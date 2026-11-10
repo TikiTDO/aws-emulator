@@ -19,25 +19,34 @@ use std::collections::{BTreeMap, BTreeSet};
 use service_com_amazonaws_polly_parrot_v1::ops::types::{
     ENGINE_VALUES, GENDER_VALUES, LANGUAGE_CODE_VALUES, VOICE_ID_VALUES,
 };
+use service_com_amazonaws_polly_parrot_v1::state::{UNLISTED_VOICES, VOICE_CATALOG};
 
 use crate::lexicons_and_speech::{error_code, ids, json, voices, Polly};
 use crate::support::{fixture_task_id, get_task, seed_task, stored_task};
+use crate::voice_catalog_naming_and_engines::ascii_version_of;
 
-/// RULE: `DescribeVoices` reports every voice the service offers — the model's
-/// `VoiceId` enum is that enumeration — each exactly once and each with a modelled
-/// gender, default language and non-empty set of supported engines.
+/// RULE: `DescribeVoices` reports every voice the service OFFERS, each exactly once
+/// and each with a modelled gender, default language and non-empty set of supported
+/// engines. The model's `VoiceId` enum is wider than that catalog — it is the set of
+/// ids a request may name — so a reported id is always one the enum declares, and the
+/// ids the catalog does not report are exactly the voices it does not offer, which
+/// synthesis still resolves.
 #[tokio::test]
 async fn describe_voices_reports_every_modeled_voice() {
     let polly = Polly::new();
     let all = voices(&polly, "").await;
 
     let reported = ids(&all);
+    let offered: BTreeSet<String> = VOICE_CATALOG
+        .iter()
+        .map(|voice| voice.id.to_string())
+        .collect();
     let modeled: BTreeSet<String> = VOICE_ID_VALUES.iter().map(|id| (*id).to_string()).collect();
-    let missing: Vec<&String> = modeled.difference(&reported).collect();
+    let missing: Vec<&String> = offered.difference(&reported).collect();
     let unmodeled: Vec<&String> = reported.difference(&modeled).collect();
     assert!(
         missing.is_empty(),
-        "case \"unfiltered\": the catalog omits {} modelled voices: {missing:?}",
+        "case \"unfiltered\": the catalog omits {} voices it offers: {missing:?}",
         missing.len()
     );
     assert!(
@@ -47,19 +56,51 @@ async fn describe_voices_reports_every_modeled_voice() {
     );
     assert_eq!(
         all.len(),
-        modeled.len(),
-        "case \"unfiltered\": {} rows for {} voices, so some voice is reported twice",
+        offered.len(),
+        "case \"unfiltered\": {} rows for {} offered voices, so some voice is reported twice",
         all.len(),
-        modeled.len()
+        offered.len()
     );
+
+    // The ids the catalog does not report are the voices it does not offer, and every
+    // one of them is still a voice a request may name: nothing modelled is unaccounted
+    // for, and no unoffered voice is advertised.
+    let unlisted: BTreeSet<String> = UNLISTED_VOICES
+        .iter()
+        .map(|voice| voice.id.to_string())
+        .collect();
+    assert_eq!(
+        modeled.difference(&reported).cloned().collect::<BTreeSet<String>>(),
+        unlisted,
+        "case \"unfiltered\": the unreported ids must be exactly the voices the catalog \
+         does not offer"
+    );
+    for id in &unlisted {
+        let response = polly
+            .synthesize(&serde_json::json!({
+                "Text": "hi",
+                "VoiceId": id,
+                "Engine": "generative",
+                "OutputFormat": "mp3",
+            }))
+            .await;
+        assert_eq!(
+            response.status(),
+            200,
+            "case {id:?}: a voice the catalog does not list must still be resolved by \
+             synthesis, body {:?}",
+            String::from_utf8_lossy(response.body())
+        );
+    }
 
     // Every reported voice's own members, for every row rather than a sampled one.
     for voice in &all {
         let id = voice["Id"].as_str().expect("every voice carries an Id");
+        let name = voice["Name"].as_str().expect("every voice carries a Name");
         assert_eq!(
-            voice["Name"].as_str(),
-            Some(id),
-            "case {id:?}: Name must be the voice id, got {voice:?}"
+            ascii_version_of(name),
+            id,
+            "case {id:?}: Id must be the ASCII version of Name, got {voice:?}"
         );
         let gender = voice["Gender"].as_str().unwrap_or_default();
         assert!(
@@ -92,8 +133,10 @@ async fn describe_voices_reports_every_modeled_voice() {
 }
 
 /// RULE: a filtered query reports every voice of that language or engine and no other,
-/// so the filters partition the same catalog an unfiltered query reports. Checked over
-/// EVERY modelled `LanguageCode` and `Engine`, not the handful an issue quotes.
+/// so the filters partition the same catalog an unfiltered query reports — and a filter
+/// no reported voice satisfies answers an empty list rather than the whole catalog.
+/// Checked over EVERY modelled `LanguageCode` and `Engine`, not the handful an issue
+/// quotes.
 #[tokio::test]
 async fn every_modeled_language_and_engine_is_served_by_the_catalog() {
     let polly = Polly::new();
@@ -113,10 +156,6 @@ async fn every_modeled_language_and_engine_is_served_by_the_catalog() {
     for language in LANGUAGE_CODE_VALUES {
         let filtered = voices(&polly, &format!("?LanguageCode={language}")).await;
         let expected = by_language.get(language).cloned().unwrap_or_default();
-        assert!(
-            !expected.is_empty(),
-            "case {language:?}: a modelled language with no voice at all in the catalog"
-        );
         assert_eq!(
             ids(&filtered),
             expected,
@@ -130,16 +169,35 @@ async fn every_modeled_language_and_engine_is_served_by_the_catalog() {
                 voice["Id"]
             );
         }
+        // A language no voice has as its default is still a language of the catalog:
+        // it is spoken by a bilingual voice, which the widened view reports.
+        if expected.is_empty() {
+            let widened = voices(
+                &polly,
+                &format!("?LanguageCode={language}&IncludeAdditionalLanguageCodes=true"),
+            )
+            .await;
+            assert!(
+                !widened.is_empty(),
+                "case {language:?}: a modelled language no voice speaks at all"
+            );
+        }
     }
 
-    // Every engine the model declares has voices, and the engines partition nothing
-    // away: every voice appears under at least one of them.
+    // The engines partition nothing away: every reported voice appears under at least
+    // one of them, and an engine no reported voice is offered on answers nothing.
     let mut covered: BTreeSet<String> = BTreeSet::new();
     for engine in ENGINE_VALUES {
         let filtered = voices(&polly, &format!("?Engine={engine}")).await;
-        assert!(
-            !filtered.is_empty(),
-            "case {engine:?}: a modelled engine with no voice in the catalog"
+        let expected: BTreeSet<String> = all
+            .iter()
+            .filter(|voice| engines_of(voice).iter().any(|e| e == engine))
+            .map(|voice| voice["Id"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(
+            ids(&filtered),
+            expected,
+            "case {engine:?}: the engine filter reported the wrong voices"
         );
         for voice in &filtered {
             let id = voice["Id"].as_str().expect("every voice carries an Id");
@@ -166,15 +224,18 @@ async fn additional_language_codes_is_present_only_for_a_bilingual_voice() {
     let all = voices(&polly, "").await;
 
     // The named rows: the bilingual voice the model's own `AdditionalLanguageCodes`
-    // documentation describes (Aditi, en-IN + hi-IN), its mirror image, another
-    // bilingual voice, and monolingual voices of three different languages.
-    let table: [(&str, Option<&[&str]>); 6] = [
+    // documentation describes (Aditi, en-IN + hi-IN), another voice of the same
+    // language pair, the other bilingual pair and its second voice, and monolingual
+    // voices of three different languages.
+    let table: [(&str, Option<&[&str]>); 8] = [
         ("Aditi", Some(&["hi-IN"])),
-        ("Kajal", Some(&["en-IN"])),
+        ("Kajal", Some(&["hi-IN"])),
         ("Hala", Some(&["arb"])),
+        ("Zayd", Some(&["arb"])),
         ("Joanna", None),
         ("Sabrina", None),
-        ("Hyunduk", None),
+        ("Seoyeon", None),
+        ("Zeina", None),
     ];
     for (id, expected) in table {
         let voice = all
@@ -232,7 +293,7 @@ async fn additional_language_codes_is_present_only_for_a_bilingual_voice() {
 
     // A voice is reported for its additional language only when the request asks for
     // additional languages, which is what makes the two views distinguishable.
-    for (id, extra) in [("Aditi", "hi-IN"), ("Kajal", "en-IN"), ("Hala", "arb")] {
+    for (id, extra) in [("Aditi", "hi-IN"), ("Kajal", "hi-IN"), ("Hala", "arb")] {
         let default_view = ids(&voices(&polly, &format!("?LanguageCode={extra}")).await);
         let widened = ids(&voices(
             &polly,
@@ -325,7 +386,11 @@ async fn synthesis_accepts_exactly_the_engines_the_catalog_reports() {
 }
 
 /// The engines one reported voice carries.
-fn engines_of(voice: &serde_json::Value) -> Vec<String> {
+///
+/// `pub(crate)` because the whole `tests/all/` tree is ONE test crate: the naming and
+/// engine-order suite reads a voice's engines through this one definition rather than
+/// keeping a second copy of it.
+pub(crate) fn engines_of(voice: &serde_json::Value) -> Vec<String> {
     voice["SupportedEngines"]
         .as_array()
         .map(|engines| {

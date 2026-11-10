@@ -404,21 +404,17 @@ impl<Eng: Send + Sync + 'static> StartSpeechSynthesisStream<Eng> {
                 ));
             }
         }
-        // The voice catalog carries one row for every value of the model's `VoiceId`
-        // enum (`crate::state::VOICE_CATALOG`), and the boundary has already refused
-        // a value outside that enum, so every request that reaches here names a
-        // catalogued voice. The lookup still FAILS CLOSED: a catalog that stopped
-        // covering the enum would be this emulator's own fault, and is reported as
-        // one rather than serving a stream whose voice nothing checked.
+        // The voice catalog is the set of voices the service OFFERS, and the model's
+        // `VoiceId` enum — which the boundary has already narrowed this value to — is
+        // wider than it, so the lookup resolves a voice the catalog does not list as
+        // well (`crate::state::UNLISTED_VOICES`). It still FAILS CLOSED: a value the
+        // enum declares and no table knows would be this emulator's own fault, and is
+        // reported as one rather than serving a stream whose voice nothing checked.
         // `SynthesizeSpeech` reads the voice the same way, so the two cannot disagree
         // about one.
         let voice = {
             let guard = state.lock();
-            guard
-                .voices
-                .iter()
-                .find(|voice| voice.id == settings.voice_id)
-                .copied()
+            guard.voice(&settings.voice_id).copied()
         };
         let voice = voice.ok_or_else(service_failure)?;
         if !voice.supports_engine(STREAMING_ENGINE) {

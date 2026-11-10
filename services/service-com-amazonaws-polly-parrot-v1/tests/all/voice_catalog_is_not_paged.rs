@@ -10,7 +10,8 @@
 //! largest result there is), every modelled `Engine`, every modelled `LanguageCode`
 //! with and without `IncludeAdditionalLanguageCodes`, both filters together, and a
 //! query no voice satisfies (the empty result). The catalog the expectations are
-//! derived from is the model's own `VoiceId` enumeration.
+//! derived from is the set of voices this service offers (`state::VOICE_CATALOG`),
+//! every id of which is a value of the model's `VoiceId` enumeration.
 //!
 //! The last test is the boundary of the rule: the one operation this service models
 //! WITH a pagination config still pages, so "no token" is a property of the model's
@@ -22,6 +23,7 @@ use std::time::{Duration, SystemTime};
 use service_com_amazonaws_polly_parrot_v1::ops::types::{
     ENGINE_VALUES, LANGUAGE_CODE_VALUES, VOICE_ID_VALUES,
 };
+use service_com_amazonaws_polly_parrot_v1::state::VOICE_CATALOG;
 
 // `voices` is the crate's one `DescribeVoices` reader: it makes a single call and
 // asserts the response is complete (200, no `NextToken`), which is half of the rule
@@ -61,22 +63,31 @@ async fn one_call_reports_every_voice_the_query_keeps() {
     let polly = Polly::new();
 
     // The unfiltered call is the largest result the operation has, and it must carry
-    // the whole enumeration of voices the model declares.
+    // the whole catalog of voices the service offers, each id one the model declares.
     let all = voices(&polly, "").await;
     let reported = ids(&all);
-    let modeled: BTreeSet<String> = VOICE_ID_VALUES.iter().map(|id| (*id).to_string()).collect();
+    let offered: BTreeSet<String> = VOICE_CATALOG
+        .iter()
+        .map(|voice| voice.id.to_string())
+        .collect();
     assert_eq!(
-        reported, modeled,
-        "case \"unfiltered\": one call must report every modelled voice, missing {:?}",
-        modeled.difference(&reported).collect::<Vec<_>>()
+        reported, offered,
+        "case \"unfiltered\": one call must report every offered voice, missing {:?}",
+        offered.difference(&reported).collect::<Vec<_>>()
     );
     assert_eq!(
         all.len(),
-        modeled.len(),
+        offered.len(),
         "case \"unfiltered\": {} rows for {} voices",
         all.len(),
-        modeled.len()
+        offered.len()
     );
+    for id in &reported {
+        assert!(
+            VOICE_ID_VALUES.contains(&id.as_str()),
+            "case \"unfiltered\": {id:?} is not a modelled VoiceId"
+        );
+    }
 
     // Every other query's complete answer, computed from that same catalog: what the
     // filters keep is a property of the voices, not of a page boundary.
@@ -138,7 +149,7 @@ async fn a_next_token_this_read_never_mints_is_refused() {
     let empty = voices(&polly, "?NextToken=").await;
     assert_eq!(
         ids(&empty).len(),
-        VOICE_ID_VALUES.len(),
+        VOICE_CATALOG.len(),
         "case \"?NextToken=\": an empty token must read as no token, got {} voices",
         empty.len()
     );

@@ -13,7 +13,9 @@
 //!   rather than through the map, so no operation can read past its own Region.
 //! * [`ComAmazonawsPollyParrotV1State::voices`] — the voice catalog `DescribeVoices`
 //!   serves. Seeded once from [`VOICE_CATALOG`] when the state is first touched and
-//!   never written at runtime; Amazon Polly models no operation that mutates it.
+//!   never written at runtime; Amazon Polly models no operation that mutates it. A
+//!   request may name a voice the catalog does not list, so a `VoiceId` is resolved
+//!   through [`ComAmazonawsPollyParrotV1State::voice`] rather than over that field.
 //! * [`ComAmazonawsPollyParrotV1State::synthesis_tasks`] — the asynchronous speech
 //!   synthesis tasks `StartSpeechSynthesisTask` creates and
 //!   `GetSpeechSynthesisTask` and `ListSpeechSynthesisTasks` report. Keyed by
@@ -96,9 +98,14 @@ pub struct StoredLexicon {
 /// service has no operation that creates or edits a voice.
 #[derive(Debug, Clone, Copy)]
 pub struct StoredVoice {
-    /// The `VoiceId` enum value, e.g. `"Joanna"`.
+    /// The `VoiceId` enum value, e.g. `"Joanna"` — the ASCII form of [`name`].
+    ///
+    /// [`name`]: StoredVoice::name
     pub id: &'static str,
-    /// The human-readable voice name. Amazon Polly uses the voice id as its name.
+    /// The voice's own name, spelled the way the voice's language spells it: a voice
+    /// whose name carries diacritics keeps them here, and `id` is "the ASCII version
+    /// of the voice name" (`DescribeVoices`' own documentation). For a voice whose
+    /// name is already ASCII the two are the same string.
     pub name: &'static str,
     /// `"Female"` or `"Male"` — the `Gender` enum.
     pub gender: &'static str,
@@ -242,6 +249,34 @@ pub fn reported_list<T: ToString>(values: &[T]) -> Option<Vec<String>> {
     (!values.is_empty()).then(|| values.iter().map(ToString::to_string).collect())
 }
 
+/// The one order every voice reports its supported engines in.
+///
+/// `Voice$SupportedEngines` is the SET of engines a voice is offered on — "Specifies
+/// which engines (`standard`, `neural`, `long-form` or `generative`) are supported by a
+/// given voice" — and the service reports that set in a single order for every voice,
+/// newest engine first, which is the reverse of the order the model's `Engine` enum
+/// declares its values in. Kept here as ONE list, so no catalog row can report its
+/// engines in a different order from another row's.
+pub const REPORTED_ENGINE_ORDER: [&str; 4] = ["generative", "long-form", "neural", "standard"];
+
+/// `Voice$SupportedEngines` for one voice: its engines in [`REPORTED_ENGINE_ORDER`],
+/// whatever order the catalog row happens to name them in, and absent entirely for a
+/// voice with none (the rule [`reported_list`] states).
+///
+/// An engine the order above does not name — one a later model adds — is reported
+/// after the ones it does, keeping the row's own relative order, so a new `Engine`
+/// value is still reported rather than dropped.
+pub fn reported_engines(engines: &[&str]) -> Option<Vec<String>> {
+    let mut reported: Vec<&str> = engines.to_vec();
+    reported.sort_by_key(|engine| {
+        REPORTED_ENGINE_ORDER
+            .iter()
+            .position(|known| known == engine)
+            .unwrap_or(REPORTED_ENGINE_ORDER.len())
+    });
+    reported_list(&reported)
+}
+
 /// The `SynthesisTask` wire shape for a stored task.
 ///
 /// Shared by `GetSpeechSynthesisTask`, `ListSpeechSynthesisTasks` and
@@ -337,6 +372,20 @@ impl ComAmazonawsPollyParrotV1State {
     /// from one it did not.
     pub(crate) fn page_token_key(&self) -> PageTokenKey {
         self.page_token_key
+    }
+
+    /// The voice a request's `VoiceId` names, whether or not the catalog lists it.
+    ///
+    /// A request may name any value of the model's `VoiceId` enum, which is wider than
+    /// the offered catalog ([`UNLISTED_VOICES`]), so the lookup reads the catalog first
+    /// and then the voices the catalog does not list — a synthesis request therefore
+    /// reads the gender and engines of the voice it actually named, and never falls
+    /// through to no voice at all.
+    pub fn voice(&self, id: &str) -> Option<&StoredVoice> {
+        self.voices
+            .iter()
+            .find(|voice| voice.id == id)
+            .or_else(|| UNLISTED_VOICES.iter().find(|voice| voice.id == id))
     }
 
     /// Materialise everything the CLOCK already owes the task store at `now`, and
@@ -519,140 +568,141 @@ pub fn is_unmintable_page_token(token: Option<&str>) -> bool {
 /// Every `id` is a value of the model's `VoiceId` enum
 /// (`smithy_query(query="shape", shape="VoiceId")`), every `language_code` a value of
 /// its `LanguageCode` enum, every `gender` a value of `Gender` and every entry of
-/// `supported_engines` a value of `Engine`; the language names and the
+/// `supported_engines` a value of `Engine`; the voice names, the language names and the
 /// voice→language→engine assignments come from the AWS "Available voices" table
-/// linked from `SynthesizeSpeech$Engine`'s documentation. `Voice$Name` is the voice
-/// id, which is how Amazon Polly names a voice.
+/// linked from `SynthesizeSpeech$Engine`'s documentation.
+///
+/// A voice's `name` is the name that table spells, diacritics included, and its `id` is
+/// "the ASCII version of the voice name" (`DescribeVoices`) — which is why the eight
+/// voices whose own names carry diacritics are the only rows whose `name` and `id`
+/// differ. `language_name` is the language's name in English as that table names it
+/// (so `de-CH` is "Swiss Standard German", not "Swiss German"), and one language is
+/// named the same way by every voice that speaks it.
 ///
 /// `Aditi` carries `hi-IN` as an additional language code because
 /// `Voice$AdditionalLanguageCodes`'s own documentation states it: "the default
 /// language for Aditi is Indian English (en-IN) ... this parameter would show the
-/// code `hi-IN`".
+/// code `hi-IN`" — which is the rule for every bilingual voice: its `language_code` is
+/// the language it was first used for and its additional codes are the other languages
+/// it speaks, so `hi-IN` and `arb` are reported as additional languages of the Indian
+/// English and Gulf Arabic voices rather than as those voices' default language.
 ///
-/// The catalog is COMPLETE: every value of the model's `VoiceId` enum has exactly one
-/// row here, because that enum is the enumeration of the voices the service offers —
-/// so the voices `DescribeVoices` reports and the voices `SynthesizeSpeech` accepts are
-/// one set, and no filtered query can hide a voice the service has.
+/// The catalog is the voices the service OFFERS, which is what this operation reports
+/// — "the list of voices that are available for use when requesting speech synthesis".
+/// The model's `VoiceId` enum is WIDER than it: the enum is the set of ids a request
+/// may name, and it carries ids of voices the offered table does not list.
+/// [`UNLISTED_VOICES`] holds those, so a request naming one is still resolved against
+/// the voice it names rather than against nothing, and no voice the catalog reports is
+/// hidden from a filtered query.
 pub const VOICE_CATALOG: &[StoredVoice] = &[
     // ---- English ----
-    voice("Danielle", "Female", "en-US", "US English", &[], &["neural", "generative", "long-form"]),
-    voice("Gregory", "Male", "en-US", "US English", &[], &["neural", "long-form"]),
+    voice("Danielle", "Female", "en-US", "US English", &[], &["generative", "neural"]),
+    voice("Gregory", "Male", "en-US", "US English", &[], &["neural"]),
     voice("Ivy", "Female", "en-US", "US English", &[], &["neural", "standard"]),
-    voice("Joanna", "Female", "en-US", "US English", &[], &["neural", "standard", "generative"]),
+    voice("Joanna", "Female", "en-US", "US English", &[], &["generative", "neural", "standard"]),
     voice("Joey", "Male", "en-US", "US English", &[], &["neural", "standard"]),
     voice("Justin", "Male", "en-US", "US English", &[], &["neural", "standard"]),
     voice("Kendra", "Female", "en-US", "US English", &[], &["neural", "standard"]),
-    voice("Kenneth", "Male", "en-US", "US English", &[], &["generative"]),
     voice("Kevin", "Male", "en-US", "US English", &[], &["neural"]),
     voice("Kimberly", "Female", "en-US", "US English", &[], &["neural", "standard"]),
-    voice("Matthew", "Male", "en-US", "US English", &[], &["neural", "standard", "generative"]),
-    voice("Ruth", "Female", "en-US", "US English", &[], &["neural", "generative", "long-form"]),
-    voice("Salli", "Female", "en-US", "US English", &[], &["neural", "standard"]),
-    voice("Stephen", "Male", "en-US", "US English", &[], &["neural", "generative"]),
-    voice("Tina", "Female", "en-US", "US English", &[], &["generative"]),
-    voice("Amy", "Female", "en-GB", "British English", &[], &["neural", "standard", "generative"]),
+    voice("Matthew", "Male", "en-US", "US English", &[], &["generative", "neural", "standard"]),
+    voice("Ruth", "Female", "en-US", "US English", &[], &["generative", "neural"]),
+    voice("Salli", "Female", "en-US", "US English", &[], &["generative", "neural", "standard"]),
+    voice("Stephen", "Male", "en-US", "US English", &[], &["generative", "neural"]),
+    voice("Tiffany", "Female", "en-US", "US English", &[], &["generative"]),
+    voice("Amy", "Female", "en-GB", "British English", &[], &["generative", "neural", "standard"]),
     voice("Arthur", "Male", "en-GB", "British English", &[], &["neural"]),
-    voice("Brian", "Male", "en-GB", "British English", &[], &["neural", "standard"]),
-    voice("Curtis", "Male", "en-GB", "British English", &[], &["generative"]),
+    voice("Brian", "Male", "en-GB", "British English", &[], &["generative", "neural", "standard"]),
     voice("Emma", "Female", "en-GB", "British English", &[], &["neural", "standard"]),
-    voice("Tiffany", "Female", "en-GB", "British English", &[], &["generative"]),
     voice("Geraint", "Male", "en-GB-WLS", "Welsh English", &[], &["standard"]),
-    voice("Nate", "Male", "en-AU", "Australian English", &[], &["generative"]),
     voice("Nicole", "Female", "en-AU", "Australian English", &[], &["standard"]),
-    voice("Olivia", "Female", "en-AU", "Australian English", &[], &["neural", "generative"]),
+    voice("Olivia", "Female", "en-AU", "Australian English", &[], &["generative", "neural"]),
     voice("Russell", "Male", "en-AU", "Australian English", &[], &["standard"]),
     voice("Aditi", "Female", "en-IN", "Indian English", &["hi-IN"], &["standard"]),
-    voice("Kiara", "Female", "en-IN", "Indian English", &[], &["generative"]),
+    voice("Kajal", "Female", "en-IN", "Indian English", &["hi-IN"], &["generative", "neural"]),
     voice("Raveena", "Female", "en-IN", "Indian English", &[], &["standard"]),
-    voice("Aria", "Female", "en-NZ", "New Zealand English", &[], &["neural", "generative"]),
-    voice("Ayanda", "Female", "en-ZA", "South African English", &[], &["neural"]),
-    voice("Niamh", "Female", "en-IE", "Irish English", &[], &["neural"]),
-    voice("Jasmine", "Female", "en-SG", "Singaporean English", &[], &["neural"]),
-    // ---- Hindi ----
-    voice("Arjun", "Male", "hi-IN", "Hindi", &[], &["generative"]),
-    voice("Kajal", "Female", "hi-IN", "Hindi", &["en-IN"], &["neural", "generative"]),
+    voice("Aria", "Female", "en-NZ", "New Zealand English", &[], &["generative", "neural"]),
+    voice("Ayanda", "Female", "en-ZA", "South African English", &[], &["generative", "neural"]),
+    voice("Niamh", "Female", "en-IE", "Irish English", &[], &["generative", "neural"]),
+    voice("Jasmine", "Female", "en-SG", "Singaporean English", &[], &["generative", "neural"]),
     // ---- German ----
-    voice("Daniel", "Male", "de-DE", "German", &[], &["neural", "generative"]),
-    voice("Florian", "Male", "de-DE", "German", &[], &["generative"]),
+    voice("Daniel", "Male", "de-DE", "German", &[], &["generative", "neural"]),
     voice("Hans", "Male", "de-DE", "German", &[], &["standard"]),
+    voice("Lennart", "Male", "de-DE", "German", &[], &["generative"]),
     voice("Marlene", "Female", "de-DE", "German", &[], &["standard"]),
-    voice("Vicki", "Female", "de-DE", "German", &[], &["neural", "standard", "generative"]),
-    voice("Hannah", "Female", "de-AT", "Austrian German", &[], &["neural"]),
-    voice("Sabrina", "Female", "de-CH", "Swiss German", &[], &["neural"]),
+    voice("Vicki", "Female", "de-DE", "German", &[], &["generative", "neural", "standard"]),
+    voice("Hannah", "Female", "de-AT", "Austrian German", &[], &["generative", "neural"]),
+    voice("Sabrina", "Female", "de-CH", "Swiss Standard German", &[], &["generative", "neural"]),
     // ---- French ----
     voice("Ambre", "Female", "fr-FR", "French", &[], &["generative"]),
-    voice("Celine", "Female", "fr-FR", "French", &[], &["standard"]),
-    voice("Lea", "Female", "fr-FR", "French", &[], &["neural", "standard"]),
+    voice_spelled("Celine", "Céline", "Female", "fr-FR", "French", &[], &["generative", "standard"]),
+    voice("Florian", "Male", "fr-FR", "French", &[], &["generative"]),
+    voice_spelled("Lea", "Léa", "Female", "fr-FR", "French", &[], &["generative", "neural", "standard"]),
     voice("Mathieu", "Male", "fr-FR", "French", &[], &["standard"]),
-    voice("Remi", "Male", "fr-FR", "French", &[], &["neural", "generative"]),
+    voice_spelled("Remi", "Rémi", "Male", "fr-FR", "French", &[], &["generative", "neural"]),
     voice("Chantal", "Female", "fr-CA", "Canadian French", &[], &["standard"]),
-    voice("Gabrielle", "Female", "fr-CA", "Canadian French", &[], &["neural"]),
-    voice("Liam", "Male", "fr-CA", "Canadian French", &[], &["neural"]),
-    voice("Isabelle", "Female", "fr-BE", "Belgian French", &[], &["neural"]),
+    voice("Gabrielle", "Female", "fr-CA", "Canadian French", &[], &["generative", "neural"]),
+    voice("Liam", "Male", "fr-CA", "Canadian French", &[], &["generative", "neural"]),
+    voice("Isabelle", "Female", "fr-BE", "Belgian French", &[], &["generative", "neural"]),
     // ---- Spanish ----
     voice("Conchita", "Female", "es-ES", "Castilian Spanish", &[], &["standard"]),
     voice("Enrique", "Male", "es-ES", "Castilian Spanish", &[], &["standard"]),
-    voice("Lucia", "Female", "es-ES", "Castilian Spanish", &[], &["neural", "standard"]),
-    voice("Sergio", "Male", "es-ES", "Castilian Spanish", &[], &["neural", "generative"]),
-    voice("Andres", "Male", "es-MX", "Mexican Spanish", &[], &["neural", "generative"]),
-    voice("Carolina", "Female", "es-MX", "Mexican Spanish", &[], &["generative"]),
-    voice("Mia", "Female", "es-MX", "Mexican Spanish", &[], &["neural", "standard"]),
-    voice("Carlos", "Male", "es-US", "US Spanish", &[], &["generative"]),
-    voice("Lupe", "Female", "es-US", "US Spanish", &[], &["neural", "standard", "generative"]),
+    voice("Lucia", "Female", "es-ES", "Castilian Spanish", &[], &["generative", "neural", "standard"]),
+    voice("Sergio", "Male", "es-ES", "Castilian Spanish", &[], &["generative", "neural"]),
+    voice_spelled("Andres", "Andrés", "Male", "es-MX", "Mexican Spanish", &[], &["generative", "neural"]),
+    voice("Mia", "Female", "es-MX", "Mexican Spanish", &[], &["generative", "neural", "standard"]),
+    voice("Lupe", "Female", "es-US", "US Spanish", &[], &["generative", "neural", "standard"]),
     voice("Miguel", "Male", "es-US", "US Spanish", &[], &["standard"]),
-    voice("Pedro", "Male", "es-US", "US Spanish", &[], &["neural", "generative"]),
-    voice("Penelope", "Female", "es-US", "US Spanish", &[], &["standard"]),
+    voice("Pedro", "Male", "es-US", "US Spanish", &[], &["generative", "neural"]),
+    voice_spelled("Penelope", "Penélope", "Female", "es-US", "US Spanish", &[], &["standard"]),
     // ---- Italian ----
-    voice("Adriano", "Male", "it-IT", "Italian", &[], &["neural", "generative"]),
+    voice("Adriano", "Male", "it-IT", "Italian", &[], &["neural"]),
     voice("Beatrice", "Female", "it-IT", "Italian", &[], &["generative"]),
-    voice("Bianca", "Female", "it-IT", "Italian", &[], &["neural", "standard", "generative"]),
+    voice("Bianca", "Female", "it-IT", "Italian", &[], &["generative", "neural", "standard"]),
     voice("Carla", "Female", "it-IT", "Italian", &[], &["standard"]),
     voice("Giorgio", "Male", "it-IT", "Italian", &[], &["standard"]),
     voice("Lorenzo", "Male", "it-IT", "Italian", &[], &["generative"]),
     // ---- Portuguese ----
-    voice("Camila", "Female", "pt-BR", "Brazilian Portuguese", &[], &["neural", "standard", "generative"]),
-    voice("Leo", "Male", "pt-BR", "Brazilian Portuguese", &[], &["generative"]),
+    voice("Camila", "Female", "pt-BR", "Brazilian Portuguese", &[], &["generative", "neural", "standard"]),
     voice("Ricardo", "Male", "pt-BR", "Brazilian Portuguese", &[], &["standard"]),
     voice("Thiago", "Male", "pt-BR", "Brazilian Portuguese", &[], &["neural"]),
-    voice("Vitoria", "Female", "pt-BR", "Brazilian Portuguese", &[], &["neural", "standard"]),
+    voice_spelled("Vitoria", "Vitória", "Female", "pt-BR", "Brazilian Portuguese", &[], &["neural", "standard"]),
     voice("Cristiano", "Male", "pt-PT", "Portuguese", &[], &["standard"]),
-    voice("Ines", "Female", "pt-PT", "Portuguese", &[], &["neural", "standard"]),
+    voice_spelled("Ines", "Inês", "Female", "pt-PT", "Portuguese", &[], &["neural", "standard"]),
     // ---- East Asian ----
     voice("Kazuha", "Female", "ja-JP", "Japanese", &[], &["neural"]),
     voice("Mizuki", "Female", "ja-JP", "Japanese", &[], &["standard"]),
     voice("Takumi", "Male", "ja-JP", "Japanese", &[], &["neural", "standard"]),
     voice("Tomoko", "Female", "ja-JP", "Japanese", &[], &["neural"]),
-    voice("Hyunduk", "Male", "ko-KR", "Korean", &[], &["generative"]),
     voice("Jihye", "Female", "ko-KR", "Korean", &[], &["neural"]),
-    voice("Seoyeon", "Female", "ko-KR", "Korean", &[], &["neural", "standard"]),
+    voice("Seoyeon", "Female", "ko-KR", "Korean", &[], &["generative", "neural", "standard"]),
     voice("Zhiyu", "Female", "cmn-CN", "Chinese Mandarin", &[], &["neural", "standard"]),
     voice("Hiujin", "Female", "yue-CN", "Cantonese", &[], &["neural"]),
     // ---- Arabic ----
     voice("Zeina", "Female", "arb", "Arabic", &[], &["standard"]),
     voice("Hala", "Female", "ar-AE", "Gulf Arabic", &["arb"], &["neural"]),
-    voice("Zayd", "Male", "ar-AE", "Gulf Arabic", &[], &["neural"]),
+    voice("Zayd", "Male", "ar-AE", "Gulf Arabic", &["arb"], &["neural"]),
     // ---- Nordic ----
     voice("Astrid", "Female", "sv-SE", "Swedish", &[], &["standard"]),
     voice("Elin", "Female", "sv-SE", "Swedish", &[], &["neural"]),
-    voice("Lennart", "Male", "sv-SE", "Swedish", &[], &["neural"]),
     voice("Mads", "Male", "da-DK", "Danish", &[], &["standard"]),
     voice("Naja", "Female", "da-DK", "Danish", &[], &["standard"]),
     voice("Sofie", "Female", "da-DK", "Danish", &[], &["neural"]),
     voice("Ida", "Female", "nb-NO", "Norwegian", &[], &["neural"]),
     voice("Liv", "Female", "nb-NO", "Norwegian", &[], &["standard"]),
     voice("Suvi", "Female", "fi-FI", "Finnish", &[], &["neural"]),
-    voice("Dora", "Female", "is-IS", "Icelandic", &[], &["standard"]),
+    voice_spelled("Dora", "Dóra", "Female", "is-IS", "Icelandic", &[], &["standard"]),
     voice("Karl", "Male", "is-IS", "Icelandic", &[], &["standard"]),
     // ---- Other European ----
-    voice("Laura", "Female", "nl-NL", "Dutch", &[], &["neural"]),
+    voice("Laura", "Female", "nl-NL", "Dutch", &[], &["generative", "neural"]),
     voice("Lotte", "Female", "nl-NL", "Dutch", &[], &["standard"]),
     voice("Ruben", "Male", "nl-NL", "Dutch", &[], &["standard"]),
-    voice("Lisa", "Female", "nl-BE", "Belgian Dutch", &[], &["neural"]),
-    voice("Ewa", "Female", "pl-PL", "Polish", &[], &["standard"]),
+    voice("Lisa", "Female", "nl-BE", "Belgian Dutch", &[], &["generative", "neural"]),
+    voice("Ewa", "Female", "pl-PL", "Polish", &[], &["generative", "standard"]),
     voice("Jacek", "Male", "pl-PL", "Polish", &[], &["standard"]),
     voice("Jan", "Male", "pl-PL", "Polish", &[], &["standard"]),
     voice("Maja", "Female", "pl-PL", "Polish", &[], &["standard"]),
-    voice("Ola", "Female", "pl-PL", "Polish", &[], &["neural"]),
+    voice("Ola", "Female", "pl-PL", "Polish", &[], &["generative", "neural"]),
     voice("Jitka", "Female", "cs-CZ", "Czech", &[], &["neural"]),
     voice("Carmen", "Female", "ro-RO", "Romanian", &[], &["standard"]),
     voice("Arlet", "Female", "ca-ES", "Catalan", &[], &["neural"]),
@@ -663,7 +713,33 @@ pub const VOICE_CATALOG: &[StoredVoice] = &[
     voice("Tatyana", "Female", "ru-RU", "Russian", &[], &["standard"]),
 ];
 
-/// One catalog row. `const fn` so [`VOICE_CATALOG`] stays a compile-time constant
+/// The voices the model's `VoiceId` enum declares that the offered catalog
+/// ([`VOICE_CATALOG`]) does not list.
+///
+/// `VoiceId` is the set of ids a REQUEST may name, and it is wider than the catalog:
+/// a voice id gets into the enum when the voice exists, and the catalog
+/// `DescribeVoices` reports is the narrower set of voices offered for synthesis. These
+/// rows are therefore NOT reported by `DescribeVoices` — a discovery call must not
+/// offer a voice the catalog does not list — but they are still resolved for a request
+/// that names one ([`ComAmazonawsPollyParrotV1State::voice`]), so synthesis reads such
+/// a voice's own gender and engines rather than reading nothing.
+///
+/// Every row is a generative-only voice, which is what the newer `VoiceId` values are.
+pub const UNLISTED_VOICES: &[StoredVoice] = &[
+    voice("Kenneth", "Male", "en-US", "US English", &[], &["generative"]),
+    voice("Tina", "Female", "en-US", "US English", &[], &["generative"]),
+    voice("Curtis", "Male", "en-GB", "British English", &[], &["generative"]),
+    voice("Nate", "Male", "en-AU", "Australian English", &[], &["generative"]),
+    voice("Kiara", "Female", "en-IN", "Indian English", &[], &["generative"]),
+    voice("Arjun", "Male", "hi-IN", "Hindi", &[], &["generative"]),
+    voice("Carolina", "Female", "es-MX", "Mexican Spanish", &[], &["generative"]),
+    voice("Carlos", "Male", "es-US", "US Spanish", &[], &["generative"]),
+    voice("Leo", "Male", "pt-BR", "Brazilian Portuguese", &[], &["generative"]),
+    voice("Hyunduk", "Male", "ko-KR", "Korean", &[], &["generative"]),
+];
+
+/// One catalog row whose voice name is already ASCII, so `Voice$Name` and `Voice$Id`
+/// are the same string. `const fn` so [`VOICE_CATALOG`] stays a compile-time constant
 /// and the table above reads as data rather than as struct literals.
 const fn voice(
     id: &'static str,
@@ -673,10 +749,32 @@ const fn voice(
     additional_language_codes: &'static [&'static str],
     supported_engines: &'static [&'static str],
 ) -> StoredVoice {
+    voice_spelled(
+        id,
+        id,
+        gender,
+        language_code,
+        language_name,
+        additional_language_codes,
+        supported_engines,
+    )
+}
+
+/// One catalog row whose voice name carries diacritics, so it is spelled out beside
+/// the `VoiceId` enum value — which is "the ASCII version of the voice name".
+#[allow(clippy::too_many_arguments)]
+const fn voice_spelled(
+    id: &'static str,
+    name: &'static str,
+    gender: &'static str,
+    language_code: &'static str,
+    language_name: &'static str,
+    additional_language_codes: &'static [&'static str],
+    supported_engines: &'static [&'static str],
+) -> StoredVoice {
     StoredVoice {
         id,
-        // Amazon Polly's `Voice$Name` is the voice id.
-        name: id,
+        name,
         gender,
         language_code,
         language_name,
@@ -689,12 +787,13 @@ const fn voice(
 mod tests {
     use super::*;
 
-    /// Every catalog row must name values the model declares, or `DescribeVoices`
-    /// would serve a voice no SDK can deserialize.
+    /// Every row of either voice table must name values the model declares, or
+    /// `DescribeVoices` would serve — or synthesis would resolve — a voice no SDK can
+    /// deserialize.
     #[test]
     fn every_seeded_voice_uses_modeled_enum_values() {
         use crate::ops::types::{ENGINE_VALUES, GENDER_VALUES, LANGUAGE_CODE_VALUES, VOICE_ID_VALUES};
-        for voice in VOICE_CATALOG {
+        for voice in VOICE_CATALOG.iter().chain(UNLISTED_VOICES) {
             assert!(
                 VOICE_ID_VALUES.contains(&voice.id),
                 "voice {:?}: id is not a modeled VoiceId",
@@ -732,6 +831,123 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A `VoiceId` a request may name resolves to exactly one voice: the two tables
+    /// together cover the model's whole enum and share no id, so synthesis reads the
+    /// voice the request named whether or not the catalog lists it, and
+    /// `DescribeVoices` reports each listed voice once.
+    #[test]
+    fn every_modeled_voice_id_resolves_to_exactly_one_voice() {
+        use crate::ops::types::VOICE_ID_VALUES;
+        let state = ComAmazonawsPollyParrotV1State::default();
+        for id in VOICE_ID_VALUES {
+            let resolved = state.voice(id);
+            assert!(
+                resolved.is_some_and(|voice| voice.id == *id),
+                "voice {id:?}: a modelled VoiceId must resolve to its own voice, got {resolved:?}"
+            );
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for voice in VOICE_CATALOG.iter().chain(UNLISTED_VOICES) {
+            assert!(
+                seen.insert(voice.id),
+                "voice {:?}: declared twice across the voice tables",
+                voice.id
+            );
+        }
+        assert_eq!(
+            seen.len(),
+            VOICE_ID_VALUES.len(),
+            "the voice tables must declare each modelled VoiceId once, got {} for {}",
+            seen.len(),
+            VOICE_ID_VALUES.len()
+        );
+        // And the catalog is the narrower of the two: a voice the catalog does not list
+        // is not reported, so it must not be in the catalog as well.
+        for voice in UNLISTED_VOICES {
+            assert!(
+                !VOICE_CATALOG.iter().any(|listed| listed.id == voice.id),
+                "voice {:?}: a voice the catalog does not list cannot also be listed",
+                voice.id
+            );
+        }
+    }
+
+    /// Whatever engines a voice is offered on, and whatever order its catalog row names
+    /// them in, the reported list is that same set in the service's one engine order —
+    /// checked over EVERY subset of the modelled `Engine` values and every permutation
+    /// of each, so no row's spelling can change the order a client sees.
+    #[test]
+    fn supported_engines_are_reported_in_one_order_whatever_the_row_says() {
+        let engines = REPORTED_ENGINE_ORDER;
+        for mask in 0..(1u8 << engines.len()) {
+            let subset: Vec<&str> = engines
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask & (1 << i) != 0)
+                .map(|(_, engine)| *engine)
+                .collect();
+            let expected: Option<Vec<String>> = (!subset.is_empty())
+                .then(|| subset.iter().map(|engine| (*engine).to_string()).collect());
+
+            // Every rotation of the subset is one spelling of the same set.
+            for rotation in 0..subset.len().max(1) {
+                let mut row = subset.clone();
+                row.rotate_left(rotation);
+                assert_eq!(
+                    reported_engines(&row),
+                    expected,
+                    "case {row:?}: wrong reported engines"
+                );
+            }
+        }
+
+        // An engine the order does not name is still reported, after the ones it does.
+        assert_eq!(
+            reported_engines(&["whispered", "standard", "generative"]),
+            Some(vec![
+                "generative".to_string(),
+                "standard".to_string(),
+                "whispered".to_string(),
+            ]),
+            "an engine outside the reported order must still be reported"
+        );
+    }
+
+    /// A catalog row's `name` is the voice's own spelling and its `id` the ASCII form of
+    /// it, so a client that displays the name and synthesizes with the id reaches the
+    /// same voice.
+    #[test]
+    fn a_voice_id_is_the_ascii_form_of_its_name() {
+        let mut spelled = 0usize;
+        for voice in VOICE_CATALOG.iter().chain(UNLISTED_VOICES) {
+            assert!(
+                voice.id.is_ascii(),
+                "voice {:?}: an id is the ASCII form of the name",
+                voice.id
+            );
+            assert_eq!(
+                voice.name.chars().count(),
+                voice.id.chars().count(),
+                "voice {:?}: name {:?} and id must be the same name",
+                voice.id,
+                voice.name
+            );
+            if !voice.name.is_ascii() {
+                spelled += 1;
+            } else {
+                assert_eq!(
+                    voice.name, voice.id,
+                    "voice {:?}: an ASCII voice name is its own id",
+                    voice.id
+                );
+            }
+        }
+        assert!(
+            spelled > 0,
+            "the catalog must keep the diacritics of the voices whose names carry them"
+        );
     }
 
     /// One stored task, as a start call would have recorded it: `task_id` identifies the

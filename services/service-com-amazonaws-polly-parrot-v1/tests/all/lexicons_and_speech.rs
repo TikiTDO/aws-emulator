@@ -1182,12 +1182,27 @@ async fn describe_voices_filters_the_catalog() {
         }
     }
 
-    // An engine filter narrows to voices that support it.
+    // An engine filter keeps exactly the voices the unfiltered catalog reports that
+    // engine for — so an engine every voice is offered on would keep them all and an
+    // engine none is offered on keeps none, and nothing in between is silently widened.
     for engine in ["standard", "neural", "generative", "long-form"] {
         let filtered = voices(&polly, &format!("?Engine={engine}")).await;
-        assert!(
-            !filtered.is_empty(),
-            "engine {engine:?}: the catalog must carry voices for it"
+        let expected: BTreeSet<String> = all
+            .iter()
+            .filter(|voice| {
+                voice["SupportedEngines"]
+                    .as_array()
+                    .is_some_and(|engines| engines.iter().any(|e| e.as_str() == Some(engine)))
+            })
+            .map(|voice| voice["Id"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(
+            ids(&filtered),
+            expected,
+            "engine {engine:?}: the filter kept the wrong voices, {} reported for {} \
+             expected",
+            filtered.len(),
+            expected.len()
         );
         assert!(
             filtered.len() < all.len(),

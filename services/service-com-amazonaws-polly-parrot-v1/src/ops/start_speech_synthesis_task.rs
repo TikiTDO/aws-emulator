@@ -432,11 +432,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // reading the synchronous path takes.
         let voice = {
             let guard = state.lock();
-            guard
-                .voices
-                .iter()
-                .find(|voice| voice.id == input.voice_id)
-                .copied()
+            guard.voice(&input.voice_id).copied()
         };
         if let Some(voice) = voice {
             if !voice.supports_engine(engine) {

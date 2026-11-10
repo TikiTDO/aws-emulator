@@ -1048,16 +1048,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // `VoiceId` decides which engines the request may name, and the voice catalog
         // is where that is recorded — so the check reads the same state
-        // `DescribeVoices` reports and the two cannot disagree. The catalog carries
-        // every voice the model declares, so every `VoiceId` that reaches here is
-        // narrowed by the voice's own engines.
-        if let Some(voice) = state
-            .lock()
-            .voices
-            .iter()
-            .find(|voice| voice.id == input.voice_id)
-            .copied()
-        {
+        // `DescribeVoices` reports and the two cannot disagree. A `VoiceId` the catalog
+        // does not list is still resolved to the voice it names
+        // (`crate::state::UNLISTED_VOICES`), so every value the model declares is
+        // narrowed by its own voice's engines.
+        if let Some(voice) = state.lock().voice(&input.voice_id).copied() {
             // "Provide an engine that is supported by the voice you select … If a
             // chosen voice isn't supported by the standard engine, this will result
             // in an error" (`SynthesizeSpeechInput$Engine`).
@@ -1088,9 +1083,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let timbre = render::Timbre::for_gender(
             state
                 .lock()
-                .voices
-                .iter()
-                .find(|voice| voice.id == input.voice_id)
+                .voice(&input.voice_id)
                 .map(|voice| voice.gender),
         );
         // Reading the document, reading it into phonemes, producing the waveform and

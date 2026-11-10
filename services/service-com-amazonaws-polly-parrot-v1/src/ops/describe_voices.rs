@@ -4,9 +4,12 @@
 //! Reports the voice catalog, narrowed by the query parameters.
 //!
 //! The catalog is state ([`crate::state::ComAmazonawsPollyParrotV1State::voices`]),
-//! seeded once and never written, so this is a pure read. It carries every voice the
-//! model's `VoiceId` enum declares, so a client that discovers voices here sees the
-//! same set `SynthesizeSpeech` accepts. `Engine` keeps only voices
+//! seeded once and never written, so this is a pure read. It carries the voices the
+//! service OFFERS for synthesis — "the list of voices that are available for use when
+//! requesting speech synthesis" — which is narrower than the model's `VoiceId` enum,
+//! the set of ids a REQUEST may name: the voices that enum declares and this catalog
+//! does not offer ([`crate::state::UNLISTED_VOICES`]) are resolved for a synthesis
+//! request but never advertised here. `Engine` keeps only voices
 //! whose `SupportedEngines` carry it; `LanguageCode` keeps only voices that speak it,
 //! counting a bilingual voice's `AdditionalLanguageCodes` only when
 //! `IncludeAdditionalLanguageCodes` is set — the rule that member documents. Both
@@ -16,6 +19,14 @@
 //! A reported voice carries `AdditionalLanguageCodes` only when it speaks a language
 //! beyond its default one ([`crate::state::reported_list`]): for a monolingual voice
 //! the key is absent, not an empty array.
+//!
+//! `Name` is the voice's own name as Amazon Polly spells it, diacritics included, and
+//! `Id` is "the ASCII version of the voice name" this operation's own documentation
+//! describes — so a voice whose name carries diacritics is reported under that
+//! spelling while the id a later `SynthesizeSpeech` names stays ASCII.
+//! `SupportedEngines` is a SET, reported in the service's one engine order
+//! ([`crate::state::reported_engines`]), so two voices never report the same engines
+//! in different orders.
 //!
 //! The response carries the WHOLE filtered catalog: the model declares no pagination
 //! for this operation (`ListSpeechSynthesisTasks` is the only operation here that
@@ -228,7 +239,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 additional_language_codes: crate::state::reported_list(
                     voice.additional_language_codes,
                 ),
-                supported_engines: crate::state::reported_list(voice.supported_engines),
+                supported_engines: crate::state::reported_engines(voice.supported_engines),
             })
             .collect();
 

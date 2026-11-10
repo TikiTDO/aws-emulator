@@ -84,6 +84,8 @@ mod task_retention;
 mod voice_catalog;
 #[path = "all/voice_catalog_is_not_paged.rs"]
 mod voice_catalog_is_not_paged;
+#[path = "all/voice_catalog_naming_and_engines.rs"]
+mod voice_catalog_naming_and_engines;
 #[path = "all/voice_engine_compatibility.rs"]
 mod voice_engine_compatibility;
 #[path = "all/xml_character_data_length.rs"]
