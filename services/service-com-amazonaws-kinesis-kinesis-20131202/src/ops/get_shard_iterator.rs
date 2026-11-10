@@ -323,8 +323,7 @@ fn requested_position(
         };
         let Ok(millis) = at.to_millis() else {
             return Err(invalid_argument(
-                "Timestamp must be a Unix epoch date with precision in milliseconds"
-                    .to_string(),
+                crate::state::TIMESTAMP_NOT_AN_EPOCH_DATE_MESSAGE.to_string(),
             ));
         };
         let millis = u128::try_from(millis).unwrap_or_default();

@@ -30,12 +30,21 @@ md-5 = "0.10"
 # Folds a channel's region, name and creation instant into the short opaque `ChannelId` a
 # read reports (`crate::state::channel_id`).
 sha2 = { workspace = true }
+# Resolves the `KeyId` a `StartStreamEncryption` request names against KMS, over the
+# emulator's own in-process transport, before the stream is reported as encrypted under it.
+aws-sdk-kms = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# The one place this tree states the Region LABEL grammar, for the caller-supplied region
+# that ends up in the authority of the KMS endpoint the lookup above is routed on.
+service-common = { path = "../common" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
 sha2 = { workspace = true }
+# The encryption suites mount the KMS service beside Kinesis on one engine, because
+# `StartStreamEncryption` resolves the `KeyId` it is given by calling it.
+service-com-amazonaws-kms-trentservice = { workspace = true }
 
 [lints]
 workspace = true

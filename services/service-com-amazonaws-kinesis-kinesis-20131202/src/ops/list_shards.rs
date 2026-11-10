@@ -275,8 +275,8 @@ impl ShardSelection {
                 }),
             AT_TRIM_HORIZON => Ok(Self::AtTrimHorizon),
             AT_LATEST => Ok(Self::AtLatest),
-            AT_TIMESTAMP => filter_instant(filter, AT_TIMESTAMP).map(Self::AtTimestamp),
-            FROM_TIMESTAMP => filter_instant(filter, FROM_TIMESTAMP).map(Self::FromTimestamp),
+            AT_TIMESTAMP => filter_instant(filter).map(Self::AtTimestamp),
+            FROM_TIMESTAMP => filter_instant(filter).map(Self::FromTimestamp),
             FROM_TRIM_HORIZON => Ok(Self::FromTrimHorizon),
             // Every value `SHARD_FILTER_TYPE_VALUES` holds is named above, so a value that
             // reaches here is one this emulator has no selection rule for yet: refused,
@@ -315,22 +315,29 @@ impl ShardSelection {
     }
 }
 
+/// What a `ShardFilter` whose `Type` needs a `Timestamp` is refused with when it carries
+/// none. `Timestamp` "can only be used if FROM_TIMESTAMP or AT_TIMESTAMP shard types are
+/// specified" (`ShardFilter$Timestamp`), and the refusal states that RULE: it names both
+/// types the member belongs to rather than the one the request happened to send, so the
+/// sentence has no variable part at all.
+const SHARD_FILTER_TIMESTAMP_REQUIRED_MESSAGE: &str =
+    "Timestamp must be provided when the ShardFilter Type is AT_TIMESTAMP or FROM_TIMESTAMP.";
+
 /// The instant a `FROM_TIMESTAMP` / `AT_TIMESTAMP` filter names: "A timestamp is a Unix
 /// epoch date with precision in milliseconds" (`ShardFilter$Timestamp`), so one that names
-/// no instant of that epoch is refused rather than read as another.
-fn filter_instant(
-    filter: &ShardFilter,
-    filter_type: &str,
-) -> Result<::std::time::SystemTime, ListShardsError> {
-    filter
-        .timestamp
-        .and_then(|at| ::std::time::SystemTime::try_from(at).ok())
-        .ok_or_else(|| {
-            invalid_argument(format!(
-                "ShardFilter.Timestamp is required with the {filter_type} shard type, as a \
-                 Unix epoch date"
-            ))
-        })
+/// no instant of that epoch is refused rather than read as another — with the service's one
+/// sentence for that rule ([`crate::state::TIMESTAMP_NOT_AN_EPOCH_DATE_MESSAGE`], which
+/// `GetShardIterator`'s own timestamp member is refused with too) — and one that names no
+/// timestamp at all is refused with [`SHARD_FILTER_TIMESTAMP_REQUIRED_MESSAGE`].
+fn filter_instant(filter: &ShardFilter) -> Result<::std::time::SystemTime, ListShardsError> {
+    let Some(at) = filter.timestamp else {
+        return Err(invalid_argument(
+            SHARD_FILTER_TIMESTAMP_REQUIRED_MESSAGE.to_string(),
+        ));
+    };
+    ::std::time::SystemTime::try_from(at).map_err(|_| {
+        invalid_argument(crate::state::TIMESTAMP_NOT_AN_EPOCH_DATE_MESSAGE.to_string())
+    })
 }
 
 /// Refuse the request with the error this operation models for a parameter that "exceeds

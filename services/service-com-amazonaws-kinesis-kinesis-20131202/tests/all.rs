@@ -37,6 +37,8 @@ mod consumer_listing;
 mod data_records;
 #[path = "all/encrypted_records.rs"]
 mod encrypted_records;
+#[path = "all/encryption_key_resolution.rs"]
+mod encryption_key_resolution;
 #[path = "all/enhanced_monitoring.rs"]
 mod enhanced_monitoring;
 #[path = "all/manual_resharding.rs"]
@@ -59,6 +61,8 @@ mod resource_tag_removal;
 mod resource_tags;
 #[path = "all/retention_period.rs"]
 mod retention_period;
+#[path = "all/shard_filter_timestamp.rs"]
+mod shard_filter_timestamp;
 #[path = "all/shard_iterators.rs"]
 mod shard_iterators;
 #[path = "all/shard_listing.rs"]

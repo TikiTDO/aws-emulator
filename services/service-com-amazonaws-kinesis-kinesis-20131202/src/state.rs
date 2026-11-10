@@ -4294,6 +4294,16 @@ pub const NO_OPEN_SHARD_MESSAGE: &str =
 /// rather than an expiry. The sentence Kinesis answers for that error class.
 pub const INVALID_SHARD_ITERATOR_MESSAGE: &str = "Invalid ShardIterator.";
 
+/// How a request whose timestamp member names no instant of the Unix epoch is refused: "A
+/// time stamp is the Unix epoch date with precision in milliseconds"
+/// (`GetShardIteratorInput$Timestamp`, and the same sentence on `ShardFilter$Timestamp`), so
+/// a value that names no such instant is refused rather than read as another.
+///
+/// ONE sentence for the one rule: every member of this service that carries an epoch date is
+/// refused identically rather than each wording it.
+pub const TIMESTAMP_NOT_AN_EPOCH_DATE_MESSAGE: &str =
+    "Timestamp must be a Unix epoch date with precision in milliseconds";
+
 /// How a read refuses a request whose `StreamARN` names a different stream than its
 /// `ShardIterator` does: the iterator already names the stream its position is in, so the
 /// pair has to name ONE stream — the same rule [`STREAM_IDENTIFIER_MISMATCH_MESSAGE`]
