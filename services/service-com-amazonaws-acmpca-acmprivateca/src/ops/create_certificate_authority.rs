@@ -274,13 +274,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // @idempotent: a repeat of the same token inside the five-minute window answers
         // with the CA the first call minted instead of minting a second one. A token
-        // reused for a DIFFERENT configuration is not a repeat of that call, so it mints
-        // a CA of its own, and the record of the first configuration stays replayable for
-        // the rest of its window ([`crate::state::replay_idempotent`]).
+        // reused for a DIFFERENT request — another configuration, another account or
+        // another region — is not a repeat of that call, so it mints a CA of its own and
+        // the record of the first request stays replayable for the rest of its window
+        // ([`crate::state::replay_idempotent`]). The account and the region are part of the
+        // request's identity because the CA a replay hands back belongs to one account and
+        // lives in one region ([`crate::state::CreatedAuthorityRequest`]).
+        let owner_account = ::emulator_server::emulator_account_id().to_string();
+        let identity = crate::state::CreatedAuthorityRequest::new(
+            &owner_account,
+            &region,
+            input.certificate_authority_configuration.clone(),
+        );
         if let Some(arn) = crate::state::replay_idempotent(
             &mut state.create_idempotency,
             input.idempotency_token.as_ref(),
-            &input.certificate_authority_configuration,
+            &identity,
             now,
         ) {
             return Ok(CreateCertificateAuthorityOutput {
@@ -322,7 +331,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     )
                 })?,
             key_pair,
-            owner_account: ::emulator_server::emulator_account_id().to_string(),
+            owner_account,
             ca_type: input.certificate_authority_type,
             // A new CA is returned in CREATING and settles into PENDING_CERTIFICATE on
             // the clock, so a caller that reads it immediately still sees the transient
@@ -368,7 +377,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         crate::state::record_idempotent(
             &mut state.create_idempotency,
             input.idempotency_token,
-            record.configuration.clone(),
+            identity,
             &arn,
             now,
         );

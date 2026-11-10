@@ -80,7 +80,7 @@ type TemplateRow<'a> = (&'a str, Option<&'a str>, ExpectedConstraints);
 /// it under the root CA certificate template, import what comes back — which is how a suite
 /// chooses the window the CA's certificate holds: the certificate a CA signs for itself is
 /// the one issuance no window bounds, because it is the issuance that SETS the window.
-async fn root_ca_valid_for(
+pub(crate) async fn root_ca_valid_for(
     emulator: &Emulator,
     case: &str,
     common_name: &str,

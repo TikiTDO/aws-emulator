@@ -42,6 +42,11 @@ regex = "1.13"
 # CRLs to that bucket, and S3 is called over the in-process callback into this same
 # emulator (no network client feature is enabled: the transport is the emulator's own).
 aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# The CloudWatch metric store a CA publishes its issuance series into
+# (`state::issuance_metrics`): the datapoints go into the store `PutMetricData` writes and
+# `ListMetrics` / `GetMetricStatistics` read, which is reached through the shared engine and
+# needs the owning service's state TYPE.
+service-com-amazonaws-cloudwatch-graniteserviceversion20100801 = { workspace = true }
 
 [dev-dependencies]
 # Generates the real certificates and certification requests the tests feed the

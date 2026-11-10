@@ -63,6 +63,26 @@ impl Emulator {
         Self { router, engine }
     }
 
+    /// The same emulator with CloudWatch mounted beside this service on the ONE engine,
+    /// exactly as `core/router` assembles them — which is what makes the metric store a CA
+    /// publishes its issuance series into the store CloudWatch's own readers answer from.
+    pub(crate) fn with_cloudwatch() -> Self {
+        let mut emulator = Self::new();
+        emulator.router.register_service(
+            service_com_amazonaws_cloudwatch_graniteserviceversion20100801::EmulatedService::new(
+                Arc::clone(&emulator.engine),
+            ),
+        );
+        emulator
+    }
+
+    /// The router every service mounted on this emulator is reached through, so a suite that
+    /// mounts a second service beside this one ([`Self::with_cloudwatch`]) drives that
+    /// service over its OWN wire protocol rather than through this service's.
+    pub(crate) fn router(&self) -> &MultiServiceRouter {
+        &self.router
+    }
+
     /// This service's store inside the engine the router hands every handler — the same
     /// store the operations read and write, reached the way a handler reaches it.
     pub(crate) fn state(
@@ -99,6 +119,46 @@ impl Emulator {
             .header("x-amz-target", format!("ACMPrivateCA.{operation}"))
             .header("authorization", AUTHORIZATION)
             .body(bytes::Bytes::from(body))
+            .expect("the request builds");
+        let response = self.router.dispatch(request).await;
+        let status = response.status().as_u16();
+        let parsed = if response.body().is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(response.body()).unwrap_or(Value::Null)
+        };
+        (status, parsed)
+    }
+
+    /// Call `operation` as a client of `region`: the SigV4 credential scope names that
+    /// region, which is where the resources the call mints live.
+    ///
+    /// A suite that cares which region a request arrives from \u2014 a CA belongs to the region
+    /// its ARN names \u2014 drives the same emulator through here.
+    pub(crate) async fn call_in_region(
+        &self,
+        region: &str,
+        operation: &str,
+        body: &Value,
+    ) -> (u16, Value) {
+        let host = format!("acm-pca.{region}.amazonaws.com");
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(format!("https://{host}/"))
+            .header("content-type", "application/x-amz-json-1.1")
+            .header("host", &host)
+            .header("x-amz-target", format!("ACMPrivateCA.{operation}"))
+            .header(
+                "authorization",
+                format!(
+                    "AWS4-HMAC-SHA256 \
+                     Credential=AKIDTESTTESTTEST/20260101/{region}/acm-pca/aws4_request, \
+                     SignedHeaders=host;x-amz-date, Signature=deadbeef"
+                ),
+            )
+            .body(bytes::Bytes::from(
+                serde_json::to_vec(body).expect("the request body serializes"),
+            ))
             .expect("the request builds");
         let response = self.router.dispatch(request).await;
         let status = response.status().as_u16();

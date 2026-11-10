@@ -7,20 +7,23 @@
 //! resolution and the PEM bodies the service hands back. Handlers hold no state of
 //! their own — they reach this store through [`service_state`].
 //!
-//! Three concerns of the store live in files of their own beside this one, and are
+//! Several concerns of the store live in files of their own beside this one, and are
 //! re-exported from here so every handler still reaches them as `crate::state::*`: the key
 //! pair a CA signs with ([`key_material`]), what makes a presented certificate the CA's own
-//! ([`imported_certificate`]) and the audit reports a CA produces over the certificates it
-//! has issued ([`audit_reports`]).
+//! ([`imported_certificate`]), the audit reports a CA produces over the certificates it
+//! has issued ([`audit_reports`]) and the CloudWatch series a CA publishes about the
+//! certificates it issues ([`issuance_metrics`]).
 
 mod audit_reports;
 mod certificate_templates;
 mod imported_certificate;
+mod issuance_metrics;
 mod key_material;
 
 pub use audit_reports::*;
 pub use certificate_templates::*;
 pub use imported_certificate::*;
+pub use issuance_metrics::*;
 pub use key_material::*;
 
 use std::collections::{HashMap, HashSet};
@@ -2183,6 +2186,43 @@ fn validity_key(validity: &Validity) -> (i64, String) {
     (validity.value, validity.r#type.clone())
 }
 
+/// What identifies ONE `CreateCertificateAuthority` call, so a repeat of it is answered with
+/// the CA the first call minted instead of a second CA.
+///
+/// The configuration is what the caller asked for, and the account and region are WHOSE CA it
+/// is: a private CA belongs to the account that created it ([`CertificateAuthorityRecord`]'s
+/// `owner_account`, which is what a listing filters a `ResourceOwner` by) and lives in the
+/// region its ARN names. The idempotency records of this operation sit on the store as a
+/// whole rather than on one account's CAs, so all three are part of the identity: a token is
+/// honoured as a replay only for a request that asks the same account, in the same region,
+/// for the same configuration, and a token presented for anything else mints a CA of its own
+/// rather than handing back a handle to a CA that is not the caller's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreatedAuthorityRequest {
+    /// The account the CA belongs to.
+    pub owner_account: String,
+    /// The region the CA lives in.
+    pub region: String,
+    /// The `CertificateAuthorityConfiguration` member the CA is built from.
+    pub configuration: CertificateAuthorityConfiguration,
+}
+
+impl CreatedAuthorityRequest {
+    /// The identity of a request asking `owner_account` for a CA in `region` built from
+    /// `configuration`.
+    pub fn new(
+        owner_account: &str,
+        region: &str,
+        configuration: CertificateAuthorityConfiguration,
+    ) -> Self {
+        Self {
+            owner_account: owner_account.to_string(),
+            region: region.to_string(),
+            configuration,
+        }
+    }
+}
+
 /// The bucket an `IssueCertificate` is remembered under: the `IdempotencyToken` it carried,
 /// and the empty string for a request that carried none.
 ///
@@ -2337,11 +2377,12 @@ fn evict_oldest<R>(tokens: &mut IdempotencyRecords<R>) -> bool {
 pub struct ComAmazonawsAcmpcaAcmprivatecaState {
     /// Every private CA, keyed by its ARN.
     pub certificate_authorities: HashMap<String, CertificateAuthorityRecord>,
-    /// `CreateCertificateAuthority` idempotency tokens -> the CA ARN each minted, with
-    /// the configuration that CA was created from: a token is honoured as a replay only
-    /// of a request for the SAME configuration, and it holds one record per configuration
-    /// it has been seen with ([`replay_idempotent`]).
-    pub create_idempotency: IdempotencyRecords<CertificateAuthorityConfiguration>,
+    /// `CreateCertificateAuthority` idempotency tokens -> the CA ARN each minted, with the
+    /// request that CA was created for: a token is honoured as a replay only of a request
+    /// asking the same account, in the same region, for the same configuration
+    /// ([`CreatedAuthorityRequest`]), and it holds one record per request it has been seen
+    /// with ([`replay_idempotent`]).
+    pub create_idempotency: IdempotencyRecords<CreatedAuthorityRequest>,
 }
 
 impl ComAmazonawsAcmpcaAcmprivatecaState {

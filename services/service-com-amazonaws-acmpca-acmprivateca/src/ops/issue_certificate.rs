@@ -219,31 +219,60 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let region = crate::state::request_region(&ctx.parts().headers);
+        // How long the issuance takes is what the CA's `Time` series observes, so it is
+        // measured over the work itself — from here, where the request has arrived, to the
+        // instant the issuance is complete.
+        let requested_at = ::std::time::Instant::now();
         // The issuance itself holds the store, so it is performed by the method below and
-        // the guard is released with it; what comes back is the certificate's ARN and the
-        // CRL the CA owes object storage, which is deposited here with no lock held.
-        let (arn, publication) = self.issue(input)?;
-        if let Some(publication) = publication {
+        // the guard is released with it; what comes back is the certificate's ARN, the CRL
+        // the CA owes object storage and the CA that completed the issuance, each delivered
+        // here with no lock held.
+        let issuance = self.issue(input)?;
+        // An issuance this CA completed is also its own contribution to the CA's CloudWatch
+        // issuance series ([`crate::state::publish_completed_issuance`]).
+        if let Some(certificate_authority_arn) = &issuance.completed_by {
+            crate::state::publish_completed_issuance(
+                &*self.engine,
+                certificate_authority_arn,
+                requested_at.elapsed(),
+            );
+        }
+        if let Some(publication) = issuance.publication {
             crate::state::publish_crl(ctx, &region, publication).await;
         }
 
         Ok(IssueCertificateOutput {
-            certificate_arn: Some(arn),
+            certificate_arn: Some(issuance.arn),
         })
     }
 }
 
+/// What one answered `IssueCertificate` leaves for the handler to deliver once this
+/// service's store has been released.
+struct Issuance {
+    /// The ARN of the certificate the CA issued — or of the one it had already issued, for
+    /// a repeat of a request it has already answered.
+    arn: String,
+    /// The CRL the CA owes object storage because of this issuance, when it owes one
+    /// ([`crate::state::initial_crl_publication`]).
+    publication: Option<crate::state::CrlPublication>,
+    /// The CA that COMPLETED this issuance, when the CA accounts for it: `None` for the
+    /// self-signed certificate a CA still waiting for its own answers, which gives that CA
+    /// the certificate every issuance it serves is signed under rather than being one of
+    /// them (`crate::state::issuance_metrics`).
+    completed_by: Option<String>,
+}
+
 impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> IssueCertificate<Eng> {
     /// Issue the certificate this request asks the CA for, answering its ARN together with
-    /// the CRL the CA publishes because of it ([`crate::state::initial_crl_publication`]).
+    /// what the CA owes other services because of it: the CRL it publishes
+    /// ([`crate::state::initial_crl_publication`]) and the issuance its CloudWatch series
+    /// counts ([`crate::state::issuance_metrics`]).
     ///
     /// Everything that reads or writes the store happens here, so this service's lock is
     /// taken and released inside one synchronous call and no handler holds it while calling
     /// another service.
-    fn issue(
-        &self,
-        input: IssueCertificateInput,
-    ) -> Result<(String, Option<crate::state::CrlPublication>), IssueCertificateError> {
+    fn issue(&self, input: IssueCertificateInput) -> Result<Issuance, IssueCertificateError> {
         let ca_arn = input.certificate_authority_arn;
         if crate::state::parse_certificate_authority_arn(&ca_arn).is_none() {
             return Err(IssueCertificateErrorModeled::InvalidArnException(
@@ -294,7 +323,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> IssueCertificate<
         // request is read apart from what decides that exception, so the service answers
         // the state error for a CA that has not been activated whatever else the request
         // carries.
-        if record.status != crate::state::STATUS_ACTIVE
+        // Whether this CA holds the certificate it signs with yet is also what says whether
+        // the certificate it is about to sign is an issuance the CA SERVES or the one that
+        // ACTIVATES it, which is what its issuance series accounts for.
+        let serves_as_an_issuer = record.status == crate::state::STATUS_ACTIVE;
+        let completing_ca = serves_as_an_issuer.then(|| ca_arn.clone());
+        if !serves_as_an_issuer
             && !record.signs_its_own_root_certificate(input.template_arn.as_deref(), &input.csr)
         {
             return Err(IssueCertificateErrorModeled::InvalidStateException(
@@ -339,7 +373,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> IssueCertificate<
             &identity,
             now,
         ) {
-            return Ok((arn, None));
+            return Ok(Issuance {
+                arn,
+                // A repeat changes nothing the CRL says, so the CA owes object storage
+                // nothing for it.
+                publication: None,
+                // It is an issuance request the CA completed all the same, so the CA
+                // accounts for it like the one it replays.
+                completed_by: completing_ca.clone(),
+            });
         }
 
         // Every issued certificate lives in memory for the life of the process, so the
@@ -480,7 +522,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> IssueCertificate<
         // that were REVOKED).
         let publication = crate::state::initial_crl_publication(record, now);
 
-        Ok((arn, publication))
+        Ok(Issuance {
+            arn,
+            publication,
+            completed_by: completing_ca,
+        })
     }
 }
 

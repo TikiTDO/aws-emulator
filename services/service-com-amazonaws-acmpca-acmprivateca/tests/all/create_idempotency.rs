@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 
 use serde_json::{json, Value};
 
-use crate::private_ca_lifecycle::{string, Emulator};
+use crate::private_ca_lifecycle::{string, Emulator, REGION};
 
 /// The token every row of a test reuses: one string, so what decides the answer is the
 /// request beside it.
@@ -385,5 +385,54 @@ async fn two_tokens_with_one_configuration_mint_two_cas() {
         minted.len(),
         3,
         "expected one CA per token, got {minted:?}"
+    );
+}
+
+/// A token is not a handle to a resource across regions either: a private CA belongs to the
+/// region its ARN names, so one token carrying one configuration replays only the CA of the
+/// region the call was made in, and a client of another region is minted a CA of its own.
+///
+/// The rows are the regions a client signs for; the region is read from the call's credential
+/// scope, as every ARN this service mints is.
+#[tokio::test]
+async fn one_token_in_another_region_mints_a_ca_of_its_own() {
+    let emulator = Emulator::new();
+    let body = create_with(&first_configuration());
+
+    let mut minted: BTreeSet<String> = BTreeSet::new();
+    for region in [REGION, "us-east-1", "ap-southeast-2"] {
+        let case = format!("a client of {region}");
+        let (status, created) = emulator
+            .call_in_region(region, "CreateCertificateAuthority", &body)
+            .await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: expected the create to answer 200, got {status} {created:?}"
+        );
+        let arn = string(&created, "CertificateAuthorityArn", &case);
+        let prefix = format!("arn:aws:acm-pca:{region}:");
+        assert!(
+            arn.starts_with(&prefix),
+            "case {case:?}: expected a CA ARN under {prefix:?}, got {arn:?}"
+        );
+        assert!(
+            minted.insert(arn.clone()),
+            "case {case:?}: a region of its own must mint a CA of its own, got {arn:?} again"
+        );
+
+        // The retry the token is for: the same call from the same region replays that CA.
+        let (_, again) = emulator
+            .call_in_region(region, "CreateCertificateAuthority", &body)
+            .await;
+        let replayed = string(&again, "CertificateAuthorityArn", &case);
+        assert_eq!(
+            replayed, arn,
+            "case {case:?}: expected the retry to replay {arn:?}, got {replayed:?}"
+        );
+    }
+    assert_eq!(
+        minted.len(),
+        3,
+        "expected one CA per region the token was presented in, got {minted:?}"
     );
 }

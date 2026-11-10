@@ -39,6 +39,8 @@ mod crl_publication;
 mod delete_certificate_authority;
 #[path = "all/enum_value_set_order.rs"]
 mod enum_value_set_order;
+#[path = "all/issuance_metrics.rs"]
+mod issuance_metrics;
 #[path = "all/issued_certificate_reads.rs"]
 mod issued_certificate_reads;
 #[path = "all/permission_action_set.rs"]
