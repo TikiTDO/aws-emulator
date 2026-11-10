@@ -9,8 +9,9 @@
 //! `TagKey`/`TagValue` length bounds, the documented tag character set, or the prefix AWS
 //! reserves for its own tags — is `BadRequestException` (400), the code that layer answers
 //! with, as is an ARN that is not a pipe ARN at all; and a merge that would push the pipe
-//! past 50 tags is the modelled `ValidationException` (400). This is the ONLY file to touch
-//! for this operation.
+//! past 50 tags is the modelled `ValidationException` (400). A successful write answers
+//! `204 No Content` with no body, because the modelled output declares no member. This is
+//! the ONLY file to touch for this operation.
 //!
 //! The tag-content rules live in [`crate::state::tag_violation`], so the create path that
 //! also installs tags refuses exactly what this one refuses.
@@ -144,7 +145,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     const NAME: &'static str = "TagResource";
     const INPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::TAG_RESOURCE_INPUT_SCHEMA;
     const OUTPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::TAG_RESOURCE_OUTPUT_SCHEMA;
-    const SUCCESS_STATUS: u16 = 200u16;
+    /// `TagResourceResponse` declares NO member
+    /// (`smithy_query(query="shape",shape="TagResourceResponse")`), so a successful write
+    /// leaves the caller nothing to parse, and the model pins no code for it — the `@http`
+    /// code is the protocol's default rather than a stated one (`code: 200,
+    /// codeDefaulted: true`). An answer with no content IS the no-content status, so this
+    /// answers 204: a client that branches on the status then reads no body that is not
+    /// there. The empty body such an answer carries is framed once for the whole service,
+    /// in `crate::service`.
+    const SUCCESS_STATUS: u16 = 204u16;
 
     async fn handle(
         &self,

@@ -69,6 +69,8 @@ mod service_set_tag_keys;
 mod state_roundtrip;
 #[path = "all/tag_key_rules.rs"]
 mod tag_key_rules;
+#[path = "all/tag_mutation_no_content.rs"]
+mod tag_mutation_no_content;
 #[path = "all/tagging_refusal_wording.rs"]
 mod tagging_refusal_wording;
 #[path = "all/tagging_refusals.rs"]

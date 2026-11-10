@@ -34,7 +34,9 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::pipe_lifecycle::{create, describe, router, Reply};
-use crate::pipe_tagging::{assert_tags_agree, create_body, pipe_arn, tag, tag_map, untag};
+use crate::pipe_tagging::{
+    assert_tags_agree, create_body, pipe_arn, tag, tag_map, untag, TAG_MUTATION_STATUS,
+};
 use crate::tag_key_rules::{
     elided, one_tag, shown, tags_of, CHARACTER_SET_SENTENCE, RESERVED_PREFIX_SENTENCE,
 };
@@ -543,7 +545,7 @@ async fn the_two_tag_key_bounds_are_answered_by_different_codes_on_removal() {
         let reply = untag(&router, &pipe_arn(name), &borrowed).await;
         match &expected {
             None => assert_eq!(
-                reply.status, 200,
+                reply.status, TAG_MUTATION_STATUS,
                 "case {case:?}: a key inside the bound must be accepted, got {reply:?}"
             ),
             Some((code, message)) => {

@@ -7,8 +7,9 @@
 //! a key outside `TagKey`'s published bound is the `BadRequestException` (400) that layer
 //! answers a broken tag rule with — raised by the boundary validator, which walks a list's
 //! elements, and worded in `crate::service`. An ARN that is not a pipe ARN at all is that
-//! same `BadRequestException`, because no pipe can ever carry it. This is the ONLY file to
-//! touch for this operation.
+//! same `BadRequestException`, because no pipe can ever carry it. A successful removal
+//! answers `204 No Content` with no body, because the modelled output declares no member.
+//! This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -131,7 +132,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     const NAME: &'static str = "UntagResource";
     const INPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::UNTAG_RESOURCE_INPUT_SCHEMA;
     const OUTPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::UNTAG_RESOURCE_OUTPUT_SCHEMA;
-    const SUCCESS_STATUS: u16 = 200u16;
+    /// `UntagResourceResponse` declares NO member
+    /// (`smithy_query(query="shape",shape="UntagResourceResponse")`), so a successful
+    /// removal leaves the caller nothing to parse, and the model pins no code for it — the
+    /// `@http` code is the protocol's default rather than a stated one (`code: 200,
+    /// codeDefaulted: true`). An answer with no content IS the no-content status, so this
+    /// answers 204, the same way `TagResource` does. The empty body such an answer carries
+    /// is framed once for the whole service, in `crate::service`.
+    const SUCCESS_STATUS: u16 = 204u16;
 
     async fn handle(
         &self,

@@ -31,6 +31,7 @@ use serde_json::json;
 use crate::pipe_lifecycle::{call, create, describe, router, REGION};
 use crate::pipe_tagging::{
     assert_tags_agree, create_body, list_tags, pipe_arn, tag, tag_map, untag,
+    TAG_MUTATION_STATUS,
 };
 use crate::tagging_refusal_wording::tag_refusal_document;
 
@@ -336,7 +337,7 @@ async fn untag_resource_refuses_a_key_outside_the_published_bound() {
         let reply = untag(&router, &arn, &borrowed).await;
         match &echoed_key {
             None => assert_eq!(
-                reply.status, 200,
+                reply.status, TAG_MUTATION_STATUS,
                 "case {case:?}: a key inside the bound must be accepted, got {reply:?}"
             ),
             Some(key) => {

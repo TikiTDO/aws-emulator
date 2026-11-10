@@ -30,7 +30,9 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::pipe_lifecycle::{call, create, describe, minimal_body, router, Reply, REGION};
+use crate::pipe_lifecycle::{
+    call, call_raw, create, describe, minimal_body, reply_of, router, Reply, REGION,
+};
 
 /// The uppercase hex digits a percent-escape is written with (RFC 3986 §2.1).
 const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
@@ -44,6 +46,13 @@ const MAX_TAGS: usize = 50;
 /// `TagKey` / `TagValue` shapes in `smithy-model/com-amazonaws-pipes-pipes.json`.
 const MAX_TAG_KEY_LEN: usize = 128;
 const MAX_TAG_VALUE_LEN: usize = 256;
+
+/// The status a successful `TagResource` / `UntagResource` answers: no content, because
+/// `TagResourceResponse` and `UntagResourceResponse` declare no member
+/// (`smithy_query(query="shape",shape="TagResourceResponse,UntagResourceResponse")`).
+/// What such an answer carries — no body at all — is pinned in
+/// `tests/all/tag_mutation_no_content.rs`.
+pub(crate) const TAG_MUTATION_STATUS: u16 = 204;
 
 /// The ARN `CreatePipe` mints for `name` in the region every request here is signed for.
 pub(crate) fn pipe_arn(name: &str) -> String {
@@ -90,7 +99,19 @@ pub(crate) async fn tag(
     resource_arn: &str,
     tags: &Value,
 ) -> Reply {
-    call(
+    reply_of(tag_http(router, resource_arn, tags).await)
+}
+
+/// `POST /tags/{resourceArn}` — `TagResource`, as the WHOLE response, so a suite can assert
+/// the framing (the status line, the body bytes and the headers) and not only the members a
+/// body parses into. [`tag`] is this plus that parse, so there is ONE request path for this
+/// operation.
+pub(crate) async fn tag_http(
+    router: &MultiServiceRouter,
+    resource_arn: &str,
+    tags: &Value,
+) -> http::Response<bytes::Bytes> {
+    call_raw(
         router,
         "POST",
         &format!("/tags/{}", encode(resource_arn)),
@@ -105,12 +126,23 @@ pub(crate) async fn untag(
     resource_arn: &str,
     tag_keys: &[&str],
 ) -> Reply {
+    reply_of(untag_http(router, resource_arn, tag_keys).await)
+}
+
+/// `DELETE /tags/{resourceArn}?tagKeys=…` — `UntagResource`, as the whole response, for the
+/// same reason [`tag_http`] exists. `tagKeys` is an `@httpQuery` list, so each key travels
+/// as its own repeated parameter.
+pub(crate) async fn untag_http(
+    router: &MultiServiceRouter,
+    resource_arn: &str,
+    tag_keys: &[&str],
+) -> http::Response<bytes::Bytes> {
     let query = tag_keys
         .iter()
         .map(|key| format!("tagKeys={}", encode(key)))
         .collect::<Vec<_>>()
         .join("&");
-    call(
+    call_raw(
         router,
         "DELETE",
         &format!("/tags/{}?{query}", encode(resource_arn)),
@@ -318,8 +350,8 @@ async fn tag_resource_merges_into_the_tags_the_pipe_already_carries() {
 
         let tagged = tag(&router, &pipe_arn(&name), request).await;
         assert_eq!(
-            tagged.status, 200,
-            "case {case:?}: TagResource must answer 200, got {tagged:?}"
+            tagged.status, TAG_MUTATION_STATUS,
+            "case {case:?}: TagResource must answer {TAG_MUTATION_STATUS}, got {tagged:?}"
         );
         let expected = tag_map(merged);
         assert_tags_agree(&router, case, &name, &expected).await;
@@ -327,8 +359,9 @@ async fn tag_resource_merges_into_the_tags_the_pipe_already_carries() {
         // `@idempotent`: the same call again states the same end state.
         let again = tag(&router, &pipe_arn(&name), request).await;
         assert_eq!(
-            again.status, 200,
-            "case {case:?}: a repeated TagResource must answer 200, got {again:?}"
+            again.status, TAG_MUTATION_STATUS,
+            "case {case:?}: a repeated TagResource must answer {TAG_MUTATION_STATUS}, got \
+             {again:?}"
         );
         assert_tags_agree(&router, &format!("{case} (repeated)"), &name, &expected).await;
     }
@@ -398,8 +431,8 @@ async fn untag_resource_removes_only_the_keys_it_names() {
 
         let untagged = untag(&router, &pipe_arn(&name), &borrowed).await;
         assert_eq!(
-            untagged.status, 200,
-            "case {case:?}: UntagResource must answer 200, got {untagged:?}"
+            untagged.status, TAG_MUTATION_STATUS,
+            "case {case:?}: UntagResource must answer {TAG_MUTATION_STATUS}, got {untagged:?}"
         );
         let expected = tag_map(remaining);
         assert_tags_agree(&router, case, &name, &expected).await;
@@ -408,8 +441,9 @@ async fn untag_resource_removes_only_the_keys_it_names() {
         // nothing.
         let again = untag(&router, &pipe_arn(&name), &borrowed).await;
         assert_eq!(
-            again.status, 200,
-            "case {case:?}: a repeated UntagResource must answer 200, got {again:?}"
+            again.status, TAG_MUTATION_STATUS,
+            "case {case:?}: a repeated UntagResource must answer {TAG_MUTATION_STATUS}, got \
+             {again:?}"
         );
         assert_tags_agree(&router, &format!("{case} (repeated)"), &name, &expected).await;
     }
@@ -521,7 +555,7 @@ async fn a_pipe_carries_at_most_the_published_tag_maximum() {
     );
     let tagged = tag(&router, &pipe_arn(below), &json!({"extra": "one"})).await;
     assert_eq!(
-        tagged.status, 200,
+        tagged.status, TAG_MUTATION_STATUS,
         "case \"49-plus-1\": a merge landing exactly on the {MAX_TAGS}-tag bound must \
          succeed, got {tagged:?}"
     );
@@ -532,7 +566,7 @@ async fn a_pipe_carries_at_most_the_published_tag_maximum() {
     // On the bound: replacing a stored key's value keeps the count at 50, so it is fine.
     let replaced = tag(&router, &pipe_arn(below), &json!({"key0": "replaced"})).await;
     assert_eq!(
-        replaced.status, 200,
+        replaced.status, TAG_MUTATION_STATUS,
         "case \"50-replace-existing\": replacing a value does not grow the map, got \
          {replaced:?}"
     );

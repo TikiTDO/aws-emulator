@@ -84,14 +84,16 @@ impl Reply {
     }
 }
 
-/// Dispatch one signed restJson1 request and read the reply.
-pub(crate) async fn call(
+/// Dispatch one signed restJson1 request and hand back the WHOLE response, so a suite can
+/// assert the framing — the status line, the body bytes and the headers — and not only the
+/// members a body parses into. [`call`] is this plus that parse.
+pub(crate) async fn call_raw(
     router: &MultiServiceRouter,
     method: &str,
     uri: &str,
     body: Option<Value>,
     region: &str,
-) -> Reply {
+) -> http::Response<bytes::Bytes> {
     let payload = body
         .map(|value| serde_json::to_vec(&value).expect("serialize the request body"))
         .unwrap_or_default();
@@ -111,7 +113,25 @@ pub(crate) async fn call(
         .body(bytes::Bytes::from(payload))
         .expect("build the request");
 
-    let response = router.dispatch(request).await;
+    router.dispatch(request).await
+}
+
+/// Dispatch one signed restJson1 request and read the reply.
+pub(crate) async fn call(
+    router: &MultiServiceRouter,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    region: &str,
+) -> Reply {
+    reply_of(call_raw(router, method, uri, body, region).await)
+}
+
+/// What one response says, read the way every suite here reads one: the status, the wire
+/// error code (empty on success) and the parsed body. Split out of [`call`] so a suite that
+/// needs the WHOLE response ([`call_raw`]) can still read it as a [`Reply`] rather than
+/// building a second request path of its own.
+pub(crate) fn reply_of(response: http::Response<bytes::Bytes>) -> Reply {
     let status = response.status().as_u16();
     let header_code = response
         .headers()

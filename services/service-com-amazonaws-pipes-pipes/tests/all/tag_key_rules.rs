@@ -37,7 +37,9 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use crate::pipe_lifecycle::{create, describe, router};
-use crate::pipe_tagging::{assert_tags_agree, create_body, pipe_arn, tag, tag_map};
+use crate::pipe_tagging::{
+    assert_tags_agree, create_body, pipe_arn, tag, tag_map, TAG_MUTATION_STATUS,
+};
 use crate::tagging_refusal_wording::tag_refusal_document;
 
 /// `TagKey`'s published maximum (128) and minimum (1), and `TagValue`'s (256 and 0).
@@ -333,7 +335,7 @@ async fn tag_resource_refuses_a_tag_whose_key_or_value_breaks_the_published_rule
         match &broken {
             None => assert_eq!(
                 (reply.status, reply.error_code.as_str()),
-                (200, ""),
+                (TAG_MUTATION_STATUS, ""),
                 "case {case:?}: a tag inside every rule must be accepted, got {reply:?}"
             ),
             Some(broken) => {

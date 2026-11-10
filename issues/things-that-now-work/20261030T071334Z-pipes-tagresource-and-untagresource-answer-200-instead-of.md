@@ -46,3 +46,30 @@ Expected (AWS, recorded): 204 No Content with an empty body on success. Actual (
 1. Replay fixture pipes-pipe-tag-management, step task#10: TagResource on an existing pipe ARN with a non-empty tag map. Emulator answers 200; AWS answers 204.
 2. Same fixture, step task#12: UntagResource with tagKeys for the tag just written. Emulator answers 200; AWS answers 204.
 3. Both must answer 204 with an empty body on success (error paths unchanged).
+
+## Fix status
+
+Cause 1 (TagResource) and cause 2 (UntagResource): FIXED. Both operations state the
+no-content success status on the operation itself
+(`SUCCESS_STATUS` in `services/service-com-amazonaws-pipes-pipes/src/ops/tag_resource.rs`
+and `src/ops/untag_resource.rs`), and the body the serializer renders for a members-less
+output structure is emptied at the one no-content seam every response of this service passes
+through (`Service::override_protocol` in `src/service.rs`, through
+`service_common::no_content_responses::without_content`). Replay reports both status keys
+as `progressed`: the 204 matches on every affected step.
+
+Remaining on those steps, and NOT a cause of this report:
+`pipes|TagResource|2xx->2xx|$headers.content-length` and the same key for
+`UntagResource`. The service states `content-length: 0` at that seam and every in-process
+path serves it (the front door, the inter-service callback, the SDK connector — see
+`set_framing_content_length` in `vendor/server/src/lib.rs`), but the HTTP/1.1 server writer
+the vendored listener is built on strips `content-length` from a status that cannot carry a
+body, which `vendor/server/src/lib.rs` records as its own behaviour
+(`the_connector_keeps_a_handler_length_and_adds_none_to_a_status_without_content`). No seam
+a service crate owns runs after that writer. The same blocker, with the same evidence, is
+already filed for another service in
+`issues/things-that-now-work/20261102T020000Z-notifications-mp-buyer-agreements-text-and-the-two-204-content-length-keys-remain-open.md`.
+
+Also still diverging on `pipes-pipe-tag-management#task#8`, from before this change and
+untouched by it: `pipes|DescribePipe|2xx->2xx|$.SourceParameters`,
+`$.TargetParameters` and `$.EnrichmentParameters`.
