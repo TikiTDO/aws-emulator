@@ -15,6 +15,13 @@
 // exactly that. The lines above are the file header, which no landing edits.
 #[path = "all/prefix_lists.rs"]
 mod prefix_lists;
+// Deleting LAUNCH TEMPLATE VERSIONS: the per-version outcome a request gets for the versions
+// it names, the default version no request may delete, the numbering a delete does not give
+// back, and what the call refuses without deleting anything. Declared beside `prefix_lists`
+// for the reason the note above gives: the sorted neighbourhood and the tail of this file are
+// where every new ec2 suite inserts its lines.
+#[path = "all/delete_launch_template_versions.rs"]
+mod delete_launch_template_versions;
 // The FILTERS a describe serves for the members of the records it reports — the reported
 // record's own id, and the tag pair for a record that carries tags — whether or not that
 // operation's own documentation enumerates them. Declared beside `prefix_lists` for the reason

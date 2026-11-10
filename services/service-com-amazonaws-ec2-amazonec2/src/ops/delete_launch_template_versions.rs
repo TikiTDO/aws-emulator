@@ -1,15 +1,28 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteLaunchTemplateVersions
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteLaunchTemplateVersions`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteLaunchTemplateVersions::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Implemented: takes the versions the request names out of the launch template it names
+//! and reports the outcome OF EACH ONE — "information about the launch template versions
+//! that were successfully deleted"
+//! (`DeleteLaunchTemplateVersionsResult$SuccessfullyDeletedLaunchTemplateVersions`) beside
+//! "information about the launch template versions that could not be deleted"
+//! ($UnsuccessfullyDeletedLaunchTemplateVersions). So a request naming a version the
+//! template holds and one it does not succeeds in part: the first is deleted and reported
+//! successful, the second is reported under the `launchTemplateVersionDoesNotExist` member
+//! of `ResponseError$Code` and nothing else about the request is refused.
+//!
+//! The template is resolved by id or by name — "you must specify either the launch template
+//! ID or the launch template name, but not both" — by
+//! [`crate::state::resolve_launch_template_id`], the one reader every operation that takes
+//! that pair shares, so WHICH template a request names fails in one way across the crate
+//! rather than per version.
+//!
+//! "You can't delete the default version of a launch template; you must first assign a
+//! different version as the default. If the default version is the only version for the
+//! launch template, you must delete the entire launch template using DeleteLaunchTemplate":
+//! the default version is a fact of the TEMPLATE, not of one of the versions named, so a
+//! request that names it is refused whole, before any version is deleted.
 //!
 //! ## Shape of an operation
 //!
@@ -150,18 +163,198 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteLaunchTemplateVersions` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteLaunchTemplateVersionsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteLaunchTemplateVersions"))
+        use std::collections::BTreeSet;
+
+        use crate::scaffolded::Scaffolded;
+        use crate::state::{
+            LaunchTemplateVersionRequest, launch_template_version_request, require_service_state,
+            resolve_launch_template_id,
+        };
+
+        // A launch template carries no Region member, so nothing here depends on the Region
+        // the request was signed for.
+        let _ = ctx;
+
+        // "The version numbers of one or more LAUNCH TEMPLATE VERSIONS to delete"
+        // (`Versions`), so a request that names none has named nothing to delete. The member
+        // is `@required`, which the boundary validator refuses an ABSENT one for; it is
+        // `clientOptional` and carries no `@length`, so a list that arrives empty reaches
+        // here and is answered as the missing parameter it is.
+        let named = input.versions.len();
+        if named == 0 {
+            return Err(Scaffolded::missing_parameter(format!(
+                "The request must contain the parameter {VERSIONS_PARAMETER}"
+            )));
+        }
+        // "You can specify up to 200 launch template version numbers" (`Versions`), which
+        // the model declares no `@length` for, so the handler is the only place that bound
+        // can be enforced.
+        if named > MAX_DELETED_VERSIONS {
+            return Err(Scaffolded::invalid_parameter_value(format!(
+                "Value ({named}) for parameter {VERSIONS_PARAMETER} is invalid. The maximum \
+                 number of launch template versions that may be deleted in one request is \
+                 {MAX_DELETED_VERSIONS}"
+            )));
+        }
+
+        // "The VERSION NUMBERS of one or more launch template versions to delete": the two
+        // aliases name whichever version the template currently records, which is not
+        // something a delete can be asked for, so a word that is not a version number names
+        // nothing to delete — and the valid values this states are the version numbers the
+        // member documents. The word is read by the one reader every operation that takes a
+        // launch template version shares, so a value that is neither a number nor an alias
+        // is refused the same way here as there. A repeated number names ONE version, so the
+        // list is deduplicated while the request's order is kept: the response reports one
+        // outcome per version named.
+        let mut named_once: BTreeSet<i64> = BTreeSet::new();
+        let mut requested: Vec<i64> = Vec::new();
+        for version in &input.versions {
+            match launch_template_version_request(version)? {
+                LaunchTemplateVersionRequest::Numbered(number) => {
+                    if named_once.insert(number) {
+                        requested.push(number);
+                    }
+                }
+                LaunchTemplateVersionRequest::Latest | LaunchTemplateVersionRequest::Default => {
+                    return Err(Scaffolded::invalid_parameter_value(format!(
+                        "Invalid value '{version}' for {VERSIONS_PARAMETER}. Valid values \
+                         are version numbers"
+                    )));
+                }
+            }
+        }
+
+        // An empty value names nothing, so it is read as a parameter the request did not
+        // give rather than as an id or a name to look up — the reading `DeleteLaunchTemplate`
+        // gives the same pair.
+        let named_id = input
+            .launch_template_id
+            .as_deref()
+            .filter(|id| !id.is_empty());
+        let named_name = input
+            .launch_template_name
+            .as_deref()
+            .filter(|name| !name.is_empty());
+
+        let state = require_service_state(&*self.engine)?;
+        let mut store = state.lock();
+
+        // WHICH template a request names is a fact of the request and of the account, not of
+        // any one version, so it is resolved once, through the reader every operation that
+        // takes the pair shares: naming both keys, naming neither, a malformed id and an id
+        // or name the account holds no template for are refused the same way here as there,
+        // and no version is deleted for a request that named no template.
+        let launch_template_id = resolve_launch_template_id(&store, named_id, named_name)?;
+
+        let record = store
+            .launch_templates
+            .get(&launch_template_id)
+            .ok_or_else(|| {
+                Scaffolded::internal_error(format!(
+                    "launch template '{launch_template_id}' resolved but was not stored"
+                ))
+            })?;
+        // Every reported item names the template it is about by BOTH keys
+        // (`DeleteLaunchTemplateVersionsResponseSuccessItem$LaunchTemplateName`), read off
+        // the stored template rather than echoed from the request, so a request that named
+        // the template by one key reports the other as the store holds it.
+        let launch_template_name = record.launch_template_name().to_string();
+        let default_version = record.template.default_version_number;
+        let held: BTreeSet<i64> = record.versions.keys().copied().collect();
+
+        // "You can't delete the default version of a launch template; you must first assign a
+        // different version as the default. If the default version is the only version for
+        // the launch template, you must delete the entire launch template using
+        // DeleteLaunchTemplate." Which version is the default is a fact of the TEMPLATE, so a
+        // request that names it is refused whole — before any version is deleted — rather
+        // than reported as one item's failure, and the versions it named as well are all
+        // still there afterwards.
+        if default_version.is_some_and(|number| named_once.contains(&number)) {
+            return Err(Scaffolded::invalid_parameter_value(
+                DEFAULT_VERSION_CANNOT_BE_DELETED,
+            ));
+        }
+
+        // "Checks whether you have the required permissions for the action, WITHOUT ACTUALLY
+        // MAKING THE REQUEST, and provides an error response. If you have the required
+        // permissions, the error response is DryRunOperation" (`DryRun`). Every caller of
+        // this emulator is permitted, so the flag is answered after every parameter has been
+        // read and every read-only check made, and before the first write: a request that
+        // would have been refused is refused with that reason instead, and one that would
+        // have succeeded leaves every version where it was.
+        if input.dry_run == Some(true) {
+            return Err(Scaffolded::dry_run_operation());
+        }
+
+        // One outcome per version named, in the order the request named them: deleted, or
+        // reported as a version the template does not hold. A version the template DOES hold
+        // is taken out of the store here, so a later `DescribeLaunchTemplateVersions` no
+        // longer reports it and the template's latest version follows the versions that
+        // remain.
+        let mut deleted: Vec<DeleteLaunchTemplateVersionsResponseSuccessItem> = Vec::new();
+        let mut undeleted: Vec<DeleteLaunchTemplateVersionsResponseErrorItem> = Vec::new();
+        for version_number in requested {
+            if !held.contains(&version_number) {
+                undeleted.push(DeleteLaunchTemplateVersionsResponseErrorItem {
+                    launch_template_id: Some(launch_template_id.clone()),
+                    launch_template_name: Some(launch_template_name.clone()),
+                    version_number: Some(version_number),
+                    response_error: Some(ResponseError {
+                        code: Some(LAUNCH_TEMPLATE_VERSION_DOES_NOT_EXIST.to_string()),
+                        message: Some(VERSION_DOES_NOT_EXIST_MESSAGE.to_string()),
+                    }),
+                });
+                continue;
+            }
+            store
+                .remove_launch_template_version(&launch_template_id, version_number)
+                .ok_or_else(|| {
+                    Scaffolded::internal_error(format!(
+                        "launch template version '{version_number}' of \
+                         '{launch_template_id}' was held but could not be removed"
+                    ))
+                })?;
+            deleted.push(DeleteLaunchTemplateVersionsResponseSuccessItem {
+                launch_template_id: Some(launch_template_id.clone()),
+                launch_template_name: Some(launch_template_name.clone()),
+                version_number: Some(version_number),
+            });
+        }
+
+        // Both sets are reported, each with the items that fell to it: the response answers
+        // for every version the request named, so a caller reads one set against the other
+        // rather than inferring an absent set's contents.
+        Ok(DeleteLaunchTemplateVersionsOutput {
+            successfully_deleted_launch_template_versions: Some(deleted),
+            unsuccessfully_deleted_launch_template_versions: Some(undeleted),
+        })
     }
 }
+
+/// The parameter the `Versions` member reaches the wire as: ec2Query flattens the list into
+/// `LaunchTemplateVersion.N` form fields (`xmlName: LaunchTemplateVersion` on
+/// `DeleteLaunchTemplateVersionsRequest$Versions`), so a refusal about the list names the
+/// parameter the caller actually sent.
+const VERSIONS_PARAMETER: &str = "LaunchTemplateVersion";
+
+/// The most versions one request may delete: "You can delete up to 200 launch template
+/// versions in a single request. To delete more than 200 versions in a single request, use
+/// DeleteLaunchTemplate, which deletes the launch template and all of its versions"
+/// (`DeleteLaunchTemplateVersions`).
+const MAX_DELETED_VERSIONS: usize = 200;
+
+/// The `ResponseError$Code` an item reports for a version the named template does not hold:
+/// the `launchTemplateVersionDoesNotExist` member of `LaunchTemplateErrorCode`
+/// (`crate::ops::types::LAUNCH_TEMPLATE_ERROR_CODE_VALUES`).
+const LAUNCH_TEMPLATE_VERSION_DOES_NOT_EXIST: &str = "launchTemplateVersionDoesNotExist";
+
+/// The `ResponseError$Message` that code carries, as EC2 words it: one fixed sentence,
+/// naming neither the version nor the template — the item itself reports both.
+const VERSION_DOES_NOT_EXIST_MESSAGE: &str = "The launch template version does not exist.";
+
+/// The `InvalidParameterValue` message EC2 refuses a request that names the template's
+/// default version with, as it words it: two fixed sentences, naming neither the version nor
+/// the template — the rule is the same whichever version is the default and whichever
+/// template holds it.
+const DEFAULT_VERSION_CANNOT_BE_DELETED: &str = "The default version cannot be deleted. \
+     Either specify another version as default or delete the launch template.";

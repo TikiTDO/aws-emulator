@@ -1459,6 +1459,7 @@ impl ComAmazonawsEc2Amazonec2State {
             LaunchTemplateRecord {
                 template,
                 versions,
+                highest_version_minted: FIRST_LAUNCH_TEMPLATE_VERSION,
                 payload_bytes,
             },
         );
@@ -1471,8 +1472,9 @@ impl ComAmazonawsEc2Amazonec2State {
     ///
     /// Everything the service itself owns is derived here rather than taken from the caller:
     /// "launch template versions are numbered in the order in which they are created"
-    /// (`CreateLaunchTemplateVersion`), so the number is the template's latest plus one, and
-    /// storing it is what moves `LaunchTemplate$LatestVersionNumber`. The template's DEFAULT
+    /// (`CreateLaunchTemplateVersion`), so the number is one past the highest the template
+    /// has ever minted ([`LaunchTemplateRecord::highest_version_minted`]), and storing it is
+    /// what moves `LaunchTemplate$LatestVersionNumber`. The template's DEFAULT
     /// version is left where it is: a new version is not the default one until something
     /// makes it so. The bytes the version retains are counted into the store's budget here as
     /// well, on the record a delete of the template gives back in one piece.
@@ -1498,18 +1500,12 @@ impl ComAmazonawsEc2Amazonec2State {
             return None;
         }
         let record = self.launch_templates.get_mut(launch_template_id)?;
-        // The version AFTER every version the template holds, so a number is never reused
-        // even if the latest version has since been deleted — and a record holding no version
-        // at all is numbered from [`FIRST_LAUNCH_TEMPLATE_VERSION`], the number the first
-        // version of a template carries.
-        let version_number = record
-            .versions
-            .keys()
-            .next_back()
-            .copied()
-            .max(record.template.latest_version_number)
-            .unwrap_or(FIRST_LAUNCH_TEMPLATE_VERSION - 1)
-            .saturating_add(1);
+        // The version AFTER every version this template has ever minted
+        // ([`LaunchTemplateRecord::highest_version_minted`]), so a number is never reused
+        // even if the version that carried it has since been deleted — and a record that has
+        // minted nothing is numbered from [`FIRST_LAUNCH_TEMPLATE_VERSION`], the number the
+        // first version of a template carries.
+        let version_number = record.highest_version_minted.saturating_add(1);
         record.versions.insert(
             version_number,
             LaunchTemplateVersionRecord {
@@ -1522,9 +1518,51 @@ impl ComAmazonawsEc2Amazonec2State {
             },
         );
         record.template.latest_version_number = Some(version_number);
+        record.highest_version_minted = version_number;
         record.payload_bytes = record.payload_bytes.saturating_add(payload_bytes);
         self.add_stored_bytes(payload_bytes);
         Some(version_number)
+    }
+
+    /// Remove ONE version of the launch template `launch_template_id` names, and answer the
+    /// version as it was last reported — `None` when the account holds no such template or
+    /// that template holds no such version, in which case NOTHING was written.
+    ///
+    /// The template itself stays, with every other version it holds, so this is the one way
+    /// a single version leaves the store ([`Self::remove_launch_template`] being the way all
+    /// of them do). `LaunchTemplate$LatestVersionNumber` is "the version number of the latest
+    /// version of the launch template", so it is re-read off the versions that REMAIN here,
+    /// in one place: a delete of the latest version moves it down to the highest version the
+    /// template still holds, which is also the version `$Latest` then resolves to, and a
+    /// delete of any other version leaves it where it was. The number itself is not given
+    /// back — [`LaunchTemplateRecord::highest_version_minted`] keeps counting, because "you
+    /// can't specify, change, or replace the numbering of launch template versions".
+    ///
+    /// The bytes the version retained go back to the store's budget, and the
+    /// `CreateLaunchTemplateVersion` client token that minted it goes too: a token must never
+    /// answer with a version that is no longer stored.
+    pub fn remove_launch_template_version(
+        &mut self,
+        launch_template_id: &str,
+        version_number: i64,
+    ) -> Option<LaunchTemplateVersionRecord> {
+        let record = self.launch_templates.get_mut(launch_template_id)?;
+        let removed = record.versions.remove(&version_number)?;
+        // Never more than the record was charged, so the store's budget cannot wrap below
+        // what the template's remaining versions hold.
+        let released = launch_template_version_record_bytes(&removed).min(record.payload_bytes);
+        record.payload_bytes -= released;
+        // The latest version is the latest version the template STILL holds, and a template
+        // that holds none has no latest version to report: the member follows the versions
+        // that remain whichever of them this call took, so no reader can report a version
+        // number that is no longer stored.
+        record.template.latest_version_number = record.versions.keys().next_back().copied();
+        self.launch_template_version_client_tokens
+            .retain(|(minted, _), number| {
+                minted != launch_template_id || *number != version_number
+            });
+        self.release_stored_bytes(released);
+        Some(removed)
     }
 
     /// Make the version `version_number` names the DEFAULT version of the launch template
@@ -2617,6 +2655,17 @@ pub struct LaunchTemplateRecord {
     /// The template's versions, by `VersionNumber`. `CreateLaunchTemplate` stores the
     /// first one; a delete of the template takes all of them with it.
     pub versions: BTreeMap<i64, LaunchTemplateVersionRecord>,
+    /// The highest version number this template has ever minted, which is the number the
+    /// NEXT version is counted from.
+    ///
+    /// Kept beside the versions because the two facts come apart as soon as a version is
+    /// deleted: `LaunchTemplate$LatestVersionNumber` is "the version number of the latest
+    /// version of the launch template", so deleting the latest version moves it down to the
+    /// highest version the template still holds, while "you can't specify, change, or
+    /// replace the numbering of launch template versions"
+    /// (`CreateLaunchTemplateVersion`) means the number that version carried is never
+    /// minted a second time.
+    pub highest_version_minted: i64,
     /// The caller-chosen bytes this record retains, counted into the store's budget while
     /// it is stored.
     pub payload_bytes: usize,
@@ -2748,7 +2797,27 @@ pub struct LaunchTemplateVersionSpec {
 /// the store's byte ceiling needs. It is used to decide whether the version fits, never
 /// reported to anyone.
 pub fn launch_template_version_payload_bytes(spec: &LaunchTemplateVersionSpec) -> usize {
-    spec.version_description.as_ref().map_or(0, String::len) + format!("{:?}", spec.data).len()
+    version_payload_bytes(spec.version_description.as_deref(), &spec.data)
+}
+
+/// The caller-chosen bytes one STORED launch template version retains, for the delete that
+/// gives them back ([`ComAmazonawsEc2Amazonec2State::remove_launch_template_version`]).
+///
+/// The same measure [`launch_template_version_payload_bytes`] charged when the version was
+/// stored — both read it off [`version_payload_bytes`] — so a version can never release a
+/// different number of bytes from the one it was charged.
+pub fn launch_template_version_record_bytes(version: &LaunchTemplateVersionRecord) -> usize {
+    version_payload_bytes(version.version_description.as_deref(), &version.data)
+}
+
+/// The ONE measure of a launch template version's caller-chosen bytes, taken off the two
+/// members that carry them, so the writer that charges a version and the delete that gives
+/// its bytes back cannot measure it differently — and neither has to copy the version to ask.
+fn version_payload_bytes(
+    version_description: Option<&str>,
+    data: &RequestLaunchTemplateData,
+) -> usize {
+    version_description.map_or(0, str::len) + format!("{data:?}").len()
 }
 
 /// The id prefix every launch template id carries, which is also what
