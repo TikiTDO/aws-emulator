@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeImport
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeImport`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeImport::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the import one `ImportArn` names, as it stands now. Everything it reports is
+//! read from the import catalogue's own record ([`crate::state::Import`]), whose status
+//! and end time are derived from the clock, so this and `ListImports` report one answer
+//! about the import `ImportTable` started.
+//!
+//! This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -81,10 +79,19 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-dynamodb-dynamodb-20120
 // here — hence the `DescribeImportError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.dynamodb#DescribeImport")]
+// `InternalServerError` is widened in through `extra_errors`: this SERVICE models it
+// ("An error occurred on the server side") and the single-export reader next door
+// declares it, while this operation's own `errors` list omits it — so an unreachable
+// shared store has a modelled server error to report rather than being dressed up as a
+// client failure.
+#[smithy_macros::operation_error(
+    "com.amazonaws.dynamodb#DescribeImport",
+    extra_errors = ["InternalServerError"]
+)]
 #[derive(Debug)]
 pub enum DescribeImportErrorModeled {
     ImportNotFoundException(ImportNotFoundException),
+    InternalServerError(InternalServerError),
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
@@ -138,18 +145,48 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeImport` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeImportErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeImport"))
+        let region = crate::state::request_region(ctx.parts());
+        let now = ::std::time::SystemTime::now();
+        let state = crate::state::service_state(&*self.engine).ok_or_else(store_unavailable)?;
+        // "The Amazon Resource Name (ARN) associated with the table you're importing to"
+        // (`$ImportArn`): held to the form and the scope such an ARN takes before anything
+        // is looked up.
+        crate::state::check_import_arn(&input.import_arn, &region).map_err(lift)?;
+
+        let mut store = state.lock();
+        // Finish any transition the clock already made due before reporting; this is a
+        // read, so that is the only write it makes. The import's own `IN_PROGRESS` ->
+        // terminal transition needs none: it is derived from the stored instants.
+        store.apply_due_transitions(now);
+        let import = store.import(&region, &input.import_arn).map_err(lift)?;
+
+        Ok(DescribeImportOutput {
+            import_table_description: import.describe(now),
+        })
+    }
+}
+
+/// The modelled server error for a request that cannot reach this service's store.
+fn store_unavailable() -> DescribeImportError {
+    DescribeImportErrorModeled::InternalServerError(InternalServerError {
+        message: Some("the DynamoDB table store is unavailable".to_string()),
+    })
+    .into()
+}
+
+/// Lift a store refusal into this operation's error channel: an import this region holds
+/// none of is the `ImportNotFoundException` this operation models, and a value that is no
+/// import ARN of this endpoint at all is the `ValidationException` such an input is.
+fn lift(error: crate::state::RequestError) -> DescribeImportError {
+    match error {
+        crate::state::RequestError::NotFound(message) => {
+            DescribeImportErrorModeled::ImportNotFoundException(ImportNotFoundException {
+                message: Some(message),
+            })
+            .into()
+        }
+        crate::state::RequestError::Validation(message) => {
+            crate::scaffolded::Scaffolded::validation(message)
+        }
     }
 }

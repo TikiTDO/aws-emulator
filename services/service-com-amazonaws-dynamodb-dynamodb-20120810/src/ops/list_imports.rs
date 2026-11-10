@@ -16,8 +16,8 @@
 //! token this operation mints is one a client may send straight back.
 //!
 //! An account that has run no import is answered an empty list and no token: the records
-//! are written by the IMPORT surface (`ImportTable`), which is still a scaffold tracked
-//! by its own stub issue, so a store driven through this slice's own API holds none.
+//! are written by the IMPORT surface (`ImportTable`), so a store nothing has imported
+//! into holds none.
 //!
 //! This is the ONLY file to touch for this operation.
 //!
@@ -187,9 +187,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let cursor = input.next_token.as_deref().map(decode_token).transpose()?;
 
         let store = state.lock();
-        // A reporting operation, and one that reports nothing a transition could change:
-        // an import record is fixed once written, and whether it still falls inside the
-        // documented window is derived from the clock on each read. So this reads only.
+        // A reporting operation, and one that reports nothing a WRITE could settle: an
+        // import record is fixed once written, and both the status it reports and whether
+        // it still falls inside the documented window are derived from the clock on each
+        // read. So this reads only.
         let mut summaries: Vec<ImportSummary> = store
             // Imports are recorded per region, so a listing answers with the ones this
             // request's own region holds, in the ascending ARN order the store keys by.
@@ -209,7 +210,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .as_deref()
                     .is_none_or(|start| import.arn.as_str() > start)
             })
-            .map(crate::state::Import::summary)
+            .map(|import| import.summary(now))
             .collect();
         drop(store);
 

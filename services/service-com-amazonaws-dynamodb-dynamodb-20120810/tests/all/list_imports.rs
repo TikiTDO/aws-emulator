@@ -13,11 +13,12 @@
 //! region, the page size (on each bound the member publishes and one past it), the age of
 //! a record, and the cursor.
 //!
-//! `ImportTable` — the operation that WRITES an import record — is still a scaffold
-//! tracked by its own stub issue, so the suites below seed the records through the same
-//! per-service store the handler reads (the shared engine `emulator_and_engine` hands
-//! back), and drive every read over the wire through the router the emulator's front
-//! doors use.
+//! `ImportTable` — the operation that WRITES an import record — creates a table of its
+//! own, so the suites below seed the records they are about through the same per-service
+//! store the handler reads (the shared engine `emulator_and_engine` hands back), which is
+//! what lets one case hold a record of any age, status or region; `tests/all/table_imports`
+//! is where the records an import really writes are pinned. Every read here is driven over
+//! the wire through the router the emulator's front doors use.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -28,7 +29,7 @@ use service_com_amazonaws_dynamodb_dynamodb_20120810::ops::types::{
     S3BucketSource, IMPORT_STATUS_VALUES, INPUT_FORMAT_VALUES,
 };
 use service_com_amazonaws_dynamodb_dynamodb_20120810::state::{
-    self, Import, IMPORT_HISTORY_WINDOW,
+    self, Import, ImportDetails, IMPORT_HISTORY_WINDOW,
 };
 
 use crate::emulator::{call, call_in, emulator_and_engine, error_code, message, ok, REGION};
@@ -77,6 +78,9 @@ fn completed_import(region: &str, table: &str, started_at: SystemTime) -> Import
         input_format: "DYNAMODB_JSON".to_string(),
         started_at,
         ended_at: Some(started_at + Duration::from_secs(30)),
+        // The members only the two single-import readers report, which this suite is not
+        // about: a listing reads none of them.
+        details: ImportDetails::default(),
     }
 }
 
@@ -214,6 +218,7 @@ async fn every_member_of_a_recorded_import_is_reported() {
             input_format: format.to_string(),
             started_at: started,
             ended_at: finished.then(|| started + Duration::from_secs(45)),
+            details: ImportDetails::default(),
         });
     }
     for import in &recorded {

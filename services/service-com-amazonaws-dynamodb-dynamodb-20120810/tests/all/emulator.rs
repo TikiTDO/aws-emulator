@@ -144,6 +144,65 @@ pub fn emulator_with_streams() -> MultiServiceRouter {
     router
 }
 
+/// One emulator holding this service AND Amazon S3, over ONE shared engine.
+///
+/// The objects a table export writes and the ones a table import reads are Amazon S3's
+/// resources: they exist only if that service serves them — so a suite about either mounts
+/// S3 beside DynamoDB, exactly as `core/router` assembles them.
+pub fn emulator_with_s3() -> MultiServiceRouter {
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    let mut router = MultiServiceRouter::new();
+    router.set_request_authentication(false);
+    router.register_service(EmulatedService::new(Arc::clone(&engine)));
+    router.register_service(service_com_amazonaws_s3_amazons3::EmulatedService::new(
+        engine,
+    ));
+    router
+}
+
+/// An Amazon S3 client over this emulator's own in-process callback — the seam an export
+/// writes its objects through and an import reads them from, so what a suite writes here
+/// is what the import really reads.
+pub fn s3(router: &MultiServiceRouter) -> aws_sdk_s3::Client {
+    let callback = smithy_server_runtime::EmbeddedEmulator::from_router(router.clone());
+    let config = aws_sdk_s3::Config::builder()
+        .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+        .region(aws_sdk_s3::config::Region::new(REGION))
+        .endpoint_url(format!("https://s3.{REGION}.amazonaws.com"))
+        .force_path_style(true)
+        .credentials_provider(callback.aws_credentials_provider())
+        .http_client(callback.http_client())
+        .retry_config(aws_sdk_s3::config::retry::RetryConfig::disabled())
+        .timeout_config(aws_sdk_s3::config::timeout::TimeoutConfig::disabled())
+        .identity_cache(aws_sdk_s3::config::IdentityCache::no_cache())
+        .stalled_stream_protection(aws_sdk_s3::config::StalledStreamProtectionConfig::disabled())
+        .build();
+    aws_sdk_s3::Client::from_conf(config)
+}
+
+/// Create one bucket through Amazon S3's own API, which is what gives an import a source
+/// and an export a destination.
+pub async fn create_bucket(router: &MultiServiceRouter, bucket: &str) {
+    s3(router)
+        .create_bucket()
+        .bucket(bucket)
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("S3 creates the bucket {bucket:?}: {error:?}"));
+}
+
+/// Store one object through Amazon S3's own API — a source object an import then reads.
+pub async fn put_object(router: &MultiServiceRouter, bucket: &str, key: &str, body: Vec<u8>) {
+    s3(router)
+        .put_object()
+        .bucket(bucket)
+        .key(key)
+        .body(aws_sdk_s3::primitives::ByteStream::from(body))
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("S3 stores {key:?} in {bucket:?}: {error:?}"));
+}
+
 /// One emulator holding this service AND KMS, over ONE shared engine.
 ///
 /// A table's encryption key is a KMS resource: the key ARN a table reports, and the key

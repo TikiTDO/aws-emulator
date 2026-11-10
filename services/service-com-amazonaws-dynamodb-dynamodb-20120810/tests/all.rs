@@ -203,6 +203,8 @@ mod table_description_members;
 mod table_description_shape;
 #[path = "all/table_exports.rs"]
 mod table_exports;
+#[path = "all/table_imports.rs"]
+mod table_imports;
 #[path = "all/table_encryption_and_ceilings.rs"]
 mod table_encryption_and_ceilings;
 #[path = "all/table_items.rs"]

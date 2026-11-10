@@ -52,8 +52,15 @@ service-com-amazonaws-kinesis-kinesis-20131202 = { workspace = true }
 # where S3 holds them (`state::export_objects`).
 service-com-amazonaws-s3-amazons3 = { workspace = true }
 # The data file an export writes is GZIP-compressed (`.json.gz`), which is the encoder for
-# it; the pure-Rust backend, so nothing links a system library.
+# it; the pure-Rust backend, so nothing links a system library. The same decoder reads a
+# GZIP-compressed import source (`state::import_objects`).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# An import source may be CSV (`ImportTable$InputFormat`), whose quoting and escaping this
+# reads rather than splitting on the delimiter by hand (`state::import_objects`).
+csv = "1"
+# An import source may be Zstandard-compressed (`ImportTable$InputCompressionType`); the
+# pure-Rust decoder, so nothing links a system library (`state::import_objects`).
+ruzstd = "0.9"
 # The KMS service owns the keys a table's `SSESpecification` names: resolving the key id,
 # ARN, alias name or alias ARN a request carries into the key ARN `SSEDescription` reports
 # is that service's answer, read through its `state` seam (`state::encryption`).

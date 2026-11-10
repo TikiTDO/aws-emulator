@@ -286,7 +286,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // Every list this request carries is clamped BEFORE anything walks it, so the
         // work that follows is bounded by constants rather than by the request body.
-        clamped_lists(&input).map_err(lift)?;
+        let declared = DeclaredTable::of(&input);
+        declared.clamped().map_err(lift)?;
 
         // The tag set the table starts life with, refused by exactly the rules the
         // tagging operations apply to a later edit: at most
@@ -309,7 +310,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             None => None,
         };
 
-        let key_schema = validated_key_schema(&input).map_err(lift)?;
+        let key_schema = validated_key_schema(&declared).map_err(lift)?;
         // The stream the table publishes to, when the request enables one: its view
         // type is resolved before anything is stored, so a specification that cannot
         // hold together refuses the whole create.
@@ -323,7 +324,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .map(str::to_string),
             None => None,
         };
-        let (billing_mode, provisioned_throughput) = validated_throughput(&input).map_err(lift)?;
+        let (billing_mode, provisioned_throughput) = validated_declared_throughput(
+            input.billing_mode.as_deref(),
+            input.table_throughput_mode.as_deref(),
+            input.provisioned_throughput.as_ref(),
+        )
+        .map_err(lift)?;
         // An on-demand capacity ceiling cannot hold on a table created in the
         // PROVISIONED capacity mode, whichever resource it was named for
         // ([`crate::state::check_on_demand_ceilings`]). That contradiction is in the
@@ -354,9 +360,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         .map_err(lift)?;
         let region = crate::state::request_region(ctx.parts());
         let global_secondary_indexes =
-            validated_indexes(&input, &billing_mode, &region, &name, now).map_err(lift)?;
+            validated_indexes(&declared, &billing_mode, &region, &name, now).map_err(lift)?;
         let local_secondary_indexes = validated_local_indexes(
-            &input,
+            &declared,
             &key_schema,
             &global_secondary_indexes,
             &region,
@@ -365,7 +371,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .map_err(lift)?;
         let vector_indexes = validated_vector_indexes(
-            &input,
+            &declared,
             &global_secondary_indexes,
             &local_secondary_indexes,
             &region,
@@ -730,79 +736,118 @@ fn unsupported_member(input: &CreateTableInput) -> Option<&'static str> {
     None
 }
 
-/// Clamp every caller-sized list this operation walks, before anything walks it.
+/// The TABLE one request declares: its primary key, the attributes it is declared over
+/// and the indexes carried with it.
 ///
-/// Each count comes straight from the request body, and the checks that follow match
-/// definitions against key schemas, so the work would otherwise be the PRODUCT of two
-/// request-chosen counts. Every bound here is one the contract already implies, so a
-/// list past it is invalid whatever its contents: at most
-/// [`crate::state::MAX_GLOBAL_SECONDARY_INDEXES`] indexes, at most
-/// [`crate::state::MAX_INDEX_KEY_ELEMENTS`] key elements per index, at most
-/// [`crate::state::MAX_VECTOR_INDEXES`] vector indexes with at most
-/// [`crate::state::MAX_VECTOR_SEARCH_SCHEMA_ELEMENTS`] search-schema elements each, and
-/// at most [`crate::state::MAX_ATTRIBUTE_DEFINITIONS`] attribute definitions.
-fn clamped_lists(input: &CreateTableInput) -> Result<(), crate::state::RequestError> {
-    let definitions = input.attribute_definitions.as_ref().map_or(0, Vec::len);
-    if definitions > crate::state::MAX_ATTRIBUTE_DEFINITIONS {
-        return Err(crate::state::RequestError::Validation(format!(
-            "Invalid AttributeDefinitions: a table may declare at most {} attribute \
-             definitions, got {definitions}",
-            crate::state::MAX_ATTRIBUTE_DEFINITIONS
-        )));
-    }
-    let indexes = input.global_secondary_indexes.as_ref().map_or(0, Vec::len);
-    if indexes > crate::state::MAX_GLOBAL_SECONDARY_INDEXES {
-        return Err(crate::state::RequestError::Validation(format!(
-            "Invalid GlobalSecondaryIndexes: a table may carry at most {} global secondary \
-             indexes, got {indexes}",
-            crate::state::MAX_GLOBAL_SECONDARY_INDEXES
-        )));
-    }
-    for index in input.global_secondary_indexes.iter().flatten() {
-        if index.key_schema.len() > crate::state::MAX_INDEX_KEY_ELEMENTS {
-            return Err(crate::state::RequestError::Validation(format!(
-                "Invalid KeySchema for index {}: an index key may carry at most {} elements, \
-                 got {}",
-                index.index_name,
-                crate::state::MAX_INDEX_KEY_ELEMENTS,
-                index.key_schema.len()
-            )));
+/// A table is declared in TWO places — `CreateTable`'s own members and
+/// `ImportTable$TableCreationParameters`, "the parameters for the table to import the
+/// data into" — and both declare the same resource, so the rules a declaration is held to
+/// and the stored table built from it are stated ONCE, here, and each operation borrows
+/// its own shape into this one before applying them. Same construction as
+/// [`DeclaredVectorIndex`], one level up.
+///
+/// Slices rather than owned lists: the declaration lives in the request for as long as
+/// the checks run, and nothing here changes it.
+pub(crate) struct DeclaredTable<'d> {
+    pub(crate) key_schema: &'d [KeySchemaElement],
+    pub(crate) attribute_definitions: &'d [AttributeDefinition],
+    pub(crate) global_secondary_indexes: &'d [GlobalSecondaryIndex],
+    pub(crate) local_secondary_indexes: &'d [LocalSecondaryIndex],
+    pub(crate) vector_indexes: &'d [VectorIndex],
+}
+
+impl<'d> DeclaredTable<'d> {
+    /// The table `CreateTable`'s own members declare.
+    pub(crate) fn of(input: &'d CreateTableInput) -> Self {
+        Self {
+            key_schema: input.key_schema.as_deref().unwrap_or_default(),
+            attribute_definitions: input.attribute_definitions.as_deref().unwrap_or_default(),
+            global_secondary_indexes: input
+                .global_secondary_indexes
+                .as_deref()
+                .unwrap_or_default(),
+            local_secondary_indexes: input
+                .local_secondary_indexes
+                .as_deref()
+                .unwrap_or_default(),
+            vector_indexes: input.vector_indexes.as_deref().unwrap_or_default(),
         }
     }
-    let local_indexes = input.local_secondary_indexes.as_ref().map_or(0, Vec::len);
-    if local_indexes > crate::state::MAX_LOCAL_SECONDARY_INDEXES {
-        return Err(crate::state::RequestError::Validation(format!(
-            "Invalid LocalSecondaryIndexes: a table may carry at most {} local secondary \
-             indexes, got {local_indexes}",
-            crate::state::MAX_LOCAL_SECONDARY_INDEXES
-        )));
-    }
-    for index in input.local_secondary_indexes.iter().flatten() {
-        if index.key_schema.len() > crate::state::MAX_INDEX_KEY_ELEMENTS {
+
+    /// Clamp every caller-sized list the checks below walk, before anything walks it.
+    ///
+    /// Each count comes straight from the request body, and the checks that follow match
+    /// definitions against key schemas, so the work would otherwise be the PRODUCT of two
+    /// request-chosen counts. Every bound here is one the contract already implies, so a
+    /// list past it is invalid whatever its contents: at most
+    /// [`crate::state::MAX_GLOBAL_SECONDARY_INDEXES`] indexes, at most
+    /// [`crate::state::MAX_INDEX_KEY_ELEMENTS`] key elements per index, at most
+    /// [`crate::state::MAX_VECTOR_INDEXES`] vector indexes with at most
+    /// [`crate::state::MAX_VECTOR_SEARCH_SCHEMA_ELEMENTS`] search-schema elements each, and
+    /// at most [`crate::state::MAX_ATTRIBUTE_DEFINITIONS`] attribute definitions.
+    pub(crate) fn clamped(&self) -> Result<(), crate::state::RequestError> {
+        let definitions = self.attribute_definitions.len();
+        if definitions > crate::state::MAX_ATTRIBUTE_DEFINITIONS {
             return Err(crate::state::RequestError::Validation(format!(
-                "Invalid KeySchema for index {}: an index key may carry at most {} elements, \
-                 got {}",
-                index.index_name,
-                crate::state::MAX_INDEX_KEY_ELEMENTS,
-                index.key_schema.len()
+                "Invalid AttributeDefinitions: a table may declare at most {} attribute \
+                 definitions, got {definitions}",
+                crate::state::MAX_ATTRIBUTE_DEFINITIONS
             )));
         }
+        let indexes = self.global_secondary_indexes.len();
+        if indexes > crate::state::MAX_GLOBAL_SECONDARY_INDEXES {
+            return Err(crate::state::RequestError::Validation(format!(
+                "Invalid GlobalSecondaryIndexes: a table may carry at most {} global secondary \
+                 indexes, got {indexes}",
+                crate::state::MAX_GLOBAL_SECONDARY_INDEXES
+            )));
+        }
+        for index in self.global_secondary_indexes {
+            if index.key_schema.len() > crate::state::MAX_INDEX_KEY_ELEMENTS {
+                return Err(crate::state::RequestError::Validation(format!(
+                    "Invalid KeySchema for index {}: an index key may carry at most {} elements, \
+                     got {}",
+                    index.index_name,
+                    crate::state::MAX_INDEX_KEY_ELEMENTS,
+                    index.key_schema.len()
+                )));
+            }
+        }
+        let local_indexes = self.local_secondary_indexes.len();
+        if local_indexes > crate::state::MAX_LOCAL_SECONDARY_INDEXES {
+            return Err(crate::state::RequestError::Validation(format!(
+                "Invalid LocalSecondaryIndexes: a table may carry at most {} local secondary \
+                 indexes, got {local_indexes}",
+                crate::state::MAX_LOCAL_SECONDARY_INDEXES
+            )));
+        }
+        for index in self.local_secondary_indexes {
+            if index.key_schema.len() > crate::state::MAX_INDEX_KEY_ELEMENTS {
+                return Err(crate::state::RequestError::Validation(format!(
+                    "Invalid KeySchema for index {}: an index key may carry at most {} elements, \
+                     got {}",
+                    index.index_name,
+                    crate::state::MAX_INDEX_KEY_ELEMENTS,
+                    index.key_schema.len()
+                )));
+            }
+        }
+        let vector_indexes = self.vector_indexes.len();
+        if vector_indexes > crate::state::MAX_VECTOR_INDEXES {
+            return Err(crate::state::RequestError::Validation(format!(
+                "Invalid VectorIndexes: a table may carry at most {} vector indexes, got \
+                 {vector_indexes}",
+                crate::state::MAX_VECTOR_INDEXES
+            )));
+        }
+        for index in self.vector_indexes {
+            clamped_search_schema(
+                &index.index_name,
+                index.search_schema.as_ref().map_or(0, Vec::len),
+            )?;
+        }
+        Ok(())
     }
-    let vector_indexes = input.vector_indexes.as_ref().map_or(0, Vec::len);
-    if vector_indexes > crate::state::MAX_VECTOR_INDEXES {
-        return Err(crate::state::RequestError::Validation(format!(
-            "Invalid VectorIndexes: a table may carry at most {} vector indexes, got \
-             {vector_indexes}",
-            crate::state::MAX_VECTOR_INDEXES
-        )));
-    }
-    for index in input.vector_indexes.iter().flatten() {
-        clamped_search_schema(
-            &index.index_name,
-            index.search_schema.as_ref().map_or(0, Vec::len),
-        )?;
-    }
-    Ok(())
 }
 
 /// Hold ONE vector index's search schema to the elements it may carry.
@@ -939,17 +984,17 @@ fn validated_key_type_order(
 /// scalar type — "The attributes in KeySchema must also be defined in the
 /// AttributeDefinitions array" (`CreateTable$KeySchema`).
 ///
-/// [`clamped_lists`] has already bounded every list this walks.
-fn validated_key_schema(
-    input: &CreateTableInput,
+/// [`DeclaredTable::clamped`] has already bounded every list this walks.
+pub(crate) fn validated_key_schema(
+    declared: &DeclaredTable<'_>,
 ) -> Result<Vec<KeySchemaElement>, crate::state::RequestError> {
-    let key_schema = input.key_schema.clone().unwrap_or_default();
+    let key_schema = declared.key_schema.to_vec();
     if key_schema.is_empty() {
         return Err(crate::state::RequestError::Validation(
             "KeySchema is required and must declare a HASH key attribute".to_string(),
         ));
     }
-    let definitions = input.attribute_definitions.clone().unwrap_or_default();
+    let definitions = declared.attribute_definitions.to_vec();
     if key_schema.len() > crate::state::MAX_TABLE_KEY_ELEMENTS {
         return Err(crate::state::RequestError::Validation(format!(
             "Invalid KeySchema: a table's primary key may declare at most {} \
@@ -974,24 +1019,21 @@ fn validated_key_schema(
     // every vector index the request declares: a vector index consumes the attribute its
     // `VectorAttribute` names and each attribute its `SearchSchema` names, whose types
     // this array is what declares.
-    let index_key_attributes: ::std::collections::HashSet<&str> = input
+    let index_key_attributes: ::std::collections::HashSet<&str> = declared
         .global_secondary_indexes
         .iter()
-        .flatten()
         .flat_map(|index| index.key_schema.iter())
         .chain(
-            input
+            declared
                 .local_secondary_indexes
                 .iter()
-                .flatten()
                 .flat_map(|index| index.key_schema.iter()),
         )
         .map(|element| element.attribute_name.as_str())
         .chain(
-            input
+            declared
                 .vector_indexes
                 .iter()
-                .flatten()
                 .flat_map(vector_index_attributes),
         )
         .collect();
@@ -1079,15 +1121,15 @@ fn vector_index_attributes(index: &VectorIndex) -> impl Iterator<Item = &str> {
 /// based on your table's capacity mode" (`GlobalSecondaryIndex$ProvisionedThroughput`).
 /// An index created with the table is reported `CREATING` and becomes `ACTIVE` on the
 /// same clock-owed transition as the table.
-fn validated_indexes(
-    input: &CreateTableInput,
+pub(crate) fn validated_indexes(
+    declared: &DeclaredTable<'_>,
     billing_mode: &str,
     region: &str,
     table: &str,
     now: ::std::time::SystemTime,
 ) -> Result<Vec<crate::state::GlobalSecondaryIndex>, crate::state::RequestError> {
-    let requested = input.global_secondary_indexes.clone().unwrap_or_default();
-    let definitions = input.attribute_definitions.clone().unwrap_or_default();
+    let requested = declared.global_secondary_indexes.to_vec();
+    let definitions = declared.attribute_definitions.to_vec();
     let mut indexes: Vec<crate::state::GlobalSecondaryIndex> = Vec::new();
     for index in &requested {
         if indexes.iter().any(|stored| stored.name == index.index_name) {
@@ -1145,15 +1187,15 @@ fn validated_indexes(
 ///
 /// [`clamped_lists`] has already bounded every list this walks.
 fn validated_local_indexes(
-    input: &CreateTableInput,
+    declared: &DeclaredTable<'_>,
     table_key_schema: &[KeySchemaElement],
     global_secondary_indexes: &[crate::state::GlobalSecondaryIndex],
     region: &str,
     table: &str,
     now: ::std::time::SystemTime,
 ) -> Result<Vec<crate::state::LocalSecondaryIndex>, crate::state::RequestError> {
-    let requested = input.local_secondary_indexes.clone().unwrap_or_default();
-    let definitions = input.attribute_definitions.clone().unwrap_or_default();
+    let requested = declared.local_secondary_indexes.to_vec();
+    let definitions = declared.attribute_definitions.to_vec();
     let partition_key = table_key_schema
         .iter()
         .find(|element| element.key_type == "HASH")
@@ -1214,16 +1256,16 @@ fn validated_local_indexes(
 /// partitions and filters by that attribute's VALUE, so its type has to be declared. A
 /// definition is not REQUIRED for the `VectorAttribute` — no schema is built over the
 /// vector itself — but one the request does declare for it counts as used all the same.
-fn validated_vector_indexes(
-    input: &CreateTableInput,
+pub(crate) fn validated_vector_indexes(
+    declared: &DeclaredTable<'_>,
     global_secondary_indexes: &[crate::state::GlobalSecondaryIndex],
     local_secondary_indexes: &[crate::state::LocalSecondaryIndex],
     region: &str,
     table: &str,
     now: ::std::time::SystemTime,
 ) -> Result<Vec<crate::state::VectorIndex>, crate::state::RequestError> {
-    let requested = input.vector_indexes.clone().unwrap_or_default();
-    let definitions = input.attribute_definitions.clone().unwrap_or_default();
+    let requested = declared.vector_indexes.to_vec();
+    let definitions = declared.attribute_definitions.to_vec();
     let mut indexes: Vec<crate::state::VectorIndex> = Vec::new();
     for index in &requested {
         let taken = indexes.iter().any(|stored| stored.name == index.index_name)
@@ -1599,19 +1641,22 @@ pub(crate) fn validated_index_throughput(
 /// as PROVISIONED, you must specify this property. If you set BillingMode as
 /// PAY_PER_REQUEST, you cannot specify this property"
 /// (`CreateTable$ProvisionedThroughput`). `BillingMode` defaults to `PROVISIONED`.
-fn validated_throughput(
-    input: &CreateTableInput,
+///
+/// Stated once for every operation that CREATES a table from a declaration of one — the
+/// members are the same wherever they are carried (`CreateTable`'s own, and
+/// `ImportTable$TableCreationParameters`), so the rule and its two sentences are too.
+pub(crate) fn validated_declared_throughput(
+    billing_mode: Option<&str>,
+    table_throughput_mode: Option<&str>,
+    provisioned_throughput: Option<&ProvisionedThroughput>,
 ) -> Result<(String, Option<ProvisionedThroughput>), crate::state::RequestError> {
-    let billing_mode = crate::state::requested_throughput_mode(
-        input.billing_mode.as_deref(),
-        input.table_throughput_mode.as_deref(),
-    )
-    .unwrap_or("PROVISIONED")
-    .to_string();
+    let billing_mode = crate::state::requested_throughput_mode(billing_mode, table_throughput_mode)
+        .unwrap_or("PROVISIONED")
+        .to_string();
     // Each mode member was held to the enum's value set before this handler ran, so the
     // two modes below are the whole of what a request can resolve to.
     let on_demand = billing_mode == "PAY_PER_REQUEST";
-    match (on_demand, input.provisioned_throughput.clone()) {
+    match (on_demand, provisioned_throughput.cloned()) {
         (true, None) => Ok((billing_mode, None)),
         (true, Some(_)) => Err(crate::state::RequestError::Validation(
             CAPACITY_WITH_PAY_PER_REQUEST_MESSAGE.to_string(),

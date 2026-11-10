@@ -1,15 +1,32 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ImportTable
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ImportTable`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ImportTable::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Imports table data from an S3 bucket: this CREATES the table the request's
+//! `TableCreationParameters` declare, reads the source objects the `S3BucketSource`
+//! selects out of Amazon S3's own store on this engine
+//! ([`crate::state::read_import_source`]), decodes them in the format the request names
+//! ([`crate::state::imported_items`]) and writes the items it decoded into that table, so
+//! every figure the import reports is the task's own count and every item the new table
+//! holds came out of the source.
+//!
+//! The table is created in the same declaration `CreateTable` creates one from, through
+//! the same rules ([`super::create_table::DeclaredTable`]), so an import cannot create a
+//! table a create could not. It is reported `CREATING` and the import `IN_PROGRESS` for
+//! the one span every clock-owed transition of this project takes, and both settle
+//! together: the table an import creates is ready exactly when the import that fills it
+//! has finished.
+//!
+//! What the TASK runs into is reported on the record rather than answered to the caller:
+//! a source bucket the object store holds none of, and a target name that is already a
+//! table's, each leave the import `FAILED` with the reason. The one conflict answered to
+//! the caller is a target an import is still filling, which is the resource already being
+//! written that `ResourceInUseException` states.
+//!
+//! The record the task leaves behind is [`crate::state::Import`], which `DescribeImport`
+//! and `ListImports` report, so the three of them answer one thing about one import.
+//!
+//! This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -114,10 +131,19 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-dynamodb-dynamodb-20120
 // here — hence the `ImportTableError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.dynamodb#ImportTable")]
+// `InternalServerError` is widened in through `extra_errors`: this SERVICE models it
+// ("An error occurred on the server side") and the export surface next door declares it,
+// while this operation's own `errors` list omits it — so a store this process cannot
+// reach has a modelled server error to report rather than being dressed up as a client
+// failure.
+#[smithy_macros::operation_error(
+    "com.amazonaws.dynamodb#ImportTable",
+    extra_errors = ["InternalServerError"]
+)]
 #[derive(Debug)]
 pub enum ImportTableErrorModeled {
     ImportConflictException(ImportConflictException),
+    InternalServerError(InternalServerError),
     LimitExceededException(LimitExceededException),
     ResourceInUseException(ResourceInUseException),
 }
@@ -173,18 +199,620 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ImportTable` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ImportTableErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ImportTable"))
+        let region = crate::state::request_region(ctx.parts());
+        let now = ::std::time::SystemTime::now();
+        let state = crate::state::service_state(&*self.engine).ok_or_else(store_unavailable)?;
+        // "Parameters for the table to import the data into"
+        // (`$TableCreationParameters`): the table this import creates is declared here,
+        // and held to the rules `CreateTable` holds its own declaration to.
+        let parameters = &input.table_creation_parameters;
+        let name = crate::state::resolve_table_name_in(&parameters.table_name, &region)
+            .map_err(bad_request)?;
+        let declared = declared_table(parameters);
+        // Every list the declaration carries is clamped BEFORE anything walks it, so the
+        // work that follows is bounded by constants rather than by the request body.
+        declared.clamped().map_err(bad_request)?;
+        let key_schema =
+            super::create_table::validated_key_schema(&declared).map_err(bad_request)?;
+        let (billing_mode, provisioned_throughput) =
+            super::create_table::validated_declared_throughput(
+                parameters.billing_mode.as_deref(),
+                None,
+                parameters.provisioned_throughput.as_ref(),
+            )
+            .map_err(bad_request)?;
+        // An on-demand capacity ceiling cannot hold on a table created in the
+        // PROVISIONED capacity mode, whichever resource it was named for, and each
+        // ceiling is held to the values the member takes — the same two checks a create
+        // applies, over the members this declaration carries.
+        crate::state::check_on_demand_ceilings(&billing_mode, requested_on_demand_ceilings(parameters))
+            .map_err(bad_request)?;
+        crate::state::check_on_demand_ceiling_values(parameters.on_demand_throughput.as_ref())
+            .map_err(bad_request)?;
+        let warm_throughput =
+            crate::state::WarmThroughputSettings::tracking(provisioned_throughput.as_ref(), now);
+        let global_secondary_indexes =
+            super::create_table::validated_indexes(&declared, &billing_mode, &region, &name, now)
+                .map_err(bad_request)?;
+        let vector_indexes = super::create_table::validated_vector_indexes(
+            &declared,
+            &global_secondary_indexes,
+            &[],
+            &region,
+            &name,
+            now,
+        )
+        .map_err(bad_request)?;
+        // The projection budget is summed across EVERY index of the table, the VECTOR
+        // indexes included, so it can only be checked once all of them are known.
+        crate::state::check_projection_budget(
+            global_secondary_indexes
+                .iter()
+                .map(|index| crate::state::projected_non_key_attributes(&index.projection))
+                .chain(
+                    vector_indexes
+                        .iter()
+                        .map(crate::state::vector_projected_non_key_attributes),
+                ),
+        )
+        .map_err(bad_request)?;
+        // "Valid values for ImportFormat are CSV, DYNAMODB_JSON or ION" (`$InputFormat`):
+        // a source in the Amazon Ion encoding is not read yet, so an import of one is
+        // refused as unimplemented rather than accepted and answered with a record of an
+        // import that read nothing.
+        if input.input_format == crate::state::INPUT_FORMAT_ION {
+            return Err(crate::scaffolded::Scaffolded::not_implemented(
+                "ImportTable with InputFormat ION",
+            ));
+        }
+        // The compression the source is read with, resolved to what the member defaults
+        // to where the request named none.
+        let compression = input
+            .input_compression_type
+            .clone()
+            .unwrap_or_else(|| crate::state::DEFAULT_INPUT_COMPRESSION_TYPE.to_string());
+        // What this request ASKED FOR, in the one form two requests are compared in: a
+        // replayed `ClientToken` answers the import it already started only if every
+        // other member is the one that import was started with.
+        let signature = crate::state::import_request_signature(
+            &input.s3_bucket_source,
+            &input.input_format,
+            input.input_format_options.as_ref(),
+            input.input_compression_type.as_deref(),
+            Some(parameters),
+        );
+        // The table's server-side encryption: a specification that enables it names a KMS
+        // key, and KMS is what resolves that identifier to the key ARN every later
+        // description reports. In force from the instant the table is created, which is
+        // the instant of this call.
+        let encryption = crate::state::requested_encryption(
+            &*self.engine,
+            &region,
+            parameters.sse_specification.as_ref(),
+            None,
+            now,
+        )
+        .map_err(sse_unresolved)?;
+        // The instant this import is recorded at, at the precision it is reported in, so
+        // the instant in its ARN, the instant it reports and the instant a client can
+        // send back are all the same one.
+        let started_at = crate::state::at_timestamp_precision(now);
+
+        // Everything this call decides about the catalogue and the target name is decided
+        // under the store's own guard, and the guard is released at the end of this
+        // block: reading the source below must run with no lock held.
+        {
+            let mut store = state.lock();
+            store.apply_due_transitions(now);
+            // "Providing a ClientToken makes the call to ImportTableInput idempotent,
+            // meaning that multiple identical calls have the same effect as one single
+            // call" (`$ClientToken`): a token that still stands for an import answers
+            // with that import rather than starting a second one, and the same token with
+            // any other parameters is the conflict the operation models.
+            //
+            // Settled BEFORE anything is asked of the target name: what a replayed token
+            // decides is whether this call starts work at all.
+            if let Some(answer) = replayed(&store, &region, &input, &signature, now) {
+                return answer;
+            }
+            // An import CREATES a table, so it is held to the quotas a create is held
+            // to, plus the catalogue's own.
+            check_quotas(&store, &region)?;
+            // "You attempted to recreate an existing table" (the `ResourceInUseException`
+            // doc): a target that IS already a table is refused outright. A target another
+            // import is still filling is not yet one — it is the table that import is
+            // creating — so that call is accepted and its own TASK is what runs into the
+            // name being taken, which fails it. Either way the table holding the name is
+            // left exactly as it is, and no source is read for a task with nowhere to put
+            // what it carries.
+            if store.contains_table(&region, &name) {
+                if !store.import_in_progress_for_table(&region, &name, now) {
+                    return Err(target_in_use(&name));
+                }
+                let import = recorded_import(
+                    &input,
+                    &region,
+                    &name,
+                    &compression,
+                    started_at,
+                    TaskOutcome {
+                        failure: Some(crate::state::ImportFailure {
+                            code: crate::state::IMPORT_FAILURE_TABLE_ALREADY_EXISTS.to_string(),
+                            message: crate::state::table_already_exists_message(&name),
+                        }),
+                        ..TaskOutcome::default()
+                    },
+                );
+                let description = import.describe(now);
+                store.insert_import(import);
+                return Ok(ImportTableOutput {
+                    import_table_description: description,
+                });
+            }
+        }
+
+        // The source objects this import reads, out of Amazon S3's own store on this
+        // engine: a bucket that store holds none of is a source nothing can be read from,
+        // which FAILS the task — the import is accepted, so the reason is reported on the
+        // record rather than answered here.
+        let objects = match crate::state::read_import_source(&*self.engine, &input.s3_bucket_source)
+        {
+            Ok(objects) => Ok(objects),
+            Err(crate::state::ImportSourceFault::StoreUnavailable) => {
+                return Err(ImportTableErrorModeled::InternalServerError(InternalServerError {
+                    message: Some("the Amazon S3 object store is unavailable".to_string()),
+                })
+                .into())
+            }
+            Err(crate::state::ImportSourceFault::NoSuchBucket) => {
+                Err(crate::state::ImportFailure {
+                    code: crate::state::IMPORT_FAILURE_NO_SUCH_BUCKET.to_string(),
+                    message: crate::state::IMPORT_FAILURE_NO_SUCH_BUCKET_MESSAGE.to_string(),
+                })
+            }
+        };
+        // The attribute types the declaration DECLARES, which is what a CSV column's
+        // value is read as.
+        let declared_types: ::std::collections::BTreeMap<String, String> = parameters
+            .attribute_definitions
+            .iter()
+            .map(|definition| {
+                (
+                    definition.attribute_name.clone(),
+                    definition.attribute_type.clone(),
+                )
+            })
+            .collect();
+        // Decoding the source is CPU-bound and sized by the objects read, so it runs on a
+        // BLOCKING task rather than on a runtime worker a large source would starve.
+        let (read, failure) = match objects {
+            Ok(objects) => {
+                let format = input.input_format.clone();
+                let compression = compression.clone();
+                let options = input.input_format_options.clone();
+                let decoded = ::tokio::task::spawn_blocking(move || {
+                    crate::state::imported_items(
+                        &objects,
+                        &format,
+                        &compression,
+                        options.as_ref(),
+                        &declared_types,
+                    )
+                })
+                .await;
+                match decoded {
+                    Ok(Ok(read)) => (read, None),
+                    // A source past this emulator's own ceilings is refused BEFORE the
+                    // table is created, with the modelled limit error.
+                    Ok(Err(crate::state::ImportTooLarge)) => {
+                        return Err(limit_exceeded(crate::state::import_too_large_message(
+                            &input.s3_bucket_source.s3_bucket,
+                        )))
+                    }
+                    Err(error) => {
+                        return Err(ImportTableErrorModeled::InternalServerError(
+                            InternalServerError {
+                                message: Some(format!(
+                                    "the import could not read its source: {error}"
+                                )),
+                            },
+                        )
+                        .into())
+                    }
+                }
+            }
+            Err(failure) => (crate::state::ImportedData::default(), Some(failure)),
+        };
+
+        let started_at = crate::state::at_timestamp_precision(now);
+        let mut table = crate::state::Table {
+            arn: crate::state::table_arn(&region, &name),
+            name: name.clone(),
+            // "A unique identifier for the table, in UUID format, generated by DynamoDB
+            // when the table is created" (`TableDescription$TableId`): the table an import
+            // creates is a new table, so it is minted one here — which is also the
+            // `TableId` the import itself reports.
+            id: crate::state::new_table_id(),
+            region: region.clone(),
+            key_schema,
+            attribute_definitions: parameters.attribute_definitions.clone(),
+            billing_mode: billing_mode.clone(),
+            provisioned_throughput,
+            warm_throughput,
+            throughput_history: crate::state::ThroughputHistory::default(),
+            global_secondary_indexes,
+            // `TableCreationParameters` declares no local secondary index, so an imported
+            // table carries none: a local index can only be defined with the table, and
+            // this declaration has no member for one.
+            local_secondary_indexes: Vec::new(),
+            vector_indexes,
+            // And no `TableClass`, no deletion protection, no resource policy and no
+            // stream: the declaration carries a member for none of them, so the imported
+            // table starts life exactly as a create that named none of them would.
+            table_class: None,
+            table_class_updated_at: None,
+            deletion_protection_enabled: false,
+            point_in_time_recovery: crate::state::PointInTimeRecovery::default(),
+            tags: crate::state::ResourceTags::default(),
+            creation_date_time: now,
+            // The table becomes ACTIVE when the import that fills it finishes: its data
+            // is the import's, so it is not ready before the task is.
+            active_at: now + crate::state::STATUS_TRANSITION,
+            updated_at: None,
+            pay_per_request_at: (billing_mode == "PAY_PER_REQUEST").then_some(now),
+            removed_at: None,
+            resource_policy: None,
+            stream_resource_policy: None,
+            stream: None,
+            items: ::std::collections::BTreeMap::new(),
+            stored_bytes: 0,
+            write_budget: crate::state::CapacityBudget::new(now),
+            read_budget: crate::state::CapacityBudget::new(now),
+            key_write_budgets: crate::state::KeyWriteBudgets::default(),
+            reported_counters: crate::state::MeteredCounters::new(now),
+            contributor_insights: crate::state::ContributorInsights::default(),
+            time_to_live: crate::state::TimeToLive::default(),
+            kinesis_destinations: Vec::new(),
+            // This table was imported into, not restored, so it has no `RestoreSummary`.
+            restore: None,
+            replicas: Vec::new(),
+            encryption,
+            on_demand_throughput: crate::state::OnDemandCeilings::default()
+                .apply(parameters.on_demand_throughput.as_ref()),
+            auto_scaling: crate::state::TableAutoScaling::default(),
+        };
+        // The items the source carried, keyed against the table they are written into:
+        // one the table cannot hold is counted among the import's errors rather than
+        // stored ([`crate::state::keyed_items`]).
+        let keyed = crate::state::keyed_items(&table, read.items);
+        table.items = keyed.items;
+        table.stored_bytes = keyed.stored_bytes;
+        // The figures `ItemCount`/`TableSizeBytes` report are metered when a table is
+        // created, and this one was created holding the imported items.
+        table.meter_counters(now);
+
+        let mut store = state.lock();
+        store.apply_due_transitions(now);
+        // Every decision of the first block again, under the guard this insert happens
+        // under: the guard was released while the source was read, so another call may
+        // have replayed this token, taken the name or started an import into it since —
+        // and each is answered exactly as it is above, in the same order.
+        if let Some(answer) = replayed(&store, &region, &input, &signature, now) {
+            return answer;
+        }
+        check_quotas(&store, &region)?;
+        if store.contains_table(&region, &name) {
+            if !store.import_in_progress_for_table(&region, &name, now) {
+                return Err(target_in_use(&name));
+            }
+            let import = recorded_import(
+                &input,
+                &region,
+                &name,
+                &compression,
+                started_at,
+                TaskOutcome {
+                    failure: Some(crate::state::ImportFailure {
+                        code: crate::state::IMPORT_FAILURE_TABLE_ALREADY_EXISTS.to_string(),
+                        message: crate::state::table_already_exists_message(&name),
+                    }),
+                    ..TaskOutcome::default()
+                },
+            );
+            let description = import.describe(now);
+            audited(Self::NAME, ctx, &import, 0);
+            store.insert_import(import);
+            return Ok(ImportTableOutput {
+                import_table_description: description,
+            });
+        }
+        // The imported items are the store's own growth, so they are measured against the
+        // same budget an item write is, BEFORE the table is inserted.
+        if store.stored_bytes().saturating_add(table.stored_bytes)
+            > crate::state::MAX_STORE_SIZE_BYTES
+            || table.items.len() > crate::state::MAX_ITEMS_PER_TABLE
+            || table.stored_bytes > crate::state::MAX_TABLE_SIZE_BYTES
+        {
+            return Err(limit_exceeded(crate::state::import_too_large_message(
+                &input.s3_bucket_source.s3_bucket,
+            )));
+        }
+        let import = recorded_import(
+            &input,
+            &region,
+            &name,
+            &compression,
+            started_at,
+            TaskOutcome {
+                table_id: Some(table.id.clone()),
+                processed_item_count: read.processed_item_count,
+                imported_item_count: keyed.imported_item_count,
+                error_count: read.error_count.saturating_add(keyed.error_count),
+                // A source that could not be read processed nothing, so there are no
+                // bytes to report for it.
+                processed_size_bytes: failure.is_none().then_some(read.processed_size_bytes),
+                failure,
+            },
+        );
+        let description = import.describe(now);
+        let items = table.items.len();
+        audited(Self::NAME, ctx, &import, items);
+        store.insert_table(table);
+        store.insert_import(import);
+        Ok(ImportTableOutput {
+            import_table_description: description,
+        })
     }
+}
+
+/// What a replayed `ClientToken` decides, where the request carries one and the catalogue
+/// still holds the import it stands for: the import itself for an identical call, and the
+/// modelled conflict for one that changed any other member. `None` where the token stands
+/// for no import of this region, which is a call that starts work of its own.
+///
+/// Asked under EVERY guard this operation takes, because the guard is released while the
+/// source is read: a concurrent replay must answer the import the token already started
+/// rather than record a second one.
+fn replayed(
+    store: &crate::state::ComAmazonawsDynamodbDynamodb20120810State,
+    region: &str,
+    input: &ImportTableInput,
+    signature: &str,
+    now: ::std::time::SystemTime,
+) -> Option<Result<ImportTableOutput, ImportTableError>> {
+    let token = input.client_token.as_deref()?;
+    let started = store.import_for_client_token(region, token, now)?;
+    if started.request_signature() != signature {
+        return Some(Err(import_conflict()));
+    }
+    Some(Ok(ImportTableOutput {
+        import_table_description: started.describe(now),
+    }))
+}
+
+/// The audit record for a state-changing call: who asked, what was started and how its
+/// task ended up. Never a credential — only the access key id the caller presented.
+///
+/// Emitted wherever this operation records an import, the conflict paths included, so
+/// every state-changing outcome is attributed. Request-sourced strings are rendered with
+/// `Debug`, so a control character in one cannot shape the record.
+fn audited(
+    operation: &str,
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    import: &crate::state::Import,
+    items: usize,
+) {
+    ::tracing::info!(
+        operation,
+        akid = %::emulator_server::extract_akid(&ctx.parts().headers),
+        table_name = ?import.table_name,
+        import_arn = %import.arn,
+        source_bucket = ?import.s3_bucket_source.s3_bucket,
+        items,
+        outcome = ?import.status,
+        "table import started"
+    );
+}
+
+/// The table `TableCreationParameters` declares, as the rules every table-creating
+/// operation applies see it ([`super::create_table::DeclaredTable`]).
+///
+/// The declaration carries no local secondary index: a local index can only be defined
+/// with the table and this member set has none for it, so the table declares an empty
+/// list of them.
+fn declared_table(
+    parameters: &TableCreationParameters,
+) -> super::create_table::DeclaredTable<'_> {
+    super::create_table::DeclaredTable {
+        key_schema: &parameters.key_schema,
+        attribute_definitions: &parameters.attribute_definitions,
+        global_secondary_indexes: parameters
+            .global_secondary_indexes
+            .as_deref()
+            .unwrap_or_default(),
+        local_secondary_indexes: &[],
+        vector_indexes: parameters.vector_indexes.as_deref().unwrap_or_default(),
+    }
+}
+
+/// Every on-demand capacity ceiling this declaration names: the table's own, and the one
+/// each global secondary index carries — an index's capacity mode is the table's, so the
+/// same rule holds for all of them.
+fn requested_on_demand_ceilings(
+    parameters: &TableCreationParameters,
+) -> impl Iterator<Item = &OnDemandThroughput> {
+    ::std::iter::once(parameters.on_demand_throughput.as_ref())
+        .chain(
+            parameters
+                .global_secondary_indexes
+                .iter()
+                .flatten()
+                .map(|index| index.on_demand_throughput.as_ref()),
+        )
+        .flatten()
+}
+
+/// The modelled refusal of an import whose target IS already a table of this region:
+/// `ResourceInUseException` — "You attempted to recreate an existing table" — in the
+/// sentence this service states for a name that is already taken.
+///
+/// A target another import is still FILLING is not refused here: it is not a table yet
+/// but the one that import is creating, so such a call is accepted and its task fails on
+/// the name ([`crate::state::IMPORT_FAILURE_TABLE_ALREADY_EXISTS`]).
+fn target_in_use(name: &str) -> ImportTableError {
+    ImportTableErrorModeled::ResourceInUseException(ResourceInUseException {
+        message: Some(crate::state::table_already_exists_message(name)),
+    })
+    .into()
+}
+
+/// What one import task made of the request: the table it created, the figures it
+/// counted, and why it did not finish.
+///
+/// Every member defaults to what a task that did nothing counted, so a path that failed
+/// before reading anything names only its reason.
+#[derive(Debug, Default)]
+struct TaskOutcome {
+    /// The `TableId` of the table the task created, where it created one.
+    table_id: Option<String>,
+    processed_item_count: i64,
+    imported_item_count: i64,
+    error_count: i64,
+    processed_size_bytes: Option<i64>,
+    /// Why the task did not finish, where it did not.
+    failure: Option<crate::state::ImportFailure>,
+}
+
+/// The record one import leaves behind: what the request asked for, and what its task
+/// made of it.
+///
+/// ONE construction site, so the two paths that record an import — a task that read its
+/// source and one that failed before it could — describe the same resource the same way.
+/// The status stored is where the task ENDED UP: a task that finished is a completed
+/// import and one that could not is a failed one. Until the task's own instant has passed
+/// every reader reports `IN_PROGRESS` instead
+/// ([`crate::state::Import::status`]), so nothing sleeps for it.
+fn recorded_import(
+    input: &ImportTableInput,
+    region: &str,
+    name: &str,
+    compression: &str,
+    started_at: ::std::time::SystemTime,
+    outcome: TaskOutcome,
+) -> crate::state::Import {
+    crate::state::Import {
+        arn: crate::state::new_import_arn(region, name, started_at),
+        region: region.to_string(),
+        table_name: name.to_string(),
+        status: if outcome.failure.is_some() {
+            crate::state::IMPORT_STATUS_FAILED.to_string()
+        } else {
+            crate::state::IMPORT_STATUS_COMPLETED.to_string()
+        },
+        s3_bucket_source: input.s3_bucket_source.clone(),
+        // No log group: this emulator writes no import error log, so there is none to
+        // report. The member is reported only where one was made.
+        cloud_watch_log_group_arn: None,
+        input_format: input.input_format.clone(),
+        started_at,
+        // One span after it began, which is when the table it filled is ready too.
+        ended_at: Some(started_at + crate::state::STATUS_TRANSITION),
+        details: crate::state::ImportDetails {
+            table_id: outcome.table_id,
+            client_token: input.client_token.clone(),
+            input_compression_type: Some(compression.to_string()),
+            input_format_options: input.input_format_options.clone(),
+            table_creation_parameters: Some(input.table_creation_parameters.clone()),
+            processed_item_count: outcome.processed_item_count,
+            imported_item_count: outcome.imported_item_count,
+            error_count: outcome.error_count,
+            processed_size_bytes: outcome.processed_size_bytes,
+            failure: outcome.failure,
+        },
+    }
+}
+
+/// Hold an import to the quotas it is held to: the ones a CREATE is held to, because an
+/// import creates a table, plus the import catalogue's own
+/// ([`crate::state::MAX_IMPORTS_PER_REGION`]).
+fn check_quotas(
+    store: &crate::state::ComAmazonawsDynamodbDynamodb20120810State,
+    region: &str,
+) -> Result<(), ImportTableError> {
+    if store.table_count_in(region) >= crate::state::MAX_TABLES {
+        return Err(limit_exceeded(format!(
+            "Subscriber limit exceeded: this account already holds the maximum of {} tables \
+             in {region}",
+            crate::state::MAX_TABLES
+        )));
+    }
+    if store.region_bucket_exhausted(region) {
+        return Err(limit_exceeded(format!(
+            "Subscriber limit exceeded: this emulator holds tables for at most {} regions, \
+             and {region} is not one of them",
+            crate::state::MAX_REGIONS
+        )));
+    }
+    if store.import_count_in(region) >= crate::state::MAX_IMPORTS_PER_REGION {
+        return Err(limit_exceeded(format!(
+            "Subscriber limit exceeded: this account already holds the maximum of {} imports \
+             in {region}",
+            crate::state::MAX_IMPORTS_PER_REGION
+        )));
+    }
+    Ok(())
+}
+
+/// The modelled limit error for an import past one of the quotas it is held to: "When
+/// importing into DynamoDB, up to 50 simultaneous import table operations are allowed per
+/// account" and "There is a soft account quota of 2,500 tables"
+/// (`LimitExceededException`).
+fn limit_exceeded(message: String) -> ImportTableError {
+    ImportTableErrorModeled::LimitExceededException(LimitExceededException {
+        message: Some(message),
+    })
+    .into()
+}
+
+/// The modelled refusal of a `ClientToken` that already stands for a DIFFERENT import:
+/// "This can occur when the current import conflicts with a previous import request that
+/// had the same client token" (`ImportConflictException`). The sentence is the fixed one
+/// this service answers that conflict with
+/// ([`crate::state::IMPORT_CONFLICT_MESSAGE`]) and echoes no part of the request: the
+/// token the caller reused is the one it just sent.
+fn import_conflict() -> ImportTableError {
+    ImportTableErrorModeled::ImportConflictException(ImportConflictException {
+        message: Some(crate::state::IMPORT_CONFLICT_MESSAGE.to_string()),
+    })
+    .into()
+}
+
+/// The modelled refusal for a declaration whose `SSESpecification` could not be served: a
+/// key this Region's KMS endpoint does not serve, or a type the service does not offer, is
+/// the 400 the bad request it is, and a KMS store this process cannot reach at all is a
+/// server fault — the same two arms `CreateTable` answers with.
+fn sse_unresolved(fault: crate::state::SseFault) -> ImportTableError {
+    match fault {
+        crate::state::SseFault::Invalid(error) => bad_request(error),
+        crate::state::SseFault::StoreUnavailable => {
+            ImportTableErrorModeled::InternalServerError(InternalServerError {
+                message: Some("the KMS key store is unavailable".to_string()),
+            })
+            .into()
+        }
+    }
+}
+
+/// The modelled server error for a request that cannot reach this service's store.
+fn store_unavailable() -> ImportTableError {
+    ImportTableErrorModeled::InternalServerError(InternalServerError {
+        message: Some("the DynamoDB table store is unavailable".to_string()),
+    })
+    .into()
+}
+
+/// A bad member of this request, which this operation models no error for: the
+/// `ValidationException` such an input is.
+fn bad_request(error: crate::state::RequestError) -> ImportTableError {
+    crate::scaffolded::Scaffolded::validation(error.message())
 }
