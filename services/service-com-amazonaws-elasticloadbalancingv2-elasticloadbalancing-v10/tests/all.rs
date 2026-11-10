@@ -81,6 +81,8 @@ mod rule_page_markers_and_redirect_validation;
 mod rule_priorities;
 #[path = "all/rule_transforms_and_fixed_response_content_type.rs"]
 mod rule_transforms_and_fixed_response_content_type;
+#[path = "all/scheduled_target_health_check_port.rs"]
+mod scheduled_target_health_check_port;
 #[path = "all/shared_endpoint_routing.rs"]
 mod shared_endpoint_routing;
 #[path = "all/ssl_policies.rs"]

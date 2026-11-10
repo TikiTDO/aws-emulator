@@ -103,6 +103,8 @@ mod list_services;
 mod list_task_definition_families;
 #[path = "all/list_task_definitions.rs"]
 mod list_task_definitions;
+#[path = "all/load_balanced_task_health_check_port.rs"]
+mod load_balanced_task_health_check_port;
 #[path = "all/load_balanced_task_propagation.rs"]
 mod load_balanced_task_propagation;
 #[path = "all/load_balancer_pairing_refusal_wording.rs"]

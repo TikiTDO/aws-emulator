@@ -2409,21 +2409,30 @@ pub fn load_balancer_binding_violation(
 }
 
 /// Whether one `portMapping` declares `port` as a container port: either as its own
-/// `containerPort`, or inside the `containerPortRange` it declares instead ("The port
-/// number range on the container that's bound to the dynamically mapped host port
-/// range", written `<start>-<end>`).
+/// `containerPort`, or inside the `containerPortRange` it declares instead.
 pub(super) fn port_mapping_covers(mapping: &PortMapping, port: i32) -> bool {
     if mapping.container_port == Some(port) {
         return true;
     }
-    mapping
-        .container_port_range
-        .as_deref()
-        .and_then(|range| range.split_once('-'))
-        .and_then(|(start, end)| {
-            Some((start.trim().parse::<i32>().ok()?, end.trim().parse::<i32>().ok()?))
-        })
-        .is_some_and(|(start, end)| (start..=end).contains(&port))
+    container_port_range(mapping).is_some_and(|range| range.contains(&port))
+}
+
+/// The inclusive range of container ports one `portMapping` declares instead of a single
+/// `containerPort` ("The port number range on the container that's bound to the dynamically
+/// mapped host port range", written `<start>-<end>`, whose "first port in the range must be
+/// less than last port in the range").
+///
+/// `None` for a mapping that declares no range, or one whose value is not two port numbers
+/// in that order — a value no range covers rather than one read backwards.
+pub(super) fn container_port_range(
+    mapping: &PortMapping,
+) -> Option<::std::ops::RangeInclusive<i32>> {
+    let (start, end) = mapping.container_port_range.as_deref()?.split_once('-')?;
+    let (start, end) = (
+        start.trim().parse::<i32>().ok()?,
+        end.trim().parse::<i32>().ok()?,
+    );
+    (start <= end).then_some(start..=end)
 }
 
 /// The target groups of `arns` that NO load balancer forwards to, read from the Elastic

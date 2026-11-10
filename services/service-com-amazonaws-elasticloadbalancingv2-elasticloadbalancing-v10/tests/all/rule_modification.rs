@@ -429,6 +429,22 @@ fn refusal_table(rule_arn: &str, default_arn: &str, unknown_arn: &str, absent_gr
             code: VALIDATION_ERROR,
         },
         RefusalRow {
+            // A list longer than the transform TYPES there are must repeat one of them, so a
+            // third transform is refused inside the bounded walk
+            // (`state::check_rule_transforms`) however long the list is. The sentence it
+            // earns is asserted after this table.
+            case: "one more transform than a rule carries",
+            fields: [
+                vec![p("RuleArn", rule_arn)],
+                host_header_rewrite(1, "^a\\.example\\.com$", "b.example.com"),
+                url_rewrite(2, "^/a$", "/b"),
+                url_rewrite(3, "^/c$", "/d"),
+            ]
+            .concat(),
+            status: 400,
+            code: VALIDATION_ERROR,
+        },
+        RefusalRow {
             case: "a condition field this service does not match on",
             fields: vec![
                 p("RuleArn", rule_arn),
@@ -526,6 +542,30 @@ async fn a_refused_modification_leaves_every_rule_as_it_was() {
             row.case
         );
     }
+
+    // A transform list past the two types `TransformTypeEnum` declares repeats one of them,
+    // and the clause that refuses it names the type the caller has to remove — read here
+    // because the table above asserts the refusal CLASS and this is the sentence inside it.
+    let case = "the sentence a transform list past the bound earns";
+    let over_the_bound = modify_rule(
+        &router,
+        &rule,
+        &[
+            host_header_rewrite(1, "^a\\.example\\.com$", "b.example.com"),
+            url_rewrite(2, "^/a$", "/b"),
+            url_rewrite(3, "^/c$", "/d"),
+        ]
+        .concat(),
+    )
+    .await;
+    let message = over_the_bound.text("Message").unwrap_or_default();
+    // The quoted type as the wire carries it: the awsQuery serializer escapes the
+    // apostrophes of the clause's own `'<type>'` quoting.
+    assert_eq!(
+        message, "A rule carries at most one &apos;url-rewrite&apos; transform",
+        "case {case:?}: expected the clause to name the repeated type, got {message:?} in {}",
+        over_the_bound.body
+    );
 }
 
 /// The load balancers one target group reports.

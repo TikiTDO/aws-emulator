@@ -251,6 +251,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     // scheduler owns it, so no reconcile of another workload's targets may
                     // take it out of the group.
                     registered_for: None,
+                    // A bare address or instance id names no workload of this emulator, so
+                    // nothing declares which ports it listens on
+                    // ([`crate::state::ServedPorts`]).
+                    serves_ports: Vec::new().into(),
                 },
             );
         }

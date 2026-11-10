@@ -525,6 +525,10 @@ mod dynamodb_streams_routing;
 mod ecr_repository_policy_principal;
 #[path = "all/ecs_service_target_group_association.rs"]
 mod ecs_service_target_group_association;
+// Declared HERE, in the sorted list, for the reason the note above gives: the tail of this
+// file is the region every concurrent landing appends to.
+#[path = "all/ecs_service_target_group_health_check_port.rs"]
+mod ecs_service_target_group_health_check_port;
 // Declared HERE, in the sorted list, rather than appended at the end of this file like
 // the most recent suites: the tail is where every landing in the same window appends, so
 // it is the contended region now, while this span of the sorted list is untouched by

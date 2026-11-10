@@ -28,10 +28,17 @@
 //!
 //! A health check reaches the registered target over the network, and this emulator makes no
 //! outbound connection — so what one check can observe is whether the emulator itself holds
-//! something that stands behind the registration ([`observe`]):
+//! something that stands behind the registration, ON THE PORT the check connects to
+//! ([`observe`]). That port is the group's effective health-check port — `HealthCheckPort`
+//! when it names one, and the port the target receives traffic on otherwise:
 //!
-//! * a registration another emulated service's SCHEDULER made for a workload it runs stands
-//!   for that workload, which is running here, so the check passes;
+//! * a registration whose workload declares the ports it LISTENS on
+//!   ([`super::ServedPorts`], what another emulated service's scheduler registered it with)
+//!   fails every check against a port that is not one of them: a workload that is running
+//!   answers nothing on a port it does not serve, which is what a health check pointed at
+//!   the wrong port finds;
+//! * otherwise, a registration another emulated service's SCHEDULER made for a workload it
+//!   runs stands for that workload, which is running here, so the check passes;
 //! * an `instance` target passes while EC2 — which owns instances — reports that instance
 //!   running, and fails for one it reports stopped or holds no longer;
 //! * an `ip` target passes while some network interface of the account holds that address,
@@ -47,7 +54,8 @@
 //! The verdict only MOVES once the target group's own thresholds are reached — "the number of
 //! consecutive health check failures required before considering a target unhealthy"
 //! (`CreateTargetGroup$UnhealthyThresholdCount`) and its healthy counterpart — which
-//! [`super::target_health::TargetProbe`] folds the observations into.
+//! [`super::target_health::TargetProbe`] folds the observations into, and a registration whose
+//! checks have failed without reaching that threshold is still `initial`.
 //!
 //! # The clock the series is published on
 //!
@@ -67,7 +75,10 @@
 //! publishes what is due at that instant and starts the one bounded in-process task that
 //! waits for the next due check. Nothing here is on a READ path, and nothing it publishes
 //! depends on who called: the checks it materialises are the ones the stored due instants
-//! have already made due.
+//! have already made due. [`check_registrations`] is the one entry point another emulated
+//! service's scheduler reaches, for the first check of a registration it has just created:
+//! it observes those registrations and nothing else, and publishes no datapoint, so it moves
+//! no other registration's probe and no series' schedule.
 
 use ::std::collections::{BTreeMap, HashMap, HashSet};
 use ::std::sync::Arc;
@@ -81,7 +92,7 @@ use super::target_health::{HEALTHY_STATE, UNHEALTHY_STATE};
 use super::{
     load_balancer_type_code,
     ComAmazonawsElasticloadbalancingv2ElasticloadbalancingV10State as ElbState, LoadBalancerRecord,
-    TargetKey,
+    RegisteredTarget, TargetGroupRecord, TargetKey,
 };
 
 /// "The number of targets that are considered healthy" — the metric an Elastic Load
@@ -245,12 +256,56 @@ struct Checked {
     id: String,
     /// Whether another emulated service's scheduler owns this registration.
     scheduled: bool,
+    /// Whether the workload behind the registration listens on the port this check
+    /// CONNECTS to — the group's effective health-check port, which is `HealthCheckPort`
+    /// when it names one and the port the target receives traffic on otherwise
+    /// (`TargetGroupRecord::health_check_port_of`).
+    ///
+    /// `None` when that is not known: a registration whose workload declares no ports
+    /// ([`super::ServedPorts`]), or a health check whose port no number names.
+    serves_health_check_port: Option<bool>,
 }
 
 /// What one check observed about a registration: `Some(true)` for one something in this
 /// emulator stands behind, `Some(false)` for one nothing does, and `None` when nothing was
 /// observed at all.
 type Observation = Option<bool>;
+
+/// Run ONE check of exactly the registrations `registrations` names — each a
+/// `(target group ARN, registration key)` of this store — and fold what each check observed
+/// into that registration's own probe.
+///
+/// What [`drive_host_count_metrics`] does on the writes this service's OWN API makes, for a
+/// registration ANOTHER emulated service's scheduler has just created through the state seam
+/// (`super::TargetGroupRecord::register_for`): the first check of a registration is owed by
+/// the write that created it, so the verdict its checks reach does not wait for a clock
+/// wake-up and a registration whose checks fail is never reported healthy on the way to one.
+/// The periodic checking is the clock's, which the create of the listener that routes to the
+/// group started.
+///
+/// NOTHING else is touched: no other registration is observed, no series is opened or closed
+/// and no datapoint is published, so a call made while materialising one new registration
+/// cannot advance any other registration's probe or any series' schedule. A registration of a
+/// target group no load balancer forwards to is checked by nothing and is skipped here too.
+///
+/// Called with NO guard of this store held: it takes the lock itself.
+pub fn check_registrations<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    registrations: &[(String, TargetKey)],
+) {
+    if registrations.is_empty() {
+        return;
+    }
+    let Some(state) = super::service_state(engine) else {
+        return;
+    };
+    let checked = {
+        let store = state.lock();
+        named_registrations(&store, registrations)
+    };
+    let observations = observe_all(engine, &checked);
+    fold_observations(&mut state.lock(), &observations);
+}
 
 /// Publish every host-count datapoint the clock has already made due, and start the one
 /// bounded in-process task that waits for the next one.
@@ -346,16 +401,36 @@ fn next_wait_or_release(store: &mut ElbState, generation: u64) -> Option<Duratio
         .values()
         .map(|series| series.next_check_at)
         .min();
+    // A registration whose checks have FAILED without reaching the unhealthy verdict yet is
+    // checked again at the ACCELERATED spacing, however far off the next datapoint of the
+    // series it is counted into is: the verdict is a number of CHECKS away
+    // (`UnhealthyThresholdCount` of them), so it is the check spacing that decides how long
+    // such a registration sits in `initial` rather than the publish schedule.
+    let failing = a_registration_is_failing(store);
     match earliest {
-        Some(due) => Some(
-            due.saturating_duration_since(now)
-                .clamp(MIN_PUBLISH_WAIT, MAX_PUBLISH_WAIT),
-        ),
+        Some(due) => {
+            let wait = due.saturating_duration_since(now);
+            let wait = if failing {
+                wait.min(ACCELERATED_SPACING)
+            } else {
+                wait
+            };
+            Some(wait.clamp(MIN_PUBLISH_WAIT, MAX_PUBLISH_WAIT))
+        }
         None => {
             release_clock(store, generation);
             None
         }
     }
+}
+
+/// Whether some registration a load balancer of this store checks has a failing check and no
+/// verdict yet ([`super::TargetProbe::is_failing`]).
+fn a_registration_is_failing(store: &ElbState) -> bool {
+    store.target_groups.values().any(|group| {
+        !group.load_balancer_arns.is_empty()
+            && group.targets.values().any(|target| target.probe.is_failing())
+    })
 }
 
 /// Check every registration of a routed target group, fold what the checks observed into the
@@ -435,17 +510,55 @@ fn registrations_to_check(store: &ElbState) -> Vec<Checked> {
             if checked.len() >= MAX_CHECKS_PER_PASS {
                 return checked;
             }
-            checked.push(Checked {
-                target_group_arn: target_group_arn.clone(),
-                key: key.clone(),
-                target_type: group.target_type.clone(),
-                vpc_id: group.vpc_id.clone(),
-                id: target.id.clone(),
-                scheduled: target.registered_for.is_some(),
-            });
+            checked.push(checked_registration(target_group_arn, group, key, target));
         }
     }
     checked
+}
+
+/// The registrations `registrations` names, as the checks of them this store would run: one
+/// per `(target group ARN, key)` that is still held by a target group a load balancer
+/// forwards to, and up to [`MAX_CHECKS_PER_PASS`] of them.
+///
+/// A pair naming a group or a registration this store no longer holds contributes nothing: a
+/// deregistration may have taken it out since the caller read it.
+fn named_registrations(store: &ElbState, registrations: &[(String, TargetKey)]) -> Vec<Checked> {
+    registrations
+        .iter()
+        .take(MAX_CHECKS_PER_PASS)
+        .filter_map(|(target_group_arn, key)| {
+            let group = store.target_groups.get(target_group_arn)?;
+            if group.load_balancer_arns.is_empty() {
+                return None;
+            }
+            let target = group.targets.get(key)?;
+            Some(checked_registration(target_group_arn, group, key, target))
+        })
+        .collect()
+}
+
+/// What one check of the registration `key` of `group` reads: where it is stored, what it
+/// stands for, and the port the check connects to.
+fn checked_registration(
+    target_group_arn: &str,
+    group: &TargetGroupRecord,
+    key: &TargetKey,
+    target: &RegisteredTarget,
+) -> Checked {
+    Checked {
+        target_group_arn: target_group_arn.to_string(),
+        key: key.clone(),
+        target_type: group.target_type.clone(),
+        vpc_id: group.vpc_id.clone(),
+        id: target.id.clone(),
+        scheduled: target.registered_for.is_some(),
+        // The port this group's check connects to for THIS registration, read against the
+        // ports the workload behind it serves.
+        serves_health_check_port: group
+            .health_check_port_of(target)
+            .and_then(|port| port.parse::<i32>().ok())
+            .and_then(|port| target.serves(port)),
+    }
 }
 
 /// What one check of each registration in `checked` observed.
@@ -512,6 +625,14 @@ struct Inventory {
 /// silence, which is how this service reads every other fact it does not own
 /// ([`super::network`]).
 fn observe(target: &Checked, held: Option<&Inventory>) -> Observation {
+    if target.serves_health_check_port == Some(false) {
+        // The check connects to the group's effective health-check port, and the workload
+        // behind this registration does not listen on it: nothing answers there, whatever
+        // else stands behind the registration. This is the one condition a check can
+        // observe about the PORT, and it is read before what stands behind the target,
+        // because a workload that is running answers nothing on a port it does not serve.
+        return Some(false);
+    }
     if target.scheduled {
         // The workload another service's scheduler registered this target for runs in this
         // emulator, and that is what stands behind the registration.
@@ -836,10 +957,12 @@ mod tests {
     }
 
     /// RULE: what one check observes is whether the emulator holds something that stands
-    /// behind the registration, and nothing at all where there is no inventory to read.
+    /// behind the registration AND answers on the port the check connects to, and nothing
+    /// at all where there is no inventory to read.
     ///
     /// The rows span the target types a check reads, a registration another service's
-    /// scheduler owns, and an account whose inventory does not hold the group's VPC.
+    /// scheduler owns, whether the workload behind it listens on the health-check port, and
+    /// an account whose inventory does not hold the group's VPC.
     #[test]
     fn a_check_observes_only_what_the_emulator_holds() {
         let held = Inventory {
@@ -847,14 +970,22 @@ mod tests {
             addresses: HashSet::from(["10.0.1.7".to_string()]),
             running: HashSet::from(["i-0123456789abcdef0".to_string()]),
         };
-        for (case, target_type, id, scheduled, expected) in [
-            ("an address an interface holds", "ip", "10.0.1.7", false, Some(true)),
-            ("an address no interface holds", "ip", "10.0.1.9", false, Some(false)),
+        for (case, target_type, id, scheduled, serves, expected) in [
+            ("an address an interface holds", "ip", "10.0.1.7", false, None, Some(true)),
+            (
+                "an address no interface holds",
+                "ip",
+                "10.0.1.9",
+                false,
+                None,
+                Some(false),
+            ),
             (
                 "a running instance",
                 "instance",
                 "i-0123456789abcdef0",
                 false,
+                None,
                 Some(true),
             ),
             (
@@ -862,6 +993,7 @@ mod tests {
                 "instance",
                 "i-00000000000000000",
                 false,
+                None,
                 Some(false),
             ),
             (
@@ -870,13 +1002,40 @@ mod tests {
                 "arn:aws:lambda:us-east-1:000000000000:function:f",
                 false,
                 None,
+                None,
             ),
             (
                 "a registration a scheduler owns",
                 "ip",
                 "10.0.9.9",
                 true,
+                None,
                 Some(true),
+            ),
+            (
+                "a scheduler's registration whose workload listens on the checked port",
+                "ip",
+                "10.0.9.9",
+                true,
+                Some(true),
+                Some(true),
+            ),
+            (
+                "a scheduler's registration whose workload does not listen on the \
+                 checked port",
+                "ip",
+                "10.0.9.9",
+                true,
+                Some(false),
+                Some(false),
+            ),
+            (
+                "an address an interface holds, checked on a port nothing behind it serves",
+                "ip",
+                "10.0.1.7",
+                false,
+                Some(false),
+                Some(false),
             ),
         ] {
             let checked = Checked {
@@ -886,6 +1045,7 @@ mod tests {
                 vpc_id: Some("vpc-0123456789abcdef0".to_string()),
                 id: id.to_string(),
                 scheduled,
+                serves_health_check_port: serves,
             };
             let observed = observe(&checked, Some(&held));
             assert_eq!(
@@ -893,8 +1053,13 @@ mod tests {
                 "case {case:?}: expected {expected:?}, got {observed:?}"
             );
             // With no inventory to read, and with an inventory that holds no such VPC,
-            // only a scheduler's own registration is observed.
-            let expected_unknown = scheduled.then_some(true);
+            // only a scheduler's own registration is observed — and a check against a port
+            // nothing serves fails whatever the inventory holds.
+            let expected_unknown = if serves == Some(false) {
+                Some(false)
+            } else {
+                scheduled.then_some(true)
+            };
             let without = observe(&checked, None);
             assert_eq!(
                 without, expected_unknown,

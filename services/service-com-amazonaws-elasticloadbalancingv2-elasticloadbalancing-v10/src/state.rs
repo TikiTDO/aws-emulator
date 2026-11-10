@@ -67,13 +67,15 @@ pub use rule_actions::{check_redirect_actions, redirects_to_itself, REDIRECT_LOO
 /// and the two spans the clock owes a registration.
 pub mod target_health;
 
-pub use target_health::{deregistration_delay, TargetProbe, DEREGISTRATION_DELAY_ATTRIBUTE};
+pub use target_health::{
+    deregistration_delay, ServedPorts, TargetProbe, DEREGISTRATION_DELAY_ATTRIBUTE,
+};
 
 /// The periodic health check of the registrations a load balancer routes to, and the
 /// host-count series that check is published as.
 pub mod host_counts;
 
-pub use host_counts::{drive_host_count_metrics, HostCountPublisher};
+pub use host_counts::{check_registrations, drive_host_count_metrics, HostCountPublisher};
 
 /// The load balancer's OWN network interfaces, which live in the inventory EC2 holds.
 pub mod service_interfaces;
@@ -3229,6 +3231,14 @@ pub struct RegisteredTarget {
     /// (an Amazon ECS service registering the tasks its `loadBalancers` bind) may add and
     /// remove the registrations it owns and must leave a caller's own alone.
     pub registered_for: Option<String>,
+    /// The ports the workload behind this registration LISTENS on, as the scheduler that
+    /// runs it declares them — empty for a registration nothing declares ports for, which
+    /// is every `RegisterTargets` caller's own ([`ServedPorts`]).
+    ///
+    /// What a health check of this registration can get an answer on: the check connects to
+    /// the group's effective health-check port ([`TargetGroupRecord::health_check_port_of`]),
+    /// and a port the workload does not listen on is answered by nothing.
+    pub serves_ports: ServedPorts,
 }
 
 /// How a registration is keyed in a target group: the target id and the port the target
@@ -3827,21 +3837,38 @@ pub fn check_rule_actions(actions: &[Action]) -> Result<(), String> {
     Ok(())
 }
 
+/// How many transforms one rule carries: the one host header rewrite and the one URL
+/// rewrite the model's sentence allows, which are also the two values
+/// `TransformTypeEnum` declares (`smithy_query(query="shape",
+/// shape="TransformTypeEnum")`: `host-header-rewrite`, `url-rewrite`).
+///
+/// It is what bounds [`check_rule_transforms`]: a list longer than the types there ARE must
+/// repeat one of them, so the walk reads no further than this many entries plus the one that
+/// repeats — the work is bounded by the enum rather than by the length of the list a caller
+/// chose to send, the way [`ACTIONS_PER_RULE`] bounds a rule's actions.
+pub const TRANSFORMS_PER_RULE: usize = 2;
+
 /// Enforce what the model states about a rule's TRANSFORMS and declares no error shape
 /// for: "You can add one host header rewrite transform and one URL rewrite transform" —
-/// so a rule carries at most one transform of each type `TransformTypeEnum` declares.
+/// so a rule carries at most one transform of each type `TransformTypeEnum` declares, and
+/// therefore at most [`TRANSFORMS_PER_RULE`] of them.
 ///
 /// Judged wherever a rule's transforms are SET, by the create that first stores them and
 /// by the modification that replaces them, exactly as its conditions are
 /// ([`check_rule_conditions`]).
+///
+/// BOUNDED by the enum: every entry carries one of the two types, so a list past
+/// [`TRANSFORMS_PER_RULE`] repeats a type inside its first [`TRANSFORMS_PER_RULE`] + 1
+/// entries and is refused there. Nothing further is read, and the duplicate is found through
+/// a set rather than by scanning what was accepted so far, so neither the number of
+/// comparisons nor the work of one call grows with the length a request chose.
 pub fn check_rule_transforms(transforms: &[RuleTransform]) -> Result<(), String> {
-    let mut seen: Vec<&str> = Vec::new();
-    for transform in transforms {
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for transform in transforms.iter().take(TRANSFORMS_PER_RULE + 1) {
         let kind = transform.r#type.as_str();
-        if seen.contains(&kind) {
+        if !seen.insert(kind) {
             return Err(format!("A rule carries at most one '{kind}' transform"));
         }
-        seen.push(kind);
     }
     Ok(())
 }

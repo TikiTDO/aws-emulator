@@ -15,6 +15,12 @@
 //! group — through `draining`, for the group's deregistration delay, exactly as
 //! `DeregisterTargets` takes a target out (`ELBv2 state::target_health`).
 //!
+//! A registration also carries the ports the task's containers LISTEN on
+//! ([`revision_container_ports`], bounded by [`MAX_SERVED_PORT_RANGES`]), because that is
+//! what the load balancer's health check of it can get an answer on: the check connects to
+//! the target group's effective health-check port, and a port no container of the task
+//! listens on is one the task answers nothing on.
+//!
 //! # Reconciled, never appended
 //!
 //! The registrations Amazon ECS owns in a target group are exactly the ones its live tasks
@@ -36,7 +42,22 @@
 //! cross-store access here follows, which is what keeps a cycle between the stores
 //! unreachable.
 
+use ::std::ops::RangeInclusive;
+
+use ::service_com_amazonaws_elasticloadbalancingv2_elasticloadbalancing_v10::state::ServedPorts;
+
 use super::*;
+
+/// How many declared container-port ranges the registration of ONE task carries.
+///
+/// A bound on the work one registration costs, not an Amazon ECS quota:
+/// `PortMapping$containerPortRange` states "you can specify a maximum of 100 port ranges per
+/// container", and a revision describes at most [`MAX_CONTAINER_DEFINITIONS`] containers, so
+/// that product is the most a revision can legitimately declare. `portMappings` carries no
+/// length of its own, so a revision past this bound has the first this many of its ranges
+/// read and no more: the stored list is held to a figure this service fixes rather than to
+/// one a request chose.
+pub const MAX_SERVED_PORT_RANGES: usize = 100 * MAX_CONTAINER_DEFINITIONS;
 
 /// One target an ECS service's task occupies in one ELBv2 target group.
 ///
@@ -62,6 +83,20 @@ pub struct TargetRegistration {
     /// marked as owned by — so a later reconcile can take out exactly the registrations of
     /// the tasks that are gone.
     pub task_arn: String,
+    /// The ports the task's containers LISTEN on, as its revision declares them
+    /// ([`revision_container_ports`]).
+    ///
+    /// Carried into the registration because it is what a health check of that target can
+    /// get an answer on: the load balancer connects to the target group's effective
+    /// health-check port, and a port no container of the task listens on is a port the task
+    /// answers nothing on — which is what a target group whose `HealthCheckPort` names
+    /// another port finds.
+    ///
+    /// SHARED: one task's declared ports are read once and the registrations of that task
+    /// hold the same list, so a task bound to several target groups costs one allocation.
+    /// The type is the Elastic Load Balancing v2 service's own alias for the shape, which
+    /// is where this value is stored ([`ServedPorts`]).
+    pub served_ports: ServedPorts,
 }
 
 impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
@@ -112,6 +147,9 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                     .iter()
                     .find_map(AttachmentRecord::subnet_id)
                     .map(str::to_string);
+                // The ports this task's containers listen on, read off the revision it runs
+                // once for the task rather than per binding.
+                let served_ports = self.task_container_ports(task);
                 for binding in self.placement_load_balancers(service, task) {
                     let Some(arn) = binding.target_group_arn.as_deref() else {
                         continue;
@@ -129,6 +167,7 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                         port: binding.container_port,
                         subnet_id: subnet_id.clone(),
                         task_arn: task.task_arn.clone(),
+                        served_ports: served_ports.clone(),
                     });
                 }
             }
@@ -141,6 +180,16 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
             ))
         });
         registrations
+    }
+
+    /// The ports the containers of `task` listen on, read off the REVISION the task runs
+    /// ([`revision_container_ports`]); empty for a task whose revision this store no longer
+    /// holds, which declares no ports for a check to be read against.
+    fn task_container_ports(&self, task: &TaskRecord) -> ServedPorts {
+        parse_revision_reference(&task.task_definition_arn, TASK_DEFINITION_RESOURCE_TYPE)
+            .and_then(|(family, revision)| Some((family, revision?)))
+            .and_then(|key| self.task_definitions.get(&key))
+            .map_or_else(|| ServedPorts::from(Vec::new()), revision_container_ports)
     }
 
     /// The `loadBalancers` bindings the placement that placed `task` registers it into: the
@@ -171,6 +220,39 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
 /// rather than serving, so neither it nor a task that is still coming up is a target.
 fn task_receives_traffic(task: &TaskRecord) -> bool {
     task.desired_status != STATUS_STOPPED && task.last_status == STATUS_RUNNING
+}
+
+/// The ports the containers of one revision LISTEN on: every `containerPort` its
+/// `containerDefinitions` declare in their `portMappings`, and every port of a
+/// `containerPortRange` declared instead of one.
+///
+/// The ports a target of such a task answers on. A task in the `awsvpc` network mode is
+/// reached at its own interface's address on those very ports — "for containers in a task
+/// with the `awsvpc` network mode, the `hostPortRange` is set to the same value as the
+/// `containerPortRange`" (`PortMapping$containerPortRange`), and `PortMapping$hostPort`
+/// says the same of a single port — so a port the revision declares no container listening
+/// on is a port nothing in the task answers on. A revision that declares no port mapping at
+/// all declares nothing, which is no claim about any port.
+///
+/// BOUNDED by [`MAX_SERVED_PORT_RANGES`]: a revision over it keeps the first that many
+/// ranges it declares and the rest are not read, so the stored list is never sized by the
+/// length of a list a caller chose to send — and a check against a port outside the ones
+/// kept still FAILS, rather than the whole registration falling back to claiming nothing.
+fn revision_container_ports(definition: &TaskDefinitionRecord) -> ServedPorts {
+    let ports: Vec<RangeInclusive<i32>> = definition
+        .container_definitions
+        .iter()
+        .flat_map(|container| container.port_mappings.iter().flatten())
+        .flat_map(|mapping| {
+            mapping
+                .container_port
+                .map(|port| port..=port)
+                .into_iter()
+                .chain(container_port_range(mapping))
+        })
+        .take(MAX_SERVED_PORT_RANGES)
+        .collect();
+    ServedPorts::from(ports)
 }
 
 /// Bring the Elastic Load Balancing v2 target groups in line with the tasks this store now
@@ -224,6 +306,13 @@ pub fn reconcile_target_group_registrations<Eng: Send + Sync + 'static>(
         return;
     };
     let mut store = state.lock();
+    // The registrations this reconcile ADDED, each as the key the target group holds it
+    // under: the write that creates a registration owes it its first health check, and
+    // nothing else is checked for it.
+    let mut added: Vec<(
+        String,
+        ::service_com_amazonaws_elasticloadbalancingv2_elasticloadbalancing_v10::state::TargetKey,
+    )> = Vec::new();
     for (arn, group) in store.target_groups.iter_mut() {
         // What the clock already owes this group: a registration whose drain is over has
         // left it, so it occupies neither a key nor the group's quota.
@@ -275,6 +364,7 @@ pub fn reconcile_target_group_registrations<Eng: Send + Sync + 'static>(
                 registration.port,
                 zones.get(&registration.target_id).cloned(),
                 &registration.task_arn,
+                registration.served_ports.clone(),
                 now,
             );
             // A group already holding its quota of targets takes no further registration, so
@@ -288,8 +378,23 @@ pub fn reconcile_target_group_registrations<Eng: Send + Sync + 'static>(
                      its quota of targets"
                 );
             }
+            if registered {
+                added.push((arn.clone(), key));
+            }
         }
     }
+    // The registrations this reconcile made are CHECKED at once, the way the Elastic Load
+    // Balancing v2 write that registers a caller's own targets checks them: a task whose
+    // containers do not listen on the group's health-check port answers no check, and the
+    // state it is reported in must follow those checks from the moment it is registered
+    // rather than wait for a clock wake-up. Only the registrations this call added, so a
+    // reconcile that moved nothing checks nothing and no other registration is touched; with
+    // the guard this reconcile held RELEASED, so the check takes the store's lock itself.
+    drop(store);
+    ::service_com_amazonaws_elasticloadbalancingv2_elasticloadbalancing_v10::state::check_registrations(
+        engine,
+        &added,
+    );
 }
 
 /// Whether `workload` names a TASK of this service — the form

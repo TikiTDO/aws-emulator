@@ -24,10 +24,21 @@
 //!   immediately and leaves the target group only once the deregistration delay has
 //!   passed ([`deregistration_delay`]).
 //!
+//! Past the registration span the state is the one the CHECKS reached, never a constant:
+//! `unhealthy` once the group's `UnhealthyThresholdCount` consecutive checks failed, and the
+//! second `initial` (`Elb.InitialHealthChecking`) while a check has failed and that threshold
+//! is not reached yet — so a registration whose checks are failing is never reported healthy
+//! on the way to its verdict. What one check observes is decided in [`super::host_counts`],
+//! against the effective health-check port and the ports the workload behind the registration
+//! serves ([`ServedPorts`]). A registration whose checks pass, and one no check observed
+//! anything about, keep the `healthy` the clock owes them.
+//!
 //! Both spans are stored as the instant they come due, never slept for; a read
 //! materialises what the clock already owes ([`TargetGroupRecord::settle_draining`]) and
 //! writes nothing else.
 
+use std::ops::RangeInclusive;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use crate::ops::types::{TargetDescription, TargetHealth, TargetHealthDescription};
@@ -120,6 +131,15 @@ const UNAVAILABLE: (&str, &str, &str) = (
 );
 const UNHEALTHY_TIMED_OUT: (&str, &str, &str) =
     (UNHEALTHY_STATE, "Target.Timeout", "Request timed out");
+/// The other `initial` the model names, for a registration whose checks have STARTED and
+/// have not decided yet: "`Elb.InitialHealthChecking` - The load balancer is still sending
+/// the target the minimum number of health checks required to determine its health status"
+/// (`TargetHealth$Reason`).
+const INITIAL_HEALTH_CHECKING: (&str, &str, &str) = (
+    "initial",
+    "Elb.InitialHealthChecking",
+    "Health checks in progress",
+);
 
 /// The `TargetHealthStateEnum` value of a registration the load balancer can route to.
 ///
@@ -147,8 +167,10 @@ pub struct TargetProbe {
     failures: u32,
     /// Consecutive passing checks since the last failing one.
     passes: u32,
-    /// Whether the checks have decided this registration is unhealthy.
-    unhealthy: bool,
+    /// What the runs have DECIDED: `Some(true)` once as many consecutive checks passed as
+    /// the group's `HealthyThresholdCount`, `Some(false)` once as many failed as its
+    /// `UnhealthyThresholdCount`, and `None` while neither threshold has been reached.
+    verdict: Option<bool>,
 }
 
 impl TargetProbe {
@@ -163,22 +185,53 @@ impl TargetProbe {
             self.failures = 0;
             self.passes = self.passes.saturating_add(1);
             if self.passes >= threshold(healthy_threshold) {
-                self.unhealthy = false;
+                self.verdict = Some(true);
             }
         } else {
             self.passes = 0;
             self.failures = self.failures.saturating_add(1);
             if self.failures >= threshold(unhealthy_threshold) {
-                self.unhealthy = true;
+                self.verdict = Some(false);
             }
         }
     }
 
     /// Whether the checks have decided this registration is unhealthy.
     pub fn is_unhealthy(&self) -> bool {
-        self.unhealthy
+        self.verdict == Some(false)
+    }
+
+    /// Whether the checks have FAILED without reaching a verdict yet: at least one check
+    /// since the last passing one found nothing answering, and not as many consecutive ones
+    /// as the group's `UnhealthyThresholdCount` takes.
+    ///
+    /// Which is the `initial` the model words as "the load balancer is still sending the
+    /// target the minimum number of health checks required to determine its health status":
+    /// nothing has found this registration healthy, so it is not reported healthy on its way
+    /// to the unhealthy verdict. A registration whose checks are passing, and one no check
+    /// observed anything about, are not this: neither is contradicted by a failing check, so
+    /// both keep the health the clock owes them. A registration that already HAS a verdict
+    /// keeps it until as many consecutive checks disagree with it as its threshold takes,
+    /// which is what [`Self::observed`] folds.
+    pub fn is_failing(&self) -> bool {
+        self.verdict.is_none() && self.failures > 0
     }
 }
+
+/// The ports the workload behind a registration SERVES, as inclusive ranges of port
+/// numbers — one `start..=start` per single port.
+///
+/// What a health check of that registration can get an answer on: a check CONNECTS to the
+/// effective health-check port ([`TargetGroupRecord::health_check_port_of`]), so a port the
+/// workload does not serve is a port nothing answers on, however healthy the workload
+/// itself is. An EMPTY list declares nothing: the registration of a bare address is one this
+/// service knows no ports for, and a check of it observes what it observes about the address
+/// alone.
+///
+/// SHARED, not copied: one workload's declared ports are the same list for every
+/// registration that stands for it, so registering it in several target groups costs one
+/// allocation and cloning a registration costs none.
+pub type ServedPorts = Arc<[RangeInclusive<i32>]>;
 
 /// One reported health, from a `(state, reason, description)` triple above.
 fn reported(state: (&str, &str, &str)) -> TargetHealth {
@@ -186,6 +239,21 @@ fn reported(state: (&str, &str, &str)) -> TargetHealth {
         state: Some(state.0.to_string()),
         reason: Some(state.1.to_string()),
         description: Some(state.2.to_string()),
+    }
+}
+
+impl RegisteredTarget {
+    /// Whether the workload behind this registration answers on `port` \u2014 `None` when
+    /// nothing declares which ports it serves ([`ServedPorts`]), which is no answer either
+    /// way rather than a port it does not serve.
+    ///
+    /// The one reading of [`RegisteredTarget::serves_ports`], so the health check and any
+    /// later reader of a registration's ports agree on what a declared set means.
+    pub fn serves(&self, port: i32) -> Option<bool> {
+        if self.serves_ports.is_empty() {
+            return None;
+        }
+        Some(self.serves_ports.iter().any(|range| range.contains(&port)))
     }
 }
 
@@ -262,9 +330,14 @@ impl TargetGroupRecord {
     ///
     /// The registration is this group's own in every respect a reader sees: it is keyed and
     /// health-checked exactly as `RegisterTargets` keys and checks one, so it begins
-    /// `initial` and reaches `healthy` one settling span later
+    /// `initial` and is reported whatever its checks then determine
     /// ([`TargetGroupRecord::health_of`]). It carries the workload it stands for, which is
     /// what lets the scheduler that added it take it out again.
+    ///
+    /// `serves_ports` is the ports that workload LISTENS on, as the scheduler that runs it
+    /// declares them ([`ServedPorts`]): a check of this registration gets an answer only on
+    /// a port among them, so a health check the target group points at any other port is
+    /// answered by nothing. A scheduler that declares none leaves the ports unknown.
     ///
     /// Nothing is replaced: a key this group already holds — whether a caller registered it
     /// or the same workload did — is left exactly as it is, so a reconcile does not restart
@@ -279,6 +352,7 @@ impl TargetGroupRecord {
         port: Option<i32>,
         availability_zone: Option<String>,
         workload: &str,
+        serves_ports: ServedPorts,
         now: SystemTime,
     ) -> bool {
         let key: TargetKey = (id.to_string(), port.or(self.port));
@@ -299,6 +373,7 @@ impl TargetGroupRecord {
                 draining_until: None,
                 probe: TargetProbe::default(),
                 registered_for: Some(workload.to_string()),
+                serves_ports,
             },
         );
         true
@@ -344,6 +419,13 @@ impl TargetGroupRecord {
             // consecutive failures is reached, and `TargetHealth$Reason` words that for a
             // check nothing answered.
             return reported(UNHEALTHY_TIMED_OUT);
+        }
+        if target.probe.is_failing() {
+            // A check has failed and the group's threshold of consecutive failures has not
+            // been reached yet, which is the state `TargetHealth$Reason` words as the
+            // minimum number of checks still being sent: nothing has found this
+            // registration healthy, so it is not reported healthy on the way to its verdict.
+            return reported(INITIAL_HEALTH_CHECKING);
         }
         TargetHealth {
             state: Some(HEALTHY_STATE.to_string()),
