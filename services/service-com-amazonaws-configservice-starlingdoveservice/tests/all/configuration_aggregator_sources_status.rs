@@ -19,6 +19,9 @@
 //! `MultiServiceRouter`.
 
 use serde_json::{json, Value};
+use service_com_amazonaws_configservice_starlingdoveservice::state::{
+    service_state, AGGREGATION_COMPLETES_AFTER,
+};
 
 use crate::config_setup_and_rule_loop::{Emulator, ROLE_ARN};
 
@@ -92,10 +95,26 @@ fn organization_source(regions: &[&str]) -> Value {
 
 /// Create `name` with the aggregation sources `request` carries, answering the
 /// `LastUpdatedTime` Config recorded for it.
+///
+/// Writing an aggregator's sources STARTS the aggregation of those sources, which
+/// completes a span later ([`AGGREGATION_COMPLETES_AFTER`]) — until then the aggregator
+/// has no source status to report at all, which is what
+/// `an_aggregator_reports_no_source_status_until_it_has_aggregated` pins. Every case
+/// here is about the statuses of an aggregator that HAS aggregated, so the sources are
+/// moved that span into the past rather than waited out, leaving the instant the
+/// aggregation completed equal to the `LastUpdatedTime` the create reported.
 async fn put_aggregator(emulator: &Emulator, name: &str, request: &Value) -> f64 {
     let mut body = request.clone();
     body["ConfigurationAggregatorName"] = json!(name);
     let created = emulator.ok("PutConfigurationAggregator", &body).await;
+    let state = service_state(&*emulator.engine).expect("the test engine is the shared engine");
+    let mut store = state.lock();
+    let aggregator = store
+        .configuration_aggregators
+        .get_mut(name)
+        .unwrap_or_else(|| panic!("case {name:?}: the created aggregator must be in state"));
+    aggregator.last_updated_at -= AGGREGATION_COMPLETES_AFTER;
+    drop(store);
     created["ConfigurationAggregator"]["LastUpdatedTime"]
         .as_f64()
         .unwrap_or_else(|| panic!("case {name:?}: the aggregator must carry a LastUpdatedTime, got {created}"))

@@ -205,22 +205,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the inventory, and nothing is written.
         let store = state.lock();
 
-        // A configuration item is what a CUSTOMER MANAGED configuration recorder
-        // captured, so reporting one needs such a recorder to exist: a service-linked
-        // recorder records for the service it is linked to and does not stand in for
-        // one.
-        if !store.has_customer_managed_recorder() {
-            return Err(
-                BatchGetResourceConfigErrorModeled::NoAvailableConfigurationRecorderException(
-                    NoAvailableConfigurationRecorderException {
-                        message: Some(
-                            crate::state::NO_AVAILABLE_CONFIGURATION_RECORDER_MESSAGE.to_string(),
-                        ),
-                    },
-                )
-                .into(),
-            );
-        }
+        // This is a REPORT of the configuration items the inventory holds, so what it
+        // holds is the whole answer: an account with no configuration recorder has
+        // recorded nothing, which answers every requested key with no item rather than
+        // refusing the batch. The modelled recorder-availability refusal belongs to the
+        // operations that CHANGE what Config records.
 
         let mut items = Vec::new();
         for key in requested {

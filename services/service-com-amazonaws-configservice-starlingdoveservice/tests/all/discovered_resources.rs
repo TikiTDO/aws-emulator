@@ -8,8 +8,8 @@
 //! for (never both), excluding deleted resources unless the request asks for them,
 //! ordered by resource id and served in pages of at most `limit` identifiers (100 when
 //! the request asks for no limit of its own) with a `nextToken` only while resources
-//! remain; a read with no customer managed configuration recorder in the account is
-//! refused with `NoAvailableConfigurationRecorderException`.
+//! remain; a read of an account with no configuration recorder is SERVED, and reports
+//! the empty inventory such an account has discovered.
 //!
 //! Every case drives the emulator the way a client does — an `awsJson1_1` `POST /`
 //! through the same `MultiServiceRouter` the production router builds — using the
@@ -379,9 +379,9 @@ async fn a_page_carries_at_most_the_limit_and_its_token_resumes_the_listing() {
 }
 
 #[tokio::test]
-async fn a_discovered_resource_read_needs_a_configuration_recorder() {
-    // Rows differ along the request shape, so the refusal is about the account holding
-    // no recorder rather than about what the request asked for.
+async fn a_discovered_resource_read_without_a_configuration_recorder_reports_an_empty_page() {
+    // Rows differ along the request shape, so what is served is the empty inventory
+    // rather than something about what the request asked for.
     let requests: [(&str, Value); 4] = [
         ("a bare listing", json!({ "resourceType": EC2_VOLUME })),
         (
@@ -400,15 +400,17 @@ async fn a_discovered_resource_read_needs_a_configuration_recorder() {
 
     for (case, request) in requests {
         let emulator = Emulator::new();
-        let (status, code) = emulator.refused("ListDiscoveredResources", &request).await;
+        // An account that has recorded nothing has discovered nothing, so the read is
+        // served an empty page rather than refused for the recorder it does not have.
+        let body = emulator.ok("ListDiscoveredResources", &request).await;
         assert_eq!(
-            (status, code.as_str()),
-            (400, "NoAvailableConfigurationRecorderException"),
-            "case {case:?}: with no configuration recorder the read is refused 400 \
-             NoAvailableConfigurationRecorderException, got {status} {code}"
+            reported_ids(case, &body),
+            Vec::<String>::new(),
+            "case {case:?}: with no configuration recorder the read reports no \
+             identifiers, got {body}"
         );
 
-        // With a recorder the same read is served, and reports the empty inventory.
+        // With a recorder the same read reports the same empty inventory.
         emulator
             .ok(
                 "PutConfigurationRecorder",

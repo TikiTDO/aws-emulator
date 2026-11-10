@@ -288,12 +288,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // An update keeps the id and ARN the configuration was created with.
                 existing.update_from(requested);
             } else {
-                let sequence = store.next_remediation_configuration_seq;
-                // A u64 counter cannot be exhausted by API calls, so it never reissues
-                // an id; saturating rather than wrapping keeps that true by
-                // construction.
-                store.next_remediation_configuration_seq = sequence.saturating_add(1);
-                let id = crate::state::mint_remediation_configuration_id(sequence);
+                let id = crate::state::mint_remediation_configuration_id();
                 let arn = crate::state::remediation_configuration_arn(&region, name, &id);
                 store.remediation_configurations.insert(
                     name.to_string(),

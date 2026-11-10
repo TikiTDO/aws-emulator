@@ -11045,6 +11045,7 @@ dependencies = [
  "flate2",
  "hex",
  "http",
+ "rand 0.9.5",
  "regex",
  "serde_json",
  "service-com-amazonaws-eventbridge-awsevents",
@@ -11058,6 +11059,7 @@ dependencies = [
  "sqlparser",
  "tokio",
  "tracing",
+ "uuid",
  "yaml-rust2",
 ]
 

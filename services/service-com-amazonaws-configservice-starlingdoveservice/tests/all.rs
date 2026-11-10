@@ -195,3 +195,5 @@ mod delivery_channel_recorder_role;
 mod validation_clause_quotes_the_submitted_value;
 #[path = "all/registry_resource_types_and_remediation_targets.rs"]
 mod registry_resource_types_and_remediation_targets;
+#[path = "all/read_paths_and_assigned_ids.rs"]
+mod read_paths_and_assigned_ids;

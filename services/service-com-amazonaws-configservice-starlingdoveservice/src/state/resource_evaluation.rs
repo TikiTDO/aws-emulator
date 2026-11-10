@@ -260,7 +260,7 @@ pub fn execution_outcome(
     if !account_evaluates_in_mode {
         return (
             RESOURCE_EVALUATION_STATUS_FAILED.to_string(),
-            Some(no_rule_configuration_failure_reason(evaluation_mode)),
+            Some(NO_RULE_CONFIGURATION_FAILURE_REASON.to_string()),
             compliance,
         );
     }
@@ -274,13 +274,13 @@ pub fn execution_outcome(
 /// Why an execution failed when the account had no rule configured to evaluate in its
 /// mode: there was no rule configuration for Config to run the resource details
 /// against, so no evaluation ran.
-fn no_rule_configuration_failure_reason(evaluation_mode: &str) -> String {
-    format!(
-        "the {evaluation_mode} evaluation could not be run: this account has no Config rule that \
-         evaluates in {evaluation_mode} mode, so there was no rule configuration to evaluate the \
-         resource details against",
-    )
-}
+///
+/// The sentence Config answers with, verbatim and carrying no part of the request. It
+/// names the PROACTIVE mode because that is the only mode an execution runs in
+/// (`StartResourceEvaluation` refuses any other), so this reason is reached only for
+/// an account with no proactive rule.
+pub const NO_RULE_CONFIGURATION_FAILURE_REASON: &str =
+    "No Config rule is enabled in proactive mode for the given resource type.";
 
 /// Why an execution failed when it had rule implementations to run: this emulator
 /// runs no rule logic, so it says so and names the rules whose verdicts are missing
@@ -502,9 +502,11 @@ mod tests {
                     "case {case:?}: an execution the account configured no rule for cannot \
                      succeed, got {status}"
                 );
-                assert!(
-                    reason.is_some_and(|reason| reason.contains(EVALUATION_MODE_PROACTIVE)),
-                    "case {case:?}: a failed execution must say why"
+                assert_eq!(
+                    reason.as_deref(),
+                    Some(NO_RULE_CONFIGURATION_FAILURE_REASON),
+                    "case {case:?}: expected the failure reason Config answers an account \
+                     with no proactive rule with, got {reason:?}"
                 );
                 assert_eq!(
                     compliance, COMPLIANCE_TYPE_NOT_APPLICABLE,

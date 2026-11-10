@@ -8,10 +8,11 @@
 //! signed for, in the order the keys were sent; a key it holds no such configuration
 //! item for (a resource the inventory does not hold, and a deleted one, since "The API
 //! does not return results for deleted resources") is absent from BOTH lists, because
-//! `unprocessedResourceKeys` carries only keys this read could not process; and the
-//! whole request is refused when the account holds no customer managed configuration
-//! recorder (`NoAvailableConfigurationRecorderException`) or when the batch carries
-//! fewer than one or more than a hundred keys (`ValidationException`).
+//! `unprocessedResourceKeys` carries only keys this read could not process; a read of
+//! an account with no configuration recorder is SERVED, and answers every key with no
+//! item, since such an account has recorded nothing; and the whole request is refused
+//! when the batch carries fewer than one or more than a hundred keys
+//! (`ValidationException`).
 //!
 //! Two further properties of a reported item are pinned with it: it is the SAME
 //! configuration item the resource's own history reports as current, member for member
@@ -590,9 +591,9 @@ async fn a_batch_outside_the_key_count_the_operation_accepts_is_refused() {
 }
 
 #[tokio::test]
-async fn a_batch_read_needs_a_customer_managed_configuration_recorder() {
-    // Rows differ along the batch sent, so the refusal is about the account holding no
-    // customer managed recorder rather than about what the batch asked for.
+async fn a_batch_read_without_a_configuration_recorder_answers_no_item() {
+    // Rows differ along the batch sent, so what is served is the empty set of recorded
+    // configuration items rather than something about what the batch asked for.
     let requests: [(&str, Vec<Value>, usize); 4] = [
         ("one recorded resource", vec![key(EC2_VOLUME, "vol-0001")], 1),
         (
@@ -609,35 +610,39 @@ async fn a_batch_read_needs_a_customer_managed_configuration_recorder() {
     ];
 
     for (case, keys, held) in requests {
+        // An account with no recorder of its own: nothing is seeded, so the inventory
+        // is empty and every key is answered with no item rather than refused.
         let emulator = Emulator::new();
-        seed(&emulator, &inventory());
-
-        let (status, code) = emulator.refused(BATCH, &batch(&keys)).await;
+        let body = emulator.ok(BATCH, &batch(&keys)).await;
         assert_eq!(
-            (status, code.as_str()),
-            (400, "NoAvailableConfigurationRecorderException"),
-            "case {case:?}: with no configuration recorder the read is refused 400 \
-             NoAvailableConfigurationRecorderException, got {status} {code}"
+            (
+                reported_items(case, &body).len(),
+                reported_unprocessed(case, &body)
+            ),
+            (0, Vec::<(String, String)>::new()),
+            "case {case:?}: with no configuration recorder the read answers no \
+             configuration item and no unprocessed key, got {body}"
         );
 
-        // A SERVICE-LINKED recorder records for the service it is linked to, so it does
-        // not stand in for a customer managed one.
+        // A SERVICE-LINKED recorder records for the service it is linked to, and the
+        // read reports the same empty inventory.
         emulator
             .ok(
                 "PutServiceLinkedConfigurationRecorder",
                 &json!({ "ServicePrincipal": SERVICE_LINKED_PRINCIPALS[0] }),
             )
             .await;
-        let (status, code) = emulator.refused(BATCH, &batch(&keys)).await;
+        let body = emulator.ok(BATCH, &batch(&keys)).await;
         assert_eq!(
-            (status, code.as_str()),
-            (400, "NoAvailableConfigurationRecorderException"),
-            "case {case:?}: a service-linked recorder is no customer managed recorder, so \
-             the read is still refused 400 NoAvailableConfigurationRecorderException, got \
-             {status} {code}"
+            reported_items(case, &body).len(),
+            0,
+            "case {case:?}: a service-linked recorder records no customer resource, so \
+             the read still answers no item, got {body}"
         );
 
-        // With a customer managed recorder the same batch is served.
+        // With the inventory seeded the same batch answers the keys it holds an item
+        // for.
+        seed(&emulator, &inventory());
         emulator
             .ok(
                 "PutConfigurationRecorder",
@@ -651,8 +656,8 @@ async fn a_batch_read_needs_a_customer_managed_configuration_recorder() {
                 reported_unprocessed(case, &body)
             ),
             (held, Vec::<(String, String)>::new()),
-            "case {case:?}: with a recorder the read answers the {held} key(s) the \
-             inventory holds a configuration item for, got {body}"
+            "case {case:?}: the read answers the {held} key(s) the inventory holds a \
+             configuration item for, got {body}"
         );
     }
 }

@@ -317,13 +317,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         // The groups this store contributes: its own source, named by the group key,
-        // while the aggregator takes that source in, the filters admit it and there are
-        // conformance packs to summarise. Collected as a list so the page walk below is
-        // the one every group takes, however many a group key resolves to — this store's
-        // one account in one Region is why at most one group reaches it.
-        let contributes = !excluded_by_filters
-            && aggregator.aggregates_source(account_id, &region)
-            && !store.conformance_packs.is_empty();
+        // while the aggregator takes that source in and the filters admit it. A group
+        // the aggregator takes in is REPORTED whatever it holds — "the count of
+        // compliant and noncompliant conformance packs" of a group with no pack is
+        // zero of each, not an absent row. Collected as a list so the page walk below
+        // is the one every group takes, however many a group key resolves to — this
+        // store's one account in one Region is why at most one group reaches it.
+        let contributes = !excluded_by_filters && aggregator.aggregates_source(account_id, &region);
         let mut groups: Vec<&str> = Vec::new();
         if contributes {
             groups.push(group_name);

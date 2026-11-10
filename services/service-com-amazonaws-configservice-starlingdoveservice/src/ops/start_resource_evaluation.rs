@@ -272,11 +272,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
-        let sequence = store.next_resource_evaluation_seq;
-        // A u64 counter cannot be exhausted by API calls, so it never reissues an id;
-        // saturating rather than wrapping keeps that true by construction.
-        store.next_resource_evaluation_seq = sequence.saturating_add(1);
-        let id = crate::state::mint_resource_evaluation_id(sequence);
+        let id = crate::state::mint_resource_evaluation_id();
         // Recorded through the state's own writer, which indexes the client token and
         // keeps the evaluation store bounded.
         store.record_resource_evaluation(crate::state::ResourceEvaluationEntry {

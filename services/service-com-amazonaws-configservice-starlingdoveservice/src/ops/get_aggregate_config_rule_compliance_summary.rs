@@ -314,9 +314,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // The groups this store contributes: its own source, named by the group key,
         // while the aggregator takes that source in, the filters admit it and there are
-        // Config rules to summarise. Collected as a list so the page walk below is the
-        // one every group takes, however many a group key resolves to — this store's
-        // one account in one Region is why at most one group reaches it.
+        // Config rules to summarise. A group with no rule at all contributes no
+        // ROLL-UP, which is what the recorded answer of an aggregated account holding
+        // no rule carries: an empty result page. Collected as a list so the page walk
+        // below is the one every group takes, however many a group key resolves to —
+        // this store's one account in one Region is why at most one group reaches it.
         let contributes = !excluded_by_filters
             && aggregator.aggregates_source(account_id, &region)
             && !store.config_rules.is_empty();

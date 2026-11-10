@@ -585,7 +585,7 @@ async fn reports_only_the_sources_the_aggregator_and_the_filters_admit() {
 }
 
 #[tokio::test]
-async fn reports_no_group_for_an_aggregated_account_with_no_conformance_packs() {
+async fn reports_a_zero_valued_group_for_an_aggregated_account_with_no_conformance_packs() {
     let emulator = Emulator::in_region(HOME_REGION);
     put_whole_account_aggregator(&emulator).await;
 
@@ -595,10 +595,13 @@ async fn reports_no_group_for_an_aggregated_account_with_no_conformance_packs() 
             &summary_request(),
         )
         .await;
-    let groups = reported("no packs to summarise", &body);
-    assert!(
-        groups.is_empty(),
-        "no packs to summarise: expected an empty result page, got {groups:?}"
+    // A group the aggregator takes in is reported whatever it holds: no pack is zero
+    // compliant and zero noncompliant packs, not an absent row.
+    let group = only_group("no packs to summarise", &body, &account());
+    assert_eq!(
+        (group.compliant, group.non_compliant),
+        (0, 0),
+        "no packs to summarise: expected a zero-valued summary row, got {group:?}"
     );
     assert_eq!(
         body["GroupByKey"].as_str(),

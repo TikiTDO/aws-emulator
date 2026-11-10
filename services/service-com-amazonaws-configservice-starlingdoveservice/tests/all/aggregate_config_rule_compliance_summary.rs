@@ -549,6 +549,10 @@ async fn reports_no_group_for_an_aggregated_account_with_no_config_rules() {
     let body = emulator
         .ok("GetAggregateConfigRuleComplianceSummary", &summary_request())
         .await;
+    // Recorded behaviour: a rule-compliance roll-up of an aggregated account holding no
+    // rule is an empty result page, not a zero-valued row (unlike the CONFORMANCE PACK
+    // summary, which reports a zero-valued row — see
+    // `aggregate_conformance_pack_compliance_summary`).
     let groups = reported("no rules to summarise", &body);
     assert!(
         groups.is_empty(),

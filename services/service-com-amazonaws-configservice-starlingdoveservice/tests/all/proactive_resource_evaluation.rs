@@ -63,6 +63,11 @@ const CFN_RESOURCE_SCHEMA: &str = "CFN_RESOURCE_SCHEMA";
 /// (`com.amazonaws.configservice#ResourceEvaluationId`, length 1..128).
 const RESOURCE_EVALUATION_ID_MAX: usize = 128;
 
+/// The `FailureReason` Config answers for an execution the account has no proactive
+/// rule for: a fixed sentence carrying no part of the request.
+const NO_PROACTIVE_RULE_REASON: &str =
+    "No Config rule is enabled in proactive mode for the given resource type.";
+
 /// One row of the round-trip table.
 struct SummaryCase {
     name: &'static str,
@@ -328,14 +333,14 @@ async fn the_terminal_status_follows_the_proactive_rules_the_account_holds() {
             name: "no rules at all",
             rule: None,
             terminal_status: FAILED,
-            reason_names: Some(PROACTIVE),
+            reason_names: Some(NO_PROACTIVE_RULE_REASON),
             compliance: NOT_APPLICABLE,
         },
         OutcomeCase {
             name: "a rule in the default detective mode only",
             rule: Some(rule("detective-only", json!({}))),
             terminal_status: FAILED,
-            reason_names: Some(PROACTIVE),
+            reason_names: Some(NO_PROACTIVE_RULE_REASON),
             compliance: NOT_APPLICABLE,
         },
         OutcomeCase {

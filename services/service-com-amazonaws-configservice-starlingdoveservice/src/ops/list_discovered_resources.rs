@@ -272,22 +272,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let store = state.lock();
 
-        // The resources this listing reports are the Amazon Web Services resources a
-        // CUSTOMER MANAGED configuration recorder discovers, so reporting them needs
-        // one to exist: a service-linked recorder records for the service it is linked
-        // to and does not stand in for one.
-        if !store.has_customer_managed_recorder() {
-            return Err(
-                ListDiscoveredResourcesErrorModeled::NoAvailableConfigurationRecorderException(
-                    NoAvailableConfigurationRecorderException {
-                        message: Some(
-                            crate::state::NO_AVAILABLE_CONFIGURATION_RECORDER_MESSAGE.to_string(),
-                        ),
-                    },
-                )
-                .into(),
-            );
-        }
+        // This is a REPORT of the discovered-resource inventory, so what the inventory
+        // holds is the whole answer: an account with no configuration recorder has
+        // discovered nothing, which is an empty page rather than a refusal. The
+        // modelled recorder-availability refusal belongs to the operations that CHANGE
+        // what Config records, not to a read of what it already has.
 
         // The token is opaque: anything this operation did not issue is malformed.
         let resume_at = match input.next_token.as_deref() {

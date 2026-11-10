@@ -177,7 +177,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // for the write, so the channel is looked up exactly ONCE below.
         let has_customer_managed_recorder = store.has_customer_managed_recorder();
         let recorder_is_recording = store.recording_customer_managed_recorder().is_some();
-        let seq = store.next_config_snapshot_seq;
 
         // A snapshot captures what a CUSTOMER MANAGED configuration recorder records
         // for this account, so one has to exist...
@@ -231,9 +230,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         };
 
-        // The id of the snapshot being created: distinct per delivery, taken from the
-        // store's own sequence rather than from anything in the request.
-        let config_snapshot_id = crate::state::mint_config_snapshot_id(seq);
+        // The id of the snapshot being created: drawn per delivery, so it is distinct
+        // from every other snapshot's and carries nothing from the request.
+        let config_snapshot_id = crate::state::mint_config_snapshot_id();
 
         // Recording the delivery on the channel is what makes it that channel's last
         // snapshot delivery attempt.
@@ -242,9 +241,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             now,
         ));
 
-        // The sequence advances only for a delivery that was actually scheduled, so a
-        // refused call consumes no snapshot id.
-        store.next_config_snapshot_seq = seq.wrapping_add(1);
         drop(store);
 
         // The delivery itself — the snapshot object written into the channel's bucket —

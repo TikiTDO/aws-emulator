@@ -92,9 +92,7 @@ fn seed_service_linked(emulator: &Emulator, count: usize) {
     for index in 0..count {
         let name = format!("{SERVICE_LINKED_RECORDER_NAME_PREFIX}Seed{index:02}");
         let service_principal = format!("seed{index:02}.amazonaws.com");
-        let sequence = store.next_recorder_seq;
-        store.next_recorder_seq = sequence.saturating_add(1);
-        let id = mint_recorder_id(sequence);
+        let id = mint_recorder_id();
         let arn = recorder_arn(&emulator.region, &name, &id);
         store.recorder_status.insert(
             name.clone(),

@@ -336,11 +336,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             existing.recording_mode = recording_mode;
             existing.recording_scope = recording_scope;
         } else {
-            let sequence = store.next_recorder_seq;
-            // A u64 counter cannot be exhausted by API calls, so it never reissues an
-            // id; saturating rather than wrapping keeps that true by construction.
-            store.next_recorder_seq = sequence.saturating_add(1);
-            let id = crate::state::mint_recorder_id(sequence);
+            let id = crate::state::mint_recorder_id();
             let arn = crate::state::recorder_arn(&region, &name, &id);
             store.recorders.insert(
                 name.clone(),

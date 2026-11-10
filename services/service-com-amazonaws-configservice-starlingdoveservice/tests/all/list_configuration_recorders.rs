@@ -94,9 +94,7 @@ fn seed(emulator: &Emulator, seeds: &[Seed]) -> Vec<Value> {
     let mut store = state.lock();
     let mut summaries: Vec<(String, Value)> = Vec::new();
     for seed in seeds {
-        let sequence = store.next_recorder_seq;
-        store.next_recorder_seq = sequence.saturating_add(1);
-        let id = mint_recorder_id(sequence);
+        let id = mint_recorder_id();
         let arn = recorder_arn(&emulator.region, &seed.name, &id);
         store.recorders.insert(
             seed.name.clone(),

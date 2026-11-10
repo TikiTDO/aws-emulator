@@ -134,10 +134,14 @@ fn timestamp(answer: &Answer, member: &str, case: &str) -> f64 {
 
 /// Whether two epoch-second instants are the same instant as a response can express it:
 /// the ISO 8601 `date-time` rendering a timestamp member carries is written to
-/// MICROSECOND resolution, so two values closer together than a microsecond are the same
-/// reported instant.
+/// MICROSECOND resolution, so a reported instant can sit up to one whole microsecond
+/// from the instant the store holds, and an epoch-second value of this decade carried as
+/// a 64-bit float resolves to only a fraction of a microsecond on top of that. Two
+/// values within one microsecond-and-a-bit of each other are therefore the one reported
+/// instant; anything a millisecond or more apart — the resolution a different instant
+/// would differ by — is not.
 fn same_instant(left: f64, right: f64) -> bool {
-    (left - right).abs() < 1e-6
+    (left - right).abs() < 2e-6
 }
 
 /// How many profile times one `ListProfileTimes` answer reports.

@@ -310,11 +310,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             existing.aggregator_filters = input.aggregator_filters;
             existing.last_updated_at = now;
         } else {
-            let sequence = store.next_aggregator_seq;
-            // A u64 counter cannot be exhausted by API calls, so it never reissues an
-            // id; saturating rather than wrapping keeps that true by construction.
-            store.next_aggregator_seq = sequence.saturating_add(1);
-            let id = crate::state::mint_configuration_aggregator_id(sequence);
+            let id = crate::state::mint_configuration_aggregator_id();
             let arn = crate::state::configuration_aggregator_arn(&region, &id);
             store.configuration_aggregators.insert(
                 name.clone(),

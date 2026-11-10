@@ -2121,17 +2121,6 @@ pub struct ComAmazonawsConfigserviceStarlingdoveserviceState {
     /// BOUNDED at [`REMEDIATION_EXECUTIONS_KEPT`] entries: write it through
     /// [`Self::record_remediation_execution`].
     pub remediation_executions: BTreeMap<RemediationExecutionKey, RemediationExecutionEntry>,
-    /// Source of the next remediation configuration id, so every remediation
-    /// configuration Config creates here gets a distinct one.
-    pub next_remediation_configuration_seq: u64,
-    /// Source of the next `ConfigRuleId` suffix, so every rule gets a distinct id.
-    pub next_rule_seq: u64,
-    /// Source of the next configuration recorder id, so every recorder Config
-    /// creates here gets a distinct one.
-    pub next_recorder_seq: u64,
-    /// Source of the next `configSnapshotId`, so every configuration-snapshot delivery
-    /// `DeliverConfigSnapshot` schedules gets a distinct one.
-    pub next_config_snapshot_seq: u64,
     /// Stored queries, keyed by `QueryName` — unique per account per Region, which is
     /// what one engine's store stands for. A `BTreeMap` so a list of them pages over a
     /// stable ordering and a page token survives inserts and deletes.
@@ -2139,8 +2128,6 @@ pub struct ComAmazonawsConfigserviceStarlingdoveserviceState {
     /// BOUNDED at [`STORED_QUERIES_QUOTA`] entries: `PutStoredQuery` refuses a NEW
     /// query past that quota, so no sequence of calls can grow this map further.
     pub stored_queries: BTreeMap<String, StoredQueryEntry>,
-    /// Source of the next `QueryId` suffix, so every stored query gets a distinct id.
-    pub next_stored_query_seq: u64,
     /// Connectors to third-party cloud service providers, keyed by connector ARN. The
     /// ARN carries both the Region the connector belongs to and its name, so the key
     /// is what identifies one connector of one account in one Region. A `BTreeMap` so
@@ -2165,9 +2152,6 @@ pub struct ComAmazonawsConfigserviceStarlingdoveserviceState {
     /// drops the token that started it, and a caller varying only the token cannot
     /// grow this index on its own.
     pub resource_evaluation_tokens: HashMap<String, String>,
-    /// Source of the next `ResourceEvaluationId`, so every evaluation gets a distinct
-    /// one.
-    pub next_resource_evaluation_seq: u64,
     /// The resources Config has discovered in this account and Region, keyed by
     /// `(resourceType, resourceId)` — the pair that identifies a resource in Config,
     /// which is why a resource read takes both. A `BTreeMap` so a discovered-resource
@@ -2208,9 +2192,6 @@ pub struct ComAmazonawsConfigserviceStarlingdoveserviceState {
     /// `BTreeMap` so `DescribeConfigurationAggregators` pages over a stable ordering
     /// and a page token survives aggregators created and deleted between pages.
     pub configuration_aggregators: BTreeMap<String, ConfigurationAggregatorEntry>,
-    /// Source of the next configuration aggregator id, so every aggregator gets a
-    /// distinct one.
-    pub next_aggregator_seq: u64,
     /// Aggregation authorizations, keyed by
     /// [`aggregation_authorization_key`]. A `BTreeMap` so
     /// `DescribeAggregationAuthorizations` pages over a stable ordering and a page
@@ -2225,9 +2206,6 @@ pub struct ComAmazonawsConfigserviceStarlingdoveserviceState {
     /// NEW pack past that quota and an existing name is updated in place, so no
     /// sequence of calls can grow this map further.
     pub conformance_packs: BTreeMap<String, ConformancePackEntry>,
-    /// Source of the next `ConformancePackId`, so every conformance pack gets a
-    /// distinct one.
-    pub next_conformance_pack_seq: u64,
     /// When set, the instant the next recording-and-evaluation pass of this account's
     /// running configuration recorder falls due. Written through
     /// [`Self::owe_recording_pass`] and taken by
@@ -2867,22 +2845,15 @@ pub fn recorder_arn(region: &str, name: &str, id: &str) -> String {
     )
 }
 
-/// The id Config assigns the `seq`-th configuration recorder created in this
-/// emulator: sixteen base-36 characters, the shape Config's own recorder ids take.
-///
-/// [`splitmix64`] is a bijection on `u64`, so distinct sequence numbers give distinct
-/// ids; it is only there to spread the digits, because an id is opaque and a caller
-/// must not be able to read a creation order out of it.
-pub fn mint_recorder_id(seq: u64) -> String {
-    base36(splitmix64(seq), 16)
-}
+/// How many base-36 characters a configuration recorder's assigned id carries.
+pub const RECORDER_ID_CHARS: usize = 16;
 
-/// SplitMix64's finalising mix: a bijection on `u64`.
-fn splitmix64(seq: u64) -> u64 {
-    let mut z = seq.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
+/// The id Config assigns a configuration recorder created in this emulator: sixteen
+/// opaque base-36 characters, DRAWN ([`opaque_id`]) rather than derived from how many
+/// recorders have been created, because an id a caller holds must tell it nothing
+/// about any other.
+pub fn mint_recorder_id() -> String {
+    opaque_id(RECORDER_ID_CHARS)
 }
 
 /// The ARN resource type of a stored query, as Config spells it in the ARNs it mints
@@ -2901,15 +2872,15 @@ pub fn stored_query_arn(region: &str, name: &str, id: &str) -> String {
     )
 }
 
-/// The `QueryId` Config assigns the `seq`-th stored query created in this emulator:
-/// sixteen base-36 characters, which satisfies `QueryId`'s 1..36 length and `^\S+$`
-/// pattern and is ARN-safe.
+/// The `QueryId` Config assigns a stored query created in this emulator: an opaque
+/// 32-character hexadecimal token ([`uuid_id`]), which sits inside `QueryId`'s 1..36
+/// length, satisfies its `^\S+$` pattern and is admitted by the `query-<id>` segment
+/// of `QueryArn`'s own pattern (`[a-zA-Z\d-_/]+`).
 ///
-/// [`splitmix64`] is a bijection on `u64`, so distinct sequence numbers give distinct
-/// ids; it is only there to spread the digits, because an id is opaque and a caller
-/// must not be able to read a creation order out of it.
-pub fn mint_stored_query_id(seq: u64) -> String {
-    base36(splitmix64(seq), 16)
+/// DRAWN rather than derived from how many queries have been created: a caller holding
+/// one query's id learns nothing about another's.
+pub fn mint_stored_query_id() -> String {
+    uuid_id()
 }
 
 /// Whether `name` is a `QueryName` the model allows: 1..64 characters of
@@ -2968,21 +2939,15 @@ pub fn conformance_pack_stack_arn(region: &str, name: &str, id: &str) -> String 
     )
 }
 
-/// The `ConformancePackId` Config assigns the `seq`-th conformance pack created in this
-/// emulator: `conformance-pack-` and [`CONFORMANCE_PACK_ID_CHARS`] base-36 characters,
+/// The `ConformancePackId` Config assigns a conformance pack created in this emulator:
+/// `conformance-pack-` and [`CONFORMANCE_PACK_ID_CHARS`] opaque base-36 characters,
 /// which satisfies `ConformancePackId`'s 1..1024 length and is ARN-safe.
 ///
-/// [`splitmix64`] is a bijection on `u64`, so distinct sequence numbers give distinct
-/// ids; the mixing input differs from the other mints', so the n-th pack and the n-th
-/// recorder do not carry the same id.
-pub fn mint_conformance_pack_id(seq: u64) -> String {
-    // Reduced to what `CONFORMANCE_PACK_ID_CHARS` base-36 digits can hold, so every
-    // id is exactly that many characters long rather than as many as the mixed value
-    // happens to need.
-    let spread = splitmix64(seq ^ 0x436f_6e66_5061_636b) % 36u64.pow(CONFORMANCE_PACK_ID_CHARS);
+/// DRAWN ([`opaque_id`]) rather than derived from how many packs have been created.
+pub fn mint_conformance_pack_id() -> String {
     format!(
         "{CONFORMANCE_PACK_ARN_RESOURCE_TYPE}-{}",
-        base36(spread, CONFORMANCE_PACK_ID_CHARS as usize)
+        opaque_id(CONFORMANCE_PACK_ID_CHARS)
     )
 }
 
@@ -2994,19 +2959,18 @@ pub fn mint_conformance_pack_id(seq: u64) -> String {
 /// declared rule name fits inside [`GENERATED_CONFIG_RULE_NAME_MAX_LENGTH`]. Recorded
 /// behaviour: a pack-deployed rule is named `<declared>-conformance-pack-<short
 /// random>` and the whole name stays inside that ceiling.
-const CONFORMANCE_PACK_ID_CHARS: u32 = 8;
+const CONFORMANCE_PACK_ID_CHARS: usize = 8;
 
-/// The `configSnapshotId` of the `seq`-th configuration-snapshot delivery scheduled
-/// in this emulator: sixteen base-36 characters, the same opaque shape this service's
-/// other server-assigned ids take (see [`mint_recorder_id`]). The model constrains
+/// The `configSnapshotId` of a configuration-snapshot delivery scheduled in this
+/// emulator: sixteen opaque base-36 characters, the same shape this service's other
+/// server-assigned ids take (see [`mint_recorder_id`]). The model constrains
 /// `DeliverConfigSnapshotResponse$configSnapshotId` to a plain `String`, so the only
 /// requirement is that it identifies one snapshot.
 ///
-/// [`splitmix64`] is a bijection on `u64`, so distinct sequence numbers give distinct
-/// ids; the mixing input differs from the other mints', so the n-th snapshot and the
-/// n-th recorder do not carry the same id.
-pub fn mint_config_snapshot_id(seq: u64) -> String {
-    base36(splitmix64(seq ^ 0x5347_4e41_5053_4e50), 16)
+/// DRAWN ([`opaque_id`]) rather than derived from how many snapshots have been
+/// delivered.
+pub fn mint_config_snapshot_id() -> String {
+    opaque_id(RECORDER_ID_CHARS)
 }
 
 /// The DNS suffix every Amazon Web Services service principal ends with, which is
@@ -3305,16 +3269,22 @@ pub fn configuration_aggregator_arn(region: &str, id: &str) -> String {
     )
 }
 
-/// The id Config assigns the `seq`-th configuration aggregator created in this
-/// emulator: `config-aggregator-` plus eight base-36 characters, the shape the
+/// The id Config assigns a configuration aggregator created in this emulator:
+/// `config-aggregator-` plus eight opaque base-36 characters, the shape the
 /// `ConfigurationAggregatorArn` pattern allows (`config-aggregator-[a-z\d]+`).
 ///
-/// [`splitmix64`] spreads the digits so a caller cannot read a creation order out of
-/// an id; being a bijection on `u64`, distinct sequence numbers still give distinct
-/// ids.
-pub fn mint_configuration_aggregator_id(seq: u64) -> String {
-    format!("{AGGREGATOR_ARN_RESOURCE_TYPE}-{}", base36(splitmix64(seq), 8))
+/// DRAWN ([`opaque_id`]) rather than derived from how many aggregators have been
+/// created.
+pub fn mint_configuration_aggregator_id() -> String {
+    format!(
+        "{AGGREGATOR_ARN_RESOURCE_TYPE}-{}",
+        opaque_id(AGGREGATOR_ID_CHARS)
+    )
 }
+
+/// How many base-36 characters a configuration aggregator's assigned id carries after
+/// its prefix.
+const AGGREGATOR_ID_CHARS: usize = 8;
 
 /// The ARN resource type of an aggregation authorization, as Config spells it in the
 /// ARNs it mints: an aggregation authorization's ARN is
@@ -3451,11 +3421,11 @@ pub fn remediation_configuration_arn(region: &str, config_rule_name: &str, id: &
     )
 }
 
-/// The id Config assigns the `seq`-th remediation configuration created in this
-/// emulator: sixteen base-36 characters, minted the same opaque way a configuration
-/// recorder id is (see [`mint_recorder_id`]).
-pub fn mint_remediation_configuration_id(seq: u64) -> String {
-    base36(splitmix64(seq ^ 0x5245_4d45_4449_4154), 16)
+/// The id Config assigns a remediation configuration created in this emulator:
+/// sixteen opaque base-36 characters, drawn the same way a configuration recorder id
+/// is (see [`mint_recorder_id`]).
+pub fn mint_remediation_configuration_id() -> String {
+    opaque_id(RECORDER_ID_CHARS)
 }
 
 /// Whether `parameter` carries a value at all: a static value with at least one
@@ -3529,29 +3499,17 @@ pub fn ill_formed_parameter(requested: &RemediationConfiguration) -> Option<(Str
     })
 }
 
-/// The `ConfigRuleId` for the `seq`-th rule created in this emulator:
-/// `config-rule-<six base-36 characters>`, the shape Config's own rule ids take.
-pub fn mint_config_rule_id(seq: u64) -> String {
-    format!("config-rule-{}", base36(seq, 6))
+/// The `ConfigRuleId` Config assigns a rule created in this emulator:
+/// `config-rule-<six opaque base-36 characters>`, the shape Config's own rule ids
+/// take.
+///
+/// DRAWN ([`opaque_id`]) rather than derived from how many rules have been created.
+pub fn mint_config_rule_id() -> String {
+    format!("config-rule-{}", opaque_id(CONFIG_RULE_ID_CHARS))
 }
 
-/// `value` in base 36 (digits then lowercase letters), left-padded to `width`.
-fn base36(mut value: u64, width: usize) -> String {
-    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    let mut out = Vec::with_capacity(width);
-    loop {
-        out.push(DIGITS[(value % 36) as usize]);
-        value /= 36;
-        if value == 0 {
-            break;
-        }
-    }
-    while out.len() < width {
-        out.push(b'0');
-    }
-    out.reverse();
-    String::from_utf8(out).expect("base-36 digits are ASCII")
-}
+/// How many base-36 characters a Config rule's assigned id carries after its prefix.
+const CONFIG_RULE_ID_CHARS: usize = 6;
 
 /// The recording group Config records with when a recorder is put without one
 /// (`PutConfigurationRecorder`: "Default is to record all supported resource types,
@@ -4211,18 +4169,16 @@ pub async fn publish_service_event_via(
     }
 }
 
-/// The `ResourceEvaluationId` Config assigns the `seq`-th resource evaluation started
-/// in this emulator.
+/// The `ResourceEvaluationId` Config assigns a resource evaluation started in this
+/// emulator.
 ///
-/// The model gives `ResourceEvaluationId` no pattern (only a 1..128 length), so the id
-/// takes the opaque sixteen-base-36-character form this service already mints ids in
-/// (see [`mint_recorder_id`]). [`splitmix64`] is a bijection on `u64`, so distinct
-/// sequence numbers give distinct ids; it spreads the digits so a caller cannot read a
-/// start order out of an id.
-pub fn mint_resource_evaluation_id(seq: u64) -> String {
-    // A different mixing input from `mint_recorder_id`'s, so the n-th evaluation and
-    // the n-th recorder do not carry the same opaque id.
-    base36(splitmix64(seq ^ 0x5265_736f_7572_6345), 16)
+/// The model gives `ResourceEvaluationId` no pattern (only a 1..128 length), and the
+/// recorded ids are opaque and unordered, so the id takes the same opaque
+/// 32-character hexadecimal form a stored query's does ([`uuid_id`]): DRAWN rather
+/// than derived from how many evaluations have been started, so one evaluation's id
+/// tells a caller nothing about another's.
+pub fn mint_resource_evaluation_id() -> String {
+    uuid_id()
 }
 
 /// `at` as nanoseconds since the Unix epoch: one totally ordered integer for an
@@ -4921,8 +4877,11 @@ mod config_rule;
 mod conformance_pack;
 mod delivery_channel;
 mod discovered_resource;
+// How the ids above are DRAWN, in one place, so no mint derives one from a counter.
+mod identifier;
 pub use aggregator::*;
 pub use config_rule::*;
 pub use conformance_pack::*;
 pub use delivery_channel::*;
 pub use discovered_resource::*;
+pub use identifier::*;

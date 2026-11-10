@@ -3,7 +3,9 @@
 //! @op DescribeConfigurationAggregatorSourcesStatus
 //! Reports the sync status of the aggregation sources the named configuration
 //! aggregator in [`crate::state`] takes in, a page at a time: one record per (source,
-//! Region) pair, narrowed to the status types the request filters on.
+//! Region) pair, narrowed to the status types the request filters on — and only once
+//! the aggregation of those sources has completed, because a sync status describes a
+//! relationship data has moved across.
 //!
 //! ## Shape of an operation
 //!
@@ -220,13 +222,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the next page resumes at and survives sources added to or taken off the
         // aggregator between pages.
         //
+        // A pair is reported only once the aggregation of the aggregator's current
+        // sources has COMPLETED: a sync status describes a relationship data has moved
+        // across, so an aggregator whose sources have just been written reports none
+        // yet, and that first aggregation is work the clock owes
+        // (`ConfigurationAggregatorEntry::has_aggregated`). This read only ASKS the
+        // clock — it writes nothing — and asks it ONCE, before any pair is looked at,
+        // so one page cannot carry some pairs and drop others.
+        //
         // The walk costs ONE PAGE, whatever the aggregator holds: the status filter is
         // decided once, before any pair is looked at, so a filter these sources are not
         // in is answered with an empty page rather than a scan; the resume point is
         // found by binary search over the two sorted lists rather than scanned for; and
         // a record is built only for a pair that goes into the page.
+        let has_aggregated = aggregator.has_aggregated(::std::time::SystemTime::now());
         let sources = aggregator
             .aggregated_sources(account_id, &region)
+            .filter(|_| has_aggregated)
             .filter(|sources| {
                 update_status.is_empty()
                     || update_status

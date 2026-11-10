@@ -320,11 +320,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // `DescribeConfigRuleEvaluationStatus` reports.
             existing.evaluation.invoke(now);
         } else {
-            let sequence = store.next_rule_seq;
-            // A u64 counter cannot be exhausted by API calls, so it never reissues an
-            // id; saturating rather than wrapping keeps that true by construction.
-            store.next_rule_seq = sequence.saturating_add(1);
-            let id = crate::state::mint_config_rule_id(sequence);
+            let id = crate::state::mint_config_rule_id();
             let arn = crate::state::config_rule_arn(&region, &id);
             store.config_rules.insert(
                 name.to_string(),

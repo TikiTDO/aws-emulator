@@ -976,13 +976,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         .into(),
                     );
                 }
-                let sequence = store.next_conformance_pack_seq;
-                // A u64 counter cannot be exhausted by API calls, so it never reissues
-                // an id; saturating rather than wrapping keeps that true by construction.
-                store.next_conformance_pack_seq = sequence.saturating_add(1);
                 // The id, the ARN and the stack ARN are Config's to assign, never read
                 // off the request.
-                let id = crate::state::mint_conformance_pack_id(sequence);
+                let id = crate::state::mint_conformance_pack_id();
                 (
                     id.clone(),
                     crate::state::conformance_pack_arn(&region, &name, &id),
@@ -1039,9 +1035,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             for rule in rules {
                 let rule_name = crate::state::conformance_pack_rule_name(&rule.declared_name, &id);
-                let sequence = store.next_rule_seq;
-                store.next_rule_seq = sequence.saturating_add(1);
-                let rule_id = crate::state::mint_config_rule_id(sequence);
+                let rule_id = crate::state::mint_config_rule_id();
                 let rule_arn = crate::state::config_rule_arn(&region, &rule_id);
                 store.config_rules.insert(
                     rule_name.clone(),
@@ -1087,10 +1081,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     &remediation.rule_declared_name,
                     &id,
                 );
-                let sequence = store.next_remediation_configuration_seq;
-                store.next_remediation_configuration_seq = sequence.saturating_add(1);
-                let remediation_id =
-                    crate::state::mint_remediation_configuration_id(sequence);
+                let remediation_id = crate::state::mint_remediation_configuration_id();
                 let remediation_arn = crate::state::remediation_configuration_arn(
                     &region,
                     &rule_name,

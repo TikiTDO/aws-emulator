@@ -504,7 +504,7 @@ fn only_an_on_demand_pass_is_recorded_as_one_and_only_while_it_runs() {
 
 #[test]
 fn a_recorder_id_is_distinct_for_every_recorder_and_is_part_of_the_arn() {
-    let mut ids: Vec<String> = (0..1_000).map(mint_recorder_id).collect();
+    let mut ids: Vec<String> = (0..1_000).map(|_| mint_recorder_id()).collect();
     let minted = ids.len();
     ids.sort_unstable();
     ids.dedup();
@@ -524,19 +524,17 @@ fn a_recorder_id_is_distinct_for_every_recorder_and_is_part_of_the_arn() {
         );
     }
 
-    let arn = recorder_arn("us-west-2", "probe", &mint_recorder_id(7));
+    let id = mint_recorder_id();
+    let arn = recorder_arn("us-west-2", "probe", &id);
     assert!(
-        arn.contains(&format!(
-            ":{RECORDER_ARN_RESOURCE_TYPE}/probe/{}",
-            mint_recorder_id(7)
-        )),
+        arn.contains(&format!(":{RECORDER_ARN_RESOURCE_TYPE}/probe/{id}")),
         "the recorder ARN carries the resource type, the name and the id, got {arn:?}"
     );
 }
 
 #[test]
 fn a_resource_evaluation_id_is_distinct_for_every_evaluation() {
-    let mut ids: Vec<String> = (0..1_000).map(mint_resource_evaluation_id).collect();
+    let mut ids: Vec<String> = (0..1_000).map(|_| mint_resource_evaluation_id()).collect();
     let minted = ids.len();
     ids.sort_unstable();
     ids.dedup();
@@ -551,15 +549,11 @@ fn a_resource_evaluation_id_is_distinct_for_every_evaluation() {
             (1..=128).contains(&id.len())
                 && id
                     .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
-            "a ResourceEvaluationId is 1..128 opaque base-36 characters, got {id:?}"
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "a ResourceEvaluationId is lowercase hexadecimal inside the modelled 1..128 \
+             length, got {id:?}"
         );
     }
-    assert_ne!(
-        mint_resource_evaluation_id(0),
-        mint_recorder_id(0),
-        "the n-th evaluation and the n-th recorder must not carry the same id"
-    );
 }
 
 #[test]
@@ -621,7 +615,7 @@ fn the_resource_evaluation_store_stays_bounded_and_drops_the_oldest() {
         let mut store = ComAmazonawsConfigserviceStarlingdoveserviceState::default();
         let mut ids: Vec<String> = Vec::new();
         for index in 0..started {
-            let id = mint_resource_evaluation_id(index as u64);
+            let id = mint_resource_evaluation_id();
             ids.push(id.clone());
             store.record_resource_evaluation(ResourceEvaluationEntry {
                 id,

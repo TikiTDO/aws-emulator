@@ -156,12 +156,31 @@ impl ConfigurationAggregatorEntry {
         (!sources.source_ids.is_empty() && !sources.aws_regions.is_empty()).then_some(sources)
     }
 
+    /// The instant the aggregation of this aggregator's CURRENT sources completes,
+    /// which is when each of them first has a sync status to report and the instant
+    /// that status was last verified at.
+    ///
+    /// Writing an aggregator's sources starts the aggregation of those sources; the
+    /// status of a relationship exists only once data has moved across it, so until the
+    /// clock owes that first aggregation the aggregator reports no status at all (see
+    /// [`AGGREGATION_COMPLETES_AFTER`]).
+    pub fn aggregated_at(&self) -> SystemTime {
+        self.last_updated_at + AGGREGATION_COMPLETES_AFTER
+    }
+
+    /// Whether the aggregation of this aggregator's current sources has completed as of
+    /// `now`, which is what decides whether there is any source status to report.
+    pub fn has_aggregated(&self, now: SystemTime) -> bool {
+        now >= self.aggregated_at()
+    }
+
     /// The sync status this aggregator reports for the source `source_id`, of kind
     /// `source_type`, collected from `aws_region`.
     ///
     /// `LastUpdateTime` is the instant the relationship was last verified, which is
-    /// when the aggregator's sources were last written ([`Self::last_updated_at`]), so
-    /// it is stable across reads and moves only when the sources themselves do.
+    /// when the aggregation of the aggregator's current sources completed
+    /// ([`Self::aggregated_at`]), so it is stable across reads and moves only when the
+    /// sources themselves do.
     pub fn source_status(
         &self,
         source_id: &str,
@@ -173,7 +192,7 @@ impl ConfigurationAggregatorEntry {
             source_type: Some(source_type.to_string()),
             aws_region: Some(aws_region.to_string()),
             last_update_status: Some(AGGREGATED_SOURCE_STATUS_SUCCEEDED.to_string()),
-            last_update_time: Some(timestamp(self.last_updated_at)),
+            last_update_time: Some(timestamp(self.aggregated_at())),
             // No sync served here has failed, so there is no error to report: see
             // [`AGGREGATED_SOURCE_STATUS_SUCCEEDED`].
             last_error_code: None,
@@ -181,3 +200,16 @@ impl ConfigurationAggregatorEntry {
         }
     }
 }
+
+/// How long after an aggregator's sources are written the aggregation of those sources
+/// completes.
+///
+/// A sync status describes a relationship DATA HAS MOVED ACROSS, so an aggregator whose
+/// sources were just written has none to report yet. Neither the model nor the
+/// operation's documentation states how long that first aggregation takes, so this span
+/// is CHOSEN: it is long enough that a caller reading the statuses straight after
+/// writing the sources still sees the aggregator before it has aggregated anything —
+/// which is what makes the sequencing observable — and short enough for a poller to
+/// wait out. Only the clock moves it, so the read that reports the statuses never
+/// writes.
+pub const AGGREGATION_COMPLETES_AFTER: Duration = Duration::from_secs(3);
