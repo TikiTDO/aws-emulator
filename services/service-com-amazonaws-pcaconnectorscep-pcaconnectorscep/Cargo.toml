@@ -31,6 +31,28 @@ sha2 = { workspace = true }
 uuid = "1"
 # Hex: the opaque `NextToken` both listings page with.
 hex = { workspace = true }
+# The tree's one reading of how a client ADDRESSES an emulated data plane: the reserved
+# path namespace a plane served on the emulator's own endpoint sits under, the host a
+# request reached, and whether that host names a service at all.
+service-common = { path = "../common" }
+# Reads the PEM framing the private CA publishes its certificate in, so the connector's
+# SCEP `GetCACert` can answer the DER certificate inside it. A maintained PEM reader
+# rather than a hand-rolled one: this decodes a body the emulator holds for a caller.
+pem = "3"
+# Amazon Web Services Private CA client the connector's SCEP data plane reads its CA
+# certificate through (`GetCertificateAuthorityCertificate`), called over the in-process
+# callback into this same emulator — no network client feature is enabled, so the
+# transport is the emulator's own.
+aws-sdk-acmpca = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+
+[dev-dependencies]
+# The SCEP data-plane suite mounts Amazon Web Services Private CA beside this service on
+# one engine — what the assembled emulator does — because a connector's `GetCACert`
+# answers the certificate that service holds for the CA the connector names.
+service-com-amazonaws-acmpca-acmprivateca = { workspace = true }
+# Reads the subject and serial number out of the DER certificate the SCEP plane answers,
+# so the suite compares it with the one the private CA holds.
+x509-cert = "0.2"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

@@ -31,6 +31,8 @@ mod connector_oidc_parameters;
 mod connector_private_ca_reachability;
 #[path = "all/connector_projection_agreement.rs"]
 mod connector_projection_agreement;
+#[path = "all/connector_scep_endpoint.rs"]
+mod connector_scep_endpoint;
 #[path = "all/connector_vpc_endpoint.rs"]
 mod connector_vpc_endpoint;
 // The shared harness the suites drive the service through: one copy of the router, the

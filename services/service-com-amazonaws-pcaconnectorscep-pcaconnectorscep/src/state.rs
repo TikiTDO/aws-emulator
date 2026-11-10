@@ -1165,7 +1165,13 @@ const PUBLIC_DNS_SUFFIX: &str = "amazonaws.com";
 /// DNS name. A connector whose create named a VPC endpoint serves only there.
 const PRIVATE_DNS_SUFFIX: &str = "vpce.amazonaws.com";
 
-/// The connector's HTTPS SCEP URL.
+/// The host label every connector's SCEP host carries in front of this service's own
+/// regional domain, and the segment that names the same plane in the path the surface is
+/// published at on the emulator's own endpoint ([`local_connector_endpoint`]). One
+/// spelling, so the address announced and the address claimed cannot drift.
+const SCEP_HOST_LABEL: &str = "scep";
+
+/// The connector's HTTPS SCEP URL on the host AWS publishes it under.
 ///
 /// The model states only that it is an HTTPS SCEP URL, so the host is derived from the
 /// connector's own id and the Region the request was signed for: stable across reads,
@@ -1177,6 +1183,9 @@ const PRIVATE_DNS_SUFFIX: &str = "vpce.amazonaws.com";
 /// suffix; with one, the connector is "accessible only through that specific VPC endpoint",
 /// so the host is qualified by that endpoint's id and sits under the PrivateLink suffix
 /// instead. Two connectors that differ only in that choice therefore report different hosts.
+///
+/// This is the address for a caller that resolves AWS's own hostnames; what this service
+/// ANNOUNCES to the caller in front of it is [`announced_connector_endpoint`].
 pub fn connector_endpoint(
     region: &str,
     connector_id: &str,
@@ -1184,10 +1193,194 @@ pub fn connector_endpoint(
 ) -> String {
     match vpc_endpoint_id {
         Some(vpc_endpoint_id) => format!(
-            "https://{connector_id}.scep.{vpc_endpoint_id}.{ARN_SERVICE}.{region}.{PRIVATE_DNS_SUFFIX}"
+            "https://{connector_id}.{SCEP_HOST_LABEL}.{vpc_endpoint_id}.{ARN_SERVICE}.{region}.{PRIVATE_DNS_SUFFIX}"
         ),
-        None => format!("https://{connector_id}.scep.{ARN_SERVICE}.{region}.{PUBLIC_DNS_SUFFIX}"),
+        None => format!(
+            "https://{connector_id}.{SCEP_HOST_LABEL}.{ARN_SERVICE}.{region}.{PUBLIC_DNS_SUFFIX}"
+        ),
     }
+}
+
+/// One connector's SCEP URL on the EMULATOR'S OWN endpoint:
+/// `https://<authority>/_aws/scep/<region>/<connector-id>`.
+///
+/// It carries what the published host carries, with the Region and the connector's id moved
+/// out of the host and into the PATH: a client on the machine this emulator runs on resolves
+/// no `amazonaws.com` name, so the only address it can dial is the endpoint it already
+/// reached, and the plane is named by [`SCEP_HOST_LABEL`] behind the reserved path segment
+/// every data plane this emulator serves on its own endpoint sits under
+/// (`service_common::data_plane_addressing`) — a path under that segment naming another
+/// plane is never read as this one's.
+pub fn local_connector_endpoint(authority: &str, region: &str, connector_id: &str) -> String {
+    format!(
+        "https://{authority}/{}/{SCEP_HOST_LABEL}/{region}/{connector_id}",
+        ::service_common::data_plane_addressing::EMULATOR_PATH_NAMESPACE
+    )
+}
+
+/// The `Endpoint` this service ANNOUNCES for a connector, resolved once when the connector
+/// is created and stored, so every later read reports the same value.
+///
+/// The member exists for a client to DIAL — it is "the connector's HTTPS public SCEP URL",
+/// the address a SCEP-enabled device or an MDM system is configured with — so the address
+/// announced has to be one this emulator itself answers on:
+///
+/// * a request that addressed the EMULATOR'S OWN endpoint
+///   ([`reached_emulator_endpoint`]) comes from a client that resolves nothing else, so the
+///   connector is announced on that same endpoint ([`local_connector_endpoint`]), the
+///   addressing [`crate::service::scep`] serves;
+/// * a connector created through any other request on an emulator that IS served on a port
+///   ([`served_endpoint_authority`]) is announced on that port, the one address this process
+///   answers on, so a connector minted by an in-process call of another service announces an
+///   address its caller can reach too;
+/// * a request that addressed one of AWS's own hosts on an emulator served on no port at all
+///   comes from a client that resolves them, so the connector is announced on the host
+///   [`connector_endpoint`] builds — which the same plane claims host-style.
+pub fn announced_connector_endpoint(
+    parts: &::http::request::Parts,
+    served_base: &str,
+    region: &str,
+    connector_id: &str,
+    vpc_endpoint_id: Option<&str>,
+) -> String {
+    match reached_emulator_endpoint(parts).or_else(|| served_endpoint_authority(served_base)) {
+        Some(authority) => local_connector_endpoint(&authority, region, connector_id),
+        None => connector_endpoint(region, connector_id, vpc_endpoint_id),
+    }
+}
+
+/// The EMULATOR'S OWN endpoint this request reached — an address or a loopback name, which
+/// is what a client configured with one local endpoint URL sends — and `None` for a request
+/// whose host names a service, which is a client that resolves AWS's own hosts.
+///
+/// The tree's one reading of that question
+/// (`service_common::data_plane_addressing::reached_emulator_endpoint`), so this service
+/// writes no second rule for which host is the emulator's own; it reads the host off the
+/// header or off an absolute-form URI, as both carry it.
+fn reached_emulator_endpoint(parts: &::http::request::Parts) -> Option<String> {
+    ::service_common::data_plane_addressing::reached_emulator_endpoint(
+        &parts.uri.to_string(),
+        parts
+            .headers
+            .get(::http::header::HOST)
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
+/// The `host[:port]` this emulator is SERVED at, read off the base URL
+/// `OperationContext::endpoint` reports ("the base URL a later request addresses… Callers
+/// send normally signed requests to it"), or `None` for an emulator that is served on no
+/// port at all — which is what its unserved base names
+/// (`smithy_server_runtime::UNSERVED_URL_BASE`, a host RFC 6761 reserves so that nothing
+/// resolves it).
+///
+/// Only a value SHAPED like a host is taken
+/// (`service_common::data_plane_addressing::is_host_shaped`), so nothing that is not an
+/// address reaches a URL this service announces.
+fn served_endpoint_authority(served_base: &str) -> Option<String> {
+    if served_base == ::smithy_server_runtime::UNSERVED_URL_BASE {
+        return None;
+    }
+    let authority =
+        ::service_common::data_plane_addressing::url_authority(served_base).trim_end_matches('/');
+    ::service_common::data_plane_addressing::is_host_shaped(authority)
+        .then(|| authority.to_string())
+}
+
+/// Which connector's SCEP plane a request addresses: the Region it lives in and its own id,
+/// which together name exactly one connector ([`connector_arn`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddressedConnector {
+    pub region: String,
+    pub connector_id: String,
+}
+
+impl AddressedConnector {
+    /// The ARN of the connector this address names — the key its record is stored under.
+    pub fn connector_arn(&self) -> String {
+        connector_arn(&self.region, &self.connector_id)
+    }
+}
+
+/// Whether `path` addresses this service's SCEP plane on the emulator's own endpoint at all
+/// — the reserved namespace segment and the segment that names this surface, whatever
+/// follows them.
+///
+/// It is what the service CLAIMS such a request on: a path on this plane is this service's
+/// to answer however the rest of it reads, so a client holding a URL this service published
+/// is never answered by the front door's "unknown service".
+pub fn addresses_connector_plane(path: &str) -> bool {
+    connector_plane_path(path).is_some()
+}
+
+/// The connector a path on the EMULATOR'S own endpoint names, or `None` when the path is not
+/// one [`local_connector_endpoint`] mints there.
+///
+/// The inverse of that function, so what is recognised is exactly what is published: the
+/// Region segment has to be one an ARN of this service can carry ([`is_region_shaped`]) and
+/// the id segment has to be the last one, bar an empty trailing segment — a URL a client
+/// pasted with its trailing slash.
+pub fn parse_connector_plane_path(path: &str) -> Option<AddressedConnector> {
+    use ::service_common::data_plane_addressing::first_segment;
+    let (region, rest) = first_segment(connector_plane_path(path)?)?;
+    if !is_region_shaped(region) {
+        return None;
+    }
+    let (connector_id, rest) = first_segment(rest)?;
+    if connector_id.is_empty() || rest != "/" {
+        return None;
+    }
+    Some(AddressedConnector {
+        region: region.to_string(),
+        connector_id: connector_id.to_string(),
+    })
+}
+
+/// The path BENEATH this service's SCEP plane prefix, or `None` for a path that is not on
+/// it: the one reading of that prefix, by exact segment equality.
+fn connector_plane_path(path: &str) -> Option<&str> {
+    use ::service_common::data_plane_addressing::{first_segment, EMULATOR_PATH_NAMESPACE};
+    let (namespace, rest) = first_segment(path)?;
+    if namespace != EMULATOR_PATH_NAMESPACE {
+        return None;
+    }
+    let (plane, rest) = first_segment(rest)?;
+    (plane == SCEP_HOST_LABEL).then_some(rest)
+}
+
+/// The connector a published SCEP HOST names, or `None` when the host is not one
+/// [`connector_endpoint`] builds.
+///
+/// The inverse of that function — both of its forms, public and PrivateLink — so a client
+/// that DOES resolve AWS's own hostnames reaches the same plane at the same address this
+/// service published to it. The Region label has to be one an ARN of this service can carry,
+/// and the first label is the connector's own id.
+pub fn connector_addressed_by_host(host: &str) -> Option<AddressedConnector> {
+    let host = ::service_common::data_plane_addressing::host_only(host).to_ascii_lowercase();
+    // The PrivateLink suffix is tried FIRST because it ENDS with the public one, so the
+    // public strip would otherwise leave the `vpce` label on the Region.
+    let body = host
+        .strip_suffix(&format!(".{PRIVATE_DNS_SUFFIX}"))
+        .or_else(|| host.strip_suffix(&format!(".{PUBLIC_DNS_SUFFIX}")))?;
+    let (head, region) = body.rsplit_once('.')?;
+    let (head, service) = head.rsplit_once('.')?;
+    if service != ARN_SERVICE || !is_region_shaped(region) {
+        return None;
+    }
+    // What is left is the connector's own id and the plane's label, which the PrivateLink
+    // form follows with the VPC endpoint id the connector is reachable through.
+    let (connector_id, labels) = head.split_once('.')?;
+    let on_this_plane = labels == SCEP_HOST_LABEL
+        || labels
+            .strip_prefix(SCEP_HOST_LABEL)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .is_some_and(|vpc_endpoint_id| {
+                !vpc_endpoint_id.is_empty() && !vpc_endpoint_id.contains('.')
+            });
+    (on_this_plane && !connector_id.is_empty()).then(|| AddressedConnector {
+        region: region.to_string(),
+        connector_id: connector_id.to_string(),
+    })
 }
 
 /// The audience an Intune connector publishes.

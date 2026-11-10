@@ -17,12 +17,13 @@
 //! own behaviour, so an unedited service still routes and answers correctly:
 //!
 //! - `can_handle` — which requests this service claims. The default matches the
-//!   request's resolved route key against this service's signing name. Edit it
-//!   for anything the model does not express: a signing name shared by several
-//!   services, or routing that keys on the access-key id.
+//!   request's resolved route key against this service's signing name. EDITED HERE: it
+//!   also claims a request addressed to a connector's SCEP data plane (see "The SCEP
+//!   data plane" below).
 //! - `override_operation` — serve a request the model's routing key cannot name
-//!   correctly. The default returns `None`, so every request resolves through the
-//!   generated routing table. Return `Some(op)` to route one yourself.
+//!   correctly. EDITED HERE: a request to a published `Connector$Endpoint` is named as an
+//!   operation, so this service answers it; every other request resolves through the
+//!   generated routing table.
 //! - `override_refusal` — how this service words a request the framework refused
 //!   before any handler ran. The default returns `None`, keeping the framework's
 //!   wording. See the inline note on that method for how to reword.
@@ -39,6 +40,31 @@
 //! table, and the default error renderers — lives in the generated `ServiceDefinition`
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
+//!
+//! ## The SCEP data plane
+//!
+//! This service publishes two kinds of address. The CONTROL plane is
+//! `pca-connector-scep.<region>.amazonaws.com`, whose first label names the service, and
+//! that is what the framework's route key resolves. Beside it, every connector is given
+//! its own SCEP URL (`Connector$Endpoint`, "the connector's HTTPS public SCEP URL"), which
+//! is the address a SCEP-enabled device or an MDM system is configured with. A request to
+//! it has to reach THIS service rather than the control-plane resolver, which can name no
+//! service from a connector's own label — or from the emulator's own endpoint, where the
+//! same plane is published with the connector in the PATH for a client that resolves no
+//! `amazonaws.com` name ([`crate::state::announced_connector_endpoint`]).
+//!
+//! Two seams carry it, and nothing else changes:
+//!
+//! - [`Service::can_handle`] also claims a request addressed to that plane
+//!   ([`scep::claims_parts`]), which is what routes it here at all.
+//! - [`Service::override_operation`] serves it, through [`scep::ScepDataPlane`]. A SCEP
+//!   device presents no AWS credential, so that plane declares no auth scheme and the
+//!   router serves the request however it arrived.
+//!
+//! What is served on it — the private CA's own certificate for `GetCACert`, and an error
+//! for every SCEP operation this emulator does not implement — is documented in [`scep`].
+
+pub mod scep;
 
 use smithy_server_runtime::{
     http, ErasedOperation, Refusal, Refused, Service,
@@ -52,6 +78,11 @@ use std::sync::Arc;
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
     entry: crate::ServiceDefinition<Eng>,
+    /// Serves the SCEP data plane a connector publishes — the wire its `Endpoint`
+    /// advertises. Held on the service because [`Service::override_operation`] hands the
+    /// router a BORROW of one of its own operations, and it owns the shared engine so every
+    /// answer is computed from the same store the control-plane handlers write.
+    scep: scep::ScepDataPlane<Eng>,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -60,6 +91,7 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
+            scep: scep::ScepDataPlane::new(Arc::clone(&engine)),
             entry: crate::ServiceDefinition::new(engine),
         }
     }
@@ -74,24 +106,33 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     }
 
     fn can_handle(&self, parts: &http::request::Parts) -> bool {
-        // Claim a request whose resolved route key is this service's signing
-        // name. Edit this for anything the model does not express — a signing
-        // name shared by several services, or access-key-id-based routing.
-        match smithy_server_runtime::resolve_route_key(parts) {
-            Some(key) => key == self.entry.identity().signing_name(),
-            None => false,
+        // A request whose resolved route key is this service's signing name is the control
+        // plane, exactly as the framework's default claims it.
+        if smithy_server_runtime::resolve_route_key(parts)
+            .is_some_and(|key| key == self.entry.identity().signing_name())
+        {
+            return true;
         }
+        // And a request addressed to a connector's SCEP data plane — the URL this service
+        // PUBLISHES in every connector's `Endpoint`, whose host is a connector's own rather
+        // than this service's, or the reserved path that plane is published at on the
+        // emulator's OWN endpoint. Neither can be named by a route key. See the module docs:
+        // without this the router answers `404 UnknownService` for a URL this service handed
+        // out.
+        scep::claims_parts(parts)
     }
 
     fn override_operation(
         &self,
         req: &aws_smithy_runtime_api::http::Request,
     ) -> Option<&dyn ErasedOperation> {
-        // Return `Some(op)` to serve a request the model's routing key cannot name
-        // correctly; `None` (the default) lets the generated routing table resolve
-        // it. `req` is the whole request, so a decision that depends on the body —
-        // the `Action` form field on a query protocol, say — is reachable here.
-        let _ = req;
+        // A request to a published connector `Endpoint` names no modelled operation — SCEP
+        // is the device's own protocol — so it is named here instead, and served by the
+        // plane that holds this service's state. Everything else resolves through the
+        // generated routing table.
+        if self.scep.claims(req) {
+            return Some(&self.scep);
+        }
         None
     }
 

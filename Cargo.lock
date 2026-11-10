@@ -973,6 +973,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-acmpca"
+version = "1.126.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5ecaba1335e51fecdc1affaf2d79a9527fd37ef8b5737bcff3fb21661d285eb"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json 0.65.1",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema 1.2.0",
+ "aws-smithy-types",
+ "aws-types",
+ "fastrand",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-billing"
 version = "1.79.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -16346,17 +16369,22 @@ dependencies = [
  "aws-emulator-smithy-macros",
  "aws-emulator-smithy-schema-server",
  "aws-emulator-smithy-server-runtime",
+ "aws-sdk-acmpca",
  "aws-smithy-runtime-api",
  "aws-smithy-schema 0.2.1",
  "aws-smithy-types",
  "bytes",
  "hex",
  "http",
+ "pem",
  "serde_json",
+ "service-com-amazonaws-acmpca-acmprivateca",
+ "service-common",
  "sha2 0.10.9",
  "tokio",
  "tracing",
  "uuid",
+ "x509-cert",
 ]
 
 [[package]]

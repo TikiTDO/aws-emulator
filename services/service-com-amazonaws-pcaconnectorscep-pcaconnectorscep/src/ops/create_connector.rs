@@ -304,7 +304,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // specific VPC endpoint" (the member's own doc). Neither `Connector` nor
         // `ConnectorSummary` models a `VpcEndpointId` member, so `Endpoint` — the SCEP URL a
         // client is configured against — is where that choice shows up.
-        let endpoint = crate::state::connector_endpoint(
+        //
+        // `Endpoint` is an address the CALLER then dials, so it is announced on an address
+        // this emulator answers on: the endpoint the request reached, with the connector in
+        // the path, for a client that resolves nothing else, and the published SCEP host for
+        // one that resolves AWS's own hostnames. Resolved once here and stored, so every
+        // later read reports the same value.
+        let endpoint = crate::state::announced_connector_endpoint(
+            ctx.parts(),
+            ctx.endpoint().as_str(),
             &region,
             &connector_id,
             input.vpc_endpoint_id.as_deref(),
