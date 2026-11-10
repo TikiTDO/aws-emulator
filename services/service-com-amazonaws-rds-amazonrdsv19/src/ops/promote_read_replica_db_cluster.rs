@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op PromoteReadReplicaDBCluster
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `PromoteReadReplicaDBCluster`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`PromoteReadReplicaDBCluster::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Promoting a read replica DB cluster ENDS its replication: the cluster carries the
+//! replication source `CreateDBCluster$ReplicationSourceIdentifier` gave it exactly while it
+//! is a read replica, so the promotion clears that source and the cluster is standalone from
+//! then on — which is also what makes the source cluster stop reporting it in
+//! `ReadReplicaIdentifiers`. A cluster that carries no source is in no state this call can be
+//! performed in, and neither is one that is not up, so both are the modelled
+//! `InvalidDBClusterStateFault`.
 //!
 //! ## Shape of an operation
 //!
@@ -148,18 +147,115 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `PromoteReadReplicaDBCluster` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(PromoteReadReplicaDBClusterErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        let region = crate::state::request_region(ctx)
+            .map_err(PromoteReadReplicaDBClusterError::validation)?;
+        // "The identifier of the DB cluster read replica to promote. This parameter isn't
+        // case-sensitive", and every member that names a DB cluster also accepts its ARN,
+        // so the lookup folds the way the stored key does.
+        let identifier = crate::state::db_cluster_identifier_of(&input.db_cluster_identifier)
+            .to_ascii_lowercase();
+
+        // No store means this service was mounted on an engine it has no state in, so it
+        // cannot serve the operation at all. Unreachable with the engine the router builds;
+        // 501 is the honest answer, never a promotion nothing performed.
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(crate::scaffolded::Scaffolded::not_implemented(Self::NAME));
+        };
+        let mut store = state.lock();
+        // The transitions the clock already made due — owed at this instant whether or not
+        // anybody called — so the promotion is judged against the state the cluster is
+        // really in.
+        store.settle_due_transitions(&region);
+
+        // The cluster this call ACTS ON is resolved FIRST: the operation models
+        // `DBClusterNotFoundFault` for exactly this, and a cluster that does not exist has
+        // no replication to end. RDS is regional, so only the region the request was signed
+        // for is in scope.
+        let key = (region.clone(), identifier.clone());
+        let Some(cluster) = store.db_clusters.get(&key) else {
+            return Err(not_found(&input.db_cluster_identifier));
+        };
+        // Only a READ REPLICA can be promoted to a standalone DB cluster:
+        // `DBClusterIdentifier` "must match the identifier of an existing DB cluster read
+        // replica", and a cluster is one exactly while it carries the replication source
+        // `CreateDBCluster$ReplicationSourceIdentifier` gave it. A standalone cluster — one
+        // created without a source, or one an earlier promotion already made standalone —
+        // is in no state this call can be performed in, which is the modelled cluster state
+        // fault rather than a promotion that changed nothing. It is decided BEFORE the
+        // cluster's lifecycle status: this is a precondition on what the identifier names,
+        // which no waiting changes, so the caller is told that rather than to poll.
+        if cluster.replication_source_arn.is_none() {
+            return Err(invalid_state(
+                crate::state::PROMOTE_NOT_A_READ_REPLICA_MESSAGE.to_string(),
+            ));
+        }
+        // A promotion is work done ON a running cluster, so a replica still coming up,
+        // stopped, failing over, taking a modification or on its way out cannot take one:
+        // the same modelled fault, worded for the state the cluster is in and will leave.
+        // The status the clock has yet to settle is real, so a promotion issued immediately
+        // after a create sees `creating` and is refused.
+        if cluster.status != crate::state::DB_CLUSTER_STATUS_AVAILABLE {
+            let status = cluster.status.clone();
+            // The cluster is named as the REQUEST wrote it, as the not-found refusal above
+            // names it: the members that name a DB cluster accept "the user-supplied DB
+            // cluster identifier or the Amazon Resource Name (ARN)", so a caller matching
+            // the refusal against what it sent finds it there rather than the folded key.
+            let named = &input.db_cluster_identifier;
+            return Err(invalid_state(format!(
+                "DB cluster {named} is not available for a promotion (status {status})"
+            )));
+        }
+
+        // The promotion is accepted: the cluster replicates from nothing from now on — so
+        // the source stops reporting it in `ReadReplicaIdentifiers`, which is read off these
+        // records — it reports `promoting`, and the clock owes it `available`, so a caller
+        // that polls straight after the call sees the promotion in progress, as it would
+        // against the real service.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("PromoteReadReplicaDBCluster"))
+        // A key this handler resolved and a lookup under it can only disagree if the record
+        // is not where the resolve said it was, which answers the same modelled 404 as a
+        // cluster that was never there: a disagreement is a "not found", never a panic that
+        // would take the whole emulator down with it.
+        let promoted = {
+            let Some(record) = store.db_clusters.get_mut(&key) else {
+                return Err(not_found(&input.db_cluster_identifier));
+            };
+            record.replication_source_arn = None;
+            record.status = crate::state::DB_CLUSTER_STATUS_PROMOTING.to_string();
+            record.pending_status = Some(crate::state::PendingStatus::in_a_moment(
+                crate::state::DB_CLUSTER_STATUS_AVAILABLE,
+            ));
+            record.clone()
+        };
+
+        // The answer is the cluster this call changed, projected the one way every operation
+        // of this service projects one, so the promotion a caller is told about is the
+        // promotion a following describe reports.
+        Ok(PromoteReadReplicaDBClusterOutput {
+            db_cluster: Some(store.cluster_to_wire(&promoted)),
+        })
     }
+}
+
+/// The modelled 404 for a `DBClusterIdentifier` naming no DB cluster of this region.
+///
+/// `named` is the value the REQUEST carried rather than the key the store folded it to, and
+/// the sentence is the one this front door words for a call whose SUBJECT is the cluster and
+/// which acts on the cluster itself — the wording its delete and its failover answer.
+fn not_found(named: &str) -> PromoteReadReplicaDBClusterError {
+    PromoteReadReplicaDBClusterErrorModeled::DBClusterNotFoundFault(DBClusterNotFoundFault {
+        message: Some(crate::state::db_cluster_cannot_be_accessed_message(named)),
+    })
+    .into()
+}
+
+/// The modelled 400 for a cluster this promotion cannot be performed on: "the requested
+/// operation can't be performed while the cluster is in this state".
+fn invalid_state(message: String) -> PromoteReadReplicaDBClusterError {
+    PromoteReadReplicaDBClusterErrorModeled::InvalidDBClusterStateFault(
+        InvalidDBClusterStateFault {
+            message: Some(message),
+        },
+    )
+    .into()
 }

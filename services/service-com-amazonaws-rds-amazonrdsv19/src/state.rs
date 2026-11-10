@@ -1739,6 +1739,18 @@ pub fn db_cluster_not_found_colon_message(named: &str) -> String {
 pub const MODIFY_DB_CLUSTER_INVALID_STATE_MESSAGE: &str =
     "This cluster could not be modified. Please try again";
 
+/// The message `PromoteReadReplicaDBCluster` answers an `InvalidDBClusterStateFault` with for
+/// a cluster that is no read replica at all: one created without a replication source, or one
+/// an earlier promotion already made standalone.
+///
+/// Like the modification's sentence above it has NO variable parts — Amazon RDS states only
+/// the precondition the call has, interpolating neither the identifier the request carried nor
+/// the cluster's status — so it is a constant rather than a `format!` over the request, and a
+/// caller matching on the text to tell this refusal from the status refusal of the same fault
+/// sees exactly what the real service sends.
+pub const PROMOTE_NOT_A_READ_REPLICA_MESSAGE: &str =
+    "You cannot promote a DB cluster that is not a read replica.";
+
 /// The sentence every `DBClusterAlreadyExistsFault` of this service carries: the answer to
 /// a request that would put a second DB cluster under an identifier the region already
 /// holds — the create that names a stored identifier, and the modification that renames a

@@ -566,6 +566,17 @@ pub const DB_CLUSTER_STATUS_STOPPED: &str = "stopped";
 /// call observes the failover.
 pub const DB_CLUSTER_STATUS_FAILING_OVER: &str = "failing-over";
 
+/// The status a DB cluster reports while a read replica cluster is being promoted to a
+/// standalone one, from the same published list as [`DB_CLUSTER_STATUS_STOPPING`] (Amazon
+/// Aurora User Guide, "Viewing Amazon Aurora DB cluster status": `promoting` — the read
+/// replica DB cluster is being promoted to a standalone DB cluster).
+///
+/// Transient, like the statuses above: `PromoteReadReplicaDBCluster` "promotes a read replica
+/// DB cluster to a standalone DB cluster" and answers before the cluster is a standalone one,
+/// so the clock owes it [`DB_CLUSTER_STATUS_AVAILABLE`] and a caller polling straight after
+/// the call observes the promotion — and the state errors that status carries.
+pub const DB_CLUSTER_STATUS_PROMOTING: &str = "promoting";
+
 /// The status an event notification subscription reports once it is set up and
 /// delivering, from `EventSubscription$Status`'s published list ("creating | modifying |
 /// deleting | active | no-permission | topic-not-exist").
