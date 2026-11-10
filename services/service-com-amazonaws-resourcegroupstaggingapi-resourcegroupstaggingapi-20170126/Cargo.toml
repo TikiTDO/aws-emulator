@@ -20,11 +20,6 @@ tokio = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
-# Reads the ORDER a request's JSON object wrote a map member's entries in, which
-# the built input (a `HashMap`) does not keep: see
-# `src/service/submitted_collections.rs`. Only the deserializer seam is used; no
-# shape here derives `Serialize`.
-serde = { workspace = true }
 tracing = { workspace = true }
 # Digests the request's filters into the opaque pagination token, so a token is
 # only accepted back by the projection it was cut from.

@@ -21,8 +21,10 @@
 //!   for anything the model does not express: a signing name shared by several
 //!   services, or routing that keys on the access-key id.
 //! - `override_operation` — serve a request the model's routing key cannot name
-//!   correctly. The default returns `None`, so every request resolves through the
-//!   generated routing table. Return `Some(op)` to route one yourself.
+//!   correctly. THIS SERVICE answers it with the same operation the generated table
+//!   resolves, wrapped so that the error bodies it answers with are the ones this
+//!   service answers with: see [`submitted_collections`] and
+//!   [`error_message_member`].
 //! - `override_refusal` — how this service words a request the framework refused
 //!   before any handler ran. The default returns `None`, keeping the framework's
 //!   wording. See the inline note on that method for how to reword.
@@ -40,8 +42,12 @@
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
 
+mod error_message_member;
+mod submitted_collections;
+mod submitted_map;
+
 use smithy_server_runtime::{
-    http, ErasedOperation, Refusal, Refused, Service,
+    http, ErasedOperation, OperationRoutingTable, Refusal, Refused, Service,
 };
 use std::sync::Arc;
 
@@ -52,6 +58,12 @@ use std::sync::Arc;
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
     entry: crate::ServiceDefinition<Eng>,
+    /// The same modelled operations the generated table holds, each wrapped so that the
+    /// error bodies it answers with are the ones this service answers with
+    /// ([`submitted_collections::stated_error_bodies`]). Keyed by the routing key the
+    /// protocol resolves — the key the generated table uses — and built from the SAME
+    /// shared engine, so a wrapped operation reads and writes the one store.
+    stated_error_bodies: OperationRoutingTable,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -60,6 +72,7 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
+            stated_error_bodies: submitted_collections::stated_error_bodies(&engine),
             entry: crate::ServiceDefinition::new(engine),
         }
     }
@@ -87,12 +100,14 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         &self,
         req: &aws_smithy_runtime_api::http::Request,
     ) -> Option<&dyn ErasedOperation> {
-        // Return `Some(op)` to serve a request the model's routing key cannot name
-        // correctly; `None` (the default) lets the generated routing table resolve
-        // it. `req` is the whole request, so a decision that depends on the body —
-        // the `Action` form field on a query protocol, say — is reachable here.
-        let _ = req;
-        None
+        // NOT a re-route: the key is the one the generated table's own protocol resolves,
+        // and the operation it names is the one served — wrapped so that a constraint
+        // refusal quotes the collection the caller submitted and every error body reports
+        // its text in the member this model declares. A key the model does not name
+        // resolves to `None` here exactly as it does in the generated table, so the
+        // router's routing-error path is unchanged.
+        let key = self.entry.protocol().routing_key(req).ok()?;
+        self.stated_error_bodies.get(key)
     }
 
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {

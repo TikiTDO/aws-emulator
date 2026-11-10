@@ -153,6 +153,39 @@ const CONDITION_EQ: &str = "EQ";
 /// supported, "for `TYPE`, `NAME`, and `HTTP_NAME`".
 const CONDITION_BEGINS_WITH: &str = "BEGINS_WITH";
 
+/// The conditions each namespace filter supports, from `NamespaceFilter$Condition`:
+/// "`EQ` is supported for `TYPE`, `NAME`, `RESOURCE_OWNER` and `HTTP_NAME`" and
+/// "`BEGINS_WITH` is supported for `TYPE`, `NAME`, and `HTTP_NAME`" — so
+/// `RESOURCE_OWNER` takes `EQ` alone. `None` for a name this filter does not declare,
+/// which is refused as a bad filter NAME rather than for its condition.
+///
+/// Each set is stated in the order the refusal lists it.
+fn supported_conditions(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        "TYPE" | "NAME" | "HTTP_NAME" => Some(&[CONDITION_BEGINS_WITH, CONDITION_EQ]),
+        FILTER_RESOURCE_OWNER => Some(&[CONDITION_EQ]),
+        _ => None,
+    }
+}
+
+/// The message refusing every filter of one request whose `Condition` its `Name` does
+/// not support, or `None` when each filter's condition is one that filter supports.
+///
+/// The condition matrix is this listing's ([`supported_conditions`]); the clause and the
+/// envelope around it are the service's, so every filtered listing words the same
+/// refusal the same way.
+fn unsupported_conditions(filters: &[NamespaceFilter]) -> Option<String> {
+    crate::state::unsupported_filter_conditions(
+        filters.iter().map(|filter| {
+            (
+                filter.name.as_str(),
+                filter.condition.as_deref().unwrap_or(CONDITION_EQ),
+            )
+        }),
+        supported_conditions,
+    )
+}
+
 /// Refuse the request with the modelled `InvalidInput` (HTTP 400), the only client
 /// error this operation declares.
 fn invalid_input(message: String) -> ListNamespacesError {
@@ -165,12 +198,11 @@ fn invalid_input(message: String) -> ListNamespacesError {
 /// Why `filter` cannot be applied, or `Ok(())` when it can.
 ///
 /// Every rule here comes from the documentation on `NamespaceFilter`: the filter names
-/// are the modelled `NamespaceFilterName` enum, `EQ` and `BEGINS_WITH` are the
-/// conditions it declares supported (`EQ` being the default when `Condition` is
-/// omitted), each takes exactly one value ("you can specify only one value"),
-/// `BEGINS_WITH` is supported "for `TYPE`, `NAME`, and `HTTP_NAME`" and so not for
-/// `RESOURCE_OWNER`, and the values an equality comparison accepts for `TYPE` and
-/// `RESOURCE_OWNER` are the enumerated ones.
+/// are the modelled `NamespaceFilterName` enum, each filter takes exactly one value
+/// ("you can specify only one value"), and the values an equality comparison accepts
+/// for `TYPE` and `RESOURCE_OWNER` are the enumerated ones. The `Condition` itself is
+/// checked over EVERY filter first ([`unsupported_conditions`]), because the refusal
+/// reports all of them together.
 fn filter_rejection(filter: &NamespaceFilter) -> Result<(), String> {
     if !NAMESPACE_FILTER_NAME_VALUES.contains(&filter.name.as_str()) {
         return Err(format!(
@@ -180,18 +212,6 @@ fn filter_rejection(filter: &NamespaceFilter) -> Result<(), String> {
         ));
     }
     let condition = filter.condition.as_deref().unwrap_or(CONDITION_EQ);
-    if condition != CONDITION_EQ && condition != CONDITION_BEGINS_WITH {
-        return Err(format!(
-            "Filters.Condition {condition} isn't supported for a namespace filter. Valid \
-             values are {CONDITION_EQ} and {CONDITION_BEGINS_WITH}."
-        ));
-    }
-    if condition == CONDITION_BEGINS_WITH && filter.name == FILTER_RESOURCE_OWNER {
-        return Err(format!(
-            "Filters.Condition {CONDITION_BEGINS_WITH} isn't supported for the \
-             {FILTER_RESOURCE_OWNER} filter."
-        ));
-    }
     if filter.values.len() != 1 {
         return Err(format!(
             "Filters.Values must contain exactly one value, but {} were specified.",
@@ -293,6 +313,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 crate::state::UNREACHABLE_STATE_MESSAGE.to_string(),
             ));
         };
+
+        // Every filter's `Condition` is checked FIRST, over the whole request, because
+        // the refusal reports one clause per offending filter.
+        if let Some(message) =
+            unsupported_conditions(input.filters.as_deref().unwrap_or_default())
+        {
+            return Err(invalid_input(message));
+        }
 
         for filter in input.filters.iter().flatten() {
             if let Err(message) = filter_rejection(filter) {

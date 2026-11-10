@@ -248,10 +248,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .is_some_and(|namespace| namespace.namespace_type == "HTTP")
         {
             return Err(UpdateServiceErrorModeled::InvalidInput(InvalidInput {
-                message: Some(format!(
-                    "The service {service_id} is associated with an HTTP namespace, so its \
-                     settings can't be updated with UpdateService."
-                )),
+                message: Some(crate::state::API_ONLY_NAMESPACE_UPDATE_MESSAGE.to_string()),
             })
             .into());
         }

@@ -516,6 +516,10 @@ pub mod sensitive_members;
 /// caller's store.
 pub mod service_principal_calls;
 pub mod shared_path;
+/// The ONE home for the half of a constraint refusal the framework's walk cannot state —
+/// the COLLECTION a clause about a collection member is about — served as the
+/// per-operation wrapper that is the only layer with the request it has to be read from.
+pub mod submitted_collections;
 /// The ONE list of SQL functions caller SQL may call, for every data plane that runs it on
 /// the in-process SQLite engine.
 pub mod sqlite_confinement;

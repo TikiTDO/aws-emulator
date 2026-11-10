@@ -31,6 +31,13 @@ hex = { workspace = true }
 # `state::NAMESPACE_NAME_BACKTRACK_LIMIT`.
 fancy-regex = "0.16"
 
+# The constraint-refusal wording this service answers with, and the renaming of the
+# member an error body carries its text in: the shared collecting walk, the shared
+# per-operation layer that quotes the collection a request submitted, and the one home
+# for that rename. See `src/service/submitted_collections.rs` and
+# `src/service/error_message_member.rs`.
+service-common = { path = "../common" }
+
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 

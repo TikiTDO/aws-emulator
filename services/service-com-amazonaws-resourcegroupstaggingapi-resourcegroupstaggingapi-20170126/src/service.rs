@@ -45,28 +45,10 @@ use smithy_server_runtime::{
 };
 use std::sync::Arc;
 
-/// The one half of a constraint refusal the framework cannot state — the
-/// COLLECTION a clause about a collection member is about; see the module's own
+/// What this service states about the half of a constraint refusal the framework cannot
+/// state — the COLLECTION a clause about a collection member is about; see the module's own
 /// header.
 mod submitted_collections;
-use submitted_collections::QuotingSubmittedCollections;
-
-/// Wire one `crate::ops::<module>::<Operation>` per line into `table`, each
-/// wrapped in [`QuotingSubmittedCollections`] and keyed by its operation shape
-/// name — the routing key `ServerHttpProtocol::routing_key` resolves and the
-/// generated table is keyed by.
-macro_rules! wrap_operations {
-    ($table:expr, $engine:expr, $($module:ident :: $operation:ident),+ $(,)?) => {
-        $(
-            $table.add_operation(
-                stringify!($operation),
-                ::std::boxed::Box::new(QuotingSubmittedCollections::new(
-                    crate::ops::$module::$operation::new(::std::sync::Arc::clone(&$engine)),
-                )) as ::std::boxed::Box<dyn ErasedOperation>,
-            );
-        )+
-    };
-}
 
 /// The `com-amazonaws-resourcegroupstaggingapi-resourcegroupstaggingapi-20170126` emulated service: the generated [`ServiceDefinition`] plus
 /// the behavioral seams this file owns.
@@ -75,12 +57,11 @@ macro_rules! wrap_operations {
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
     entry: crate::ServiceDefinition<Eng>,
-    /// The same modelled operations the generated table holds, each wrapped in
-    /// [`QuotingSubmittedCollections`] — so a constraint clause about a
-    /// collection member states the collection the request carried. Keyed by the
-    /// routing key the protocol resolves (the key the generated table uses) and
-    /// built from the SAME shared engine, so a wrapped operation reads and writes
-    /// the one store. Held on the service because
+    /// The same modelled operations the generated table holds, each served so that a
+    /// constraint clause about a collection member states the collection the request
+    /// carried ([`submitted_collections`]). Keyed by the routing key the protocol resolves
+    /// (the key the generated table uses) and built from the SAME shared engine, so a
+    /// wrapped operation reads and writes the one store. Held on the service because
     /// [`Service::override_operation`] hands back a borrow of `self`.
     quoting_submitted_collections: OperationRoutingTable,
 }
@@ -90,23 +71,10 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// generated [`ServiceDefinition`], which constructs each operation from it; the
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
-        let mut quoting_submitted_collections = OperationRoutingTable::new();
-        wrap_operations!(
-            quoting_submitted_collections,
-            engine,
-            describe_report_creation::DescribeReportCreation,
-            get_compliance_summary::GetComplianceSummary,
-            get_resources::GetResources,
-            get_tag_keys::GetTagKeys,
-            get_tag_values::GetTagValues,
-            list_required_tags::ListRequiredTags,
-            start_report_creation::StartReportCreation,
-            tag_resources::TagResources,
-            untag_resources::UntagResources,
-        );
         Self {
+            quoting_submitted_collections:
+                submitted_collections::quoting_submitted_collections(&engine),
             entry: crate::ServiceDefinition::new(engine),
-            quoting_submitted_collections,
         }
     }
 }

@@ -73,6 +73,10 @@ sha2 = { workspace = true }
 # `iam_trust_policy`: an IAM trust policy IS a JSON document, so it is read with a
 # maintained JSON parser rather than by hand.
 serde_json = { workspace = true }
+# `submitted_collections`: reads the ORDER a request's JSON object wrote a map member's
+# entries in, which the built input (a `HashMap`) does not keep. Only the deserializer
+# seam is used; no shape here derives `Serialize`.
+serde = { workspace = true }
 # `query_error_envelope`: the v4 UUID an awsQuery error envelope reports as its
 # `<RequestId>`, from the maintained crate the framework's own request-id minter and the
 # service-local copies of that writer use, rather than derived here.

@@ -150,6 +150,34 @@ const FILTER_RESOURCE_OWNER: &str = "RESOURCE_OWNER";
 /// `SELF` or `OTHER_ACCOUNTS`."
 const RESOURCE_OWNERS: [&str; 2] = ["SELF", "OTHER_ACCOUNTS"];
 
+/// The conditions each service filter supports, from `ServiceFilter$Condition`: `EQ` is
+/// the only one it lists, for either filter name. `None` for a name this filter does not
+/// declare, which is refused as a bad filter NAME rather than for its condition.
+fn supported_conditions(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        FILTER_NAMESPACE_ID | FILTER_RESOURCE_OWNER => Some(&[CONDITION_EQ]),
+        _ => None,
+    }
+}
+
+/// The message refusing every filter of one request whose `Condition` its `Name` does
+/// not support, or `None` when each filter's condition is one that filter supports.
+///
+/// The condition matrix is this listing's ([`supported_conditions`]); the clause and the
+/// envelope around it are the service's, so every filtered listing words the same
+/// refusal the same way.
+fn unsupported_conditions(filters: &[ServiceFilter]) -> Option<String> {
+    crate::state::unsupported_filter_conditions(
+        filters.iter().map(|filter| {
+            (
+                filter.name.as_str(),
+                filter.condition.as_deref().unwrap_or(CONDITION_EQ),
+            )
+        }),
+        supported_conditions,
+    )
+}
+
 /// The owner every resource this emulator holds belongs to: it shares no namespace in
 /// from another account, so `SELF` selects all of them and `OTHER_ACCOUNTS` none.
 const RESOURCE_OWNER_SELF: &str = "SELF";
@@ -188,10 +216,11 @@ impl Matcher {
 /// Compile one request filter into a [`Matcher`], or say why the request is invalid.
 ///
 /// Every rule here comes from the documentation on `ServiceFilter`: the filter names are
-/// the modelled `ServiceFilterName` enum, `EQ` is the only condition it lists (and the
-/// default when `Condition` is omitted), `EQ` takes exactly one value ("When you specify
+/// the modelled `ServiceFilterName` enum, `EQ` takes exactly one value ("When you specify
 /// `EQ`, specify one value"), a `NAMESPACE_ID` value is "one namespace ID or ARN", and a
-/// `RESOURCE_OWNER` value is one of `SELF` or `OTHER_ACCOUNTS`.
+/// `RESOURCE_OWNER` value is one of `SELF` or `OTHER_ACCOUNTS`. The `Condition` itself is
+/// checked over EVERY filter first ([`unsupported_conditions`]), because the refusal
+/// reports all of them together.
 fn compile(
     filter: &ServiceFilter,
     state: &crate::state::ComAmazonawsServicediscoveryRoute53autonamingV20170314State,
@@ -201,13 +230,6 @@ fn compile(
             "Filters.Name {} isn't valid. Valid values are {}.",
             filter.name,
             SERVICE_FILTER_NAME_VALUES.join(", ")
-        ));
-    }
-    let condition = filter.condition.as_deref().unwrap_or(CONDITION_EQ);
-    if condition != CONDITION_EQ {
-        return Err(format!(
-            "Filters.Condition {condition} isn't supported for a service filter. The only \
-             supported value is {CONDITION_EQ}."
         ));
     }
     if filter.values.len() != 1 {
@@ -279,6 +301,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 crate::state::UNREACHABLE_STATE_MESSAGE.to_string(),
             ));
         };
+
+        // Every filter's `Condition` is checked FIRST, over the whole request, because
+        // the refusal reports one clause per offending filter.
+        if let Some(message) = unsupported_conditions(input.filters.as_deref().unwrap_or_default())
+        {
+            return Err(invalid_input(message));
+        }
 
         // A `NextToken` is opaque, so the only tokens this listing can resume from are
         // the ones it issued; anything else is a bad request rather than an empty page.

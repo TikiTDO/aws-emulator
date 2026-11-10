@@ -162,6 +162,41 @@ const FILTER_UPDATE_DATE: &str = "UPDATE_DATE";
 const TARGET_NAMESPACE: &str = "NAMESPACE";
 const TARGET_SERVICE: &str = "SERVICE";
 
+/// The conditions each operation filter supports, from `OperationFilter$Condition`:
+/// "`EQ` ... is supported for `NAMESPACE_ID`, `SERVICE_ID`, `STATUS`, and `TYPE`. `EQ`
+/// is the default condition and can be omitted", "`IN` ... is supported for `STATUS`
+/// and `TYPE`", "`BETWEEN` ... is supported for `UPDATE_DATE`". `None` for a name this
+/// filter does not declare, which is refused as a bad filter NAME rather than for its
+/// condition.
+///
+/// Each set is stated in the order the refusal lists it.
+fn supported_conditions(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        FILTER_NAMESPACE_ID | FILTER_SERVICE_ID => Some(&[CONDITION_EQ]),
+        FILTER_STATUS | FILTER_TYPE => Some(&[CONDITION_EQ, CONDITION_IN]),
+        FILTER_UPDATE_DATE => Some(&[CONDITION_BETWEEN]),
+        _ => None,
+    }
+}
+
+/// The message refusing every filter of one request whose `Condition` its `Name` does
+/// not support, or `None` when each filter's condition is one that filter supports.
+///
+/// The condition matrix is this listing's ([`supported_conditions`]); the clause and the
+/// envelope around it are the service's, so every filtered listing words the same
+/// refusal the same way.
+fn unsupported_conditions(filters: &[OperationFilter]) -> Option<String> {
+    crate::state::unsupported_filter_conditions(
+        filters.iter().map(|filter| {
+            (
+                filter.name.as_str(),
+                filter.condition.as_deref().unwrap_or(CONDITION_EQ),
+            )
+        }),
+        supported_conditions,
+    )
+}
+
 /// One validated request filter, ready to match a stored operation record.
 #[derive(Debug)]
 enum Matcher {
@@ -226,30 +261,18 @@ fn unix_date(value: &str) -> Result<std::time::SystemTime, String> {
 
 /// Compile one request filter into a [`Matcher`], or say why the request is invalid.
 ///
-/// The name/condition matrix is `OperationFilter$Condition`'s: "`EQ` ... is supported
-/// for `NAMESPACE_ID`, `SERVICE_ID`, `STATUS`, and `TYPE`. `EQ` is the default
-/// condition and can be omitted", "`IN` ... is supported for `STATUS` and `TYPE`",
-/// "`BETWEEN` ... is supported for `UPDATE_DATE`". A combination it does not list —
-/// `BEGINS_WITH` for any operation filter, `IN` for a resource id, `EQ` for a date
-/// range — is refused rather than guessed at.
+/// The name/condition matrix is `OperationFilter$Condition`'s ([`supported_conditions`]),
+/// and a combination it does not list — `BEGINS_WITH` for any operation filter, `IN` for
+/// a resource id, `EQ` for a date range — is refused over every filter of the request
+/// before this runs ([`unsupported_conditions`]), so what is left here is the value rules
+/// for a filter whose condition that matrix admits.
 fn compile(filter: &OperationFilter) -> Result<Matcher, String> {
     let name = filter.name.as_str();
     let condition = filter.condition.as_deref().unwrap_or(CONDITION_EQ);
-    let supported: &[&str] = match name {
-        FILTER_NAMESPACE_ID | FILTER_SERVICE_ID => &[CONDITION_EQ],
-        FILTER_STATUS | FILTER_TYPE => &[CONDITION_EQ, CONDITION_IN],
-        FILTER_UPDATE_DATE => &[CONDITION_BETWEEN],
-        other => {
-            return Err(format!(
-                "{other} isn't a valid filter name for ListOperations; valid names are {}.",
-                OPERATION_FILTER_NAME_VALUES.join(", ")
-            ))
-        }
-    };
-    if !supported.contains(&condition) {
+    if supported_conditions(name).is_none() {
         return Err(format!(
-            "condition {condition} isn't supported for the {name} filter; {name} supports {}.",
-            supported.join(", ")
+            "{name} isn't a valid filter name for ListOperations; valid names are {}.",
+            OPERATION_FILTER_NAME_VALUES.join(", ")
         ));
     }
     if filter.values.is_empty() {
@@ -391,6 +414,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(invalid(crate::state::UNREACHABLE_STATE_MESSAGE.to_string()));
         };
+
+        // Every filter's `Condition` is checked FIRST, over the whole request, because
+        // the refusal reports one clause per offending filter.
+        if let Some(message) = unsupported_conditions(input.filters.as_deref().unwrap_or_default())
+        {
+            return Err(invalid(message));
+        }
 
         // "If you specify more than one filter, an operation must match all filters to
         // be returned by ListOperations." Every filter is compiled BEFORE any record

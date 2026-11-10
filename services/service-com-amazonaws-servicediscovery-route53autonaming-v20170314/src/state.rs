@@ -95,6 +95,15 @@ pub const ROUTE53_HEALTH_CHECK_VERDICT: &str = HEALTH_STATUS_UNHEALTHY;
 /// "The maximum number of tags that can be applied to a resource is 50."
 pub const MAX_TAGS_PER_RESOURCE: usize = 50;
 
+/// The `TooManyTagsException` message, which is FIXED text: the service reports that
+/// the tag quota for the resource was passed and names neither the quota, the resource
+/// nor the keys the request carried, so no request value reaches the body.
+///
+/// One constant for every operation that applies the quota — the tag write and each
+/// create that accepts `Tags` — so the quota refusal reads the same wherever it is
+/// reached.
+pub const TAG_LIMIT_EXCEEDED_MESSAGE: &str = "Allowable tag limit for resource exceeded";
+
 /// How many operation records this store keeps.
 ///
 /// AWS does not publish a retention rule for `Operation` records, so this bound is
@@ -418,17 +427,67 @@ pub fn dns_namespace_change_request(
 /// change shape carries only the properties that kind has (an HTTP namespace has no
 /// SOA, a DNS namespace no `HttpName`), so asking the wrong kind of update of a
 /// namespace that does exist is a bad request rather than a missing namespace. The
-/// wording names the namespace, the type it actually has and the operation that refused
-/// it, so one text serves every namespace update.
-pub fn wrong_namespace_type_message(
-    namespace_id: &str,
-    stored_type: &str,
-    operation: &str,
-) -> String {
+/// message reports the comparison a caller has to make to fix the request: the
+/// `NamespaceType` the stored namespace actually has, and the one the operation it
+/// called requires. Neither the namespace nor the operation is named — the caller knows
+/// both — so one text serves every namespace update.
+pub fn wrong_namespace_type_message(stored_type: &str, required_type: &str) -> String {
     format!(
-        "The namespace {namespace_id} is a {stored_type} namespace, so it can't be updated \
-         with {operation}."
+        "Namespace with incorrect type {stored_type} provided. Please provide namespace with \
+         type {required_type}."
     )
+}
+
+/// The opening of the message a filtered listing refuses unsupported filter conditions
+/// with, which is followed by one clause per offending filter
+/// ([`filter_condition_clause`]).
+const INVALID_FILTER_CONDITIONS: &str = "Invalid filter condition(s) provided: ";
+
+/// One clause of that message: the filter the request named, the conditions that filter
+/// supports, and the condition the request asked for.
+///
+/// A request may state several filters, so the message accumulates one clause per
+/// offending filter and each clause ends with its own separator — which is why the
+/// separator belongs to the clause rather than to the join.
+fn filter_condition_clause(name: &str, supported: &[&str], condition: &str) -> String {
+    format!(
+        "filter {name} supports condition(s) [{}], but got {condition}; ",
+        supported.join(", ")
+    )
+}
+
+/// The `InvalidInput` message for every filter of one request whose `Condition` its
+/// `Name` does not support, or `None` when every filter's condition is supported.
+///
+/// `stated` is the (filter name, condition) pair each filter of the request states, in the
+/// order the request stated them, and `supported` is the listing's own condition matrix —
+/// `None` from it for a name that listing does not declare, which is refused as a bad
+/// filter NAME rather than for its condition.
+///
+/// One message for the whole request: the clauses are reported together, so a caller that
+/// sent several bad filters learns about all of them from one refusal. This is why the
+/// condition check runs over every filter before any other filter rule — a request refused
+/// here is refused for its conditions alone. The matrix is each listing's; the clause and
+/// the envelope are here, so no two filtered listings word this refusal differently.
+pub fn unsupported_filter_conditions<'f>(
+    stated: impl IntoIterator<Item = (&'f str, &'f str)>,
+    supported: impl Fn(&str) -> Option<&'static [&'static str]>,
+) -> Option<String> {
+    let clauses: Vec<String> = stated
+        .into_iter()
+        .filter_map(|(name, condition)| {
+            let supported = supported(name)?;
+            (!supported.contains(&condition))
+                .then(|| filter_condition_clause(name, supported, condition))
+        })
+        .collect();
+    invalid_filter_conditions_message(&clauses)
+}
+
+/// The envelope [`unsupported_filter_conditions`] states those clauses in, or `None` when
+/// there are none.
+fn invalid_filter_conditions_message(clauses: &[String]) -> Option<String> {
+    (!clauses.is_empty()).then(|| format!("{INVALID_FILTER_CONDITIONS}{}", clauses.concat()))
 }
 
 /// The message a namespace create is refused with when the `Name` is already owned by
@@ -453,6 +512,17 @@ pub fn duplicate_create_message(operation: &str, completed: Option<&str>) -> Str
 /// class of conflict and names neither the service nor the namespace the caller asked
 /// for, so no request value reaches the body.
 pub const SERVICE_ALREADY_EXISTS_MESSAGE: &str = "Service already exists.";
+
+/// The `InvalidInput` message a service-settings update is refused with when the
+/// service belongs to an HTTP namespace.
+///
+/// `UpdateService` documents the refusal — "You can't call UpdateService and update
+/// settings in the following scenarios: When the service is associated with an HTTP
+/// namespace" — and an HTTP namespace is the API-only kind: it holds no Route 53 hosted
+/// zone, so there are no records or health checks for such a call to update. FIXED text,
+/// naming neither the service nor the operation.
+pub const API_ONLY_NAMESPACE_UPDATE_MESSAGE: &str =
+    "Service in API-only namespace cannot be updated.";
 
 /// A persisted namespace. `ServiceCount` is NOT a field: it is derived from
 /// [`ComAmazonawsServicediscoveryRoute53autonamingV20170314State::service_count`] so

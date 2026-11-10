@@ -35,6 +35,8 @@ mod instance_health_status;
 mod instance_operations_missing_service;
 #[path = "all/instance_ownership.rs"]
 mod instance_ownership;
+#[path = "all/invalid_input_message_templates.rs"]
+mod invalid_input_message_templates;
 #[path = "all/list_instances.rs"]
 mod list_instances;
 #[path = "all/list_operations.rs"]

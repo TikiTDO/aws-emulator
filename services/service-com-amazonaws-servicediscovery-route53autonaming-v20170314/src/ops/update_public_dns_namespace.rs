@@ -112,6 +112,10 @@ impl From<UpdatePublicDnsNamespaceErrorModeled> for UpdatePublicDnsNamespaceErro
     }
 }
 
+/// The `NamespaceType` this update applies to: the stored namespace must carry it, and
+/// the refusal of one that does not names it as the type the caller has to provide.
+const NAMESPACE_TYPE_REQUIRED: &str = "DNS_PUBLIC";
+
 /// The `UpdatePublicDnsNamespace` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -213,13 +217,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // kind of update of a namespace that does exist is a bad request, not a missing
         // namespace, so it is the modelled `InvalidInput`.
         let stored_type = state.namespace_type(&namespace_id);
-        if stored_type != "DNS_PUBLIC" {
+        if stored_type != NAMESPACE_TYPE_REQUIRED {
             return Err(
                 UpdatePublicDnsNamespaceErrorModeled::InvalidInput(InvalidInput {
                     message: Some(crate::state::wrong_namespace_type_message(
-                        &namespace_id,
                         &stored_type,
-                        Self::NAME,
+                        NAMESPACE_TYPE_REQUIRED,
                     )),
                 })
                 .into(),
