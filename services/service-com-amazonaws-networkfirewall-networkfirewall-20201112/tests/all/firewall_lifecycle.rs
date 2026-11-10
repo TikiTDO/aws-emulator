@@ -19,8 +19,8 @@ use serde_json::{json, Value};
 use service_com_amazonaws_networkfirewall_networkfirewall_20201112::state;
 
 use crate::harness::{
-    error_code, is_uuid_form, minimal_policy_document as minimal_policy, string_at, Harness,
-    ACCOUNT, REGION,
+    error_code, is_uuid_form, minimal_policy_document as minimal_policy, string_at, with_tag_list,
+    Harness, ACCOUNT, REGION,
 };
 
 /// One row of the create -> describe round-trip table.
@@ -152,7 +152,8 @@ async fn a_created_firewall_reads_back_identically_by_name_and_by_arn() {
                 .get("Firewall")
                 .unwrap_or_else(|| panic!("case {case:?}: expected Firewall in {described:?}"));
             assert_eq!(
-                described_firewall, created_firewall,
+                described_firewall,
+                &with_tag_list(created_firewall),
                 "case {case:?} resolved by {by:?}: expected the describe to report the created \
                  firewall, got {described_firewall:?}"
             );
@@ -253,7 +254,8 @@ async fn a_created_firewall_policy_reads_back_identically() {
         ] {
             let described = harness.ok("DescribeFirewallPolicy", &by).await;
             assert_eq!(
-                described["FirewallPolicyResponse"], created["FirewallPolicyResponse"],
+                described["FirewallPolicyResponse"],
+                with_tag_list(&created["FirewallPolicyResponse"]),
                 "case {name} resolved by {by:?}: expected the stored response, got {described:?}"
             );
             assert_eq!(

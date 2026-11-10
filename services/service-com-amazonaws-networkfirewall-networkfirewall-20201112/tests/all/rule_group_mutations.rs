@@ -15,7 +15,8 @@
 use serde_json::{json, Value};
 
 use crate::harness::{
-    error_code, is_uuid_form, minimal_policy_document as minimal_policy, string_at, Harness,
+    error_code, is_uuid_form, minimal_policy_document as minimal_policy, string_at, with_tag_list,
+    Harness,
 };
 use crate::rule_group_lifecycle::{
     create_request, expected_arn, stateful_one_rule, stateless_any, stateless_group, stateless_rule,
@@ -245,8 +246,8 @@ async fn deleting_one_type_leaves_the_same_name_in_the_other_type() {
         )
         .await;
     assert_eq!(
-        described.get("RuleGroupResponse"),
-        stateful.get("RuleGroupResponse"),
+        described.get("RuleGroupResponse").cloned(),
+        stateful.get("RuleGroupResponse").map(with_tag_list),
         "case STATEFUL: expected the other type's rule group to be untouched, got {described:?}"
     );
 }
@@ -500,10 +501,10 @@ async fn an_update_is_what_the_next_read_reports() {
             );
             assert_eq!(
                 (
-                    described.get("RuleGroupResponse"),
+                    described.get("RuleGroupResponse").cloned(),
                     described.get("UpdateToken")
                 ),
-                (Some(response), Some(&json!(new_token))),
+                (Some(with_tag_list(response)), Some(&json!(new_token))),
                 "case {} read by {read:?}: expected the update's own response and token, got \
                  {described:?}",
                 case.name
@@ -668,10 +669,13 @@ async fn an_update_that_cannot_run_changes_nothing() {
             .await;
         assert_eq!(
             (
-                described.get("RuleGroupResponse"),
+                described.get("RuleGroupResponse").cloned(),
                 described.get("UpdateToken")
             ),
-            (created.get("RuleGroupResponse"), created.get("UpdateToken")),
+            (
+                created.get("RuleGroupResponse").map(with_tag_list),
+                created.get("UpdateToken")
+            ),
             "case {name}: expected the refused updates to change nothing, got {described:?}"
         );
     }

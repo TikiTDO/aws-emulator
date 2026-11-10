@@ -6,11 +6,12 @@
 //! Two rules, both about what a request may carry rather than about one request:
 //!
 //! * an entry of `StatelessDefaultActions` or `StatelessFragmentDefaultActions`
-//!   must name a standard stateless action (`aws:pass`, `aws:drop`,
-//!   `aws:forward_to_sfe`) or a custom action the same document declares in
-//!   `StatelessCustomActions`; anything else is refused with HTTP 400 /
-//!   `InvalidRequestException` before any state changes, so the policy name stays
-//!   free;
+//!   must name a standard stateless action with its namespace (`aws:pass`,
+//!   `aws:drop`, `aws:forward_to_sfe`) or a custom action the same document
+//!   declares in `StatelessCustomActions`, neither list may be empty, and one
+//!   list may name only one standard action; anything else is refused with HTTP
+//!   400 / `InvalidRequestException` before any state changes, so the policy name
+//!   stays free;
 //! * a create under a name that is already taken is a defect of the REQUEST
 //!   (`InvalidRequestException`), not the in-use/state conflict
 //!   `InvalidOperationException` reports.
@@ -37,19 +38,24 @@ const STANDARD_ACTIONS: [&str; 3] = ["aws:pass", "aws:drop", "aws:forward_to_sfe
 /// The text a create whose name is already taken is refused with, as recorded.
 const ALREADY_EXISTS: &str = "A resource with the specified name already exists";
 
-/// The action `entry` names, with the optional `aws:` namespace prefix dropped
-/// and the case normalised.
-///
-/// A read compares through this rather than by bytes because the SPELLING a
-/// policy reports is not this suite's subject: the service canonicalises a
-/// standard action's spelling (its own issue owns that), while the action the
-/// entry NAMES must survive the round trip whichever spelling the request used.
-fn bare_action(entry: &str) -> String {
-    let token = entry
-        .split_once(':')
-        .filter(|(namespace, _)| namespace.eq_ignore_ascii_case("aws"))
-        .map_or(entry, |(_, token)| token);
-    token.to_ascii_lowercase()
+/// The actions a described policy reports for `member`, exactly as it reports
+/// them: a policy keeps the spelling the accepted request used, so a read is
+/// compared by bytes.
+async fn described_actions(harness: &Harness, name: &str, member: &str) -> Vec<String> {
+    let described = harness
+        .ok("DescribeFirewallPolicy", &json!({ "FirewallPolicyName": name }))
+        .await;
+    described["FirewallPolicy"][member]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected {member} in {described:?}"))
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .unwrap_or_else(|| panic!("expected {member} entries to be strings"))
+                .to_string()
+        })
+        .collect()
 }
 
 /// A policy document with the given default actions and, optionally, one declared
@@ -70,25 +76,6 @@ fn document(default_actions: &[&str], fragment_actions: &[&str], custom: Option<
     policy
 }
 
-/// The actions a described policy reports for `member`, bare.
-async fn described_actions(harness: &Harness, name: &str, member: &str) -> Vec<String> {
-    let described = harness
-        .ok("DescribeFirewallPolicy", &json!({ "FirewallPolicyName": name }))
-        .await;
-    described["FirewallPolicy"][member]
-        .as_array()
-        .unwrap_or_else(|| panic!("expected {member} in {described:?}"))
-        .iter()
-        .map(|entry| {
-            bare_action(
-                entry
-                    .as_str()
-                    .unwrap_or_else(|| panic!("expected {member} entries to be strings")),
-            )
-        })
-        .collect()
-}
-
 /// One row of the accepted table: the case, the two action lists the document
 /// carries, and the custom action it declares (if any).
 type AcceptedRow<'a> = (&'a str, Vec<&'a str>, Vec<&'a str>, Option<&'a str>);
@@ -102,14 +89,15 @@ type RefusedRow<'a> = (&'a str, Vec<&'a str>, Vec<&'a str>, &'a str, &'a str);
 /// and the response path of that resource's ARN.
 type DuplicateRow<'a> = (&'a str, &'a str, Value, &'a str, Value, Vec<&'a str>);
 
-/// RULE: a default stateless action naming a standard action — in any of the
-/// spellings that name it — or a custom action the same document declares is
-/// accepted, stored, and names the same action when the policy is read back.
+/// RULE: a default stateless action naming a standard action — in any CASE of
+/// its namespaced name — or a custom action the same document declares is
+/// accepted, stored, and reported back in the spelling the request used.
 ///
 /// Rows span all three standard actions (the catalog above; `aws:pass` and
-/// `aws:drop` are not the one the recorded case used), the prefix-free and
-/// upper-case spellings of them, a declared custom action beside a standard one,
-/// and a custom action in the fragment member.
+/// `aws:drop` are not the one the recorded case used), the upper-case and
+/// mixed-case spellings of them, the same standard action named twice (which
+/// still names one action), a declared custom action beside a standard one, and
+/// a custom action in the fragment member.
 #[tokio::test]
 async fn a_supported_stateless_default_action_is_accepted_and_round_trips() {
     let harness = Harness::new();
@@ -123,11 +111,20 @@ async fn a_supported_stateless_default_action_is_accepted_and_round_trips() {
             vec![STANDARD_ACTIONS[2]],
             None,
         ),
-        // The spelling the corpus records as accepted: the token alone, with no
-        // `aws:` prefix.
-        ("prefix-free", vec!["forward_to_sfe"], vec!["aws:drop"], None),
-        // The canonical spelling a read reports.
+        // The spelling the corpus records a stored policy reporting back.
         ("upper-case", vec!["AWS:PASS"], vec!["AWS:FORWARD_TO_SFE"], None),
+        (
+            "mixed-case",
+            vec!["Aws:Forward_To_Sfe"],
+            vec!["aWs:dRop"],
+            None,
+        ),
+        (
+            "the-same-standard-action-twice",
+            vec!["aws:pass", "AWS:PASS"],
+            vec!["aws:drop"],
+            None,
+        ),
         (
             "standard-plus-declared-custom",
             vec!["aws:pass", "DeclaredAction"],
@@ -162,11 +159,12 @@ async fn a_supported_stateless_default_action_is_accepted_and_round_trips() {
             ("StatelessFragmentDefaultActions", fragment_actions),
         ] {
             let reported = described_actions(&harness, &name, member).await;
-            let expected: Vec<String> = expected.iter().map(|entry| bare_action(entry)).collect();
+            let expected: Vec<String> =
+                expected.iter().map(|entry| (*entry).to_string()).collect();
             assert_eq!(
                 reported, expected,
-                "case {case}: expected the read to report {member} naming {expected:?}, \
-                 got {reported:?}"
+                "case {case}: expected the read to report {member} as the request spelled it, \
+                 {expected:?}, got {reported:?}"
             );
         }
     }
@@ -251,6 +249,36 @@ async fn an_unsupported_stateless_default_action_is_refused_and_leaves_the_name_
             vec!["NotDeclaredHere"],
             "StatelessFragmentDefaultActions",
             "NotDeclaredHere",
+        ),
+        // The namespace is part of a standard action's name, so the token on its
+        // own, and the token under another namespace, name no action.
+        (
+            "a-standard-action-without-its-namespace",
+            vec!["forward_to_sfe"],
+            vec!["aws:drop"],
+            "StatelessDefaultActions",
+            "forward_to_sfe",
+        ),
+        (
+            "an-upper-case-token-without-its-namespace",
+            vec!["PASS"],
+            vec!["aws:drop"],
+            "StatelessDefaultActions",
+            "PASS",
+        ),
+        (
+            "a-standard-token-under-another-namespace",
+            vec!["amazon:pass"],
+            vec!["aws:drop"],
+            "StatelessDefaultActions",
+            "amazon:pass",
+        ),
+        (
+            "a-token-without-its-namespace-in-the-fragment-member",
+            vec!["aws:pass"],
+            vec!["drop"],
+            "StatelessFragmentDefaultActions",
+            "drop",
         ),
     ];
 
@@ -389,8 +417,8 @@ async fn a_refused_update_leaves_the_stored_policy_unchanged() {
             "case {case}: a refused update must not rotate the token, got {described:?}"
         );
         for (member, expected) in [
-            ("StatelessDefaultActions", "pass"),
-            ("StatelessFragmentDefaultActions", "drop"),
+            ("StatelessDefaultActions", "aws:pass"),
+            ("StatelessFragmentDefaultActions", "aws:drop"),
         ] {
             let reported = described_actions(&harness, "updated-policy", member).await;
             assert_eq!(
@@ -419,9 +447,147 @@ async fn a_refused_update_leaves_the_stored_policy_unchanged() {
     let reported = described_actions(&harness, "updated-policy", "StatelessDefaultActions").await;
     assert_eq!(
         reported,
-        vec!["drop".to_string(), "acceptedaction".to_string()],
+        vec!["aws:drop".to_string(), "AcceptedAction".to_string()],
         "case accepted update: expected the new actions to be stored, got {reported:?}"
     );
+}
+
+/// RULE: a stateless default-action list specifies ONE standard action, so a
+/// list naming two different standard actions and a list naming none at all are
+/// both refused with HTTP 400 / `InvalidRequestException`: the first naming
+/// every standard action it carries in request order, the second naming only the
+/// member it looked at — and in both cases nothing is stored.
+///
+/// Rows span both action members, every pair of the three standard actions, a
+/// list of all three, a pair spelled in different cases, a pair beside a
+/// declared custom action, and the empty list in each member.
+#[tokio::test]
+async fn a_list_must_specify_exactly_one_standard_action() {
+    let harness = Harness::new();
+
+    // (case, default actions, fragment actions, the message the refusal carries)
+    let rows: Vec<(&str, Vec<&str>, Vec<&str>, String)> = vec![
+        (
+            "pass-and-drop",
+            vec!["aws:pass", "aws:drop"],
+            vec!["aws:drop"],
+            exist_together("StatelessDefaultActions", "aws:pass, aws:drop"),
+        ),
+        (
+            "forward-and-pass",
+            vec!["aws:forward_to_sfe", "aws:pass"],
+            vec!["aws:drop"],
+            exist_together(
+                "StatelessDefaultActions",
+                "aws:forward_to_sfe, aws:pass",
+            ),
+        ),
+        (
+            "drop-and-forward",
+            vec!["aws:drop", "aws:forward_to_sfe"],
+            vec!["aws:drop"],
+            exist_together("StatelessDefaultActions", "aws:drop, aws:forward_to_sfe"),
+        ),
+        (
+            "all-three",
+            vec!["aws:pass", "aws:drop", "aws:forward_to_sfe"],
+            vec!["aws:pass"],
+            exist_together(
+                "StatelessDefaultActions",
+                "aws:pass, aws:drop, aws:forward_to_sfe",
+            ),
+        ),
+        (
+            "two-in-different-cases",
+            vec!["AWS:PASS", "aws:drop"],
+            vec!["aws:pass"],
+            exist_together("StatelessDefaultActions", "AWS:PASS, aws:drop"),
+        ),
+        (
+            "two-beside-a-declared-custom-action",
+            vec!["aws:pass", "DeclaredHere", "aws:drop"],
+            vec!["aws:pass"],
+            exist_together("StatelessDefaultActions", "aws:pass, aws:drop"),
+        ),
+        (
+            "two-in-the-fragment-member",
+            vec!["aws:pass"],
+            vec!["aws:drop", "aws:pass"],
+            exist_together(
+                "StatelessFragmentDefaultActions",
+                "aws:drop, aws:pass",
+            ),
+        ),
+        (
+            "an-empty-default-member",
+            vec![],
+            vec!["aws:drop"],
+            null_or_empty("StatelessDefaultActions"),
+        ),
+        (
+            "an-empty-fragment-member",
+            vec!["aws:pass"],
+            vec![],
+            null_or_empty("StatelessFragmentDefaultActions"),
+        ),
+        (
+            "both-members-empty",
+            vec![],
+            vec![],
+            null_or_empty("StatelessDefaultActions"),
+        ),
+    ];
+
+    for (case, actions, fragment_actions, expected) in &rows {
+        let custom = actions
+            .iter()
+            .chain(fragment_actions.iter())
+            .any(|entry| *entry == "DeclaredHere")
+            .then_some("DeclaredHere");
+        let name = format!("one-standard-{case}");
+        let (status, body) = harness
+            .call(
+                "CreateFirewallPolicy",
+                &json!({
+                    "FirewallPolicyName": name,
+                    "FirewallPolicy": document(actions, fragment_actions, custom),
+                }),
+            )
+            .await;
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (400, "InvalidRequestException"),
+            "case {case}: expected 400 InvalidRequestException, got {status} {body:?}"
+        );
+        let message = error_message(&body);
+        assert_eq!(
+            &message, expected,
+            "case {case}: expected {expected:?}, got {message:?}"
+        );
+
+        // Nothing was stored, so the name a refused create used is still free.
+        let (status, body) = harness
+            .call(
+                "DescribeFirewallPolicy",
+                &json!({ "FirewallPolicyName": name }),
+            )
+            .await;
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (400, "ResourceNotFoundException"),
+            "case {case}: expected the refused name to stay free, got {status} {body:?}"
+        );
+    }
+}
+
+/// The message a list naming more than one standard action is refused with.
+fn exist_together(member: &str, actions: &str) -> String {
+    format!("{member} cannot exist together, parameter: [{actions}], context: {member}")
+}
+
+/// The message a list that names no action at all is refused with.
+fn null_or_empty(member: &str) -> String {
+    format!("{member} cannot be null or empty, context: {member}")
 }
 
 /// RULE: a create under a name that is already taken is refused with

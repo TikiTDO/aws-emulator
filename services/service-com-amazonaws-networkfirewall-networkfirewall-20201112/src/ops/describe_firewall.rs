@@ -194,9 +194,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `READY`. Nothing else here writes.
         record.settle(::std::time::SystemTime::now());
 
+        let mut firewall = record.to_firewall();
+        // The response projects the stored record rather than echoing a request,
+        // so the firewall's tag collection is reported as a list — empty when it
+        // carries no tags (see `state::projected_resource_tags`).
+        firewall.tags = crate::state::projected_resource_tags(firewall.tags);
+
         Ok(DescribeFirewallOutput {
             update_token: Some(record.update_token.clone()),
-            firewall: Some(record.to_firewall()),
+            firewall: Some(firewall),
             firewall_status: Some(record.to_firewall_status()),
         })
     }

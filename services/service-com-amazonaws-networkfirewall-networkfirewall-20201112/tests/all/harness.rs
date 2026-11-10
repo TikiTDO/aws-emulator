@@ -231,6 +231,22 @@ pub fn is_uuid_form(value: &str) -> bool {
         })
 }
 
+/// A resource projection with its `Tags` member defaulted to the EMPTY LIST.
+///
+/// A read and a delete project the stored record, so each reports a resource's
+/// tag collection as a list where a create and an update report the `Tags`
+/// member as the request gave it — absent when it gave none. An assertion that a
+/// read reports what a create or an update minted passes the WRITE's projection
+/// through this and leaves the read's own side untouched, so the read must still
+/// carry the list while every other member stays an exact comparison.
+pub fn with_tag_list(projection: &Value) -> Value {
+    let mut projection = projection.clone();
+    if let Some(object) = projection.as_object_mut() {
+        object.entry("Tags").or_insert_with(|| json!([]));
+    }
+    projection
+}
+
 /// Read a required string out of a response body, naming the path on failure.
 pub fn string_at<'a>(body: &'a Value, path: &[&str]) -> &'a str {
     let mut cursor = body;

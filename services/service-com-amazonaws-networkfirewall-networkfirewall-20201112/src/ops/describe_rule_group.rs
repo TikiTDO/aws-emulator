@@ -211,6 +211,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         drop(state);
 
         let mut rule_group_response = record.to_response(associations);
+        // The response projects the stored record rather than echoing a request,
+        // so the rule group's tag collection is reported as a list — empty when
+        // it carries no tags (see `state::projected_resource_tags`).
+        rule_group_response.tags =
+            crate::state::projected_resource_tags(rule_group_response.tags);
         // The analyzer runs on request and reports on stateless rule groups only, so a
         // stateful rule group has no findings to report rather than an empty list. It
         // reads the rules and writes nothing: a describe leaves the rule group exactly

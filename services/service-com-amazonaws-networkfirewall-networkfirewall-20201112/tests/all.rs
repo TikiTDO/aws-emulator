@@ -27,6 +27,8 @@ mod flow_operations;
 mod harness;
 #[path = "all/logging_configuration.rs"]
 mod logging_configuration;
+#[path = "all/read_tag_projection.rs"]
+mod read_tag_projection;
 #[path = "all/reference_validation.rs"]
 mod reference_validation;
 #[path = "all/refusal_message_shapes.rs"]

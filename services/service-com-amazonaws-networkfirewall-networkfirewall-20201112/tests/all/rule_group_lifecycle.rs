@@ -13,7 +13,9 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::{error_code, is_uuid_form, string_at, Harness, ACCOUNT, REGION};
+use crate::harness::{
+    error_code, is_uuid_form, string_at, with_tag_list, Harness, ACCOUNT, REGION,
+};
 
 /// A stateless rule group document with a single rule that matches anything.
 pub(crate) fn stateless_any() -> Value {
@@ -253,7 +255,7 @@ async fn a_created_rule_group_reads_back_identically_by_name_and_by_arn() {
             let described = harness.ok("DescribeRuleGroup", &by).await;
             assert_eq!(
                 described.get("RuleGroupResponse"),
-                Some(created_response),
+                Some(&with_tag_list(created_response)),
                 "case {case:?} resolved by {by:?}: expected the describe to report the created \
                  rule group, got {described:?}"
             );

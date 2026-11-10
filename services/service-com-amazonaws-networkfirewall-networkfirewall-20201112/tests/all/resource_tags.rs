@@ -30,23 +30,23 @@ enum TagWrite {
 /// A resource this service tags: how to create one, and where its own reader
 /// reports the tags it carries.
 #[derive(Debug)]
-struct TaggableKind {
+pub struct TaggableKind {
     /// Names the row in every assertion.
-    label: &'static str,
+    pub label: &'static str,
     /// The `X-Amz-Target` of the resource's own describe operation.
-    describe: &'static str,
+    pub describe: &'static str,
     /// The request that describe takes.
-    describe_request: Value,
+    pub describe_request: Value,
     /// Where the described body carries the resource's `Tags`.
-    tags_path: &'static [&'static str],
+    pub tags_path: &'static [&'static str],
     /// The resource's ARN, which every tag operation names it by.
-    arn: String,
+    pub arn: String,
 }
 
 /// The four resource kinds this emulator tags, each created empty: a firewall, a
 /// firewall policy and a rule group of each half of the service
 /// ("firewalls, firewall policies, and rule groups", `TagResource`).
-async fn taggable_kinds(harness: &Harness, suffix: &str) -> Vec<TaggableKind> {
+pub async fn taggable_kinds(harness: &Harness, suffix: &str) -> Vec<TaggableKind> {
     let policy_name = format!("tagged-policy-{suffix}");
     let policy_arn = harness.shared_policy(&policy_name).await;
     let firewall_name = format!("tagged-firewall-{suffix}");
@@ -155,7 +155,7 @@ fn tag_pair(tag: &Value) -> (String, String) {
 
 /// `Tags` as a key -> value map, so a projection is compared by content whatever
 /// order it carries.
-fn tag_map(tags: &Value) -> BTreeMap<String, String> {
+pub fn tag_map(tags: &Value) -> BTreeMap<String, String> {
     tags.as_array()
         .unwrap_or_else(|| panic!("expected a Tags list, got {tags:?}"))
         .iter()
@@ -164,7 +164,7 @@ fn tag_map(tags: &Value) -> BTreeMap<String, String> {
 }
 
 /// The `TagResource` body for `tags`.
-fn tag_request(arn: &str, tags: &[(String, String)]) -> Value {
+pub fn tag_request(arn: &str, tags: &[(String, String)]) -> Value {
     json!({
         "ResourceArn": arn,
         "Tags": tags

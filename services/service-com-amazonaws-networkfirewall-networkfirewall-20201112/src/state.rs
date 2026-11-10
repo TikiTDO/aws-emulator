@@ -139,16 +139,16 @@ pub fn effective_encryption_configuration(
     effective
 }
 
-/// The tag collection a response reports for a resource the call just REMOVED
-/// from state: the stored list, empty when the resource carries no tags.
+/// The tag collection a response reports for a resource it READ out of state or
+/// REMOVED from it: the stored list, empty when the resource carries no tags.
 ///
-/// A delete answers from the record it removed rather than echoing a request, so
-/// every collection on that record is projected — a tag list with no entries is
-/// reported as an empty list, not as an absent member. RECORDED behaviour: the
-/// `DeleteFirewallPolicy` response for a policy created with no `Tags` carries
-/// `Tags: []`, where the same policy's create response (which echoes the
-/// request's own optional `Tags` member) carries none.
-pub fn removed_resource_tags(stored: Option<Vec<Tag>>) -> Option<Vec<Tag>> {
+/// A read and a delete answer from a stored record rather than echoing a
+/// request, so every collection on that record is projected — a tag list with no
+/// entries is reported as an empty list, not as an absent member. RECORDED
+/// behaviour: the describe and the delete responses for a resource created with
+/// no `Tags` carry `Tags: []`, where that resource's create and update responses
+/// (which report the member as the request gave it) carry none.
+pub fn projected_resource_tags(stored: Option<Vec<Tag>>) -> Option<Vec<Tag>> {
     Some(stored.unwrap_or_default())
 }
 
@@ -287,42 +287,63 @@ pub const STATELESS_DEFAULT_ACTION_MEMBERS: [&str; 2] = [
 
 /// Whether `action` names one of the [`STATELESS_STANDARD_ACTIONS`].
 ///
-/// The standard action's TOKEN is what identifies it: the `aws:` namespace
-/// prefix is optional and neither half is case-sensitive, so `aws:forward_to_sfe`
-/// and `forward_to_sfe` name the same action and the service reports it in one
-/// canonical spelling whichever one the request used. RECORDED behaviour: a
-/// policy created with `forward_to_sfe` is accepted and read back as
-/// `AWS:FORWARD_TO_SFE`. A token the vocabulary does not carry names no standard
-/// action, whichever way it is spelled.
+/// The `aws:` namespace prefix is PART of a standard action's name — every one
+/// of them is documented with it — so an entry that carries no namespace names
+/// no standard action, and an entry whose namespace is not that one names an
+/// action of some other vocabulary. Neither half is case-sensitive, so a request
+/// may spell the name in any case and the service keeps the spelling it was
+/// given. A token the vocabulary does not carry names no standard action, however
+/// it is namespaced.
 pub fn is_standard_stateless_action(action: &str) -> bool {
-    let token = action
-        .split_once(':')
-        .filter(|(namespace, _)| namespace.eq_ignore_ascii_case("aws"))
-        .map_or(action, |(_, token)| token);
+    let Some((namespace, token)) = action.split_once(':') else {
+        return false;
+    };
+    if !namespace.eq_ignore_ascii_case("aws") {
+        return false;
+    }
     STATELESS_STANDARD_ACTIONS.iter().any(|standard| {
         let standard = standard.split_once(':').map_or(*standard, |(_, token)| token);
         token.eq_ignore_ascii_case(standard)
     })
 }
 
-/// Why `policy`'s stateless default actions are not a vocabulary this service
-/// can act on, or `None` when every entry names an action it can.
+/// Why `policy`'s stateless default actions are not a set of actions this
+/// service can act on, or `None` when both lists name one it can.
 ///
-/// An entry of either default-action list must name one of the
-/// [`STATELESS_STANDARD_ACTIONS`] ([`is_standard_stateless_action`]) or a custom
-/// action the SAME document declares in `StatelessCustomActions` ("You name each
-/// custom action that you define, and then you can use it by name in your default
-/// actions specifications" — `FirewallPolicy$StatelessCustomActions`; a custom
-/// action is named, not namespaced, so its name must match as declared). Anything
-/// else names no action at all, so the document is refused rather than retained:
-/// a stored policy whose default action nothing implements would silently handle
-/// every non-matching packet differently from the policy the caller asked for.
+/// Three conditions, all stated by the documentation of the members that take
+/// them (`FirewallPolicy$StatelessDefaultActions` and
+/// `FirewallPolicy$StatelessFragmentDefaultActions`, identical text: "You must
+/// specify one of the standard actions: aws:pass, aws:drop, or
+/// aws:forward_to_sfe. In addition, you can specify custom actions that are
+/// compatible with your standard section choice"):
 ///
-/// The refusal is built FROM the request in the service's one request-derived
-/// shape ([`parameter_context_message`]): the stem names the member that failed,
-/// the brackets carry the offending action verbatim, and the context is the input
-/// path it arrived on. The first offending entry is reported, lists in the order
-/// [`STATELESS_DEFAULT_ACTION_MEMBERS`] names them.
+/// * neither list may be empty: one of them has to carry the default this
+///   policy applies, so there is nothing for an empty one to specify.
+/// * every entry must NAME an action — one of the
+///   [`STATELESS_STANDARD_ACTIONS`] ([`is_standard_stateless_action`]) or a
+///   custom action the SAME document declares in `StatelessCustomActions` ("You
+///   name each custom action that you define, and then you can use it by name in
+///   your default actions specifications" — `FirewallPolicy$StatelessCustomActions`;
+///   a custom action is named, not namespaced, so its name must match as
+///   declared). Anything else names no action at all.
+/// * one list may name only ONE standard action: it is the single default the
+///   policy applies to a packet no stateless rule matched, so two DIFFERENT
+///   ones in the same list cannot both be it (the same action named twice names
+///   one action).
+///
+/// Either way the document is refused rather than retained: a stored policy whose
+/// default action nothing implements, or whose default is ambiguous, would
+/// silently handle every non-matching packet differently from the policy the
+/// caller asked for.
+///
+/// Each refusal is built FROM the request in the service's request-derived
+/// message shapes: the stem names the member that failed and what failed about
+/// it, the context is the input path it looked at
+/// ([`context_message`]), and where there IS an offending value the brackets
+/// carry it verbatim ([`parameter_context_message`]) — the one entry that names
+/// nothing, or every standard action the list names, in request order. The first
+/// failure is reported, lists in the order [`STATELESS_DEFAULT_ACTION_MEMBERS`]
+/// names them and, within one list, in the order the conditions are stated above.
 ///
 /// The document's own declared custom action names are collected into a SET, so
 /// the scan costs one lookup per default action however many custom actions the
@@ -336,23 +357,78 @@ pub fn stateless_default_action_breach(policy: &FirewallPolicy) -> Option<String
         .flatten()
         .map(|custom| custom.action_name.as_str())
         .collect();
-    let lists = [
-        &policy.stateless_default_actions,
-        &policy.stateless_fragment_default_actions,
+    let members: [(&str, &Vec<String>); 2] = [
+        (
+            STATELESS_DEFAULT_ACTION_MEMBERS[0],
+            &policy.stateless_default_actions,
+        ),
+        (
+            STATELESS_DEFAULT_ACTION_MEMBERS[1],
+            &policy.stateless_fragment_default_actions,
+        ),
     ];
-    STATELESS_DEFAULT_ACTION_MEMBERS
-        .into_iter()
-        .zip(lists)
-        .find_map(|(member, actions)| {
-            actions
-                .iter()
-                .find(|action| {
-                    !is_standard_stateless_action(action) && !declared.contains(&action.as_str())
-                })
-                .map(|action| {
-                    parameter_context_message(&format!("{member} is invalid"), action, member)
-                })
-        })
+
+    members
+        .iter()
+        .find_map(|(member, actions)| stateless_action_list_breach(member, actions, &declared))
+}
+
+/// Why the list `member` carries is not a set of actions this service can act
+/// on, or `None` when it is, applying the three conditions
+/// [`stateless_default_action_breach`] states in the order it states them.
+fn stateless_action_list_breach(
+    member: &str,
+    actions: &[String],
+    declared: &HashSet<&str>,
+) -> Option<String> {
+    if actions.is_empty() {
+        return Some(context_message(
+            &format!("{member} cannot be null or empty"),
+            member,
+        ));
+    }
+
+    let unnamed = actions.iter().find(|action| {
+        !is_standard_stateless_action(action) && !declared.contains(&action.as_str())
+    });
+    if let Some(action) = unnamed {
+        return Some(parameter_context_message(
+            &format!("{member} is invalid"),
+            action,
+            member,
+        ));
+    }
+
+    // One list may name only one standard action, and an action named twice is
+    // still ONE action: what a spelling NAMES is the standard token it carries
+    // ([`standard_action_token`]).
+    let mut named: HashSet<String> = HashSet::new();
+    let mut standard: Vec<&str> = Vec::new();
+    for action in actions {
+        if is_standard_stateless_action(action) && named.insert(standard_action_token(action)) {
+            standard.push(action);
+        }
+    }
+    (standard.len() > 1).then(|| {
+        parameter_context_message(
+            &format!("{member} cannot exist together"),
+            &standard.join(", "),
+            member,
+        )
+    })
+}
+
+/// The standard action `action` names, as one comparable token: its name with
+/// the `aws:` namespace dropped and the case normalised.
+///
+/// Two entries name the same standard action exactly when this is equal for
+/// both, since neither half of the name is case-sensitive
+/// ([`is_standard_stateless_action`]).
+fn standard_action_token(action: &str) -> String {
+    action
+        .split_once(':')
+        .map_or(action, |(_, token)| token)
+        .to_ascii_lowercase()
 }
 
 /// How many `LogDestinationConfigs` entries one logging configuration may carry.
@@ -1332,7 +1408,16 @@ pub fn parameter_message(stem: &str, parameter: &str) -> String {
 /// submitted document tripped the check without parsing prose. Everything before
 /// the brackets is fixed per check; only the bracketed value and the path vary.
 pub fn parameter_context_message(stem: &str, parameter: &str, context: &str) -> String {
-    format!("{}, context: {context}", parameter_message(stem, parameter))
+    context_message(&parameter_message(stem, parameter), context)
+}
+
+/// The same shape without a bracketed value: `<stem>, context: <path>`.
+///
+/// A check that failed on the ABSENCE of a value has no offending value to
+/// bracket, so its message names only what failed and the input path it looked
+/// at.
+pub fn context_message(stem: &str, context: &str) -> String {
+    format!("{stem}, context: {context}")
 }
 
 /// What a rule group whose rules need more capacity than is available to them is

@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use service_com_amazonaws_networkfirewall_networkfirewall_20201112::state;
 
 use crate::harness::{
-    error_code, minimal_policy_document, resource_policy_document, string_at, Harness,
+    error_code, minimal_policy_document, resource_policy_document, string_at, with_tag_list, Harness,
 };
 
 /// RULE: referencing a rule group from a firewall policy reserves that rule
@@ -126,7 +126,8 @@ async fn a_policy_reports_the_capacity_the_rule_groups_it_references_reserve() {
             )
             .await;
         assert_eq!(
-            described["FirewallPolicyResponse"], created["FirewallPolicyResponse"],
+            described["FirewallPolicyResponse"],
+            with_tag_list(&created["FirewallPolicyResponse"]),
             "case {label}: expected the stored response, got {described:?}"
         );
     }

@@ -186,9 +186,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })?;
 
         let consumed = state.consumed_policy_capacity(&record.policy);
+        let mut firewall_policy_response = record.to_response(consumed);
+        // The response projects the stored record rather than echoing a request,
+        // so the policy's tag collection is reported as a list — empty when it
+        // carries no tags (see `state::projected_resource_tags`).
+        firewall_policy_response.tags =
+            crate::state::projected_resource_tags(firewall_policy_response.tags);
+
         Ok(DescribeFirewallPolicyOutput {
             update_token: record.update_token.clone(),
-            firewall_policy_response: record.to_response(consumed),
+            firewall_policy_response,
             firewall_policy: Some(record.policy.clone()),
         })
     }

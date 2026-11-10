@@ -207,8 +207,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         record.last_modified_time = ::std::time::SystemTime::now();
         // The response projects the removed record rather than echoing a
         // request, so the policy's tag collection is reported as a list — empty
-        // when it carries no tags (see `state::removed_resource_tags`).
-        record.tags = crate::state::removed_resource_tags(record.tags.take());
+        // when it carries no tags (see `state::projected_resource_tags`).
+        record.tags = crate::state::projected_resource_tags(record.tags.take());
         let consumed = state.consumed_policy_capacity(&record.policy);
 
         Ok(DeleteFirewallPolicyOutput {

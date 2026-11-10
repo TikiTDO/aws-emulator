@@ -225,8 +225,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // The member is PRESENT whatever the resource carries: this reads a
         // record rather than echoing a request, so a resource with no tags is
-        // reported with an empty list, the same projection the delete paths make
-        // (see `crate::state::removed_resource_tags`).
+        // reported with an empty list, the same projection the read and delete
+        // paths make (see `crate::state::projected_resource_tags`).
         Ok(ListTagsForResourceOutput {
             next_token: page.next_token,
             tags: Some(page.items),
