@@ -216,8 +216,10 @@ fn documents(arn: &str) -> Vec<(String, String)> {
 }
 
 /// RULE: a stored policy comes back byte for byte from the ARN it was stored against,
-/// for either resource kind a policy attaches to, and the resource it is attached to is
-/// what the account shares.
+/// for either resource kind a policy attaches to, and attaching one to a resource this
+/// account OWNS shares it OUT — so it stays in the account's own listing and appears in
+/// neither of the account's shared listings, which report what other accounts shared
+/// WITH it.
 #[tokio::test]
 async fn a_stored_policy_round_trips_byte_for_byte_for_either_resource_kind() {
     for kind in KINDS {
@@ -271,40 +273,47 @@ async fn a_stored_policy_round_trips_byte_for_byte_for_either_resource_kind() {
             );
         }
 
-        // A project carrying a policy is what the account shares; a report group's
-        // policy lists no project.
-        let (status, listed) = call(&router, "ListSharedProjects", json!({})).await;
-        assert_eq!(
-            status, 200,
-            "{kind:?}: ListSharedProjects must succeed, got {status} with {listed}"
-        );
-        let expected: Vec<Value> = match kind {
-            Kind::Project => vec![json!(arn)],
-            Kind::ReportGroup => vec![],
-        };
-        assert_eq!(
-            listed["projects"].as_array(),
-            Some(&expected),
-            "{kind:?}: the shared listing must report exactly the projects carrying a \
-             policy, got {listed}"
-        );
+        // The resource is this account's OWN, so attaching a policy to it shares it OUT:
+        // neither shared listing may report it. Those listings are the CONSUMER's
+        // inventory — "shared with the current Amazon Web Services account or user" — and
+        // sharing runs one way, so with nothing shared WITH this account both answer an
+        // empty list. The other direction (a resource another account owns and shared
+        // with this one) is pinned by `list_shared_projects` and
+        // `list_shared_report_groups`.
+        let nothing: Vec<Value> = Vec::new();
+        for (operation, member) in [
+            ("ListSharedProjects", "projects"),
+            ("ListSharedReportGroups", "reportGroups"),
+        ] {
+            let (status, body) = call(&router, operation, json!({})).await;
+            assert_eq!(
+                status, 200,
+                "{kind:?}: {operation} must succeed, got {status} with {body}"
+            );
+            assert_eq!(
+                body[member].as_array(),
+                Some(&nothing),
+                "{kind:?}: {operation} reports nothing shared with the account that owns \
+                 the policied resource, got {body}"
+            );
+        }
 
-        // The mirror for the other resource kind: a report group carrying a policy is
-        // what the account shares, and a project's policy lists no report group.
-        let (status, groups) = call(&router, "ListSharedReportGroups", json!({})).await;
+        // The policied resource is still the account's own, so its own listing keeps
+        // reporting it: `ListProjects` by name, `ListReportGroups` by ARN.
+        let (operation, member, entry) = match kind {
+            Kind::Project => ("ListProjects", "projects", "policy-target".to_string()),
+            Kind::ReportGroup => ("ListReportGroups", "reportGroups", arn.clone()),
+        };
+        let (status, held_body) = call(&router, operation, json!({})).await;
         assert_eq!(
             status, 200,
-            "{kind:?}: ListSharedReportGroups must succeed, got {status} with {groups}"
+            "{kind:?}: {operation} must succeed, got {status} with {held_body}"
         );
-        let expected: Vec<Value> = match kind {
-            Kind::Project => vec![],
-            Kind::ReportGroup => vec![json!(arn)],
-        };
-        assert_eq!(
-            groups["reportGroups"].as_array(),
-            Some(&expected),
-            "{kind:?}: the shared listing must report exactly the report groups carrying \
-             a policy, got {groups}"
+        assert!(
+            held_body[member]
+                .as_array()
+                .is_some_and(|entries| entries.contains(&json!(entry))),
+            "{kind:?}: the account's own listing must still report {entry}, got {held_body}"
         );
     }
 }

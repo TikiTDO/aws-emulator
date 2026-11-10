@@ -1326,13 +1326,19 @@ fn name_digest(name: &str) -> u64 {
 /// dropped and new ones are minted at `created_at`. Shard STATUS is owned by
 /// [`ClusterRecord::begin_transition`], which the caller runs after resizing, so a
 /// new shard starts at the same status as the cluster it belongs to.
+///
+/// The count is clamped to the published ceiling here as well as refused at the
+/// boundary by [`validate_shard_count`], so what one request can make this function
+/// allocate is bounded by that ceiling rather than by the caller remembering to check
+/// ("Maximum is 32", [`SHARD_COUNT_MAX`]).
 pub fn shards_for(
     shard_count: i32,
     created_at: &str,
     existing: &[ShardRecord],
 ) -> Vec<ShardRecord> {
-    let wanted = shard_count.max(0) as usize;
+    let wanted = shard_count.clamp(0, SHARD_COUNT_MAX) as usize;
     let mut shards: Vec<ShardRecord> = existing.iter().take(wanted).cloned().collect();
+    shards.reserve(wanted - shards.len());
     while shards.len() < wanted {
         shards.push(ShardRecord {
             shard_id: new_resource_id(),

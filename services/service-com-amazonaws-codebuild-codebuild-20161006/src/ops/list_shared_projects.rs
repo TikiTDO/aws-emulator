@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListSharedProjects
-//! Lists the ARNs of the build projects this account shares: this is the ONLY file to
-//! touch for this operation.
+//! Lists the ARNs of the build projects shared WITH this account: this is the ONLY file
+//! to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -145,16 +145,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     const OUTPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::LIST_SHARED_PROJECTS_OUTPUT_SCHEMA;
     const SUCCESS_STATUS: u16 = 200u16;
 
-    /// Report the ARNs of the build projects that are SHARED, ordered and paged as the
-    /// request asks.
+    /// Report the ARNs of the build projects shared WITH this account, ordered and paged
+    /// as the request asks.
     ///
-    /// A project is shared exactly while a resource-based policy is attached to it —
-    /// that attachment is how a project is shared with other accounts or users
-    /// (`PutResourcePolicy`: "Stores a resource policy for the ARN of a Project or
-    /// ReportGroup object") — so this listing is the account's projects filtered by the
-    /// store's resource policies. A project's `projectVisibility` is a different grant
-    /// about a different thing (who may read its BUILDS), so publishing a project
-    /// neither shares it nor lists it here.
+    /// This listing is the CONSUMER's side of a one-directional relationship: "the list
+    /// of ARNs for the build projects shared with the current Amazon Web Services
+    /// account or user". An account shares a project it OWNS by attaching a
+    /// resource-based policy to it, and a project shared with an account cannot be
+    /// shared on again, so a project is reported here exactly while another account owns
+    /// it and the policy attached to it grants this account
+    /// (`crate::state::ComAmazonawsCodebuildCodebuild20161006State::shared_with_this_account`,
+    /// the same predicate `crate::ops::list_shared_report_groups` reports the other
+    /// resource kind CodeBuild shares through). Attaching a policy to a project of this
+    /// account's own therefore lists nothing here, whatever principal that policy names
+    /// — the account's own projects are `crate::ops::list_projects`. A project's
+    /// `projectVisibility` is a different grant about a different thing (who may read
+    /// its BUILDS), so publishing a project neither shares it nor lists it here.
+    ///
+    /// The operation's own summary ("Gets a list of projects that are shared with other
+    /// Amazon Web Services accounts or users", above) names the RELATIONSHIP the listing
+    /// is about; the members that say which SIDE of it is reported are the output's own
+    /// `projects` ("the build projects shared with the current Amazon Web Services
+    /// account or user") and `sortBy` ("to list build projects shared with the current …
+    /// account or user"), so a project is reported here when the current account is the
+    /// one it is shared WITH.
     ///
     /// Purely reporting: nothing in the store changes, so a later caller sees exactly
     /// what this one saw.
@@ -171,18 +185,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let _ = ctx;
 
         let guard = state.lock();
-        // Every shared project, each with the instant its own record was last changed —
-        // which is what the `MODIFIED_TIME` criterion orders on ("List based on when
-        // information about the shared project was last changed"). A policy held for a
-        // report group's ARN resolves no project, so it is not reported here.
+        // Every project shared with this account, each with the instant its own record
+        // was last changed — which is what the `MODIFIED_TIME` criterion orders on
+        // ("List based on when information about the shared project was last changed").
+        // A policy held for a report group's ARN resolves no project, so it is not
+        // reported here.
         let mut shared: Vec<(i64, &str)> = guard
             .projects
             .values()
             .filter_map(|stored| {
                 let arn = stored.project.arn.as_deref()?;
                 guard
-                    .resource_policies
-                    .contains_key(arn)
+                    .shared_with_this_account(arn)
                     .then_some((stored.last_modified_millis, arn))
             })
             .collect();
@@ -219,8 +233,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         Ok(ListSharedProjectsOutput {
-            // Serialized whether or not this account shares anything, `[]` when it
-            // shares nothing: the `@length(min: 1)` on `ProjectArns` bounds what a
+            // Serialized whether or not anything is shared with this account, `[]` when
+            // nothing is: the `@length(min: 1)` on `ProjectArns` bounds what a
             // request may carry, not whether the answer states its result — the same
             // reading `crate::ops::list_projects` applies to `ProjectNames`.
             projects: Some(page),

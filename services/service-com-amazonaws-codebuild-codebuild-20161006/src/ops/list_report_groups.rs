@@ -148,7 +148,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     ///
     /// The listing is the store's own report groups — "a list ARNs for the report groups
     /// in the current Amazon Web Services account" — so a group `CreateReportGroup` wrote
-    /// is reported until `DeleteReportGroup` removes it, and nothing else is. Ordering
+    /// is reported until `DeleteReportGroup` removes it, and nothing else is: a group
+    /// another account owns and shared with this one belongs to
+    /// `crate::ops::list_shared_report_groups`, not here. Ordering
     /// reads the record each criterion names (`ReportGroupSortByType`: when the group was
     /// created, when it was last changed, or its name), with the name breaking a tie so
     /// two groups stamped in the same millisecond still have one order; `sortOrder`
@@ -170,14 +172,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let _ = ctx;
 
         let guard = state.lock();
-        // Every report group of the account, each with the two instants a criterion may
-        // order on and the name that breaks a tie between equal instants.
+        // Every report group this account OWNS, each with the two instants a criterion
+        // may order on and the name that breaks a tie between equal instants. A group
+        // another account shared with this one is reported by
+        // `crate::ops::list_shared_report_groups` instead, so ownership (the account
+        // field of the group's own ARN) is what separates the two listings.
         let mut held: Vec<(&str, i64, i64, &str)> = guard
             .report_groups
             .iter()
             .filter_map(|(name, stored)| {
                 let arn = stored.report_group.arn.as_deref()?;
-                Some((
+                (!crate::state::owned_by_another_account(arn)).then_some((
                     name.as_str(),
                     stored.created_millis,
                     stored.last_modified_millis,

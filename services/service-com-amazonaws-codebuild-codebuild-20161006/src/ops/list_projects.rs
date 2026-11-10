@@ -155,10 +155,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let _ = ctx;
 
         let guard = state.lock();
+        // The projects this account OWNS — "a list of build project names, with each
+        // build project name representing a single build project" of the current
+        // account. A project another account shared with this one is reported by
+        // `crate::ops::list_shared_projects` instead, so ownership (the account field of
+        // the project's own ARN) is what separates the two listings. Every project this
+        // service stores carries the ARN it was created with, so a record carrying none
+        // is no project of this account either.
+        let mut ordered: Vec<&crate::state::StoredProject> = guard
+            .projects
+            .values()
+            .filter(|stored| {
+                stored
+                    .project
+                    .arn
+                    .as_deref()
+                    .is_some_and(|arn| !crate::state::owned_by_another_account(arn))
+            })
+            .collect();
         // Sorted by the requested criterion. The model documents no default for
         // either member, so this service lists by name ascending — the store's own
         // stable order — when the request names neither.
-        let mut ordered: Vec<&crate::state::StoredProject> = guard.projects.values().collect();
         match input.sort_by.as_deref() {
             Some("CREATED_TIME") => ordered.sort_by_key(|stored| stored.created_millis),
             Some("LAST_MODIFIED_TIME") => {

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListSharedReportGroups
-//! Reports the ARNs of the report groups this account shares: this is the ONLY file to
-//! touch for this operation.
+//! Reports the ARNs of the report groups shared WITH this account: this is the ONLY file
+//! to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -145,16 +145,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     const OUTPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::LIST_SHARED_REPORT_GROUPS_OUTPUT_SCHEMA;
     const SUCCESS_STATUS: u16 = 200u16;
 
-    /// Report the ARNs of the report groups that are SHARED, ordered and paged as the
-    /// request asks.
+    /// Report the ARNs of the report groups shared WITH this account, ordered and paged
+    /// as the request asks.
     ///
-    /// A report group is shared exactly while a resource-based policy is attached to it
-    /// — that attachment is how one is shared with other accounts or users
-    /// (`PutResourcePolicy`: "Stores a resource policy for the ARN of a Project or
-    /// ReportGroup object") — so this listing is the account's report groups filtered by
-    /// the store's resource policies, the way `crate::ops::list_shared_projects` reports
-    /// the other resource kind CodeBuild shares. A policy held for a project's ARN
-    /// resolves no report group, so it is not reported here.
+    /// This listing is the CONSUMER's side of a one-directional relationship: "the list
+    /// of ARNs for the report groups shared with the current Amazon Web Services account
+    /// or user". An account shares a report group it OWNS by attaching a resource-based
+    /// policy to it, and a group shared with an account cannot be shared on again, so a
+    /// group is reported here exactly while another account owns it and the policy
+    /// attached to it grants this account
+    /// (`crate::state::ComAmazonawsCodebuildCodebuild20161006State::shared_with_this_account`,
+    /// which `crate::ops::list_shared_projects` reports the other resource kind
+    /// CodeBuild shares through). Attaching a policy to a report group of this account's
+    /// own therefore lists nothing here, whatever principal that policy names — the
+    /// account's own groups are `crate::ops::list_report_groups` — and a policy held for
+    /// a project's ARN resolves no report group either.
+    ///
+    /// The operation's own summary ("Gets a list of report groups that are shared with
+    /// other Amazon Web Services accounts or users", above) names the RELATIONSHIP the
+    /// listing is about; the two members that say which SIDE of it is reported are the
+    /// output's own `reportGroups` ("the report groups shared with the current Amazon Web
+    /// Services account or user") and `sortBy` ("to list report groups shared with the
+    /// current … account or user"), so a group is reported here when the current account
+    /// is the one it is shared WITH.
     ///
     /// Purely reporting: nothing in the store changes, so a later caller sees exactly
     /// what this one saw.
@@ -171,17 +184,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let _ = ctx;
 
         let guard = state.lock();
-        // Every shared report group, each with the instant its own record was last
-        // changed — which is what the `MODIFIED_TIME` criterion orders on ("List based on
-        // when information about the shared report group was last changed").
+        // Every report group shared with this account, each with the instant its own
+        // record was last changed — which is what the `MODIFIED_TIME` criterion orders
+        // on ("List based on when information about the shared report group was last
+        // changed").
         let mut shared: Vec<(i64, &str)> = guard
             .report_groups
             .values()
             .filter_map(|stored| {
                 let arn = stored.report_group.arn.as_deref()?;
                 guard
-                    .resource_policies
-                    .contains_key(arn)
+                    .shared_with_this_account(arn)
                     .then_some((stored.last_modified_millis, arn))
             })
             .collect();
@@ -215,9 +228,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         Ok(ListSharedReportGroupsOutput {
-            // Serialized whether or not this account shares anything, `[]` when it shares
-            // nothing: the `@length(min: 1)` on `ReportGroupArns` bounds what a request
-            // may carry, not whether the answer states its result.
+            // Serialized whether or not anything is shared with this account, `[]` when
+            // nothing is: the `@length(min: 1)` on `ReportGroupArns` bounds what a
+            // request may carry, not whether the answer states its result.
             report_groups: Some(page),
             next_token,
         })

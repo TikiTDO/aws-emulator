@@ -1055,6 +1055,10 @@ async fn list_projects_orders_by_each_sort_by_criterion() {
                 StoredProject {
                     project: Project {
                         name: Some(name.to_string()),
+                        // The ARN `CreateProject` would have stored it with: it is what
+                        // records the account that owns the project, and the account's
+                        // own listing reports the projects it owns.
+                        arn: Some(state::project_arn(REGION, name)),
                         created: Some(state::datetime(created)),
                         last_modified: Some(state::datetime(last_modified)),
                         ..Project::default()

@@ -876,9 +876,11 @@ pub struct ComAmazonawsCodebuildCodebuild20161006State {
     /// address one (`PutResourcePolicy$resourceArn`: "The ARN of the Project or
     /// ReportGroup resource you want to associate with a resource policy"), and
     /// because one resource carries at most one such policy — a second write for
-    /// the same ARN replaces it. A project's entry here is what makes that project
-    /// SHARED, which is what `ListSharedProjects` reports; the entry for a report
-    /// group is the same record for the other resource kind CodeBuild shares.
+    /// the same ARN replaces it. An entry is the GRANT over that resource: it shares
+    /// the resource with the principals it names, so an entry for a resource ANOTHER
+    /// account owns is what puts that resource in this account's shared listings
+    /// ([`ComAmazonawsCodebuildCodebuild20161006State::shared_with_this_account`]),
+    /// while an entry for one of this account's own shares it OUT.
     ///
     /// Bounded by the resources it describes, so it needs no ceiling of its own
     /// beside [`MAX_PROJECTS`] and [`MAX_REPORT_GROUPS`]: an entry is meaningful
@@ -1190,6 +1192,74 @@ pub fn unshareable_action_message(target: PolicyTarget) -> String {
         target.policy_resource_type()
     )
 }
+
+/// Whether `document` GRANTS `account` — the question the shared-resource listings ask
+/// of the policy attached to a resource another account owns.
+///
+/// A resource-based policy is what shares a CodeBuild resource, and it shares it with
+/// the principals its statements name, so a document grants an account exactly while
+/// some statement of it ALLOWS something to a principal of that account. The principal
+/// is read the three ways a policy writes one: the wildcard, the bare account id, and an
+/// ARN whose own account field is that account ([`arn_account`]) — which covers both the
+/// account's root and any user or role of it, the "account or user" the listings report
+/// for. A statement's `Principal` is one value, a list of them, or the `AWS` member
+/// holding either, and the document's `Statement` is one statement or a list, so each
+/// form is walked; member names are matched without case, the way
+/// [`policy_contains_unshareable_action`] reads them, and `Effect` the same way, since
+/// its value is read as a word rather than as exact bytes.
+///
+/// A document that does not parse grants nothing, the way it refuses nothing.
+///
+/// The question is which principals a document GRANTS to, which is what a listing of
+/// shared resources reports; this is not an authorization decision, so nothing here
+/// evaluates a document the way an IAM evaluator would. A statement that denies is
+/// therefore not read: a document whose only statement denies grants nobody and lists
+/// nothing, and `NotPrincipal` names no principal to grant to.
+pub fn policy_grants_account(document: &str, account: &str) -> bool {
+    let Ok(::serde_json::Value::Object(parsed)) =
+        ::serde_json::from_str::<::serde_json::Value>(document)
+    else {
+        return false;
+    };
+    let Some(statements) = policy_member(&parsed, "Statement") else {
+        return false;
+    };
+    listed(statements).into_iter().any(|statement| {
+        let Some(statement) = statement.as_object() else {
+            return false;
+        };
+        let allows = policy_member(statement, "Effect")
+            .and_then(::serde_json::Value::as_str)
+            .is_some_and(|effect| effect.eq_ignore_ascii_case(ALLOW_EFFECT));
+        allows
+            && policy_member(statement, "Principal")
+                .is_some_and(|principal| principal_names_account(principal, account))
+    })
+}
+
+/// Whether a statement's `Principal` names `account` — [`policy_grants_account`]'s rule
+/// for the one member, applied through each form that member is written in.
+fn principal_names_account(principal: &::serde_json::Value, account: &str) -> bool {
+    match principal {
+        ::serde_json::Value::String(token) => {
+            token == ANY_PRINCIPAL || token == account || arn_account(token) == Some(account)
+        }
+        ::serde_json::Value::Array(entries) => entries
+            .iter()
+            .any(|entry| principal_names_account(entry, account)),
+        // `{"AWS": …}` is the account form of a principal; a principal keyed by anything
+        // else names a service or a federated identity rather than an account.
+        ::serde_json::Value::Object(members) => policy_member(members, "AWS")
+            .is_some_and(|entries| principal_names_account(entries, account)),
+        _ => false,
+    }
+}
+
+/// The `Effect` of a statement that grants what it names, rather than denying it.
+const ALLOW_EFFECT: &str = "Allow";
+
+/// The `Principal` that names every principal there is, and so every account.
+const ANY_PRINCIPAL: &str = "*";
 
 /// The member of a policy document object named `name`, matched WITHOUT case: a policy
 /// document's element names are read as names rather than as exact bytes.
@@ -1712,6 +1782,27 @@ impl ComAmazonawsCodebuildCodebuild20161006State {
             Some(PolicyTarget::ReportGroup) => self.report_group_by_arn(arn).is_some(),
             None => false,
         }
+    }
+
+    /// Whether the project or report group `arn` names is one SHARED WITH the account
+    /// this emulator serves — the question both shared-resource listings report on.
+    ///
+    /// Sharing a CodeBuild resource runs ONE way: an account shares a resource it owns
+    /// by attaching a resource-based policy to it, and a resource shared with an account
+    /// cannot be shared on again, so the shared-resource listings are the CONSUMER's
+    /// inventory ("the report groups shared with the current Amazon Web Services account
+    /// or user"). A resource is therefore reported exactly while another account owns it
+    /// ([`owned_by_another_account`]) and the policy attached to it grants this account
+    /// ([`policy_grants_account`]) — so attaching a policy to a resource of this
+    /// account's own, whatever principal it names, lists nothing here, and this
+    /// account's own listings and its shared listing partition the store between them.
+    pub fn shared_with_this_account(&self, arn: &str) -> bool {
+        if !owned_by_another_account(arn) {
+            return false;
+        }
+        self.resource_policies.get(arn).is_some_and(|stored| {
+            policy_grants_account(&stored.policy, ::emulator_server::emulator_account_id())
+        })
     }
 
     /// Drop the build project `name` identifies, reporting whether this account
@@ -2984,6 +3075,40 @@ fn resource_from_arn<'a>(arn: &'a str, prefix: &str) -> Option<&'a str> {
     fields.next()?;
     let resource = fields.next()?.strip_prefix(prefix)?;
     (!resource.is_empty()).then_some(resource)
+}
+
+/// The account field of `arn` — the fifth of its six colon-separated fields — or `None`
+/// when the value is not an ARN, or names no account.
+///
+/// The one place the OWNER of an ARN is read, for any service's ARN rather than only
+/// this one's: the resources this service lists are its own
+/// (`arn:aws:codebuild:<region>:<account>:…`), while the principal an IAM ARN in a
+/// resource policy names is `arn:aws:iam::<account>:…`, whose region field is empty.
+/// Walked field by field, the way [`resource_from_arn`] walks one, so reading an owner
+/// allocates nothing.
+pub fn arn_account(arn: &str) -> Option<&str> {
+    let mut fields = arn.splitn(6, ':');
+    if fields.next()? != "arn" {
+        return None;
+    }
+    // The partition and the service, then the region, which an IAM ARN leaves empty.
+    fields.next()?;
+    fields.next()?;
+    fields.next()?;
+    let account = fields.next()?;
+    (!account.is_empty()).then_some(account)
+}
+
+/// Whether `arn` names a resource owned by an account OTHER than the one this emulator
+/// serves — a FOREIGN resource, which this account can only have been given access to.
+///
+/// Ownership is the ARN's own account field ([`arn_account`]) against the one account
+/// every ARN this emulator mints carries, so it is a property of the record rather than
+/// of the request: it is what tells the resources this account holds apart from the ones
+/// another account shared WITH it. A value naming no account at all is no evidence of a
+/// foreign owner, so it is not taken for one.
+pub fn owned_by_another_account(arn: &str) -> bool {
+    arn_account(arn).is_some_and(|account| account != ::emulator_server::emulator_account_id())
 }
 
 /// The project name an `arn:<partition>:codebuild:<region>:<account>:project/<name>`

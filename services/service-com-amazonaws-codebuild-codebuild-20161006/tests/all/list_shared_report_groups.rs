@@ -3,18 +3,19 @@
 //! `ListSharedReportGroups`, over the wire the router serves: `POST /` with
 //! `X-Amz-Target: CodeBuild_20161006.ListSharedReportGroups` on awsJson1_1.
 //!
-//! RULE: the listing reports the ARNs of exactly those report groups of the account that
-//! carry a resource-based sharing policy — the record a report group is shared with other
-//! accounts or users by — ordered by the criterion and direction the request asks for,
-//! cut into pages of at most `maxResults` entries that `nextToken` resumes; a policy held
-//! for another resource kind lists no report group; and the read leaves the store exactly
-//! as it found it.
+//! RULE: the listing is the CONSUMER's side of a one-directional relationship — it
+//! reports the ARNs of exactly those report groups that ANOTHER account owns and whose
+//! resource-based policy grants this account, never one this account owns, however many
+//! policies that one carries — ordered by the criterion and direction the request asks
+//! for, cut into pages of at most `maxResults` entries that `nextToken` resumes; a policy
+//! held for another resource kind lists no report group; and the read leaves the store
+//! exactly as it found it.
 //!
-//! The sharing record is seeded straight into the service's state here, the way
-//! `list_shared_projects` beside this one seeds the sibling listing's: seeding it is what
-//! proves this listing is computed from the store rather than from the request, and the
-//! operation that stores one over the wire (`PutResourcePolicy`) is covered by
-//! `resource_policy`.
+//! Who OWNS a report group is the account field of the ARN it is stored with, so a group
+//! another account owns is seeded by storing it under that account's ARN, and the sharing
+//! record straight into the service's state beside it — seeding is what proves this
+//! listing is computed from the store rather than from the request, and the operation that
+//! stores a policy over the wire (`PutResourcePolicy`) is covered by `resource_policy`.
 //!
 //! The harness (`call`, `emulator_on`, `error_type`, `REGION`) is the one
 //! `project_build_lifecycle` already drives this service with, and the report-group
@@ -31,16 +32,39 @@ use smithy_server_runtime::MultiServiceRouter;
 use super::project_build_lifecycle::{call, emulator_on, error_type, REGION};
 use super::report_group_lifecycle::create_report_group_body;
 
-/// A resource-based policy document granting another account read access to `arn` — the
+/// An account that is NOT the one this emulator serves: the owner of every report group
+/// below that is shared WITH this account.
+const ANOTHER_ACCOUNT: &str = "222222222222";
+
+/// A third account, which neither owns nor is granted anything here — what a grant
+/// written for somebody else names.
+const THIRD_ACCOUNT: &str = "333333333333";
+
+/// The account this emulator serves, read out of an ARN it mints rather than written out
+/// here, so the table below cannot drift from the account the handlers compare against.
+fn this_account() -> String {
+    let minted = state::report_group_arn(REGION, "account-probe");
+    state::arn_account(&minted)
+        .unwrap_or_else(|| panic!("an ARN this emulator mints names its account: {minted}"))
+        .to_string()
+}
+
+/// The ARN a report group named `name` carries in `account`:
+/// `arn:aws:codebuild:<region>:<account>:report-group/<name>`, the form
+/// `state::report_group_arn` mints for this account's own.
+fn report_group_arn_in(account: &str, name: &str) -> String {
+    format!("arn:aws:codebuild:{REGION}:{account}:report-group/{name}")
+}
+
+/// A resource-based policy document granting `principal` read access to `arn` — the
 /// read-only consumer actions the CodeBuild user guide's "Sharing a report group"
-/// describes. Its CONTENT is not what this listing reads (the attachment is), so one
-/// document serves every row.
-fn sharing_policy(arn: &str) -> String {
+/// describes.
+fn sharing_policy(arn: &str, principal: &str) -> String {
     json!({
         "Version": "2012-10-17",
         "Statement": [{
             "Effect": "Allow",
-            "Principal": {"AWS": "arn:aws:iam::222222222222:root"},
+            "Principal": {"AWS": principal},
             "Action": ["codebuild:BatchGetReportGroups", "codebuild:BatchGetReports"],
             "Resource": arn,
         }],
@@ -48,8 +72,14 @@ fn sharing_policy(arn: &str) -> String {
     .to_string()
 }
 
-/// Attach a sharing policy to `arn` in the store the handlers read.
-fn share(engine: &engine::InMemoryEngine, arn: &str) {
+/// Attach a policy granting `principal` to `arn` in the store the handlers read.
+fn share(engine: &engine::InMemoryEngine, arn: &str, principal: &str) {
+    attach(engine, arn, sharing_policy(arn, principal));
+}
+
+/// Attach `document` to `arn` in the store the handlers read, whatever that document
+/// says — the seam the rows that vary the DOCUMENT rather than the principal use.
+fn attach(engine: &engine::InMemoryEngine, arn: &str, document: String) {
     engine
         .state::<CodeBuildState>()
         .lock()
@@ -57,10 +87,25 @@ fn share(engine: &engine::InMemoryEngine, arn: &str) {
         .insert(
             arn.to_string(),
             StoredResourcePolicy {
-                policy: sharing_policy(arn),
+                policy: document,
                 last_modified_millis: state::now_millis(),
             },
         );
+}
+
+/// Hand the report group `name` over to `account`, as the store holds a group that
+/// account owns, and answer the ARN it is now stored with: the stored ARN is the whole
+/// record of who owns a resource.
+fn owned_by(engine: &engine::InMemoryEngine, account: &str, name: &str) -> String {
+    let arn = report_group_arn_in(account, name);
+    let store = engine.state::<CodeBuildState>();
+    let mut held = store.lock();
+    let stored = held
+        .report_groups
+        .get_mut(name)
+        .unwrap_or_else(|| panic!("the store holds {name:?} after CreateReportGroup"));
+    stored.report_group.arn = Some(arn.clone());
+    arn
 }
 
 /// Create `names` as report groups of the account and hand back the ARN each was stored
@@ -124,55 +169,217 @@ pub(crate) fn listed(body: &Value, case: &str) -> Vec<String> {
         .collect()
 }
 
-/// RULE: exactly the report groups carrying a sharing policy are listed, whatever else
-/// the store holds.
+/// One seeded report group of a row of the table below: its name, the account that owns
+/// it, the principal the policy attached to it grants (`None`: no policy at all), and
+/// whether the shared listing must report it.
+struct Seeded {
+    name: &'static str,
+    owner: String,
+    principal: Option<String>,
+    shared: bool,
+}
+
+/// Seed `groups` into a fresh emulator and hand back the router, the engine and the ARN
+/// each group ended up stored with.
+async fn seed(
+    groups: &[Seeded],
+) -> (MultiServiceRouter, Arc<engine::InMemoryEngine>, Vec<String>) {
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    let router = emulator_on(Arc::clone(&engine));
+    let names: Vec<&str> = groups.iter().map(|group| group.name).collect();
+    create_report_groups(&router, &names).await;
+    let mut arns = Vec::new();
+    for group in groups {
+        let arn = owned_by(&engine, &group.owner, group.name);
+        if let Some(principal) = group.principal.as_deref() {
+            share(&engine, &arn, principal);
+        }
+        arns.push(arn);
+    }
+    (router, engine, arns)
+}
+
+/// RULE: exactly the report groups ANOTHER account owns and has shared with this account
+/// are listed — a group this account owns never is, whatever policy it carries — and the
+/// account's own listing reports exactly the groups it owns, so the two listings
+/// partition the store.
 #[tokio::test]
-async fn only_the_report_groups_carrying_a_sharing_policy_are_listed() {
-    // The rows differ along how many of the account's report groups are shared: none,
-    // the only one, one of three, a middle subset and all of them. `shared` indexes into
-    // `names`.
-    let cases: [(&str, &[&str], &[usize]); 5] = [
-        ("an account that shares nothing", &["alpha", "bravo"], &[]),
-        ("an account whose only group is shared", &["alpha"], &[0]),
+async fn only_the_report_groups_another_account_shared_with_this_one_are_listed() {
+    let this = this_account();
+    let own_root = format!("arn:aws:iam::{this}:root");
+    let another_root = format!("arn:aws:iam::{ANOTHER_ACCOUNT}:root");
+    let third_root = format!("arn:aws:iam::{THIRD_ACCOUNT}:root");
+
+    // The rows differ along the direction of the sharing relationship and along the
+    // principal a grant names: nothing shared either way, this account's own group
+    // policied for itself and for somebody else, one and several groups another account
+    // shared with this one, a foreign group granted to a third account, a foreign group
+    // carrying no policy at all, and each form a grant names this account by.
+    let rows: Vec<(&str, Vec<Seeded>)> = vec![
         (
-            "one of three shared",
-            &["alpha", "bravo", "charlie"],
-            &[1],
+            "an account that shares nothing and is shared nothing",
+            vec![
+                Seeded {
+                    name: "alpha",
+                    owner: this.clone(),
+                    principal: None,
+                    shared: false,
+                },
+                Seeded {
+                    name: "bravo",
+                    owner: this.clone(),
+                    principal: None,
+                    shared: false,
+                },
+            ],
         ),
         (
-            "two of three shared",
-            &["alpha", "bravo", "charlie"],
-            &[0, 2],
+            "the owner's own group, policied for its own root principal",
+            vec![Seeded {
+                name: "alpha",
+                owner: this.clone(),
+                principal: Some(own_root.clone()),
+                shared: false,
+            }],
         ),
         (
-            "all three shared",
-            &["alpha", "bravo", "charlie"],
-            &[0, 1, 2],
+            "the owner's own group, shared OUT to another account",
+            vec![Seeded {
+                name: "alpha",
+                owner: this.clone(),
+                principal: Some(another_root.clone()),
+                shared: false,
+            }],
+        ),
+        (
+            "one group another account shared with this one",
+            vec![Seeded {
+                name: "alpha",
+                owner: ANOTHER_ACCOUNT.to_string(),
+                principal: Some(own_root.clone()),
+                shared: true,
+            }],
+        ),
+        (
+            "two shared with this one, beside an owned group policied for itself",
+            vec![
+                Seeded {
+                    name: "alpha",
+                    owner: ANOTHER_ACCOUNT.to_string(),
+                    principal: Some(own_root.clone()),
+                    shared: true,
+                },
+                Seeded {
+                    name: "bravo",
+                    owner: this.clone(),
+                    principal: Some(own_root.clone()),
+                    shared: false,
+                },
+                Seeded {
+                    name: "charlie",
+                    owner: THIRD_ACCOUNT.to_string(),
+                    principal: Some(own_root.clone()),
+                    shared: true,
+                },
+            ],
+        ),
+        (
+            "a foreign group whose grant names a third account",
+            vec![Seeded {
+                name: "alpha",
+                owner: ANOTHER_ACCOUNT.to_string(),
+                principal: Some(third_root.clone()),
+                shared: false,
+            }],
+        ),
+        (
+            "a foreign group carrying no policy at all",
+            vec![Seeded {
+                name: "alpha",
+                owner: ANOTHER_ACCOUNT.to_string(),
+                principal: None,
+                shared: false,
+            }],
+        ),
+        (
+            "every principal form a grant names this account by",
+            vec![
+                Seeded {
+                    name: "wildcard",
+                    owner: ANOTHER_ACCOUNT.to_string(),
+                    principal: Some("*".to_string()),
+                    shared: true,
+                },
+                Seeded {
+                    name: "bare-account-id",
+                    owner: ANOTHER_ACCOUNT.to_string(),
+                    principal: Some(this.clone()),
+                    shared: true,
+                },
+                Seeded {
+                    name: "root-arn",
+                    owner: ANOTHER_ACCOUNT.to_string(),
+                    principal: Some(own_root.clone()),
+                    shared: true,
+                },
+                Seeded {
+                    name: "role-arn",
+                    owner: ANOTHER_ACCOUNT.to_string(),
+                    principal: Some(format!("arn:aws:iam::{this}:role/consumer")),
+                    shared: true,
+                },
+            ],
         ),
     ];
 
-    for (case, names, shared) in cases {
-        let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
-        let router = emulator_on(Arc::clone(&engine));
-        let arns = create_report_groups(&router, names).await;
-        for index in shared {
-            share(&engine, &arns[*index]);
-        }
-        // A policy for the other resource kind CodeBuild shares: it names no report
-        // group, so it must list none.
-        share(&engine, &state::project_arn(REGION, "shared-project"));
+    for (case, groups) in rows {
+        let (router, engine, arns) = seed(&groups).await;
+        // A policy on the other resource kind CodeBuild shares, owned elsewhere and
+        // granted to this account: it names no report group, so it must list none.
+        share(
+            &engine,
+            &format!("arn:aws:codebuild:{REGION}:{ANOTHER_ACCOUNT}:project/shared-project"),
+            &own_root,
+        );
 
-        let mut expected: Vec<String> = shared.iter().map(|index| arns[*index].clone()).collect();
+        let mut expected: Vec<String> = groups
+            .iter()
+            .zip(&arns)
+            .filter(|(group, _)| group.shared)
+            .map(|(_, arn)| arn.clone())
+            .collect();
         expected.sort();
         let body = list(&router, json!({})).await;
         assert_eq!(
             listed(&body, case),
             expected,
-            "case {case:?}: expected the shared report groups {expected:?}, got {body}"
+            "case {case:?}: expected the report groups shared with this account \
+             {expected:?}, got {body}"
         );
         assert!(
             body["nextToken"].is_null(),
             "case {case:?}: one page holds every entry, so no nextToken may be stated, got {body}"
+        );
+
+        // The mirror: the account's OWN listing reports exactly the groups it owns, so a
+        // group is in one listing or the other and never in both.
+        let mut owned: Vec<String> = groups
+            .iter()
+            .zip(&arns)
+            .filter(|(group, _)| group.owner == this)
+            .map(|(_, arn)| arn.clone())
+            .collect();
+        owned.sort();
+        let (status, held_body) = call(&router, "ListReportGroups", json!({})).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: ListReportGroups must succeed, got {status} with {held_body}"
+        );
+        assert_eq!(
+            listed(&held_body, case),
+            owned,
+            "case {case:?}: the account's own listing reports exactly the groups it owns \
+             {owned:?}, got {held_body}"
         );
 
         // The read is reporting only: a second call answers the same thing and the store
@@ -184,12 +391,122 @@ async fn only_the_report_groups_carrying_a_sharing_policy_are_listed() {
         );
         let store = engine.state::<CodeBuildState>();
         let held = store.lock();
+        let policies = groups
+            .iter()
+            .filter(|group| group.principal.is_some())
+            .count()
+            + 1;
         assert_eq!(
             (held.report_groups.len(), held.resource_policies.len()),
-            (names.len(), shared.len() + 1),
+            (groups.len(), policies),
             "case {case:?}: a read must neither add to nor drop from the store"
         );
     }
+}
+
+/// RULE: a report group another account owns is reported only while the document attached
+/// to it ALLOWS something to a principal of this account — so a document that grants this
+/// account nothing lists nothing, whatever else it says.
+#[tokio::test]
+async fn a_document_that_allows_this_account_nothing_lists_nothing() {
+    let this = this_account();
+    let own_root = format!("arn:aws:iam::{this}:root");
+
+    // The rows differ along WHY the document grants this account nothing: it denies
+    // instead of allowing, it allows somebody else, it names no principal, it carries no
+    // statement, it is the smallest JSON object there is, and it allows this account
+    // under a principal form that names a service rather than an account.
+    let documents: Vec<(&str, String)> = vec![
+        (
+            "a statement that denies this account",
+            json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Deny",
+                    "Principal": {"AWS": own_root.clone()},
+                    "Action": ["codebuild:BatchGetReportGroups"],
+                }],
+            })
+            .to_string(),
+        ),
+        (
+            "an allow for a third account only",
+            json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"AWS": format!("arn:aws:iam::{THIRD_ACCOUNT}:root")},
+                    "Action": ["codebuild:BatchGetReportGroups"],
+                }],
+            })
+            .to_string(),
+        ),
+        (
+            "an allow naming no principal",
+            json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Action": ["codebuild:BatchGetReportGroups"],
+                }],
+            })
+            .to_string(),
+        ),
+        (
+            "no statement at all",
+            json!({"Version": "2012-10-17", "Statement": []}).to_string(),
+        ),
+        ("the smallest JSON object", "{}".to_string()),
+        (
+            "a principal that names a service",
+            json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"Service": "codebuild.amazonaws.com"},
+                    "Action": ["codebuild:BatchGetReportGroups"],
+                }],
+            })
+            .to_string(),
+        ),
+    ];
+
+    for (case, document) in documents {
+        let (router, engine, arns) = seed(&[Seeded {
+            name: "foreign-group",
+            owner: ANOTHER_ACCOUNT.to_string(),
+            principal: None,
+            shared: false,
+        }])
+        .await;
+        attach(&engine, &arns[0], document.clone());
+
+        let body = list(&router, json!({})).await;
+        assert_eq!(
+            listed(&body, case),
+            Vec::<String>::new(),
+            "case {case:?}: {document} grants this account nothing, so nothing is listed, \
+             got {body}"
+        );
+    }
+
+    // The control: the same foreign group with a document that DOES allow this account
+    // is listed, so the rows above fail for the reason they name rather than because the
+    // seeding never worked.
+    let (router, engine, arns) = seed(&[Seeded {
+        name: "foreign-group",
+        owner: ANOTHER_ACCOUNT.to_string(),
+        principal: None,
+        shared: false,
+    }])
+    .await;
+    share(&engine, &arns[0], &own_root);
+    let body = list(&router, json!({})).await;
+    assert_eq!(
+        listed(&body, "an allow for this account"),
+        vec![arns[0].clone()],
+        "the control row must be listed, got {body}"
+    );
 }
 
 /// RULE: the listing is ordered by the requested criterion in the requested direction —
@@ -197,13 +514,21 @@ async fn only_the_report_groups_carrying_a_sharing_policy_are_listed() {
 /// and an absent member takes the ascending-by-ARN default.
 #[tokio::test]
 async fn the_listing_is_ordered_by_the_requested_criterion_and_direction() {
-    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
-    let router = emulator_on(Arc::clone(&engine));
+    let this = this_account();
+    let own_root = format!("arn:aws:iam::{this}:root");
     let names = ["ord-a", "ord-b", "ord-c", "ord-d"];
-    let arns = create_report_groups(&router, &names).await;
-    for arn in &arns {
-        share(&engine, arn);
-    }
+    // Four report groups another account owns, every one of them shared with this one.
+    let groups: Vec<Seeded> = names
+        .iter()
+        .map(|name| Seeded {
+            name,
+            owner: ANOTHER_ACCOUNT.to_string(),
+            principal: Some(own_root.clone()),
+            shared: true,
+        })
+        .collect();
+    let (router, engine, arns) = seed(&groups).await;
+
     // The instant each group was last changed at, seeded as a fixed value rather than
     // taken from the clock, so the modified order DISAGREES with the ARN order and each
     // row below can only pass for its own criterion. `ord-c` and `ord-d` carry the same
@@ -235,7 +560,7 @@ async fn the_listing_is_ordered_by_the_requested_criterion_and_direction() {
     let by_modified_time: Vec<String> = {
         let mut stamped: Vec<(i64, String)> = stamps
             .iter()
-            .map(|(name, millis)| (*millis, state::report_group_arn(REGION, name)))
+            .map(|(name, millis)| (*millis, report_group_arn_in(ANOTHER_ACCOUNT, name)))
             .collect();
         stamped.sort();
         stamped.into_iter().map(|(_, arn)| arn).collect()
@@ -303,14 +628,19 @@ async fn the_listing_is_ordered_by_the_requested_criterion_and_direction() {
 /// whole ordering exactly once.
 #[tokio::test]
 async fn the_listing_pages_by_max_results_and_resumes_at_the_next_token() {
-    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
-    let router = emulator_on(Arc::clone(&engine));
-    let names: Vec<String> = (0..5).map(|index| format!("paged-{index}")).collect();
-    let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
-    let arns = create_report_groups(&router, &borrowed).await;
-    for arn in &arns {
-        share(&engine, arn);
-    }
+    let this = this_account();
+    let own_root = format!("arn:aws:iam::{this}:root");
+    let names = ["paged-0", "paged-1", "paged-2", "paged-3", "paged-4"];
+    let groups: Vec<Seeded> = names
+        .iter()
+        .map(|name| Seeded {
+            name,
+            owner: ANOTHER_ACCOUNT.to_string(),
+            principal: Some(own_root.clone()),
+            shared: true,
+        })
+        .collect();
+    let (router, _engine, arns) = seed(&groups).await;
     let mut expected = arns.clone();
     expected.sort();
 
@@ -375,8 +705,8 @@ async fn the_listing_pages_by_max_results_and_resumes_at_the_next_token() {
     // A token naming nothing in the listing is a bad input, not an empty page.
     for bogus in [
         "not-a-token".to_string(),
-        state::report_group_arn(REGION, "never-created"),
-        state::report_group_arn("eu-west-1", "paged-0"),
+        report_group_arn_in(ANOTHER_ACCOUNT, "never-created"),
+        state::report_group_arn(REGION, "paged-0"),
     ] {
         let (status, body) = call(
             &router,
