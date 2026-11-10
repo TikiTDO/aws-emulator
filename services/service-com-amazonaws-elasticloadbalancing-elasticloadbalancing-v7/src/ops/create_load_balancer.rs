@@ -499,7 +499,7 @@ fn collect_tags(
                     message,
                 })
             }
-            crate::state::TagRefusal::DuplicateKey(_) => {
+            crate::state::TagRefusal::DuplicateKey => {
                 CreateLoadBalancerErrorModeled::DuplicateTagKeysException(
                     DuplicateTagKeysException { message },
                 )

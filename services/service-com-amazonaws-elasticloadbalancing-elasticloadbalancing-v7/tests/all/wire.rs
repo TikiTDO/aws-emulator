@@ -7,16 +7,32 @@
 //! multi-service router — the same path `core/router` serves — so what is checked is the
 //! emulator's HTTP behaviour, not a handler called directly.
 //!
+//! What a health check of a registered instance observes is a fact Amazon EC2 owns, so the
+//! harness also assembles the two services on ONE engine ([`emulator_with_ec2`]), sends an
+//! ec2Query call ([`ec2_call`]), launches a backend through EC2's own API
+//! ([`launch_instance`]), moves one through EC2's own API and waits out the move EC2 owes it
+//! ([`move_instance`], [`settle_ec2_transition`]) and places a registration's stored instant
+//! in the past ([`age_registration`], and [`age_registrations`] for every registration of
+//! one load balancer) — once here, because every suite that drives an instance's health
+//! needs the same ones.
+//!
 //! Declared in `tests/all.rs` alongside the suites that use it, so there is ONE request
 //! builder and ONE envelope reader rather than a copy per suite.
 
 use bytes::Bytes;
+use service_com_amazonaws_ec2_amazonec2 as ec2_service;
+use service_com_amazonaws_ec2_amazonec2::state::TRANSITION_DELAY;
+use service_com_amazonaws_elasticloadbalancing_elasticloadbalancing_v7::state::ComAmazonawsElasticloadbalancingElasticloadbalancingV7State as ElbState;
 use service_com_amazonaws_elasticloadbalancing_elasticloadbalancing_v7::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// The service's model version, as every awsQuery request carries it.
 pub(crate) const API_VERSION: &str = "2012-06-01";
+
+/// The API version an ec2Query body names, as an EC2 client sends it.
+pub(crate) const EC2_API_VERSION: &str = "2016-11-15";
 
 /// The emulator under test: ONE shared engine with this service mounted on the
 /// multi-service router, exactly as the production router assembles it.
@@ -34,6 +50,176 @@ pub(crate) fn emulator_with_engine() -> (MultiServiceRouter, Arc<engine::InMemor
         .set_request_authentication(false)
         .register_service(EmulatedService::new(Arc::clone(&engine)));
     (router, engine)
+}
+
+/// The emulator with Amazon EC2 mounted BESIDE this service on the same engine, which is
+/// how the production router assembles them: a load balancer's health checks read the EC2
+/// inventory of that one engine, so a suite that drives an instance's health needs both
+/// services behind one front door.
+pub(crate) fn emulator_with_ec2() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    let mut router = MultiServiceRouter::new();
+    router
+        .set_request_authentication(false)
+        .register_service(EmulatedService::new(Arc::clone(&engine)))
+        .register_service(ec2_service::EmulatedService::new(Arc::clone(&engine)));
+    (router, engine)
+}
+
+/// POST one ec2Query action, signed for `region` and for the `ec2` service so the router
+/// hands it to the EC2 emulator.
+pub(crate) async fn ec2_call(
+    router: &MultiServiceRouter,
+    region: &str,
+    action: &str,
+    params: &[(String, String)],
+) -> Wire {
+    let mut body = format!("Action={action}&Version={EC2_API_VERSION}");
+    for (key, value) in params {
+        body.push('&');
+        body.push_str(&form_encode(key));
+        body.push('=');
+        body.push_str(&form_encode(value));
+    }
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/")
+        .header(
+            "authorization",
+            format!(
+                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{region}/ec2/aws4_request, \
+                 SignedHeaders=host, Signature=0123456789abcdef"
+            ),
+        )
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Bytes::from(body))
+        .expect("a well-formed request");
+    let response = router.dispatch(request).await;
+    Wire {
+        status: response.status().as_u16(),
+        content_type: response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string(),
+        body: String::from_utf8(response.body().to_vec()).expect("a UTF-8 XML body"),
+    }
+}
+
+/// The AMI a launch below names. Any well-formed image id: what a health check turns on is
+/// the state EC2 reports for the instance, not the image it came from.
+pub(crate) const AMI: &str = "ami-0123456789abcdef0";
+
+/// Launch ONE instance in `region` through EC2's OWN API and answer the id EC2 minted for
+/// it, so a backend a suite registers is a real EC2 resource rather than an id made up here.
+pub(crate) async fn launch_instance(
+    router: &MultiServiceRouter,
+    region: &str,
+    label: &str,
+) -> String {
+    let launched = ec2_call(
+        router,
+        region,
+        "RunInstances",
+        &[
+            param("ImageId", AMI),
+            param("MinCount", "1"),
+            param("MaxCount", "1"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        launched.status, 200,
+        "case {label:?}: RunInstances must answer 200, got {}",
+        launched.body
+    );
+    find(parse(&launched.body).root_element(), "instanceId")
+        .and_then(Element::text)
+        .unwrap_or_else(|| panic!("case {label:?}: RunInstances reported no instance"))
+        .to_string()
+}
+
+/// Move the stored registration of `instance_id` with `load_balancer_name` `back` into the
+/// past, so the health checks the clock owes it are due without a suite waiting for them.
+///
+/// The registrations beside it are left where they are, which is how one answer comes to
+/// carry registrations at different points of their timelines.
+pub(crate) fn age_registration(
+    engine: &engine::InMemoryEngine,
+    region: &str,
+    load_balancer_name: &str,
+    instance_id: &str,
+    back: Duration,
+) {
+    let state = engine.state::<ElbState>();
+    let mut guard = state.lock();
+    let record = guard
+        .load_balancers_in_mut(region)
+        .and_then(|records| records.get_mut(load_balancer_name))
+        .unwrap_or_else(|| panic!("case {load_balancer_name:?}: no stored load balancer"));
+    let at = record
+        .instances
+        .registered_at(instance_id)
+        .unwrap_or_else(|| {
+            panic!("case {load_balancer_name:?}: {instance_id} carries no registration")
+        });
+    let moved = at.checked_sub(back).unwrap_or_else(|| {
+        panic!("case {load_balancer_name:?}: {instance_id} cannot be aged by {back:?}")
+    });
+    assert!(
+        record.instances.restamp(instance_id, moved),
+        "case {load_balancer_name:?}: {instance_id} must still be registered"
+    );
+}
+
+/// [`age_registration`] for EVERY instance registered with one load balancer.
+pub(crate) fn age_registrations(
+    engine: &engine::InMemoryEngine,
+    region: &str,
+    load_balancer_name: &str,
+    back: Duration,
+) {
+    let registered: Vec<String> = {
+        let state = engine.state::<ElbState>();
+        let guard = state.lock();
+        guard
+            .load_balancers_in(region)
+            .and_then(|records| records.get(load_balancer_name))
+            .unwrap_or_else(|| panic!("case {load_balancer_name:?}: no stored load balancer"))
+            .instances
+            .iter()
+            .cloned()
+            .collect()
+    };
+    for instance_id in registered {
+        age_registration(engine, region, load_balancer_name, &instance_id, back);
+    }
+}
+
+/// Drive one EC2 instance-state action over `instance_id` through EC2's OWN API and let the
+/// move EC2 owes it fall due, so the state EC2 reports afterwards is the terminal one the
+/// action asked for.
+pub(crate) async fn move_instance(
+    router: &MultiServiceRouter,
+    region: &str,
+    case: &str,
+    action: &str,
+    instance_id: &str,
+) {
+    let moved = ec2_call(router, region, action, &[param("InstanceId.1", instance_id)]).await;
+    assert_eq!(
+        moved.status, 200,
+        "case {case:?}: {action} must answer 200, got {}",
+        moved.body
+    );
+    settle_ec2_transition().await;
+}
+
+/// Wait until a state change EC2 started before now has certainly fallen due. Derived from
+/// EC2's own span, not a literal, so the two cannot drift.
+pub(crate) async fn settle_ec2_transition() {
+    ::tokio::time::sleep(TRANSITION_DELAY + Duration::from_millis(200)).await;
 }
 
 /// One wire answer: the HTTP status, the `Content-Type` it was answered with, and the XML

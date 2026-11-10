@@ -6,12 +6,12 @@
 //! The rule under test: the operation answers ONE `InstanceState` member per described
 //! instance — every instance registered with the named load balancer, or every instance
 //! the request's `Instances` filter names — and each member's `State`, `ReasonCode` and
-//! `Description` are projected together from that instance's stored registration and the
-//! load balancer's health check:
+//! `Description` are projected together from the verdict that instance's health checks
+//! have reached with this load balancer:
 //!
 //! * an instance the load balancer does not hold is `OutOfService` / `ELB` /
 //!   "Instance is not currently registered with the LoadBalancer.";
-//! * a registered instance whose owed health checks have not fallen due yet is
+//! * a registered instance whose checks have not reached a verdict yet is
 //!   `OutOfService` / `ELB` / "Instance registration is still in progress.";
 //! * once `UnhealthyThreshold` consecutive checks are due — the instances these rows
 //!   register are ids the account's EC2 inventory holds no instance for, so nothing stands
@@ -25,7 +25,7 @@
 //! Asserted over a TABLE whose rows differ in the configured `UnhealthyThreshold`
 //! (including both modelled bounds), in how many instances are registered, and in whether
 //! the request filters by `Instances` — and at each point of the timeline, which is placed
-//! by moving the stored registration instant back rather than by sleeping.
+//! by moving the stored registration back rather than by sleeping.
 
 use super::wire::{call, emulator_with_engine, kid_text, members, param, parse, Wire};
 use service_com_amazonaws_elasticloadbalancing_elasticloadbalancing_v7::state::{
@@ -187,34 +187,11 @@ fn timeline_cases() -> Vec<Case> {
     ]
 }
 
-/// Move the registration instant of every instance of one load balancer `back` into the
-/// past, so the health checks the clock owes are due without the test waiting for them.
-fn age_registrations(
-    engine: &engine::InMemoryEngine,
-    case: &Case,
-    back: Duration,
-) {
-    let state = engine.state::<ElbState>();
-    let mut guard = state.lock();
-    let record = guard
-        .load_balancers_in_mut(case.region)
-        .and_then(|records| records.get_mut(case.name))
-        .unwrap_or_else(|| panic!("case {:?}: no stored load balancer", case.name));
-    let registered: Vec<String> = record.instances.iter().cloned().collect();
-    for instance_id in registered {
-        let at = record
-            .instances
-            .registered_at(&instance_id)
-            .unwrap_or_else(|| panic!("case {:?}: {instance_id} carries no registration", case.name));
-        let moved = at
-            .checked_sub(back)
-            .unwrap_or_else(|| panic!("case {:?}: {instance_id} cannot be aged", case.name));
-        assert!(
-            record.instances.restamp(&instance_id, moved),
-            "case {:?}: {instance_id} must still be registered",
-            case.name
-        );
-    }
+/// Move the registration instant of every instance of one case's load balancer `back`
+/// into the past, so the health checks the clock owes are due without the test waiting for
+/// them — the shared seam (`super::wire`), read against this case's own load balancer.
+fn age_registrations(engine: &engine::InMemoryEngine, case: &Case, back: Duration) {
+    super::wire::age_registrations(engine, case.region, case.name, back);
 }
 
 /// What this case's describe answers now.

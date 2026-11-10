@@ -484,14 +484,17 @@ async fn add_tags_refuses_with_the_modelled_error_and_stores_nothing() {
             names: vec!["tag-refusal-elb"],
             tags: vec![tag("env", Some("prod")), tag("env", Some("staging"))],
             code: "DuplicateTagKeys",
-            message: "Tag key 'env' was specified more than once",
+            // `DuplicateTagKeys` is FIXED text in full: the two rows state different keys
+            // and earn the identical sentence, which names neither the key nor the load
+            // balancer.
+            message: "Duplicate Tag Keys found in the request. Tag keys should be unique.",
         },
         RefusalCase {
             case: "one key stated twice, once without a value",
             names: vec!["tag-refusal-elb"],
             tags: vec![tag("owner", None), tag("owner", Some("ops"))],
             code: "DuplicateTagKeys",
-            message: "Tag key 'owner' was specified more than once",
+            message: "Duplicate Tag Keys found in the request. Tag keys should be unique.",
         },
         RefusalCase {
             // `LoadBalancerNames` is `@required`, so a request carrying no name at all is

@@ -15,12 +15,16 @@
 mod described_load_balancer_policies;
 #[path = "all/documented_rule_refusals.rs"]
 mod documented_rule_refusals;
+#[path = "all/duplicate_tag_key_refusal.rs"]
+mod duplicate_tag_key_refusal;
 #[path = "all/elbv2_listener_chain_on_the_shared_endpoint.rs"]
 mod elbv2_listener_chain_on_the_shared_endpoint;
 #[path = "all/health_check_relation_message_text.rs"]
 mod health_check_relation_message_text;
 #[path = "all/instance_health_follows_the_backend.rs"]
 mod instance_health_follows_the_backend;
+#[path = "all/instance_health_probe.rs"]
+mod instance_health_probe;
 #[path = "all/instance_health_timeline.rs"]
 mod instance_health_timeline;
 #[path = "all/listeners_health_check_and_attributes.rs"]

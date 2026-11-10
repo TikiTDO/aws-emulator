@@ -175,7 +175,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 crate::state::TagRefusal::TooMany => {
                     AddTagsErrorModeled::TooManyTagsException(TooManyTagsException { message })
                 }
-                crate::state::TagRefusal::DuplicateKey(_) => {
+                crate::state::TagRefusal::DuplicateKey => {
                     AddTagsErrorModeled::DuplicateTagKeysException(DuplicateTagKeysException {
                         message,
                     })

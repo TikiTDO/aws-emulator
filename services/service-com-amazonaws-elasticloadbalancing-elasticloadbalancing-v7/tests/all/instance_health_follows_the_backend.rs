@@ -24,116 +24,25 @@
 //! registration back ([`crate::state::InstanceSet::restamp`], the seam the sibling
 //! timeline suite uses), never by sleeping for the checks.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use ::service_com_amazonaws_ec2_amazonec2 as ec2_service;
-use ::service_com_amazonaws_ec2_amazonec2::state::TRANSITION_DELAY;
 use service_com_amazonaws_elasticloadbalancing_elasticloadbalancing_v7::state::{
-    ComAmazonawsElasticloadbalancingElasticloadbalancingV7State as ElbState,
     DESCRIPTION_INSTANCE_STOPPED, DESCRIPTION_INSTANCE_TERMINATED, HEALTH_CHECK_SPAN,
     HEALTH_FAILED_HEALTH_CHECKS, HEALTH_IN_SERVICE, HEALTH_REGISTRATION_IN_PROGRESS,
     InstanceHealth, REASON_CODE_INSTANCE, STATE_OUT_OF_SERVICE,
 };
-use service_com_amazonaws_elasticloadbalancing_elasticloadbalancing_v7::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
 
-use super::wire::{call, find, form_encode, kid_text, members, param, parse, Element, Wire};
+use super::wire::{
+    age_registration, call, emulator_with_ec2, kid_text, launch_instance, members, param, parse,
+    settle_ec2_transition,
+};
 
 /// The region every call here is signed for.
 const REGION: &str = "us-east-1";
 
-/// The API version an ec2Query body names, as EC2's own harness sends it.
-const EC2_API_VERSION: &str = "2016-11-15";
-
-/// The AMI a launch names. Any well-formed image id: what the rows turn on is the state
-/// EC2 reports for the instance, not what it was launched from.
-const AMI: &str = "ami-0123456789abcdef0";
-
-/// The emulator under test: ONE shared engine with the Classic Elastic Load Balancing
-/// service and EC2 mounted on it, which is how the production router assembles them — the
-/// load balancer's health checks read the EC2 inventory of that same engine.
-fn emulator_with_ec2() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
-    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
-    let mut router = MultiServiceRouter::new();
-    router
-        .set_request_authentication(false)
-        .register_service(EmulatedService::new(Arc::clone(&engine)))
-        .register_service(ec2_service::EmulatedService::new(Arc::clone(&engine)));
-    (router, engine)
-}
-
-/// POST one ec2Query action, signed for the `ec2` service so the router hands it to the
-/// EC2 emulator.
-async fn ec2_call(router: &MultiServiceRouter, action: &str, params: &[(String, String)]) -> Wire {
-    let mut body = format!("Action={action}&Version={EC2_API_VERSION}");
-    for (key, value) in params {
-        body.push('&');
-        body.push_str(&form_encode(key));
-        body.push('=');
-        body.push_str(&form_encode(value));
-    }
-    let request = ::http::Request::builder()
-        .method("POST")
-        .uri("/")
-        .header(
-            "authorization",
-            format!(
-                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{REGION}/ec2/aws4_request, \
-                 SignedHeaders=host, Signature=0123456789abcdef"
-            ),
-        )
-        .header("content-type", "application/x-www-form-urlencoded")
-        .body(::bytes::Bytes::from(body))
-        .expect("a well-formed request");
-    let response = router.dispatch(request).await;
-    Wire {
-        status: response.status().as_u16(),
-        content_type: String::new(),
-        body: String::from_utf8(response.body().to_vec()).expect("a UTF-8 XML body"),
-    }
-}
-
-/// Launch one instance through EC2 and answer the id EC2 minted for it.
-async fn launch_instance(router: &MultiServiceRouter, case: &str) -> String {
-    let launched = ec2_call(
-        router,
-        "RunInstances",
-        &[
-            param("ImageId", AMI),
-            param("MinCount", "1"),
-            param("MaxCount", "1"),
-        ],
-    )
-    .await;
-    assert_eq!(
-        launched.status, 200,
-        "case {case:?}: RunInstances must answer 200, got {}",
-        launched.body
-    );
-    let doc = parse(&launched.body);
-    find(doc.root_element(), "instanceId")
-        .and_then(Element::text)
-        .unwrap_or_else(|| panic!("case {case:?}: RunInstances reported no instance: {}", launched.body))
-        .to_string()
-}
-
-/// Drive one EC2 instance-state action over `instance_id` and let the move EC2 owes it
-/// fall due, so the state EC2 reports is the terminal one the action asked for.
+/// Drive one EC2 instance-state action over `instance_id`: the shared seam, in this suite's
+/// own region.
 async fn move_instance(router: &MultiServiceRouter, case: &str, action: &str, instance_id: &str) {
-    let moved = ec2_call(router, action, &[param("InstanceId.1", instance_id)]).await;
-    assert_eq!(
-        moved.status, 200,
-        "case {case:?}: {action} must answer 200, got {}",
-        moved.body
-    );
-    settle_ec2_transition().await;
-}
-
-/// Wait until a state change EC2 started before now has certainly fallen due. Derived from
-/// EC2's own span, not a literal, so the two cannot drift.
-async fn settle_ec2_transition() {
-    ::tokio::time::sleep(TRANSITION_DELAY + Duration::from_millis(200)).await;
+    super::wire::move_instance(router, REGION, case, action, instance_id).await;
 }
 
 /// The health triple of one `InstanceState` member: `(State, ReasonCode, Description)`.
@@ -363,33 +272,6 @@ async fn health(router: &MultiServiceRouter, name: &str, instance_id: &str) -> T
     )
 }
 
-/// Move the stored registration of `instance_id` `back` into the past, so the health
-/// checks the clock owes it are due without this suite waiting for them.
-fn age_registration(
-    engine: &engine::InMemoryEngine,
-    name: &str,
-    instance_id: &str,
-    back: Duration,
-) {
-    let state = engine.state::<ElbState>();
-    let mut guard = state.lock();
-    let record = guard
-        .load_balancers_in_mut(REGION)
-        .and_then(|records| records.get_mut(name))
-        .unwrap_or_else(|| panic!("case {name:?}: no stored load balancer"));
-    let at = record
-        .instances
-        .registered_at(instance_id)
-        .unwrap_or_else(|| panic!("case {name:?}: {instance_id} carries no registration"));
-    let moved = at
-        .checked_sub(back)
-        .unwrap_or_else(|| panic!("case {name:?}: {instance_id} cannot be aged"));
-    assert!(
-        record.instances.restamp(instance_id, moved),
-        "case {name:?}: {instance_id} must still be registered"
-    );
-}
-
 /// The reported state of a registered instance is the outcome of the checks against its
 /// backend, decided by the load balancer's own thresholds.
 #[tokio::test]
@@ -402,7 +284,7 @@ async fn instance_health_is_the_outcome_of_checking_the_registered_backend() {
             // launched for this row.
             Backend::Absent => "i-00000000000000bad".to_string(),
             _ => {
-                let launched = launch_instance(&router, case.name).await;
+                let launched = launch_instance(&router, REGION, case.name).await;
                 settle_ec2_transition().await;
                 match case.backend {
                     Backend::Stopped => {
@@ -435,6 +317,7 @@ async fn instance_health_is_the_outcome_of_checking_the_registered_backend() {
         let deciding = case.deciding_threshold();
         age_registration(
             &engine,
+            REGION,
             case.name,
             &instance_id,
             HEALTH_CHECK_SPAN.saturating_mul(deciding.saturating_sub(1)),
@@ -450,7 +333,7 @@ async fn instance_health_is_the_outcome_of_checking_the_registered_backend() {
 
         // The check that reaches the threshold: the verdict follows what the checks
         // observed about the backend.
-        age_registration(&engine, case.name, &instance_id, HEALTH_CHECK_SPAN);
+        age_registration(&engine, REGION, case.name, &instance_id, HEALTH_CHECK_SPAN);
         let settled = health(&router, case.name, &instance_id).await;
         assert_eq!(
             settled,
@@ -504,7 +387,7 @@ async fn a_verdict_moves_only_once_the_threshold_of_checks_disagrees_with_it() {
         backend: Backend::Running,
     };
 
-    let instance_id = launch_instance(&router, name).await;
+    let instance_id = launch_instance(&router, REGION, name).await;
     settle_ec2_transition().await;
     create_load_balancer(&router, name).await;
     configure_health_check(&router, &case).await;
@@ -513,6 +396,7 @@ async fn a_verdict_moves_only_once_the_threshold_of_checks_disagrees_with_it() {
     // The answered checks put it in service.
     age_registration(
         &engine,
+        REGION,
         name,
         &instance_id,
         HEALTH_CHECK_SPAN.saturating_mul(2),
@@ -528,7 +412,7 @@ async fn a_verdict_moves_only_once_the_threshold_of_checks_disagrees_with_it() {
     // configured run of them has.
     move_instance(&router, name, "StopInstances", &instance_id).await;
     for failed in 1..case.unhealthy_threshold {
-        age_registration(&engine, name, &instance_id, HEALTH_CHECK_SPAN);
+        age_registration(&engine, REGION, name, &instance_id, HEALTH_CHECK_SPAN);
         let holding = health(&router, name, &instance_id).await;
         assert_eq!(
             holding,
@@ -537,7 +421,7 @@ async fn a_verdict_moves_only_once_the_threshold_of_checks_disagrees_with_it() {
             case.unhealthy_threshold
         );
     }
-    age_registration(&engine, name, &instance_id, HEALTH_CHECK_SPAN);
+    age_registration(&engine, REGION, name, &instance_id, HEALTH_CHECK_SPAN);
     let moved = health(&router, name, &instance_id).await;
     assert_eq!(
         moved,
@@ -551,6 +435,7 @@ async fn a_verdict_moves_only_once_the_threshold_of_checks_disagrees_with_it() {
     move_instance(&router, name, "StartInstances", &instance_id).await;
     age_registration(
         &engine,
+        REGION,
         name,
         &instance_id,
         HEALTH_CHECK_SPAN.saturating_mul(u32::try_from(case.healthy_threshold).expect("a threshold")),
