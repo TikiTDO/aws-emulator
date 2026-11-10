@@ -22,10 +22,12 @@ http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 # Hex is the alphabet the modelled DescribeReportDefinitions NextToken pattern allows,
-# so pagination tokens are hex-encoded report names.
+# so a pagination token is the hex of its authenticated cursor.
 hex = { workspace = true }
 # `validation_message`: how a boundary constraint refusal is worded, shared so this
 # service's envelope and its `@pattern` rendering cannot drift from the other services'.
+# `page_tokens`: the secret a paginated read authenticates its continuation tokens under,
+# so a token this service did not issue is refused rather than served.
 service-common = { path = "../common" }
 
 [build-dependencies]

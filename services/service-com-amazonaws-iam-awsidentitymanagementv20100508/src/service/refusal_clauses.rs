@@ -11,13 +11,13 @@
 //! * the VALUE half is dropped. A refusal of IAM's states the member and the requirement and
 //!   nothing the request carried — for a value outside a declared bound, outside an
 //!   enumerated set, outside a member's `@pattern`, and for a SCALAR member that was absent;
-//! * a `@pattern` requirement on a member of the input ITSELF quotes the expression the way
-//!   AWS publishes one for a member: without the pair of anchors the model writes around a
-//!   whole-value expression ([`::service_common::validation::unanchored`]). The CHECK still
-//!   runs the model's pattern as written; only the rendering drops the pair. A `@pattern`
-//!   requirement about a value NESTED inside a collection keeps the framework's own clause
-//!   instead — the value it carried and the expression as the model writes it — which is what
-//!   IAM states for one;
+//! * a `@pattern` requirement quotes the expression the way AWS publishes one for a member:
+//!   without the pair of anchors the model writes around a whole-value expression
+//!   ([`::service_common::validation::unanchored`]). The CHECK still runs the model's pattern
+//!   as written; only the rendering drops the pair. The member a clause is about is the
+//!   member the model constrained, whether the value reached it at the top of an operation's
+//!   input or inside one of its collections, so one key of a list is stated the same way as
+//!   the input's own member;
 //! * an enumerated set is stated in the order IAM publishes for that enum
 //!   ([`PUBLISHED_ENUM_ORDERS`]) rather than the model's declaration order.
 //!
@@ -197,28 +197,16 @@ fn absent_member_clause(violation: &Violation) -> Option<String> {
     without_the_value(violation)
 }
 
-/// Whether `path` names a member reached at the TOP of an operation's input, rather than a
-/// value nested inside one of its collections or structures.
-///
-/// A validation path spells nesting with `.`, so a single segment is a member of the input
-/// itself and anything longer is a value reached through it (`tagKeys.1.member` is one key of
-/// a list).
-fn names_a_top_level_member(path: &str) -> bool {
-    !path.contains('.')
-}
-
 /// The clause for a value outside its member's `@pattern`: the member and the expression,
 /// with the expression quoted as AWS publishes it and nothing of the value.
 ///
-/// That restatement is for a member of the input ITSELF. A value nested inside a collection
-/// keeps the framework's own clause — the value it carried and the model's expression as
-/// written — which is what IAM states for one
-/// (`tests/all/server_certificate_untag_input_bounds.rs` pins a tag key's, and
-/// `tests/all/validation_error_clauses.rs` the restated form over the input's own members).
+/// The restatement is about the MEMBER the model constrained, which a validation path names
+/// in its last segment — `tagKeys.1.member` is one key of a list, constrained by the key
+/// shape's own `@pattern` — so a value reached inside a collection is stated exactly as one
+/// supplied for a member of the input itself (`tests/all/validation_error_clauses.rs` pins
+/// the input's own members, `tests/all/server_certificate_untag_input_bounds.rs` one key of a
+/// list).
 fn pattern_clause(violation: &Violation, pattern: &str) -> Option<String> {
-    if !names_a_top_level_member(&violation.path) {
-        return None;
-    }
     let stated = without_the_value(violation)?;
     // The value half is already gone, so the only occurrence left is the requirement's own
     // quoting of the expression.

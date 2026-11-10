@@ -9,9 +9,15 @@
 //! it was last delivered. Insertion order is the enumeration order
 //! `DescribeReportDefinitions` pages over, which is what makes its pagination
 //! deterministic.
+//!
+//! The store also holds the secret its continuation tokens are authenticated under
+//! ([`PageTokenKey`]), which is what lets a paginated read tell a token it ISSUED from one
+//! a caller wrote for itself.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
+
+pub use ::service_common::page_tokens::PageTokenKey;
 
 use crate::ops::types::{
     ReportDefinition, ReportStatus, ResourceNotFoundException, Tag, ValidationException,
@@ -352,9 +358,24 @@ pub struct ComAmazonawsCostandusagereportserviceAwsorigamiservicegatewayserviceS
     /// a name lookup is a short scan, and the vector *is* the insertion order
     /// `DescribeReportDefinitions` pages over.
     pub reports: Vec<StoredReport>,
+    /// The secret THIS store's continuation tokens are authenticated under, drawn from
+    /// the system's randomness when the store is created ([`PageTokenKey`]).
+    ///
+    /// Private, and handed out only as a [`Copy`] of the key ([`Self::page_token_key`]),
+    /// so a token is minted and verified through the key the store holds rather than from
+    /// anything a request carries. A token minted under another store's key — another
+    /// emulator process, a restarted one — is therefore not a token this store issued.
+    page_token_key: PageTokenKey,
 }
 
 impl ComAmazonawsCostandusagereportserviceAwsorigamiservicegatewayserviceState {
+    /// This store's page-token secret, for the paginated read that mints and verifies a
+    /// `NextToken`. A `Copy` of the key, so a read can take it and go on to borrow the
+    /// reports it is about to report in the same call.
+    pub fn page_token_key(&self) -> PageTokenKey {
+        self.page_token_key
+    }
+
     /// The index of the report called `report_name`, if the account holds it.
     ///
     /// Report names are the resource's identity, and AWS report names are

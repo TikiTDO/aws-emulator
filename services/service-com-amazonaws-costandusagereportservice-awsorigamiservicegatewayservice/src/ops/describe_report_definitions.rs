@@ -131,9 +131,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
     /// List the report definitions this account holds, one page at a time.
     ///
-    /// A reporting operation: it only reads the store. The page starts at the report the
+    /// A reporting operation: it only reads the store. The page starts at the position the
     /// `NextToken` names (the beginning of the list when there is none), runs for at most
     /// `MaxResults` reports, and carries a `NextToken` only when reports remain after it.
+    ///
+    /// A `NextToken` is honoured only when THIS store minted it ([`encode_page_token`]):
+    /// the position it names travels inside it behind an authenticator, so a value a
+    /// caller wrote itself names no position and is refused.
     ///
     /// Each report on the page is the stored record projected onto the wire shape by
     /// [`crate::state::StoredReport::wire_definition`] — the definition as supplied plus
@@ -154,10 +158,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
         let store = state.lock();
+        let key = store.page_token_key();
 
         let start = match input.next_token.as_deref() {
             None | Some("") => 0,
-            Some(token) => resolve_page_token(token, &store)?,
+            Some(token) => resolve_page_token(token, key, &store)?,
         };
 
         // `MaxResults` is the page size. The model pins it to exactly 5
@@ -177,10 +182,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // Only a page with reports after it carries a token; the last page has none, so
         // a paginating client stops.
-        let next_token = store
-            .reports
-            .get(end)
-            .map(|next| encode_page_token(&next.definition.report_name));
+        let next_token = (end < store.reports.len()).then(|| encode_page_token(key, end));
 
         Ok(DescribeReportDefinitionsOutput {
             report_definitions: Some(page),
@@ -195,26 +197,42 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// ever pages by.
 const DEFAULT_PAGE_SIZE: usize = 5;
 
-/// The opaque pagination token for the report a page resumes at.
+/// The opaque pagination token for the position a page resumes at: that position behind
+/// the authenticator THIS store holds the secret for
+/// ([`crate::state::PageTokenKey::mint`]), rendered as hex.
 ///
-/// Hex of the report name: the modelled token pattern is `^[A-Za-z0-9_\.\-=]*$`, which a
-/// report name (pattern `^[0-9A-Za-z!\-_.*\'()]+$`) can leave, while hex digits are always
-/// inside it. The token is therefore opaque to the caller but resolvable back to the
-/// report it names.
-fn encode_page_token(report_name: &str) -> String {
-    hex::encode(report_name.as_bytes())
+/// The position travels inside the token rather than being it: a token that only has to
+/// have the right SHAPE is one a caller can write, and the page it would be served is a
+/// page this operation never offered. The authenticator is what no caller can produce, so
+/// what comes back from a caller is either a token this store minted or detectably not
+/// one.
+///
+/// Hex is the rendering because the modelled token pattern is `^[A-Za-z0-9_\.\-=]*$`,
+/// which hex digits are always inside, and because the authenticated bytes are not text.
+/// A position is a few digits, so the rendered token stays well inside `NextToken`'s
+/// modelled length of 0..256 — which the report NAME it used to carry (itself up to 256
+/// characters) would not.
+fn encode_page_token(key: crate::state::PageTokenKey, resume_at: usize) -> String {
+    hex::encode(key.mint(&resume_at.to_string()))
 }
 
 /// The index in `store` the token resumes at.
 ///
 /// Refused with a 400 `ValidationException` when the token is not one this operation
-/// issued, or names a report the account no longer holds: this operation models no
-/// client-input error of its own, so the framework's validation channel carries the
-/// refusal rather than a 501 (which would claim the operation is unimplemented) or a
-/// silent restart from the first report (which would hand a paginating client the same
-/// reports twice).
+/// issued — one that is not hex, one too short to carry an authenticator, one whose
+/// authenticator does not match the position it travels with (so one minted under another
+/// store's key as well), one whose position is no number, and one naming a position past
+/// the end of a store that has since shrunk: this operation models no client-input error
+/// of its own, so the framework's validation channel carries the refusal rather than a 501
+/// (which would claim the operation is unimplemented) or a silent restart from the first
+/// report (which would hand a paginating client the same reports twice).
+///
+/// A position the shrunken store exactly REACHES is still honoured, and answers the empty
+/// last page: the reports that page would have held were deleted, which is the walk ending
+/// rather than the token being wrong.
 fn resolve_page_token(
     token: &str,
+    key: crate::state::PageTokenKey,
     store: &crate::state::ComAmazonawsCostandusagereportserviceAwsorigamiservicegatewayserviceState,
 ) -> Result<usize, DescribeReportDefinitionsError> {
     let invalid = || {
@@ -223,9 +241,13 @@ fn resolve_page_token(
              DescribeReportDefinitions response returned.",
         )
     };
-    let report_name = hex::decode(token)
+    let resume_at: usize = hex::decode(token)
         .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .and_then(|bytes| key.cursor_of(&bytes))
+        .and_then(|cursor| cursor.parse().ok())
         .ok_or_else(invalid)?;
-    store.position(&report_name).ok_or_else(invalid)
+    if resume_at > store.reports.len() {
+        return Err(invalid());
+    }
+    Ok(resume_at)
 }
