@@ -42,13 +42,18 @@
 //!    configured, the client must provide an access token instead of an identity token": an
 //!    identity token claims no scope at all, so it matches none.
 //!
-//! A token that fails any of those is `401` `{"message":"Unauthorized"}` — the refusal
-//! `UNAUTHORIZED` gateway response words — and NOT the `500` of an authorizer whose decision
-//! could not be obtained: the distinction between "fix the token" and "the authorizer is
-//! broken" is the whole point of the two response types. A token that passes all of them
-//! AUTHORIZES the call, and its claim set is published to the integration as
-//! `$context.authorizer.claims.<name>` ([`Authorized::claims`]), which is where a mapping
-//! template reads the signed-in user from.
+//! A token that fails any of those is refused, and WHICH refusal it earns is the class the
+//! failure belongs to ([`Refusal`]) — never the `500` of an authorizer whose decision could
+//! not be obtained: the distinction between "fix the token" and "the authorizer is broken" is
+//! the whole point of the two response types. Almost every failure is one refusal: the request
+//! authorized nobody, which is `401`. Two classes are their own, because the recorded answers
+//! of this endpoint distinguish them: a token whose own `exp` has elapsed carries the sentence
+//! of an EXPIRED token at that same `401`, and a token that claims a pool this authorizer
+//! TRUSTS as its issuer and does not VERIFY against that pool's published key set — a value
+//! presenting itself as a credential that pool never signed — is refused as the authorizer
+//! denying the call, `403`. A token that passes all of the rules AUTHORIZES the call, and its
+//! claim set is published to the integration as `$context.authorizer.claims.<name>`
+//! ([`Authorized::claims`]), which is where a mapping template reads the signed-in user from.
 //!
 //! Three of the rules above — the RFC 6750 presentation prefix, the `aud`/`client_id` audience
 //! reading and the `exp`/`nbf` window — are also implemented by the JWT authorizer of
@@ -86,9 +91,37 @@ pub enum Decision {
     /// audience satisfies the authorizer's validation expression. The call is authorized and
     /// these are the claims the integration sees.
     Authorized(Authorized),
-    /// The token is not one this authorizer accepts, for the reason given — which is logged,
-    /// never answered: the caller is told `Unauthorized` and nothing about the token.
-    Unauthorized(String),
+    /// The token is not one this authorizer accepts: the CLASS of refusal the request earns,
+    /// and the reason — which is logged, never answered, because what the caller is told about
+    /// a token it presented is the refusal's own sentence and nothing about the token.
+    Refused(Refusal, String),
+}
+
+/// Which refusal a token this authorizer does not accept earns — the question the data plane
+/// answers the request by ([`super::cognito_refusal`]).
+///
+/// A request this authorizer does not admit authorized nobody, which is the `401` every one of
+/// its refusals is answered through except the two this endpoint words differently: the token
+/// whose own `exp` has elapsed, which carries the sentence of an expired token at that same
+/// `401`, and the token that claims a TRUSTED pool and does not verify against it, which is
+/// answered as the authorizer denying the call. Which of the three a failed check belongs to is
+/// what this names, so the rule lives beside the checks and not in the serving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The authorizer does not admit what the request presented, and nothing about the failure
+    /// is worded differently from any other: no value at the identity source, a value that is
+    /// not a signed token, a token naming no issuer, a token whose issuer is no user pool this
+    /// authorizer's `providerARNs` name, a window that cannot be read or has not begun, an
+    /// audience the `identityValidationExpression` does not match, or none of the method's
+    /// `authorizationScopes` claimed.
+    Unauthorized,
+    /// The request presented a signed token whose own `exp` has passed: a credential that was
+    /// one, and is not one now.
+    Expired,
+    /// The request presented a token claiming a pool this authorizer TRUSTS as its issuer whose
+    /// signature does not check out against that pool's published key set: a value presenting
+    /// itself as a credential of a trusted pool that the pool never signed.
+    Unverified,
 }
 
 /// The authorization a presented token earned: its claim set, as the integration reads it.
@@ -123,14 +156,21 @@ pub fn evaluate<Eng: Send + Sync + 'static>(
     let read = match jwt::read(token) {
         Ok(read) => read,
         Err(defect) => {
-            return Decision::Unauthorized(format!("the presented value is not a token: {defect}"))
+            return Decision::Refused(
+                Refusal::Unauthorized,
+                format!("the presented value is not a token: {defect}"),
+            )
         }
     };
     let Some(issuer) = read.claim_str(jwt::ISSUER_CLAIM) else {
-        return Decision::Unauthorized("the presented token names no issuer".to_string());
+        return Decision::Refused(
+            Refusal::Unauthorized,
+            "the presented token names no issuer".to_string(),
+        );
     };
     let Some(key_set) = accepted_issuer_key_set(engine, authorizer, issuer) else {
-        return Decision::Unauthorized(
+        return Decision::Refused(
+            Refusal::Unauthorized,
             "the presented token's issuer is no user pool this authorizer accepts".to_string(),
         );
     };
@@ -140,28 +180,49 @@ pub fn evaluate<Eng: Send + Sync + 'static>(
     let verified = match jwt::verify(token, &key_set) {
         Ok(verified) => verified,
         Err(defect) => {
-            return Decision::Unauthorized(format!(
-                "the presented token is not one its issuer signed: {defect}"
-            ))
+            return Decision::Refused(
+                Refusal::Unverified,
+                format!("the presented token is not one its issuer signed: {defect}"),
+            )
         }
     };
     // Its own validity window, through the shared reading of RFC 7519 §4.1.4/§4.1.5. A token
     // carrying NO expiry is refused here rather than accepted without end: a pool mints no such
     // token, so a value presenting itself as one is not a token this authorizer accepts.
     if let Some(defect) = verified.outside_window(now) {
-        return Decision::Unauthorized(format!("the presented token is outside its window: {defect}"));
+        return Decision::Refused(
+            window_refusal(defect),
+            format!("the presented token is outside its window: {defect}"),
+        );
     }
     if let Some(unmatched) = audience_unmatched(authorizer, &verified) {
-        return Decision::Unauthorized(unmatched);
+        return Decision::Refused(Refusal::Unauthorized, unmatched);
     }
     if !scopes_satisfied(&verified, method_scopes) {
-        return Decision::Unauthorized(
+        return Decision::Refused(
+            Refusal::Unauthorized,
             "the presented token claims none of the method's authorization scopes".to_string(),
         );
     }
     Decision::Authorized(Authorized {
         claims: claims_of(&verified),
     })
+}
+
+/// The refusal a token outside its own validity window earns.
+///
+/// A token whose `exp` has PASSED is the one failure of this rule a holder can tell from the
+/// refusal — "the time on or after which the JWT MUST NOT be accepted" (RFC 7519 §4.1.4) is
+/// behind it, and the holder's remedy is to obtain another token — so that class is answered
+/// with the sentence API Gateway words an expired token with
+/// ([`super::EXPIRED_IDENTITY_TOKEN`]). The other two readings of the window are not a token
+/// that has expired: one names no `exp` at all, which no pool mints, and one has not begun,
+/// so each is a value that authenticates nobody at this instant.
+fn window_refusal(defect: jwt::WindowDefect) -> Refusal {
+    match defect {
+        jwt::WindowDefect::Expired => Refusal::Expired,
+        jwt::WindowDefect::NoExpiry | jwt::WindowDefect::NotYetValid => Refusal::Unauthorized,
+    }
 }
 
 /// Whether `token` satisfies the method's `required` scopes, which is what
@@ -306,6 +367,37 @@ mod tests {
             jwt::encode_base64url(claims.to_string().as_bytes())
         );
         jwt::read(&encoded).expect("the test builds a well-formed compact JWS")
+    }
+
+    /// RULE: a token outside its own validity window is refused as EXPIRED only when its `exp`
+    /// has passed; a window that cannot be read or has not begun presents no credential.
+    #[test]
+    fn only_an_elapsed_expiry_is_refused_as_an_expired_token() {
+        // Rows are every reading of the window the shared check reports.
+        let rows: &[(&str, jwt::WindowDefect, Refusal)] = &[
+            (
+                "an expiry that has passed",
+                jwt::WindowDefect::Expired,
+                Refusal::Expired,
+            ),
+            (
+                "no expiry at all",
+                jwt::WindowDefect::NoExpiry,
+                Refusal::Unauthorized,
+            ),
+            (
+                "a window that has not begun",
+                jwt::WindowDefect::NotYetValid,
+                Refusal::Unauthorized,
+            ),
+        ];
+        for (case, defect, expected) in rows {
+            let actual = window_refusal(*defect);
+            assert_eq!(
+                actual, *expected,
+                "case {case:?}: expected {expected:?}, got {actual:?}"
+            );
+        }
     }
 
     /// RULE: a `providerARNs` entry names a user pool by the `userpool/{id}` resource of a

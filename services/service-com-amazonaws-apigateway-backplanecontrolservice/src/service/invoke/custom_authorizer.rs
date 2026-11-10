@@ -187,7 +187,12 @@ const EXPLICIT_DENY_MESSAGE: &str =
     "User is not authorized to access this resource with an explicit deny";
 
 /// The sentence a call no statement of the authorizer's policy allows is refused with.
-const NOT_AUTHORIZED_MESSAGE: &str = "User is not authorized to access this resource";
+///
+/// `pub(super)` because it is the sentence an AUTHORIZER's refusal of a call carries whichever
+/// kind of authorizer took the decision: a `COGNITO_USER_POOLS` authorizer that evaluated the
+/// presented token and does not accept it refuses the call with this same sentence
+/// ([`super::cognito_refusal`]), rather than holding a second copy of it.
+pub(super) const NOT_AUTHORIZED_MESSAGE: &str = "User is not authorized to access this resource";
 
 /// What `held` says about the method `method_arn`.
 ///

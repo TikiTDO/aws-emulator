@@ -17,10 +17,14 @@
 //! > user pool that authorizer's `providerARNs` list, whose signature checks out against that
 //! > pool's published key set, which is inside its own validity window, and — where the
 //! > authorizer declares an `identityValidationExpression` — whose audience matches it.
-//! > Anything else is `401` `{"message":"Unauthorized"}` and never reaches the integration,
-//! > and NEVER the `500` of an authorizer whose decision could not be obtained. A method
-//! > declaring `authorizationScopes` admits only a token claiming one of them. An admitted
-//! > request reaches the integration with the token's claims available as
+//! > Anything else never reaches the integration, and is NEVER the `500` of an authorizer whose
+//! > decision could not be obtained: a request this authorizer does not admit authorized
+//! > nobody, which is `401` `{"message":"Unauthorized"}` — except for the token that claims a
+//! > pool the authorizer TRUSTS and does not verify against that pool's key set, a value
+//! > presenting itself as a credential that pool never signed, which is refused as the
+//! > authorizer denying the call: `403` `{"Message":"User is not authorized to access this
+//! > resource"}`. A method declaring `authorizationScopes` admits only a token claiming one of
+//! > them. An admitted request reaches the integration with the token's claims available as
 //! > `$context.authorizer.claims.<name>`.
 //!
 //! The rows span what that rule generalises over: WHICH pool minted the presented token (the
@@ -61,10 +65,17 @@ const TOKEN_HEADER: &str = "Authorization";
 /// The query parameter the one query-sourced authorizer below extracts its token from.
 const TOKEN_PARAMETER: &str = "access_token";
 
-/// The status and sentence a token the authorizer cannot accept earns, and that nothing the
+/// The status and sentence a request this authorizer does not admit earns, and that nothing the
 /// method fronts ran.
 const UNAUTHORIZED: u16 = 401;
 const UNAUTHORIZED_MESSAGE: &str = "Unauthorized";
+
+/// The status and sentence a token claiming a TRUSTED pool that does not verify against that
+/// pool's key set earns: the authorizer denying the call, which the data plane answers through
+/// the same `ACCESS_DENIED` gateway response a `CUSTOM` authorizer's refusal is answered
+/// through — so the sentence travels in that response's IAM-shaped `Message` member.
+const DENIED: u16 = 403;
+const DENIED_MESSAGE: &str = "User is not authorized to access this resource";
 
 /// The sentence the `API_CONFIGURATION_ERROR` / `AUTHORIZER_CONFIGURATION_ERROR` gateway
 /// responses carry — the `500` that must never answer a token question.
@@ -96,8 +107,19 @@ struct Answer {
 impl Answer {
     /// The `message` member of a data-plane body, or `"<no message>"`.
     fn message(&self) -> String {
+        self.member("message")
+    }
+
+    /// The `Message` member an AUTHORIZATION refusal's body carries its sentence under, or
+    /// `"<no message>"`.
+    fn authorization_message(&self) -> String {
+        self.member("Message")
+    }
+
+    /// One string member of a data-plane body, or `"<no message>"`.
+    fn member(&self, name: &str) -> String {
         self.body
-            .get("message")
+            .get(name)
             .and_then(Value::as_str)
             .unwrap_or("<no message>")
             .to_string()
@@ -435,8 +457,11 @@ enum Expected {
     /// The gate admitted the request and the `MOCK` integration answered it with the claims of
     /// the token presented: this `sub` and this `token_use`.
     Served { sub: String, token_use: String },
-    /// The authorizer could not accept the presented value at all.
+    /// The authorizer does not admit what the request presented, so it authorized nobody.
     Unauthorized,
+    /// The token claims a pool the authorizer trusts and does not verify against that pool's
+    /// published key set, which is that authorizer denying the call.
+    Denied,
 }
 
 /// One request to the deployed stage: the gated resource it addresses, the value presented at
@@ -766,7 +791,12 @@ fn a_cognito_user_pools_authorizer_gates_a_deployed_rest_method() {
                         path_part: "by-one-pool",
                         header: Some(rebuilt(&home.id_token, &header, &other_sub)),
                         query: None,
-                        expected: Expected::Unauthorized,
+                        // The issuer is the trusted pool, so this value presents itself as a
+                        // credential that pool signed: a claim set rewritten after signing does
+                        // not verify against the pool's key set, which the recorded
+                        // tampered-token leg of
+                        // `apigw-cognito-authorizer-invalid-token-negative` answers `403`.
+                        expected: Expected::Denied,
                     },
                     Row {
                         case: "the home pool's token at an authorizer naming both pools"
@@ -884,6 +914,15 @@ fn a_cognito_user_pools_authorizer_gates_a_deployed_rest_method() {
                                 (UNAUTHORIZED, UNAUTHORIZED_MESSAGE.to_string()),
                                 "case {:?}: expected {UNAUTHORIZED} {UNAUTHORIZED_MESSAGE:?}, \
                                  got {}",
+                                row.case,
+                                answer.summary()
+                            );
+                        }
+                        Expected::Denied => {
+                            assert_eq!(
+                                (answer.status, answer.authorization_message()),
+                                (DENIED, DENIED_MESSAGE.to_string()),
+                                "case {:?}: expected {DENIED} {DENIED_MESSAGE:?}, got {}",
                                 row.case,
                                 answer.summary()
                             );

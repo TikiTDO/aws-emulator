@@ -482,4 +482,9 @@ mod stage_template_url_conversions;
 // period, and the `QUOTA_EXCEEDED` refusal every request past it earns.
 #[path = "all/usage_plan_quota_enforcement.rs"]
 mod usage_plan_quota_enforcement;
+// Appended for the reason the note above gives: WHICH refusal a `COGNITO_USER_POOLS`-gated
+// method answers a token it does not admit with — the `401` of a request that authenticated
+// nobody, the `401` of an expired token, and the `403` of an authorizer that denies the call.
+#[path = "all/stage_cognito_token_refusal_class.rs"]
+mod stage_cognito_token_refusal_class;
 

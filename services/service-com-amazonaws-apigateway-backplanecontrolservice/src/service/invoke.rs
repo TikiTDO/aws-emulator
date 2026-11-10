@@ -640,11 +640,37 @@ const INVALID_API_KEY: GatewayRefusal = GatewayRefusal {
 };
 
 /// An authorizer's identity source is absent from the request, so the authorizer is not
-/// even called: `401` `{"message":"Unauthorized"}`.
+/// even called, or what it carried is no credential the authorizer could evaluate at all:
+/// `401` `{"message":"Unauthorized"}`.
 const UNAUTHORIZED: GatewayRefusal = GatewayRefusal {
     response_type: "UNAUTHORIZED",
     message: Cow::Borrowed("Unauthorized"),
-    error_type: Some("UnauthorizedException"),
+    error_type: Some(UNAUTHORIZED_EXCEPTION),
+    validation_detail: Cow::Borrowed(""),
+    message_member: MESSAGE_MEMBER,
+};
+
+/// The exception class the endpoint reports a request that authenticated nobody in, which is
+/// the class of every refusal answered through the one `401` gateway response type
+/// ([`UNAUTHORIZED`], [`EXPIRED_IDENTITY_TOKEN`]).
+const UNAUTHORIZED_EXCEPTION: &str = "UnauthorizedException";
+
+/// The identity token an authorizer's identity source carried is a signed token whose own
+/// `exp` has passed: `401`, carrying the sentence API Gateway words an EXPIRED token with
+/// rather than the one a request that presented nothing earns — a holder whose token ran out
+/// has to obtain another, which is a different remedy from presenting a credential at all.
+///
+/// Answered through the same `UNAUTHORIZED` gateway response as [`UNAUTHORIZED`]: that is the
+/// one type a request that authenticated nobody is answered through, and a gateway response's
+/// own default template renders THIS refusal's sentence
+/// (`{"message":$context.error.messageString}`), so one type carries both sentences and a
+/// developer's customization of it reaches both. The catalog's `EXPIRED_TOKEN` type is the
+/// `403` of an expired SigV4 security token ([`crate::state::default_gateway_status_code`]),
+/// which is a credential of the signing protocol rather than a pool-minted identity token.
+const EXPIRED_IDENTITY_TOKEN: GatewayRefusal = GatewayRefusal {
+    response_type: "UNAUTHORIZED",
+    message: Cow::Borrowed("The incoming token has expired"),
+    error_type: Some(UNAUTHORIZED_EXCEPTION),
     validation_detail: Cow::Borrowed(""),
     message_member: MESSAGE_MEMBER,
 };
@@ -2257,7 +2283,8 @@ fn metered_refusal(
 ///   pools the authorizer's `providerARNs` name and of the method's own
 ///   `authorizationScopes` — all of which are records this emulator holds
 ///   ([`cognito_user_pools`]) — and the claims of an accepted token are what the
-///   integration sees as `$context.authorizer.claims`;
+///   integration sees as `$context.authorizer.claims`; a token it does not accept earns the
+///   refusal of the CLASS that failure belongs to ([`cognito_refusal`]);
 /// * `CUSTOM` is a Lambda function's RETURN VALUE ([`custom_authorizer`]): the result the
 ///   stage is already holding for this identity decides the call, and otherwise the function
 ///   has to be asked — which is a call this cannot make, so it answers
@@ -2366,14 +2393,14 @@ fn authorization_refusal<Eng: Send + Sync + 'static>(
                     .map(|(claim, value)| (format!("{AUTHORIZER_CLAIMS_MEMBER}.{claim}"), value))
                     .collect(),
             ),
-            cognito_user_pools::Decision::Unauthorized(reason) => {
+            cognito_user_pools::Decision::Refused(refusal, reason) => {
                 tracing::warn!(
                     authorizer = %authorizer.name,
                     %reason,
                     "refusing an invoke: the user-pool authorizer does not accept the presented \
                      token"
                 );
-                Authorized::Refused(UNAUTHORIZED)
+                Authorized::Refused(cognito_refusal(refusal))
             }
         };
     }
@@ -2442,6 +2469,30 @@ fn authorization_refusal<Eng: Send + Sync + 'static>(
                 "refusing an invoke: the authorizer's policy does not allow this method"
             );
             Authorized::Refused(access_denied(sentence.to_string()))
+        }
+    }
+}
+
+/// The gateway response a `COGNITO_USER_POOLS` authorizer's refusal of a presented token is
+/// answered through — the class of the failure ([`cognito_user_pools::Refusal`]) decides it.
+///
+/// A request this authorizer does not admit authorized nobody, so [`UNAUTHORIZED`] is what
+/// almost every one of its refusals is answered through — a value that is not a signed token,
+/// an issuer the authorizer does not list, an audience its validation expression does not
+/// match, a method scope the token does not claim. Two classes this endpoint words differently:
+/// a token whose own `exp` has elapsed carries the sentence of an expired token at that same
+/// `401` ([`EXPIRED_IDENTITY_TOKEN`]), and a token claiming a pool the authorizer TRUSTS that
+/// does not verify against that pool's published key set is refused as the authorizer DENYING
+/// the call — the same `403` [`access_denied`] a `CUSTOM` authorizer's refusal earns, carrying
+/// the same sentence a call the authorizer allows no statement for is refused with
+/// ([`custom_authorizer::NOT_AUTHORIZED_MESSAGE`]), so a developer's customization of an
+/// authorization failure (`ACCESS_DENIED`) reaches both kinds of authorizer.
+fn cognito_refusal(refusal: cognito_user_pools::Refusal) -> GatewayRefusal {
+    match refusal {
+        cognito_user_pools::Refusal::Unauthorized => UNAUTHORIZED,
+        cognito_user_pools::Refusal::Expired => EXPIRED_IDENTITY_TOKEN,
+        cognito_user_pools::Refusal::Unverified => {
+            access_denied(custom_authorizer::NOT_AUTHORIZED_MESSAGE.to_string())
         }
     }
 }
