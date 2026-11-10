@@ -188,7 +188,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             broker_id: Some(broker.broker_id.clone()),
             username: Some(user.username.clone()),
             console_access: Some(user.console_access),
-            groups: state::optional_list(&user.groups),
+            // "The list of groups (20 maximum) to which the ActiveMQ user belongs" —
+            // a user that belongs to none has an EMPTY list of them, which is what a
+            // client reading the member iterates; the member is not dropped.
+            groups: Some(user.groups.clone()),
             replication_user: Some(user.replication_user),
             // "The status of the changes pending for the ActiveMQ user" — present
             // only while the broker still owes this user a change, and carrying

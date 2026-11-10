@@ -295,6 +295,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             created,
             revisions: vec![first_revision.clone()],
             tags: input.tags.clone().unwrap_or_default().into_iter().collect(),
+            created_for_broker: None,
         };
         store
             .configurations
@@ -304,7 +305,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             arn: Some(configuration_arn),
             // Reported in the spelling the configuration surface uses, derived
             // from the modelled value the record holds.
-            authentication_strategy: Some(state::reported_configuration_authentication_strategy(
+            authentication_strategy: Some(state::reported_authentication_strategy(
                 &authentication_strategy,
             )),
             created: Some(::aws_smithy_types::DateTime::from(created)),

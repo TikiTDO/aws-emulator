@@ -286,21 +286,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )));
         }
 
-        // `Configuration` names a configuration resource this service does not
-        // hold yet (`CreateConfiguration` is still unimplemented), so a broker
-        // cannot be created against one. Refusing names the member rather than
-        // accepting the reference and reporting no configuration later.
-        if let Some(configuration) = &input.configuration {
-            return Err(bad_request(state::Invalid::new(
-                "configuration",
-                format!(
-                    "configuration must name a configuration that exists; no configuration \
-                     with id {:?} exists",
-                    configuration.id
-                ),
-            )));
-        }
-
         // Bound every caller-sized collection before anything is stored, so one
         // request cannot grow one record by as much as it asks for.
         if let Some(security_groups) = &input.security_groups {
@@ -367,6 +352,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let region = state::request_region(ctx.parts());
+        // The address this broker is published at: the endpoint this emulator answered
+        // the create on, so what the broker's instances publish leads back to the
+        // emulator the client is already talking to.
+        let published_host = ::service_common::data_plane_addressing::host_only(
+            &::service_common::data_plane_addressing::emulator_endpoint_authority(ctx),
+        )
+        .to_string();
 
         // The members the request may also set on the broker, in the records the
         // state module keeps them in. Each is stored as sent, except the
@@ -380,15 +372,37 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .and_then(|logs| logs.general)
                 .unwrap_or(false),
         };
-        let encryption_options =
-            input
-                .encryption_options
-                .as_ref()
-                .map(|options| state::BrokerEncryptionOptions {
-                    kms_key_id: options.kms_key_id.clone(),
-                    use_aws_owned_key: options.use_aws_owned_key,
-                });
-        let maintenance_window_start_time =
+        // The members Amazon MQ DECIDES when the request names none: the engine
+        // release the broker runs, the storage it is given and how its data is
+        // encrypted (see `state::broker_published_values`). They are resolved here,
+        // once, so every read of the broker reports them.
+        let engine_version =
+            state::resolved_engine_version(&input.engine_type, input.engine_version.as_deref());
+        // The version LINE, which is the granularity a configuration's own
+        // `EngineVersion` carries, for the configuration this broker is created with.
+        let configuration_engine_version = input
+            .engine_version
+            .clone()
+            .filter(|version| !version.is_empty())
+            .unwrap_or_else(|| state::latest_engine_version(&input.engine_type).to_string());
+        let authentication_strategy = input
+            .authentication_strategy
+            .clone()
+            .filter(|strategy| !strategy.is_empty())
+            .unwrap_or_else(|| state::DEFAULT_AUTHENTICATION_STRATEGY.to_string());
+        let storage_type = input
+            .storage_type
+            .clone()
+            .filter(|storage| !storage.is_empty())
+            .unwrap_or_else(|| state::default_storage_type(&input.engine_type).to_string());
+        let encryption_options = input.encryption_options.as_ref().map_or_else(
+            state::BrokerEncryptionOptions::aws_owned_key,
+            |options| state::BrokerEncryptionOptions {
+                kms_key_id: options.kms_key_id.clone(),
+                use_aws_owned_key: options.use_aws_owned_key,
+            },
+        );
+        let requested_maintenance_window =
             input
                 .maintenance_window_start_time
                 .as_ref()
@@ -475,14 +489,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .collect::<Vec<String>>()
                 .join("\u{1e}"),
             format!("{:?}|{}", logs.audit, logs.general),
-            encryption_options.as_ref().map_or(String::new(), |options| {
+            input.encryption_options.as_ref().map_or(String::new(), |options| {
                 format!(
                     "{}|{}",
                     options.kms_key_id.clone().unwrap_or_default(),
                     options.use_aws_owned_key
                 )
             }),
-            maintenance_window_start_time
+            requested_maintenance_window
                 .as_ref()
                 .map_or(String::new(), |window| format!(
                     "{}|{}|{}",
@@ -566,6 +580,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }));
         }
 
+        // The configuration the broker is to run, when the request names one: only a
+        // configuration this service HOLDS can be applied, so it is resolved against
+        // stored state before anything is minted, and a request naming one that does
+        // not exist is refused rather than stored with a reference to nothing.
+        let requested_configuration = match &input.configuration {
+            None => None,
+            Some(configuration) => Some(
+                store
+                    .resolve_broker_configuration(&configuration.id, configuration.revision)
+                    .map_err(bad_request)?,
+            ),
+        };
+
         let created = ::std::time::SystemTime::now();
         // The id is MINTED by the store, which owns the mint sequence that
         // makes it unique; the ARN is then built around it.
@@ -575,23 +602,35 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &region,
             &format!("broker:{}:{}", input.broker_name, broker_id),
         );
+        // Every broker runs a configuration: the one the request named, or one minted
+        // from the engine's default settings for this broker, which the configuration
+        // reads of this service then resolve like any other.
+        let configuration = requested_configuration.unwrap_or_else(|| {
+            store.mint_broker_default_configuration(&state::DefaultConfigurationFor {
+                broker_name: &input.broker_name,
+                broker_id: &broker_id,
+                engine_type: &input.engine_type,
+                engine_version: &configuration_engine_version,
+                authentication_strategy: &authentication_strategy,
+                created,
+                signing_name: ctx.identity().signing_name(),
+                region: &region,
+            })
+        });
         let broker = state::Broker {
             broker_id: broker_id.clone(),
             broker_arn: broker_arn.clone(),
             broker_name: input.broker_name.clone(),
             engine_type: input.engine_type.clone(),
-            engine_version: input.engine_version.clone(),
+            engine_version,
             deployment_mode: input.deployment_mode.clone(),
             host_instance_type: input.host_instance_type.clone(),
             publicly_accessible: input.publicly_accessible,
             auto_minor_version_upgrade: input
                 .auto_minor_version_upgrade
                 .unwrap_or(state::DEFAULT_AUTO_MINOR_VERSION_UPGRADE),
-            authentication_strategy: input
-                .authentication_strategy
-                .clone()
-                .unwrap_or_else(|| state::DEFAULT_AUTHENTICATION_STRATEGY.to_string()),
-            storage_type: input.storage_type.clone(),
+            authentication_strategy,
+            storage_type,
             storage_size: input.storage_size,
             security_groups: input.security_groups.clone().unwrap_or_default(),
             subnet_ids: input.subnet_ids.clone().unwrap_or_default(),
@@ -615,8 +654,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .collect(),
             logs,
             encryption_options,
-            maintenance_window_start_time,
+            // The window the request named, or the one this broker is assigned.
+            maintenance_window_start_time: requested_maintenance_window
+                .unwrap_or_else(|| state::assigned_maintenance_window(&broker_id)),
             ldap_server_metadata,
+            configuration,
+            published_host,
         };
         store.brokers.insert(broker_id.clone(), broker);
 

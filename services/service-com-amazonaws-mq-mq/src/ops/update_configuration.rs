@@ -275,7 +275,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // The answer describes the configuration this call revised, so it
             // reports that configuration's strategy in the spelling the
             // configuration surface uses, exactly as its own describe does.
-            authentication_strategy: Some(state::reported_configuration_authentication_strategy(
+            authentication_strategy: Some(state::reported_authentication_strategy(
                 &configuration.authentication_strategy,
             )),
         })

@@ -391,13 +391,12 @@ fn offered_engine_versions(engine_type: &str) -> Vec<String> {
         .collect()
 }
 
-/// A storage type as the instance-option catalog renders it: Amazon MQ publishes the
-/// catalog's `storageType` in LOWER case (`ebs`, `efs`), not in the upper-case spelling
-/// the `BrokerStorageType` enum uses for a broker's own storage type — so a client that
+/// A storage type as the instance-option catalog renders it: the one spelling Amazon MQ
+/// answers a `BrokerStorageType` in ([`state::reported_storage_type`]), so a client that
 /// feeds a value this catalog served back as the `storageType` filter, or compares it
-/// with a value from another catalog entry, matches.
+/// with the `storageType` a broker read answers, matches.
 fn catalog_storage_type(storage_type: &str) -> String {
-    storage_type.to_ascii_lowercase()
+    state::reported_storage_type(storage_type)
 }
 
 /// Amazon MQ's whole instance-option catalog for `region`, in the order the service

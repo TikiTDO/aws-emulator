@@ -191,15 +191,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 let latest = configuration.latest_revision();
                 Configuration {
                     arn: configuration.configuration_arn.clone(),
-                    authentication_strategy:
-                        state::reported_configuration_authentication_strategy(
-                            &configuration.authentication_strategy,
-                        ),
+                    authentication_strategy: state::reported_authentication_strategy(
+                        &configuration.authentication_strategy,
+                    ),
                     created: configuration.created_timestamp(),
                     description: latest.description.clone(),
-                    engine_type: state::reported_configuration_engine_type(
-                        &configuration.engine_type,
-                    ),
+                    engine_type: state::reported_engine_type(&configuration.engine_type),
                     engine_version: configuration.engine_version.clone(),
                     id: configuration.configuration_id.clone(),
                     latest_revision: ConfigurationRevision {

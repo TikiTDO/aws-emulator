@@ -36,9 +36,9 @@ use service_com_amazonaws_mq_mq::state::{
 
 use crate::broker_lifecycle::{create_body, Mq};
 
-/// A storage type as this catalog renders it: Amazon MQ publishes the instance-option
-/// catalog's `storageType` in lower case, not in the upper-case spelling the
-/// `BrokerStorageType` enum uses for a broker's own storage type.
+/// A storage type as this catalog renders it: Amazon MQ publishes a `storageType` in
+/// lower case, not in the upper-case spelling the `BrokerStorageType` enum declares for
+/// the value a request sends.
 fn rendered(storage_type: &str) -> String {
     storage_type.to_ascii_lowercase()
 }

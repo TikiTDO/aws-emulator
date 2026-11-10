@@ -8,9 +8,25 @@
 //! share — the broker records, the `ListBrokers` page-token codec, and the
 //! model's documented value constraints — lives here rather than in a module
 //! `lib.rs` could not name.
+//!
+//! The readings a BROKER's own answer needs, each one concern, live in this
+//! module's own files: [`broker_published_values`] (what the service decides for a
+//! broker its create did not), [`broker_endpoints`] (where a client reaches a running
+//! broker) and [`broker_configuration`] (the configuration a broker runs).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, SystemTime};
+
+/// Which configuration revision a broker runs, and where it comes from.
+mod broker_configuration;
+/// Where a client reaches a running broker: its console and its wire endpoints.
+mod broker_endpoints;
+/// The values the service decides for a broker rather than echoing from its create.
+mod broker_published_values;
+
+pub use broker_configuration::*;
+pub use broker_endpoints::*;
+pub use broker_published_values::*;
 
 /// Region used for an ARN when the request carries no SigV4 credential scope to
 /// read one from.
@@ -219,6 +235,13 @@ pub struct BrokerUser {
 /// From `ChangeType`'s modelled values (`CREATE`, `UPDATE`, `DELETE`).
 pub const CHANGE_TYPE_DELETE: &str = "DELETE";
 
+/// The kind of logs `LogsSummary$auditLogGroup` names the log group of — the last
+/// segment of the group's name ([`Broker::log_group`]).
+pub const LOG_KIND_AUDIT: &str = "audit";
+
+/// The kind of logs `LogsSummary$generalLogGroup` names the log group of.
+pub const LOG_KIND_GENERAL: &str = "general";
+
 /// The broker logging `CreateBroker` was asked for. `Logs$general` is a plain
 /// flag, and `Logs$audit` is kept optional because the member "does not apply to
 /// RabbitMQ brokers", so a request that never set it must not report one.
@@ -274,13 +297,17 @@ pub struct Broker {
     pub broker_arn: String,
     pub broker_name: String,
     pub engine_type: String,
-    pub engine_version: Option<String>,
+    /// The engine release this broker RUNS — the patch release the create's version
+    /// line resolved to ([`resolved_engine_version`]), not the line it named.
+    pub engine_version: String,
     pub deployment_mode: String,
     pub host_instance_type: String,
     pub publicly_accessible: bool,
     pub auto_minor_version_upgrade: bool,
     pub authentication_strategy: String,
-    pub storage_type: Option<String>,
+    /// The storage this broker was given: the `BrokerStorageType` the create named, or
+    /// the engine's default ([`default_storage_type`]).
+    pub storage_type: String,
     pub storage_size: Option<i32>,
     pub security_groups: Vec<String>,
     pub subnet_ids: Vec<String>,
@@ -297,9 +324,22 @@ pub struct Broker {
     pub users: BTreeMap<String, BrokerUser>,
     pub tags: BTreeMap<String, String>,
     pub logs: BrokerLogs,
-    pub encryption_options: Option<BrokerEncryptionOptions>,
-    pub maintenance_window_start_time: Option<BrokerMaintenanceWindow>,
+    /// How this broker's data is encrypted: the options the create named, or the
+    /// Amazon Web Services owned key ([`BrokerEncryptionOptions::aws_owned_key`]).
+    pub encryption_options: BrokerEncryptionOptions,
+    /// The week's maintenance window this broker is on: the one the create named, or
+    /// the one it was assigned ([`assigned_maintenance_window`]).
+    pub maintenance_window_start_time: BrokerMaintenanceWindow,
     pub ldap_server_metadata: Option<BrokerLdapServerMetadata>,
+    /// The configuration revision this broker runs: the one its create named, or
+    /// the configuration the create minted for it
+    /// ([`ComAmazonawsMqMqState::mint_broker_default_configuration`]).
+    pub configuration: BrokerConfigurationRef,
+    /// The host this emulator answered the create on, which is the address this
+    /// broker is published at ([`Broker::allocated_instances`]). Recorded at create
+    /// time so every read of the broker publishes the one address, whichever host a
+    /// later caller reached the emulator on.
+    pub published_host: String,
 }
 
 impl Broker {
@@ -324,6 +364,14 @@ impl Broker {
     /// broker that was never created has none.
     pub fn log_group(&self, kind: &str) -> String {
         format!("/aws/amazonmq/broker/{}/{kind}", self.broker_id)
+    }
+
+    /// Whether AUDIT logging applies to this broker at all: `Logs$audit` "does not
+    /// apply to RabbitMQ brokers", so that engine's brokers report neither the flag
+    /// nor its log group, and every other broker reports both — the flag being `false`
+    /// when audit logging is off, which is a value a client reads, not an absence.
+    pub fn audit_logging_applies(&self) -> bool {
+        self.engine_type != ENGINE_TYPE_RABBITMQ
     }
 
     /// `Tags`, as the modelled map, or `None` when the broker carries none.
@@ -367,29 +415,36 @@ const ENGINE_TYPE_PRODUCT_SPELLINGS: &[(&str, &str)] = &[
     (ENGINE_TYPE_RABBITMQ, "RabbitMQ"),
 ];
 
-/// How a configuration's `EngineType` is spelled on the wire.
+/// How an `EngineType` is spelled on the wire.
 ///
-/// The broker surface answers in the modelled enum spelling (`ACTIVEMQ`), but
-/// the configuration surface answers with the engine's product spelling
-/// (`ActiveMQ`), which is what a recorded Amazon MQ answer for a configuration
-/// carries. The stored record keeps the modelled value a request has to send, so
-/// this is the one place the reported spelling is derived and the two cannot
-/// drift; a value outside the modelled set is reported exactly as stored rather
-/// than rewritten into a spelling nothing published.
-pub fn reported_configuration_engine_type(engine_type: &str) -> String {
+/// RULE: Amazon MQ ACCEPTS the model's enum token on input (`ACTIVEMQ`) and ANSWERS
+/// with the engine's product spelling (`ActiveMQ`) — the spelling the recorded broker
+/// and configuration answers both carry, and the one a client comparing the member
+/// against a published engine name matches. The stored record keeps the modelled value
+/// a request has to send, so this is the one place the reported spelling is derived and
+/// the two cannot drift; a value outside the modelled set is reported exactly as stored
+/// rather than rewritten into a spelling nothing published.
+pub fn reported_engine_type(engine_type: &str) -> String {
     ENGINE_TYPE_PRODUCT_SPELLINGS
         .iter()
         .find(|(modelled, _)| *modelled == engine_type)
         .map_or_else(|| engine_type.to_string(), |(_, spelled)| (*spelled).to_string())
 }
 
-/// How a configuration's `AuthenticationStrategy` is spelled on the wire: the
-/// modelled value lower-cased (`SIMPLE` -> `simple`), which is what a recorded
-/// Amazon MQ answer for a configuration carries. As with
-/// [`reported_configuration_engine_type`], the stored record keeps the modelled
-/// value.
-pub fn reported_configuration_authentication_strategy(strategy: &str) -> String {
+/// How an `AuthenticationStrategy` is spelled on the wire: the modelled value
+/// lower-cased (`SIMPLE` -> `simple`), which is what the recorded Amazon MQ answers for
+/// a broker and for a configuration both carry. As with [`reported_engine_type`], the
+/// stored record keeps the modelled value.
+pub fn reported_authentication_strategy(strategy: &str) -> String {
     strategy.to_ascii_lowercase()
+}
+
+/// How a `BrokerStorageType` is spelled on the wire: the modelled value lower-cased
+/// (`EFS` -> `efs`), which is what the recorded Amazon MQ broker answer carries, and
+/// the spelling the instance-option catalog already reports. As with
+/// [`reported_engine_type`], the stored record keeps the modelled value.
+pub fn reported_storage_type(storage_type: &str) -> String {
+    storage_type.to_ascii_lowercase()
 }
 
 /// One revision of a configuration: the revision number, when it was made, the
@@ -456,6 +511,11 @@ pub struct ConfigurationRecord {
     /// Every revision, oldest first; a created configuration starts with one.
     pub revisions: Vec<ConfigurationRevisionRecord>,
     pub tags: BTreeMap<String, String>,
+    /// The broker this configuration was created FOR, when it is the one a
+    /// `CreateBroker` minted for a broker that named none
+    /// ([`ComAmazonawsMqMqState::mint_broker_default_configuration`]); `None` for a
+    /// configuration a `CreateConfiguration` created.
+    pub created_for_broker: Option<String>,
 }
 
 /// The revision number a configuration's first revision carries: Amazon MQ
@@ -508,9 +568,9 @@ impl ConfigurationRecord {
 /// (the engine type and version)"), so the sentence is built from the stored
 /// record — never from a request member this operation does not carry.
 ///
-/// The engine is named in the spelling the configuration surface reports it in
-/// ([`reported_configuration_engine_type`]), so the sentence and the
-/// `engineType` member of the same answer agree.
+/// The engine is named in the spelling every answer reports it in
+/// ([`reported_engine_type`]), so the sentence and the `engineType` member of the same
+/// answer agree.
 pub fn default_configuration_description(
     name: &str,
     engine_type: &str,
@@ -518,7 +578,7 @@ pub fn default_configuration_description(
 ) -> String {
     format!(
         "Auto-generated default for {name} on {} {engine_version}",
-        reported_configuration_engine_type(engine_type)
+        reported_engine_type(engine_type)
     )
 }
 
@@ -580,10 +640,18 @@ impl ComAmazonawsMqMqState {
         }
     }
 
-    /// The configuration carrying `name`. Configuration names are unique per
-    /// account, so this scan over the one map is the name index.
+    /// The configuration a CALLER created under `name`. Configuration names are
+    /// unique per account, so this scan over the one map is the name index — a second
+    /// map could desync from it.
+    ///
+    /// A configuration created FOR a broker carries that broker's name by
+    /// construction, and broker names are their own namespace, so it is not part of
+    /// the names a `CreateConfiguration` competes for: a caller can still name a
+    /// configuration after a broker it created.
     pub fn configuration_by_name(&self, name: &str) -> Option<&ConfigurationRecord> {
-        self.configurations.values().find(|c| c.name == name)
+        self.configurations
+            .values()
+            .find(|c| c.name == name && c.created_for_broker.is_none())
     }
 
     /// Mint the `ConfigurationId` of a configuration created at `created`: `c-`
@@ -896,18 +964,16 @@ pub fn broker_not_found_message(broker_id: &str) -> String {
 /// `NotFoundException$errorAttribute` ("The attribute which caused the error").
 pub const USERNAME_ATTRIBUTE: &str = "username";
 
-/// The sentence this service answers a `Username` that resolves to no user of
-/// the broker the request named with, on every operation that resolves one. No
-/// recorded response covers this refusal, so it is worded the way this service
-/// words the resource-not-found it does have recorded
-/// ([`broker_not_found_message`]), naming the user asked for and the broker it
-/// was asked of — both read from the request. Shared so the handlers that look a
-/// user up state the one failure identically.
+/// The sentence Amazon MQ answers a `Username` that resolves to no user of the
+/// broker the request named with, on every operation that resolves one.
+///
+/// Amazon MQ words a missing USER differently from a missing broker
+/// ([`broker_not_found_message`]), so a client can tell the two refusals apart: the
+/// fixed text below, with the username and the broker id from the request as its only
+/// variable parts. Shared so the handlers that look a user up state the one failure
+/// identically.
 pub fn user_not_found_message(broker_id: &str, username: &str) -> String {
-    format!(
-        "Cannot find user [{username}] of broker ID [{broker_id}]. Verify that your user \
-         exists or check broker permissions."
-    )
+    format!("Can\u{2019}t find user [{username}] for broker [{broker_id}]. Make sure user exists.")
 }
 
 /// The input member a refusal names when the `ConfigurationId` of the request

@@ -165,14 +165,19 @@ struct Row {
     template: fn() -> String,
     /// The `BrokerName` the template declares, which the create must carry out.
     expected_name: &'static str,
+    /// The engine type the broker must report, in the spelling Amazon MQ answers an
+    /// engine type in (`ActiveMQ`), not the `EngineType` token the template declares.
     expected_engine_type: &'static str,
-    /// The engine version the broker must report, or `None` where the declaration leaves it
-    /// to Amazon MQ's own default.
-    expected_engine_version: Option<&'static str>,
+    /// The engine RELEASE the broker must report: the patch release of the version line
+    /// the template declared, or of Amazon MQ's latest line where it declared none.
+    expected_engine_version: &'static str,
     expected_deployment_mode: &'static str,
     expected_host_instance_type: &'static str,
     expected_publicly_accessible: bool,
-    expected_storage_type: Option<&'static str>,
+    /// The storage the broker must report, lower-cased as Amazon MQ answers it: the
+    /// `StorageType` the template declared, or the engine's own default where it
+    /// declared none.
+    expected_storage_type: &'static str,
     /// The subnets the broker must report, in declaration order.
     expected_subnets: &'static [&'static str],
     /// The security groups the broker must report, in declaration order.
@@ -242,12 +247,12 @@ const ROWS: &[Row] = &[
             .to_string()
         },
         expected_name: "orders-rabbit",
-        expected_engine_type: "RABBITMQ",
-        expected_engine_version: Some("3.13"),
+        expected_engine_type: "RabbitMQ",
+        expected_engine_version: "3.13.7",
         expected_deployment_mode: "SINGLE_INSTANCE",
         expected_host_instance_type: "mq.m5.large",
         expected_publicly_accessible: true,
-        expected_storage_type: None,
+        expected_storage_type: "ebs",
         expected_subnets: &[],
         expected_security_groups: &[],
         expected_users: &[ExpectedUser {
@@ -313,12 +318,12 @@ const ROWS: &[Row] = &[
             .join("\n")
         },
         expected_name: "events_active",
-        expected_engine_type: "ACTIVEMQ",
-        expected_engine_version: Some("5.18"),
+        expected_engine_type: "ActiveMQ",
+        expected_engine_version: "5.18.8",
         expected_deployment_mode: "ACTIVE_STANDBY_MULTI_AZ",
         expected_host_instance_type: "mq.t3.micro",
         expected_publicly_accessible: false,
-        expected_storage_type: Some("EFS"),
+        expected_storage_type: "efs",
         expected_subnets: &["subnet-11111111", "subnet-22222222"],
         expected_security_groups: &["sg-0123456789abcdef0"],
         // `DescribeBroker` reports a broker's users keyed by username, so the two come back
@@ -374,12 +379,12 @@ const ROWS: &[Row] = &[
             .to_string()
         },
         expected_name: "fanout-cluster",
-        expected_engine_type: "RABBITMQ",
-        expected_engine_version: None,
+        expected_engine_type: "RabbitMQ",
+        expected_engine_version: "3.13.7",
         expected_deployment_mode: "CLUSTER_MULTI_AZ",
         expected_host_instance_type: "mq.m5.xlarge",
         expected_publicly_accessible: true,
-        expected_storage_type: None,
+        expected_storage_type: "ebs",
         expected_subnets: &[],
         expected_security_groups: &[],
         expected_users: &[ExpectedUser {
@@ -431,12 +436,14 @@ const ROWS: &[Row] = &[
             .to_string()
         },
         expected_name: "audit-single",
-        expected_engine_type: "ACTIVEMQ",
-        expected_engine_version: Some("5.17.6"),
+        expected_engine_type: "ActiveMQ",
+        // The template declared a release rather than a line, so that release is what
+        // the broker runs.
+        expected_engine_version: "5.17.6",
         expected_deployment_mode: "SINGLE_INSTANCE",
         expected_host_instance_type: "mq.t3.micro",
         expected_publicly_accessible: false,
-        expected_storage_type: Some("EBS"),
+        expected_storage_type: "ebs",
         expected_subnets: &["subnet-abcdef01"],
         expected_security_groups: &[],
         expected_users: &[ExpectedUser {
@@ -578,7 +585,7 @@ async fn a_stack_provisions_the_mq_broker_its_template_declares() {
         }
         assert_eq!(
             broker.get("engineVersion").and_then(Value::as_str),
-            row.expected_engine_version,
+            Some(row.expected_engine_version),
             "case {case:?}: expected engineVersion {:?}, got {broker}",
             row.expected_engine_version
         );
@@ -590,7 +597,7 @@ async fn a_stack_provisions_the_mq_broker_its_template_declares() {
         );
         assert_eq!(
             broker.get("storageType").and_then(Value::as_str),
-            row.expected_storage_type,
+            Some(row.expected_storage_type),
             "case {case:?}: expected storageType {:?}, got {broker}",
             row.expected_storage_type
         );

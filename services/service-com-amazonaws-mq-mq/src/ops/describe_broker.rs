@@ -7,6 +7,11 @@
 //! stored instants — nothing is written here, so a describe never changes what a
 //! later caller sees.
 //!
+//! The members Amazon MQ answers in its own wire spelling rather than in the model's
+//! enum token (`engineType`, `authenticationStrategy`, `storageType`) go through the
+//! one derivation in `crate::state`, and the instance a running broker publishes is
+//! derived from the broker's stored address (`state::broker_endpoints`).
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -220,6 +225,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let store = state.lock();
+        let now = ::std::time::SystemTime::now();
         let Some(broker) = store.brokers.get(&input.broker_id) else {
             return Err(DescribeBrokerErrorModeled::NotFoundException(NotFoundException {
                 error_attribute: Some("broker-id".to_string()),
@@ -233,49 +239,75 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             broker_id: Some(broker.broker_id.clone()),
             broker_arn: Some(broker.broker_arn.clone()),
             broker_name: Some(broker.broker_name.clone()),
-            broker_state: Some(
-                broker
-                    .broker_state(::std::time::SystemTime::now())
-                    .to_string(),
-            ),
-            engine_type: Some(broker.engine_type.clone()),
-            engine_version: broker.engine_version.clone(),
+            broker_state: Some(broker.broker_state(now).to_string()),
+            // The three members Amazon MQ answers in its own wire spelling rather than
+            // in the model's enum token, derived from the modelled value stored.
+            engine_type: Some(state::reported_engine_type(&broker.engine_type)),
+            authentication_strategy: Some(state::reported_authentication_strategy(
+                &broker.authentication_strategy,
+            )),
+            storage_type: Some(state::reported_storage_type(&broker.storage_type)),
+            engine_version: Some(broker.engine_version.clone()),
             deployment_mode: Some(broker.deployment_mode.clone()),
             host_instance_type: Some(broker.host_instance_type.clone()),
             publicly_accessible: Some(broker.publicly_accessible),
             auto_minor_version_upgrade: Some(broker.auto_minor_version_upgrade),
-            authentication_strategy: Some(broker.authentication_strategy.clone()),
-            storage_type: broker.storage_type.clone(),
             storage_size: broker.storage_size,
             security_groups: state::optional_list(&broker.security_groups),
             subnet_ids: state::optional_list(&broker.subnet_ids),
             data_replication_mode: broker.data_replication_mode.clone(),
             created: Some(broker.created_timestamp()),
             tags: broker.optional_tags(),
-            // The logging the broker was created with, plus the CloudWatch Logs
-            // log groups Amazon MQ derives from the broker's own id.
-            logs: Some(LogsSummary {
-                audit: broker.logs.audit,
-                audit_log_group: (broker.logs.audit == Some(true))
-                    .then(|| broker.log_group("audit")),
-                general: broker.logs.general,
-                general_log_group: broker.log_group("general"),
+            // The instance allocated to the broker once it is running: where a client
+            // opens its console and dials its wire protocols.
+            broker_instances: {
+                let instances: Vec<BrokerInstance> = broker
+                    .allocated_instances(now)
+                    .into_iter()
+                    .map(|instance| BrokerInstance {
+                        console_url: Some(instance.console_url),
+                        endpoints: Some(instance.endpoints),
+                        ip_address: instance.ip_address,
+                    })
+                    .collect();
+                (!instances.is_empty()).then_some(instances)
+            },
+            // The configuration the broker runs, and the configurations applied to it
+            // before that one. Nothing applies a second configuration to a broker yet
+            // — `UpdateBroker`, the operation that would, is still a stub — so the
+            // history of a broker that runs its first configuration is empty.
+            configurations: Some(Configurations {
+                current: Some(ConfigurationId {
+                    id: broker.configuration.id.clone(),
+                    revision: Some(broker.configuration.revision),
+                }),
+                history: Some(Vec::new()),
                 pending: None,
             }),
-            encryption_options: broker.encryption_options.as_ref().map(|options| {
-                EncryptionOptions {
-                    kms_key_id: options.kms_key_id.clone(),
-                    use_aws_owned_key: options.use_aws_owned_key,
-                }
+            // The logging the broker was created with, plus the CloudWatch Logs
+            // log groups Amazon MQ derives from the broker's own id. Audit logging
+            // is reported as the flag it is — `false` when it is off — on every
+            // broker whose engine has it at all.
+            logs: Some(LogsSummary {
+                audit: broker
+                    .audit_logging_applies()
+                    .then(|| broker.logs.audit.unwrap_or(false)),
+                audit_log_group: broker
+                    .audit_logging_applies()
+                    .then(|| broker.log_group(state::LOG_KIND_AUDIT)),
+                general: broker.logs.general,
+                general_log_group: broker.log_group(state::LOG_KIND_GENERAL),
+                pending: None,
             }),
-            maintenance_window_start_time: broker
-                .maintenance_window_start_time
-                .as_ref()
-                .map(|window| WeeklyStartTime {
-                    day_of_week: window.day_of_week.clone(),
-                    time_of_day: window.time_of_day.clone(),
-                    time_zone: Some(window.time_zone.clone()),
-                }),
+            encryption_options: Some(EncryptionOptions {
+                kms_key_id: broker.encryption_options.kms_key_id.clone(),
+                use_aws_owned_key: broker.encryption_options.use_aws_owned_key,
+            }),
+            maintenance_window_start_time: Some(WeeklyStartTime {
+                day_of_week: broker.maintenance_window_start_time.day_of_week.clone(),
+                time_of_day: broker.maintenance_window_start_time.time_of_day.clone(),
+                time_zone: Some(broker.maintenance_window_start_time.time_zone.clone()),
+            }),
             // `LdapServerMetadataOutput` carries no password member, so the
             // stored service-account password is not reported.
             ldap_server_metadata: broker.ldap_server_metadata.as_ref().map(|ldap| {

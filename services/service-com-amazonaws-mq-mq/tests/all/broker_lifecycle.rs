@@ -233,12 +233,17 @@ async fn the_broker_lifecycle_round_trips_through_state() {
         ("/brokerId", json!(broker_id.clone())),
         ("/brokerArn", json!(broker_arn.clone())),
         ("/brokerName", json!("demo-broker")),
-        ("/engineType", json!("ACTIVEMQ")),
-        ("/engineVersion", json!("5.18")),
+        // Amazon MQ answers these three in its own wire spelling, not in the
+        // model's enum token (see `state::reported_engine_type`).
+        ("/engineType", json!("ActiveMQ")),
+        ("/storageType", json!("ebs")),
+        ("/authenticationStrategy", json!("simple")),
+        // The create named the 5.18 LINE; the broker reports the patch release it
+        // runs on that line.
+        ("/engineVersion", json!("5.18.8")),
         ("/deploymentMode", json!("SINGLE_INSTANCE")),
         ("/hostInstanceType", json!("mq.t3.micro")),
         ("/publiclyAccessible", json!(false)),
-        ("/storageType", json!("EBS")),
         ("/securityGroups", json!(["sg-1", "sg-2"])),
         ("/subnetIds", json!(["subnet-a"])),
         ("/tags/team", json!("payments")),
@@ -246,7 +251,6 @@ async fn the_broker_lifecycle_round_trips_through_state() {
         // Documented defaults: AutoMinorVersionUpgrade is "true by default",
         // AuthenticationStrategy's "default is SIMPLE".
         ("/autoMinorVersionUpgrade", json!(true)),
-        ("/authenticationStrategy", json!("SIMPLE")),
     ] {
         assert_eq!(
             described.pointer(pointer).cloned().unwrap_or(Value::Null),
@@ -286,7 +290,7 @@ async fn the_broker_lifecycle_round_trips_through_state() {
         ("/brokerSummaries/0/brokerId", json!(broker_id.clone())),
         ("/brokerSummaries/0/brokerArn", json!(broker_arn.clone())),
         ("/brokerSummaries/0/brokerName", json!("demo-broker")),
-        ("/brokerSummaries/0/engineType", json!("ACTIVEMQ")),
+        ("/brokerSummaries/0/engineType", json!("ActiveMQ")),
         ("/brokerSummaries/0/deploymentMode", json!("SINGLE_INSTANCE")),
         ("/brokerSummaries/0/hostInstanceType", json!("mq.t3.micro")),
     ] {
@@ -411,13 +415,22 @@ async fn every_modelled_engine_deployment_and_storage_combination_round_trips() 
                     );
                     for (pointer, expected) in [
                         ("/brokerName", json!(name)),
-                        ("/engineType", json!(engine_type)),
+                        // The wire spellings Amazon MQ answers these members in,
+                        // whatever modelled token the create sent.
+                        (
+                            "/engineType",
+                            json!(if *engine_type == "ACTIVEMQ" {
+                                "ActiveMQ"
+                            } else {
+                                "RabbitMQ"
+                            }),
+                        ),
+                        ("/storageType", json!(storage_type.to_lowercase())),
+                        ("/authenticationStrategy", json!("ldap")),
                         ("/deploymentMode", json!(deployment_mode)),
-                        ("/storageType", json!(storage_type)),
                         ("/hostInstanceType", json!(host_instance_type)),
                         ("/publiclyAccessible", json!(publicly_accessible)),
                         ("/autoMinorVersionUpgrade", json!(false)),
-                        ("/authenticationStrategy", json!("LDAP")),
                     ] {
                         assert_eq!(
                             described.pointer(pointer).cloned().unwrap_or(Value::Null),
@@ -1238,21 +1251,23 @@ async fn create_broker_reports_the_logging_it_was_asked_for() {
 
     // Rows: the `Logs` member as sent, then the `audit`/`general` the summary
     // must report. `Logs` has exactly two flags, so the table spans every
-    // combination plus the absent member.
-    let cases: Vec<(&str, Option<Value>, Option<bool>, bool)> = vec![
-        ("no logs member", None, None, false),
-        ("general only", Some(json!({"general": true})), None, true),
-        ("audit only", Some(json!({"audit": true})), Some(true), false),
+    // combination plus the absent member. Every row is an ActiveMQ broker
+    // (`create_body`), the engine audit logging applies to, so every row reports
+    // the audit flag — `false` where audit logging is off, never absent.
+    let cases: Vec<(&str, Option<Value>, bool, bool)> = vec![
+        ("no logs member", None, false, false),
+        ("general only", Some(json!({"general": true})), false, true),
+        ("audit only", Some(json!({"audit": true})), true, false),
         (
             "both on",
             Some(json!({"audit": true, "general": true})),
-            Some(true),
+            true,
             true,
         ),
         (
             "both off",
             Some(json!({"audit": false, "general": false})),
-            Some(false),
+            false,
             false,
         ),
     ];
@@ -1275,28 +1290,17 @@ async fn create_broker_reports_the_logging_it_was_asked_for() {
         );
         assert_eq!(
             described.pointer("/logs/audit").and_then(Value::as_bool),
-            expected_audit,
+            Some(expected_audit),
             "case {case:?}: expected audit={expected_audit:?}, got {described:?}"
         );
-        assert_eq!(
-            string_at(&described, "/logs/generalLogGroup"),
-            format!("/aws/amazonmq/broker/{broker_id}/general"),
-            "case {case:?}: the general log group must name this broker, got {described:?}"
-        );
-        let audit_log_group = described
-            .pointer("/logs/auditLogGroup")
-            .and_then(Value::as_str);
-        if expected_audit == Some(true) {
+        for (kind, pointer) in [
+            ("general", "/logs/generalLogGroup"),
+            ("audit", "/logs/auditLogGroup"),
+        ] {
             assert_eq!(
-                audit_log_group,
-                Some(format!("/aws/amazonmq/broker/{broker_id}/audit").as_str()),
-                "case {case:?}: audit logging must report its log group, got {described:?}"
-            );
-        } else {
-            assert_eq!(
-                audit_log_group, None,
-                "case {case:?}: a broker without audit logging must report no audit log \
-                 group, got {described:?}"
+                string_at(&described, pointer),
+                format!("/aws/amazonmq/broker/{broker_id}/{kind}"),
+                "case {case:?}: the {kind} log group must name this broker, got {described:?}"
             );
         }
     }
@@ -1486,7 +1490,7 @@ async fn create_broker_reports_the_window_encryption_and_ldap_it_was_given() {
         );
         assert_eq!(
             string_at(&described, "/authenticationStrategy"),
-            "LDAP",
+            "ldap",
             "case {case:?}: the authentication strategy must round-trip, got {described:?}"
         );
     }

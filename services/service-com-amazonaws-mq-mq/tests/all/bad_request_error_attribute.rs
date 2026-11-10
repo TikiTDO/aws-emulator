@@ -48,6 +48,7 @@ use service_com_amazonaws_mq_mq::state::{
 
 use crate::broker_lifecycle::{create_body, string_at, Mq};
 use crate::configuration_name::configuration_body;
+use crate::configuration_wire_form::engine_type_on_the_wire;
 
 /// One input member whose modelled value set this service refuses itself: the
 /// operation that carries it, the member's `jsonName`, and the set the model declares.
@@ -224,8 +225,9 @@ async fn a_value_inside_every_modelled_enum_is_accepted() {
                 );
                 assert_eq!(
                     string_at(&described, "/engineType"),
-                    *engine_type,
-                    "case {case:?}: expected the stored engineType back, got {described:?}"
+                    engine_type_on_the_wire(engine_type),
+                    "case {case:?}: expected the stored engineType back, in the spelling \
+                     Amazon MQ answers it in, got {described:?}"
                 );
             }
         }

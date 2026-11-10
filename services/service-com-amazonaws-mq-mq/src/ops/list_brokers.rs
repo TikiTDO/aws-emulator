@@ -199,7 +199,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 broker_arn: Some(broker.broker_arn.clone()),
                 broker_name: Some(broker.broker_name.clone()),
                 broker_state: Some(broker.broker_state(now).to_string()),
-                engine_type: broker.engine_type.clone(),
+                // Reported in the spelling Amazon MQ answers an engine type in,
+                // derived from the modelled value the record holds.
+                engine_type: state::reported_engine_type(&broker.engine_type),
                 deployment_mode: broker.deployment_mode.clone(),
                 host_instance_type: Some(broker.host_instance_type.clone()),
                 created: Some(broker.created_timestamp()),
