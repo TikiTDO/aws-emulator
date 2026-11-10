@@ -198,7 +198,9 @@ use crate::ops::types::{
     ChannelInfo, ChannelLoggingInfo, ClientAuthentication, ClientVpcConnection, ClusterInfo,
     ClusterOperationInfo,
     ClusterOperationV2,
-    ClusterOperationV2Provisioned, ConflictException, Configuration,
+    ClusterOperationV2Provisioned,
+    ClusterOperationV2Summary,
+    ConflictException, Configuration,
     ConfigurationInfo, ConfigurationRevision, ConnectivityInfo, ConsumerGroupReplicationUpdate,
     CreateChannelInput,
     CreateClusterInput, CreateConfigurationInput, CreateReplicatorInput, CreateVpcConnectionInput,
@@ -1917,6 +1919,27 @@ impl ClusterOperation {
             // holds was filed by an update that a serverless cluster is refused
             // on, so no stored operation has that detail to report.
             serverless: None,
+        }
+    }
+
+    /// The same stored operation as `ClusterOperationV2Summary`, the shape
+    /// `ListClusterOperationsV2` pages.
+    ///
+    /// The summary is the V2 view WITHOUT its per-kind detail arm: it carries
+    /// exactly the members every cluster kind shares, so it is derived from the
+    /// full V2 rendering at the same reading instant rather than computed a
+    /// second way, and a listed operation cannot disagree with the by-ARN
+    /// reader of the same ARN about any member both report.
+    pub fn to_cluster_operation_v2_summary(&self, now: SystemTime) -> ClusterOperationV2Summary {
+        let full = self.to_cluster_operation_v2(now);
+        ClusterOperationV2Summary {
+            cluster_arn: full.cluster_arn,
+            cluster_type: full.cluster_type,
+            start_time: full.start_time,
+            end_time: full.end_time,
+            operation_arn: full.operation_arn,
+            operation_state: full.operation_state,
+            operation_type: full.operation_type,
         }
     }
 }
@@ -4382,6 +4405,56 @@ pub fn decode_page_token(prefix: &str, token: &str) -> Option<String> {
     let decoded = ::aws_smithy_types::base64::decode(token).ok()?;
     let decoded = String::from_utf8(decoded).ok()?;
     decoded.strip_prefix(prefix).map(ToString::to_string)
+}
+
+/// Separates the three fields a cluster-operation listing's token carries: the
+/// cluster ARN it was minted for, the millisecond the page's last operation was
+/// filed at, and that operation's own ARN. Neither an MSK ARN nor a decimal
+/// number can contain it, so the plaintext splits back into exactly three
+/// fields.
+const CLUSTER_OPERATION_TOKEN_SEPARATOR: char = '#';
+
+/// Encode the cluster and the [`ClusterOperation::history_key`] a page of that
+/// cluster's operation history stopped at, through the one page-token codec of
+/// this service ([`encode_page_token`]) under `prefix`.
+///
+/// The cluster is INSIDE the plaintext, so a token minted from one cluster's
+/// history cannot resume another's, and `prefix` is the minting listing's own,
+/// so neither can a token minted by a different listing of the same history.
+pub fn encode_cluster_operation_page_token(
+    prefix: &str,
+    cluster_arn: &str,
+    last: (std::cmp::Reverse<u128>, &str),
+) -> String {
+    let (std::cmp::Reverse(millis), operation_arn) = last;
+    encode_page_token(
+        prefix,
+        &format!(
+            "{cluster_arn}{CLUSTER_OPERATION_TOKEN_SEPARATOR}{millis}\
+             {CLUSTER_OPERATION_TOKEN_SEPARATOR}{operation_arn}"
+        ),
+    )
+}
+
+/// The history key a token resumes after, or `None` when the token is not one
+/// `prefix` minted for the history of the cluster `cluster_arn` names — the
+/// inverse of [`encode_cluster_operation_page_token`], so a listing resumes by
+/// comparing the SAME key its page order is built from.
+pub fn decode_cluster_operation_page_token(
+    prefix: &str,
+    token: &str,
+    cluster_arn: &str,
+) -> Option<(std::cmp::Reverse<u128>, String)> {
+    let plaintext = decode_page_token(prefix, token)?;
+    let (arn, rest) = plaintext.split_once(CLUSTER_OPERATION_TOKEN_SEPARATOR)?;
+    if arn != cluster_arn {
+        return None;
+    }
+    let (millis, operation_arn) = rest.split_once(CLUSTER_OPERATION_TOKEN_SEPARATOR)?;
+    Some((
+        std::cmp::Reverse(millis.parse::<u128>().ok()?),
+        operation_arn.to_string(),
+    ))
 }
 
 /// This service's store in the shared engine: call it with a handler's `&*self.engine`.

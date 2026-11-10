@@ -90,7 +90,9 @@ use super::types::*;
 // The largest page `MaxResults` may ask for, from that member's `range` in the
 // model (1..100), and the size used when the request names none. The crate's own
 // bound, shared with every other listing rather than restated here.
-use crate::state::MAX_RESULTS_LIMIT;
+use crate::state::{
+    decode_cluster_operation_page_token, encode_cluster_operation_page_token, MAX_RESULTS_LIMIT,
+};
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -139,47 +141,6 @@ impl From<ListClusterOperationsErrorModeled> for ListClusterOperationsError {
 /// Marker that prefixes a token's plaintext, so a token minted for some other
 /// list cannot be mistaken for one of these.
 const NEXT_TOKEN_PREFIX: &str = "kafka:cluster-operations:";
-
-/// Separates the cluster ARN a token was minted for, the millisecond the page's
-/// last operation was filed at and that operation's own ARN. Neither an MSK ARN
-/// nor a decimal number can contain it, so the plaintext splits back into
-/// exactly three fields.
-const NEXT_TOKEN_SEPARATOR: char = '#';
-
-/// Encode the cluster and the history key a page stopped at as a token. Base64
-/// of a marked plaintext: the token is ENCODED, not authenticated, so a caller
-/// could decode it or mint one. That is harmless here — the key inside is only
-/// used as a `>` comparison against the history of the cluster the request
-/// already names, so a forged resume point can only skip or repeat operations
-/// the caller may already list.
-fn encode_next_token(cluster_arn: &str, last: (::std::cmp::Reverse<u128>, &str)) -> String {
-    let (::std::cmp::Reverse(millis), arn) = last;
-    ::aws_smithy_types::base64::encode(format!(
-        "{NEXT_TOKEN_PREFIX}{cluster_arn}{NEXT_TOKEN_SEPARATOR}{millis}{NEXT_TOKEN_SEPARATOR}{arn}"
-    ))
-}
-
-/// The history key a token resumes after, or `None` when the token is not one
-/// this operation minted FOR THIS CLUSTER: a token carries the list it was
-/// minted from, so one page's token cannot resume another cluster's history.
-fn decode_next_token(
-    token: &str,
-    cluster_arn: &str,
-) -> Option<(::std::cmp::Reverse<u128>, String)> {
-    let decoded = ::aws_smithy_types::base64::decode(token).ok()?;
-    let decoded = String::from_utf8(decoded).ok()?;
-    let (arn, rest) = decoded
-        .strip_prefix(NEXT_TOKEN_PREFIX)?
-        .split_once(NEXT_TOKEN_SEPARATOR)?;
-    if arn != cluster_arn {
-        return None;
-    }
-    let (millis, operation_arn) = rest.split_once(NEXT_TOKEN_SEPARATOR)?;
-    Some((
-        ::std::cmp::Reverse(millis.parse::<u128>().ok()?),
-        operation_arn.to_string(),
-    ))
-}
 
 /// The `ListClusterOperations` operation.
 ///
@@ -248,7 +209,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // pages shifts nothing already returned.
         let resume_after = match input.next_token.as_deref() {
             None => None,
-            Some(token) => match decode_next_token(token, &input.cluster_arn) {
+            Some(token) => match decode_cluster_operation_page_token(
+                NEXT_TOKEN_PREFIX,
+                token,
+                &input.cluster_arn,
+            ) {
                 Some(key) => Some(key),
                 None => {
                     return Err(ListClusterOperationsErrorModeled::BadRequestException(
@@ -320,7 +285,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 break;
             }
             page.push(operation.to_cluster_operation_info(now));
-            last_token = Some(encode_next_token(
+            last_token = Some(encode_cluster_operation_page_token(
+                NEXT_TOKEN_PREFIX,
                 &input.cluster_arn,
                 operation.history_key(),
             ));

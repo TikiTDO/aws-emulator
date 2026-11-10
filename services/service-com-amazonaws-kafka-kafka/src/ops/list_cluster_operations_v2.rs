@@ -1,15 +1,28 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListClusterOperationsV2
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListClusterOperationsV2`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListClusterOperationsV2::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Pages the operations one cluster has recorded, latest first, through the
+//! single derivation
+//! [`crate::state::ComAmazonawsKafkaKafkaState::cluster_operation_history`] —
+//! the same history `ListClusterOperations` pages, rendered in the V2 summary
+//! shape by [`crate::state::ClusterOperation::to_cluster_operation_v2_summary`]
+//! at one reading instant, so a listed operation and the by-ARN V2 reader of it
+//! cannot disagree, and an operation's state moves because the clock moved and
+//! never because somebody listed it.
+//!
+//! The cluster is resolved first: a `ClusterArn` that is not an MSK cluster ARN
+//! is a bad request, and a well-formed one this endpoint's region holds no
+//! cluster for is a 404 — the history is listed FROM a cluster, so a missing
+//! cluster has none to serve, which is not an empty page. The V2 summary
+//! reports an operation through the members every cluster kind shares and names
+//! the kind itself (`ClusterType`), so unlike the V1 listing this one serves
+//! EVERY kind of cluster rather than refusing the ones with no customer broker
+//! nodes.
+//!
+//! `MaxResults` / `NextToken` then page what is left, at the model's own bound,
+//! with each page's token minted from the history key the page stopped at under
+//! this listing's own marker, so one listing's token cannot resume another's.
 //!
 //! ## Shape of an operation
 //!
@@ -79,6 +92,12 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+// The largest page `MaxResults` may ask for, from that member's `range` in the
+// model (1..100), and the size used when the request names none. The crate's own
+// bound, shared with every other listing rather than restated here.
+use crate::state::{
+    decode_cluster_operation_page_token, encode_cluster_operation_page_token, MAX_RESULTS_LIMIT,
+};
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -118,6 +137,11 @@ impl From<ListClusterOperationsV2ErrorModeled> for ListClusterOperationsV2Error 
     }
 }
 
+/// Marker that prefixes a token's plaintext, so a token minted by some other
+/// list — including the V1 listing of this same history — cannot be mistaken
+/// for one of these.
+const NEXT_TOKEN_PREFIX: &str = "kafka:cluster-operations-v2:";
+
 /// The `ListClusterOperationsV2` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -154,18 +178,116 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListClusterOperationsV2` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListClusterOperationsV2ErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListClusterOperationsV2"))
+        // Decided FIRST, on the ARN as submitted and from the request alone: the
+        // caller holds no resource-based policy over a cluster of another account,
+        // so such a request is refused rather than answered out of what this
+        // registry happens to hold under that ARN. See
+        // [`crate::state::authorization`].
+        crate::state::authorization::authorize_operation(Self::NAME, &input.cluster_arn)?;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                ListClusterOperationsV2ErrorModeled::InternalServerErrorException(
+                    InternalServerErrorException {
+                        invalid_parameter: None,
+                        message: Some("the kafka service state is unavailable".to_string()),
+                    },
+                )
+                .into(),
+            );
+        };
+        let region = crate::state::request_region(ctx.parts());
+
+        if !crate::state::is_cluster_arn(&input.cluster_arn) {
+            return Err(ListClusterOperationsV2ErrorModeled::BadRequestException(
+                crate::state::malformed_arn(crate::state::CLUSTER_ARN_MEMBER),
+            )
+            .into());
+        }
+
+        // A token names the history key the previous page stopped at; the next
+        // page starts after it in the same order, so an operation filed between
+        // pages shifts nothing already returned.
+        let resume_after = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => {
+                match decode_cluster_operation_page_token(
+                    NEXT_TOKEN_PREFIX,
+                    token,
+                    &input.cluster_arn,
+                ) {
+                    Some(key) => Some(key),
+                    None => {
+                        return Err(ListClusterOperationsV2ErrorModeled::BadRequestException(
+                            BadRequestException {
+                                invalid_parameter: Some("NextToken".to_string()),
+                                message: Some("The pagination token is not valid.".to_string()),
+                            },
+                        )
+                        .into())
+                    }
+                }
+            }
+        };
+
+        // Absent `MaxResults` pages at the largest size the model allows, and no
+        // request may ask for a longer page than that range permits.
+        let page_size = usize::try_from(input.max_results.unwrap_or(MAX_RESULTS_LIMIT))
+            .unwrap_or(MAX_RESULTS_LIMIT as usize)
+            .clamp(1, MAX_RESULTS_LIMIT as usize);
+
+        let now = std::time::SystemTime::now();
+        // Reporting only: nothing here writes. An operation's state is a
+        // function of its stored completion instant and the reading instant, so
+        // no reader has to settle anything for the page to be right.
+        let state = state.lock();
+
+        // The operations are listed FROM a cluster, so an endpoint that holds no
+        // cluster for this ARN has no history to serve — which is a missing
+        // resource, not an empty page.
+        let Some(cluster) = state.cluster_in(&region, &input.cluster_arn) else {
+            return Err(
+                ListClusterOperationsV2ErrorModeled::NotFoundException(NotFoundException {
+                    invalid_parameter: Some("ClusterArn".to_string()),
+                    message: Some(crate::state::RESOURCE_NOT_FOUND_MESSAGE.to_string()),
+                })
+                .into(),
+            );
+        };
+
+        // One walk of this cluster's history from its resume point, stopping as
+        // soon as the page is full. Every cluster kind is served here: the
+        // summary reports only the members each kind shares, and names the kind
+        // itself.
+        let history = state.cluster_operation_history(cluster);
+        let mut page: Vec<ClusterOperationV2Summary> = Vec::with_capacity(page_size);
+        let mut last_token: Option<String> = None;
+        let mut more_remain = false;
+        for operation in history.iter().filter(|operation| {
+            resume_after
+                .as_ref()
+                .is_none_or(|(millis, arn)| operation.history_key() > (*millis, arn.as_str()))
+        }) {
+            if page.len() == page_size {
+                more_remain = true;
+                break;
+            }
+            page.push(operation.to_cluster_operation_v2_summary(now));
+            last_token = Some(encode_cluster_operation_page_token(
+                NEXT_TOKEN_PREFIX,
+                &input.cluster_arn,
+                operation.history_key(),
+            ));
+        }
+
+        // The token is minted from the HISTORY KEY the resume comparison uses,
+        // not from the rendered summary, so the two can never disagree, and only
+        // a page that left something behind carries one: a full page that
+        // exhausted the history closes the list.
+        let next_token = if more_remain { last_token } else { None };
+
+        Ok(ListClusterOperationsV2Output {
+            cluster_operation_info_list: Some(page),
+            next_token,
+        })
     }
 }

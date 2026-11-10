@@ -484,6 +484,39 @@ async fn every_other_timestamp_member_is_an_iso8601_date_time() {
         "case operation-v2: the two shapes render one stored end instant, got {operation_v2}"
     );
     // `ListClusterOperationsV2` renders `ClusterOperationV2Summary`, whose two timestamp
-    // members are the same date-time shape; the operation is still a 501 scaffold in this
-    // emulator (its own stub issue), so there is no response here to assert against.
+    // members are the same date-time shape, so the listing must report the same two stored
+    // instants the readers above do.
+    let operations_v2 = ok(
+        "operation-v2",
+        "ListClusterOperationsV2",
+        emulator
+            .call(
+                "GET",
+                &format!("/api/v2/clusters/{}/operations", pct(&cluster_arn)),
+                None,
+            )
+            .await,
+    );
+    assert_eq!(
+        assert_date_times_in_list(
+            "operation-v2",
+            &operations_v2,
+            "/clusterOperationInfoList",
+            "/startTime",
+            operation_window
+        ),
+        vec![operation_at],
+        "case operation-v2: the listing must report the stored start instant, got {operations_v2}"
+    );
+    assert_eq!(
+        assert_date_times_in_list(
+            "operation-v2",
+            &operations_v2,
+            "/clusterOperationInfoList",
+            "/endTime",
+            operation_window
+        ),
+        vec![operation_end],
+        "case operation-v2: the listing must report the stored end instant, got {operations_v2}"
+    );
 }

@@ -47,6 +47,8 @@ mod cluster_delete_state_guard;
 mod cluster_lifecycle;
 #[path = "all/cluster_operation_listing.rs"]
 mod cluster_operation_listing;
+#[path = "all/cluster_operation_listing_v2.rs"]
+mod cluster_operation_listing_v2;
 #[path = "all/cluster_operation_v2.rs"]
 mod cluster_operation_v2;
 #[path = "all/cluster_policy.rs"]
