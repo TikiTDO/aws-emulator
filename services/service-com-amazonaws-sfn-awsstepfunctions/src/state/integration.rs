@@ -35,8 +35,9 @@
 //! operation ([`Rest`]) and a call is made only for an operation whose bindings are
 //! stated. An `awsQuery` service takes the whole
 //! request as a FORM — the action and the service's API version beside one field per
-//! member of the input ([`form_body`]) — and answers an XML document wrapping the
-//! operation's own result ([`query_result`]).
+//! LEAF of the input ([`form_body`]), a member that is a collection spread over the
+//! numbered fields that protocol names its parts by ([`FORM_MAPS`]) — and answers an
+//! XML document wrapping the operation's own result ([`query_result`]).
 //!
 //! The parameters of a `Task` state's integration are written in the integration's
 //! own convention, PascalCase, whatever the invoked API spells its own members in,
@@ -59,8 +60,8 @@
 //!   since each entry's facts are that service's own model's;
 //! * an operation of a REST service whose own bindings are not carried, since where
 //!   each of its members goes on the wire is that operation's own fact, and a member
-//!   of a FORM request that is a structure or a list, whose field names are the
-//!   invoked shape's own ([`form_body`]);
+//!   of a FORM request that is a structure or a list no [`FORM_MAPS`] entry names the
+//!   fields of, whose names are the invoked shape's own ([`form_body`]);
 //! * a run-a-job (`.sync`) pattern over an integration that is not in the
 //!   [`RUN_A_JOB`] catalogue below, because the job it starts is reported and
 //!   stopped through calls only that integration names;
@@ -271,6 +272,15 @@ const LAMBDA_INVOKE_INTEGRATION: &str = "lambda:invoke";
 
 /// The ARN namespace of Amazon SQS, whose queues a `Task` state sends to.
 const SQS_NAMESPACE: &str = "sqs";
+
+/// The ARN namespace of Amazon SNS, whose topics a `Task` state publishes to
+/// (`awsService.arnNamespace`).
+const SNS_NAMESPACE: &str = "sns";
+
+/// The `<namespace>:<action>` the optimized family names the publish to a topic by,
+/// which is the key its [`TARGET_RESOURCES`] and [`FORM_MAPS`] entries are carried
+/// under.
+const SNS_PUBLISH_INTEGRATION: &str = "sns:publish";
 
 /// The `Resource` segment that selects the AWS SDK integration family
 /// (`arn:aws:states:::aws-sdk:<service>:<action>`).
@@ -807,6 +817,55 @@ impl MemberCase {
     }
 }
 
+/// How the query protocol spreads a MAP member of one integration's request over form
+/// fields.
+///
+/// An `awsQuery` request is a flat form, so a member that is a map is carried as one
+/// NUMBERED ENTRY per pair — `<member>.entry.<n>.<key>` beside
+/// `<member>.entry.<n>.<value>` — and the names its key and value halves go under are
+/// the map shape's own (`key` and `value` unless that shape's members carry an
+/// `xmlName`). Those names are facts of the INVOKED model, which this crate cannot
+/// read, so they are stated per member here; a collection member no entry names is
+/// one no call is made for ([`form_body`]), exactly as before.
+#[derive(Debug, Clone, Copy)]
+pub struct FormMap {
+    /// The member, as the WIRE spelling of the request names it ([`MemberCase`]).
+    pub member: &'static str,
+    /// The name each pair's KEY is written under.
+    pub key: &'static str,
+    /// The name each pair's VALUE is written under.
+    pub value: &'static str,
+    /// Whether each pair's value is a STRUCTURE, whose own members are then one field
+    /// each below that name (`<member>.entry.<n>.<value>.<Member>`); a map of scalars
+    /// carries the value itself under it.
+    pub structured: bool,
+}
+
+/// The map members of the integration requests this emulator binds to a form field,
+/// keyed by the `<namespace>:<action>` the OPTIMIZED family names the integration by.
+///
+/// The key serves BOTH families, unlike the conversions an integration itself
+/// documents: what these state is the shape of the INVOKED operation's own member, so
+/// it holds however the `Resource` named that operation.
+const FORM_MAPS: &[(&str, &[FormMap])] = &[
+    // `arn:aws:states:::sns:publish` carries `Publish`'s `MessageAttributes`, a map
+    // whose key is written `Name` and whose value `Value`, each value a
+    // `MessageAttributeValue` structure of `DataType`, `StringValue` and `BinaryValue`
+    // (`smithy_query(query="shape",shape="MessageAttributeMap,MessageAttributeValue",
+    // model_path="services/service-com-amazonaws-sns-amazonsimplenotificationservice/
+    // smithy-model/com-amazonaws-sns-amazonsimplenotificationservice.json")`: the map's
+    // key member carries `xmlName` `Name` and its value member `xmlName` `Value`).
+    (
+        SNS_PUBLISH_INTEGRATION,
+        &[FormMap {
+            member: "MessageAttributes",
+            key: "Name",
+            value: "Value",
+            structured: true,
+        }],
+    ),
+];
+
 /// The services a `Task` state's integration call is made to, and how a request to
 /// each is bound to HTTP ([`Wire`]) — so the document the state built IS the
 /// operation's input, wherever that protocol puts it.
@@ -912,6 +971,32 @@ pub const APIS: &[Api] = &[
         // legacy query codes (`AWS.SimpleQueueService.NonExistentQueue`) beside their
         // shapes.
         query_compatible: true,
+    },
+    // `services/service-com-amazonaws-sns-amazonsimplenotificationservice/smithy-model/
+    // com-amazonaws-sns-amazonsimplenotificationservice.json`: awsQuery, sigv4Name
+    // `sns`, endpointPrefix `sns`, arnNamespace `sns`, sdkId `SNS`, version
+    // `2010-03-31` — a FORM protocol, so the operation's input goes on the wire as form
+    // fields beside the action it names ([`Wire::Query`]).
+    Api {
+        namespace: SNS_NAMESPACE,
+        signing_name: SNS_NAMESPACE,
+        endpoint_prefix: SNS_NAMESPACE,
+        wire: Wire::Query {
+            version: "2010-03-31",
+        },
+        sdk_id: "SNS",
+        error_prefix: "SNS",
+        // The client class `AmazonSNSClient`, whose base exception is
+        // `AmazonSNSException`; the model's service shape is the service's full name
+        // (`AmazonSimpleNotificationService`), which the SDK's own names do not carry.
+        sdk_client: "AmazonSNS",
+        sdk_exception: "AmazonSNSException",
+        // `Publish`'s input: `TopicArn`, `Message`, `MessageAttributes`.
+        member_case: MemberCase::Pascal,
+        // Its model declares the `awsQuery` protocol itself rather than the
+        // compatibility modifier, so an error of it is named by its own query code and
+        // there is no second name to ask for.
+        query_compatible: false,
     },
     // `services/service-com-amazonaws-eventbridge-awsevents/smithy-model/
     // com-amazonaws-eventbridge-awsevents.json`: awsJson1_1, sigv4Name `events`,
@@ -1239,6 +1324,7 @@ pub fn dataset_call(operation: &str) -> Option<Call> {
         parsed_output: false,
         json_text: &[],
         json_text_at: &[],
+        form_maps: &[],
         sdk_envelope: false,
         epoch_millis: &[],
         targets: None,
@@ -1282,6 +1368,11 @@ pub struct Call {
     /// top level, each named by the path to it through the request's objects and lists
     /// ([`JSON_TEXT_AT_MEMBERS`]). Empty for every call that converts nothing.
     pub json_text_at: &'static [&'static [&'static str]],
+    /// The MAP members of this call's request, for a request a FORM protocol spreads
+    /// over one field per leaf ([`FORM_MAPS`]). Empty for every call whose request
+    /// carries no such member, and for every protocol that carries the request as a
+    /// document.
+    pub form_maps: &'static [FormMap],
     /// Whether the task's result is the literal SDK response of this call, which
     /// carries the SDK's own response envelope beside the operation's members
     /// ([`with_sdk_envelope`]).
@@ -1424,6 +1515,34 @@ pub struct TargetResource {
     pub default: Option<&'static str>,
     /// How that member spells the resource it names ([`TargetNaming`]).
     pub named: TargetNaming,
+    /// The error the invoked operation MODELS for a call its caller is not authorized
+    /// to make ([`Denied`]); `None` where that operation models none, whose refusal
+    /// reaches the state under the invoked service's BASE SDK exception
+    /// ([`Api::base_error`]) — the class its client deserializes an unmodelled code
+    /// into.
+    pub denied: Option<Denied>,
+}
+
+/// The error one operation answers a call its caller is not authorized to make with,
+/// as that operation's own model declares it.
+///
+/// A refusal the role gate makes on the invoked service's behalf
+/// ([`super::task_authorization`]) is the refusal THAT SERVICE would have answered, so
+/// where the operation models an access-denied error of its own the task reports that
+/// error's class and the status and code its answer carries — which is what a
+/// definition's `Retry` and `Catch` match on. Every field is read from the operation's
+/// own `smithy_query(query="operation")`, so this states no wire detail of its own.
+#[derive(Debug, Clone, Copy)]
+pub struct Denied {
+    /// The SDK exception class the error shape is deserialized into, which is the
+    /// error half of the name a `Task` state reports ([`Api::task_error`]).
+    pub exception: &'static str,
+    /// The code the answer names the class by — for an `awsQuery` service the error's
+    /// own query code (`awsQueryError.code`), which is what that service's client
+    /// matches on.
+    pub code: &'static str,
+    /// The status that refusal answers with (`httpError`).
+    pub status: u16,
 }
 
 /// How the member of an integration's request that names the call's target SPELLS it.
@@ -1593,6 +1712,7 @@ pub const TARGET_RESOURCES: &[TargetResource] = &[
         member: "StateMachineArn",
         default: None,
         named: TargetNaming::Arn,
+        denied: None,
     },
     // DynamoDB's item-level integrations each act on ONE table, the one their
     // `TableName` parameter names: "The name of the table to contain the item" /
@@ -1613,6 +1733,7 @@ pub const TARGET_RESOURCES: &[TargetResource] = &[
         member: "TableName",
         default: None,
         named: DYNAMODB_TABLE,
+        denied: None,
     },
     TargetResource {
         integration: "dynamodb:getItem",
@@ -1620,6 +1741,7 @@ pub const TARGET_RESOURCES: &[TargetResource] = &[
         member: "TableName",
         default: None,
         named: DYNAMODB_TABLE,
+        denied: None,
     },
     TargetResource {
         integration: "dynamodb:updateItem",
@@ -1627,6 +1749,7 @@ pub const TARGET_RESOURCES: &[TargetResource] = &[
         member: "TableName",
         default: None,
         named: DYNAMODB_TABLE,
+        denied: None,
     },
     TargetResource {
         integration: "dynamodb:deleteItem",
@@ -1634,6 +1757,7 @@ pub const TARGET_RESOURCES: &[TargetResource] = &[
         member: "TableName",
         default: None,
         named: DYNAMODB_TABLE,
+        denied: None,
     },
     // `arn:aws:states:::sqs:sendMessage` sends to the queue its `QueueUrl` parameter
     // addresses, which is the queue `sqs:SendMessage` is taken on
@@ -1649,6 +1773,33 @@ pub const TARGET_RESOURCES: &[TargetResource] = &[
         member: "QueueUrl",
         default: None,
         named: TargetNaming::QueueUrl,
+        denied: None,
+    },
+    // `arn:aws:states:::sns:publish` publishes to the topic its `TopicArn` parameter
+    // names — "The topic you want to publish to" — which is the resource
+    // `sns:Publish` is taken on
+    // (`smithy_query(query="operation",operation="Publish",model_path="services/
+    // service-com-amazonaws-sns-amazonsimplenotificationservice/smithy-model/
+    // com-amazonaws-sns-amazonsimplenotificationservice.json")`). Unlike the
+    // integrations above, `Publish` MODELS the refusal of an unauthorized call:
+    // `AuthorizationErrorException` "indicates that the user has been denied access to
+    // the requested resource", answered with HTTP 403 under the query code
+    // `AuthorizationError` — so that is the error a denied publish reaches the state
+    // as, rather than the service's base SDK exception.
+    TargetResource {
+        integration: SNS_PUBLISH_INTEGRATION,
+        action: None,
+        member: "TopicArn",
+        // `Publish` documents no default destination: "If you don't specify a value for
+        // the TopicArn parameter, you must specify a value for the PhoneNumber or
+        // TargetArn parameters", so a request naming none names no topic at all.
+        default: None,
+        named: TargetNaming::Arn,
+        denied: Some(Denied {
+            exception: "AuthorizationErrorException",
+            code: "AuthorizationError",
+            status: 403,
+        }),
     },
     // `arn:aws:states:::lambda:invoke` invokes the function its `FunctionName`
     // parameter names. The action is `lambda:InvokeFunction` — the permission Lambda
@@ -1664,6 +1815,7 @@ pub const TARGET_RESOURCES: &[TargetResource] = &[
         member: "FunctionName",
         default: None,
         named: TargetNaming::FunctionName,
+        denied: None,
     },
     // `arn:aws:states:::athena:startQueryExecution` runs its query IN a workgroup —
     // `WorkGroup` is "the name of the workgroup in which the query is being started"
@@ -1683,6 +1835,7 @@ pub const TARGET_RESOURCES: &[TargetResource] = &[
         member: "WorkGroup",
         default: Some(ATHENA_DEFAULT_WORK_GROUP),
         named: ATHENA_WORK_GROUP,
+        denied: None,
     },
     // `arn:aws:states:::glue:startJobRun` runs the job its `JobName` parameter names —
     // "the name of the job definition to use", `@required`
@@ -1696,6 +1849,7 @@ pub const TARGET_RESOURCES: &[TargetResource] = &[
         member: "JobName",
         default: None,
         named: GLUE_JOB,
+        denied: None,
     },
 ];
 
@@ -2576,6 +2730,9 @@ pub fn read(resource: &str) -> Result<Call, String> {
         parsed_output,
         json_text,
         json_text_at,
+        // What a form field names the parts of a map member by is the INVOKED model's
+        // own fact, so it holds for both families: the entry is read for each.
+        form_maps: form_maps_of(&integration),
         // The OPTIMIZED family's result is the literal SDK response; the AWS SDK
         // family's is the invoked operation's own members.
         sdk_envelope: !aws_sdk,
@@ -2632,6 +2789,7 @@ fn http_invoke(shown: &str, action: &str) -> Result<Call, String> {
         parsed_output: false,
         json_text: &[],
         json_text_at: &[],
+        form_maps: &[],
         sdk_envelope: false,
         epoch_millis: &[],
         targets: None,
@@ -2677,6 +2835,7 @@ fn direct_invocation(function: &str, shown: &str) -> Result<Call, String> {
         parsed_output: false,
         json_text: &[],
         json_text_at: &[],
+        form_maps: &[],
         // The result of this form is the function's own payload, not the SDK response
         // the optimized integration reports ([`reported_result`]).
         sdk_envelope: false,
@@ -2711,6 +2870,16 @@ fn paths_of(
         .iter()
         .find(|(named, _)| *named == integration)
         .map_or(&[][..], |(_, paths)| *paths)
+}
+
+/// The MAP members [`FORM_MAPS`] names for `integration`, and none for one with no
+/// entry — the same reading as [`members_of`], over what a form field names the parts
+/// of a map by.
+fn form_maps_of(integration: &str) -> &'static [FormMap] {
+    FORM_MAPS
+        .iter()
+        .find(|(named, _)| *named == integration)
+        .map_or(&[][..], |(_, maps)| *maps)
 }
 
 /// The call that reports the job `job` started under `job_id`, and its request.
@@ -2786,6 +2955,7 @@ fn pattern_call(api: &'static Api, operation: &str) -> Call {
         parsed_output: false,
         json_text: &[],
         json_text_at: &[],
+        form_maps: &[],
         sdk_envelope: false,
         epoch_millis: &[],
         targets: None,
@@ -3352,7 +3522,8 @@ fn wired(call: &Call, request: &Value) -> Result<Wired, String> {
                     uri: "/".to_string(),
                     target: None,
                     headers: Vec::new(),
-                    body: form_body(&call.operation, version, &document)?.into_bytes(),
+                    body: form_body(&call.operation, version, &document, call.form_maps)?
+                        .into_bytes(),
                 })
             }
             // A service whose protocol is a REST one reaches this only for a call
@@ -3379,45 +3550,125 @@ fn wired(call: &Call, request: &Value) -> Result<Wired, String> {
 
 /// The `application/x-www-form-urlencoded` body an `awsQuery` request carries:
 /// `Action` naming the operation, `Version` naming the service's API version, and one
-/// field per member of the operation's input.
+/// field per LEAF of the operation's input.
 ///
-/// Each value is percent-encoded by the maintained encoder
+/// Each field name and each value is percent-encoded by the maintained encoder
 /// ([`::percent_encoding`]), over RFC 3986's unreserved set — which is the encoding
 /// AWS's own canonical request states — so a value carrying a delimiter is one field
-/// rather than several.
+/// rather than several, and a map key the caller chose cannot read as the protocol's
+/// own `.` separator.
 ///
-/// A member whose value is a STRUCTURE or a LIST is not bound: this protocol spreads
-/// such a member over one field per leaf, under names that are the invoked shape's own,
-/// and those names are not readable from this crate. The call is not made for one
-/// rather than made with a field the service does not carry.
-fn form_body(operation: &str, version: &str, document: &Value) -> Result<String, String> {
+/// A member whose value is a MAP is spread as this protocol spreads one: one numbered
+/// `entry` per pair, each carrying the pair's key and its value under the names that
+/// map's own key and value members are written with ([`FormMap`]), and a value that is
+/// a structure carrying its own members as one field each below it. Those names are the
+/// invoked shape's, so a collection member no entry is carried for — any list, and a
+/// map or structure this emulator does not state the field names of — is still NOT
+/// bound: the call is not made for one rather than made with a field the service does
+/// not carry.
+fn form_body(
+    operation: &str,
+    version: &str,
+    document: &Value,
+    maps: &[FormMap],
+) -> Result<String, String> {
     let mut body = format!("Action={operation}&Version={version}");
     for (member, value) in document.as_object().into_iter().flatten() {
-        let field = match value {
-            Value::Null => continue,
-            Value::String(text) => text.clone(),
-            Value::Bool(_) | Value::Number(_) => value.to_string(),
-            Value::Array(_) | Value::Object(_) => {
-                return Err(format!(
-                    "this task's '{member}' is a {}, which this emulator does not bind to that \
-                     service's form-field protocol",
-                    match value {
-                        Value::Array(_) => "list",
-                        _ => "structure",
-                    }
-                ))
-            }
+        let spread = match maps.iter().find(|map| map.member == *member) {
+            Some(map) => Spread::Map(map),
+            None => Spread::Scalar,
         };
-        body.push('&');
-        body.push_str(
-            &::percent_encoding::utf8_percent_encode(member, UNRESERVED_ONLY).to_string(),
-        );
-        body.push('=');
-        body.push_str(
-            &::percent_encoding::utf8_percent_encode(&field, UNRESERVED_ONLY).to_string(),
-        );
+        let mut fields = Vec::new();
+        form_fields(&encoded(member), value, spread, &mut fields)?;
+        for (field, value) in fields {
+            body.push('&');
+            body.push_str(&field);
+            body.push('=');
+            body.push_str(&encoded(&value));
+        }
     }
     Ok(body)
+}
+
+/// What one node of a form request's document is spread over fields AS, which is a
+/// fact of the member the invoked model declares at that place rather than of the
+/// value.
+#[derive(Debug, Clone, Copy)]
+enum Spread<'a> {
+    /// One field, which is what every scalar is; a structure or a list reached here
+    /// is a member whose field names this emulator does not carry, so no call is made
+    /// for it.
+    Scalar,
+    /// A MAP, whose pairs are numbered `entry` fields under the names its key and
+    /// value members are written with.
+    Map(&'a FormMap),
+    /// A STRUCTURE, each of whose members is one field named `<this>.<member>`.
+    Structure,
+}
+
+/// The `entry` wrapper this protocol numbers a map's pairs under
+/// (`<member>.entry.<n>.<key>`).
+const MAP_ENTRY: &str = "entry";
+
+/// The fields the node `name` of a form request goes on the wire as, appended to
+/// `fields` as (already-encoded name, raw value) pairs.
+fn form_fields(
+    name: &str,
+    value: &Value,
+    spread: Spread<'_>,
+    fields: &mut Vec<(String, String)>,
+) -> Result<(), String> {
+    // A member the request did not carry is no field at all.
+    match value {
+        Value::Null => Ok(()),
+        Value::String(text) => {
+            fields.push((name.to_string(), text.clone()));
+            Ok(())
+        }
+        Value::Bool(_) | Value::Number(_) => {
+            fields.push((name.to_string(), value.to_string()));
+            Ok(())
+        }
+        Value::Object(members) => match spread {
+            Spread::Map(map) => {
+                for (index, (key, held)) in members.iter().enumerate() {
+                    let entry = format!("{name}.{MAP_ENTRY}.{}", index + 1);
+                    fields.push((format!("{entry}.{}", encoded(map.key)), key.clone()));
+                    let at = format!("{entry}.{}", encoded(map.value));
+                    let held_as = match map.structured {
+                        true => Spread::Structure,
+                        false => Spread::Scalar,
+                    };
+                    form_fields(&at, held, held_as, fields)?;
+                }
+                Ok(())
+            }
+            Spread::Structure => {
+                for (member, held) in members {
+                    let at = format!("{name}.{}", encoded(member));
+                    form_fields(&at, held, Spread::Scalar, fields)?;
+                }
+                Ok(())
+            }
+            Spread::Scalar => Err(unbound_form_member(name, "structure")),
+        },
+        Value::Array(_) => Err(unbound_form_member(name, "list")),
+    }
+}
+
+/// Why no call is made for a request carrying the member `name` as the collection
+/// `kind`: this protocol spreads such a member over one field per leaf, under names
+/// that are the invoked shape's own.
+fn unbound_form_member(name: &str, kind: &str) -> String {
+    format!(
+        "this task's '{name}' is a {kind}, which this emulator does not bind to that service's \
+         form-field protocol"
+    )
+}
+
+/// `text` percent-encoded as ONE field of a form ([`UNRESERVED_ONLY`]).
+fn encoded(text: &str) -> String {
+    ::percent_encoding::utf8_percent_encode(text, UNRESERVED_ONLY).to_string()
 }
 
 /// The characters a value percent-encoded as ONE component escapes: everything but RFC

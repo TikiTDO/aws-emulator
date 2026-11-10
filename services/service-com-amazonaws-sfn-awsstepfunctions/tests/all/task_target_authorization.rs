@@ -11,8 +11,9 @@
 //! which is not the operation's name) over the ARN of the resource the request addresses,
 //! whether the request names it by that ARN, by a queue's url or by a function's name. A
 //! call the policies in force on the role do not allow is NOT made: the task fails with
-//! the invoked service's own access-denied refusal, reported under that service's base
-//! SDK exception, and the execution ends `FAILED`.
+//! the invoked service's own access-denied refusal — reported under the error that
+//! operation MODELS for an unauthorized call, and under the service's base SDK exception
+//! for one that models none — and the execution ends `FAILED`.
 //!
 //! The rows differ along what the rule generalises over: which integration the `Resource`
 //! names, which family names it (the optimized one and the AWS SDK one, which make the
@@ -53,8 +54,8 @@ fn definition(resource: &str, parameters: &Value) -> String {
 }
 
 /// One row: the case, the `Resource` the `Task` names, its parameters, the IAM action the
-/// refusal must name, the ARN it must be refused ON, and the error name a `Task` state
-/// reports for it.
+/// refusal must name, the ARN it must be refused ON, the error name a `Task` state
+/// reports for it, and the code the answer it stands in for came back under.
 struct Row {
     case: &'static str,
     resource: &'static str,
@@ -62,6 +63,10 @@ struct Row {
     action: &'static str,
     resource_arn: String,
     refusal_error: &'static str,
+    /// The `Error Code:` fragment the cause carries: the code the invoked operation's
+    /// OWN answer to an unauthorized call names its class by, which is
+    /// [`REFUSAL_CODE`] for an operation that models no such error.
+    refusal_code: &'static str,
 }
 
 /// A call whose published action the execution role is not granted is refused with the
@@ -75,6 +80,7 @@ async fn an_integration_call_is_judged_by_its_own_action_and_addressed_resource(
     let queue_url = format!("https://sqs.{REGION}.amazonaws.com/{ACCOUNT}/intake");
     let queue_arn = format!("arn:aws:sqs:{REGION}:{ACCOUNT}:intake");
     let function_arn = format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:handler");
+    let topic_arn = format!("arn:aws:sns:{REGION}:{ACCOUNT}:orders");
     let role_arn = chain
         .role(
             "TargetActionsRole",
@@ -99,6 +105,7 @@ async fn an_integration_call_is_judged_by_its_own_action_and_addressed_resource(
             action: "sqs:SendMessage",
             resource_arn: queue_arn.clone(),
             refusal_error: "SQS.AmazonSQSException",
+            refusal_code: REFUSAL_CODE,
         },
         Row {
             // The other family makes the same call on the same queue, so the refusal
@@ -109,6 +116,29 @@ async fn an_integration_call_is_judged_by_its_own_action_and_addressed_resource(
             action: "sqs:SendMessage",
             resource_arn: queue_arn,
             refusal_error: "SQS.AmazonSQSException",
+            refusal_code: REFUSAL_CODE,
+        },
+        // `Publish` MODELS the refusal of an unauthorized call
+        // (`AuthorizationErrorException`, HTTP 403 under the query code
+        // `AuthorizationError`), so the task reports THAT error rather than the
+        // service's base SDK exception, and the cause carries that code.
+        Row {
+            case: "a publish to a topic, addressed by its ARN",
+            resource: "arn:aws:states:::sns:publish",
+            parameters: json!({ "TopicArn": topic_arn.clone(), "Message": "hello" }),
+            action: "sns:Publish",
+            resource_arn: topic_arn.clone(),
+            refusal_error: "SNS.AuthorizationErrorException",
+            refusal_code: "Error Code: AuthorizationError",
+        },
+        Row {
+            case: "the same publish through the AWS SDK integration",
+            resource: "arn:aws:states:::aws-sdk:sns:publish",
+            parameters: json!({ "TopicArn": topic_arn.clone(), "Message": "hello" }),
+            action: "sns:Publish",
+            resource_arn: topic_arn,
+            refusal_error: "SNS.AuthorizationErrorException",
+            refusal_code: "Error Code: AuthorizationError",
         },
         Row {
             case: "an invocation, the function named by its ARN",
@@ -117,6 +147,7 @@ async fn an_integration_call_is_judged_by_its_own_action_and_addressed_resource(
             action: "lambda:InvokeFunction",
             resource_arn: function_arn.clone(),
             refusal_error: "Lambda.AWSLambdaException",
+            refusal_code: REFUSAL_CODE,
         },
         Row {
             case: "the same invocation through the AWS SDK integration",
@@ -125,6 +156,7 @@ async fn an_integration_call_is_judged_by_its_own_action_and_addressed_resource(
             action: "lambda:InvokeFunction",
             resource_arn: function_arn.clone(),
             refusal_error: "Lambda.AWSLambdaException",
+            refusal_code: REFUSAL_CODE,
         },
         Row {
             // A bare function name names the same function, so it is the same access
@@ -135,6 +167,7 @@ async fn an_integration_call_is_judged_by_its_own_action_and_addressed_resource(
             action: "lambda:InvokeFunction",
             resource_arn: function_arn.clone(),
             refusal_error: "Lambda.AWSLambdaException",
+            refusal_code: REFUSAL_CODE,
         },
         Row {
             // The partial form Lambda documents names it too.
@@ -144,6 +177,7 @@ async fn an_integration_call_is_judged_by_its_own_action_and_addressed_resource(
             action: "lambda:InvokeFunction",
             resource_arn: function_arn,
             refusal_error: "Lambda.AWSLambdaException",
+            refusal_code: REFUSAL_CODE,
         },
     ];
 
@@ -183,8 +217,9 @@ async fn an_integration_call_is_judged_by_its_own_action_and_addressed_resource(
             .unwrap_or_else(|| panic!("case {case:?}: expected taskFailedEventDetails"));
         let cause = string(details, "cause");
         assert!(
-            cause.contains(REFUSAL_CODE),
-            "case {case:?}: expected the cause to carry {REFUSAL_CODE:?}, got {cause:?}"
+            cause.contains(row.refusal_code),
+            "case {case:?}: expected the cause to carry {:?}, got {cause:?}",
+            row.refusal_code
         );
         assert!(
             cause.contains(row.action),

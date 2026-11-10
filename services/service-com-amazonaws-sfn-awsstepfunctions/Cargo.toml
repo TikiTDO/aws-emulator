@@ -130,6 +130,11 @@ service-com-amazonaws-s3-amazons3 = { workspace = true }
 # `tests/all/form_protocol_integration.rs`, mounted the same way, so what the task
 # reports is that service's own answer.
 service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# The service a `Task` state's `arn:aws:states:::sns:publish` integration publishes to
+# in `tests/all/sns_publish_task_integration.rs`, mounted beside Step Functions and SQS
+# on the one engine the test router builds: the publish is really recorded by SNS's own
+# handler and really delivered to the queue subscribed to the topic.
+service-com-amazonaws-sns-amazonsimplenotificationservice = { workspace = true }
 
 [lints]
 workspace = true

@@ -17,6 +17,11 @@
 //! value is one this protocol binds to one field). A member this emulator does not
 //! bind to a form field is still not faked: the execution fails with ASL's
 //! `States.Runtime` and a cause that says what was not sent.
+//!
+//! The harness is `pub(crate)`: `tests/all/sns_publish_task_integration.rs` holds the
+//! same rule over the other `awsQuery` service a `Task` state calls, and `tests/all.rs`
+//! is one crate root — so the router, the two wire protocols and the form encoding are
+//! stated here once rather than copied.
 
 use std::sync::Arc;
 
@@ -41,14 +46,24 @@ const SFN_JSON_VERSION: &str = "1.0";
 const STS_SIGNING_NAME: &str = "sts";
 const STS_API_VERSION: &str = "2011-06-15";
 
-/// Step Functions and STS over ONE engine, so the identity a task reads is the one STS
-/// itself answers for the same caller.
-struct Chain {
+/// SQS's wire facts, from the same reading of its model: `awsJson1_0`, service shape
+/// `AmazonSQS`, `sigv4Name` `sqs`. It is the service a topic's subscriber is a queue
+/// of in the sibling suite.
+pub(crate) const SQS_TARGET_PREFIX: &str = "AmazonSQS";
+pub(crate) const SQS_SIGNING_NAME: &str = "sqs";
+pub(crate) const SQS_JSON_VERSION: &str = "1.0";
+
+/// Step Functions and the `awsQuery` services a `Task` state calls over ONE engine, so
+/// the answer a task reads is the one that service itself gives the same caller.
+///
+/// `pub(crate)`, not private: the sibling suite named in this module's docs drives this
+/// one rather than standing up a second copy of it.
+pub(crate) struct Chain {
     router: MultiServiceRouter,
 }
 
 impl Chain {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
         let mut router = MultiServiceRouter::new();
         router.set_request_authentication(false);
@@ -58,24 +73,40 @@ impl Chain {
                 Arc::clone(&engine),
             ),
         );
+        // The other `awsQuery` service a `Task` state's integration calls, and the
+        // service a topic's subscriber is a queue of: both are mounted here because
+        // this one router serves every suite that drives it.
+        router.register_service(
+            service_com_amazonaws_sns_amazonsimplenotificationservice::EmulatedService::new(
+                Arc::clone(&engine),
+            ),
+        );
+        router.register_service(service_com_amazonaws_sqs_amazonsqs::EmulatedService::new(
+            Arc::clone(&engine),
+        ));
         Self { router }
     }
 
-    /// Call one Step Functions operation, requiring a 200.
-    async fn sfn(&self, operation: &str, body: &Value) -> Value {
+    /// Call one operation of the `awsJson` service `signing_name` names, requiring a
+    /// 200.
+    pub(crate) async fn json(
+        &self,
+        signing_name: &str,
+        target_prefix: &str,
+        version: &str,
+        operation: &str,
+        body: &Value,
+    ) -> Value {
         let authorization = format!(
-            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{REGION}/{SFN_SIGNING_NAME}/\
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{REGION}/{signing_name}/\
              aws4_request, SignedHeaders=host;x-amz-target, Signature=0123456789abcdef"
         );
         let request = http::Request::builder()
             .method("POST")
             .uri("/")
-            .header("host", format!("{SFN_SIGNING_NAME}.{REGION}.amazonaws.com"))
-            .header(
-                "content-type",
-                format!("application/x-amz-json-{SFN_JSON_VERSION}"),
-            )
-            .header("x-amz-target", format!("{SFN_TARGET_PREFIX}.{operation}"))
+            .header("host", format!("{signing_name}.{REGION}.amazonaws.com"))
+            .header("content-type", format!("application/x-amz-json-{version}"))
+            .header("x-amz-target", format!("{target_prefix}.{operation}"))
             .header("authorization", authorization)
             .body(Bytes::from(
                 serde_json::to_vec(body).expect("the request body serializes"),
@@ -101,12 +132,51 @@ impl Chain {
         parsed
     }
 
-    /// One awsQuery call to STS, the way a client of that service makes it: an
-    /// `application/x-www-form-urlencoded` POST naming the action and the API version.
-    async fn sts(&self, action: &str) -> String {
-        let host = format!("{STS_SIGNING_NAME}.{REGION}.amazonaws.com");
+    /// Call one Step Functions operation, requiring a 200.
+    pub(crate) async fn sfn(&self, operation: &str, body: &Value) -> Value {
+        self.json(
+            SFN_SIGNING_NAME,
+            SFN_TARGET_PREFIX,
+            SFN_JSON_VERSION,
+            operation,
+            body,
+        )
+        .await
+    }
+
+    /// Call one SQS operation, requiring a 200.
+    pub(crate) async fn sqs(&self, operation: &str, body: &Value) -> Value {
+        self.json(
+            SQS_SIGNING_NAME,
+            SQS_TARGET_PREFIX,
+            SQS_JSON_VERSION,
+            operation,
+            body,
+        )
+        .await
+    }
+
+    /// One awsQuery call, the way a client of such a service makes it: an
+    /// `application/x-www-form-urlencoded` POST naming the action, the service's API
+    /// version and one field per parameter. Its XML body, with whatever status it
+    /// answered — which is what a REFUSED call is read from.
+    pub(crate) async fn query(
+        &self,
+        signing_name: &str,
+        version: &str,
+        action: &str,
+        params: &[(&str, &str)],
+    ) -> (u16, String) {
+        let mut body = format!("Action={action}&Version={version}");
+        for (name, value) in params {
+            body.push('&');
+            body.push_str(name);
+            body.push('=');
+            body.push_str(&form_value(value));
+        }
+        let host = format!("{signing_name}.{REGION}.amazonaws.com");
         let authorization = format!(
-            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{REGION}/{STS_SIGNING_NAME}/\
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{REGION}/{signing_name}/\
              aws4_request, SignedHeaders=host, Signature=0123456789abcdef"
         );
         let request = http::Request::builder()
@@ -115,13 +185,19 @@ impl Chain {
             .header("host", host)
             .header("content-type", "application/x-www-form-urlencoded")
             .header("authorization", authorization)
-            .body(Bytes::from(format!(
-                "Action={action}&Version={STS_API_VERSION}"
-            )))
+            .body(Bytes::from(body))
             .expect("a well-formed request");
         let response = self.router.dispatch(request).await;
         let status = response.status().as_u16();
-        let body = String::from_utf8_lossy(&response.into_body()).to_string();
+        let text = String::from_utf8_lossy(&response.into_body()).to_string();
+        (status, text)
+    }
+
+    /// One awsQuery call to STS that must succeed: its XML body.
+    async fn sts(&self, action: &str) -> String {
+        let (status, body) = self
+            .query(STS_SIGNING_NAME, STS_API_VERSION, action, &[])
+            .await;
         assert_eq!(
             status, 200,
             "case {action}: expected 200 from STS itself, got {status} with body {body:?}"
@@ -130,7 +206,7 @@ impl Chain {
     }
 
     /// Create a state machine, start one execution of it, and report what it ended as.
-    async fn run(&self, name: &str, definition: &Value) -> Value {
+    pub(crate) async fn run(&self, name: &str, definition: &Value) -> Value {
         let created = self
             .sfn(
                 "CreateStateMachine",
@@ -155,8 +231,21 @@ impl Chain {
     }
 }
 
+/// `value` percent-encoded as one field of a form, over RFC 3986's unreserved set —
+/// the encoding AWS's own canonical request states.
+pub(crate) fn form_value(value: &str) -> String {
+    ::percent_encoding::utf8_percent_encode(value, UNRESERVED_ONLY).to_string()
+}
+
+/// The characters [`form_value`] escapes: everything but RFC 3986's unreserved set.
+const UNRESERVED_ONLY: &::percent_encoding::AsciiSet = &::percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
 /// A one-state definition whose `Task` names `resource` and sends `parameters`.
-fn task(resource: &str, parameters: Value) -> Value {
+pub(crate) fn task(resource: &str, parameters: Value) -> Value {
     json!({
         "StartAt": "Work",
         "States": {
@@ -171,7 +260,7 @@ fn task(resource: &str, parameters: Value) -> Value {
 }
 
 /// The text of the first `<name>` element of an XML body.
-fn element(body: &str, name: &str) -> String {
+pub(crate) fn element(body: &str, name: &str) -> String {
     body.split_once(&format!("<{name}>"))
         .and_then(|(_, rest)| rest.split_once(&format!("</{name}>")))
         .map(|(text, _)| text.to_string())

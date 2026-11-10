@@ -181,6 +181,8 @@ mod sdk_response_envelope;
 mod send_task_failure;
 #[path = "all/sibling_abort_timing.rs"]
 mod sibling_abort_timing;
+#[path = "all/sns_publish_task_integration.rs"]
+mod sns_publish_task_integration;
 #[path = "all/state_data_in_history.rs"]
 mod state_data_in_history;
 #[path = "all/state_machine_aliases.rs"]

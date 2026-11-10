@@ -62,7 +62,7 @@ type InstantRow = (&'static str, &'static [&'static str], Value, Value);
 #[test]
 fn a_resource_names_the_call_its_action_does() {
     // (case, the Resource, the signing name and operation it names, parks at a job)
-    let rows: [ResourceRow; 32] = [
+    let rows: [ResourceRow; 34] = [
         (
             "the optimized DynamoDB integration",
             "arn:aws:states:::dynamodb:putItem",
@@ -135,6 +135,20 @@ fn a_resource_names_the_call_its_action_does() {
             Some(("ecs", "RunTask")),
             false,
         ),
+        // A service whose protocol carries its request as a FORM: the action names the
+        // operation there too, under either family.
+        (
+            "the optimized SNS publish",
+            "arn:aws:states:::sns:publish",
+            Some(("sns", "Publish")),
+            false,
+        ),
+        (
+            "the AWS SDK integration of that same operation",
+            "arn:aws:states:::aws-sdk:sns:publish",
+            Some(("sns", "Publish")),
+            false,
+        ),
         // A service whose protocol is a REST one: the call is made for the
         // operation whose own bindings are carried, and for no other.
         (
@@ -199,7 +213,7 @@ fn a_resource_names_the_call_its_action_does() {
         ),
         (
             "a service with no entry at all",
-            "arn:aws:states:::sns:publish",
+            "arn:aws:states:::batch:submitJob",
             None,
             false,
         ),
@@ -1632,4 +1646,109 @@ fn a_served_invocation_whose_function_errored_is_a_failed_task() {
         read.is_none(),
         "case \"another operation's answer\": expected no failure, got {read:?}"
     );
+}
+
+/// A FORM request carries one field per LEAF of the operation's input: a map member is
+/// spread over the numbered `entry` fields that protocol names a map's pairs by, under
+/// the names that map's own key and value members are written with — and a collection
+/// whose field names this emulator does not carry is still not bound, so no call is
+/// made for it.
+///
+/// The rows differ along the shape of the member: a scalar, a map of one pair, a map of
+/// several (which must be numbered rather than overwrite one another), a map key and
+/// value carrying the form's own delimiters, and the two collections no entry names.
+#[test]
+fn a_form_request_spreads_a_map_member_over_its_numbered_entries() {
+    let maps = &[FormMap {
+        member: "MessageAttributes",
+        key: "Name",
+        value: "Value",
+        structured: true,
+    }];
+    // (case, the document the state built, the fields expected after the action and the
+    //  version — `None` for a document no request is built from)
+    let rows: &[(&str, Value, Option<&[&str]>)] = &[
+        (
+            "a scalar member",
+            ::serde_json::json!({ "Message": "hello" }),
+            Some(&["Message=hello"]),
+        ),
+        (
+            "a map of one pair, whose value is a structure",
+            ::serde_json::json!({
+                "MessageAttributes": {
+                    "kind": { "DataType": "String", "StringValue": "created" },
+                },
+            }),
+            Some(&[
+                "MessageAttributes.entry.1.Name=kind",
+                "MessageAttributes.entry.1.Value.DataType=String",
+                "MessageAttributes.entry.1.Value.StringValue=created",
+            ]),
+        ),
+        (
+            "a map of two pairs, each under its own number",
+            ::serde_json::json!({
+                "MessageAttributes": {
+                    "a": { "DataType": "String", "StringValue": "one" },
+                    "b": { "DataType": "Number", "StringValue": "2" },
+                },
+            }),
+            Some(&[
+                "MessageAttributes.entry.1.Name=a",
+                "MessageAttributes.entry.1.Value.DataType=String",
+                "MessageAttributes.entry.1.Value.StringValue=one",
+                "MessageAttributes.entry.2.Name=b",
+                "MessageAttributes.entry.2.Value.DataType=Number",
+                "MessageAttributes.entry.2.Value.StringValue=2",
+            ]),
+        ),
+        (
+            "a key and a value carrying the form's own delimiters",
+            ::serde_json::json!({
+                "MessageAttributes": {
+                    "a&b": { "DataType": "String", "StringValue": "c=d" },
+                },
+            }),
+            Some(&[
+                "MessageAttributes.entry.1.Name=a%26b",
+                "MessageAttributes.entry.1.Value.DataType=String",
+                "MessageAttributes.entry.1.Value.StringValue=c%3Dd",
+            ]),
+        ),
+        (
+            "a list member no entry names",
+            ::serde_json::json!({ "PolicyArns": ["arn:aws:iam::1:policy/p"] }),
+            None,
+        ),
+        (
+            "a structure member no entry names",
+            ::serde_json::json!({ "Tags": { "Key": "k" } }),
+            None,
+        ),
+    ];
+    for (case, document, expected) in rows {
+        let built = form_body("Publish", "2010-03-31", document, maps);
+        match (built, expected) {
+            (Ok(body), Some(fields)) => {
+                let mut wanted = vec!["Action=Publish".to_string(), "Version=2010-03-31".to_string()];
+                wanted.extend(fields.iter().map(|field| (*field).to_string()));
+                let carried: Vec<String> = body.split('&').map(str::to_string).collect();
+                assert_eq!(
+                    carried, wanted,
+                    "case {case:?}: expected {wanted:?}, got {carried:?}"
+                );
+            }
+            (Err(why), None) => assert!(
+                why.contains("form-field protocol"),
+                "case {case:?}: a member no field carries must say so, got {why:?}"
+            ),
+            (Ok(body), None) => {
+                panic!("case {case:?}: expected no request, got {body:?}")
+            }
+            (Err(why), Some(fields)) => {
+                panic!("case {case:?}: expected {fields:?}, got the refusal {why:?}")
+            }
+        }
+    }
 }

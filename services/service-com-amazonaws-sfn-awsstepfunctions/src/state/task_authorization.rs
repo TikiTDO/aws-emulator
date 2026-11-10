@@ -79,7 +79,7 @@ use ::std::sync::Arc;
 use ::service_common::iam_authorization::{self as iam, Decision};
 
 use super::integration::{
-    access_request, Call, Failed, Handovers, MapRuns, RoleGate, TASK_FAILED_ERROR,
+    access_request, Call, Denied, Failed, Handovers, MapRuns, RoleGate, TASK_FAILED_ERROR,
 };
 
 /// The GLOBAL service principal Step Functions assumes a state machine's execution
@@ -159,11 +159,21 @@ pub type IamState =
     ::service_com_amazonaws_iam_awsidentitymanagementv20100508::ComAmazonawsIamAwsidentitymanagementv20100508State;
 
 /// The error code an AWS service refuses an unauthorized call with, which the cause
-/// of a failed task names as the code the call came back under.
+/// of a failed task names as the code the call came back under, for an operation that
+/// models no access-denied error of its OWN.
 const ACCESS_DENIED_CODE: &str = "AccessDeniedException";
 
 /// The status that refusal carries.
 const ACCESS_DENIED_STATUS: u16 = 400;
+
+/// The error an operation that MODELS the refusal of an unauthorized call answers it
+/// with ([`Denied`]), or the unmodelled refusal above for an operation that models
+/// none: the code the answer names the class by, and the status it carries.
+fn denied_answer(denied: Option<Denied>) -> (&'static str, u16) {
+    denied.map_or((ACCESS_DENIED_CODE, ACCESS_DENIED_STATUS), |denied| {
+        (denied.code, denied.status)
+    })
+}
 
 /// What decides whether `role_arn` may make the calls of one walk, or `None` when
 /// there is nothing to decide them against — an engine with no IAM store, or an
@@ -204,21 +214,28 @@ pub fn role_gate<Eng: Send + Sync + 'static>(
         }
         // Only a call whose target this module can name is decided here; anything else
         // is left to the invoked operation's own answer.
-        call.targets?;
+        let targets = call.targets?;
         let iam = iam_state(&*engine)?;
         let (action, resource) = access_request(call, request, &region)?;
+        let (code, status) = denied_answer(targets.denied);
         let refused = refusal(
             &iam.lock(),
             &role_arn,
             &action,
             &resource,
             call.api.sdk_client,
+            code,
+            status,
         )?;
-        // The invoked operation models no access-denied error of its own, so the
-        // refusal reaches the state under the invoked service's BASE SDK exception,
-        // which is what its client deserializes an unmodelled code into.
+        // The refusal reaches the state as the error the invoked OPERATION models for
+        // an unauthorized call, where it models one; an operation that models none
+        // leaves the invoked service's BASE SDK exception, which is what its client
+        // deserializes an unmodelled code into.
         Some(Failed {
-            error: call.api.base_error(),
+            error: targets.denied.map_or_else(
+                || call.api.base_error(),
+                |denied| call.api.task_error(denied.exception),
+            ),
             cause: refused,
         })
     }))
@@ -310,7 +327,15 @@ pub fn role_denial<Eng: Send + Sync + 'static>(
         return None;
     }
     let iam = iam_state(engine)?;
-    let denial = refusal(&iam.lock(), role_arn, action, resource, service);
+    let denial = refusal(
+        &iam.lock(),
+        role_arn,
+        action,
+        resource,
+        service,
+        ACCESS_DENIED_CODE,
+        ACCESS_DENIED_STATUS,
+    );
     denial
 }
 
@@ -344,6 +369,12 @@ pub fn job_report_denial<Eng: Send + Sync + 'static>(
         &call.action(),
         resource,
         call.api.sdk_client,
+        // The reporting call is an operation of the pattern rather than the `Task`
+        // state's own work, and no [`super::integration::TargetResource`] entry names
+        // a modelled access-denied error for one, so its refusal carries the code and
+        // status an unmodelled one does ([`denied_answer`]).
+        ACCESS_DENIED_CODE,
+        ACCESS_DENIED_STATUS,
     )?;
     Some(Failed {
         error: TASK_FAILED_ERROR.to_string(),
@@ -404,19 +435,25 @@ pub fn role_is_denied<Eng: Send + Sync + 'static>(
 /// the service reads exactly as one the service answered itself. The identifier of the
 /// refused request is not among them: no call was made, so there is no request to name,
 /// and nothing is invented to fill the field.
+///
+/// `code` and `status` are what the invoked operation's own answer to an unauthorized
+/// call carries ([`denied_answer`]), because that is the answer this gate is standing
+/// in for.
 fn refusal(
     iam: &IamState,
     role_arn: &str,
     action: &str,
     resource: &str,
     service: &str,
+    code: &str,
+    status: u16,
 ) -> Option<String> {
     let sentence = not_authorized(iam, role_arn, action, resource)?;
     Some(super::integration::sdk_exception_message(
         service,
         &sentence,
-        ACCESS_DENIED_CODE,
-        ACCESS_DENIED_STATUS,
+        code,
+        status,
         None,
     ))
 }

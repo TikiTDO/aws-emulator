@@ -671,8 +671,8 @@ async fn a_refused_call_fails_the_task_with_the_services_own_error() {
 async fn a_resource_no_call_is_made_for_fails_rather_than_being_faked() {
     let cases: [(&str, &str); 5] = [
         (
-            "a service whose request is not one JSON document",
-            "arn:aws:states:::sns:publish",
+            "a service with no wire facts carried for it at all",
+            "arn:aws:states:::batch:submitJob",
         ),
         (
             "the run-a-job pattern over an integration whose job cannot be reported",
