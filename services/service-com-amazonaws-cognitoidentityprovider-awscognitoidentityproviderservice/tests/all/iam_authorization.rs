@@ -53,6 +53,11 @@ const ACCESS_DENIED: (u16, &str) = (400, "AccessDeniedException");
 /// principals and their policies are made with.
 struct Emulator {
     router: MultiServiceRouter,
+    /// The ONE shared engine both services are mounted on — also the engine carrying the
+    /// account's session directory, which is where the service that MINTS a temporary
+    /// credential records the session it belongs to and where this gate reads it back
+    /// ([`Emulator::session`]).
+    engine: Arc<engine::InMemoryEngine>,
 }
 
 impl Emulator {
@@ -64,9 +69,11 @@ impl Emulator {
         router.set_request_authentication(false);
         router.register_service(cognito_idp::EmulatedService::new(Arc::clone(&engine)));
         router.register_service(
-            service_com_amazonaws_iam_awsidentitymanagementv20100508::EmulatedService::new(engine),
+            service_com_amazonaws_iam_awsidentitymanagementv20100508::EmulatedService::new(
+                Arc::clone(&engine),
+            ),
         );
-        Self { router }
+        Self { router, engine }
     }
 
     /// One call to this service, with `access_key_id` in the SigV4 credential scope.
@@ -221,6 +228,109 @@ impl Emulator {
             ],
         )
         .await;
+    }
+
+    /// Create an IAM role under `path` carrying `policy` as its inline policy (when one is
+    /// given), open a SESSION of it, and answer the access key id that session is presented
+    /// by with the session's own ARN — the principal a refusal of such a call must blame.
+    ///
+    /// The role and its documents are IAM's OWN records, written through IAM's own
+    /// operations. The SESSION is recorded where the service that mints a temporary credential
+    /// records every session it hands out — the account's shared session directory in this
+    /// same engine, keyed by the access key id the credential is presented under — which is
+    /// the one place a serving service can read which principal a temporary credential speaks
+    /// for. Written here rather than minted through the token service, because that service
+    /// depends on THIS one.
+    ///
+    /// `path` is carried so the role is held under an ARN that is NOT its session's: an
+    /// assumed-role session ARN carries no path, so a decision taken on the session ARN alone
+    /// would find no document at all.
+    async fn role_session(
+        &self,
+        role_name: &str,
+        path: &str,
+        session_name: &str,
+        policies: &[String],
+    ) -> Principal {
+        let trust = json!({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": {
+                    "AWS": format!("arn:aws:iam::{}:root", ::engine::emulator_account_id()),
+                },
+                "Action": "sts:AssumeRole",
+            }],
+        })
+        .to_string();
+        let created = self
+            .iam(
+                "CreateRole",
+                &[
+                    ("RoleName", role_name.to_string()),
+                    ("Path", path.to_string()),
+                    ("AssumeRolePolicyDocument", trust),
+                ],
+            )
+            .await;
+        let role_arn = xml_element(&created, "Arn")
+            .unwrap_or_else(|| panic!("CreateRole answers the role's Arn, got {created}"));
+        for (index, policy) in policies.iter().enumerate() {
+            self.iam(
+                "PutRolePolicy",
+                &[
+                    ("RoleName", role_name.to_string()),
+                    ("PolicyName", format!("inline-{index}")),
+                    ("PolicyDocument", policy.clone()),
+                ],
+            )
+            .await;
+        }
+        self.session(role_name, session_name, Some(role_arn))
+    }
+
+    /// Record a session of `role_arn` (or of nothing at all, for a credential the directory
+    /// holds no issuer for) under a fresh access key id, and answer that key id with the
+    /// session's ARN.
+    fn session(
+        &self,
+        role_name: &str,
+        session_name: &str,
+        role_arn: Option<String>,
+    ) -> Principal {
+        use ::service_common::management_events::{
+            RecordedSession, RecordedSessionIssuer, SessionAuditDirectory,
+            PRINCIPAL_TYPE_ASSUMED_ROLE, SESSION_ISSUER_TYPE_ROLE,
+        };
+
+        let account = ::engine::emulator_account_id();
+        // The identity `sts:GetCallerIdentity` reports for such a credential: the session,
+        // named for the role and the session name — and carrying no path, which is why the
+        // ROLE's own ARN has to be read from the issuer.
+        let arn = format!("arn:aws:sts::{account}:assumed-role/{role_name}/{session_name}");
+        let access_key_id = format!("ASIA{}", session_name.to_uppercase().replace('-', ""));
+        let now = ::std::time::SystemTime::now();
+        let session = RecordedSession {
+            principal_type: PRINCIPAL_TYPE_ASSUMED_ROLE.to_string(),
+            principal_id: format!("AROAEXAMPLEROLEID:{session_name}"),
+            arn: arn.clone(),
+            account_id: account.to_string(),
+            user_name: Some(session_name.to_string()),
+            issuer: role_arn.map(|role_arn| RecordedSessionIssuer {
+                principal_type: SESSION_ISSUER_TYPE_ROLE.to_string(),
+                principal_id: "AROAEXAMPLEROLEID".to_string(),
+                arn: role_arn,
+                account_id: account.to_string(),
+                user_name: role_name.to_string(),
+            }),
+            source_identity: None,
+            created_at: now,
+            expires_at: now + ::std::time::Duration::from_secs(3_600),
+        };
+        ::engine::InMemoryEngine::state::<SessionAuditDirectory>(&self.engine)
+            .lock()
+            .remember(access_key_id.clone(), session, now);
+        Principal { access_key_id, arn }
     }
 }
 
@@ -659,6 +769,186 @@ async fn a_refused_call_performs_nothing() {
         json!("ESSENTIALS"),
         "case \"a pool update\": expected the refused update to have changed nothing, got \
          {described}"
+    );
+}
+
+/// RULE: a request signed with a TEMPORARY credential speaks for the SESSION it was minted
+/// for — the principal `sts:GetCallerIdentity` reports for that credential, which is what a
+/// refusal blames — and the permissions in force on it are the ISSUING ROLE's, read under the
+/// ARN the account holds that role by. So a session of a role whose documents do not allow
+/// the action is refused exactly as any other caller is, and one whose role allows it is
+/// served.
+///
+/// The rows span what the rule generalises over: a role carrying no document, a role carrying
+/// a grant for ANOTHER service's action alone (the least-privilege session the recorded case
+/// is about), a service-wide grant, a grant scoped to the pool the request addresses, a grant
+/// beside an explicit deny of the action, and a credential the directory holds no issuer for.
+/// Each is driven over two operations, so the decision is the operation's own action rather
+/// than one spelled for a single call.
+#[tokio::test]
+async fn a_session_is_judged_on_the_role_that_issued_it() {
+    let emulator = Emulator::new();
+    let (user_pool_id, pool_arn) = emulator.pool("session-pool").await;
+    let (_other_id, other_pool_arn) = emulator.pool("session-other-pool").await;
+    // A PATH on every role, so the role is held under an ARN its session's does not carry:
+    // the documents are found only because the issuer's own ARN is what they are read under.
+    let path = "/identity/";
+
+    // (case, the documents the issuing role carries, whether the call must be served)
+    let rows: Vec<(&str, Vec<String>, bool)> = vec![
+        ("a role carrying no document at all", vec![], false),
+        (
+            "a role granting only another service's action",
+            vec![allow("sts:GetCallerIdentity", "*")],
+            false,
+        ),
+        (
+            "a role with a service-wide grant",
+            vec![allow("cognito-idp:*", "*")],
+            true,
+        ),
+        (
+            "a role granting this service on the pool addressed",
+            vec![allow("cognito-idp:*", &pool_arn)],
+            true,
+        ),
+        (
+            "a role granting this service on another pool",
+            vec![allow("cognito-idp:*", &other_pool_arn)],
+            false,
+        ),
+    ];
+
+    // Two operations, each with its own action and the same addressed resource.
+    for operation in ["GetCSVHeader", "DescribeUserPool"] {
+        let action = action_of(operation);
+        let body = json!({ "UserPoolId": &user_pool_id });
+        for (index, (case, documents, served)) in rows.iter().enumerate() {
+            let role_name = format!("session-role-{}-{index}", operation.to_lowercase());
+            let session_name = format!("probe-{}-{index}", operation.to_lowercase());
+            let principal = emulator
+                .role_session(&role_name, path, &session_name, documents)
+                .await;
+            let (status, answered) = emulator
+                .call(&principal.access_key_id, operation, &body)
+                .await;
+            if *served {
+                assert_eq!(
+                    (status, code_of(&answered).as_str()),
+                    (200, ""),
+                    "case {case:?} calling {operation}: expected the session to be served, got \
+                     {status} with {answered}"
+                );
+                continue;
+            }
+            assert_eq!(
+                (status, code_of(&answered).as_str()),
+                ACCESS_DENIED,
+                "case {case:?} calling {operation}: expected {ACCESS_DENIED:?}, got {status} \
+                 with {answered}"
+            );
+            // The refusal blames the SESSION, not the role and not the account.
+            let expected = format!(
+                "User: {} is not authorized to perform: {action} on resource: {pool_arn} \
+                 because no identity-based policy allows the {action} action",
+                principal.arn
+            );
+            assert_eq!(
+                message_of(&answered),
+                expected,
+                "case {case:?} calling {operation}: expected {expected:?}, got {:?}",
+                message_of(&answered)
+            );
+        }
+
+        // An explicit deny in a document the issuing role carries wins over its own wildcard
+        // grant, and the refusal says so.
+        let denied = emulator
+            .role_session(
+                &format!("session-denied-{}", operation.to_lowercase()),
+                path,
+                &format!("denied-{}", operation.to_lowercase()),
+                &[allow_all_but(&action)],
+            )
+            .await;
+        let (status, answered) = emulator.call(&denied.access_key_id, operation, &body).await;
+        assert_eq!(
+            (status, code_of(&answered).as_str()),
+            ACCESS_DENIED,
+            "case \"an explicit deny on the issuing role\" calling {operation}: expected \
+             {ACCESS_DENIED:?}, got {status} with {answered}"
+        );
+        let expected = format!(
+            "User: {} is not authorized to perform: {action} on resource: {pool_arn} with an \
+             explicit deny in an identity-based policy",
+            denied.arn
+        );
+        assert_eq!(
+            message_of(&answered),
+            expected,
+            "case \"an explicit deny on the issuing role\" calling {operation}: expected \
+             {expected:?}, got {:?}",
+            message_of(&answered)
+        );
+    }
+
+    // A temporary credential the directory holds no ISSUER for speaks for the session itself,
+    // and the account holds no document under a session ARN — so nothing allows the call.
+    let issuerless = emulator.session("session-role-0-getcsvheader", "no-issuer", None);
+    let (status, answered) = emulator
+        .call(
+            &issuerless.access_key_id,
+            "GetCSVHeader",
+            &json!({ "UserPoolId": &user_pool_id }),
+        )
+        .await;
+    assert_eq!(
+        (status, code_of(&answered).as_str()),
+        ACCESS_DENIED,
+        "case \"a session with no issuer\": expected {ACCESS_DENIED:?}, got {status} with \
+         {answered}"
+    );
+
+    // The gate reads the documents per request, so one the role gains between two calls
+    // decides the second: nothing is cached.
+    let later = emulator
+        .role_session("session-granted-later", path, "later", &[])
+        .await;
+    let (status, refused) = emulator
+        .call(
+            &later.access_key_id,
+            "GetCSVHeader",
+            &json!({ "UserPoolId": &user_pool_id }),
+        )
+        .await;
+    assert_eq!(
+        (status, code_of(&refused).as_str()),
+        ACCESS_DENIED,
+        "case \"before the grant is written\": expected {ACCESS_DENIED:?}, got {status} with \
+         {refused}"
+    );
+    emulator
+        .iam(
+            "PutRolePolicy",
+            &[
+                ("RoleName", "session-granted-later".to_string()),
+                ("PolicyName", "granted-later".to_string()),
+                ("PolicyDocument", allow("cognito-idp:*", "*")),
+            ],
+        )
+        .await;
+    let (status, served) = emulator
+        .call(
+            &later.access_key_id,
+            "GetCSVHeader",
+            &json!({ "UserPoolId": &user_pool_id }),
+        )
+        .await;
+    assert_eq!(
+        (status, code_of(&served).as_str()),
+        (200, ""),
+        "case \"after the grant is written\": expected the next call to be served, got {status} \
+         with {served}"
     );
 }
 

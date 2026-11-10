@@ -56,7 +56,7 @@ const DESTINATION_NOT_FOUND: &str =
 /// The access-key id standing for the account's own published credential: neither STS nor IAM
 /// holds a record for it, so it resolves to the account's ambient identity, which holds no IAM
 /// policies — the position AWS account root credentials are in. Every fixture is made with it.
-const ACCOUNT_KEY: &str = "AKIDEXAMPLE";
+pub(crate) const ACCOUNT_KEY: &str = "AKIDEXAMPLE";
 
 /// The `RoleSessionName` every `AssumeRole` here asks for — the last segment of the
 /// assumed-role ARN a refusal names as the principal.
@@ -64,9 +64,9 @@ const SESSION: &str = "probe";
 
 /// A principal a call is signed as: the access key id it presents, and the ARN a refusal must
 /// blame it by — what `sts:GetCallerIdentity` reports for that key.
-struct Principal {
-    access_key_id: String,
-    arn: String,
+pub(crate) struct Principal {
+    pub(crate) access_key_id: String,
+    pub(crate) arn: String,
 }
 
 /// This service beside the IAM and STS services its callers are made with, all on ONE shared
@@ -75,13 +75,15 @@ struct Principal {
 /// `crate::harness::Logs` mounts this service alone and signs every call with one key, which
 /// is right for a suite about what this service stores; a suite about WHO is calling needs the
 /// two services that hold principals and their policies, and a credential scope naming a
-/// different key per call, so it assembles the router here.
-struct Emulator {
+/// different key per call, so it assembles the router here. Shared with the suite about the
+/// identity decision taken in front of EVERY operation
+/// (`crate::identity_policy_authorization`), so one router stands for both.
+pub(crate) struct Emulator {
     router: MultiServiceRouter,
 }
 
 impl Emulator {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
         let mut router = MultiServiceRouter::new();
         // Nothing here signs: the `Authorization` header carries only the credential scope,
@@ -107,7 +109,24 @@ impl Emulator {
 
     /// One call to this service, signed for [`REGION`] with `access_key_id` in the credential
     /// scope, returning `(status, parsed body)`.
-    async fn call_as(&self, access_key_id: &str, operation: &str, body: &Value) -> (u16, Value) {
+    pub(crate) async fn call_as(
+        &self,
+        access_key_id: &str,
+        operation: &str,
+        body: &Value,
+    ) -> (u16, Value) {
+        let (status, _headers, parsed) = self.reported_as(access_key_id, operation, body).await;
+        (status, parsed)
+    }
+
+    /// [`Emulator::call_as`], with the response HEADERS as well — for a rule about what a
+    /// response reports beside its body.
+    pub(crate) async fn reported_as(
+        &self,
+        access_key_id: &str,
+        operation: &str,
+        body: &Value,
+    ) -> (u16, http::HeaderMap, Value) {
         let request = http::Request::builder()
             .method("POST")
             .uri("/")
@@ -126,17 +145,18 @@ impl Emulator {
             .expect("a valid test request");
         let response = self.router.dispatch(request).await;
         let status = response.status().as_u16();
+        let headers = response.headers().clone();
         let payload = response.into_body();
         let parsed = if payload.is_empty() {
             Value::Null
         } else {
             serde_json::from_slice(&payload).unwrap_or(Value::Null)
         };
-        (status, parsed)
+        (status, headers, parsed)
     }
 
     /// A call signed with the account's own credential that must succeed.
-    async fn ok(&self, operation: &str, body: &Value) -> Value {
+    pub(crate) async fn ok(&self, operation: &str, body: &Value) -> Value {
         let (status, parsed) = self.call_as(ACCOUNT_KEY, operation, body).await;
         assert_eq!(
             status, 200,
@@ -147,7 +167,7 @@ impl Emulator {
 
     /// One awsQuery call to IAM or STS, signed with the account's own credential, which must
     /// succeed.
-    async fn query(
+    pub(crate) async fn query(
         &self,
         signing_name: &str,
         version: &str,
@@ -210,7 +230,7 @@ fn xml_element(body: &str, name: &str) -> Option<String> {
 }
 
 /// One identity-based policy document carrying one statement.
-fn statement(effect: &str, action: &str, resource: &str) -> String {
+pub(crate) fn statement(effect: &str, action: &str, resource: &str) -> String {
     json!({
         "Version": "2012-10-17",
         "Statement": [{"Effect": effect, "Action": action, "Resource": resource}],
@@ -220,7 +240,11 @@ fn statement(effect: &str, action: &str, resource: &str) -> String {
 
 /// Create an IAM role carrying one inline policy per document in `policies`, assume it through
 /// STS, and answer the session's access key id with the session ARN.
-async fn assumed_role(aws: &Emulator, role_name: &str, policies: &[String]) -> Principal {
+pub(crate) async fn assumed_role(
+    aws: &Emulator,
+    role_name: &str,
+    policies: &[String],
+) -> Principal {
     let account = engine::emulator_account_id();
     let trust = json!({
         "Version": "2012-10-17",

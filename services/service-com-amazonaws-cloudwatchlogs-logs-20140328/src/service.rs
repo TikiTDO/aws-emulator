@@ -117,13 +117,59 @@
 //! helper is a change of its own rather than a side effect of this service's issues, so it
 //! is worded here — as that module asks, and as it records that "which values an enum's
 //! value set lists and in which order" stays with the service.
+//!
+//! # Who is calling, and what they may do
+//!
+//! Every call of this API is signed, and AWS decides a signed call against the calling
+//! principal's identity-based IAM policies BEFORE it is dispatched. That decision is taken
+//! in front of every operation this service serves, by
+//! [`identity_authorization::IamAuthorized`] — the wrapper `override_operation` hands the
+//! router in place of each dispatch below — so a caller whose policies do not allow the
+//! action it asked for is refused with the AWS-common `AccessDeniedException` and no
+//! handler of this service is reached. The rule and the resource a request is judged
+//! against live in that module; the decision itself is
+//! [`crate::state::identity_authorization`], the one place this service reads a principal's
+//! documents.
+//!
+//! # Naming the request a response answers
+//!
+//! Every response AWS sends names the request it answered, in the response header this
+//! protocol reports that id in (`x-amzn-RequestId`) — on a success exactly as on a failure.
+//! It is a property of the RESPONSE, not of any modelled shape: no output and no error shape
+//! of this model declares it, so no handler can set it, and the framework's `awsJson1_1`
+//! renderers do not write it.
+//!
+//! The rule is not restated here: `service_common::query_error_envelope` owns it for every
+//! emulated service, and this file only chooses the report this protocol takes (the header
+//! alone — `awsJson1_1` has no envelope element for the id) and wires it at the two layers
+//! every response of this service passes through:
+//!
+//! * [`RequestIdReportingOperation::header`], the outermost layer of each dispatch
+//!   `override_operation` hands back, which covers a success, a modelled error, the
+//!   authorization refusal and a constraint refusal raised while an operation was being
+//!   served;
+//! * [`RequestIdEnvelopeDefinition::header_only`], the definition wrapper
+//!   [`Service::definition`] hands back, which covers a response NO operation produced: a
+//!   routing failure, a transport failure detected up front, and a pre-dispatch
+//!   authentication refusal.
 
 use service_common::event_stream::EventStreamRoute;
+use service_common::query_error_envelope::{
+    RequestIdEnvelopeDefinition, RequestIdReportingOperation,
+};
 use smithy_server_runtime::{
-    http, BoxFuture, ErasedOperation, OperationContext, Refusal, Refused, Service, Violation,
-    ViolationKind,
+    http, BoxFuture, ErasedOperation, ErasedServiceDefinition, OperationContext, Refusal, Refused,
+    Service, Violation, ViolationKind,
 };
 use std::sync::Arc;
+
+/// Whether IAM lets the principal that signed a request perform the action it asked for,
+/// which is decided in front of every operation this service serves
+/// ([`identity_authorization::IamAuthorized`]).
+///
+/// Public: its catalog of the operations that take the decision themselves, and the resource
+/// a request is judged against, are checked by this crate's tests.
+pub mod identity_authorization;
 
 /// The operations the generated routing table cannot serve: each one's output member
 /// targets a `@streaming` union (`StartLiveTail$responseStream`,
@@ -537,39 +583,62 @@ pub(crate) fn constraint_envelope(violations: &[Violation]) -> Option<String> {
 /// Generic over the engine type `Eng` so this file names no concrete engine; the
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
-    entry: crate::ServiceDefinition<Eng>,
+    /// The generated entry, with its three framework-level error renderers wrapped so a
+    /// response no operation produced still names the request it answers (see "Naming the
+    /// request a response answers"). Identity, the protocol and the operations are the
+    /// generated entry's untouched.
+    entry: RequestIdEnvelopeDefinition<crate::ServiceDefinition<Eng>>,
     /// The dispatch `override_operation` hands back, which carries the served
-    /// operation's refusal code into [`Service::override_refusal`]. Held on the service
-    /// because that seam returns a borrow of `self`.
-    refusal_scope: OperationScopedRefusal,
+    /// operation's refusal code into [`Service::override_refusal`] — behind the IAM
+    /// decision, and under the layer that names the request its response answers. Held on
+    /// the service because that seam returns a borrow of `self`.
+    refusal_scope: Dispatch<Eng>,
     /// One of this service's two event-stream operations, `StartLiveTail`. It is NOT in the
     /// entry's routing table in a servable form: the generated `ErasedOperation` shim of
     /// an operation whose output is a `@streaming` union declines the request (it cannot
     /// drive `serialize_as_event_stream<P>` through an object-safe `run`), so it is held
     /// here behind an [`EventStreamRoute`] and routed by
-    /// [`EmulatedService::override_operation`].
-    start_live_tail: EventStreamRoute<crate::ops::start_live_tail::StartLiveTail<Eng>>,
+    /// [`EmulatedService::override_operation`] — behind the same two layers as the dispatch
+    /// above.
+    start_live_tail: Dispatch<Eng>,
     /// This service's other event-stream operation, `GetLogObject`, held and routed for
     /// the same reason as `start_live_tail` above: its output member `fieldStream` is a
     /// `@streaming` union, so the generated shim in the entry's routing table declines the
     /// request.
-    get_log_object: EventStreamRoute<crate::ops::get_log_object::GetLogObject<Eng>>,
+    get_log_object: Dispatch<Eng>,
 }
+
+/// One dispatch this service hands the router: whatever serves the request, behind the IAM
+/// decision taken in front of every operation
+/// ([`identity_authorization::IamAuthorized`]) and under the layer that names the request
+/// its response answers ([`RequestIdReportingOperation::header`]) — so neither can be
+/// forgotten for one route and taken for another.
+type Dispatch<Eng> = RequestIdReportingOperation<identity_authorization::IamAuthorized<Eng>>;
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// Build this service from the shared engine. The engine is threaded into the
     /// generated [`ServiceDefinition`], which constructs each operation from it; the
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
+        // Each dispatch is built from the SAME shared engine, so the policies the decision
+        // reads and the state the operation serves from are the one store.
+        let authorized = |served: Box<dyn ErasedOperation>| {
+            RequestIdReportingOperation::header(identity_authorization::IamAuthorized::new(
+                Arc::clone(&engine),
+                served,
+            ))
+        };
         Self {
-            entry: crate::ServiceDefinition::new(Arc::clone(&engine)),
-            refusal_scope: OperationScopedRefusal,
-            start_live_tail: EventStreamRoute(crate::ops::start_live_tail::StartLiveTail::new(
+            entry: RequestIdEnvelopeDefinition::header_only(crate::ServiceDefinition::new(
                 Arc::clone(&engine),
             )),
-            get_log_object: EventStreamRoute(crate::ops::get_log_object::GetLogObject::new(
-                engine,
-            )),
+            refusal_scope: authorized(Box::new(OperationScopedRefusal)),
+            start_live_tail: authorized(Box::new(EventStreamRoute(
+                crate::ops::start_live_tail::StartLiveTail::new(Arc::clone(&engine)),
+            ))),
+            get_log_object: authorized(Box::new(EventStreamRoute(
+                crate::ops::get_log_object::GetLogObject::new(Arc::clone(&engine)),
+            ))),
         }
     }
 }
@@ -578,7 +647,10 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     fn definition(&self) -> &dyn smithy_server_runtime::ErasedServiceDefinition {
         // The model-derived half of this service — identity, protocol, routing
         // table, and the default error renderers — lives in the generated entry.
-        // The router reads it through this one accessor. Do not edit the entry.
+        // The router reads it through this one accessor. Do not edit the entry: what is
+        // handed back is the shared `RequestIdEnvelopeDefinition`, which reads identity,
+        // protocol and the routing table straight off that entry and adds the request-id
+        // header to the three error renderers (see "Naming the request a response answers").
         &self.entry
     }
 
@@ -598,9 +670,11 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     ) -> Option<&dyn ErasedOperation> {
         // Serve the operation the generated routing table names, through the scope that
         // carries its refusal code into `override_refusal` (see "The code a refusal
-        // carries"). The routing decision itself is NOT overridden: the key is resolved
-        // by the model's own protocol, and a request the table cannot serve is declined
-        // here so the framework's routing-error path stays exactly as it was.
+        // carries") — behind the IAM decision taken in front of every operation, and under
+        // the layer that names the request each response answers. The routing decision
+        // itself is NOT overridden: the key is resolved by the model's own protocol, and a
+        // request the table cannot serve is declined here so the framework's routing-error
+        // path stays exactly as it was.
         let operation = self.definition().protocol().routing_key(req).ok()?;
         self.definition().routing_table().get(operation)?;
         // The exceptions are the event-stream operations, whose generated shims in that

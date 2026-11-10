@@ -80,6 +80,26 @@ pub(crate) async fn call(
     operation: &str,
     body: &Value,
 ) -> Answered {
+    let (status, headers, payload) = answered_with_headers(router, operation, body).await;
+    let errortype = headers
+        .get(ERRORTYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToString::to_string);
+    Answered {
+        status,
+        errortype,
+        payload,
+    }
+}
+
+/// Call `operation` with `body`, answering the status, EVERY response header and the JSON
+/// body — for a rule about what a response reports beside its body (the id it names the
+/// request it answers by, `crate::response_request_id`).
+pub(crate) async fn answered_with_headers(
+    router: &MultiServiceRouter,
+    operation: &str,
+    body: &Value,
+) -> (u16, http::HeaderMap, Value) {
     let request = http::Request::builder()
         .method("POST")
         .uri("/")
@@ -94,11 +114,7 @@ pub(crate) async fn call(
         .expect("the request is well formed");
     let response = router.dispatch(request).await;
     let status = response.status().as_u16();
-    let errortype = response
-        .headers()
-        .get(ERRORTYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(ToString::to_string);
+    let headers = response.headers().clone();
     let payload = if response.body().is_empty() {
         Value::Null
     } else {
@@ -109,11 +125,7 @@ pub(crate) async fn call(
             )
         })
     };
-    Answered {
-        status,
-        errortype,
-        payload,
-    }
+    (status, headers, payload)
 }
 
 /// Call `operation`, requiring success, and return its response body.

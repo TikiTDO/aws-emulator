@@ -28,7 +28,9 @@
 //!   [`BehindWebAcl`], so a request to a pool with a WAFv2 web ACL associated is decided
 //!   by that web ACL before the operation serves it — and through
 //!   [`iam_authorization::IamAuthorized`], so an operation the model requires a signature
-//!   for is served only to a caller IAM allows to perform it.
+//!   for is served only to a caller IAM allows to perform it — and, outermost, through
+//!   [`RequestIdReportingOperation::header`], so every response an operation produced names
+//!   the request it answers (see "Naming the request a response answers").
 //! - `override_refusal` — how this service words a request the framework refused
 //!   before any handler ran. The default returns `None`, keeping the framework's
 //!   wording. See the inline note on that method for how to reword.
@@ -55,10 +57,39 @@
 //! table, and the default error renderers — lives in the generated `ServiceDefinition`
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
+//!
+//! ## Naming the request a response answers
+//!
+//! Every response AWS sends names the request it answered, in the response header this
+//! protocol reports that id in (`x-amzn-RequestId`) — on a success exactly as on a
+//! failure, which is what an SDK surfaces for the call and what a client correlating a
+//! call with a record of it joins on. It is a property of the RESPONSE rather than of any
+//! modelled shape: no output and no error shape of this model declares it, so no handler
+//! can set it, and the framework's `awsJson1_1` renderers do not write it.
+//!
+//! The rule is not restated here: `service_common::query_error_envelope` owns it for every
+//! emulated service, and this file only chooses the report this protocol takes (the header
+//! alone — `awsJson1_1` has no envelope element for the id) and wires it at the two layers
+//! every response of this service passes through:
+//!
+//! * [`RequestIdReportingOperation::header`], the outermost wrapper of each row of the
+//!   table `override_operation` serves from, which covers a success, a modelled error, the
+//!   web ACL's and the IAM gate's own refusals, and a constraint refusal raised while that
+//!   operation was being served;
+//! * [`RequestIdEnvelopeDefinition::header_only`], the definition wrapper
+//!   [`Service::definition`] hands back, which covers a response NO operation produced: a
+//!   routing failure, a transport failure detected up front, and a pre-dispatch
+//!   authentication refusal.
+//!
+//! Nothing else about a response changes: the status, the other headers and every byte of
+//! the body stay as the renderer wrote them.
 
 use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse};
 use aws_smithy_schema_server::constraints::{self, Violation, ViolationKind};
 use aws_smithy_schema_server::ProtocolError;
+use service_common::query_error_envelope::{
+    RequestIdEnvelopeDefinition, RequestIdReportingOperation,
+};
 use service_common::validation::{
     refusing_violations_with_declared_echoes_quoting_up_to, unanchored, SubmittedEcho,
 };
@@ -66,8 +97,9 @@ use service_common::validation_message::{
     quoting_the_submitted_collection, quoting_the_whole_submitted_value,
 };
 use smithy_server_runtime::{
-    http, BoxFuture, DeserializableStruct, ErasedOperation, Operation, OperationContext,
-    OperationError, OperationRoutingTable, Refusal, Refused, ServerHttpProtocol, Service,
+    http, BoxFuture, DeserializableStruct, ErasedOperation, ErasedServiceDefinition, Operation,
+    OperationContext, OperationError, OperationRoutingTable, Refusal, Refused, ServerHttpProtocol,
+    Service,
 };
 use std::sync::Arc;
 
@@ -159,7 +191,11 @@ const MAX_RESULTS_MEMBER_PATH: &str = "maxResults";
 /// Generic over the engine type `Eng` so this file names no concrete engine; the
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
-    entry: crate::ServiceDefinition<Eng>,
+    /// The generated entry, with its three framework-level error renderers wrapped so a
+    /// response no operation produced still names the request it answers (see the module
+    /// docs). Identity, the protocol and the operations are the generated entry's
+    /// untouched.
+    entry: RequestIdEnvelopeDefinition<crate::ServiceDefinition<Eng>>,
     /// The shared engine, so the non-API routes a user-pool endpoint serves
     /// (the pool's JSON Web Key Set and a level's hosted logo image, see
     /// [`EmulatedService::override_routing_error`]) can be answered from this
@@ -179,15 +215,17 @@ pub struct EmulatedService<Eng: Send + Sync + 'static> {
 }
 
 /// Wire one `crate::ops::<module>::<Operation>` per line into `table`, each wrapped in
-/// [`WithSubmittedValues`], in [`iam_authorization::IamAuthorized`] and in
-/// [`BehindWebAcl`], and keyed by its operation shape name — the routing key
-/// `ServerHttpProtocol::routing_key` resolves and the generated table is keyed by.
+/// [`WithSubmittedValues`], in [`iam_authorization::IamAuthorized`], in
+/// [`BehindWebAcl`] and — outermost, so every response an operation produced names the
+/// request it answers — in [`RequestIdReportingOperation::header`], and keyed by its
+/// operation shape name — the routing key `ServerHttpProtocol::routing_key` resolves and
+/// the generated table is keyed by.
 macro_rules! wrap_operations {
     ($table:expr, $engine:expr, $($module:ident :: $operation:ident),+ $(,)?) => {
         $(
             $table.add_operation(
                 stringify!($operation),
-                ::std::boxed::Box::new(BehindWebAcl::new(
+                ::std::boxed::Box::new(RequestIdReportingOperation::header(BehindWebAcl::new(
                     stringify!($operation),
                     ::std::sync::Arc::clone(&$engine),
                     ::std::boxed::Box::new(iam_authorization::IamAuthorized::new(
@@ -197,7 +235,7 @@ macro_rules! wrap_operations {
                             crate::ops::$module::$operation::new(::std::sync::Arc::clone(&$engine)),
                         )) as ::std::boxed::Box<dyn ErasedOperation>,
                     )) as ::std::boxed::Box<dyn ErasedOperation>,
-                )) as ::std::boxed::Box<dyn ErasedOperation>,
+                ))) as ::std::boxed::Box<dyn ErasedOperation>,
             );
         )+
     };
@@ -346,7 +384,9 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
             verify_user_attribute::VerifyUserAttribute,
         );
         Self {
-            entry: crate::ServiceDefinition::new(Arc::clone(&engine)),
+            entry: RequestIdEnvelopeDefinition::header_only(crate::ServiceDefinition::new(
+                Arc::clone(&engine),
+            )),
             engine,
             with_submitted_values,
             protocol: error_wire::ErrorWireProtocol::new(),
@@ -740,7 +780,10 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     fn definition(&self) -> &dyn smithy_server_runtime::ErasedServiceDefinition {
         // The model-derived half of this service — identity, protocol, routing
         // table, and the default error renderers — lives in the generated entry.
-        // The router reads it through this one accessor. Do not edit the entry.
+        // The router reads it through this one accessor. Do not edit the entry: what is
+        // handed back is the shared `RequestIdEnvelopeDefinition`, which reads identity,
+        // protocol and the routing table straight off that entry and adds the request-id
+        // header to the three error renderers (see the module docs).
         &self.entry
     }
 
@@ -813,8 +856,10 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // [`WithSubmittedValues`] so a constraint refusal states the value the caller
         // submitted rather than the framework's summary of it, in
         // [`iam_authorization::IamAuthorized`] so a caller IAM does not allow is refused
-        // before the operation reads or writes anything, and in [`BehindWebAcl`] so
-        // the web ACL in front of the pool decides the request first. A key the model does not
+        // before the operation reads or writes anything, in [`BehindWebAcl`] so
+        // the web ACL in front of the pool decides the request first, and in
+        // [`RequestIdReportingOperation::header`] so whatever of those layers answers, the
+        // response names the request it answered. A key the model does not
         // name resolves to `None` here exactly as it does in the generated table (the two
         // non-modelled GET routes below are among them), so the router's routing-error
         // path is unchanged.
@@ -1142,7 +1187,7 @@ mod tests {
 
     use super::{
         hosted_logo_route, jwks_route_pool_id, logo_media_type, routes_to_signing_name,
-        unsigned_target_names_shape, EmulatedService,
+        unsigned_target_names_shape, EmulatedService, ErasedServiceDefinition,
     };
     use std::sync::Arc;
 

@@ -97,8 +97,9 @@ pub fn action_for(operation: &str) -> String {
 }
 
 /// This service's ARN namespace and signing name, which is how a policy statement spells one
-/// of its actions.
-const ACTION_PREFIX: &str = "logs";
+/// of its actions — and the vendor field of every ARN it mints, so the resource a call is
+/// judged against is spelled under the same namespace as the action.
+pub const ACTION_PREFIX: &str = "logs";
 
 /// `Some(message)` when IAM does not allow `logs:<operation>` on `resource` for the calling
 /// principal — the sentence the refusal carries — and `None` when it does.

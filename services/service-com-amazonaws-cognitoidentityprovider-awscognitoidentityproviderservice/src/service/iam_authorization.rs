@@ -23,10 +23,13 @@
 //!
 //! Three pieces, each held in exactly one place:
 //!
-//! 1. **who** — the principal the request's access key id speaks for: the IAM user that
-//!    owns that long-term key, read from IAM's own `access_keys` map (the map `iam:GetUser`
-//!    resolves a caller through, so the principal a refusal blames is the one IAM holds the
-//!    key under), else the account's own published credential;
+//! 1. **who** — the principal the request's access key id speaks for: the SESSION it was
+//!    minted for, read from the account's shared session directory
+//!    ([`::service_common::management_events::SessionAuditDirectory`], where the minting
+//!    service records every session it hands out), else the IAM user that owns that
+//!    long-term key, read from IAM's own `access_keys` map (the map `iam:GetUser` resolves a
+//!    caller through, so the principal a refusal blames is the one IAM holds the key under),
+//!    else the account's own published credential;
 //! 2. **what it may do** — the identity-based policy documents the IAM store holds for
 //!    that principal and the permissions boundary that caps them, read through the IAM
 //!    service's own accessors (`principal_policies`, `permissions_boundary_document`),
@@ -69,13 +72,17 @@
 //!   explicit `Deny` in a document that CAN be read still refuses, and a permissions
 //!   boundary the store DOES hold still caps the grant.
 //! * **An engine carrying no IAM store**, where no principal and no policy can exist.
-//! * **A credential STS minted for a session.** Which role such a key speaks for is a record
-//!   of the STS service's own store, and this crate cannot read it: STS depends on THIS
-//!   service (a user pool is an identity provider it verifies web identity tokens against),
-//!   so a dependency back on STS is a cycle Cargo refuses. Such a key resolves to the
-//!   account's own identity above, which is the position this gate already leaves the
-//!   account's own credential in; a session is bounded as soon as the record naming its role
-//!   is reachable from here.
+//! * **A session whose ISSUING ROLE this account does not hold a record of.** The
+//!   permissions of an assumed-role session are the role's, so the documents in force are
+//!   the ones IAM holds under the role's own ARN; a session the directory names no issuer for
+//!   is judged on the documents IAM holds for the session principal itself.
+//!
+//! WHICH session a temporary credential belongs to is read from the SHARED directory rather
+//! than from the minting service's own store, because that store is unreachable from here:
+//! STS depends on THIS service (a user pool is an identity provider it verifies web identity
+//! tokens against), so a dependency back on STS is a cycle Cargo refuses. The directory is
+//! the one place in this tree where the facts about a session live for every service that
+//! serves a call made with it, which is exactly the position this gate is in.
 
 use std::sync::Arc;
 
@@ -420,10 +427,35 @@ fn caller<Eng: Send + Sync + 'static>(engine: &Eng, ctx: &OperationContext<'_>) 
         boundary: None,
         unreadable_attachment: false,
     };
+    // A SESSION credential: the account's shared session directory holds the session every
+    // temporary credential this emulator minted belongs to, so a request signed with one
+    // speaks for THAT session — the principal `sts:GetCallerIdentity` reports for it — and is
+    // judged on the documents in force on the role that issued it.
+    let session = session_directory(engine)
+        .and_then(|directory| directory.lock().session(&access_key_id).cloned());
+    // No IAM store on this engine: no principal and no policy can exist, so nothing can be
+    // judged and the caller is left unbounded (see the module docs) — whatever credential it
+    // presented.
     let Some(iam) = iam_store::service_state(engine) else {
         return caller;
     };
     let store = iam.lock();
+    if let Some(session) = session {
+        caller.account_credential = false;
+        caller.arn = session.arn.clone();
+        caller.principals = vec![session.arn];
+        // "The permissions of the temporary security credentials are determined by the role
+        // that was assumed": the documents are the ISSUER's, under the ARN the account holds
+        // the role by — which carries its PATH, where the session ARN does not.
+        if let Some(issuer) = session.issuer {
+            caller.principals.push(issuer.arn.clone());
+            caller.read_policies_of(&store, &issuer.arn);
+        } else {
+            let principal = caller.arn.clone();
+            caller.read_policies_of(&store, &principal);
+        }
+        return caller;
+    }
     // IAM's store maps an access key id to the user that owns it (`access_keys`, the map
     // IAM's own `GetUser` resolves a caller through), so a request signed with one speaks for
     // THAT user and is judged on the user's policies rather than served as the account. A key
@@ -441,6 +473,25 @@ fn caller<Eng: Send + Sync + 'static>(engine: &Eng, ctx: &OperationContext<'_>) 
         caller.read_policies_of(&store, &user_arn);
     }
     caller
+}
+
+/// The account's SESSION directory in the shared engine: every session this emulator minted,
+/// keyed by the access key id it was minted under.
+///
+/// A SHARED type ([`::service_common::management_events::SessionAuditDirectory`]) rather than
+/// a field of any service's own state, because the service that MINTS a session is not the
+/// service that serves the calls made with it (see the module docs). Read-only here: the gate
+/// writes nothing.
+fn session_directory<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+) -> Option<::engine::ServiceState<::service_common::management_events::SessionAuditDirectory>> {
+    (engine as &dyn ::std::any::Any)
+        .downcast_ref::<::engine::InMemoryEngine>()
+        .map(
+            ::engine::InMemoryEngine::state::<
+                ::service_common::management_events::SessionAuditDirectory,
+            >,
+        )
 }
 
 #[cfg(test)]

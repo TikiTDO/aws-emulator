@@ -195,6 +195,8 @@ mod resend_confirmation_code;
 mod resource_server_lifecycle;
 #[path = "all/resource_tags.rs"]
 mod resource_tags;
+#[path = "all/response_request_id.rs"]
+mod response_request_id;
 #[path = "all/revocation_links_and_mfa_setup.rs"]
 mod revocation_links_and_mfa_setup;
 #[path = "all/revoke_token.rs"]
