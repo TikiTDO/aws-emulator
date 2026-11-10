@@ -49,23 +49,29 @@ service-common = { path = "../common" }
 # rather than keeping a second copy of either fact.
 service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
-# The same pre-flight reads the destination's two owners over the in-process callback, so the
-# bucket policy and the key policy it judges are the ones those services themselves hold:
-# `aws-sdk-s3` for the bucket's error codes and `aws-sdk-kms` for the key's manager and its
-# key policy. Only the generated clients are needed — the emulator supplies the transport.
+# The same pre-flight reads each destination's owner over the in-process callback, so the
+# policies it judges are the ones those services themselves hold: `aws-sdk-s3` for the
+# bucket's error codes, `aws-sdk-kms` for the key's manager and its key policy,
+# `aws-sdk-lambda` for the function's resource policy and `aws-sdk-sns` for the topic and its
+# access policy. Only the generated clients are needed — the emulator supplies the transport.
 aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 aws-sdk-kms = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-lambda = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-sns = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
-# The `S3Action` destination suite mounts Amazon S3 and KMS beside this service on one
-# engine, exactly as the assembled router mounts them, and makes every bucket, bucket policy
-# and key through those services' OWN operations over the in-process callback. DEV-ONLY:
-# this crate depends on no other service's crate outside its tests.
+# The destination pre-flight suites mount Amazon S3, KMS, Lambda and Amazon SNS beside this
+# service on one engine, exactly as the assembled router mounts them, and make every bucket,
+# bucket policy, key, function, permission and topic through those services' OWN operations
+# over the in-process callback. DEV-ONLY: this crate depends on no other service's crate
+# outside its tests.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
 service-com-amazonaws-kms-trentservice = { workspace = true }
+service-com-amazonaws-lambda-awsgirapiservice = { workspace = true }
+service-com-amazonaws-sns-amazonsimplenotificationservice = { workspace = true }
 
 [lints]
 workspace = true

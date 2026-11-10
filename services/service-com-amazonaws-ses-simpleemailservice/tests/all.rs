@@ -25,6 +25,8 @@ mod identity_notification_topics;
 mod ses_account_sending_and_legacy_addresses;
 #[path = "all/ses_active_receipt_rule_set.rs"]
 mod ses_active_receipt_rule_set;
+#[path = "all/ses_add_header_action_charset.rs"]
+mod ses_add_header_action_charset;
 #[path = "all/ses_configuration_set_creation.rs"]
 mod ses_configuration_set_creation;
 #[path = "all/ses_configuration_set_delivery_options.rs"]
@@ -77,6 +79,8 @@ mod ses_production_access_gate_wording;
 mod ses_query_error_envelope;
 #[path = "all/ses_receipt_filters.rs"]
 mod ses_receipt_filters;
+#[path = "all/ses_receipt_rule_destination_preflight.rs"]
+mod ses_receipt_rule_destination_preflight;
 #[path = "all/ses_receipt_rule_s3_destination_authorization.rs"]
 mod ses_receipt_rule_s3_destination_authorization;
 #[path = "all/ses_receipt_rule_set_creation.rs"]
@@ -87,6 +91,8 @@ mod ses_receipt_rule_set_deletion;
 mod ses_receipt_rule_set_listing;
 #[path = "all/ses_receipt_rule_sets.rs"]
 mod ses_receipt_rule_sets;
+#[path = "all/ses_receipt_rule_stored_defaults.rs"]
+mod ses_receipt_rule_stored_defaults;
 #[path = "all/ses_refusal_names_the_refused_request.rs"]
 mod ses_refusal_names_the_refused_request;
 #[path = "all/ses_refused_calls_name_the_request.rs"]

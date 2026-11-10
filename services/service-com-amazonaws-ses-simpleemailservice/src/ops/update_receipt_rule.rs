@@ -153,7 +153,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let rule_set_name = input.rule_set_name;
-        let rule = input.rule;
+        let mut rule = input.rule;
         let region = crate::state::region_from_request(ctx.parts());
 
         // The rule this request carries is stored whole, so its actions are held
@@ -166,7 +166,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::receipt_actions_defect(rule.actions.as_deref().unwrap_or_default())
         {
             return Err(match defect {
-                crate::state::ReceiptActionDefect::NotOneAction { message } => {
+                crate::state::ReceiptActionDefect::NotOneAction { message }
+                | crate::state::ReceiptActionDefect::InvalidParameter { message } => {
                     crate::scaffolded::Scaffolded::invalid_parameter_value(message)
                 }
                 crate::state::ReceiptActionDefect::SnsTopic { topic, message } => {
@@ -200,13 +201,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             });
         }
 
-        // The destination an `S3Action` names has to be one SES may write the
-        // received message into, exactly as it has to be on the create
-        // (`create_receipt_rule.rs` reads it through the same one reading): the
-        // bucket's own policy has to grant SES the object write and the key it
-        // would encrypt the message with has to grant it the encryption, or the
-        // update is refused and the stored rule is left exactly as it was.
-        if let Some(refusal) = crate::state::s3_action_authorization::unauthorized_s3_action(
+        // Every destination the rule's actions name has to be one SES may really
+        // reach, exactly as it has to be on the create (`create_receipt_rule.rs`
+        // runs the same one pre-flight): the bucket an `S3Action` writes into and
+        // the key it encrypts with, the function a `LambdaAction` calls, and every
+        // topic an action notifies. A rule SES could never carry out is refused
+        // and the stored rule is left exactly at its last-good state, instead of
+        // a working rule being replaced by one that can never fire.
+        if let Some(refusal) = crate::state::receipt_destinations::unauthorized_destination(
             ctx,
             &region,
             &rule_set_name,
@@ -215,16 +217,44 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .await
         {
-            return Err(
-                UpdateReceiptRuleErrorModeled::InvalidS3ConfigurationException(
-                    InvalidS3ConfigurationException {
-                        bucket: Some(refusal.bucket),
-                        message: Some(refusal.message),
+            return Err(match refusal {
+                crate::state::receipt_destinations::DestinationRefusal::S3 { bucket, message } => {
+                    UpdateReceiptRuleErrorModeled::InvalidS3ConfigurationException(
+                        InvalidS3ConfigurationException {
+                            bucket: Some(bucket),
+                            message: Some(message),
+                        },
+                    )
+                    .into()
+                }
+                crate::state::receipt_destinations::DestinationRefusal::LambdaFunction {
+                    function_arn,
+                    message,
+                } => UpdateReceiptRuleErrorModeled::InvalidLambdaFunctionException(
+                    InvalidLambdaFunctionException {
+                        function_arn: Some(function_arn),
+                        message: Some(message),
                     },
                 )
                 .into(),
-            );
+                crate::state::receipt_destinations::DestinationRefusal::SnsTopic {
+                    topic,
+                    message,
+                } => UpdateReceiptRuleErrorModeled::InvalidSnsTopicException(
+                    InvalidSnsTopicException {
+                        topic: Some(topic),
+                        message: Some(message),
+                    },
+                )
+                .into(),
+            });
         }
+
+        // The replacement is stored with every member the request left out but the
+        // model or its documentation states a value for, so an update that names
+        // only some members reads back the way a create with the same members
+        // does.
+        crate::state::materialize_receipt_rule_defaults(&mut rule);
 
         let Some(state) = crate::state::service_state(&*self.engine) else {
             // See `verify_email_identity.rs`: an engine with no store for this

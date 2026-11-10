@@ -34,20 +34,24 @@
 //! ([`smithy_server_runtime::OperationContext::callback`]): the AWS SDK over the emulator's
 //! own in-process transport, so nothing here opens a socket or leaves the host. The decision
 //! itself is [`::service_common::iam_authorization`], the tree's one evaluation of policy
-//! documents against `(action, resource, principal)`.
+//! documents against `(action, resource, principal)`, read for a refusal the way
+//! [`super::receipt_destinations::withholds`] reads one.
 //!
 //! An answer that is not one of those services stating the destination's own facts — an
 //! emulator with no object store or no KMS mounted beside this one, a refusal, any other
 //! failure to ask — establishes NOTHING, so it refuses nothing: a refusal has to be grounded
 //! in what the owning service answered. Both calls READ, so a refused rule leaves the
 //! destination exactly as the caller left it.
+//!
+//! This is the `S3Action` half of the one pre-flight every operation storing a rule runs;
+//! [`super::receipt_destinations`] is where that pre-flight is driven, and where the pieces
+//! both halves share live.
 
-use ::service_common::iam_authorization::{self as iam, Decision};
+use ::service_common::iam_authorization as iam;
 
-/// The service principal Amazon SES acts under when it writes a received message into the
-/// bucket a receipt rule names, and therefore the principal a bucket policy or a key policy
-/// names to grant it.
-pub const SES_SERVICE_PRINCIPAL: &str = "ses.amazonaws.com";
+use super::receipt_destinations::{
+    rule_scoped_context, withholds, SES_SERVICE_PRINCIPAL, SOURCE_ACCOUNT_KEY, SOURCE_ARN_KEY,
+};
 
 /// The Amazon S3 action an `S3Action` performs: it SAVES the received message into the
 /// bucket ("this action saves the received message to an Amazon Simple Storage Service
@@ -69,13 +73,10 @@ const SETUP_NOTIFICATION_OBJECT: &str = "AMAZON_SES_SETUP_NOTIFICATION";
 /// key under it and encrypting with it.
 pub const KEY_ENCRYPT_ACTIONS: &[&str] = &["kms:Encrypt", "kms:GenerateDataKey"];
 
-/// The condition key naming the ACCOUNT whose resource a service principal is acting on
-/// behalf of, which is how a grant to such a principal is scoped to one account.
-const SOURCE_ACCOUNT_KEY: &str = "aws:SourceAccount";
-
-/// The condition key naming the RESOURCE a service principal is acting on behalf of, which
-/// for this pre-flight is the receipt rule being stored ([`receipt_rule_arn`]).
-const SOURCE_ARN_KEY: &str = "aws:SourceArn";
+/// The condition key the Amazon SES Developer Guide's own inbound-mail bucket policy scopes
+/// its grant by, beside [`SOURCE_ACCOUNT_KEY`] and [`SOURCE_ARN_KEY`]: the write Amazon SES
+/// performs carries the account it acts for in it, which is the value such a policy compares.
+const REFERER_KEY: &str = "aws:Referer";
 
 /// The condition key naming the service a KMS request was made THROUGH, whose value is that
 /// service's regional endpoint name.
@@ -89,15 +90,6 @@ const NO_SUCH_BUCKET_CODE: &str = "NoSuchBucket";
 
 /// The Amazon S3 error code for a bucket that exists and carries no policy.
 const NO_SUCH_BUCKET_POLICY_CODE: &str = "NoSuchBucketPolicy";
-
-/// How many DISTINCT Amazon S3 destinations one stored rule is authorized against.
-///
-/// An EMULATOR ceiling, not an AWS quota: `ReceiptRule$Actions` is a list a caller writes, and
-/// each destination in it costs this pre-flight a read of two other services, so the work one
-/// request can drive is bounded here. A receipt rule's action list is short — it is the
-/// ordered set of things SES does with one received message — so no rule a client really
-/// writes reaches it.
-pub const MAX_AUTHORIZED_DESTINATIONS: usize = 20;
 
 /// Why the `S3Action` of a receipt rule cannot be stored: the bucket the refusal names (the
 /// one the request itself carried, which is what `InvalidS3ConfigurationException$Bucket`
@@ -136,68 +128,28 @@ pub fn could_not_write_message(bucket: &str) -> String {
     format!("Could not write to bucket: {bucket}")
 }
 
-/// The ARN of the receipt rule `rule_name` of the rule set `rule_set_name`, which is the
-/// value `aws:SourceArn` carries in a grant written for one receipt rule.
-#[must_use]
-pub fn receipt_rule_arn(region: &str, rule_set_name: &str, rule_name: &str) -> String {
-    format!(
-        "arn:aws:ses:{region}:{}:receipt-rule-set/{rule_set_name}:receipt-rule/{rule_name}",
-        ::engine::EMULATOR_ACCOUNT_ID
-    )
-}
-
 /// The ARN of the object `key` of `bucket`: an Amazon S3 object ARN leaves the Region and
 /// account-id fields empty, because a bucket name is globally unique.
 fn object_arn(bucket: &str, key: &str) -> String {
     format!("arn:aws:s3:::{bucket}/{key}")
 }
 
-/// The refusal the FIRST `S3Action` of `actions` that Amazon SES may not write to earns, and
-/// `None` when every one of them names a destination it may — or when nothing establishes
-/// otherwise (see the module docs).
+/// The refusal ONE `S3Action`'s destination earns, and `None` when Amazon SES may write the
+/// received message into it — or when nothing establishes otherwise (see the module docs).
 ///
-/// `rule_set_name` and `rule_name` name the rule being stored, which is what a grant in the
-/// destination's policy is scoped to; `region` is the Region the request is signed for, which
-/// is the endpoint the bucket and the key are asked of.
-///
-/// Each DISTINCT destination the rule names is asked about once, and at most
-/// [`MAX_AUTHORIZED_DESTINATIONS`] of them are: the actions a rule carries are a caller's
-/// list, so the number of asks one request can drive is bounded here rather than by the size
-/// of the request. A destination past that ceiling is left unjudged, which is the narrower
-/// answer — nothing is refused on an answer nobody asked for.
-///
-/// The ONE reading, so `CreateReceiptRule` and `UpdateReceiptRule` hold a stored rule's
-/// destination to the same requirements instead of each keeping its own copy of them.
-pub async fn unauthorized_s3_action(
+/// `rule_arn` names the rule being stored, which is what a grant in the destination's policy
+/// is scoped to; `region` is the Region the request is signed for, which is the endpoint the
+/// bucket and the key are asked of.
+pub async fn unauthorized_s3_destination(
     ctx: &::smithy_server_runtime::OperationContext<'_>,
     region: &str,
-    rule_set_name: &str,
-    rule_name: &str,
-    actions: &[crate::ops::types::ReceiptAction],
+    s3_action: &crate::ops::types::S3Action,
+    rule_arn: &str,
 ) -> Option<S3ActionRefusal> {
-    let rule_arn = receipt_rule_arn(region, rule_set_name, rule_name);
-    let mut asked: Vec<(&str, &str, &str)> = Vec::new();
-    for s3_action in actions.iter().filter_map(|action| action.s3_action.as_ref()) {
-        let destination = (
-            s3_action.bucket_name.as_str(),
-            s3_action.object_key_prefix.as_deref().unwrap_or_default(),
-            s3_action.kms_key_arn.as_deref().unwrap_or_default(),
-        );
-        if asked.contains(&destination) {
-            continue;
-        }
-        if asked.len() >= MAX_AUTHORIZED_DESTINATIONS {
-            break;
-        }
-        asked.push(destination);
-        if let Some(refusal) = bucket_refusal(ctx, region, s3_action, &rule_arn).await {
-            return Some(refusal);
-        }
-        if let Some(refusal) = key_refusal(ctx, region, s3_action, &rule_arn).await {
-            return Some(refusal);
-        }
+    if let Some(refusal) = bucket_refusal(ctx, region, s3_action, rule_arn).await {
+        return Some(refusal);
     }
-    None
+    key_refusal(ctx, region, s3_action, rule_arn).await
 }
 
 /// What asking the object store for a bucket's policy answered.
@@ -272,20 +224,26 @@ async fn bucket_policy(
 
 /// Whether `policy` grants Amazon SES the object write this action performs, on the object
 /// the pre-flight writes under the action's `prefix` ([`SETUP_NOTIFICATION_OBJECT`]).
+///
+/// The three condition keys the Developer Guide's own bucket policy scopes such a grant by
+/// travel with the write as its context, and are declared as keys this request MODELS because
+/// it carries a value for each.
 fn bucket_policy_permits_write(policy: &str, bucket: &str, prefix: &str, rule_arn: &str) -> bool {
     let object = object_arn(bucket, &format!("{prefix}{SETUP_NOTIFICATION_OBJECT}"));
     let principals = [SES_SERVICE_PRINCIPAL.to_string()];
+    let scoped = rule_scoped_context(rule_arn);
     let context = [
+        scoped[0].clone(),
+        scoped[1].clone(),
         (
-            SOURCE_ACCOUNT_KEY.to_string(),
+            REFERER_KEY.to_string(),
             ::engine::EMULATOR_ACCOUNT_ID.to_string(),
         ),
-        (SOURCE_ARN_KEY.to_string(), rule_arn.to_string()),
     ];
     let request = iam::Request::new(OBJECT_WRITE_ACTION, &object, &principals)
         .with_context(&context)
-        .with_published_keys(&[SOURCE_ACCOUNT_KEY, SOURCE_ARN_KEY]);
-    iam::resource_decision(policy, &request) == Decision::Allowed
+        .with_published_keys(&[SOURCE_ACCOUNT_KEY, SOURCE_ARN_KEY, REFERER_KEY]);
+    !withholds(policy, &request)
 }
 
 /// What asking KMS about the key an `S3Action` names answered.
@@ -407,11 +365,12 @@ fn unanswered_key<E: ::std::error::Error + 'static, R: ::std::fmt::Debug>(
 
 /// Whether `policy` lets Amazon SES encrypt the message under the key `key_arn` names.
 ///
-/// Permitted when the key policy grants the service principal at least one of
-/// [`KEY_ENCRYPT_ACTIONS`] and denies none of them: a policy that states nothing about this
-/// principal grants it nothing ("ensure that you add a statement to your key's policy to give
-/// Amazon SES permission to use it", `S3Action$KmsKeyArn`), and an explicit deny refuses
-/// whatever else the document allows.
+/// Permitted when the key policy withholds NONE of [`KEY_ENCRYPT_ACTIONS`] — encrypting a
+/// message under a KMS key is generating a data key under it and encrypting with it, which is
+/// why the statement `S3Action$KmsKeyArn` asks for ("ensure that you add a statement to your
+/// key's policy to give Amazon SES permission to use it") grants both. A policy that states
+/// nothing about this principal grants it nothing, and an explicit deny refuses whatever else
+/// the document allows ([`withholds`]).
 fn key_policy_permits_encryption(
     policy: &str,
     key_arn: &str,
@@ -440,18 +399,12 @@ fn key_policy_permits_encryption(
         VIA_SERVICE_KEY,
         CALLER_ACCOUNT_KEY,
     ];
-    let mut granted = false;
-    for action in KEY_ENCRYPT_ACTIONS {
+    KEY_ENCRYPT_ACTIONS.iter().all(|action| {
         let request = iam::Request::new(action, key_arn, &principals)
             .with_context(&context)
             .with_published_keys(&published);
-        match iam::resource_decision(policy, &request) {
-            Decision::Denied => return false,
-            Decision::Allowed => granted = true,
-            Decision::NotStated => {}
-        }
-    }
-    granted
+        !withholds(policy, &request)
+    })
 }
 
 /// The KMS client the action's key is read through: the AWS SDK driven over the emulator's own

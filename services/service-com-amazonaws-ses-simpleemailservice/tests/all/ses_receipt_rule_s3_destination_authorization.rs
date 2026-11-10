@@ -121,6 +121,16 @@ fn key_policy_granting_ses() -> String {
     )
 }
 
+/// The same policy granting the service principal ONE of the two encrypt operations only:
+/// encrypting a message under a KMS key is generating a data key under it AND encrypting with
+/// it, so a policy naming just one of them does not let Amazon SES encrypt the message.
+fn key_policy_granting_one_operation() -> String {
+    format!(
+        r#"{{"Version":"2012-10-17","Statement":[{},{{"Sid":"AllowSESEncryptOnly","Effect":"Allow","Principal":{{"Service":"ses.amazonaws.com"}},"Action":"kms:Encrypt","Resource":"*"}}]}}"#,
+        root_statement()
+    )
+}
+
 /// A bucket policy granting `principal` the object write on `resource` of `bucket`, scoped to
 /// this account — the shape the Amazon SES Developer Guide's inbound-mail bucket policy has.
 fn bucket_policy(bucket: &str, principal: &str, resource: &str) -> String {
@@ -135,6 +145,14 @@ fn bucket_policy(bucket: &str, principal: &str, resource: &str) -> String {
 fn bucket_policy_denying_ses(bucket: &str) -> String {
     format!(
         r#"{{"Version":"2012-10-17","Statement":[{{"Sid":"AllowSESPuts","Effect":"Allow","Principal":{{"Service":"ses.amazonaws.com"}},"Action":"s3:PutObject","Resource":"arn:aws:s3:::{bucket}/*"}},{{"Sid":"DenySESPuts","Effect":"Deny","Principal":{{"Service":"ses.amazonaws.com"}},"Action":"s3:PutObject","Resource":"arn:aws:s3:::{bucket}/*"}}]}}"#
+    )
+}
+
+/// The grant to Amazon SES under ONE condition clause of the caller's choosing, so a row can
+/// state what a clause this evaluation can and cannot decide means.
+fn bucket_policy_conditioned(bucket: &str, condition: &str) -> String {
+    format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Sid":"AllowSESPuts","Effect":"Allow","Principal":{{"Service":"ses.amazonaws.com"}},"Action":"s3:PutObject","Resource":"arn:aws:s3:::{bucket}/*","Condition":{condition}}}]}}"#
     )
 }
 
@@ -153,6 +171,17 @@ enum BucketSetup {
     GrantsAnotherPrincipal,
     /// The policy grants Amazon SES the write and then denies it.
     DeniesSes,
+    /// The grant is scoped by the condition key the Amazon SES Developer Guide's own
+    /// inbound-mail bucket policy writes beside the source account and ARN: the account the
+    /// write is made for.
+    GrantsSesUnderReferer,
+    /// The grant is scoped to ANOTHER account, a clause whose key the write does carry a
+    /// value for — so the clause is decidably false and the statement is not about this
+    /// write.
+    GrantsSesForAnotherAccount,
+    /// The grant is scoped by a condition key the pre-flight supplies no value for, so its
+    /// clause can be decided neither way.
+    GrantsSesUnderUndecidableCondition,
 }
 
 /// Which key, if any, the row's `S3Action` names.
@@ -169,6 +198,9 @@ enum KeySetup {
     CustomerRootOnly,
     /// A customer managed key whose policy grants Amazon SES the encryption.
     CustomerGrantsSes,
+    /// A customer managed key whose policy grants Amazon SES ONE of the two encrypt
+    /// operations only.
+    CustomerGrantsOneOperation,
     /// A well-formed key ARN KMS holds no key under.
     Unheld,
 }
@@ -269,6 +301,18 @@ async fn stage(router: &MultiServiceRouter, row: &Row) -> (String, Option<String
             Some(bucket_policy(&bucket, "sns.amazonaws.com", "*"))
         }
         BucketSetup::DeniesSes => Some(bucket_policy_denying_ses(&bucket)),
+        BucketSetup::GrantsSesUnderReferer => Some(bucket_policy_conditioned(
+            &bucket,
+            &format!(r#"{{"StringEquals":{{"aws:Referer":"{}"}}}}"#, account()),
+        )),
+        BucketSetup::GrantsSesForAnotherAccount => Some(bucket_policy_conditioned(
+            &bucket,
+            r#"{"StringEquals":{"AWS:SourceAccount":"999999999999"}}"#,
+        )),
+        BucketSetup::GrantsSesUnderUndecidableCondition => Some(bucket_policy_conditioned(
+            &bucket,
+            r#"{"Bool":{"aws:SecureTransport":"true"}}"#,
+        )),
     };
     if let Some(policy) = policy {
         s3(router)
@@ -291,11 +335,13 @@ async fn stage(router: &MultiServiceRouter, row: &Row) -> (String, Option<String
             "arn:aws:kms:{REGION}:{}:key/9e8d7c6b-5a49-4382-91f0-1234567890ab",
             account()
         )),
-        KeySetup::CustomerRootOnly | KeySetup::CustomerGrantsSes => {
-            let policy = if row.key == KeySetup::CustomerRootOnly {
-                root_only_key_policy()
-            } else {
-                key_policy_granting_ses()
+        KeySetup::CustomerRootOnly
+        | KeySetup::CustomerGrantsSes
+        | KeySetup::CustomerGrantsOneOperation => {
+            let policy = match row.key {
+                KeySetup::CustomerRootOnly => root_only_key_policy(),
+                KeySetup::CustomerGrantsOneOperation => key_policy_granting_one_operation(),
+                _ => key_policy_granting_ses(),
             };
             let created = kms(router)
                 .create_key()
@@ -377,6 +423,33 @@ async fn an_s3_action_is_authorized_against_the_bucket_and_the_key_before_the_ru
             refused_with: Some("Could not write to bucket: {bucket}"),
         },
         Row {
+            case: "a grant scoped by the account the write is made for",
+            name: "referer-granted",
+            bucket: BucketSetup::GrantsSesUnderReferer,
+            key: KeySetup::None,
+            prefix: None,
+            refused_with: None,
+        },
+        Row {
+            case: "a grant scoped to another account, which this write is not made for",
+            name: "account-elsewhere",
+            bucket: BucketSetup::GrantsSesForAnotherAccount,
+            key: KeySetup::None,
+            prefix: None,
+            refused_with: Some("Could not write to bucket: {bucket}"),
+        },
+        Row {
+            // A refusal has to be grounded in what the object store's own policy says, and a
+            // clause this evaluation cannot decide says nothing either way: the grant is left
+            // undecided rather than read as the bucket withholding the write.
+            case: "a grant under a condition key the pre-flight carries no value for",
+            name: "undecidable-condition",
+            bucket: BucketSetup::GrantsSesUnderUndecidableCondition,
+            key: KeySetup::None,
+            prefix: None,
+            refused_with: None,
+        },
+        Row {
             case: "the Amazon Web Services managed key, which needs no statement",
             name: "aws-managed-key",
             bucket: BucketSetup::GrantsSes,
@@ -399,6 +472,17 @@ async fn an_s3_action_is_authorized_against_the_bucket_and_the_key_before_the_ru
             key: KeySetup::CustomerGrantsSes,
             prefix: Some("inbound/"),
             refused_with: None,
+        },
+        Row {
+            // Encrypting a message under a KMS key is generating a data key under it and
+            // encrypting with it, so a key policy granting one of the two operations only
+            // does not let Amazon SES encrypt the message.
+            case: "a customer managed key whose policy grants one encrypt operation only",
+            name: "key-one-operation",
+            bucket: BucketSetup::GrantsSes,
+            key: KeySetup::CustomerGrantsOneOperation,
+            prefix: None,
+            refused_with: Some("Could not write to bucket: {bucket}"),
         },
         Row {
             case: "a key ARN KMS holds no key under",

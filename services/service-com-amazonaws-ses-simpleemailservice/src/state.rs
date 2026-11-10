@@ -42,6 +42,11 @@
 //! topics, its custom MAIL FROM setup — and [`reconcile_identities`] is where the two
 //! are brought back into agreement, on every operation this service serves.
 
+/// Whether Amazon SES may really reach the destinations a receipt rule's actions name — the
+/// ONE pre-flight every operation that stores a rule runs, read against those services' own
+/// stores rather than decided here.
+pub mod receipt_destinations;
+
 /// Whether Amazon SES may really write a received message into the Amazon S3 destination an
 /// `S3Action` names — the bucket's own policy and the KMS key's — which is read against those
 /// services' own stores rather than decided here.
@@ -2235,6 +2240,11 @@ pub enum ReceiptActionDefect {
     /// no single action either. The model expresses neither, so the operation
     /// refuses it through its own 400 channel.
     NotOneAction { message: String },
+    /// A member whose own documentation states the form its value takes carries
+    /// one outside it. The model declares no pattern for such a member and no
+    /// error for the violation, so the operation refuses it through its own 400
+    /// channel, exactly as it refuses an entry that is not one action.
+    InvalidParameter { message: String },
     /// A `TopicArn` member names no Amazon SNS topic to publish to
     /// (`InvalidSnsTopic`), carrying the value it named as the topic.
     SnsTopic { topic: String, message: String },
@@ -2254,11 +2264,13 @@ pub enum ReceiptActionDefect {
 /// own copy of them. What is decided is the form of the values the action's
 /// members name: a member the model documents as the ARN of a resource of another
 /// service must name a resource of THAT service ([`is_sns_topic_arn`],
-/// [`LAMBDA_FUNCTION_ARN`], [`is_kms_key_arn`]), and an `S3Action` must name a
-/// bucket. Whether those resources EXIST, and whether SES may write to them, is
-/// the other service's own state and permissions, read against that service's own
-/// store instead ([`s3_action_authorization::unauthorized_s3_action`] for the
-/// bucket and the key of an `S3Action`) — so a well-formed value is accepted here.
+/// [`LAMBDA_FUNCTION_ARN`], [`is_kms_key_arn`]), an `S3Action` must name a bucket,
+/// and a member documenting the charset its value takes must be inside it
+/// ([`is_header_name`], [`is_header_value`]). Whether the resources those values
+/// name EXIST, and whether SES may act on them, is the other service's own state
+/// and permissions, read against that service's own store instead
+/// ([`receipt_destinations::unauthorized_destination`]) — so a well-formed value is
+/// accepted here.
 pub fn receipt_actions_defect(
     actions: &[crate::ops::types::ReceiptAction],
 ) -> Option<ReceiptActionDefect> {
@@ -2330,10 +2342,44 @@ fn receipt_action_defect(
             });
         }
     }
+    if let Some(add_header_action) = &action.add_header_action {
+        if !is_header_name(&add_header_action.header_name) {
+            return Some(ReceiptActionDefect::InvalidParameter {
+                message: invalid_header_name_message(&add_header_action.header_name),
+            });
+        }
+        if !is_header_value(&add_header_action.header_value) {
+            return Some(ReceiptActionDefect::InvalidParameter {
+                message: invalid_header_value_message(&add_header_action.header_value),
+            });
+        }
+    }
     // Every action may publish a notification to an Amazon SNS topic, and the
     // `SNSAction` is nothing but that topic, so the one topic reading covers
     // them all.
-    let topic_arns = [
+    topic_arn_members(action)
+        .into_iter()
+        .find(|(_, topic_arn)| !is_sns_topic_arn(topic_arn))
+        .map(|(action_name, topic_arn)| ReceiptActionDefect::SnsTopic {
+            topic: topic_arn.to_string(),
+            message: format!(
+                "{} {topic_arn:?} must be the ARN of an Amazon SNS topic",
+                member(&format!("{action_name}.TopicArn"))
+            ),
+        })
+}
+
+/// Every Amazon SNS topic ONE receipt action notifies, as `(the member's own action, the
+/// topic ARN it carries)` in the order the action's members declare them.
+///
+/// The ONE listing, because two readings ask about the same set: whether each value names a
+/// topic at all ([`receipt_action_defect`]) and whether Amazon SES may publish to the topic it
+/// names ([`receipt_destinations`]). Every action may publish a notification to a topic, and
+/// an `SNSAction` is nothing but that topic.
+pub fn topic_arn_members(
+    action: &crate::ops::types::ReceiptAction,
+) -> Vec<(&'static str, &str)> {
+    [
         (
             "S3Action",
             action
@@ -2376,18 +2422,101 @@ fn receipt_action_defect(
                 .as_ref()
                 .map(|set| set.topic_arn.as_str()),
         ),
-    ];
-    topic_arns
-        .into_iter()
-        .filter_map(|(action_name, topic_arn)| topic_arn.map(|arn| (action_name, arn)))
-        .find(|(_, topic_arn)| !is_sns_topic_arn(topic_arn))
-        .map(|(action_name, topic_arn)| ReceiptActionDefect::SnsTopic {
-            topic: topic_arn.to_string(),
-            message: format!(
-                "{} {topic_arn:?} must be the ARN of an Amazon SNS topic",
-                member(&format!("{action_name}.TopicArn"))
-            ),
-        })
+    ]
+    .into_iter()
+    .filter_map(|(action_name, topic_arn)| topic_arn.map(|arn| (action_name, arn)))
+    .collect()
+}
+
+/// The longest `AddHeaderAction$HeaderName` SES accepts: the member documents the bound —
+/// "The name must contain at least one character, and can contain up to 50 characters."
+pub const MAX_HEADER_NAME: usize = 50;
+
+/// The longest `AddHeaderAction$HeaderValue` SES accepts: "This value can contain up to 2048
+/// characters."
+pub const MAX_HEADER_VALUE: usize = 2048;
+
+/// Whether `value` is a header name `AddHeaderAction$HeaderName` admits.
+///
+/// The member states the charset and the bounds and the model declares no pattern for them:
+/// "The name must contain at least one character, and can contain up to 50 characters. It
+/// consists of alphanumeric (a–z, A–Z, 0–9) characters and dashes."
+#[must_use]
+pub fn is_header_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().count() <= MAX_HEADER_NAME
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+/// Whether `value` is a header value `AddHeaderAction$HeaderValue` admits: "This value can
+/// contain up to 2048 characters. It can't contain newline (\n) or carriage return (\r)
+/// characters."
+#[must_use]
+pub fn is_header_value(value: &str) -> bool {
+    value.chars().count() <= MAX_HEADER_VALUE && !value.contains(['\n', '\r'])
+}
+
+/// How SES words the refusal of a header name outside the charset
+/// `AddHeaderAction$HeaderName` documents: the fixed sentence plus the name the request
+/// carried.
+#[must_use]
+pub fn invalid_header_name_message(header_name: &str) -> String {
+    format!("Invalid header name: {header_name}")
+}
+
+/// How SES words the refusal of a header value outside the form
+/// `AddHeaderAction$HeaderValue` documents — the sibling member's refusal, worded the same
+/// way over the value the request carried.
+#[must_use]
+pub fn invalid_header_value_message(header_value: &str) -> String {
+    format!("Invalid header value: {header_value}")
+}
+
+/// The `TlsPolicy` a receipt rule the request gave none for holds: "Specifies whether Amazon
+/// SES should require that incoming email is delivered over a connection encrypted with
+/// Transport Layer Security (TLS) … The default is `Optional`" (`ReceiptRule$TlsPolicy`).
+pub const DEFAULT_RECEIPT_RULE_TLS_POLICY: &str = "Optional";
+
+/// The `Encoding` an `SNSAction` the request gave none for holds: "The default value is
+/// UTF-8" (`SNSAction$Encoding`).
+pub const DEFAULT_SNS_ACTION_ENCODING: &str = "UTF-8";
+
+/// The `InvocationType` a `LambdaAction` the request gave none for holds: "The default value
+/// is `Event`" (`LambdaAction$InvocationType`).
+pub const DEFAULT_LAMBDA_ACTION_INVOCATION_TYPE: &str = "Event";
+
+/// Fill in every member of `rule` whose own documentation states the value it holds when the
+/// request omits it, so the stored rule carries it and every read of the rule reports it.
+///
+/// A member documented with a default is NOT optional in the resource — it is optional in the
+/// REQUEST — so the default is materialised where the rule is stored rather than invented by
+/// each reader: `DescribeReceiptRule`, `DescribeReceiptRuleSet` and
+/// `DescribeActiveReceiptRuleSet` all project the stored rule, and a caller that reads a rule
+/// and writes it back must not lose a value the service supplied. The modelled booleans
+/// (`ReceiptRule$Enabled`, `ReceiptRule$ScanEnabled`, both `@default false`) carry their
+/// default in the shape itself, so there is nothing to fill in for them.
+///
+/// Applied by every operation that STORES a rule, so a created and an updated rule read back
+/// alike ([`crate::ops::types::ReceiptRule`] is what both store).
+pub fn materialize_receipt_rule_defaults(rule: &mut crate::ops::types::ReceiptRule) {
+    if rule.tls_policy.is_none() {
+        rule.tls_policy = Some(DEFAULT_RECEIPT_RULE_TLS_POLICY.to_string());
+    }
+    for action in rule.actions.iter_mut().flatten() {
+        if let Some(sns_action) = &mut action.sns_action {
+            if sns_action.encoding.is_none() {
+                sns_action.encoding = Some(DEFAULT_SNS_ACTION_ENCODING.to_string());
+            }
+        }
+        if let Some(lambda_action) = &mut action.lambda_action {
+            if lambda_action.invocation_type.is_none() {
+                lambda_action.invocation_type =
+                    Some(DEFAULT_LAMBDA_ACTION_INVOCATION_TYPE.to_string());
+            }
+        }
+    }
 }
 
 /// The Region an operation serves a request that carries no SigV4 credential

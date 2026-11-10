@@ -116,8 +116,15 @@ impl RuleSpec {
     }
 
     /// The same rule as the stored shape, for seeding a set with it.
+    ///
+    /// Seeded the way a rule the account HOLDS really looks: the members whose default the
+    /// service supplies where a rule is stored
+    /// ([`materialize_receipt_rule_defaults`]) are filled in here too, so a seeded neighbour
+    /// is not a rule no operation could have produced.
+    ///
+    /// [`materialize_receipt_rule_defaults`]: service_com_amazonaws_ses_simpleemailservice::state::materialize_receipt_rule_defaults
     fn stored(&self) -> ReceiptRule {
-        ReceiptRule {
+        let mut rule = ReceiptRule {
             name: self.name.clone(),
             enabled: self.enabled,
             scan_enabled: self.scan_enabled,
@@ -128,7 +135,11 @@ impl RuleSpec {
                 Some(self.recipients.clone())
             },
             actions: None,
-        }
+        };
+        service_com_amazonaws_ses_simpleemailservice::state::materialize_receipt_rule_defaults(
+            &mut rule,
+        );
+        rule
     }
 }
 
@@ -242,11 +253,16 @@ fn assert_reports(case: &str, rule: &str, spec: &RuleSpec) {
         "case {case}: expected ScanEnabled={}, got {rule}",
         spec.scan_enabled
     );
+    // `ReceiptRule$TlsPolicy` is documented "The default is Optional", so a rule
+    // stored without one reads back carrying that default rather than nothing.
+    let tls_policy = spec
+        .tls_policy
+        .clone()
+        .or_else(|| Some("Optional".to_string()));
     assert_eq!(
         element(rule, "TlsPolicy"),
-        spec.tls_policy,
-        "case {case}: expected TlsPolicy={:?}, got {rule}",
-        spec.tls_policy
+        tls_policy,
+        "case {case}: expected TlsPolicy={tls_policy:?}, got {rule}"
     );
     let recipients = element(rule, "Recipients")
         .map(|list| elements(&list, "member"))

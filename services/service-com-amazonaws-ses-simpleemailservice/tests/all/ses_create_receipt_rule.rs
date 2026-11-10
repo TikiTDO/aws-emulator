@@ -192,11 +192,16 @@ fn assert_reports(case: &str, rule: &str, spec: &RuleSpec) {
         "case {case}: expected ScanEnabled={}, got {rule}",
         spec.scan_enabled
     );
+    // `ReceiptRule$TlsPolicy` is documented "The default is Optional", so a rule
+    // created without one reads back carrying that default rather than nothing.
+    let tls_policy = spec
+        .tls_policy
+        .clone()
+        .or_else(|| Some("Optional".to_string()));
     assert_eq!(
         element(rule, "TlsPolicy"),
-        spec.tls_policy,
-        "case {case}: expected TlsPolicy={:?}, got {rule}",
-        spec.tls_policy
+        tls_policy,
+        "case {case}: expected TlsPolicy={tls_policy:?}, got {rule}"
     );
     let recipients = element(rule, "Recipients")
         .map(|list| elements(&list, "member"))

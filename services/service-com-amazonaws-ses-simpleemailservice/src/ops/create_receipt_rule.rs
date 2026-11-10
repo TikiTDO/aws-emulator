@@ -161,7 +161,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     ) -> Result<Self::Output, Self::Error> {
         let rule_set_name = input.rule_set_name;
         let after = input.after;
-        let rule = input.rule;
+        let mut rule = input.rule;
         let region = crate::state::region_from_request(ctx.parts());
 
         // `ReceiptRuleName` is only a string in the model, so a name outside the
@@ -187,7 +187,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::receipt_actions_defect(rule.actions.as_deref().unwrap_or_default())
         {
             return Err(match defect {
-                crate::state::ReceiptActionDefect::NotOneAction { message } => {
+                crate::state::ReceiptActionDefect::NotOneAction { message }
+                | crate::state::ReceiptActionDefect::InvalidParameter { message } => {
                     crate::scaffolded::Scaffolded::invalid_parameter_value(message)
                 }
                 crate::state::ReceiptActionDefect::SnsTopic { topic, message } => {
@@ -221,14 +222,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             });
         }
 
-        // An `S3Action` names a destination of two OTHER services, and SES has to
-        // have permission to write the received message into it: the bucket's own
-        // policy has to grant it the object write, and the key it would encrypt
-        // the message with has to grant it the encryption. Both are read against
-        // those services' own stores, and a rule SES could never deliver is
-        // refused instead of being blessed at create time and failing silently on
-        // every message the rule matches.
-        if let Some(refusal) = crate::state::s3_action_authorization::unauthorized_s3_action(
+        // Every action of a stored rule addresses a destination of ANOTHER service,
+        // and SES has to be allowed to act on the account's behalf there: the
+        // bucket an `S3Action` writes into and the key it encrypts with, the
+        // function a `LambdaAction` calls, and every topic an action notifies.
+        // Each is read against that service's own store, and a rule SES could
+        // never carry out is refused instead of being blessed at create time and
+        // then failing silently on every message the rule matches.
+        if let Some(refusal) = crate::state::receipt_destinations::unauthorized_destination(
             ctx,
             &region,
             &rule_set_name,
@@ -237,16 +238,43 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .await
         {
-            return Err(
-                CreateReceiptRuleErrorModeled::InvalidS3ConfigurationException(
-                    InvalidS3ConfigurationException {
-                        bucket: Some(refusal.bucket),
-                        message: Some(refusal.message),
+            return Err(match refusal {
+                crate::state::receipt_destinations::DestinationRefusal::S3 { bucket, message } => {
+                    CreateReceiptRuleErrorModeled::InvalidS3ConfigurationException(
+                        InvalidS3ConfigurationException {
+                            bucket: Some(bucket),
+                            message: Some(message),
+                        },
+                    )
+                    .into()
+                }
+                crate::state::receipt_destinations::DestinationRefusal::LambdaFunction {
+                    function_arn,
+                    message,
+                } => CreateReceiptRuleErrorModeled::InvalidLambdaFunctionException(
+                    InvalidLambdaFunctionException {
+                        function_arn: Some(function_arn),
+                        message: Some(message),
                     },
                 )
                 .into(),
-            );
+                crate::state::receipt_destinations::DestinationRefusal::SnsTopic {
+                    topic,
+                    message,
+                } => CreateReceiptRuleErrorModeled::InvalidSnsTopicException(
+                    InvalidSnsTopicException {
+                        topic: Some(topic),
+                        message: Some(message),
+                    },
+                )
+                .into(),
+            });
         }
+
+        // The rule is stored with every member the request left out but the model
+        // or its documentation states a value for, so a reader is never told the
+        // rule holds nothing where SES holds the default.
+        crate::state::materialize_receipt_rule_defaults(&mut rule);
 
         let Some(state) = crate::state::service_state(&*self.engine) else {
             // See `create_receipt_rule_set.rs`: an engine with no store for this
