@@ -35,6 +35,20 @@
 //!   body). The default returns `None`, keeping the entry's protocol-correct
 //!   rendering. Return `Some(resp)` to reword it if desired.
 //!
+//! A sixth seam, `override_protocol`, is one this service DOES take, for the one framing
+//! correction a handler cannot make: see [`wire`].
+//!
+//! Three of those seams are EDITED here:
+//!
+//! - `override_operation` serves every modelled operation wrapped in the two rules every
+//!   request body and every response of this service passes through: the body read under
+//!   both spellings of each member the model renames with `@jsonName` (see
+//!   [`body_member_names`] for the rule and why the request is the only place it can be
+//!   applied), and the request id reported on whatever the operation answered (below).
+//! - `override_refusal` states a request refused before any handler ran under the one
+//!   client-input error this service's model declares.
+//! - `override_protocol` frames an answer that carries no content as one.
+//!
 //! The model-derived half of this service — its identity, wire protocol, routing
 //! table, and the default error renderers — lives in the generated `ServiceDefinition`
 //! and is reached, not edited, through the one `definition` method below. You
@@ -53,21 +67,38 @@
 //! (the body member) and wires it at the two layers every response of this service passes
 //! through:
 //!
-//! * [`RequestIdErrorMemberOperation`], handed back from `override_operation` for a request
-//!   the generated routing table can serve, covers everything an operation answers — a
-//!   success (untouched), a modelled error, this service's own not-found and
+//! * `service_common::query_error_envelope::RequestIdReportingOperation::error_member`,
+//!   composed around each operation this service serves wrapped (see
+//!   [`body_member_names::served_operations`]) and handed back from `override_operation`
+//!   for a request the generated routing table can serve, covers everything an operation
+//!   answers — a success (untouched), a modelled error, this service's own not-found and
 //!   not-implemented envelopes, and a constraint refusal raised while it was being served;
 //! * [`RequestIdEnvelopeDefinition::error_member`], the definition wrapper `definition`
 //!   hands back, covers a response NO operation produced: a routing failure, a transport
 //!   failure detected up front, and a pre-dispatch authentication refusal.
 
-use service_common::query_error_envelope::{
-    RequestIdEnvelopeDefinition, RequestIdErrorMemberOperation,
-};
+pub mod body_member_names;
+pub mod wire;
+
+use service_common::query_error_envelope::RequestIdEnvelopeDefinition;
 use smithy_server_runtime::{
-    http, ErasedOperation, ErasedServiceDefinition, Refusal, Refused, Service,
+    http, ErasedOperation, ErasedServiceDefinition, OperationRoutingTable, Refusal, Refused,
+    ServerHttpProtocol, Service,
 };
 use std::sync::Arc;
+
+/// The error code this service names for a request refused before any handler ran.
+///
+/// MediaTailor's model declares ONE client-input error — `BadRequestException`, HTTP 400 —
+/// and it is the error the operations that declare an error declare: see the `TagResource`
+/// operation's `errors` list in this crate's `smithy-model/` document.
+/// A refusal of a value the model itself rejects is that error, so it travels under that
+/// code rather than under a shape this service's model does not carry.
+const BAD_REQUEST_EXCEPTION: &str = "BadRequestException";
+
+/// The error class's own words, from the shape's documentation: "A request contains
+/// unexpected data."
+const BAD_REQUEST_EXCEPTION_MESSAGE: &str = "A request contains unexpected data.";
 
 /// The `com-amazonaws-mediatailor-mediatailor` emulated service: the generated [`ServiceDefinition`] plus
 /// the behavioral seams this file owns.
@@ -78,11 +109,17 @@ pub struct EmulatedService<Eng: Send + Sync + 'static> {
     /// The generated entry, with its three framework-level error renderers wrapped so a
     /// response no operation produced still names the request it answers.
     entry: RequestIdEnvelopeDefinition<crate::ServiceDefinition<Eng>>,
-    /// The report every operation's response passes through, held on the service because
-    /// [`Service::override_operation`] hands back a borrow of `self`. It stores no
-    /// operation of its own: the one it serves is the one the generated routing table
-    /// names for the request.
-    reporting: RequestIdErrorMemberOperation,
+    /// The same modelled operations the generated table holds, each served with its body
+    /// read under both spellings of every member the model renames
+    /// ([`body_member_names`]) and with the request id reported on whatever it answered.
+    /// Keyed by the routing key the protocol resolves — the key the generated table uses —
+    /// and built from the SAME shared engine, so a wrapped operation reads and writes the
+    /// one store.
+    served: OperationRoutingTable,
+    /// This service's wire protocol: the model's own `restJson1`, with an answer that
+    /// carries no content framed as one ([`wire`]). Built once here, never per request,
+    /// because [`Service::override_protocol`] hands back a borrow of it.
+    protocol: wire::NoContentFramedRestJson,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -90,9 +127,11 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// generated [`ServiceDefinition`], which constructs each operation from it; the
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
+        let served = body_member_names::served_operations(&engine);
         Self {
             entry: RequestIdEnvelopeDefinition::error_member(crate::ServiceDefinition::new(engine)),
-            reporting: RequestIdErrorMemberOperation,
+            served,
+            protocol: wire::NoContentFramedRestJson::new(),
         }
     }
 }
@@ -123,27 +162,42 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         req: &aws_smithy_runtime_api::http::Request,
     ) -> Option<&dyn ErasedOperation> {
         // Not a routing decision: the operation served is the one the generated routing
-        // table names for this request, and the wrapper only reports the request id on
-        // what it answered. A request the table can serve is claimed so every response of
-        // every operation passes through that report; a request it cannot is left to the
+        // table names for this request, wrapped in the two rules every response and every
+        // request body of this service passes through — the body read under both spellings
+        // of each member the model renames (`@jsonName`), and the request id reported on
+        // whatever the operation answered. The re-keying cannot be done anywhere behind
+        // this seam: the codec binds a body key to a member by its wire name and skips a
+        // key it binds to nothing, so a member spelled the other way is reported absent
+        // before any handler runs. A request the table cannot serve is left to the
         // framework's routing failure, which the definition wrapper above reports on.
-        self.entry
-            .routes(req)
-            .then_some(&self.reporting as &dyn ErasedOperation)
+        let key = self.entry.protocol().routing_key(req).ok()?;
+        self.served.get(key)
     }
 
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {
-        // The centralized walk calls this on a framework-level refusal (an absent
-        // required member, or a value outside a declared bound) to let this
-        // service reword it. Returning `None` keeps the framework's default
-        // wording. To state a refusal the way the emulated service states it,
-        // replace this body with a `match refusal { .. }` that returns
-        // `Some(Refused { code, message })` for the cases you reword and `None`
-        // for the rest. Replace BOTH the code and the message: a client branches
-        // on the code, so a message without its matching code is worse than
-        // leaving both alone.
-        let _ = refusal;
-        None
+        match refusal {
+            // A request the framework refused before any handler ran — an absent required
+            // member, or a value outside a declared bound — is a request that "contains
+            // unexpected data", which is the one client-input error MediaTailor declares:
+            // `BadRequestException`, HTTP 400. The framework's default names
+            // `ValidationException`, a shape this service's model does not declare at all,
+            // so a client branching on the code cannot recognise the failure. The code is
+            // this service's; the CLAUSE stays the framework's, because it is the sentence
+            // AWS's own boundary validator states for a refused value (which member was
+            // null, which bound it broke) and the model fixes the code, not the words.
+            Refusal::Invalid(violations) => Some(Refused {
+                code: BAD_REQUEST_EXCEPTION.to_string(),
+                message: aws_smithy_schema_server::constraints::envelope(violations)
+                    // Unreachable: a refusal carries at least one violation. A refusal
+                    // with no clause to state still names what it is, in the error
+                    // shape's own words.
+                    .unwrap_or_else(|| BAD_REQUEST_EXCEPTION_MESSAGE.to_string()),
+            }),
+            // Everything else keeps the framework's wording: an unauthenticated caller is
+            // the emulator's refusal, not this service's. `Refusal` is `#[non_exhaustive]`,
+            // so the catch-all is what covers it.
+            _ => None,
+        }
     }
 
     fn override_routing_error(
@@ -172,5 +226,14 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // consume it on `None`.
         let _ = error;
         None
+    }
+
+    fn override_protocol(&self) -> Option<&dyn ServerHttpProtocol> {
+        // The model's own `restJson1` codec, with one framing correction: an answer at the
+        // no-content status carries no body and states the length it has. Held in a field
+        // (built once in `new`), as this seam requires — never constructed per request.
+        // Everything a request READS and every answer that carries content is the generated
+        // protocol's, unchanged.
+        Some(&self.protocol)
     }
 }

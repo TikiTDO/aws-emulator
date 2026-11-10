@@ -27,7 +27,8 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 # `service-common` owns this tree's ONE statement of the request id a response
 # names its request by, which this service reports in the `requestId` member of
-# its JSON error bodies.
+# its JSON error bodies, and its ONE framing of an answer that carries no content,
+# which this service's two tagging writes answer with (HTTP 204).
 service-common = { path = "../common" }
 
 [build-dependencies]

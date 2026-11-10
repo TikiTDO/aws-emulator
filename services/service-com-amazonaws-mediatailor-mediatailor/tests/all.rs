@@ -31,3 +31,7 @@ mod playback_configuration;
 mod playback_configuration_logging;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/tagging_wire_form.rs"]
+mod tagging_wire_form;
+#[path = "all/wire_diagnostic.rs"]
+mod wire_diagnostic;

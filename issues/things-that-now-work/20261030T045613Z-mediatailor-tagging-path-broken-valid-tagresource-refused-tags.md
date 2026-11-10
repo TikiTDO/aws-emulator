@@ -100,3 +100,29 @@ Code citations:
 5. aws mediatailor untag-resource --resource-arn <arn> --tag-keys probe
    -> 204 with header content-length: 0; the emulator sends the 204 with no content-length header (inspect with: curl -i -X DELETE 'http://<host>:<port>/tags/<url-encoded-arn>?tagKeys=probe').
 6. Re-replay with replay_wire_corpus: fixture mediatailor-channel-tags-and-schedule-lifecycle steps task#3, task#4 and task#5 must all pass.
+
+## Resolution
+
+Cause 1 and Cause 2 are FIXED. The body member is now read under either spelling — the
+`@jsonName` an SDK writes or the member name the model declares — by
+`services/service-com-amazonaws-mediatailor-mediatailor/src/service/body_member_names.rs`,
+which re-keys the request body from each operation's own input schema and then runs the
+modelled operation unchanged, so `TagResource` answers the modelled 204 and the following
+`ListTagsForResource` reports every key it wrote. A request whose required member is absent
+under both spellings is now refused under the one client-input error this service's model
+declares (`BadRequestException`, HTTP 400) rather than under a shape the model does not
+carry.
+
+Cause 3 is implemented at the service boundary and BLOCKED below it. The service now answers
+a no-content success with an empty body and `content-length: 0`
+(`src/service/wire.rs`, through `services/common/src/no_content_responses.rs`, asserted by
+`tests/all/wire_diagnostic.rs`), but the vendored HTTP writer does not put that header on
+the socket: `vendor/server/src/lib.rs:239-256` states that the listeners' HTTP stack writes
+no `Content-Length` for a status that carries no content, its own test at
+`vendor/server/src/lib.rs:2157-2175` pins that, and
+`services/common/src/no_content_responses.rs:31-33` records the same thing. RFC 9110 § 8.6
+forbids the header on a 204, so reproducing AWS's recorded framing needs a writer that
+departs from the RFC — a change to the read-only `vendor/` serve path
+(`vendor/server/src/lib.rs:896`), not to any service crate. The replay therefore still
+reports `$headers.content-length` on the two 204 steps; every other difference on them is
+gone.
