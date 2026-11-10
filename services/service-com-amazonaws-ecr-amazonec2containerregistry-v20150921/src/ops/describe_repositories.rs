@@ -181,7 +181,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
             .into());
         };
-        let _ = ctx;
+        // The endpoint this emulator serves the registry at for this caller, which every
+        // reported repository's URI is announced on.
+        let registry_endpoint = crate::state::announced_registry_endpoint(ctx);
 
         crate::state::check_registry(input.registry_id.as_ref()).map_err(fault_error)?;
 
@@ -200,7 +202,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .repositories
             .iter()
             .filter(|(name, _)| wanted.is_empty() || wanted.contains(name))
-            .map(|(name, repo)| (name.clone(), repo.to_repository()))
+            .map(|(name, repo)| {
+                (name.clone(), repo.to_repository(&registry_endpoint))
+            })
             .collect();
 
         let (repositories, next_token) = crate::state::paginate(

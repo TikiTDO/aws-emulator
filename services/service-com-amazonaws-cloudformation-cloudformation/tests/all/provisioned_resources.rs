@@ -1069,12 +1069,25 @@ fn repository_arn(name: &str) -> String {
     format!("arn:aws:ecr:{REGION}:{ACCOUNT_ID}:repository/{name}")
 }
 
-/// `<account>.dkr.ecr.<region>.amazonaws.com/<name>` — "The format is
-/// `aws_account_id.dkr.ecr.region.amazonaws.com/repository-name`", the URI
-/// `Fn::GetAtt <repository>.RepositoryUri` reports and a container image reference is
-/// built on.
+/// `<registry endpoint>/<name>` — the URI `Fn::GetAtt <repository>.RepositoryUri` reports
+/// and a container image reference is built on, as Amazon ECR announces it here: a
+/// `repositoryUri` is an address a client pushes and pulls at, so it names the endpoint
+/// THIS emulator serves the registry at, not the
+/// `aws_account_id.dkr.ecr.region.amazonaws.com` host AWS publishes, which nothing here
+/// answers on. The stack's value is the one the repository's owning service reported, so
+/// this reads it from the same place that service does.
 fn repository_uri(name: &str) -> String {
-    format!("{ACCOUNT_ID}.dkr.ecr.{REGION}.amazonaws.com/{name}")
+    format!("{}/{name}", announced_registry_endpoint())
+}
+
+/// The `host[:port]` Amazon ECR announces its registry at for a stack's in-process create:
+/// that call is addressed to ECR's own service endpoint host, which no registry client can
+/// use, so the address announced is the one this emulator is served at — the base of an
+/// emulator reached in process for a router that was given no serving address.
+fn announced_registry_endpoint() -> &'static str {
+    ::service_common::data_plane_addressing::url_authority(
+        ::smithy_server_runtime::UNSERVED_URL_BASE,
+    )
 }
 
 /// `arn:aws:ecs:<region>:<account>:task-definition/<family>:1` — what `Ref` of an
@@ -1302,11 +1315,12 @@ fn cases() -> Vec<Case> {
                 // case letters"), a task definition's as its family.
                 form(
                     "RepositoryUri",
-                    "<account>.dkr.ecr.us-east-1.amazonaws.com/warehouse-registry-<id>",
+                    "<the registry endpoint this emulator serves>/warehouse-registry-<id>",
                     |value| {
                         value
                             .strip_prefix(&format!(
-                                "{ACCOUNT_ID}.dkr.ecr.{REGION}.amazonaws.com/warehouse-registry-"
+                                "{}/warehouse-registry-",
+                                announced_registry_endpoint()
                             ))
                             .is_some_and(|id| {
                                 !id.is_empty() && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())

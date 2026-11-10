@@ -14,15 +14,14 @@
 //! login`"), it expires [`AUTHORIZATION_TOKEN_LIFETIME`] after this call, and it is
 //! reported beside the registry URL a `docker login` points at.
 //!
-//! That URL is the endpoint the CALLER reached this emulator on
-//! ([`crate::state::caller_endpoint_host`]), not the
-//! `<account>.dkr.ecr.<region>.amazonaws.com` host AWS publishes
-//! ([`crate::state::registry_host`]): `proxyEndpoint` is an address the client is expected
-//! to FETCH from next — it is where `docker login` and every pull after it go — and this
-//! emulator is what serves that registry endpoint (`crate::service`'s registry data
-//! plane), so an address naming AWS's host would send the next client out of the emulator
-//! entirely. The same resolution, from the same request, as the layer download URL
-//! `GetDownloadUrlForLayer` announces.
+//! That URL names the endpoint THIS emulator serves the registry at
+//! ([`crate::state::announced_registry_endpoint`]), not the
+//! `<account>.dkr.ecr.<region>.amazonaws.com` host AWS publishes: `proxyEndpoint` is an
+//! address the client is expected to FETCH from next — it is where `docker login` and
+//! every pull after it go — and this emulator is what answers the registry API
+//! (`crate::service`'s registry data plane), so an address naming AWS's host would send
+//! the next client out of the emulator entirely. The same reading the `repositoryUri`
+//! every repository is reported with is built on.
 //!
 //! `registryIds` selects nothing. The model marks the member `@deprecated` with the
 //! reason spelled out — "This field is deprecated. The returned authorization token can
@@ -219,10 +218,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &principal_arn,
         );
         // The registry endpoint a `docker login` is pointed at: the one this emulator
-        // serves, at the address this caller reached it on (see the module docs).
-        let proxy_endpoint = format!(
-            "https://{}",
-            crate::state::caller_endpoint_host(ctx.parts())
+        // serves the registry API at, for this caller (see the module docs).
+        let proxy_endpoint = crate::state::registry_login_url(
+            &crate::state::announced_registry_endpoint(ctx),
         );
 
         // Issuing a registry credential is the security-relevant event of this

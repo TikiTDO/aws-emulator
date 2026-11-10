@@ -1968,13 +1968,15 @@ pub fn evaluate_lifecycle_policy(
 }
 
 /// One stored repository, with the identity fields computed once at creation so every
-/// later read reports exactly what the create returned.
+/// later read reports exactly what the create returned. The one field NOT stored is the
+/// repository's URI: that names the endpoint this registry answers at rather than anything
+/// about the repository, so every read composes it for the client it is answering
+/// ([`Repo::to_repository`]).
 #[derive(Debug, Clone)]
 pub struct Repo {
     pub name: String,
     pub registry_id: String,
     pub arn: String,
-    pub uri: String,
     pub created_at: SystemTime,
     pub image_tag_mutability: String,
     pub image_tag_mutability_exclusion_filters: Vec<ImageTagMutabilityExclusionFilter>,
@@ -2018,13 +2020,19 @@ pub struct Repo {
 }
 
 impl Repo {
-    /// The `Repository` every operation that reports this repository returns.
-    pub fn to_repository(&self) -> Repository {
+    /// The `Repository` every operation that reports this repository returns, announced at
+    /// `registry_endpoint` — the endpoint this emulator serves the registry at for the
+    /// calling client ([`announced_registry_endpoint`]).
+    ///
+    /// `repositoryUri` is composed here rather than stored on the record, because it is
+    /// not a fact about the repository: it is the address this registry answers at, so
+    /// every read announces the address the reader itself can reach.
+    pub fn to_repository(&self, registry_endpoint: &str) -> Repository {
         Repository {
             repository_arn: Some(self.arn.clone()),
             registry_id: Some(self.registry_id.clone()),
             repository_name: Some(self.name.clone()),
-            repository_uri: Some(self.uri.clone()),
+            repository_uri: Some(repository_uri(registry_endpoint, &self.name)),
             created_at: Some(::aws_smithy_types::DateTime::from(self.created_at)),
             image_tag_mutability: Some(self.image_tag_mutability.clone()),
             image_tag_mutability_exclusion_filters: if self
@@ -3404,16 +3412,6 @@ pub fn repository_arn(region: &str, name: &str) -> String {
     ::engine::emulator_arn("ecr", region, &format!("repository/{name}"))
 }
 
-/// `<registry id>.dkr.ecr.<region>.amazonaws.com` — the host of this registry in `region`,
-/// which every repository URI and the `docker login` endpoint are built on.
-pub fn registry_host(region: &str) -> String {
-    format!("{}.dkr.ecr.{region}.amazonaws.com", registry_id())
-}
-
-/// `<registry id>.dkr.ecr.<region>.amazonaws.com/<name>` — the URI a docker client pushes to.
-pub fn repository_uri(region: &str, name: &str) -> String {
-    format!("{}/{name}", registry_host(region))
-}
 
 /// How many bytes of a minted id a layer download token carries: 32, the full width of
 /// the digest [`mint_hex`] takes it from, so the token a URL carries is as hard to guess
@@ -4242,6 +4240,12 @@ pub mod pull_metrics;
 pub mod signing;
 mod image_scan;
 mod layer_download;
+/// The endpoint a registry address this service announces names, and the repository URI
+/// and `docker login` URL built on it, in `state/registry_address.rs`. Declared and
+/// re-exported here, so a handler reaches it as `crate::state::…` like every other part
+/// of this store.
+mod registry_address;
+pub use registry_address::*;
 /// The `docker login` credentials this registry has issued, and the pull bookkeeping a
 /// registry pull leaves behind, in `state/registry_v2.rs`.
 mod registry_v2;

@@ -83,6 +83,8 @@ mod pull_time_update_exclusion_quota;
 mod pull_time_update_exclusion_removal;
 #[path = "all/pull_time_update_exclusions.rs"]
 mod pull_time_update_exclusions;
+#[path = "all/published_registry_address.rs"]
+mod published_registry_address;
 #[path = "all/refusal_message_sources.rs"]
 mod refusal_message_sources;
 #[path = "all/refusal_wording.rs"]

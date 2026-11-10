@@ -17,7 +17,9 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 // The wire harness lives in `tests/all/wire.rs`, shared with every other suite.
-use crate::wire::{at, call, emulator, given_layer, ok, REGION, REGISTRY_ID};
+use crate::wire::{
+    announced_registry_endpoint, at, call, emulator, given_layer, ok, REGION, REGISTRY_ID,
+};
 
 /// The values `ImageTagMutability` accepts, from the model's enum. Spelled out here so a
 /// setting the implementation silently ignores is visible as an unexercised value.
@@ -176,8 +178,9 @@ async fn a_created_repository_is_described_from_what_was_stored() {
         );
         assert_eq!(
             at(&repository, "/repositoryUri"),
-            json!(format!("{REGISTRY_ID}.dkr.ecr.{REGION}.amazonaws.com/{name}")),
-            "case {case:?}: expected the registry's regional URI, got {:?}",
+            json!(format!("{}/{name}", announced_registry_endpoint())),
+            "case {case:?}: expected the repository announced at the endpoint this \
+             emulator serves the registry at, got {:?}",
             at(&repository, "/repositoryUri")
         );
         assert!(

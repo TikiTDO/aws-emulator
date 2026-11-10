@@ -3,12 +3,12 @@
 use super::*;
 
 /// The endpoint the request reached this emulator on, as every address this registry
-/// ANNOUNCES names it — a layer download URL and the registry endpoint a `docker login` is
-/// pointed at alike: the request's own `Host`, else the authority its URI carries, else
-/// [`LOOPBACK_HOST`].
+/// ANNOUNCES names it — a layer download URL, a repository's own `repositoryUri` and the
+/// registry endpoint a `docker login` is pointed at alike: the request's own `Host`, else
+/// the authority its URI carries, else [`LOOPBACK_HOST`].
 ///
 /// Read from the request rather than built from this registry's own
-/// `<account>.dkr.ecr.<region>.amazonaws.com` host ([`registry_host`]), because the address
+/// `<account>.dkr.ecr.<region>.amazonaws.com` host, because the address
 /// has to resolve for whoever was handed it: that host is AWS's, and an address naming it
 /// would send the next client out of the emulator entirely, while a client addressing
 /// the emulator by socket is handed that socket.

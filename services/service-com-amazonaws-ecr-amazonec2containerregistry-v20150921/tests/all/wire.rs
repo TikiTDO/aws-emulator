@@ -17,12 +17,30 @@ use smithy_server_runtime::MultiServiceRouter;
 /// The access key id every call made through [`call`] presents: a key neither STS nor IAM
 /// holds a record for, which speaks for the account's own published credential. Its
 /// credential scope is what routes a request to ECR, and that scope's region is what a
-/// repository ARN and URI are built for.
+/// repository ARN is built for.
 pub const ACCOUNT_ACCESS_KEY_ID: &str = "AKIDEXAMPLE";
 
 /// The region every call made through [`call`] and [`call_as`] is signed for, which a
-/// repository ARN and URI are built for.
+/// repository ARN is built for.
 pub const REGION: &str = "eu-west-1";
+
+/// The endpoint host every call made through [`call`], [`call_as`] and [`call_in_region`]
+/// is addressed to, for the Region it names.
+pub fn endpoint_host(region: &str) -> String {
+    format!("api.ecr.{region}.amazonaws.com")
+}
+
+/// The registry URL this service announces to a call made through this harness: its calls
+/// are addressed to [`endpoint_host`], which names a service and is therefore an endpoint
+/// no registry client can use, so what is announced is the address this emulator is served
+/// at — `smithy_server_runtime::UNSERVED_URL_BASE` for a router that was given none.
+pub const ANNOUNCED_REGISTRY_URL: &str = ::smithy_server_runtime::UNSERVED_URL_BASE;
+
+/// The `host[:port]` half of [`ANNOUNCED_REGISTRY_URL`], which is what an announced
+/// `repositoryUri` is built on.
+pub fn announced_registry_endpoint() -> &'static str {
+    ::service_common::data_plane_addressing::url_authority(ANNOUNCED_REGISTRY_URL)
+}
 
 /// The account id every generated emulator vends, spelled out here rather than imported
 /// so a wrong registry id in the implementation fails these tests.
@@ -82,7 +100,7 @@ pub async fn call_as(
     let request = ::http::Request::builder()
         .method("POST")
         .uri("/")
-        .header("host", "api.ecr.eu-west-1.amazonaws.com")
+        .header("host", endpoint_host(REGION))
         .header(
             "authorization",
             format!(
@@ -266,7 +284,7 @@ pub async fn call_in_region(
     let request = ::http::Request::builder()
         .method("POST")
         .uri("/")
-        .header("host", format!("api.ecr.{region}.amazonaws.com"))
+        .header("host", endpoint_host(region))
         .header(
             "authorization",
             format!(
