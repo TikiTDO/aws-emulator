@@ -224,11 +224,15 @@ async fn walk(outposts: &Outposts, size: usize, extra: &str, ceiling: usize) -> 
     collected
 }
 
-/// Every instance type `ListOrderableInstanceTypes` publishes, as `(instance type,
-/// VCPUs)` — the catalog an item's EC2 capacity has to name a member of.
-async fn orderable_instance_types(outposts: &Outposts) -> Vec<(String, i64)> {
-    list_instance_types(outposts, "")
-        .await
+/// Every instance type this service holds a specification of, as `(instance type,
+/// VCPUs)` — the table an item's EC2 capacity has to name a member of.
+///
+/// The wider of the service's two instance-type lists: a SERVER configuration carries
+/// capacity of a family offered on server hardware alone, which the catalog
+/// `ListOrderableInstanceTypes` publishes no entry for (see
+/// [`crate::instance_type_catalogs`]).
+fn specified_instance_types() -> Vec<(String, i64)> {
+    crate::instance_type_catalogs::specifications()
         .iter()
         .map(|entry| {
             (
@@ -239,17 +243,6 @@ async fn orderable_instance_types(outposts: &Outposts) -> Vec<(String, i64)> {
         .collect()
 }
 
-/// The `InstanceTypes` of one `ListOrderableInstanceTypes` answer.
-async fn list_instance_types(outposts: &Outposts, query: &str) -> Vec<Value> {
-    outposts
-        .ok("GET", &format!("/instanceTypes{query}"), None)
-        .await
-        .get("InstanceTypes")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-}
-
 /// Rule 1: every published item reports modelled, internally consistent hardware —
 /// checked over the WHOLE catalog, not one row, and cross-checked against the
 /// instance-type catalog the same service publishes.
@@ -258,7 +251,7 @@ async fn every_catalog_item_reports_modelled_hardware() {
     let outposts = Outposts::new();
     let answer = list(&outposts, "").await;
     let catalog = items(&answer);
-    let instance_types = orderable_instance_types(&outposts).await;
+    let instance_types = specified_instance_types();
 
     assert!(
         catalog.len() > 1,

@@ -69,6 +69,8 @@ mod get_site_address_reporting;
 mod identifier_arn_identity;
 #[path = "all/identifier_filter_rule.rs"]
 mod identifier_filter_rule;
+#[path = "all/instance_type_catalogs.rs"]
+mod instance_type_catalogs;
 #[path = "all/nested_page_tokens.rs"]
 mod nested_page_tokens;
 #[path = "all/not_found_wording.rs"]

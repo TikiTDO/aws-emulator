@@ -102,13 +102,14 @@ fn reported(output: &Value) -> Vec<(String, Option<i64>)> {
         .unwrap_or_default()
 }
 
-/// The whole published instance-type catalog, as `ListOrderableInstanceTypes` reports
-/// it: the source every `VCPUs` expectation below is computed from.
-async fn catalog(outposts: &Outposts) -> Vec<Value> {
-    outposts.ok("GET", "/instanceTypes", None).await["InstanceTypes"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+/// Every instance type this service holds a specification of: the source every
+/// `VCPUs` expectation below is computed from.
+///
+/// A capacity task configures hardware in any size it runs, which is the wider of the
+/// service's two instance-type lists rather than the catalog
+/// `ListOrderableInstanceTypes` publishes (see [`crate::instance_type_catalogs`]).
+fn catalog() -> Vec<Value> {
+    crate::instance_type_catalogs::specifications()
 }
 
 /// The `VCPUs` that catalog publishes for `instance_type`, or `None` for a type it
@@ -248,7 +249,7 @@ struct Configuring {
 #[tokio::test]
 async fn a_completed_capacity_task_is_what_the_outpost_is_configured_with() {
     let outposts = Outposts::new();
-    let catalog = catalog(&outposts).await;
+    let catalog = catalog();
     assert_eq!(
         published_vcpus(&catalog, UNPUBLISHED_INSTANCE_TYPE),
         None,
@@ -403,7 +404,7 @@ async fn a_completed_capacity_task_is_what_the_outpost_is_configured_with() {
 #[tokio::test]
 async fn a_capacity_task_still_running_has_configured_nothing() {
     let outposts = Outposts::new();
-    let catalog = catalog(&outposts).await;
+    let catalog = catalog();
     let (outpost_id, _) = an_outpost(&outposts, "running", None).await;
     // Hardware the task's configuration is weighed against, so the task this row
     // follows is one that completes.
@@ -483,7 +484,7 @@ struct Ordered {
 #[tokio::test]
 async fn an_outpost_no_capacity_task_has_touched_is_configured_by_its_orders() {
     let outposts = Outposts::new();
-    let catalog = catalog(&outposts).await;
+    let catalog = catalog();
     let published = outposts.ok("GET", "/catalog/items", None).await["CatalogItems"]
         .as_array()
         .cloned()
@@ -698,7 +699,7 @@ async fn an_outpost_no_capacity_task_has_touched_is_configured_by_its_orders() {
 #[tokio::test]
 async fn the_report_pages_and_refuses_a_token_it_did_not_issue() {
     let outposts = Outposts::new();
-    let catalog = catalog(&outposts).await;
+    let catalog = catalog();
     let (outpost_id, _) = an_outpost(&outposts, "paging", None).await;
     // See [`a_capacity_task_still_running_has_configured_nothing`]: the pools below
     // are weighed against this hardware.

@@ -6,10 +6,13 @@
 //!
 //! The rules under test, each stated once and then exercised over a SET of inputs:
 //!
-//! 1. What an Outpost can support is the instance-type CATALOG this service publishes
-//!    (the one `ListOrderableInstanceTypes` reports, which every expectation below is
-//!    computed from rather than spelled out) narrowed by every hardware fact the store
-//!    records about the scope the request names, and nothing else:
+//! 1. What an Outpost can support is every instance type this service holds a
+//!    specification of (the wider of its two instance-type lists, which every
+//!    expectation below is computed from rather than spelled out — the catalog
+//!    `ListOrderableInstanceTypes` publishes is the narrower one entry per family
+//!    capacity is ordered in, see [`crate::instance_type_catalogs`]) narrowed by every
+//!    hardware fact the store records about the scope the request names, and nothing
+//!    else:
 //!    * the hardware INSTALLED on the Outpost is what the Outpost itself can support,
 //!      so an entry is supported when one of its installed compute units can host it;
 //!      an Outpost holding no compute hardware supports nothing and reports no entry
@@ -22,8 +25,9 @@
 //!      one that did is narrowed to the instance families it records and to the vCPU
 //!      count its `MaxVcpus` admits — a fact it did not record narrowing nothing.
 //!
-//!    Each reported entry carries the `InstanceType` and the `VCPUs` the catalog
-//!    reports for it, so the capability report cannot disagree with the catalog.
+//!    Each reported entry carries the `InstanceType` and the `VCPUs` this service
+//!    specifies for it, so the capability report cannot disagree with any other report
+//!    of that instance type.
 //! 2. The report is cut into pages of at most `MaxResults` with a `NextToken` that
 //!    resumes exactly where the previous page stopped, for any page size, scoped or
 //!    not; the last page carries no token, and a token this operation did not issue —
@@ -100,13 +104,15 @@ fn vcpus(item: &Value) -> i64 {
     item.get("VCPUs").and_then(Value::as_i64).unwrap_or(-1)
 }
 
-/// The whole published catalog, as `ListOrderableInstanceTypes` reports it: the source
-/// every expectation below is computed from.
-async fn catalog(outposts: &Outposts) -> Vec<Value> {
-    outposts.ok("GET", "/instanceTypes", None).await["InstanceTypes"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+/// Every instance type this service holds a specification of: the source every
+/// expectation below is computed from.
+///
+/// Not the catalog `ListOrderableInstanceTypes` publishes, which is the narrower list
+/// of the one size per family capacity is ORDERED in: what an Outpost supports is
+/// every size its hardware runs, so the wider table is what this report is narrowed
+/// from (see [`crate::instance_type_catalogs`]).
+fn catalog() -> Vec<Value> {
+    crate::instance_type_catalogs::specifications()
 }
 
 /// Whether a catalog entry's `FormFactorConfigs` offers it in `form_factor`.
@@ -309,7 +315,7 @@ async fn walk(
 #[tokio::test]
 async fn an_outpost_supports_the_hardware_installed_on_it() {
     let outposts = Outposts::new();
-    let catalog = catalog(&outposts).await;
+    let catalog = catalog();
     assert!(
         !catalog.is_empty(),
         "the published catalog must hold entries to narrow, got {catalog:?}"
@@ -471,7 +477,7 @@ struct Row {
 #[tokio::test]
 async fn an_asset_scope_narrows_to_the_hardware_that_asset_recorded() {
     let outposts = Outposts::new();
-    let catalog = catalog(&outposts).await;
+    let catalog = catalog();
 
     // Each row is one asset: the hardware it records, and the facts the expectation
     // narrows the catalog by. The `AssetId` of each row is a value the modelled
@@ -709,7 +715,7 @@ async fn paging_covers_every_supported_instance_type_exactly_once() {
     // past-the-end boundary is past the whole catalog rather than past this narrowed
     // report; the report is this Outpost's own, so the stamp the token carries names
     // the Outpost as well as the kind of report (`state::nested_page_kind`).
-    let catalog_entries = catalog(&outposts).await.len();
+    let catalog_entries = catalog().len();
     let past_the_end = supported(
         &outposts,
         &outpost_id,

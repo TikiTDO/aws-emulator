@@ -246,7 +246,7 @@ async fn configured_types(outposts: &Outposts, outpost_id: &str) -> Vec<String> 
 #[tokio::test]
 async fn an_asset_reports_the_capacity_the_completed_task_configured_on_it() {
     let outposts = Outposts::new();
-    let catalog = catalog(&outposts).await;
+    let catalog = catalog();
     let racks = catalog_items(&outposts, "RACK").await;
     let servers = catalog_items(&outposts, "SERVER").await;
     assert!(

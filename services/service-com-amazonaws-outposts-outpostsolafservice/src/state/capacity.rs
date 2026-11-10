@@ -387,12 +387,12 @@ impl ComAmazonawsOutpostsOutpostsolafserviceState {
             .filter(|asset| in_scope(asset.asset_id.as_deref()))
             .filter_map(|asset| asset.compute_attributes.as_ref())
             .collect();
-        // The vCPUs the catalog publishes for each instance type, as ONE lookup over
-        // the catalog this service publishes ([`Self::published_vcpus`] is the same
-        // figure, found by walking it) — so weighing a pool is a lookup rather than a
-        // walk, whatever a request carries.
+        // The vCPUs this service publishes for each instance type, as ONE lookup over
+        // its specification table ([`Self::published_vcpus`] is the same figure, found
+        // by walking it) — so weighing a pool is a lookup rather than a walk, whatever
+        // a request carries.
         let published: BTreeMap<&str, i32> = self
-            .orderable_instance_types
+            .instance_type_specifications
             .iter()
             .filter_map(|record| {
                 Some((

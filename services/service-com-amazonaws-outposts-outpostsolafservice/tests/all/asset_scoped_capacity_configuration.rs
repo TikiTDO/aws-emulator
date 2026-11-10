@@ -114,13 +114,15 @@ fn reported(output: &Value) -> Vec<(String, Option<i64>)> {
         .unwrap_or_default()
 }
 
-/// The whole published instance-type catalog, as `ListOrderableInstanceTypes` reports
-/// it: the source every `VCPUs` expectation below is computed from.
-pub(crate) async fn catalog(outposts: &Outposts) -> Vec<Value> {
-    outposts.ok("GET", "/instanceTypes?MaxResults=1000", None).await["InstanceTypes"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+/// Every instance type this service holds a specification of: the source every
+/// `VCPUs` expectation below is computed from.
+///
+/// The catalog `ListOrderableInstanceTypes` publishes is the narrower one entry per
+/// family capacity is ORDERED in, while a configuration names any size the hardware
+/// runs (see [`crate::instance_type_catalogs`]), so the wider table is the one a size
+/// is sized from.
+pub(crate) fn catalog() -> Vec<Value> {
+    crate::instance_type_catalogs::specifications()
 }
 
 /// Every configuration `ListCatalogItems` publishes of one class, in the order it
@@ -338,7 +340,7 @@ fn spares(catalog: &[Value], ordered_anywhere: &[String], form_factor: &str) -> 
 #[tokio::test]
 async fn a_capacity_task_configures_only_the_hardware_it_named() {
     let outposts = Outposts::new();
-    let catalog = catalog(&outposts).await;
+    let catalog = catalog();
     let racks = catalog_items(&outposts, "RACK").await;
     let servers = catalog_items(&outposts, "SERVER").await;
     assert!(

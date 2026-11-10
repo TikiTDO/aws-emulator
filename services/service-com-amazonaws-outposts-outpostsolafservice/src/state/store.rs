@@ -57,6 +57,17 @@ pub struct ComAmazonawsOutpostsOutpostsolafserviceState {
     /// [`orderable_instance_type_catalog`] and no operation mutates it, so every
     /// read of it answers the same catalog.
     pub orderable_instance_types: Vec<OrderableInstanceTypeRecord>,
+    /// The instance types this service holds the hardware specifications of, in the
+    /// same stable order.
+    ///
+    /// Reference data, exactly as [`Self::orderable_instance_types`] is, and the
+    /// WIDER of the two: it holds every size of every family this service offers
+    /// ([`instance_type_specifications`]), while the catalog above publishes the one
+    /// size of each family capacity is ordered in. A caller configures and runs any
+    /// size its hardware holds, so the vCPU count of a size
+    /// ([`Self::published_vcpus`]) and what one Outpost SUPPORTS are read off this
+    /// table rather than off the narrower catalog.
+    pub instance_type_specifications: Vec<OrderableInstanceTypeRecord>,
     /// The catalog of items `ListCatalogItems` reports, in its stable order.
     ///
     /// Reference data rather than a caller's resource, exactly as
@@ -85,6 +96,7 @@ impl Default for ComAmazonawsOutpostsOutpostsolafserviceState {
             connections: BTreeMap::new(),
             connection_server_public_key: None,
             orderable_instance_types: orderable_instance_type_catalog(),
+            instance_type_specifications: instance_type_specifications(),
             catalog_items: catalog_item_catalog(),
             created: 0,
         }
@@ -319,15 +331,16 @@ impl ComAmazonawsOutpostsOutpostsolafserviceState {
     }
 
     /// The number of DEFAULT vCPUs this service publishes for one instance type, or
-    /// `None` for a type its catalog does not publish — a figure the emulator does
+    /// `None` for a type it holds no specification for — a figure the emulator does
     /// not have, and never one it invents.
     ///
-    /// Read off the one orderable-instance-type catalog
-    /// ([`Self::orderable_instance_types`]), so what any report of this service says
-    /// about an instance type cannot disagree with what `ListOrderableInstanceTypes`
-    /// says about it.
+    /// Read off the one specification table ([`Self::instance_type_specifications`]),
+    /// so what any report of this service says about an instance type cannot disagree
+    /// with what another says about it. The table is the wider of the two: a size a
+    /// caller configures on hardware it already holds is not one capacity is ordered
+    /// in, so it is sized from here rather than from the narrower published catalog.
     pub fn published_vcpus(&self, instance_type: &str) -> Option<i32> {
-        self.orderable_instance_types
+        self.instance_type_specifications
             .iter()
             .find(|record| record.instance_type.instance_type.as_deref() == Some(instance_type))
             .and_then(|record| record.instance_type.vcp_us)

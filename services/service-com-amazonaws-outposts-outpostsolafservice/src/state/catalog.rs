@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! The two catalogs this service PUBLISHES: the orderable instance types and the
-//! orderable hardware configurations.
+//! The two catalogs this service PUBLISHES — the orderable instance types and the
+//! orderable hardware configurations — and the instance-type specifications both are
+//! read off.
 //!
-//! Both are REFERENCE data rather than resources a caller creates — no operation
-//! mutates either — so they live together, away from the store of created resources:
-//! the configurations in the hardware catalog are described BY the instance-type
-//! catalog (which instance types a configuration runs is that catalog narrowed to the
-//! configuration's form factor and generation), so a single file is what keeps the two
-//! from drifting apart.
+//! All three are REFERENCE data rather than resources a caller creates — no operation
+//! mutates any of them — so they live together, away from the store of created
+//! resources: the configurations in the hardware catalog are described BY the
+//! instance-type specifications (which instance types a configuration runs is those
+//! specifications narrowed to the configuration's form factor and generation), and
+//! what can be ORDERED is one entry per rack family of the same specifications, so a
+//! single file is what keeps the three from drifting apart.
 
 use std::collections::BTreeMap;
 
@@ -22,14 +24,17 @@ use super::filter_accepts;
 /// GiB-per-vCPU ratio into the `MemoryInMib` the model reports.
 const MIB_PER_GIB: i32 = 1024;
 
-/// One EC2 instance FAMILY in the orderable-instance-type catalog: the sizes it is
-/// offered in, the hardware every size carries, and where an Outpost can be ordered
-/// with it.
+/// One EC2 instance FAMILY this service offers: the sizes it is offered in, the
+/// hardware every size carries, and where an Outpost can be ordered with it.
 ///
 /// A family is the unit because EC2 publishes a family's specifications as one rule
 /// — every size in it carries the same memory per vCPU and the name is
 /// `<family>.<size>` — so one row here expands to every size of that family and no
-/// size can drift from its family's ratio.
+/// size can drift from its family's ratio. The row feeds BOTH reports this service
+/// answers about instance types: its specifications
+/// ([`instance_type_specifications`]), which is every size, and the catalog of what
+/// can be ordered ([`orderable_instance_type_catalog`]), which is the family's whole
+/// host alone.
 struct OrderableFamily {
     /// The family prefix an instance type in it carries: `c5` in `c5.xlarge`.
     family: &'static str,
@@ -37,10 +42,10 @@ struct OrderableFamily {
     ///
     /// Source: the EC2 instance-type specifications AWS publishes — a
     /// compute-optimized family (`c5`, `c5d`, `c6gd`, `c6id`, `c7i`, `c8i`) carries
-    /// 2 GiB per vCPU, a general-purpose or accelerated one (`m5`, `m5d`, `m7i`,
-    /// `g4dn`) 4, and a memory- or storage-optimized one (`r5`, `r5d`, `r7i`,
-    /// `i3en`) 8. A `d`-suffix family is its base family with local NVMe storage, so
-    /// it carries the same vCPU and memory figures.
+    /// 2 GiB per vCPU, a general-purpose one (`m5`, `m5d`, `m7i`, `m8i`) 4, and a
+    /// memory- or storage-optimized one (`r5`, `r5d`, `r7i`, `r8i`, `i3en`) 8. A
+    /// `d`-suffix family is its base family with local NVMe storage, so it carries
+    /// the same vCPU and memory figures.
     memory_gib_per_vcpu: i32,
     /// Every size the family is offered in, as (size suffix, vCPUs, network
     /// performance).
@@ -55,18 +60,22 @@ struct OrderableFamily {
     form_factors: &'static [(&'static str, &'static str)],
 }
 
-/// The orderable-instance-type catalog this service publishes, by family.
+/// The EC2 instance families this service offers, each with every size it offers it
+/// in.
 ///
 /// Two different sources meet in each row. The hardware figures (the sizes, their
 /// vCPU counts, the memory ratio and the network performance) are the EC2
 /// instance-type specifications AWS publishes. WHICH generation and form factor a
 /// family can be ordered in is the hardware AWS Outposts is built on: the
-/// first-generation rack families are the ones AWS Outposts racks have offered since
-/// launch, each in its plain and its local-storage (`d`-suffix) form; the
+/// first-generation rack families are the compute-, general-purpose-, memory- and
+/// storage-optimized families AWS Outposts racks have offered since launch, each in
+/// its plain and (where it has one) its local-storage (`d`-suffix) form; the
 /// second-generation rack families are the later Intel generations those racks are
-/// built on; and an Outposts SERVER is built on the Graviton2 `c6gd` and the Intel
-/// `c6id`. A family is published in EVERY (form factor, generation) it is offered in,
-/// which is why the pairs are a list. The modelled value sets these name are
+/// built on, both the seventh (`c7i`, `m7i`, `r7i`) and the eighth (`c8i`, `m8i`,
+/// `r8i`) in their compute-, general-purpose- and memory-optimized forms; and an
+/// Outposts SERVER is built on the Graviton2 `c6gd` and the Intel `c6id`. A family is
+/// published in EVERY (form factor, generation) it is offered in, which is why the
+/// pairs are a list. The modelled value sets these name are
 /// [`crate::ops::types::FORM_FACTOR_VALUES`] (`RACK` | `SERVER`) and
 /// [`crate::ops::types::OUTPOST_GENERATION_VALUES`] (`GENERATION_1` |
 /// `GENERATION_2`).
@@ -176,19 +185,6 @@ const ORDERABLE_FAMILIES: &[OrderableFamily] = &[
         form_factors: &[(FORM_FACTOR_RACK, OUTPOST_GENERATION_1)],
     },
     OrderableFamily {
-        family: "g4dn",
-        memory_gib_per_vcpu: 4,
-        sizes: &[
-            ("xlarge", 4, "Up to 25 Gigabit"),
-            ("2xlarge", 8, "Up to 25 Gigabit"),
-            ("4xlarge", 16, "Up to 25 Gigabit"),
-            ("8xlarge", 32, "50 Gigabit"),
-            ("12xlarge", 48, "50 Gigabit"),
-            ("16xlarge", 64, "50 Gigabit"),
-        ],
-        form_factors: &[(FORM_FACTOR_RACK, OUTPOST_GENERATION_1)],
-    },
-    OrderableFamily {
         family: "c6gd",
         memory_gib_per_vcpu: 2,
         sizes: &[
@@ -285,6 +281,42 @@ const ORDERABLE_FAMILIES: &[OrderableFamily] = &[
         ],
         form_factors: &[(FORM_FACTOR_RACK, OUTPOST_GENERATION_2)],
     },
+    OrderableFamily {
+        family: "m8i",
+        memory_gib_per_vcpu: 4,
+        sizes: &[
+            ("large", 2, "Up to 12.5 Gigabit"),
+            ("xlarge", 4, "Up to 12.5 Gigabit"),
+            ("2xlarge", 8, "Up to 12.5 Gigabit"),
+            ("4xlarge", 16, "Up to 12.5 Gigabit"),
+            ("8xlarge", 32, "12.5 Gigabit"),
+            ("12xlarge", 48, "18.75 Gigabit"),
+            ("16xlarge", 64, "25 Gigabit"),
+            ("24xlarge", 96, "37.5 Gigabit"),
+            ("32xlarge", 128, "50 Gigabit"),
+            ("48xlarge", 192, "75 Gigabit"),
+            ("96xlarge", 384, "100 Gigabit"),
+        ],
+        form_factors: &[(FORM_FACTOR_RACK, OUTPOST_GENERATION_2)],
+    },
+    OrderableFamily {
+        family: "r8i",
+        memory_gib_per_vcpu: 8,
+        sizes: &[
+            ("large", 2, "Up to 12.5 Gigabit"),
+            ("xlarge", 4, "Up to 12.5 Gigabit"),
+            ("2xlarge", 8, "Up to 12.5 Gigabit"),
+            ("4xlarge", 16, "Up to 12.5 Gigabit"),
+            ("8xlarge", 32, "12.5 Gigabit"),
+            ("12xlarge", 48, "18.75 Gigabit"),
+            ("16xlarge", 64, "25 Gigabit"),
+            ("24xlarge", 96, "37.5 Gigabit"),
+            ("32xlarge", 128, "50 Gigabit"),
+            ("48xlarge", 192, "75 Gigabit"),
+            ("96xlarge", 384, "100 Gigabit"),
+        ],
+        form_factors: &[(FORM_FACTOR_RACK, OUTPOST_GENERATION_2)],
+    },
 ];
 
 /// The `FormFactor` an Outposts RACK carries, from the modelled value set
@@ -352,21 +384,79 @@ impl OrderableInstanceTypeRecord {
     }
 }
 
-/// The whole orderable-instance-type catalog, expanded from [`ORDERABLE_FAMILIES`]
-/// and ordered by instance type name.
+/// One SIZE of one family as the modelled [`DetailedInstanceTypeItem`] reports it.
 ///
-/// Expanding the families here is what keeps every entry consistent with its
-/// family's published ratio: `MemoryInMib` is the size's vCPU count times the
-/// family's GiB per vCPU times [`MIB_PER_GIB`], never a per-size figure that could
-/// disagree with it. The order is by instance type name so it is stable across
-/// processes — a page token names a position in it, so the order a caller pages
-/// through must not depend on how the table happens to be written.
-pub fn orderable_instance_type_catalog() -> Vec<OrderableInstanceTypeRecord> {
-    // The catalog may only ever name values the model declares, so the table is
-    // checked against the GENERATED value sets rather than trusted to agree with
-    // them: a model that renames a `FormFactor` or an `OutpostGeneration` trips this
-    // in every debug build instead of letting the catalog report an unmodelled
-    // member.
+/// Projecting a size here is what keeps every entry consistent with its family's
+/// published ratio: `MemoryInMib` is the size's vCPU count times the family's GiB per
+/// vCPU times [`MIB_PER_GIB`], never a per-size figure that could disagree with it.
+fn instance_type_item(
+    family: &OrderableFamily,
+    size: &str,
+    vcpus: i32,
+    network_performance: &str,
+) -> DetailedInstanceTypeItem {
+    DetailedInstanceTypeItem {
+        instance_type: Some(format!("{}.{size}", family.family)),
+        vcp_us: Some(vcpus),
+        memory_in_mib: vcpus * family.memory_gib_per_vcpu * MIB_PER_GIB,
+        network_performance: Some(network_performance.to_string()),
+        form_factor_configs: Some(
+            family
+                .form_factors
+                .iter()
+                .map(|(form_factor, generation)| FormFactorConfig {
+                    form_factor: Some((*form_factor).to_string()),
+                    outpost_generation: Some((*generation).to_string()),
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// `items` as the records a read of a catalog pages through: in one order, each
+/// numbered by its position in it.
+///
+/// The order is by instance type name so it is stable across processes — a page token
+/// names a position in it, so the order a caller pages through must not depend on how
+/// the table above happens to be written.
+fn sequenced(mut items: Vec<DetailedInstanceTypeItem>) -> Vec<OrderableInstanceTypeRecord> {
+    items.sort_by(|left, right| left.instance_type.cmp(&right.instance_type));
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(index, instance_type)| OrderableInstanceTypeRecord {
+            sequence: u64::try_from(index).unwrap_or_default() + 1,
+            instance_type,
+        })
+        .collect()
+}
+
+/// The WHOLE HOST of a family: the largest size it is offered in, as (size suffix,
+/// vCPUs, network performance), or `None` for a family offered in no size at all.
+///
+/// One instance of that size IS one physical host of the family — every smaller size
+/// is a slice of the same host — which is why it is the size an Outpost's EC2
+/// capacity is ordered in (see [`orderable_instance_type_catalog`]) and the size the
+/// published capacity of a configuration names (`EC2Capacity$MaxSize`, "the maximum
+/// size of the EC2 capacity", counted in `Quantity` whole hosts).
+fn whole_host(family: &OrderableFamily) -> Option<&(&'static str, i32, &'static str)> {
+    family.sizes.iter().max_by_key(|(_, vcpus, _)| *vcpus)
+}
+
+/// Every instance type this service knows the hardware specifications of: every size
+/// of every family in [`ORDERABLE_FAMILIES`].
+///
+/// This is the specification table, not the published catalog: a caller configures an
+/// Outpost's capacity in any size of a family its hardware runs — a capacity task
+/// names an instance type, and what one Outpost SUPPORTS is every size that fits its
+/// hardware — so the vCPU count of each size has to be a figure this service holds.
+/// What can be ORDERED is the narrower list [`orderable_instance_type_catalog`]
+/// publishes.
+pub fn instance_type_specifications() -> Vec<OrderableInstanceTypeRecord> {
+    // The table may only ever name values the model declares, so it is checked
+    // against the GENERATED value sets rather than trusted to agree with them: a
+    // model that renames a `FormFactor` or an `OutpostGeneration` trips this in every
+    // debug build instead of letting a catalog report an unmodelled member.
     debug_assert!(
         ORDERABLE_FAMILIES
             .iter()
@@ -377,39 +467,58 @@ pub fn orderable_instance_type_catalog() -> Vec<OrderableInstanceTypeRecord> {
             }),
         "every catalog configuration names a modelled FormFactor and OutpostGeneration"
     );
-    let mut items: Vec<DetailedInstanceTypeItem> = ORDERABLE_FAMILIES
-        .iter()
-        .flat_map(|family| {
-            family
-                .sizes
-                .iter()
-                .map(move |(size, vcpus, network_performance)| DetailedInstanceTypeItem {
-                    instance_type: Some(format!("{}.{size}", family.family)),
-                    vcp_us: Some(*vcpus),
-                    memory_in_mib: vcpus * family.memory_gib_per_vcpu * MIB_PER_GIB,
-                    network_performance: Some((*network_performance).to_string()),
-                    form_factor_configs: Some(
-                        family
-                            .form_factors
-                            .iter()
-                            .map(|(form_factor, generation)| FormFactorConfig {
-                                form_factor: Some((*form_factor).to_string()),
-                                outpost_generation: Some((*generation).to_string()),
-                            })
-                            .collect(),
-                    ),
+    sequenced(
+        ORDERABLE_FAMILIES
+            .iter()
+            .flat_map(|family| {
+                family
+                    .sizes
+                    .iter()
+                    .map(move |(size, vcpus, network_performance)| {
+                        instance_type_item(family, size, *vcpus, network_performance)
+                    })
+            })
+            .collect(),
+    )
+}
+
+/// The orderable-instance-type catalog this service publishes: one entry per RACK
+/// family it offers, naming that family's WHOLE HOST ([`whole_host`]).
+///
+/// EC2 capacity is ordered for an Outpost in whole hosts — a line item of an order
+/// adds hosts of a family to the hardware, and the capacity a configuration carries
+/// is published as `EC2Capacity$MaxSize` with a `Quantity` of them — so the instance
+/// types that can be ordered are the host types, one per family, and the smaller
+/// sizes of a family are configured on a host already installed rather than ordered.
+/// Those smaller sizes are therefore specifications this service holds
+/// ([`instance_type_specifications`]) rather than entries it publishes as orderable.
+///
+/// What capacity is ordered BY the instance type is rack capacity, which is the
+/// question this read answers: its own `OutpostGenerationFilter` selects "the
+/// generation of hardware", documented per value as a generation of "rack
+/// deployments" ([`OUTPOST_GENERATION_1`]). An Outposts SERVER is one host of its own
+/// — it is ordered as a whole unit from the hardware catalog
+/// ([`catalog_item_catalog`]), carrying the instance type its hardware comes with —
+/// so a SERVER-only family is hardware this service holds specifications for and
+/// publishes capacity of ([`ec2_capacities`]) without publishing it as a type
+/// capacity can be ordered in.
+pub fn orderable_instance_type_catalog() -> Vec<OrderableInstanceTypeRecord> {
+    sequenced(
+        ORDERABLE_FAMILIES
+            .iter()
+            .filter(|family| {
+                family
+                    .form_factors
+                    .iter()
+                    .any(|(form_factor, _)| *form_factor == FORM_FACTOR_RACK)
+            })
+            .filter_map(|family| {
+                whole_host(family).map(|(size, vcpus, network_performance)| {
+                    instance_type_item(family, size, *vcpus, network_performance)
                 })
-        })
-        .collect();
-    items.sort_by(|left, right| left.instance_type.cmp(&right.instance_type));
-    items
-        .into_iter()
-        .enumerate()
-        .map(|(index, instance_type)| OrderableInstanceTypeRecord {
-            sequence: u64::try_from(index).unwrap_or_default() + 1,
-            instance_type,
-        })
-        .collect()
+            })
+            .collect(),
+    )
 }
 
 /// The `CatalogItemClass` an Outposts RACK configuration is published as, from the
@@ -853,10 +962,12 @@ impl CatalogItemRecord {
 /// join of the two ([`capacity_instance_type`]) rather than one member repeating the
 /// other.
 ///
-/// Which families a configuration runs is not a second catalog: it is the
-/// orderable-instance-type catalog ([`orderable_instance_type_catalog`]) narrowed to
-/// the configuration's own form factor and generation, so an item can never offer
-/// capacity of a family this service does not publish as orderable on that hardware.
+/// Which families a configuration runs is not a second catalog: it is the instance
+/// types this service holds specifications for ([`instance_type_specifications`])
+/// narrowed to the configuration's own form factor and generation, so an item can
+/// never offer capacity of a family this service does not offer on that hardware —
+/// and the size each entry names is that family's whole host ([`whole_host`]), which
+/// is the figure `Quantity` counts.
 fn ec2_capacities(
     instance_types: &[OrderableInstanceTypeRecord],
     config: &CatalogConfiguration,
@@ -949,7 +1060,7 @@ pub fn catalog_item_catalog() -> Vec<CatalogItemRecord> {
         }),
         "a configuration carries S3 capacity exactly when it supports S3 storage"
     );
-    let instance_types = orderable_instance_type_catalog();
+    let instance_types = instance_type_specifications();
     let mut items: Vec<(i32, i64, CatalogItem)> = CATALOG_ITEMS
         .iter()
         .map(|config| {

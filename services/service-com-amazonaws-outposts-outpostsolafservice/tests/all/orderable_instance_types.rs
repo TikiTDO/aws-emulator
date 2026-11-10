@@ -11,7 +11,9 @@
 //!    `VCPUs` is the count that size names and whose `MemoryInMib` is that count
 //!    times the family's published memory-per-vCPU ratio, with a non-empty
 //!    `NetworkPerformance` and a non-empty `FormFactorConfigs` list whose every pair
-//!    is a modelled `(FormFactor, OutpostGeneration)`.
+//!    is a modelled `(FormFactor, OutpostGeneration)`. WHICH entries that catalog
+//!    holds — the whole host of each rack family, one per family — is
+//!    [`crate::instance_type_catalogs`].
 //! 2. `OutpostGenerationFilter` selects exactly the entries one of whose
 //!    `FormFactorConfigs` names that generation, and reports each selected entry
 //!    WHOLE; an absent filter selects the whole catalog.
@@ -44,10 +46,10 @@ const MIB_PER_GIB: i64 = 1024;
 ///
 /// Source: the EC2 instance-type specifications AWS publishes — a compute-optimized
 /// family (`c5`, `c5d`, `c6gd`, `c6id`, `c7i`, `c8i`) carries 2 GiB per vCPU, a
-/// general-purpose or accelerated one (`m5`, `m5d`, `m7i`, `g4dn`) 4, and a memory-
-/// or storage-optimized one (`r5`, `r5d`, `r7i`, `i3en`) 8; a `d`-suffix family is
+/// general-purpose one (`m5`, `m5d`, `m7i`, `m8i`) 4, and a memory- or
+/// storage-optimized one (`r5`, `r5d`, `r7i`, `r8i`, `i3en`) 8; a `d`-suffix family is
 /// its base family with local NVMe storage, so it carries the same figures. The rows
-/// span every family the catalog can offer, so an entry whose family is missing here
+/// span every family the service offers, so an entry whose family is missing here
 /// fails rule 1 rather than being skipped.
 const FAMILY_MEMORY_GIB_PER_VCPU: &[(&str, i64)] = &[
     ("c5", 2),
@@ -56,42 +58,39 @@ const FAMILY_MEMORY_GIB_PER_VCPU: &[(&str, i64)] = &[
     ("c6id", 2),
     ("c7i", 2),
     ("c8i", 2),
-    ("g4dn", 4),
     ("i3en", 8),
     ("m5", 4),
     ("m5d", 4),
     ("m7i", 4),
+    ("m8i", 4),
     ("r5", 8),
     ("r5d", 8),
     ("r7i", 8),
+    ("r8i", 8),
 ];
 
 /// Entries rule 1 is spot-checked against, none of them the one the issue cited:
 /// `(instance type, vCPUs, MemoryInMib)`.
 ///
 /// Source: the published EC2 specifications for each of these instance types —
-/// `c5.9xlarge` 36 vCPU / 72 GiB, `m5.4xlarge` 16 / 64, `r5.24xlarge` 96 / 768,
-/// `i3en.3xlarge` 12 / 96, `g4dn.16xlarge` 64 / 256, `c6gd.medium` 1 / 2,
-/// `c6id.32xlarge` 128 / 256, `c5d.24xlarge` 96 / 192, `m5d.2xlarge` 8 / 32,
-/// `r5d.12xlarge` 48 / 384, `c7i.48xlarge` 192 / 384, `m7i.48xlarge` 192 / 768,
-/// `r7i.16xlarge` 64 / 512 and `c8i.96xlarge` 384 / 768 — which also span the small,
-/// the odd-numbered and the largest sizes in the catalog, and both Outpost
-/// generations.
+/// `c5.24xlarge` 96 vCPU / 192 GiB, `c5d.24xlarge` 96 / 192, `i3en.24xlarge` 96 / 768,
+/// `m5.24xlarge` 96 / 384, `m5d.24xlarge` 96 / 384, `r5.24xlarge` 96 / 768,
+/// `r5d.24xlarge` 96 / 768, `c7i.48xlarge` 192 / 384, `m7i.48xlarge` 192 / 768,
+/// `r7i.48xlarge` 192 / 1536 and `r8i.96xlarge` 384 / 3072 — which span both Outpost
+/// generations and the compute-, general-purpose-, memory- and storage-optimized
+/// families.
 const SPOT_CHECKS: &[(&str, i64, i64)] = &[
-    ("c5.9xlarge", 36, 72 * MIB_PER_GIB),
-    ("m5.4xlarge", 16, 64 * MIB_PER_GIB),
-    ("r5.24xlarge", 96, 768 * MIB_PER_GIB),
-    ("i3en.3xlarge", 12, 96 * MIB_PER_GIB),
-    ("g4dn.16xlarge", 64, 256 * MIB_PER_GIB),
-    ("c6gd.medium", 1, 2 * MIB_PER_GIB),
-    ("c6id.32xlarge", 128, 256 * MIB_PER_GIB),
+    ("c5.24xlarge", 96, 192 * MIB_PER_GIB),
     ("c5d.24xlarge", 96, 192 * MIB_PER_GIB),
-    ("m5d.2xlarge", 8, 32 * MIB_PER_GIB),
-    ("r5d.12xlarge", 48, 384 * MIB_PER_GIB),
+    ("i3en.24xlarge", 96, 768 * MIB_PER_GIB),
+    ("m5.24xlarge", 96, 384 * MIB_PER_GIB),
+    ("m5d.24xlarge", 96, 384 * MIB_PER_GIB),
+    ("r5.24xlarge", 96, 768 * MIB_PER_GIB),
+    ("r5d.24xlarge", 96, 768 * MIB_PER_GIB),
     ("c7i.48xlarge", 192, 384 * MIB_PER_GIB),
     ("m7i.48xlarge", 192, 768 * MIB_PER_GIB),
-    ("r7i.16xlarge", 64, 512 * MIB_PER_GIB),
-    ("c8i.96xlarge", 384, 768 * MIB_PER_GIB),
+    ("r7i.48xlarge", 192, 1536 * MIB_PER_GIB),
+    ("r8i.96xlarge", 384, 3072 * MIB_PER_GIB),
 ];
 
 /// The vCPU count an EC2 instance SIZE names.

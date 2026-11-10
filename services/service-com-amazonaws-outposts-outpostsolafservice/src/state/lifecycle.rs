@@ -43,7 +43,8 @@ impl ComAmazonawsOutpostsOutpostsolafserviceState {
         // What the clock owes each Outpost whose provisioning has come due: the hardware
         // to install on it, or none for one that already holds its own. Worked out
         // against the catalog first and applied after, because the hardware a unit runs
-        // is read from the same catalog `ListOrderableInstanceTypes` publishes.
+        // is read from the same specifications every other report of an instance type
+        // of this service is read from.
         let settled: Vec<(String, Vec<AssetInfo>)> = self
             .outposts
             .iter()
@@ -53,7 +54,7 @@ impl ComAmazonawsOutpostsOutpostsolafserviceState {
                     true => installed_hardware(
                         record.sequence,
                         record.outpost.supported_hardware_type.as_deref(),
-                        &self.orderable_instance_types,
+                        &self.instance_type_specifications,
                     ),
                     false => Vec::new(),
                 };

@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListOrderableInstanceTypes
-//! IMPLEMENTED: reports the orderable-instance-type catalog this service publishes,
-//! in the catalog's stable order, narrowed to the Outpost generation the caller
-//! filters by and cut into pages of at most `MaxResults` with the modelled
-//! `NextToken` the next page resumes from. A read: it never changes what a later
-//! caller sees.
+//! IMPLEMENTED: reports the orderable-instance-type catalog this service publishes —
+//! the whole host of every rack instance family it offers, one entry per family — in
+//! the catalog's stable order, narrowed to the Outpost generation the caller filters
+//! by and cut into pages of at most `MaxResults` with the modelled `NextToken` the
+//! next page resumes from. A read: it never changes what a later caller sees.
 //!
 //! The catalog is seeded in
 //! [`crate::state::ComAmazonawsOutpostsOutpostsolafserviceState::default`] from
 //! [`crate::state::orderable_instance_type_catalog`] and no operation mutates it, so
-//! this operation only reads.
+//! this operation only reads. The smaller sizes of a published family are
+//! specifications this service holds
+//! ([`crate::state::instance_type_specifications`]) rather than capacity that can be
+//! ordered, so they are not published here.
 //!
 //! ## Shape of an operation
 //!

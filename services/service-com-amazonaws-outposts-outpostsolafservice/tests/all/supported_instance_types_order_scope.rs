@@ -91,13 +91,15 @@ fn vcpus(entry: &Value) -> i64 {
     entry.get("VCPUs").and_then(Value::as_i64).unwrap_or(-1)
 }
 
-/// The whole published instance-type catalog, as `ListOrderableInstanceTypes` reports
-/// it: the source every expectation below is computed from.
-async fn catalog(outposts: &Outposts) -> Vec<Value> {
-    outposts.ok("GET", "/instanceTypes?MaxResults=1000", None).await["InstanceTypes"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+/// Every instance type this service holds a specification of: the source every
+/// expectation below is computed from.
+///
+/// What an Outpost supports is every size its hardware runs, so this is the wider of
+/// the service's two instance-type lists rather than the catalog
+/// `ListOrderableInstanceTypes` publishes (one entry per family, see
+/// [`crate::instance_type_catalogs`]).
+fn catalog() -> Vec<Value> {
+    crate::instance_type_catalogs::specifications()
 }
 
 /// The `VCPUs` that catalog publishes for `instance_type`, or `None` for a type it
@@ -335,7 +337,7 @@ async fn walk(
 #[tokio::test]
 async fn an_order_scopes_the_report_to_the_capacity_its_configurations_carry() {
     let outposts = Outposts::new();
-    let catalog = catalog(&outposts).await;
+    let catalog = catalog();
     let configurations = orderable_configurations(&outposts).await;
     assert!(
         configurations.len() >= 2,
@@ -418,7 +420,7 @@ struct Row {
 #[tokio::test]
 async fn what_an_order_is_for_is_its_published_line_items_and_nothing_else() {
     let outposts = Outposts::new();
-    let catalog = catalog(&outposts).await;
+    let catalog = catalog();
     let configurations = orderable_configurations(&outposts).await;
     // Two configurations whose EC2 capacity names DIFFERENT families, so an order of
     // both is a wider scope than an order of either: which two is read off the
@@ -613,7 +615,7 @@ struct AssetRow {
 #[tokio::test]
 async fn an_order_and_an_asset_scope_narrow_together() {
     let outposts = Outposts::new();
-    let catalog = catalog(&outposts).await;
+    let catalog = catalog();
     let configurations = orderable_configurations(&outposts).await;
     let outpost_id = an_outpost(&outposts, "order-and-asset", Some("RACK")).await;
 

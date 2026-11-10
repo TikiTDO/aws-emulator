@@ -2,16 +2,20 @@
 
 //! @op GetOutpostSupportedInstanceTypes
 //! IMPLEMENTED: reports the instance types the hardware of ONE Outpost can support,
-//! computed from the stored Outpost and the instance-type catalog this service
-//! publishes, cut into pages of at most `MaxResults` with the modelled `NextToken` the
-//! next page resumes from. A read: it never changes what a later caller sees.
+//! computed from the stored Outpost and the instance types this service holds
+//! specifications for, cut into pages of at most `MaxResults` with the modelled
+//! `NextToken` the next page resumes from. A read: it never changes what a later
+//! caller sees.
 //!
 //! The rule, stated once here and applied by [`supports`] below: an instance type the
-//! scope the request names can support is a catalog entry that every hardware fact the
-//! store records about that scope admits. WHICH hardware a request scopes the report
-//! to is the narrowest one it names — one asset of the Outpost, the hardware an order
-//! of it is for, or, naming neither, the hardware INSTALLED on the Outpost — and the
-//! facts are:
+//! scope the request names can support is an instance type this service specifies
+//! ([`crate::state::instance_type_specifications`] — every SIZE of a family, because
+//! hardware runs any size of a family it carries, while
+//! `ListOrderableInstanceTypes` publishes the one size capacity is ordered in) that
+//! every hardware fact the store records about that scope admits. WHICH hardware a
+//! request scopes the report to is the narrowest one it names — one asset of the
+//! Outpost, the hardware an order of it is for, or, naming neither, the hardware
+//! INSTALLED on the Outpost — and the facts are:
 //!
 //! * the Outpost's recorded `SupportedHardwareType` is the form factor its hardware
 //!   has, so an entry whose `FormFactorConfigs` does not offer it in that form factor
@@ -334,22 +338,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let ordered = ordered.unwrap_or_default();
         let form_factor = record.outpost.supported_hardware_type.as_deref();
 
-        // The boundary a page of this report stops at is the catalog entry's own
-        // position in the catalog's stable order, which is the order the whole report
+        // The boundary a page of this report stops at is the entry's own position in
+        // the specification table's stable order, which is the order the whole report
         // is reported in.
         let (instance_types, next_token) = crate::state::page(
             &stamp,
             store
-                .orderable_instance_types
+                .instance_type_specifications
                 .iter()
                 .filter(|entry| supports(&entry.instance_type, form_factor, hardware, &ordered))
                 .map(|entry| {
                     (
                         entry.sequence,
                         // An `InstanceTypeItem` reports the instance type and the
-                        // number of default vCPUs in it; both come from the catalog
-                        // entry, so what this answers about an instance type cannot
-                        // disagree with what `ListOrderableInstanceTypes` answers.
+                        // number of default vCPUs in it; both come from the one
+                        // specification table, so what this answers about an instance
+                        // type cannot disagree with what any other report of this
+                        // service answers about it.
                         InstanceTypeItem {
                             instance_type: entry.instance_type.instance_type.clone(),
                             vcp_us: entry.instance_type.vcp_us,

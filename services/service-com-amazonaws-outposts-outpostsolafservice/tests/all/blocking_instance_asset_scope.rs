@@ -352,7 +352,7 @@ async fn the_list_names_only_the_instances_running_on_the_hardware_the_task_conf
 #[tokio::test]
 async fn the_blocking_list_and_the_capacity_weighing_agree_about_the_task_scope() {
     let outposts = Outposts::new();
-    let vcpus = published_vcpus(&outposts).await;
+    let vcpus = published_vcpus();
     let held = vcpus
         .get(INSTANCE_TYPE)
         .copied()

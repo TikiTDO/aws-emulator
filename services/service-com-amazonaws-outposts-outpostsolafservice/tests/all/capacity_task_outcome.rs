@@ -308,7 +308,7 @@ fn dry_run_verdict(row: &Weighed, figures: &Figures) -> (&'static str, Option<Va
 #[tokio::test]
 async fn a_capacity_task_ends_as_its_configuration_was_weighed() {
     let outposts = Outposts::new();
-    let vcpus = published_vcpus(&outposts).await;
+    let vcpus = published_vcpus();
     assert!(
         !vcpus.contains_key(UNPUBLISHED_INSTANCE_TYPE),
         "the row asking for {UNPUBLISHED_INSTANCE_TYPE:?} needs a type the catalog \
@@ -637,7 +637,7 @@ async fn a_capacity_task_ends_as_its_configuration_was_weighed() {
 #[tokio::test]
 async fn only_a_completed_capacity_task_configures_the_outpost() {
     let outposts = Outposts::new();
-    let vcpus = published_vcpus(&outposts).await;
+    let vcpus = published_vcpus();
     let hosts: &[Host] = &[(HOSTS[0], &[], 96)];
 
     // (case, the pools the task asks for, the instance types left configured)

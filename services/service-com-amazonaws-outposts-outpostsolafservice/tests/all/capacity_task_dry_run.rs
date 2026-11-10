@@ -29,8 +29,8 @@
 //!    belonging to another account — is not available to it, while capacity held by
 //!    the instances it may stop is.
 //!
-//! Every vCPU figure a row expects is read from the service's own published catalog
-//! over the wire (`ListOrderableInstanceTypes`), never from a copy of it.
+//! Every vCPU figure a row expects is read from the service's own specification table,
+//! never from a copy of it.
 
 use std::collections::BTreeMap;
 
@@ -484,21 +484,20 @@ fn narrow_hardware() -> Vec<AssetInfo> {
     )]
 }
 
-/// The default vCPU count this service publishes for every instance type, read over
-/// the wire from its own catalog (`ListOrderableInstanceTypes`, whose
-/// `DetailedInstanceTypeItem$VCPUs` is the figure every capacity figure of this
-/// service is counted in) — so what a row expects follows the published catalog
-/// rather than a copy of it.
-pub(crate) async fn published_vcpus(outposts: &Outposts) -> BTreeMap<String, i64> {
-    let catalog = outposts.ok("GET", "/instanceTypes", None).await;
-    let entries = catalog
-        .get("InstanceTypes")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+/// The default vCPU count this service specifies for every instance type it holds a
+/// specification of (`DetailedInstanceTypeItem$VCPUs`, the figure every capacity
+/// figure of this service is counted in) — so what a row expects follows the
+/// service's own table rather than a copy of it.
+///
+/// Read from that table rather than from the catalog `ListOrderableInstanceTypes`
+/// publishes, which is the narrower one entry per family capacity is ORDERED in: a
+/// pool configures hardware in any size it runs (see
+/// [`crate::instance_type_catalogs`]).
+pub(crate) fn published_vcpus() -> BTreeMap<String, i64> {
+    let entries = crate::instance_type_catalogs::specifications();
     assert!(
         !entries.is_empty(),
-        "the published catalog is what every row's arithmetic reads, got {catalog}"
+        "the service's specification table is what every row's arithmetic reads"
     );
     entries
         .iter()
@@ -557,7 +556,7 @@ async fn a_dry_run_weighs_the_requested_pools_against_the_available_capacity() {
     let narrow = outpost(&outposts, "verdict-narrow").await;
     crate::outpost_assets::record(&outposts, &wide, &wide_hardware(), "verdict-wide");
     crate::outpost_assets::record(&outposts, &narrow, &narrow_hardware(), "verdict-narrow");
-    let vcpus = published_vcpus(&outposts).await;
+    let vcpus = published_vcpus();
     // What each scope has available with nothing running on it: the sum of the vCPU
     // ceilings of the compute hosts in that scope.
     let wide_available = i64::from(WIDE_HOST_VCPUS) * hosts_in_wide_profile();
@@ -783,7 +782,7 @@ async fn capacity_held_by_instances_that_cannot_be_stopped_is_not_available() {
         ),
     ];
     crate::blocking_instances::record(&outposts, &outpost_id, &running, "verdict-in-use");
-    let vcpus = published_vcpus(&outposts).await;
+    let vcpus = published_vcpus();
     let ceiling = i64::from(WIDE_HOST_VCPUS) * hosts_in_wide_profile();
 
     let cases: Vec<InUse> = vec![

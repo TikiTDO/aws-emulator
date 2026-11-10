@@ -732,13 +732,7 @@ async fn an_outstanding_order_is_read_by_the_operations_that_name_one() {
             None,
         )
         .await;
-    let published = outposts
-        .ok("GET", "/instanceTypes?MaxResults=1000", None)
-        .await;
-    let catalog: Vec<Value> = published["InstanceTypes"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    let catalog: Vec<Value> = crate::instance_type_catalogs::specifications()
         .iter()
         .map(|entry| {
             json!({

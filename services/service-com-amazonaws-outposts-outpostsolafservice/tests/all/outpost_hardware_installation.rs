@@ -128,16 +128,20 @@ fn supported_types(output: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Every instance family `ListOrderableInstanceTypes` publishes as orderable on
-/// `form_factor`, and the vCPU count of the largest instance type among them: what
-/// rule 2 requires a compute unit of that hardware to report, computed from the
-/// published catalog rather than spelled out.
-async fn published(outposts: &Outposts, form_factor: &str) -> (BTreeSet<String>, i64) {
-    let catalog = outposts.ok("GET", "/instanceTypes?MaxResults=1000", None).await;
-    let entries = catalog["InstanceTypes"].as_array().cloned().unwrap_or_default();
+/// Every instance family this service offers on `form_factor` hardware, and the vCPU
+/// count of the largest instance type among them: what rule 2 requires a compute unit
+/// of that hardware to report, computed from the service's own specification table
+/// rather than spelled out.
+///
+/// The table rather than the catalog `ListOrderableInstanceTypes` publishes, because
+/// what hardware RUNS is every size of a family it carries while that catalog
+/// publishes the one size capacity is ordered in (see
+/// [`crate::instance_type_catalogs`]).
+fn offered(form_factor: &str) -> (BTreeSet<String>, i64) {
+    let entries = crate::instance_type_catalogs::specifications();
     assert!(
         !entries.is_empty(),
-        "the published catalog must hold entries, got {catalog}"
+        "the service must specify instance types for its hardware to run"
     );
     let offered = entries.iter().filter(|entry| {
         entry
@@ -225,7 +229,7 @@ async fn an_outpost_settles_holding_the_hardware_of_its_form_factor() {
 
         let form_factor = *form_factor;
         let racked = form_factor == "RACK";
-        let (families, max_vcpus) = published(&outposts, form_factor).await;
+        let (families, max_vcpus) = offered(form_factor);
         let mut types: BTreeSet<String> = BTreeSet::new();
         let mut elevations: Vec<f64> = Vec::new();
         let mut racks: BTreeSet<String> = BTreeSet::new();

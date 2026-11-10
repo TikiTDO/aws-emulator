@@ -100,14 +100,14 @@ async fn catalog_of_class(outposts: &Outposts, class: &str) -> Vec<Value> {
     )
 }
 
-/// Every instance type `ListOrderableInstanceTypes` publishes.
-async fn orderable_instance_types(outposts: &Outposts) -> BTreeSet<String> {
-    outposts
-        .ok("GET", "/instanceTypes?MaxResults=1000", None)
-        .await["InstanceTypes"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+/// Every instance type this service holds a specification of.
+///
+/// The wider of its two instance-type lists: a configuration's published capacity
+/// names the whole host of a family its hardware runs, including a family offered on
+/// SERVER hardware alone, which the catalog `ListOrderableInstanceTypes` publishes no
+/// entry for (see [`crate::instance_type_catalogs`]).
+fn specified_instance_types() -> BTreeSet<String> {
+    crate::instance_type_catalogs::specifications()
         .iter()
         .map(|entry| text(entry, "InstanceType"))
         .collect()
@@ -235,7 +235,7 @@ async fn the_class_filter_selects_on_the_class_an_item_reports() {
 async fn an_ec2_capacity_names_its_family_and_the_bare_size_of_it() {
     let outposts = Outposts::new();
     let catalog = catalog(&outposts).await;
-    let published = orderable_instance_types(&outposts).await;
+    let published = specified_instance_types();
     let mut checked = 0usize;
 
     for item in &catalog {
@@ -264,7 +264,7 @@ async fn an_ec2_capacity_names_its_family_and_the_bare_size_of_it() {
             assert!(
                 published.contains(&instance_type),
                 "case {case:?}: Family and MaxSize must join into an instance type this \
-                 service publishes as orderable, got {instance_type:?} for {capacity:?}"
+                 service holds a specification of, got {instance_type:?} for {capacity:?}"
             );
             checked += 1;
         }
