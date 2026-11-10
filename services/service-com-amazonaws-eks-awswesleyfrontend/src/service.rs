@@ -57,6 +57,7 @@
 pub mod lenient_json;
 pub mod lenient_scalars;
 pub mod off_enum_member_contract;
+pub mod parameter_contract;
 pub mod precedence;
 pub mod resolve_conflicts_contract;
 pub mod tag_contract;
@@ -224,13 +225,19 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // `^[0-9A-Za-z][A-Za-z0-9\-_]*$` pattern or its 1..100 length answers
         // 400 `InvalidParameterException`, as the real service does.
         //
+        // The MESSAGE is this service's own wherever it states one for the rule that
+        // was broken (see [`parameter_contract`]): a parameter Amazon EKS publishes
+        // its own refusal sentence for is answered in that sentence rather than in
+        // the framework's constrained-leaf report, which is a different error
+        // contract from the one this API states. A rule it states no sentence for
+        // keeps the framework's report, which already names the member and the
+        // constraint it broke.
+        //
         // The seam is per SERVICE, not per operation, so it cannot word the two tag
         // operations — the only ones here that model `BadRequestException` instead —
         // in their own channel. Those two are claimed BEFORE dispatch by
         // `override_operation` above, so a refusal of theirs never reaches this seam;
-        // everything that does reach it declares `InvalidParameterException`. The
-        // framework's message already names the member and the constraint it broke,
-        // so it is kept verbatim.
+        // everything that does reach it declares `InvalidParameterException`.
         //
         // Wording the refusal per OPERATION is not reachable from here:
         // `Refusal` (vendor/smithy-server-runtime/src/pre_dispatch.rs) carries
@@ -242,7 +249,8 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         match refusal {
             Refusal::Invalid(violations) => Some(Refused {
                 code: "InvalidParameterException".to_string(),
-                message: aws_smithy_schema_server::envelope(violations)
+                message: parameter_contract::refusal_message(violations)
+                    .or_else(|| aws_smithy_schema_server::envelope(violations))
                     .unwrap_or_else(|| "invalid request".to_string()),
             }),
             // Authentication refusals belong to the framework: the emulator, not a

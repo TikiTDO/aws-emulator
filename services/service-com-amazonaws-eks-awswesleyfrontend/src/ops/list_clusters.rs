@@ -176,16 +176,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })?;
 
         // A `nextToken` names the cluster to resume AFTER. One this service did not
-        // issue is a bad parameter, not an empty page.
+        // issue is a bad parameter, not an empty page, and it is refused in the
+        // sentence every listing of this service states for one
+        // ([`state::INVALID_NEXT_TOKEN_MESSAGE`]).
         let resume_after = match input.next_token.as_deref() {
             None => None,
             Some(token) => Some(state::decode_page_token(token).ok_or_else(|| {
                 ListClustersError::from(ListClustersErrorModeled::InvalidParameterException(
                     InvalidParameterException {
-                        message: Some(
-                            "Member must be a nextToken returned by a previous ListClusters call"
-                                .to_string(),
-                        ),
+                        message: Some(state::INVALID_NEXT_TOKEN_MESSAGE.to_string()),
                         ..Default::default()
                     },
                 ))

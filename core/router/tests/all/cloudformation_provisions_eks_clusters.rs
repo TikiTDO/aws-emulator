@@ -368,7 +368,9 @@ const ROWS: &[Row] = &[
     Row {
         case: "three subnets, both endpoint switches and several tags",
         declared_name: Some("stack-cluster-gamma"),
-        version: Some("1.30"),
+        // A Kubernetes version Amazon EKS still offers a control plane for: a create on
+        // a version whose extended support has ended is refused.
+        version: Some("1.35"),
         subnet_count: 3,
         endpoint_access: Some((false, true)),
         tags: &[("team", "platform"), ("env", "test")],

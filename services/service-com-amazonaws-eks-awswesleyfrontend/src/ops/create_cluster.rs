@@ -39,6 +39,14 @@
 //! `InvalidParameterException`) — a cluster is never minted against a role the caller
 //! cannot pass or a subnet nothing holds.
 //!
+//! Nor until the request's own parameters pass the rules Amazon EKS states for them
+//! (`crate::state::cluster_parameters`, the sentence each refusal carries): `name` is
+//! a cluster name, `version` is a Kubernetes version this service offers a control
+//! plane for, every `resourcesVpcConfig.securityGroupIds` entry is a security group
+//! id, and the two endpoint-access switches are not both off. A `name` the walk
+//! itself refuses is worded before this handler runs (see
+//! [`crate::service::parameter_contract`]).
+//!
 //! Shared types live in `super::types`; the error channel in `crate::scaffolded`.
 //!
 //! ---
@@ -262,6 +270,20 @@ fn invalid_parameter(cluster_name: &str, message: String) -> CreateClusterError 
     .into()
 }
 
+/// The same 400 `InvalidParameterException`, naming NO cluster.
+///
+/// The refusal of a value that does not have the form of another service's resource id
+/// reports that id and nothing else: the cluster was never the parameter at fault, and
+/// the recorded refusals of an invalid subnet or security group id carry no
+/// `clusterName` at all.
+fn invalid_resource_id(message: String) -> CreateClusterError {
+    CreateClusterErrorModeled::InvalidParameterException(InvalidParameterException {
+        message: Some(message),
+        ..Default::default()
+    })
+    .into()
+}
+
 /// A 403 `AccessDeniedException` for a role this caller may not have Amazon EKS assume.
 ///
 /// The shape carries `message` only, so the cluster the request named is not reported on
@@ -344,24 +366,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
-        // Then the request's own body, which needs no store: the two cardinality rules
-        // `resourcesVpcConfig`'s own documentation states. "You must specify at least two
-        // subnets. You can specify up to five security groups." The subnet minimum is
-        // waived for a local cluster on an Outpost, which is created in a single subnet
-        // (`outpostConfig`); neither rule is modelled, so neither is refused before this
-        // handler runs.
+        // Then the request's own body, which needs no store: the rules
+        // `resourcesVpcConfig`'s own documentation states. "You must specify at least
+        // two subnets that are in different Availability Zones. You can specify up to
+        // five security groups." A request that names NO subnet names nowhere for the
+        // control plane's network interfaces at all, which is the refusal an absent
+        // `resourcesVpcConfig` earns too ([`state::SUBNET_ID_REQUIRED_MESSAGE`]); one
+        // that names a single subnet cannot place it in two zones. The two-zone minimum
+        // is waived for a local cluster on an Outpost, which is created in a single
+        // subnet (`outpostConfig`); none of these rules is modelled, so none is refused
+        // before this handler runs.
         let subnet_count = input
             .resources_vpc_config
             .subnet_ids
             .as_ref()
             .map_or(0, Vec::len);
+        if subnet_count == 0 {
+            return Err(invalid_parameter(
+                &input.name,
+                state::SUBNET_ID_REQUIRED_MESSAGE.to_string(),
+            ));
+        }
         if input.outpost_config.is_none() && subnet_count < 2 {
             return Err(invalid_parameter(
                 &input.name,
-                format!(
-                    "resourcesVpcConfig.subnetIds must specify at least 2 subnets, \
-                     got {subnet_count}"
-                ),
+                state::SUBNETS_IN_TWO_AVAILABILITY_ZONES_MESSAGE.to_string(),
             ));
         }
         let security_group_count = input
@@ -377,6 +406,84 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                      security groups, got {security_group_count}"
                 ),
             ));
+        }
+
+        // Then the FORM of each value that names a resource of another service: a
+        // subnet and a security group are Amazon EC2 resources, each identified as its
+        // kind's prefix plus a hexadecimal id ([`state::is_subnet_id`],
+        // [`state::is_security_group_id`]), so a value outside that form names no such
+        // resource in any VPC — the control plane's network interfaces could never be
+        // provisioned in it or authorized against it. Each is refused before anything
+        // is asked of EC2, with the sentence this service states for it, naming the id
+        // and no cluster, and nothing is written.
+        for subnet_id in input.resources_vpc_config.subnet_ids.iter().flatten() {
+            if !state::is_subnet_id(subnet_id) {
+                return Err(invalid_resource_id(state::invalid_subnet_message(subnet_id)));
+            }
+        }
+        for group_id in input
+            .resources_vpc_config
+            .security_group_ids
+            .iter()
+            .flatten()
+        {
+            if !state::is_security_group_id(group_id) {
+                return Err(invalid_resource_id(state::invalid_security_group_message(
+                    group_id,
+                )));
+            }
+        }
+
+        // And the ONE combination of the two endpoint-access switches that leaves the
+        // cluster's Kubernetes API server endpoint unreachable on both paths
+        // ([`state::endpoint_access_fully_disabled`], which reads the defaults each
+        // switch documents). A control plane no caller can reach is not a cluster this
+        // service provisions.
+        if state::endpoint_access_fully_disabled(
+            input.resources_vpc_config.endpoint_public_access,
+            input.resources_vpc_config.endpoint_private_access,
+        ) {
+            return Err(invalid_parameter(
+                &input.name,
+                state::ENDPOINT_ACCESS_BOTH_DISABLED_MESSAGE.to_string(),
+            ));
+        }
+
+        // And the CIDR blocks the public endpoint may be reached from: a value that is
+        // not a CIDR block ([`state::is_cidr_block`]) allows and denies nothing, so the
+        // refusal names every entry that is not one.
+        let invalid_cidrs = input
+            .resources_vpc_config
+            .public_access_cidrs
+            .as_deref()
+            .map(state::invalid_public_access_cidrs)
+            .unwrap_or_default();
+        if !invalid_cidrs.is_empty() {
+            return Err(invalid_parameter(
+                &input.name,
+                state::invalid_public_access_cidrs_message(&invalid_cidrs),
+            ));
+        }
+
+        // "The desired Kubernetes version for your cluster": a version Amazon EKS
+        // offers a control plane for, which is a released row of the calendar this
+        // service publishes through `DescribeClusterVersions`
+        // ([`state::offers_cluster_version`]) — so the catalog a caller reads to pick a
+        // version and the versions a create accepts cannot disagree. A create that
+        // names no version lands on the default row instead, so there is nothing to
+        // check for it. The lock is taken for this read alone and released before
+        // anything is asked of another service.
+        if let Some(requested_version) = input.version.as_deref() {
+            let offered = {
+                let guard = store.lock();
+                state::offers_cluster_version(&guard, requested_version, now)
+            };
+            if !offered {
+                return Err(invalid_parameter(
+                    &input.name,
+                    state::unsupported_kubernetes_version_message(requested_version),
+                ));
+            }
         }
 
         // Amazon EKS "provisions elastic network interfaces in your VPC subnets", so the

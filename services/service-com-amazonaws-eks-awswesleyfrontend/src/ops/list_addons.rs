@@ -203,10 +203,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     ListAddonsError::from(ListAddonsErrorModeled::InvalidParameterException(
                         InvalidParameterException {
                             cluster_name: Some(input.cluster_name.clone()),
-                            message: Some(
-                                "Member must be a nextToken returned by a previous ListAddons call"
-                                    .to_string(),
-                            ),
+                            message: Some(state::INVALID_NEXT_TOKEN_MESSAGE.to_string()),
                             ..Default::default()
                         },
                     ))

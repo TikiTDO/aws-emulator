@@ -309,7 +309,7 @@ fn rows() -> Vec<Row> {
             body: serde_json::json!({
                 "resourcesVpcConfig": {
                     "subnetIds": ["subnet-cccc3333", "subnet-dddd4444", "subnet-eeee5555"],
-                    "securityGroupIds": ["sg-1111", "sg-2222"],
+                    "securityGroupIds": ["sg-11111111", "sg-22222222"],
                 },
             }),
             update_type: "VpcConfigUpdate",
@@ -321,7 +321,7 @@ fn rows() -> Vec<Row> {
                 ),
                 (
                     "/resourcesVpcConfig/securityGroupIds",
-                    serde_json::json!(["sg-1111", "sg-2222"]),
+                    serde_json::json!(["sg-11111111", "sg-22222222"]),
                 ),
             ],
         },
@@ -822,7 +822,10 @@ async fn a_change_that_cannot_be_made_is_refused_with_its_own_modelled_error() {
             "refuse-plain",
             serde_json::json!({
                 "resourcesVpcConfig": {
-                    "securityGroupIds": ["sg-1", "sg-2", "sg-3", "sg-4", "sg-5", "sg-6"],
+                    "securityGroupIds": [
+                        "sg-11111111", "sg-22222222", "sg-33333333",
+                        "sg-44444444", "sg-55555555", "sg-66666666",
+                    ],
                 },
             }),
             400,

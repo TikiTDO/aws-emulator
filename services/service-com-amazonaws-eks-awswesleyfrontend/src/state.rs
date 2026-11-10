@@ -3413,17 +3413,18 @@ pub fn is_cluster_name(candidate: &str) -> bool {
 /// the member it arrived in and the constraint it failed. Shared by every
 /// operation that takes a `clusterName` without a modelled constraint on it, so
 /// all of them phrase the same refusal the same way.
+///
+/// Both sentences are the ones Amazon EKS states for that parameter — the length
+/// maximum's ([`parameter_too_long_message`]) and the grammar's
+/// ([`parameter_invalid_characters_message`]) — which are the same sentences a member
+/// the model DOES constrain to the grammar earns (see
+/// [`crate::service::parameter_contract`]), so one grammar has one refusal wherever it
+/// is enforced.
 pub fn cluster_name_refusal(member: &str, value: &str) -> String {
     if value.chars().count() > MAX_CLUSTER_NAME_LEN {
-        format!(
-            "Value '{value}' at '{member}' failed to satisfy constraint: Member must have \
-             length less than or equal to {MAX_CLUSTER_NAME_LEN}"
-        )
+        parameter_too_long_message(member, MAX_CLUSTER_NAME_LEN as i64)
     } else {
-        format!(
-            "Value '{value}' at '{member}' failed to satisfy constraint: Member must satisfy \
-             regular expression pattern: {CLUSTER_NAME_PATTERN}"
-        )
+        parameter_invalid_characters_message(member)
     }
 }
 
@@ -4375,6 +4376,15 @@ pub fn decode_page_token(token: &str) -> Option<String> {
     decode_scoped_page_token(CLUSTERS_LISTING, token)
 }
 
+/// The sentence a listing refuses a `nextToken` it did not issue with.
+///
+/// Entirely fixed text, and the SAME sentence for every listing of this service: a
+/// token this service did not mint, one minted for another listing, and one whose
+/// position no longer exists are the one condition a caller acts on — start the
+/// listing again — so the recorded service words them all this way and names neither
+/// the listing nor the token.
+pub const INVALID_NEXT_TOKEN_MESSAGE: &str = "nextToken is not valid or expired.";
+
 /// The ARN of one managed capability of one cluster.
 ///
 /// A capability is a child of its cluster, so the resource part names both, the
@@ -4497,6 +4507,7 @@ mod addon_catalog;
 mod certificate_authority;
 mod certificate_material;
 mod cluster_creator_access;
+mod cluster_parameters;
 mod cluster_record;
 mod control_plane_logs;
 mod derived_identifiers;
@@ -4509,6 +4520,7 @@ pub use addon_catalog::*;
 pub use certificate_authority::*;
 pub use certificate_material::*;
 pub use cluster_creator_access::*;
+pub use cluster_parameters::*;
 pub use cluster_record::*;
 pub use control_plane_logs::*;
 pub use derived_identifiers::*;

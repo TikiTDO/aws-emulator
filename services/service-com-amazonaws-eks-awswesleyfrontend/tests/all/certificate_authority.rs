@@ -40,7 +40,7 @@ fn minimal_cluster(name: &str) -> serde_json::Value {
     serde_json::json!({
         "name": name,
         "roleArn": "arn:aws:iam::000000000000:role/eksClusterRole",
-        "resourcesVpcConfig": { "subnetIds": ["subnet-1", "subnet-2"] },
+        "resourcesVpcConfig": { "subnetIds": ["subnet-11111111", "subnet-22222222"] },
     })
 }
 

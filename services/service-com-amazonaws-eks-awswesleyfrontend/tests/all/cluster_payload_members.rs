@@ -166,7 +166,7 @@ async fn the_members_a_provisioned_control_plane_has_appear_when_it_does() {
                 serde_json::json!({
                     "resourcesVpcConfig": {
                         "subnetIds": ["subnet-aaaa1111", "subnet-bbbb2222"],
-                        "securityGroupIds": ["sg-1111"],
+                        "securityGroupIds": ["sg-11111111"],
                         "endpointPublicAccess": false,
                         "endpointPrivateAccess": true,
                     },
@@ -396,12 +396,12 @@ fn configuration_rows() -> Vec<ConfigurationRow> {
             body: serde_json::json!({
                 "resourcesVpcConfig": {
                     "subnetIds": ["subnet-aaaa1111", "subnet-bbbb2222"],
-                    "securityGroupIds": ["sg-1111", "sg-2222"],
+                    "securityGroupIds": ["sg-11111111", "sg-22222222"],
                 },
             }),
             expected: vec![(
                 "/resourcesVpcConfig/securityGroupIds",
-                serde_json::json!(["sg-1111", "sg-2222"]),
+                serde_json::json!(["sg-11111111", "sg-22222222"]),
             )],
         },
         ConfigurationRow {

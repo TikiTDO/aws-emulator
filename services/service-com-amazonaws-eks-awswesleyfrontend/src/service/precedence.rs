@@ -32,8 +32,11 @@
 //!   order, and nothing here may change what it reports;
 //! * one of the earlier answers actually fires — the value names no role this
 //!   caller can pass, the request asks for a capability type this API does not define,
-//!   or the store holds no such cluster. Otherwise the request falls
-//!   through to the modelled operation, which refuses the body exactly as before.
+//!   or the store holds no such cluster — or the request is a `CreateCluster` whose
+//!   refused parameter this service states its own sentence for (see
+//!   [`super::parameter_contract`]), whose refusal also carries the `clusterName` the
+//!   request asked for. Otherwise the request falls through to the modelled
+//!   operation, which refuses the body exactly as before.
 //!
 //! The answers are the service's own modelled shapes, rendered through the same
 //! protocol call the framework's error tail makes: `AccessDeniedException` (403) for
@@ -55,7 +58,7 @@ use std::sync::Arc;
 use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse};
 use aws_smithy_schema::serde::SerializableStruct;
 use aws_smithy_schema::Schema;
-use aws_smithy_schema_server::constraints::validate;
+use aws_smithy_schema_server::constraints::{validate, Violation};
 use aws_smithy_schema_server::ProtocolError;
 use smithy_server_runtime::{
     BoxFuture, DeserializableStruct, ErasedOperation, ErasedServiceDefinition, OperationContext,
@@ -103,12 +106,26 @@ pub struct Addressed {
     /// [`crate::service::off_enum_member_contract`]).
     undefined_value: Option<InvalidParameterException>,
     cluster: Option<String>,
+    /// The refusal this service states for the parameter the walk refused, when it
+    /// states one for that rule (see [`super::parameter_contract`]). It carries the
+    /// members the refusal payload reports beside the sentence, which the per-service
+    /// message seam cannot reach; it is answered LAST, because it is a complaint about
+    /// the body and everything above is about the request's authorization or the
+    /// resources it names.
+    parameter: Option<InvalidParameterException>,
 }
 
 impl Addressed {
     /// The same request, carrying the refusal its undefined value earns.
     fn with_undefined_value(mut self, refusal: Option<InvalidParameterException>) -> Self {
         self.undefined_value = refusal;
+        self
+    }
+
+    /// The same request, carrying this service's own refusal of the parameter the
+    /// walk refused.
+    fn with_parameter_refusal(mut self, refusal: Option<InvalidParameterException>) -> Self {
+        self.parameter = refusal;
         self
     }
 }
@@ -123,6 +140,9 @@ enum Answer {
     ValueNotDefined(InvalidParameterException),
     /// The cluster the request is addressed to does not exist.
     ClusterMissing(ResourceNotFoundException),
+    /// A parameter of the request broke a rule this service states its own refusal
+    /// for (see [`super::parameter_contract`]).
+    ParameterRefused(InvalidParameterException),
 }
 
 impl OperationError for Answer {
@@ -131,6 +151,7 @@ impl OperationError for Answer {
             Self::PassRoleDenied(exception) => exception,
             Self::ValueNotDefined(exception) => exception,
             Self::ClusterMissing(exception) => exception,
+            Self::ParameterRefused(exception) => exception,
         }
     }
 
@@ -139,6 +160,7 @@ impl OperationError for Answer {
             Self::PassRoleDenied(_) => &SCHEMA_ACCESS_DENIED_EXCEPTION,
             Self::ValueNotDefined(_) => &SCHEMA_INVALID_PARAMETER_EXCEPTION,
             Self::ClusterMissing(_) => &SCHEMA_RESOURCE_NOT_FOUND_EXCEPTION,
+            Self::ParameterRefused(_) => &SCHEMA_INVALID_PARAMETER_EXCEPTION,
         }
     }
 
@@ -147,6 +169,7 @@ impl OperationError for Answer {
             Self::PassRoleDenied(_) => ACCESS_DENIED_EXCEPTION,
             Self::ValueNotDefined(_) => INVALID_PARAMETER_EXCEPTION,
             Self::ClusterMissing(_) => RESOURCE_NOT_FOUND_EXCEPTION,
+            Self::ParameterRefused(_) => INVALID_PARAMETER_EXCEPTION,
         }
     }
 
@@ -160,6 +183,7 @@ impl OperationError for Answer {
             Self::PassRoleDenied(_) => 403,
             Self::ValueNotDefined(_) => 400,
             Self::ClusterMissing(_) => 404,
+            Self::ParameterRefused(_) => 400,
         }
     }
 
@@ -176,6 +200,7 @@ impl std::fmt::Display for Answer {
             Self::PassRoleDenied(exception) => write!(f, "{exception}"),
             Self::ValueNotDefined(exception) => write!(f, "{exception}"),
             Self::ClusterMissing(exception) => write!(f, "{exception}"),
+            Self::ParameterRefused(exception) => write!(f, "{exception}"),
         }
     }
 }
@@ -196,6 +221,7 @@ impl Answer {
             Self::PassRoleDenied(exception) => exception.message.clone(),
             Self::ValueNotDefined(exception) => exception.message.clone(),
             Self::ClusterMissing(exception) => exception.message.clone(),
+            Self::ParameterRefused(exception) => exception.message.clone(),
         }
         .unwrap_or_default();
         definition
@@ -230,27 +256,32 @@ fn read<T: DeserializableStruct>(
     T::deserialize(&mut *deserializer).ok()
 }
 
-/// Whether the framework's own validating walk would refuse this input, which is the
-/// only case this layer has a question about: it is what would otherwise be answered
-/// BEFORE the two checks the operation performs first.
-fn boundary_refuses(input: &dyn SerializableStruct, schema: &'static Schema) -> bool {
-    !validate(input, schema).is_empty()
+/// The violations the framework's own validating walk would report for this input,
+/// which is the only case this layer has a question about: they are what would
+/// otherwise be answered BEFORE the checks the operation performs first.
+fn boundary_violations(input: &dyn SerializableStruct, schema: &'static Schema) -> Vec<Violation> {
+    validate(input, schema)
 }
 
 /// Read one claimed operation's request and name what its handler answers before it
 /// judges the body, or `None` when the walk accepts the body (so there is no
 /// question) or the body cannot be read at all.
+///
+/// The walk's own violations are handed to `members` beside the input, so an arm that
+/// words the refusal of a parameter reads exactly the violations the dispatch sequence
+/// would have reported.
 fn addressed_with<T: DeserializableStruct + SerializableStruct>(
     protocol: &dyn ServerHttpProtocol,
     schema: &'static Schema,
     req: &RtRequest,
-    members: impl FnOnce(&T) -> Addressed,
+    members: impl FnOnce(&T, &[Violation]) -> Addressed,
 ) -> Option<Addressed> {
     let input: T = read(protocol, schema, req)?;
-    if !boundary_refuses(&input, schema) {
+    let violations = boundary_violations(&input, schema);
+    if violations.is_empty() {
         return None;
     }
-    Some(members(&input))
+    Some(members(&input, &violations))
 }
 
 /// One role the request hands Amazon EKS, and no cluster to resolve.
@@ -295,12 +326,14 @@ fn addressed(
     match key {
         // `roleArn` is the cluster's own role and `computeConfig.nodeRoleArn` the one
         // its Auto Mode nodes take; the handler judges them in that order. The
-        // operation creates the cluster, so there is no cluster to resolve.
+        // operation creates the cluster, so there is no cluster to resolve — and the
+        // parameter the walk refused is worded here, because the refusal carries the
+        // `clusterName` the request asked for beside the sentence.
         "CreateCluster" => addressed_with(
             protocol,
             CREATE_CLUSTER_INPUT_SCHEMA,
             req,
-            |input: &CreateClusterInput| {
+            |input: &CreateClusterInput, violations| {
                 passes_roles(
                     [
                         Some(input.role_arn.clone()),
@@ -313,13 +346,17 @@ fn addressed(
                     .flatten()
                     .collect(),
                 )
+                .with_parameter_refusal(super::parameter_contract::create_cluster_refusal(
+                    violations,
+                    &input.name,
+                ))
             },
         ),
         "CreateNodegroup" => addressed_with(
             protocol,
             CREATE_NODEGROUP_INPUT_SCHEMA,
             req,
-            |input: &CreateNodegroupInput| {
+            |input: &CreateNodegroupInput, _| {
                 passes_roles_and_addresses_cluster(
                     vec![input.node_role.clone()],
                     &input.cluster_name,
@@ -334,7 +371,7 @@ fn addressed(
             protocol,
             CREATE_CAPABILITY_INPUT_SCHEMA,
             req,
-            |input: &CreateCapabilityInput| {
+            |input: &CreateCapabilityInput, _| {
                 passes_roles_and_addresses_cluster(
                     vec![input.role_arn.clone()],
                     &input.cluster_name,
@@ -346,7 +383,7 @@ fn addressed(
             protocol,
             CREATE_FARGATE_PROFILE_INPUT_SCHEMA,
             req,
-            |input: &CreateFargateProfileInput| {
+            |input: &CreateFargateProfileInput, _| {
                 passes_roles_and_addresses_cluster(
                     vec![input.pod_execution_role_arn.clone()],
                     &input.cluster_name,
@@ -357,19 +394,19 @@ fn addressed(
             protocol,
             UPDATE_CLUSTER_CONFIG_INPUT_SCHEMA,
             req,
-            |input: &UpdateClusterConfigInput| addresses_cluster(&input.name),
+            |input: &UpdateClusterConfigInput, _| addresses_cluster(&input.name),
         ),
         "CreateAddon" => addressed_with(
             protocol,
             CREATE_ADDON_INPUT_SCHEMA,
             req,
-            |input: &CreateAddonInput| addresses_cluster(&input.cluster_name),
+            |input: &CreateAddonInput, _| addresses_cluster(&input.cluster_name),
         ),
         "CreateAccessEntry" => addressed_with(
             protocol,
             CREATE_ACCESS_ENTRY_INPUT_SCHEMA,
             req,
-            |input: &CreateAccessEntryInput| addresses_cluster(&input.cluster_name),
+            |input: &CreateAccessEntryInput, _| addresses_cluster(&input.cluster_name),
         ),
         // `roleArn` is the role the EKS Pod Identity agent has Amazon EKS assume for
         // the Pods of the service account, so the handler authorizes passing it
@@ -378,7 +415,7 @@ fn addressed(
             protocol,
             CREATE_POD_IDENTITY_ASSOCIATION_INPUT_SCHEMA,
             req,
-            |input: &CreatePodIdentityAssociationInput| {
+            |input: &CreatePodIdentityAssociationInput, _| {
                 passes_roles_and_addresses_cluster(
                     vec![input.role_arn.clone()],
                     &input.cluster_name,
@@ -389,7 +426,9 @@ fn addressed(
             protocol,
             ASSOCIATE_IDENTITY_PROVIDER_CONFIG_INPUT_SCHEMA,
             req,
-            |input: &AssociateIdentityProviderConfigInput| addresses_cluster(&input.cluster_name),
+            |input: &AssociateIdentityProviderConfigInput, _| {
+                addresses_cluster(&input.cluster_name)
+            },
         ),
         // The listings of a cluster's resources: each bounds `maxResults`, so the walk
         // can refuse the body of a read too, and each answers an unknown cluster with
@@ -398,25 +437,25 @@ fn addressed(
             protocol,
             LIST_NODEGROUPS_INPUT_SCHEMA,
             req,
-            |input: &ListNodegroupsInput| addresses_cluster(&input.cluster_name),
+            |input: &ListNodegroupsInput, _| addresses_cluster(&input.cluster_name),
         ),
         "ListAddons" => addressed_with(
             protocol,
             LIST_ADDONS_INPUT_SCHEMA,
             req,
-            |input: &ListAddonsInput| addresses_cluster(&input.cluster_name),
+            |input: &ListAddonsInput, _| addresses_cluster(&input.cluster_name),
         ),
         "ListCapabilities" => addressed_with(
             protocol,
             LIST_CAPABILITIES_INPUT_SCHEMA,
             req,
-            |input: &ListCapabilitiesInput| addresses_cluster(&input.cluster_name),
+            |input: &ListCapabilitiesInput, _| addresses_cluster(&input.cluster_name),
         ),
         "ListUpdates" => addressed_with(
             protocol,
             LIST_UPDATES_INPUT_SCHEMA,
             req,
-            |input: &ListUpdatesInput| addresses_cluster(&input.name),
+            |input: &ListUpdatesInput, _| addresses_cluster(&input.name),
         ),
         _ => None,
     }
@@ -486,21 +525,27 @@ impl<Eng: Send + Sync + 'static> PrecedenceFirst<Eng> {
         // region, so it is resolved in the region the request is signed for — the same
         // key every handler reads. A store this layer cannot reach answers nothing:
         // the modelled operation runs and reports what it always did.
-        let cluster_name = addressed.cluster.as_deref()?;
-        let store = crate::state::service_state(&*self.engine)?;
-        let region = crate::state::request_region(ctx.parts());
-        let now = std::time::SystemTime::now();
-        let mut guard = store.lock();
-        guard.materialize_due_transitions(now);
-        if guard
-            .clusters
-            .contains_key(&(region, cluster_name.to_string()))
-        {
-            return None;
+        if let Some(cluster_name) = addressed.cluster.as_deref() {
+            let store = crate::state::service_state(&*self.engine)?;
+            let region = crate::state::request_region(ctx.parts());
+            let now = std::time::SystemTime::now();
+            let mut guard = store.lock();
+            guard.materialize_due_transitions(now);
+            if !guard
+                .clusters
+                .contains_key(&(region, cluster_name.to_string()))
+            {
+                return Some(Answer::ClusterMissing(crate::state::cluster_not_found(
+                    cluster_name,
+                )));
+            }
         }
-        Some(Answer::ClusterMissing(crate::state::cluster_not_found(
-            cluster_name,
-        )))
+        // THE BODY LAST, in this service's own words for the parameter the walk
+        // refused: everything above is about the authorization of the request or the
+        // resources it names, which the recorded service answers first. A rule this
+        // service states no sentence for leaves this empty, and the modelled operation
+        // answers the framework's own report exactly as before.
+        addressed.parameter.clone().map(Answer::ParameterRefused)
     }
 }
 

@@ -73,6 +73,31 @@ pub(crate) fn minimal_request(name: &str) -> serde_json::Value {
     })
 }
 
+/// One Kubernetes version Amazon EKS offers a control plane for, read out of the
+/// catalog a caller picks one from (`DescribeClusterVersions`) — the newest row it
+/// publishes.
+///
+/// A suite that pins a `version` on a create reads it from here rather than writing
+/// one, because a version the service does not publish is refused.
+pub(crate) async fn an_offered_version(router: &MultiServiceRouter) -> String {
+    let answer = call(router, REGION, "GET", "/cluster-versions?maxResults=1", "").await;
+    assert_eq!(
+        answer.status, 200,
+        "setup: expected HTTP 200 from the version catalog, got {answer:?}"
+    );
+    answer.body["clusterVersions"]
+        .as_array()
+        .and_then(|rows| rows.first())
+        .and_then(|row| row["clusterVersion"].as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "setup: the catalog must publish a Kubernetes version, got {:?}",
+                answer.body
+            )
+        })
+        .to_owned()
+}
+
 pub(crate) fn names_of(answer: &Answer) -> Vec<String> {
     answer.body["clusters"]
         .as_array()
@@ -96,6 +121,10 @@ pub(crate) fn names_of(answer: &Answer) -> Vec<String> {
 #[tokio::test]
 async fn a_created_cluster_reads_back_exactly_as_stored() {
     let router = emulator();
+    // A Kubernetes version Amazon EKS offers a control plane for, read out of the
+    // catalog a caller picks one from rather than written here: `CreateCluster`
+    // refuses a version the service does not publish.
+    let offered_version = an_offered_version(&router).await;
 
     let cases: Vec<(&str, serde_json::Value)> = vec![
         ("only the required members", minimal_request("minimal")),
@@ -103,11 +132,11 @@ async fn a_created_cluster_reads_back_exactly_as_stored() {
             "every optional member this slice stores",
             serde_json::json!({
                 "name": "fully-specified",
-                "version": "1.29",
+                "version": offered_version,
                 "roleArn": "arn:aws:iam::000000000000:role/other",
                 "resourcesVpcConfig": {
-                    "subnetIds": ["subnet-1", "subnet-2", "subnet-3"],
-                    "securityGroupIds": ["sg-1"],
+                    "subnetIds": ["subnet-11111111", "subnet-22222222", "subnet-33333333"],
+                    "securityGroupIds": ["sg-11111111"],
                     "endpointPublicAccess": false,
                     "endpointPrivateAccess": true,
                     "publicAccessCidrs": ["10.0.0.0/8"],
@@ -129,7 +158,7 @@ async fn a_created_cluster_reads_back_exactly_as_stored() {
             serde_json::json!({
                 "name": "ipv6-cluster",
                 "roleArn": "arn:aws:iam::000000000000:role/eksClusterRole",
-                "resourcesVpcConfig": { "subnetIds": ["subnet-1", "subnet-2"] },
+                "resourcesVpcConfig": { "subnetIds": ["subnet-11111111", "subnet-22222222"] },
                 "kubernetesNetworkConfig": { "ipFamily": "ipv6" },
             }),
         ),
@@ -138,7 +167,7 @@ async fn a_created_cluster_reads_back_exactly_as_stored() {
             serde_json::json!({
                 "name": "one_tag",
                 "roleArn": "arn:aws:iam::000000000000:role/eksClusterRole",
-                "resourcesVpcConfig": { "subnetIds": ["subnet-1", "subnet-2"] },
+                "resourcesVpcConfig": { "subnetIds": ["subnet-11111111", "subnet-22222222"] },
                 "tags": { "only": "one" },
             }),
         ),
@@ -147,7 +176,7 @@ async fn a_created_cluster_reads_back_exactly_as_stored() {
             serde_json::json!({
                 "name": "Protected9",
                 "roleArn": "arn:aws:iam::000000000000:role/eksClusterRole",
-                "resourcesVpcConfig": { "subnetIds": ["subnet-1", "subnet-2"] },
+                "resourcesVpcConfig": { "subnetIds": ["subnet-11111111", "subnet-22222222"] },
                 "deletionProtection": true,
             }),
         ),
@@ -983,12 +1012,18 @@ async fn the_vpc_config_cardinality_rules_are_enforced() {
     // Rows cover each published bound and one past it, on both members, plus the
     // Outpost waiver. Source: `CreateCluster$resourcesVpcConfig`'s documentation —
     // "You must specify at least two subnets. You can specify up to five security
-    // groups."
+    // groups." The security group ids carry EC2's own identifier form, because a
+    // value outside it is refused on its own account.
     let subnets = |count: usize| -> Vec<String> {
-        (0..count).map(|index| format!("subnet-{index}")).collect()
+        (0..count)
+            .map(|index| format!("subnet-{index:017x}"))
+            .collect()
     };
-    let groups =
-        |count: usize| -> Vec<String> { (0..count).map(|index| format!("sg-{index}")).collect() };
+    let groups = |count: usize| -> Vec<String> {
+        (0..count)
+            .map(|index| format!("sg-{index:017x}"))
+            .collect()
+    };
 
     let cases: Vec<(&str, serde_json::Value, bool)> = vec![
         ("no subnets at all", serde_json::json!({ "subnetIds": subnets(0) }), false),

@@ -245,10 +245,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             None => None,
             Some(token) => Some(
                 state::decode_scoped_page_token(INSIGHTS_LISTING, token).ok_or_else(|| {
-                    invalid_parameter(
-                        "Member must be a nextToken returned by a previous ListInsights call"
-                            .to_string(),
-                    )
+                    invalid_parameter(state::INVALID_NEXT_TOKEN_MESSAGE.to_string())
                 })?,
             ),
         };
@@ -310,13 +307,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .iter()
                 .position(|insight| insight.id == id)
                 .map(|position| position + 1)
-                .ok_or_else(|| {
-                    invalid_parameter(
-                        "Member must be a nextToken returned by a previous ListInsights call \
-                         with the same filters"
-                            .to_string(),
-                    )
-                })?,
+                .ok_or_else(|| invalid_parameter(state::INVALID_NEXT_TOKEN_MESSAGE.to_string()))?,
         };
 
         let remaining = &matching[start..];

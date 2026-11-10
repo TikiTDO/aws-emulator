@@ -183,9 +183,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                                 InvalidRequestException {
                                     cluster_name: Some(input.cluster_name.clone()),
                                     message: Some(
-                                        "nextToken must be a nextToken returned by a previous \
-                                         ListAssociatedAccessPolicies call"
-                                            .to_string(),
+                                        state::INVALID_NEXT_TOKEN_MESSAGE.to_string(),
                                     ),
                                     ..Default::default()
                                 },

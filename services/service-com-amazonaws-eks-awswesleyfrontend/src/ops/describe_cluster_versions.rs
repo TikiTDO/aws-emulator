@@ -18,7 +18,10 @@
 //!
 //! * `clusterVersions` — keeps only the named versions ("List of specific cluster
 //!   versions to describe"); a version the calendar does not publish simply does
-//!   not appear.
+//!   not appear. The filter NAMES Kubernetes versions, one per entry or several
+//!   comma-separated ones (`crate::state::cluster_versions_filter`), and a value
+//!   that names none is refused rather than ignored: a listing that quietly dropped
+//!   the filter would answer a page the caller did not ask for.
 //! * `clusterType` — keeps only the rows for that cluster type.
 //! * `defaultOnly` — keeps only the default version, the one `CreateCluster`
 //!   creates when the caller names no `version`.
@@ -182,13 +185,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some(token) = input.version_status.as_deref() {
             status_filters.push(
                 SupportStatus::from_version_status(token)
-                    .ok_or_else(|| unknown_status("versionStatus", token, true))?,
+                    .ok_or_else(unknown_version_status)?,
             );
         }
         if let Some(token) = input.status.as_deref() {
             status_filters.push(
                 SupportStatus::from_cluster_version_status(token)
-                    .ok_or_else(|| unknown_status("status", token, false))?,
+                    .ok_or_else(|| invalid_parameter(&state::cluster_version_status_message(token)))?,
             );
         }
 
@@ -200,7 +203,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let include_unsupported = input.include_all.unwrap_or(false)
             || status_filters.contains(&SupportStatus::Unsupported);
 
-        let requested_versions = input.cluster_versions.unwrap_or_default();
+        let requested_versions = match input.cluster_versions.as_deref() {
+            None => Vec::new(),
+            // "The list of your desired Kubernetes versions": the filter names
+            // Kubernetes versions, which is the form its own refusal states —
+            // `state::cluster_versions_filter` reads them and answers `None` for a
+            // value that names none, which is refused rather than ignored. A filter
+            // the service cannot read is not a filter it may silently drop: the page
+            // it would answer is not the page the caller asked for.
+            Some(requested) => state::cluster_versions_filter(requested)
+                .ok_or_else(|| invalid_parameter(state::CLUSTER_VERSIONS_FILTER_MESSAGE))?,
+        };
         let requested_type = input.cluster_type;
         let default_only = input.default_only.unwrap_or(false);
 
@@ -215,18 +228,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // A `nextToken` names the calendar row to resume AFTER. One this listing did
         // not issue — including a well-formed token another listing minted — is a bad
-        // parameter, not an empty page.
+        // parameter, not an empty page, and it is refused in the sentence every
+        // listing of this service states for one.
         let resume_after = match input.next_token.as_deref() {
             None => None,
             Some(token) => Some(
-                state::decode_scoped_page_token(CLUSTER_VERSIONS_LISTING, token).ok_or_else(
-                    || {
-                        invalid_parameter(
-                            "Member must be a nextToken returned by a previous \
-                             DescribeClusterVersions call",
-                        )
-                    },
-                )?,
+                state::decode_scoped_page_token(CLUSTER_VERSIONS_LISTING, token)
+                    .ok_or_else(|| invalid_parameter(state::INVALID_NEXT_TOKEN_MESSAGE))?,
             ),
         };
 
@@ -265,12 +273,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .iter()
                 .position(|entry| entry.page_key() == key)
                 .map(|position| position + 1)
-                .ok_or_else(|| {
-                    invalid_parameter(
-                        "Member must be a nextToken returned by a previous \
-                         DescribeClusterVersions call with the same filters",
-                    )
-                })?,
+                .ok_or_else(|| invalid_parameter(state::INVALID_NEXT_TOKEN_MESSAGE))?,
         };
 
         let remaining = &matching[start..];
@@ -306,27 +309,20 @@ fn invalid_parameter(message: &str) -> DescribeClusterVersionsError {
     .into()
 }
 
-/// Refuse a status filter whose token neither modelled enum declares, naming the
-/// member, the value and the members that member accepts — the message is built
-/// from the request and the model.
-fn unknown_status(
-    member: &str,
-    token: &str,
-    version_spelling: bool,
-) -> DescribeClusterVersionsError {
-    let accepted = SupportStatus::all()
+/// Refuse a `versionStatus` whose token the modelled enum does not declare, naming
+/// the member and the members that member accepts — the sentence this service states
+/// for a member judged by an enum's value set
+/// ([`state::member_must_be_one_of_message`]).
+///
+/// The DEPRECATED `status` spelling of the same filter states a refusal of its own
+/// ([`state::cluster_version_status_message`]) rather than this one.
+fn unknown_version_status() -> DescribeClusterVersionsError {
+    let accepted: Vec<String> = SupportStatus::all()
         .iter()
-        .map(|status| {
-            if version_spelling {
-                status.version_status()
-            } else {
-                status.cluster_version_status()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" | ");
-    invalid_parameter(&format!(
-        "Value '{token}' at '{member}' failed to satisfy constraint: Member must satisfy enum \
-         value set: [{accepted}]"
+        .map(|status| status.version_status().to_string())
+        .collect();
+    invalid_parameter(&state::member_must_be_one_of_message(
+        "versionStatus",
+        &accepted,
     ))
 }

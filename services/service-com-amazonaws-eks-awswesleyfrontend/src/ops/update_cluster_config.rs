@@ -499,10 +499,16 @@ fn requested_change(
         // Availability Zones" and "You can specify up to five security groups".
         if let Some(subnet_ids) = requested.subnet_ids.as_deref() {
             if subnet_ids.len() < 2 {
-                return Err(format!(
-                    "resourcesVpcConfig.subnetIds must specify at least 2 subnets, got {}",
-                    subnet_ids.len()
-                ));
+                return Err(state::SUBNETS_IN_TWO_AVAILABILITY_ZONES_MESSAGE.to_string());
+            }
+            // And the FORM of each one, the same rule a create enforces: a subnet is an
+            // Amazon EC2 resource, identified as `subnet-` plus its hexadecimal id
+            // ([`state::is_subnet_id`]).
+            if let Some(subnet_id) = subnet_ids
+                .iter()
+                .find(|subnet_id| !state::is_subnet_id(subnet_id))
+            {
+                return Err(state::invalid_subnet_message(subnet_id));
             }
         }
         if let Some(security_group_ids) = requested.security_group_ids.as_deref() {
@@ -512,6 +518,17 @@ fn requested_change(
                      got {}",
                     security_group_ids.len()
                 ));
+            }
+            // And the FORM of each one: a security group is an Amazon EC2 resource,
+            // identified as `sg-` plus its hexadecimal id
+            // ([`state::is_security_group_id`]), so a value outside that form names no
+            // security group the cross-account network interfaces could be authorized
+            // against — the same rule, and the same sentence, a create enforces.
+            if let Some(group_id) = security_group_ids
+                .iter()
+                .find(|group_id| !state::is_security_group_id(group_id))
+            {
+                return Err(state::invalid_security_group_message(group_id));
             }
         }
         let current = record.resources_vpc_config.clone().unwrap_or_default();
@@ -537,8 +554,27 @@ fn requested_change(
             next.endpoint_private_access = private_access;
         }
         if let Some(cidrs) = requested.public_access_cidrs.as_deref() {
+            // The same rule, and the same sentence, a create enforces: a value that is
+            // not a CIDR block allows and denies nothing
+            // ([`state::is_cidr_block`]).
+            let invalid = state::invalid_public_access_cidrs(cidrs);
+            if !invalid.is_empty() {
+                return Err(state::invalid_public_access_cidrs_message(&invalid));
+            }
             params.push(param(UPDATE_PARAM_PUBLIC_ACCESS_CIDRS, json_list(cidrs)));
             next.public_access_cidrs = Some(cidrs.to_vec());
+        }
+        // The configuration this update would LEAVE the cluster in decides the one
+        // combination of the two switches that is refused
+        // ([`state::endpoint_access_fully_disabled`]): a cluster with both paths off
+        // has no Kubernetes API server endpoint any caller could reach, so an update
+        // that would turn the second one off is refused whichever of them the request
+        // carries.
+        if state::endpoint_access_fully_disabled(
+            Some(next.endpoint_public_access),
+            Some(next.endpoint_private_access),
+        ) {
+            return Err(state::ENDPOINT_ACCESS_BOTH_DISABLED_MESSAGE.to_string());
         }
 
         if requested.subnet_ids.is_some() || requested.security_group_ids.is_some() {

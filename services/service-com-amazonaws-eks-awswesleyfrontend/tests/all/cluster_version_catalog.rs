@@ -111,11 +111,15 @@ const MODELLED_CLUSTER_VERSION_STATUS: &[&str] =
 async fn every_row_publishes_the_platform_version_a_new_cluster_runs() {
     let (router, _engine) = emulator();
     let listed = whole_calendar(&router).await;
+    // The rows a cluster can be CREATED on are the ones an unfiltered listing
+    // publishes: a row whose extended support has ended is a version Amazon EKS no
+    // longer offers, so `CreateCluster` refuses it.
+    let offered = rows(&describe_versions(&router, "").await);
 
-    // Rows: every Kubernetes version the catalog publishes, pinned on the create,
+    // Rows: every Kubernetes version the catalog offers, pinned on the create,
     // plus the create that names NO version at all (which lands on the row the
     // catalog marks `defaultVersion`).
-    let mut cases: Vec<(String, Option<String>)> = listed
+    let mut cases: Vec<(String, Option<String>)> = offered
         .iter()
         .map(|row| (case_of(row), Some(case_of(row))))
         .collect();

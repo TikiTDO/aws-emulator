@@ -216,10 +216,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             None => None,
             Some(token) => Some(
                 state::decode_scoped_page_token(CAPABILITIES_LISTING, token).ok_or_else(|| {
-                    invalid_parameter(
-                        "Member must be a nextToken returned by a previous ListCapabilities call"
-                            .to_string(),
-                    )
+                    invalid_parameter(state::INVALID_NEXT_TOKEN_MESSAGE.to_string())
                 })?,
             ),
         };

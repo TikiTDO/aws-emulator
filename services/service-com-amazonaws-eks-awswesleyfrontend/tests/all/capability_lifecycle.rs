@@ -938,7 +938,7 @@ async fn a_cluster_that_is_not_active_yet_cannot_take_a_capability() {
             &serde_json::json!({
                 "name": cluster,
                 "roleArn": "arn:aws:iam::000000000000:role/eksClusterRole",
-                "resourcesVpcConfig": { "subnetIds": ["subnet-1", "subnet-2"] },
+                "resourcesVpcConfig": { "subnetIds": ["subnet-11111111", "subnet-22222222"] },
             })
             .to_string(),
         )

@@ -28,10 +28,10 @@
 use std::time::{Duration, SystemTime};
 
 use service_com_amazonaws_eks_awswesleyfrontend::state::{
-    ComAmazonawsEksAwswesleyfrontendState, CLUSTER_ACTIVATION_DELAY, MAX_ROLLBACK_TIMEOUT_MINUTES,
-    MIN_ROLLBACK_TIMEOUT_MINUTES, PLATFORM_VERSION, STATUS_ACTIVE, STATUS_UPDATING,
-    UPDATE_COMPLETION_DELAY, UPDATE_IN_PROGRESS, UPDATE_SUCCESSFUL, UPDATE_TYPE_VERSION,
-    UPDATE_TYPE_VERSION_ROLLBACK,
+    offers_cluster_version, ComAmazonawsEksAwswesleyfrontendState, CLUSTER_ACTIVATION_DELAY,
+    MAX_ROLLBACK_TIMEOUT_MINUTES, MIN_ROLLBACK_TIMEOUT_MINUTES, PLATFORM_VERSION, STATUS_ACTIVE,
+    STATUS_UPDATING, UPDATE_COMPLETION_DELAY, UPDATE_IN_PROGRESS, UPDATE_SUCCESSFUL,
+    UPDATE_TYPE_VERSION, UPDATE_TYPE_VERSION_ROLLBACK,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -188,17 +188,21 @@ async fn settle_update() {
     tokio::time::sleep(UPDATE_COMPLETION_DELAY + Duration::from_millis(250)).await;
 }
 
-/// The Kubernetes versions this service publishes and has already released, newest first.
+/// The Kubernetes versions this service OFFERS a control plane for, newest first.
 ///
 /// Read from the store the handlers read rather than written out here: the calendar is
-/// what `DescribeClusterVersions` reports, and which of its rows are released depends on
-/// the clock, so a hand-copied list would both duplicate the catalog and go stale.
+/// what `DescribeClusterVersions` reports, and which of its rows are offered depends on
+/// the clock, so a hand-copied list would both duplicate the catalog and go stale. A row
+/// the clock has carried past the end of extended support is not one a cluster can be
+/// created on, so it is not one these rows move between either.
 fn published_versions(engine: &engine::InMemoryEngine) -> Vec<String> {
     let store = engine.state::<ComAmazonawsEksAwswesleyfrontendState>();
     let guard = store.lock();
+    let now = SystemTime::now();
     guard
-        .released_cluster_versions(SystemTime::now())
+        .released_cluster_versions(now)
         .map(|row| row.cluster_version.clone())
+        .filter(|version| offers_cluster_version(&guard, version, now))
         .collect()
 }
 

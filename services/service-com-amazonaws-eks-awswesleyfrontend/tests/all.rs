@@ -81,6 +81,8 @@ mod cluster_creator_access_entry;
 mod cluster_lifecycle;
 #[path = "all/cluster_payload_members.rs"]
 mod cluster_payload_members;
+#[path = "all/cluster_request_validation.rs"]
+mod cluster_request_validation;
 #[path = "all/cluster_scalar_coercion.rs"]
 mod cluster_scalar_coercion;
 #[path = "all/cluster_update_concurrency.rs"]

@@ -10,6 +10,11 @@
 //! since the create. That move was due whether or not anybody called, so it does not
 //! change what a later caller sees.
 //!
+//! The name it is addressed by is judged BEFORE that read: a value outside the
+//! cluster-name grammar ([`crate::state::is_cluster_name`]) names no cluster that
+//! could exist, so it is refused as the invalid identifier it is rather than reported
+//! as a cluster this Region does not hold.
+//!
 //! Shared types live in `super::types`; the error channel in `crate::scaffolded`.
 //!
 //! ---
@@ -67,10 +72,20 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-eks-awswesleyfrontend.j
 // here — hence the `DescribeClusterError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.eks#DescribeCluster")]
+//
+// `InvalidParameterException` — a shape this SERVICE models, and nearly every
+// operation that takes input declares, which this one's `errors` list omits — is
+// widened in through `extra_errors`: Amazon EKS judges the cluster-name grammar of the
+// name this read is addressed by, and the recorded refusal of a value outside it is
+// that shape, in the sentence this service states for a cluster-name member.
+#[smithy_macros::operation_error(
+    "com.amazonaws.eks#DescribeCluster",
+    extra_errors = ["InvalidParameterException"]
+)]
 #[derive(Debug)]
 pub enum DescribeClusterErrorModeled {
     ClientException(ClientException),
+    InvalidParameterException(InvalidParameterException),
     ResourceNotFoundException(ResourceNotFoundException),
     ServerException(ServerException),
     ServiceUnavailableException(ServiceUnavailableException),
@@ -137,6 +152,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 },
             ))
         })?;
+
+        // THE NAME'S FORM FIRST, before anything is looked up: `name` is modelled as a
+        // plain `String` on this operation (`smithy_query(query="operation",
+        // operation="DescribeCluster")` reports `name` -> `String`, `httpLabel`,
+        // required), but every cluster of this API carries a name inside the
+        // cluster-name grammar ([`crate::state::is_cluster_name`]), so a value outside
+        // it names no cluster that could exist in any Region rather than one this
+        // Region does not hold. Amazon EKS enforces the grammar here and refuses the
+        // value as the invalid parameter it is — 400 `InvalidParameterException`, the
+        // shape this service states a bad parameter with everywhere, widened into this
+        // operation's channel above — in the sentence it states for a cluster-name
+        // member ([`crate::state::cluster_name_refusal`]), naming the cluster the
+        // request asked about. A 404 here would tell a caller that passed a cluster ARN
+        // where a name belongs that its cluster does not exist.
+        if !crate::state::is_cluster_name(&input.name) {
+            return Err(DescribeClusterErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    cluster_name: Some(input.name.clone()),
+                    message: Some(crate::state::cluster_name_refusal("name", &input.name)),
+                    ..Default::default()
+                },
+            )
+            .into());
+        }
 
         let mut guard = store.lock();
         guard.materialize_due_transitions(SystemTime::now());

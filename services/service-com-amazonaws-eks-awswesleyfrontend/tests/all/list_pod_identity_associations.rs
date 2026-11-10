@@ -396,7 +396,10 @@ async fn listing_an_absent_cluster_is_not_found_and_a_malformed_one_is_refused()
                 && if case.len() > MAX_CLUSTER_NAME_LEN {
                     message.contains(&MAX_CLUSTER_NAME_LEN.to_string())
                 } else {
-                    message.contains("regular expression pattern")
+                    // The grammar's own sentence, the one every cluster-name member
+                    // of this service is refused with.
+                    message.contains("contains invalid characters")
+                        && message.contains("regular expression")
                 },
             "case {case:?}: expected the constraint it failed, got {message:?}"
         );

@@ -194,29 +194,41 @@ async fn an_addon_name_the_catalog_does_not_publish_for_the_cluster_is_refused()
         .expect("the calendar publishes a version")
         .clone();
     let default_version = default_cluster_version(&router).await;
-    // A Kubernetes version the published calendar does not carry, so the catalog
-    // publishes no build at all for a cluster on it: every add-on name, published or
-    // not, is outside that cluster's set.
-    let uncovered = "1.21";
-    assert!(
-        !calendar.iter().any(|version| version == uncovered),
-        "setup: {uncovered} must not be a published Kubernetes version, got {calendar:?}"
-    );
+    // A published add-on the catalog publishes no build of for every one of the
+    // Kubernetes versions below: Amazon EKS began offering it on a later version, so a
+    // cluster on one of those is offered it under no name at all. (A Kubernetes
+    // version the calendar does not publish cannot stand in for one here:
+    // `CreateCluster` refuses a version Amazon EKS does not offer.)
+    let mut uncovered: Vec<(String, Vec<String>)> = Vec::new();
+    for addon_name in &published {
+        let mut versions: Vec<String> = Vec::new();
+        for version in &calendar {
+            if catalog_builds(&router, addon_name, version).await.is_empty() {
+                versions.push(version.clone());
+            }
+        }
+        if versions.len() >= 2 {
+            uncovered.push((addon_name.clone(), versions));
+        }
+    }
+    let (introduced_later, uncovered_versions) = uncovered.first().cloned().unwrap_or_else(|| {
+        panic!(
+            "setup: the catalog must publish an add-on it offers no build of for two of the \
+             published Kubernetes versions {calendar:?}"
+        )
+    });
 
     active_cluster(&router, "newest", Some(&newest)).await;
     active_cluster(&router, "defaulted", None).await;
-    active_cluster(&router, "uncovered", Some(uncovered)).await;
+    active_cluster(&router, "uncovered-first", Some(&uncovered_versions[0])).await;
+    active_cluster(&router, "uncovered-second", Some(&uncovered_versions[1])).await;
 
     // (case, cluster, that cluster's Kubernetes version, the add-on name asked for).
     // The rows differ along HOW the name misses the set the cluster is offered: a
     // name nothing publishes, a near miss of a published name (a separator swapped,
     // the case changed, a suffix added), a name of the Marketplace form, and a name
     // the catalog DOES publish — on a cluster whose Kubernetes version it publishes
-    // no build for, which is the same miss from the other side.
-    let published_name = published
-        .first()
-        .expect("the catalog publishes an add-on")
-        .clone();
+    // no build of that add-on for, which is the same miss from the other side.
     let rows: Vec<(&str, &str, &str, String)> = vec![
         (
             "a name nothing publishes",
@@ -249,16 +261,17 @@ async fn an_addon_name_the_catalog_does_not_publish_for_the_cluster_is_refused()
             "vendor_product.v2".to_string(),
         ),
         (
-            "a published name on a cluster of a Kubernetes version the catalog does not cover",
-            "uncovered",
-            uncovered,
-            published_name.clone(),
+            "a published name on a cluster of a Kubernetes version the catalog publishes no \
+             build of it for",
+            "uncovered-first",
+            &uncovered_versions[0],
+            introduced_later.clone(),
         ),
         (
-            "another published name on that same cluster",
-            "uncovered",
-            uncovered,
-            "vpc-cni".to_string(),
+            "that same published name on a cluster of another such version",
+            "uncovered-second",
+            &uncovered_versions[1],
+            introduced_later.clone(),
         ),
     ];
 
