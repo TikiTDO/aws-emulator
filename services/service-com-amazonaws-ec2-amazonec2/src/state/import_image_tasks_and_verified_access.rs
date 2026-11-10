@@ -120,9 +120,9 @@ pub const MAX_STORED_IMPORT_IMAGE_TASKS: usize = 4_096;
 /// kind with no quota code of its own answers with.
 pub const RESOURCE_COUNT_EXCEEDED: &str = "ResourceCountExceeded";
 
-/// EC2's code for a conversion (import) task id it cannot resolve — the code
-/// `DescribeImportImageTasks` answers for an `ImportTaskIds` entry that is not an import
-/// task id, and for one no task of the account has.
+/// EC2's code for a conversion (import) task id it cannot resolve — the code every
+/// operation that names an import task answers for a value that is not an import task id,
+/// and for an id no task of the account has.
 pub const INVALID_CONVERSION_TASK_ID: &str = "InvalidConversionTaskId";
 
 /// One stored import image task: the modelled [`ImportImageTask`] every operation that
@@ -296,8 +296,15 @@ pub fn import_image_task_payload_bytes(view: &ImportImageTask, client_token: Opt
 }
 
 /// Whether `id` is a well-formed import task id of the family `prefix` (carrying its
-/// hyphen) names: that prefix followed by 8 or 17 lowercase hexadecimal digits — the short
-/// and the long id form every EC2 resource id takes.
+/// hyphen) names: that prefix followed by a non-empty suffix of lowercase hexadecimal
+/// digits.
+///
+/// The suffix's LENGTH is deliberately not part of the form, unlike the 8-or-17-digit
+/// reading of the resource ids this service mints elsewhere: the recorded refusal behind
+/// `issues/.../20261022T235108Z-ec2-importimage-stub.md` names an `import-ami-` id with an
+/// eighteen-digit suffix and is answered as a task that DOES NOT EXIST, not as a value of
+/// the wrong format — so this parameter is read by the task KIND its prefix names, and
+/// whether the account holds such a task is what decides the rest.
 ///
 /// The ONE reader of that form for every kind of import task, so the ids of an import image
 /// task and of an import snapshot task can differ only in their prefix.
@@ -305,7 +312,7 @@ pub fn import_task_id_is_well_formed(prefix: &str, id: &str) -> bool {
     let Some(suffix) = id.strip_prefix(prefix) else {
         return false;
     };
-    matches!(suffix.len(), 8 | 17)
+    !suffix.is_empty()
         && suffix
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
@@ -326,11 +333,84 @@ pub fn require_well_formed_import_task_id<E>(
     if import_task_id_is_well_formed(prefix, task_id) {
         return Ok(());
     }
-    Err(crate::scaffolded::Scaffolded::service_error(
+    Err(invalid_import_task_id_format(task_id))
+}
+
+/// Refuse a value a request named as an import task id that is not an import task id at
+/// all: HTTP 400 [`INVALID_CONVERSION_TASK_ID`].
+///
+/// The id form is read BEFORE the store, and the import task family carries one code for
+/// every id it cannot resolve: a value outside the form is answered under the same code as
+/// a well-formed id that names no task ([`invalid_conversion_task_id_not_found`]), not
+/// under the code for an id of a resource kind the service does not know. The ONE
+/// definition of that refusal for every operation naming an import task, of either kind.
+pub fn invalid_import_task_id_format<E>(task_id: &str) -> crate::scaffolded::Scaffolded<E> {
+    crate::scaffolded::Scaffolded::service_error(
         INVALID_CONVERSION_TASK_ID,
         400,
         invalid_id_message(task_id),
-    ))
+    )
+}
+
+/// Every kind of import task, as the prefix (with its hyphen) an id of that kind is minted
+/// under paired with the modelled `ResourceType` the service spells that kind by: "the ID of
+/// the import image or import snapshot task" (`CancelImportTaskRequest$ImportTaskId`) names
+/// both kinds.
+///
+/// The two are one table rather than two parallel lists so the pairing cannot come apart,
+/// and the ONE place the kinds are enumerated, so a kind added to the store is recognised
+/// by every reader of an import task id at once.
+pub const IMPORT_TASK_KINDS: [(&str, &str); 2] = [
+    (
+        IMPORT_IMAGE_TASK_ID_PREFIX_WITH_HYPHEN,
+        IMPORT_IMAGE_TASK_TAGGABLE_RESOURCE,
+    ),
+    (
+        IMPORT_SNAPSHOT_TASK_ID_PREFIX_WITH_HYPHEN,
+        IMPORT_SNAPSHOT_TASK_TAGGABLE_RESOURCE,
+    ),
+];
+
+/// Whether `id` is a well-formed import task id of ANY kind this store holds, for the
+/// operations that act on an import task whichever kind it is.
+pub fn import_task_id_of_any_kind_is_well_formed(id: &str) -> bool {
+    import_task_kind_of(id).is_some()
+}
+
+/// The modelled `ResourceType` of the import task kind `id`'s prefix names — the spelling a
+/// refusal naming such a task uses for its kind — or `None` when the value names no kind of
+/// import task at all.
+///
+/// The ONE place a kind is read off an id, so the reader of the id's form and the wording of
+/// a refusal cannot disagree about which kind a value names.
+pub fn import_task_kind_of(id: &str) -> Option<&'static str> {
+    IMPORT_TASK_KINDS
+        .iter()
+        .find(|(prefix, _)| import_task_id_is_well_formed(prefix, id))
+        .map(|(_, resource_type)| *resource_type)
+}
+
+/// Refuse a request naming an import task id this account holds no import task for: HTTP
+/// 400 [`INVALID_CONVERSION_TASK_ID`], with EC2's not-found sentence for the KIND the id
+/// names — the task kind's modelled resource type, then `ID`, then the id the request sent.
+///
+/// The counterpart of [`invalid_import_task_id_format`], which answers the same code for a
+/// value that names no import task kind at all. The ONE wording for an import task of
+/// either kind a request names and this account does not hold.
+pub fn import_task_id_not_found<E>(import_task_id: &str) -> crate::scaffolded::Scaffolded<E> {
+    match import_task_kind_of(import_task_id) {
+        // The id is echoed through [`echoed_resource_id`], the bound every refusal that
+        // quotes a caller's value holds to: a suffix of any length reads as an id of a
+        // kind, so what the message repeats back is bounded here rather than by the form.
+        Some(resource_type) => id_not_found(
+            INVALID_CONVERSION_TASK_ID,
+            &format!("{resource_type} ID"),
+            &echoed_resource_id(import_task_id),
+        ),
+        // Unreachable through an operation, which reads the id's kind before it looks a
+        // task up: a value naming no kind is answered as a format failure instead.
+        None => invalid_import_task_id_format(import_task_id),
+    }
 }
 
 /// Whether `id` is a well-formed import IMAGE task id: [`import_task_id_is_well_formed`] on

@@ -6,13 +6,14 @@
 //!
 //! The rules under test are:
 //!
-//! 1. AN ID THAT IS NOT ONE EC2 COULD HAVE ISSUED NAMES NOTHING TO LOOK UP, so it is
-//!    refused 400 `InvalidID` before the store is reached, and only an id EC2 could have
-//!    issued that resolves to nothing is `InvalidConversionTaskId`. The form of an import
-//!    task id is the one the operations that mint one use — `import-ami-<hex>` for an
-//!    import image task and `import-snap-<hex>` for an import snapshot task, the two kinds
-//!    `CancelImportTaskRequest$ImportTaskId` documents, in the 8- and 17-hex-digit
-//!    resource-id forms;
+//! 1. AN ID THAT CANNOT BE RESOLVED TO AN IMPORT TASK IS REFUSED BEFORE ANYTHING IS
+//!    WRITTEN, under the one code this family answers such an id with: 400
+//!    `InvalidConversionTaskId`, whether the value names no kind of import task at all
+//!    (judged before the store is reached) or names a kind the account holds no such task
+//!    under, where the refusal spells that kind. The kind of an import task id is the one
+//!    its prefix names — `import-ami-` for an import image task and `import-snap-` for an
+//!    import snapshot task, the two kinds `CancelImportTaskRequest$ImportTaskId` documents
+//!    — followed by a hexadecimal suffix of any length;
 //! 2. A CANCEL THE TASK'S STATE DOES NOT ADMIT IS REFUSED with `IncorrectState` and writes
 //!    nothing: "cancels an IN-PROCESS import virtual machine or import snapshot task"
 //!    (`CancelImportTask`), so a task that is not importing any more has nothing left to
@@ -42,7 +43,8 @@ use std::time::{Duration, Instant};
 use ec2::ops::types::{ImportImageTask, SnapshotDetail, SnapshotTaskDetail, Tag, UserBucketDetails};
 use ec2::state::{
     ComAmazonawsEc2Amazonec2State as Ec2State, DRY_RUN_OPERATION, IMPORT_IMAGE_TASK_ID_PREFIX,
-    IMPORT_IMAGE_TASK_ID_PREFIX_WITH_HYPHEN, IMPORT_SNAPSHOT_TASK_ID_PREFIX_WITH_HYPHEN,
+    IMPORT_IMAGE_TASK_ID_PREFIX_WITH_HYPHEN, IMPORT_IMAGE_TASK_TAGGABLE_RESOURCE,
+    IMPORT_SNAPSHOT_TASK_ID_PREFIX_WITH_HYPHEN, IMPORT_SNAPSHOT_TASK_TAGGABLE_RESOURCE,
     IMPORT_TASK_STATE_ACTIVE, IMPORT_TASK_STATE_COMPLETED, IMPORT_TASK_STATE_DELETED,
     IMPORT_TASK_STATE_DELETING, INCORRECT_STATE, INVALID_CONVERSION_TASK_ID,
     INVALID_PARAMETER_VALUE, ImportImageTaskRecord, ImportSnapshotTaskSpec,
@@ -58,10 +60,6 @@ use super::wire::{child, child_text, document};
 /// The Region every call here is signed for. An import task carries no Region member, so
 /// the Region only selects the ec2Query envelope.
 const REGION: &str = "us-east-1";
-
-/// The code EC2 answers for an id it cannot parse as any resource id, as
-/// `crate::scaffolded::Scaffolded::invalid_id` raises it.
-const INVALID_ID: &str = "InvalidID";
 
 /// One request's form parameters, as the ec2Query harness takes them.
 type Params = Vec<(String, String)>;
@@ -86,11 +84,21 @@ async fn past_the_transition() {
 const BEYOND_THIS_TEST: Duration = Duration::from_secs(3_600);
 
 /// The suffix lengths an EC2 resource id is minted with: the long (17 hex digit) form EC2
-/// mints today and the short (8 hex digit) form it minted before long ids, both of which
-/// `crate::state::import_task_id_is_well_formed` accepts.
+/// mints today and the short (8 hex digit) form it minted before long ids.
 const MINTED_SUFFIXES: [(&str, &str); 2] = [
     ("the long (17 hex digit) form", "0123456789abcdef0"),
     ("the short (8 hex digit) form", "0123abcd"),
+];
+
+/// Hexadecimal suffix lengths EC2 mints no id in, which
+/// `crate::state::import_task_id_is_well_formed` nevertheless reads as this parameter's
+/// value: the length of the suffix is no part of what the parameter admits, so such an id
+/// names the task of its kind that is not there rather than a value of the wrong format.
+const UNMINTED_SUFFIXES: [(&str, &str); 4] = [
+    ("a digit short of the short form", "0123abc"),
+    ("a digit past the short form", "0123abcde"),
+    ("a digit short of the long form", "0123456789abcdef"),
+    ("a digit past the long form", "0123456789abcdef01"),
 ];
 
 /// The two kinds of import task one call can name: "the ID of the import image or import
@@ -118,6 +126,15 @@ impl Kind {
         match self {
             Self::Image => IMPORT_IMAGE_TASK_ID_PREFIX_WITH_HYPHEN,
             Self::Snapshot => IMPORT_SNAPSHOT_TASK_ID_PREFIX_WITH_HYPHEN,
+        }
+    }
+
+    /// The modelled `ResourceType` of this kind of task, which is how a refusal naming such
+    /// a task spells its kind.
+    fn resource_type(self) -> &'static str {
+        match self {
+            Self::Image => IMPORT_IMAGE_TASK_TAGGABLE_RESOURCE,
+            Self::Snapshot => IMPORT_SNAPSHOT_TASK_TAGGABLE_RESOURCE,
         }
     }
 }
@@ -324,22 +341,19 @@ fn cancellation_owed(engine: &engine::InMemoryEngine, import_task_id: &str) -> b
 }
 
 // ---------------------------------------------------------------------------
-// RULE 1: the id's FORM is judged before any lookup
+// RULE 1: the id's KIND is read before any lookup
 // ---------------------------------------------------------------------------
 
-/// Values that are NOT import task ids: each row departs from the minted form in one way —
-/// a suffix a digit short of a minted length or a digit past it, a digit outside lowercase
-/// hexadecimal, an empty suffix, a missing or unknown kind segment, another resource's id,
-/// and a value of no resource-id shape at all. Generated over BOTH minting prefixes, so
-/// neither kind's form is asserted only through the other's.
+/// Values that name NO kind of import task: each row departs in one way from an id of a
+/// kind — a digit outside lowercase hexadecimal, an uppercase suffix, an empty suffix, a
+/// missing or unknown kind segment, another resource's id, and a value of no resource-id
+/// shape at all. Generated over BOTH minting prefixes, so neither kind's form is asserted
+/// only through the other's.
 fn malformed_id_rows() -> Vec<(String, String)> {
     let departures = [
-        ("one digit short of the short form", "0123abc"),
-        ("one digit past the short form", "0123abcde"),
-        ("one digit short of the long form", "0123456789abcdef"),
-        ("one digit past the long form", "0123456789abcdef01"),
         ("an uppercase suffix", "0123ABCD"),
         ("a suffix that is not hexadecimal", "0123abcg"),
+        ("a suffix that is not hexadecimal at its end", "0123456789abcdefg"),
         ("an empty suffix", ""),
     ];
     let mut rows: Vec<(String, String)> = Vec::new();
@@ -365,24 +379,29 @@ fn malformed_id_rows() -> Vec<(String, String)> {
     rows
 }
 
-/// Every id form an import task EC2 issued can carry: each kind's minting prefix crossed
-/// with each minted suffix length.
-fn minted_id_rows() -> Vec<(String, String)> {
+/// Ids of a kind EC2 could have issued a task under, which the account holds no task for:
+/// each kind's minting prefix crossed with the minted suffix lengths and with the suffix
+/// lengths OUTSIDE them — the length of the suffix is no part of what the parameter admits,
+/// so an id is reported as the task of its kind that is not there either way. Each row
+/// carries the kind a refusal naming it must spell.
+fn minted_id_rows() -> Vec<(String, String, &'static str)> {
     let mut rows = Vec::new();
     for kind in [Kind::Image, Kind::Snapshot] {
-        for (length, suffix) in MINTED_SUFFIXES {
+        for (length, suffix) in MINTED_SUFFIXES.iter().chain(UNMINTED_SUFFIXES.iter()) {
             rows.push((
                 format!("a {kind:?} task id in {length}"),
                 format!("{}{suffix}", kind.id_prefix()),
+                kind.resource_type(),
             ));
         }
     }
     rows
 }
 
-/// Rule 1: an id outside the minted form is refused `InvalidID` with the message naming the
-/// id it was sent, while an id EC2 could have issued that the account holds no task for is
-/// `InvalidConversionTaskId` — and neither refusal writes anything.
+/// Rule 1: a value naming no kind of import task is refused `InvalidConversionTaskId` with
+/// the message naming the value it was sent, while an id whose kind EC2 reads that the
+/// account holds no task for is refused under the same code with the message naming that
+/// kind — and neither refusal writes anything.
 #[tokio::test]
 async fn an_id_ec2_could_not_have_issued_is_refused_before_any_lookup() {
     let (router, engine) = emulator();
@@ -400,20 +419,21 @@ async fn an_id_ec2_could_not_have_issued_is_refused_before_any_lookup() {
         );
         assert_eq!(
             error_code(&body),
-            INVALID_ID,
-            "case {case:?}: expected {INVALID_ID}, got {body}"
+            INVALID_CONVERSION_TASK_ID,
+            "case {case:?}: expected {INVALID_CONVERSION_TASK_ID}, got {body}"
         );
-        // The message EC2 builds for an id it cannot parse names the id it was sent. The
-        // XML body escapes the quotes around it (`&apos;`), so the text is compared.
+        // The message EC2 builds for a value it cannot read as an id of the kind the
+        // parameter names repeats that value back. The XML body escapes the quotes around
+        // it, so the text is compared.
         let message = element(&body, "Message").map(|message| unescaped(&message));
         assert_eq!(
             message,
-            Some(format!("The ID '{import_task_id}' is not valid")),
-            "case {case:?}: expected the {INVALID_ID} message to name the id, got {message:?}"
+            Some(format!("Invalid id: \"{import_task_id}\"")),
+            "case {case:?}: expected the malformed-id message to name the id, got {message:?}"
         );
     }
 
-    for (case, import_task_id) in minted_id_rows() {
+    for (case, import_task_id, resource_type) in minted_id_rows() {
         let (status, body) = cancel_task(&router, &import_task_id).await;
         assert_eq!(
             status, 400,
@@ -427,8 +447,11 @@ async fn an_id_ec2_could_not_have_issued_is_refused_before_any_lookup() {
         let message = element(&body, "Message").map(|message| unescaped(&message));
         assert_eq!(
             message,
-            Some(format!("The conversion task '{import_task_id}' does not exist")),
-            "case {case:?}: expected the not-found message to name the id, got {message:?}"
+            Some(format!(
+                "The {resource_type} ID '{import_task_id}' does not exist"
+            )),
+            "case {case:?}: expected the not-found message to name the kind and the id, got \
+             {message:?}"
         );
     }
 
@@ -879,7 +902,7 @@ async fn a_dry_run_cancel_reports_what_would_have_happened_and_writes_nothing() 
             "an id EC2 could not have issued",
             "import-fffffff0".to_string(),
             400,
-            INVALID_ID,
+            INVALID_CONVERSION_TASK_ID,
         ),
         (
             "an id EC2 could have issued that names no task",

@@ -933,6 +933,9 @@ mod snapshot_imports;
 // refuses.
 #[path = "all/import_task_cancellation.rs"]
 mod import_task_cancellation;
+// How every operation that names an import task answers an id it cannot resolve to one.
+#[path = "all/import_task_id_resolution.rs"]
+mod import_task_id_resolution;
 #[path = "all/instance_connect_endpoints.rs"]
 mod instance_connect_endpoints;
 // The fixed detail every instance reports, and the monitoring state a caller moves.

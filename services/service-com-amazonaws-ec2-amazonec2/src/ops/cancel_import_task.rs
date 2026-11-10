@@ -13,15 +13,16 @@
 //! the response reports the state the task was in beside the state it is in now, both read
 //! off the store rather than assumed.
 //!
-//! `ImportTaskId` carries no modelled pattern, so the id form is the one the operations
-//! that MINT an import task id use — `import-ami-<hex>` for an import IMAGE task and
-//! `import-snap-<hex>` for an import SNAPSHOT task, the two kinds the member documents
-//! ("the ID of the import image or import snapshot task to be canceled"), read through the
-//! crate's one reader of that form ([`crate::state::import_image_task_id_is_well_formed`],
-//! [`crate::state::import_snapshot_task_id_is_well_formed`]). An id outside both forms is
-//! not an EC2 resource id at all, so it is refused `InvalidID` BEFORE any lookup, and only
-//! an id EC2 could have issued that resolves to nothing is answered
-//! [`crate::state::invalid_conversion_task_id_not_found`].
+//! `ImportTaskId` carries no modelled pattern, so the id is read by the task KIND its
+//! prefix names — `import-ami-` for an import IMAGE task and `import-snap-` for an import
+//! SNAPSHOT task, the two kinds the member documents ("the ID of the import image or import
+//! snapshot task to be canceled") — through the crate's one reader of that form
+//! ([`crate::state::import_task_id_of_any_kind_is_well_formed`]). A value naming neither
+//! kind is refused [`crate::state::invalid_import_task_id_format`] BEFORE any lookup, and
+//! an id whose kind is read that this account holds no task for is answered
+//! [`crate::state::import_task_id_not_found`], which names that kind — both under
+//! `InvalidConversionTaskId`, the one code this family answers an id it cannot resolve
+//! with, whichever of the two causes it is.
 //!
 //! ## Shape of an operation
 //!
@@ -152,8 +153,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         use crate::scaffolded::Scaffolded;
         use crate::state::{
             IMPORT_TASK_STATE_ACTIVE, MAX_IMPORT_TASK_CANCEL_REASON_CHARS,
-            import_image_task_id_is_well_formed, import_snapshot_task_id_is_well_formed,
-            incorrect_state_of, invalid_conversion_task_id_not_found, require_service_state,
+            import_task_id_not_found, import_task_id_of_any_kind_is_well_formed,
+            incorrect_state_of, invalid_import_task_id_format, require_service_state,
         };
 
         // An import task carries no Region member of its own (it has no ARN and no zone),
@@ -174,11 +175,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         // An id that is not one EC2 issues for an import task of either kind names no
-        // resource to look up, so it is refused before the store is reached.
-        if !import_image_task_id_is_well_formed(import_task_id)
-            && !import_snapshot_task_id_is_well_formed(import_task_id)
-        {
-            return Err(Scaffolded::invalid_id(import_task_id));
+        // resource to look up, so it is refused before the store is reached — under the same
+        // code as an id this account holds no task for, because this family reports every
+        // import task id it cannot resolve under that one code.
+        if !import_task_id_of_any_kind_is_well_formed(import_task_id) {
+            return Err(invalid_import_task_id_format(import_task_id));
         }
 
         // The reason is retained on the task it cancels for the process's lifetime, and the
@@ -205,7 +206,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store.materialize_due_transitions();
 
         let Some(previous_state) = store.import_task_state(import_task_id) else {
-            return Err(invalid_conversion_task_id_not_found(import_task_id));
+            return Err(import_task_id_not_found(import_task_id));
         };
         // Only a task that is still importing can be cancelled: one already cancelling,
         // cancelled or completed is refused with the state it is in, worded the one way this

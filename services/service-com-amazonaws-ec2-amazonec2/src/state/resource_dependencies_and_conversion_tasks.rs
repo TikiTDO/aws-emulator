@@ -967,19 +967,19 @@ impl ComAmazonawsEc2Amazonec2State {
 /// kind of stored record, so it is held to the same width rather than to a second number.
 pub const MAX_IMPORT_TASK_CANCEL_REASON_CHARS: usize = 255;
 
-/// Refuse a request naming an import task id EC2 could have issued that this account holds
-/// no import task for: HTTP 400 [`INVALID_CONVERSION_TASK_ID`], EC2's code for a conversion
-/// (import) task id it cannot resolve.
+/// Refuse a request naming a CONVERSION task id EC2 could have issued that this account
+/// holds no conversion task for: HTTP 400 [`INVALID_CONVERSION_TASK_ID`], EC2's code for a
+/// conversion (import) task id it cannot resolve.
 ///
-/// The counterpart of [`require_well_formed_import_task_id`], which answers the same code
-/// for an id that is not an import task id at all: an operation acting on ONE named task
-/// cannot act on a task that is not there, where an import-task describe reports "a list of
-/// zero or more" tasks and so answers such an id with no row instead of an error.
+/// The counterpart of [`invalid_conversion_task_id_format`], which answers the same code
+/// for a value that is not a conversion task id at all: an operation acting on ONE named
+/// task cannot act on a task that is not there.
 ///
-/// ONE wording for every task of the VM import family a request names and this account does
-/// not hold, whichever operation names it: the CONVERSION tasks of
-/// [`ComAmazonawsEc2Amazonec2State::conversion_tasks`] are answered through it too, whose
-/// own malformed half is [`invalid_conversion_task_id_format`].
+/// ONE wording for every conversion task of
+/// [`ComAmazonawsEc2Amazonec2State::conversion_tasks`] a request names and this account
+/// does not hold, whichever operation names it. The IMPORT image and snapshot tasks are
+/// answered through [`import_task_id_not_found`] instead, which names the kind of task the
+/// id belongs to, the way the service words that refusal for them.
 pub fn invalid_conversion_task_id_not_found<E>(import_task_id: &str) -> Scaffolded<E> {
     id_not_found(
         INVALID_CONVERSION_TASK_ID,

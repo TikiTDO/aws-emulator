@@ -495,7 +495,6 @@ async fn a_malformed_import_task_id_is_refused_and_an_unknown_one_selects_nothin
         ("an id of another resource kind", vec!["snap-0123456789abcdef0"]),
         ("not an id at all", vec!["not-an-id"]),
         ("the prefix with no digits", vec!["import-snap-"]),
-        ("the right prefix, the wrong digit count", vec!["import-snap-0ff"]),
         ("the right prefix, a non-hex digit", vec!["import-snap-00000000000000ffg"]),
         (
             "a malformed id beside a known one",
@@ -517,7 +516,9 @@ async fn a_malformed_import_task_id_is_refused_and_an_unknown_one_selects_nothin
     }
 
     // A well-formed id of a task the account does not hold is not an error: it selects no
-    // row, alone or beside an id that does name a task.
+    // row, alone or beside an id that does name a task. The suffix's LENGTH is no part of
+    // what the member admits, so a hexadecimal suffix EC2 mints no id in reads as an id
+    // just the same.
     let unknown: Vec<(&str, Vec<&str>, Vec<String>)> = vec![
         (
             "a short-form id that names nothing",
@@ -527,6 +528,11 @@ async fn a_malformed_import_task_id_is_refused_and_an_unknown_one_selects_nothin
         (
             "a long-form id that names nothing",
             vec!["import-snap-00000000000000fff"],
+            Vec::new(),
+        ),
+        (
+            "an id in no minted length that names nothing",
+            vec!["import-snap-0ff"],
             Vec::new(),
         ),
         (
