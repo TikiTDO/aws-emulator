@@ -1,7 +1,7 @@
 Issue-Severity: CRITICAL
 Issue-Corpus: simparity-behavioral-ga-prod-v1
 Issue-Corpus-Kind: behavioral
-Issue-Trace-Ids: bedrock-runtime.bedrock-runtime-bare-model-id-needing-inference-profile-rejected bedrock-runtime.bedrock-runtime-converse-stream-content-block-index-bookkeeping bedrock-runtime.bedrock-runtime-converse-tool-result-with-an-unknown-tool-use-id-rejected bedrock-runtime.bedrock-runtime-invoke-model-stream-invocation-metrics-match-nonstreaming-usage bedrock-runtime.converse-additional-model-request-fields-validated-by-the-provider bedrock-runtime.converse-and-invoke-model-agree-on-the-invocation-envelope bedrock-runtime.converse-concurrent-requests-isolated bedrock-runtime.converse-performance-config-must-not-silently-degrade-to-standard bedrock-runtime.converse-stream-reassembles-exactly-what-converse-returns bedrock-runtime.converse-stream-reassembly-matches-stop-reason bedrock-runtime.invoke-model-nova-native-body-roundtrip bedrock-runtime.invoke-model-response-stream-byte-ordering bedrock-runtime.invoke-model-response-stream-frames-verify-their-own-crc32 bedrock-runtime.invoke-model-with-response-stream-nova-roundtrip bedrock-runtime.managed-quota-throttling-enforced-uniformly bedrock-runtime.unicode-text-round-trip-preserved bedrock-runtime__cloudwatch.refused-invocation-counted-as-client-error-never-as-an-invocation bedrock-runtime__iam__sts.bedrock-runtime-model-arn-scoped-session-denied-for-second-model bedrock__bedrock-runtime.bedrock-runtime-converse-with-a-deleted-guardrail-rejected bedrock-runtime.bedrock-runtime-converse-stream-tool-use-input-arrives-only-in-deltas bedrock-runtime.converse-tool-use-full-cycle bedrock-runtime.converse-basic-text-roundtrip bedrock-runtime.converse-multiturn-context-retained
+Issue-Trace-Ids: bedrock-runtime.bedrock-runtime-bare-model-id-needing-inference-profile-rejected bedrock-runtime.bedrock-runtime-converse-stream-content-block-index-bookkeeping bedrock-runtime.bedrock-runtime-converse-tool-result-with-an-unknown-tool-use-id-rejected bedrock-runtime.bedrock-runtime-invoke-model-stream-invocation-metrics-match-nonstreaming-usage bedrock-runtime.converse-additional-model-request-fields-validated-by-the-provider bedrock-runtime.converse-and-invoke-model-agree-on-the-invocation-envelope bedrock-runtime.converse-concurrent-requests-isolated bedrock-runtime.converse-performance-config-must-not-silently-degrade-to-standard bedrock-runtime.converse-stream-reassembles-exactly-what-converse-returns bedrock-runtime.converse-stream-reassembly-matches-stop-reason bedrock-runtime.invoke-model-nova-native-body-roundtrip bedrock-runtime.invoke-model-response-stream-byte-ordering bedrock-runtime.invoke-model-response-stream-frames-verify-their-own-crc32 bedrock-runtime.invoke-model-with-response-stream-nova-roundtrip bedrock-runtime.managed-quota-throttling-enforced-uniformly bedrock-runtime.unicode-text-round-trip-preserved bedrock-runtime__cloudwatch.refused-invocation-counted-as-client-error-never-as-an-invocation bedrock-runtime__iam__sts.bedrock-runtime-model-arn-scoped-session-denied-for-second-model bedrock__bedrock-runtime.bedrock-runtime-converse-with-a-deleted-guardrail-rejected bedrock-runtime.bedrock-runtime-converse-stream-tool-use-input-arrives-only-in-deltas bedrock-runtime.converse-tool-use-full-cycle bedrock-runtime.converse-basic-text-roundtrip bedrock-runtime.converse-multiturn-context-retained bedrock.invoke-model-basic bedrock.multi-turn-conversation bedrock.converse-system-prompt bedrock.bedrock-converse-stop-sequence-truncates-the-generated-text bedrock.inference-params-stop-sequences bedrock.inference-params-temperature bedrock.bedrock-tool-use-round-trip-returns-the-tool-result-in-the-final-answer
 Issue-Key: bedrock-runtime.converse-basic-text-roundtrip|run#8|AssertionError|assert "pong" in full_text.lower(), f"expected PONG in reply, got: {full_text!r}"
 Issue-Key: bedrock-runtime.converse-multiturn-context-retained|run#10|AssertionError|assert SECRET_NUMBER in text, f"expected {SECRET_NUMBER} recalled, got: {text!r}"
 Issue-Key: bedrock-runtime.bedrock-runtime-bare-model-id-needing-inference-profile-rejected|run#5|AssertionError|assert "PONG" in _text(via_profile).upper(), (
@@ -25,6 +25,13 @@ Issue-Key: bedrock-runtime__iam__sts.bedrock-runtime-model-arn-scoped-session-de
 Issue-Key: bedrock__bedrock-runtime.bedrock-runtime-converse-with-a-deleted-guardrail-rejected|run#13|AssertionError|assert "PONG" in _text(before).upper(), (
 Issue-Key: bedrock-runtime.bedrock-runtime-converse-stream-tool-use-input-arrives-only-in-deltas|run#27|AssertionError|assert _CITY.lower() in parsed["city"].lower(), (
 Issue-Key: bedrock-runtime.converse-tool-use-full-cycle|run#11|AssertionError|assert "paris" in tool_use["input"]["location"].lower(), (
+Issue-Key: bedrock.invoke-model-basic|run#9|AssertionError|assert "hello" in text.lower(), (
+Issue-Key: bedrock.multi-turn-conversation|run#8|AssertionError|assert "banana" in output_text, f"Expected 'banana' in response, got: {output_text!r}"
+Issue-Key: bedrock.converse-system-prompt|run#8|AssertionError|assert marker in guided_text, (
+Issue-Key: bedrock.bedrock-converse-stop-sequence-truncates-the-generated-text|run#6|AssertionError|assert "1" in stopped_text and "6" in stopped_text, (
+Issue-Key: bedrock.inference-params-stop-sequences|run#6|AssertionError|assert "1" in stopped_text and "6" in stopped_text, (
+Issue-Key: bedrock.inference-params-temperature|run#7|AssertionError|assert hot_distinct > cold_distinct, (
+Issue-Key: bedrock.bedrock-tool-use-round-trip-returns-the-tool-result-in-the-final-answer|run#10|AssertionError|assert tool_use["input"] == {"symbol": _SYMBOL}, (
 Issue-Commit: 3945994041ceeb2d9433bf9ac91cf7eef00f38b4
 
 # bedrock-runtime generation stage serves a constant emulator-notice string instead of any prompt-responsive text, and fills toolUse.input with the schema property names
@@ -93,6 +100,18 @@ to look computed (code_reviewer BLOCKER on
 services/service-com-amazonaws-bedrockruntime-amazonbedrockfrontendservice/src/state/generation.rs), which is
 the correct call: a rule-based answer generator is not inference. Closing this defect needs a real model runtime
 in the platform, so it is a platform blocker rather than a fix anyone can write in a service crate.
+
+Seven more checks of these same two causes, moved here with their replay keys from the bundled report
+20261109T011501Z-bedrock-8-net-new-data-plane-causes-converse.md (whose other causes — ConverseStream
+delivering its turn as one delta, and Converse refusing consecutive user-role messages — are fixed and
+landed): bedrock.invoke-model-basic, bedrock.multi-turn-conversation, bedrock.converse-system-prompt,
+bedrock.bedrock-converse-stop-sequence-truncates-the-generated-text, bedrock.inference-params-stop-sequences
+and bedrock.inference-params-temperature all read the completion and find the constant notice (Cause 1 here);
+bedrock.bedrock-tool-use-round-trip-returns-the-tool-result-in-the-final-answer reads toolUse.input and finds
+{'symbol': 'symbol'} (Cause 2 here). The temperature check additionally needs the served text to VARY with
+the sampling parameters, which is the same missing capability seen from the other side: with no model there
+is nothing to sample. Nothing changed about the blocker above — there is still no model runtime in this
+platform — so these keys stay FILED here rather than being closed anywhere.
 
 ## Steps to Reproduce
 1. git_clone the repo and let the behavioral suite build and boot the emulator.

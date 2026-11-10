@@ -40,7 +40,9 @@ const EVENT_STREAM: &str = "application/vnd.amazon.eventstream";
 
 /// The frames a `ConverseStream` turn that runs to completion emits, in order —
 /// `ConverseStreamOutput`'s own member names (smithy_query(query="shape",
-/// shape="ConverseStreamOutput")).
+/// shape="ConverseStreamOutput")). A content block arrives as SEVERAL
+/// `contentBlockDelta` events a client appends, so the run of them counts as the
+/// one entry here (see [`delta_runs_collapsed`]).
 const CONVERSE_STREAM_FRAMES: [&str; 5] = [
     "messageStart",
     "contentBlockDelta",
@@ -48,6 +50,21 @@ const CONVERSE_STREAM_FRAMES: [&str; 5] = [
     "messageStop",
     "metadata",
 ];
+
+/// `frames` with each RUN of consecutive `contentBlockDelta` events reduced to
+/// one entry, so a frame sequence can be compared against the event order a turn
+/// emits however many increments one block is delivered in.
+fn delta_runs_collapsed(frames: &[&str]) -> Vec<String> {
+    let mut collapsed: Vec<String> = Vec::new();
+    for frame in frames {
+        let repeats_a_delta = *frame == "contentBlockDelta"
+            && collapsed.last().is_some_and(|last| last == frame);
+        if !repeats_a_delta {
+            collapsed.push((*frame).to_string());
+        }
+    }
+    collapsed
+}
 
 fn emulator() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
@@ -466,9 +483,9 @@ fn mentions(payload: &Value, needle: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// RULE: `ConverseStream` serves the same turn `Converse` serves and frames it as
-/// the `ConverseStreamOutput` events — `messageStart`, a `contentBlockDelta` and
-/// `contentBlockStop` per content block, `messageStop`, `metadata` — in a
-/// `application/vnd.amazon.eventstream` body, with the assistant text, the stop
+/// the `ConverseStreamOutput` events — `messageStart`, the `contentBlockDelta`
+/// events and `contentBlockStop` per content block, `messageStop`, `metadata` — in
+/// a `application/vnd.amazon.eventstream` body, with the assistant text, the stop
 /// reason and the token usage identical to what `Converse` reports for the same
 /// request.
 #[tokio::test]
@@ -523,9 +540,31 @@ async fn converse_stream_frames_the_turn_converse_serves() {
         let frames = decode_frames(case, &stream.body);
         let order: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(
-            order,
+            delta_runs_collapsed(&order),
             CONVERSE_STREAM_FRAMES.to_vec(),
             "case {case:?}: expected the frame order {CONVERSE_STREAM_FRAMES:?}, got {order:?}"
+        );
+        // The block is delivered as INCREMENTS, so a client that appends what it
+        // reads is exercised: a block longer than one increment arrives as
+        // several deltas, and one that fits in a single increment as one.
+        let delta_count = order
+            .iter()
+            .filter(|frame| **frame == "contentBlockDelta")
+            .count();
+        let longer_than_one_increment = usize::try_from(state::count_text_tokens(&expected_text))
+            .unwrap_or(usize::MAX)
+            > state::stream_framing::TOKENS_PER_DELTA;
+        assert_eq!(
+            delta_count > 1,
+            longer_than_one_increment,
+            "case {case:?}: a block of {} token(s) must arrive as {} delta(s), got \
+             {delta_count} in {order:?}",
+            state::count_text_tokens(&expected_text),
+            if longer_than_one_increment {
+                "several"
+            } else {
+                "one"
+            }
         );
 
         let by_name = |name: &str| {
@@ -543,7 +582,6 @@ async fn converse_stream_frames_the_turn_converse_serves() {
             by_name("messageStart")
         );
 
-        let delta = by_name("contentBlockDelta");
         let streamed: String = frames
             .iter()
             .filter(|(frame, _)| frame == "contentBlockDelta")
@@ -559,11 +597,18 @@ async fn converse_stream_frames_the_turn_converse_serves() {
             "case {case:?}: the deltas must concatenate to the text Converse answers, \
              got {streamed:?}"
         );
-        assert_eq!(
-            delta["contentBlockIndex"].as_i64(),
-            Some(0),
-            "case {case:?}: the first delta is for content block 0, got {delta}"
-        );
+        // Every delta of the block carries that block's own index, which is what
+        // tells a client which block it is appending to.
+        for (_, payload) in frames
+            .iter()
+            .filter(|(frame, _)| frame == "contentBlockDelta")
+        {
+            assert_eq!(
+                payload["contentBlockIndex"].as_i64(),
+                Some(0),
+                "case {case:?}: every delta is for content block 0, got {payload}"
+            );
+        }
         assert_eq!(
             by_name("contentBlockStop")["contentBlockIndex"].as_i64(),
             Some(0),
@@ -627,23 +672,6 @@ async fn converse_stream_refuses_a_bad_request_with_the_modelled_error() {
             "an empty conversation",
             claude,
             json!({ "messages": [] }),
-            400,
-            "ValidationException",
-        ),
-        (
-            "a conversation that starts with the assistant",
-            claude,
-            json!({ "messages": [{"role": "assistant", "content": [{"text": "hi"}]}] }),
-            400,
-            "ValidationException",
-        ),
-        (
-            "two user turns in a row",
-            claude,
-            json!({ "messages": [
-                {"role": "user", "content": [{"text": "one"}]},
-                {"role": "user", "content": [{"text": "two"}]},
-            ] }),
             400,
             "ValidationException",
         ),

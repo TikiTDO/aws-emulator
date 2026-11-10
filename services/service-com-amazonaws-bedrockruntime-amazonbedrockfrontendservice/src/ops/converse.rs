@@ -14,7 +14,8 @@
 //! The supplied `inferenceConfig` bounds that message: it is composed to fit
 //! `maxTokens` and it HALTS where the first configured `stopSequences` entry
 //! completes (see [`crate::state::halt_at_stop_sequence`]), so a configured stop
-//! sequence is the last thing the turn serves and nothing follows it.
+//! sequence is the last thing the turn serves, nothing follows it, and the turn
+//! reports `stop_sequence` as what stopped it.
 //!
 //! A mandatory `toolConfig.toolChoice` (`any` or `tool`) obliges the turn to
 //! request a tool instead of generating text: the assistant message is then one
@@ -322,9 +323,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )));
         }
 
-        // A conversation is a non-empty sequence of turns that starts with the
-        // user and alternates user/assistant — the rule `ConverseStream` states
-        // too, so both read it from `crate::state`.
+        // A conversation needs a turn to answer; the ORDER its roles appear in
+        // is not a precondition — the rule `ConverseStream` states too, so both
+        // read it from `crate::state`.
         let messages =
             crate::state::validate_conversation(input.messages.as_ref()).map_err(validation)?;
         // Every tool result in that conversation has to address a tool request

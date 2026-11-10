@@ -39,6 +39,11 @@ pub struct EmulatedCompletion {
     /// `true` only when the cap was reached before the completion was finished,
     /// i.e. the budget was too small even for [`EMULATED_COMPLETION_FLOOR`].
     pub truncated: bool,
+    /// `true` when one of the request's configured stop sequences completed
+    /// inside this text, so generation ended ON that sequence rather than
+    /// because the completion had nothing left to say or because the cap cut it
+    /// off. It is what a turn reports as the CAUSE of its stop.
+    pub halted_at_stop_sequence: bool,
 }
 
 /// The completion a synchronous inference call answers with, composed to fit
@@ -59,7 +64,9 @@ pub struct EmulatedCompletion {
 /// `stop_sequences` are the sequences the request configured, applied by
 /// [`halt_at_stop_sequence`]: generation ends where the first of them completes,
 /// so a halted completion is NOT one the ceiling cut off however little of the
-/// budget it used.
+/// budget it used — it is reported in
+/// [`EmulatedCompletion::halted_at_stop_sequence`], which is the CAUSE a served
+/// turn names as its stop reason.
 pub fn emulated_completion(
     model_id: &str,
     messages: u32,
@@ -100,8 +107,13 @@ pub fn emulated_completion_with(
         Some(text) => EmulatedCompletion {
             text,
             truncated: false,
+            halted_at_stop_sequence: true,
         },
-        None => EmulatedCompletion { text, truncated },
+        None => EmulatedCompletion {
+            text,
+            truncated,
+            halted_at_stop_sequence: false,
+        },
     };
     if count_text_tokens(EMULATED_COMPLETION_FLOOR) > max_output_tokens {
         return halted(

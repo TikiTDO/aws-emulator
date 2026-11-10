@@ -158,8 +158,9 @@ fn cut_at_first_stop_sequence(text: &str, stop_sequences: &[&str]) -> Option<Str
 /// RULE: a stop sequence a request configures HALTS generation — the served text
 /// ends with the first of the configured sequences to complete and carries
 /// nothing after it, whatever generation budget is left over — so the turn ends
-/// on the sequence rather than at the token ceiling; a request that configures
-/// none, or whose text carries none, is served the whole completion unchanged.
+/// on the sequence, reporting `stop_sequence` rather than the ceiling's stop
+/// reason; a request that configures none, or whose text carries none, is served
+/// the whole completion unchanged.
 #[tokio::test]
 async fn converse_halts_the_served_text_at_the_first_configured_stop_sequence() {
     let router = emulator();
@@ -232,13 +233,15 @@ async fn converse_halts_the_served_text_at_the_first_configured_stop_sequence() 
                     "case {case:?}: expected the halted text to be shorter than the \
                      unconfigured {full:?}, got {served:?}"
                 );
-                // Generation ended on the sequence, not at the ceiling, so the
-                // ceiling's stop reason is not what this turn reports.
+                // Generation ended ON the sequence rather than at the ceiling,
+                // which is the cause the modelled `StopReason` names
+                // `stop_sequence` (smithy_query(query="shape",
+                // shape="StopReason")).
                 assert_eq!(
                     body["stopReason"].as_str(),
-                    Some("end_turn"),
+                    Some("stop_sequence"),
                     "case {case:?}: expected a turn halted at a stop sequence to report \
-                     end_turn, got {:?}",
+                     stop_sequence, got {:?}",
                     body["stopReason"]
                 );
             }

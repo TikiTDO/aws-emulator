@@ -589,15 +589,25 @@ async fn every_invocation_surface_applies_the_account_enforced_guardrail() {
                         })
                 };
                 let stop = event("messageStop");
-                let delta = event("contentBlockDelta");
                 let stop_reason = stop.get("stopReason").and_then(Value::as_str);
-                let text = delta
-                    .pointer("/delta/text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_else(|| {
-                        panic!("case {case:?}: the stream delivered no text: {delta}")
-                    });
-                assert_guarded_turn(case, row.expected, row.messaging, stop_reason, text);
+                // The block arrives as the increments a client appends, so the
+                // turn's text is the deltas reassembled.
+                let text: String = frames
+                    .iter()
+                    .filter(|(event_type, _)| event_type == "contentBlockDelta")
+                    .map(|(_, payload)| {
+                        payload
+                            .pointer("/delta/text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                    .collect();
+                assert!(
+                    !text.is_empty(),
+                    "case {case:?}: the stream delivered no text: {frames:?}"
+                );
+                assert_guarded_turn(case, row.expected, row.messaging, stop_reason, &text);
             }
         }
     }

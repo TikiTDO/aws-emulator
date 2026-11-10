@@ -9,13 +9,16 @@
 //! `ConverseStreamOutput` events instead of one JSON object.
 //!
 //! The frames, in the order the model's union documents them for a turn that
-//! completes: `messageStart` (the assistant's role), one `contentBlockDelta` per
-//! content block of the message, `contentBlockStop`, `messageStop` (the stop
-//! reason) and `metadata` (the usage and the latency actually measured). No
-//! language model runs in this emulator, so the turn's text is produced in one
-//! step (see [`crate::state::emulated_completion_text`]) and therefore arrives as
-//! one delta per block — nothing here splits it into fabricated increments, and
-//! nothing is echoed back from the request.
+//! completes: `messageStart` (the assistant's role), the `contentBlockDelta`
+//! events of each content block of the message, `contentBlockStop`,
+//! `messageStop` (the stop reason) and `metadata` (the usage and the latency
+//! actually measured). A streaming surface delivers its turn as INCREMENTS a
+//! client appends, so each block arrives as several deltas carrying that block's
+//! own index ([`crate::state::stream_framing`]), which reassemble to exactly what
+//! `Converse` answers with for the same request. No language model runs in this
+//! emulator, so where the content is CUT is all that is decided here: the text
+//! itself is the one generation stage's ([`crate::state::emulated_completion_text`]),
+//! and nothing is echoed back from the request.
 //!
 //! The supplied `inferenceConfig` bounds that text exactly as it bounds
 //! `Converse`'s: it is composed to fit `maxTokens` and it halts where the first
@@ -25,11 +28,12 @@
 //! A turn a mandatory `toolConfig.toolChoice` obliged to request a tool carries
 //! no text: its block opens with a `contentBlockStart` naming the minted
 //! `toolUseId` and the tool, its input arrives in that block's
-//! `contentBlockDelta`, and `messageStop` reports `tool_use`. That input is the
-//! argument object the requested tool's own `inputSchema` describes
-//! ([`crate::state::tool_input_arguments`]), serialized once, so the fragments a
-//! streaming client reassembles and the document `Converse` answers with for the
-//! same request are one value.
+//! `contentBlockDelta` events, and `messageStop` reports `tool_use`. That input is
+//! the argument object the requested tool's own `inputSchema` describes
+//! ([`crate::state::tool_input_arguments`]), serialized once and cut into
+//! increments like any other content, so the fragments a streaming client
+//! reassembles and the document `Converse` answers with for the same request are
+//! one value.
 //!
 //! This operation is hand-authored rather than generated: its output is a
 //! `@streaming` union, which the op-stub generator declines
@@ -58,8 +62,7 @@
 //!
 //! * `ValidationException` (HTTP 400) — the input fails the constraints Amazon
 //!   Bedrock states (a `modelId` that is not a model identifier, a conversation
-//!   that is not user-first and alternating, a model the Converse API does not
-//!   serve).
+//!   with no turn to answer, a model the Converse API does not serve).
 //! * `ResourceNotFoundException` (HTTP 404) — the model identifier names no model.
 //! * `AccessDeniedException` (403), `InternalServerException` (500),
 //!   `ModelErrorException` (424), `ModelNotReadyException` (429),
@@ -256,7 +259,7 @@ impl<Eng: Send + Sync + 'static> ConverseStream<Eng> {
             // A tool request opens its block with the id and the name, and its
             // input arrives in the block's deltas — the only place a streaming
             // client reads it.
-            let delta = match block {
+            let content = match block {
                 ContentBlock::toolUse(tool_use) => {
                     self.frame(
                         protocol,
@@ -272,24 +275,37 @@ impl<Eng: Send + Sync + 'static> ConverseStream<Eng> {
                         },
                         &ContentBlockStartEvent::SCHEMA,
                     )?;
-                    ContentBlockDelta::toolUse(ToolUseBlockDelta {
-                        input: crate::state::document_to_json(&tool_use.input).to_string(),
-                    })
+                    crate::state::document_to_json(&tool_use.input).to_string()
                 }
-                ContentBlock::Text(text) => ContentBlockDelta::Text(text.clone()),
+                ContentBlock::Text(text) => text.clone(),
                 // `ConverseTurn::content` answers with those two kinds only.
                 _ => continue,
             };
-            self.frame(
-                protocol,
-                &mut frames,
-                "contentBlockDelta",
-                &ContentBlockDeltaEvent {
-                    delta,
-                    content_block_index,
-                },
-                &ContentBlockDeltaEvent::SCHEMA,
-            )?;
+            // Which kind of content this block carries is a property of the
+            // block, so it is decided once rather than per increment.
+            let carries_a_tool_request = matches!(block, ContentBlock::toolUse(_));
+            // The block is delivered as the increments a client appends: each
+            // delta carries a piece of this block's content and this block's own
+            // index, and the pieces reassemble to the whole of it.
+            for piece in crate::state::stream_framing::delta_pieces(&content) {
+                let delta = if carries_a_tool_request {
+                    ContentBlockDelta::toolUse(ToolUseBlockDelta {
+                        input: piece.to_string(),
+                    })
+                } else {
+                    ContentBlockDelta::Text(piece.to_string())
+                };
+                self.frame(
+                    protocol,
+                    &mut frames,
+                    "contentBlockDelta",
+                    &ContentBlockDeltaEvent {
+                        delta,
+                        content_block_index,
+                    },
+                    &ContentBlockDeltaEvent::SCHEMA,
+                )?;
+            }
             self.frame(
                 protocol,
                 &mut frames,

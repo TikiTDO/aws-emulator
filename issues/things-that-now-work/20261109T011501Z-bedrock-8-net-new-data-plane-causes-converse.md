@@ -1,21 +1,41 @@
 Issue-Severity: HIGH
 Issue-Corpus: simparity-behavioral-aws-v1
 Issue-Corpus-Kind: behavioral
-Issue-Trace-Ids: bedrock.invoke-model-basic bedrock.multi-turn-conversation bedrock.converse-system-prompt bedrock.bedrock-converse-stop-sequence-truncates-the-generated-text bedrock.inference-params-stop-sequences bedrock.inference-params-temperature bedrock.streaming-collects-full-response bedrock.bedrock-tool-use-round-trip-returns-the-tool-result-in-the-final-answer bedrock.error-validation-wrong-role-order
-Issue-Key: bedrock.invoke-model-basic|run#9|AssertionError|assert "hello" in text.lower(), (
-Issue-Key: bedrock.multi-turn-conversation|run#8|AssertionError|assert "banana" in output_text, f"Expected 'banana' in response, got: {output_text!r}"
-Issue-Key: bedrock.converse-system-prompt|run#8|AssertionError|assert marker in guided_text, (
-Issue-Key: bedrock.bedrock-converse-stop-sequence-truncates-the-generated-text|run#6|AssertionError|assert "1" in stopped_text and "6" in stopped_text, (
-Issue-Key: bedrock.inference-params-stop-sequences|run#6|AssertionError|assert "1" in stopped_text and "6" in stopped_text, (
-Issue-Key: bedrock.inference-params-temperature|run#7|AssertionError|assert hot_distinct > cold_distinct, (
+Issue-Trace-Ids: bedrock.streaming-collects-full-response bedrock.error-validation-wrong-role-order
 Issue-Key: bedrock.streaming-collects-full-response|run#7|AssertionError|assert len(text_parts) > 1, (
-Issue-Key: bedrock.bedrock-tool-use-round-trip-returns-the-tool-result-in-the-final-answer|run#10|AssertionError|assert tool_use["input"] == {"symbol": _SYMBOL}, (
 Issue-Key: bedrock-runtime|Converse|ValidationException
 Issue-Commit: 016c7defff76bf6b624ee66d2926fa081d59376e
 
 # bedrock: 8 net-new data-plane causes — Converse/InvokeModel/ConverseStream generation ignores the prompt, the system prompt, stopSequences, temperature and prior turns; ConverseStream emits one delta; toolUse.input is a placeholder; consecutive user-role messages are refused ValidationException
 
 > _Note: this issue was identified against the code base at commit `016c7defff76bf6b624ee66d2926fa081d59376e`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
+
+## Resolution
+
+Causes 6 and 8 are FIXED, and the half of Cause 4 that needs no model with them; both of their replay keys
+pass (`bedrock.streaming-collects-full-response`, `bedrock-runtime|Converse|ValidationException`).
+
+* Cause 8: `Converse` and `ConverseStream` no longer apply a role-ORDER precondition. `Messages` is a plain
+  list, `Message.role` a required `ConversationRole` (`user`/`assistant`/`system`) and neither shape
+  constrains the sequence the roles may form, so consecutive user turns, a repeated assistant turn and a
+  conversation opening on a non-`user` role are all served; the one precondition left is that there is a turn
+  to answer (`crate::state::validate_conversation`).
+* Cause 6: a streamed content block is delivered as the INCREMENTS a client appends — several
+  `contentBlockDelta` events, each carrying that block's own `contentBlockIndex`, which reassemble to exactly
+  what `Converse` answers with (`src/state/stream_framing.rs`, used for both text blocks and a tool
+  request's input document).
+* Cause 4, in part: a turn whose generation ended because a configured stop sequence completed now reports
+  the modelled `stopReason` for that cause, `stop_sequence`, instead of `end_turn`.
+
+Causes 1, 2, 3, 5, 7 and the generation half of Cause 4 are NOT fixed and are NOT closed: they are the
+platform blocker this suite keeps rediscovering — NOTHING in this emulator can run a language model (no
+in-process model runtime, no inference engine crate in the tree, no weights and no external process), and a
+generation stage that instead COMPUTES the text from the request was implemented once before and refused at
+the merge gate as output synthesised to look computed. Their seven replay keys now live on the open report
+that owns that defect,
+`issues/things-that-do-not-work/20261028T194707Z-bedrock-runtime-generation-stage-serves-a-constant-emulator.md`
+(whose Cause 1 is the constant completion and whose Cause 2 is the self-referential `toolUse.input`), which
+this change added them to. They stay FILED there until the platform has a model runtime.
 
 ## Operation
 Converse

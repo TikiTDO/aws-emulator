@@ -70,6 +70,9 @@ pub mod generation;
 /// what starts the tool-use round trip.
 pub mod tool_use_turn;
 
+/// How a streamed turn's content is cut into the increments its event stream delivers.
+pub mod stream_framing;
+
 /// The base models this plane resolves a `modelId` against, and how each one is served.
 /// Here rather than in this file so one file holds one concern; the inventory the state
 /// struct seeds itself with is this module's.
@@ -2178,40 +2181,31 @@ pub fn content_block_tokens(block: &ContentBlock) -> u32 {
 }
 
 /// The message-sequence rule both Converse APIs state: a conversation is a
-/// non-empty sequence of turns that starts with the user and alternates between
-/// the user and the assistant.
+/// sequence of at least one turn, in whatever order the roles of those turns
+/// appear in.
 ///
-/// `Err` carries the refusal sentence, which the caller answers with the
-/// operation's own modelled `ValidationException` (400); each sentence states the
-/// rule the conversation broke, as the Converse API's own validation does.
-/// `Converse` and `ConverseStream` share this, so the same conversation is
-/// accepted or refused identically by both.
+/// The ORDER of the roles is not a precondition of being served. `Messages` is a
+/// plain list of `Message`, `Message.role` is a required `ConversationRole`
+/// (whose values are `user`, `assistant` and `system`), and neither shape
+/// constrains the sequence the roles may form — `Message`'s own documentation
+/// constrains only what content a role may carry (images and documents only on a
+/// `user` turn). A conversation that repeats a role, or opens on one other than
+/// `user`, is therefore served like any other: a client that appends two user
+/// turns before the assistant has answered, or re-appends a pending turn on a
+/// retry, is making a request this API takes.
+///
+/// What is left is the one thing a turn cannot be served without: a conversation
+/// to answer. `Err` carries the refusal sentence, which the caller answers with
+/// the operation's own modelled `ValidationException` (400). `Converse` and
+/// `ConverseStream` share this, so the same conversation is accepted or refused
+/// identically by both.
 pub fn validate_conversation(messages: Option<&Vec<Message>>) -> Result<&Vec<Message>, String> {
-    let messages = match messages {
-        Some(messages) if !messages.is_empty() => messages,
-        _ => {
-            return Err("A conversation must start with a user message. Try again with a \
-                 conversation that starts with a user message."
-                .to_string())
-        }
-    };
-    if messages[0].role != "user" {
-        return Err("A conversation must start with a user message. Try again with a \
+    match messages {
+        Some(messages) if !messages.is_empty() => Ok(messages),
+        _ => Err("A conversation must start with a user message. Try again with a \
              conversation that starts with a user message."
-            .to_string());
+            .to_string()),
     }
-    for (turn, message) in messages.iter().enumerate() {
-        let expected = if turn % 2 == 0 { "user" } else { "assistant" };
-        if message.role != expected {
-            return Err(format!(
-                "A conversation must alternate between user and assistant roles. Try again \
-                 with a conversation that alternates properly between user and assistant \
-                 roles: messages[{turn}] has role {}.",
-                message.role
-            ));
-        }
-    }
-    Ok(messages)
 }
 
 /// One served Converse-API turn: the assistant content this emulator answers
@@ -2239,6 +2233,10 @@ pub struct ConverseTurn {
     /// at a configured stop sequence ended on that sequence rather than at the
     /// cap, so this is `false` for it.
     pub truncated: bool,
+    /// Whether a configured stop sequence completed inside the text, which is
+    /// what makes the turn stop on `stop_sequence`
+    /// ([`EmulatedCompletion::halted_at_stop_sequence`]).
+    pub halted_at_stop_sequence: bool,
     /// Whether a guardrail blocked this turn, which is what makes it stop on
     /// `guardrail_intervened` and carry the guardrail's blocked messaging as its
     /// whole content ([`enforced_guardrail::EnforcedGuardrail`]).
@@ -2252,6 +2250,13 @@ impl ConverseTurn {
             enforced_guardrail::STOP_REASON_GUARDRAIL_INTERVENED
         } else if self.tool_use.is_some() {
             "tool_use"
+        } else if self.halted_at_stop_sequence {
+            // The modelled `StopReason` names the cause of the stop, and a
+            // request's `stopSequences` are "a sequence of characters that
+            // causes the model to stop generating the response": a turn that
+            // ended because one of them was generated reports THAT, not the
+            // reason a turn which simply finished reports.
+            "stop_sequence"
         } else if self.truncated {
             "max_tokens"
         } else {
@@ -2386,6 +2391,7 @@ pub fn converse_turn(
             output_tokens,
             cache,
             truncated: false,
+            halted_at_stop_sequence: false,
             guardrail_intervened: false,
         };
     }
@@ -2414,6 +2420,7 @@ pub fn converse_turn(
         output_tokens,
         cache,
         truncated: completion.truncated,
+        halted_at_stop_sequence: completion.halted_at_stop_sequence,
         guardrail_intervened: false,
     }
 }

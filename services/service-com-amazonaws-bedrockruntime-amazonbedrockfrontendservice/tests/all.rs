@@ -31,6 +31,8 @@ mod bedrock_runtime_streaming;
 mod catalogued_model_inference;
 #[path = "all/converse_prompt_cache.rs"]
 mod converse_prompt_cache;
+#[path = "all/converse_role_sequence_and_stream_increments.rs"]
+mod converse_role_sequence_and_stream_increments;
 #[path = "all/converse_tool_choice.rs"]
 mod converse_tool_choice;
 #[path = "all/converse_tool_use_arguments.rs"]

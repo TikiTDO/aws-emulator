@@ -781,8 +781,8 @@ impl ConverseTurn {
     /// the whole of the assistant's content, ending on
     /// [`STOP_REASON_GUARDRAIL_INTERVENED`].
     ///
-    /// A blocked turn requests no tool and reaches no generation cap: nothing was
-    /// generated for the request at all.
+    /// A blocked turn requests no tool, reaches no generation cap and halts on
+    /// no stop sequence: nothing was generated for the request at all.
     #[must_use]
     pub fn intervened(self, messaging: &str) -> Self {
         Self {
@@ -790,6 +790,7 @@ impl ConverseTurn {
             tool_use: None,
             output_tokens: count_text_tokens(messaging),
             truncated: false,
+            halted_at_stop_sequence: false,
             guardrail_intervened: true,
             ..self
         }

@@ -1831,10 +1831,9 @@ async fn a_model_this_emulator_runs_no_inference_for_is_refused_not_invented() {
 
 /// RULE: a request that breaks a rule the service states but the model cannot
 /// express is refused with the modelled `ValidationException` (400) — for
-/// `Converse`, a conversation that is not a non-empty user-first alternating
-/// sequence or a model the Converse API does not serve; for `InvokeModel`, a
-/// body that is not `application/json`, an empty body, and the guardrail
-/// combinations the operation documents as errors.
+/// `Converse`, a conversation with no turn to answer or a model the Converse API
+/// does not serve; for `InvokeModel`, a body that is not `application/json`, an
+/// empty body, and the guardrail combinations the operation documents as errors.
 #[tokio::test]
 async fn a_request_that_breaks_a_stated_rule_is_refused_with_validation_exception() {
     let router = emulator();
@@ -1845,34 +1844,6 @@ async fn a_request_that_breaks_a_stated_rule_is_refused_with_validation_exceptio
             "no messages at all",
             claude,
             serde_json::json!({ "messages": [] }),
-        ),
-        (
-            "leading assistant turn",
-            claude,
-            serde_json::json!({
-                "messages": [{"role": "assistant", "content": [{"text": "hi"}]}],
-            }),
-        ),
-        (
-            "two user turns in a row",
-            claude,
-            serde_json::json!({
-                "messages": [
-                    {"role": "user", "content": [{"text": "one"}]},
-                    {"role": "user", "content": [{"text": "two"}]},
-                ],
-            }),
-        ),
-        (
-            "two assistant turns in a row",
-            claude,
-            serde_json::json!({
-                "messages": [
-                    {"role": "user", "content": [{"text": "one"}]},
-                    {"role": "assistant", "content": [{"text": "two"}]},
-                    {"role": "assistant", "content": [{"text": "three"}]},
-                ],
-            }),
         ),
         (
             "a model the Converse API does not serve",
