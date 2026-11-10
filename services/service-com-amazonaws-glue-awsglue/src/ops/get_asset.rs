@@ -9,11 +9,12 @@
 //! ([`crate::state::ComAmazonawsGlueAwsglueState::asset`]). Every member comes from the
 //! stored record, so a read after a put reports what that put stored, and an identifier
 //! this account holds no asset under is refused with the modelled
-//! `EntityNotFoundException`. The `Attachments` and `IterableForms` of an asset, and the
-//! glossary terms associated with it, are written by the operations that own those
-//! surfaces, so an asset reports none of them until one of those writes has landed — the
-//! glossary terms `AssociateGlossaryTerms` merged onto the asset
-//! ([`crate::state::AssetEntry::glossary_terms`]) being the surface that has a writer.
+//! `EntityNotFoundException`. The attachments of an asset, its iterable forms and the
+//! glossary terms associated with it are written by the operations that own those surfaces,
+//! so an asset reports none of them until one of those writes has landed: the attachments
+//! `PutAttachment` wrote onto the asset ([`crate::state::AssetEntry::attachments`]) and the
+//! glossary terms `AssociateGlossaryTerms` merged onto it
+//! ([`crate::state::AssetEntry::glossary_terms`]) are the two surfaces that have a writer.
 //!
 //! ## Shape of an operation
 //!
@@ -191,16 +192,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         // Every member comes from the store, so two reads of one asset agree and a read
-        // after a put reports what that put stored, and a read after an association reports
-        // the terms that association merged onto the asset. Every collection the asset can
-        // carry is reported — EMPTY where the asset carries nothing — so a client can tell
-        // "none" from "not reported": the asset's forms as both the map and the list this
-        // read answers with (`crate::state::AssetEntry::reported_forms_map`,
-        // `reported_form_list`), its glossary terms, and the three collections no
-        // implemented operation writes yet. `PutAttachment` and the iterable-form writers
-        // are still scaffolds (`src/ops/put_attachment.rs`), and the catalog holds no
-        // metadata form for an asset at all, so those three are empty for every asset this
-        // store holds rather than absent from the answer.
+        // after a put reports what that put stored, a read after an association reports the
+        // terms that association merged onto the asset, and a read after an attachment
+        // reports that attachment. Every collection the asset can carry is reported — EMPTY
+        // where the asset carries nothing — so a client can tell "none" from "not
+        // reported": the asset's forms as both the map and the list this read answers with
+        // (`crate::state::AssetEntry::reported_forms_map`, `reported_form_list`), its
+        // glossary terms, and its attachments as both the keyed map and the list beside it
+        // (`attachments_map`, `attachment_form_list`). The iterable forms of an asset are
+        // the one collection no implemented operation writes — the model binds no operation
+        // that stores one — so that map is empty for every asset this store holds rather
+        // than absent from the answer.
         Ok(GetAssetOutput {
             id: entry.id.clone(),
             name: Some(entry.name.clone()),
@@ -210,10 +212,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             asset_type_id: entry.asset_type_id.clone(),
             glossary_terms: Some(entry.glossary_terms_list()),
             forms: Some(entry.reported_forms_map()),
-            attachments: Some(std::collections::HashMap::new()),
+            attachments: Some(entry.attachments_map()),
             iterable_forms: Some(std::collections::HashMap::new()),
             asset_forms: Some(entry.reported_form_list()),
-            metadata_forms: Some(Vec::new()),
+            metadata_forms: Some(entry.attachment_form_list()),
             // The asset type this asset is an instance of, by NAME — the asset type's own
             // record resolved through the store, so the name this reports is the name that
             // asset type's own read reports and cannot drift from it, whichever of the

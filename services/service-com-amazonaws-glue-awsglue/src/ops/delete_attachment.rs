@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteAttachment
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteAttachment`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteAttachment::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Deletes the attachment its `AttachmentName` names from the asset its `AssetIdentifier`
+//! names ([`crate::state::AssetEntry::attachments`]), so a later `GetAsset` of that asset
+//! reports neither the entry that name keyed nor its metadata form. The asset and the
+//! attachment both have to be ones this account holds: a request naming an asset it holds
+//! none of, or a name that asset holds no attachment under, is refused with the modelled
+//! `EntityNotFoundException` and deletes nothing.
 //!
 //! ## Shape of an operation
 //!
@@ -160,18 +158,125 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteAttachment` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteAttachmentErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteAttachment"))
+        // Assets live in one per-account namespace, so nothing here depends on the
+        // request's Region.
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            // This operation models a server fault, so an unreachable store is reported
+            // as that rather than as a client error the caller could act on.
+            return Err(DeleteAttachmentErrorModeled::InternalServiceException(
+                InternalServiceException {
+                    message: Some("the Glue asset store is unavailable".into()),
+                },
+            )
+            .into());
+        };
+
+        // "The identifier of the item within the iterable form. Required when
+        // iterableFormName is specified" (`ItemIdentifier`), and the form name is what says
+        // the delete targets "an item within the iterable form rather than ... the asset
+        // itself" (`IterableFormName`): the two name ONE target together, so a request
+        // carrying one without the other names no target at all and is refused with the
+        // modelled `InvalidInputException` rather than being read as a delete from the
+        // asset — worded as every operation of this surface that takes the pair words it.
+        match (
+            input.iterable_form_name.as_deref(),
+            input.item_identifier.as_deref(),
+        ) {
+            (Some(_), None) => {
+                return Err(DeleteAttachmentErrorModeled::InvalidInputException(
+                    InvalidInputException {
+                        message: Some(crate::state::item_identifier_required_message()),
+                        from_federation_source: None,
+                    },
+                )
+                .into());
+            }
+            (None, Some(_)) => {
+                return Err(DeleteAttachmentErrorModeled::InvalidInputException(
+                    InvalidInputException {
+                        message: Some(crate::state::iterable_form_name_required_message()),
+                        from_federation_source: None,
+                    },
+                )
+                .into());
+            }
+            _ => {}
+        }
+
+        let mut store = state.lock();
+
+        // "The unique identifier of the asset from which to delete the attachment": the
+        // attachment is held ON an asset, so a request naming an asset this account holds
+        // none of addresses an entity that does not exist and is refused with the modelled
+        // `EntityNotFoundException`, worded the one way the catalog's asset surface words a
+        // miss (`crate::state::asset_not_found_message`).
+        let Some(asset) = store.asset_mut(&input.asset_identifier) else {
+            return Err(DeleteAttachmentErrorModeled::EntityNotFoundException(
+                EntityNotFoundException {
+                    message: Some(crate::state::asset_not_found_message(
+                        &input.asset_identifier,
+                    )),
+                    from_federation_source: None,
+                },
+            )
+            .into());
+        };
+
+        // A delete that names an ITEM targets that item inside one of the asset's iterable
+        // forms. Nothing writes an iterable form onto an asset, so such a request names an
+        // entity that does not exist and is refused with the same modelled miss, in the one
+        // wording this surface refuses that target with
+        // (`crate::state::iterable_form_not_found_message`).
+        if let Some(iterable_form_name) = input.iterable_form_name.as_deref() {
+            return Err(DeleteAttachmentErrorModeled::EntityNotFoundException(
+                EntityNotFoundException {
+                    message: Some(crate::state::iterable_form_not_found_message(
+                        iterable_form_name,
+                        &input.asset_identifier,
+                    )),
+                    from_federation_source: None,
+                },
+            )
+            .into());
+        }
+
+        // "The name of the attachment to delete": the name is the attachment's whole address
+        // on the asset, so the delete is that map's own removal. A name the asset holds no
+        // attachment under addresses an entity that does not exist and is refused with the
+        // modelled `EntityNotFoundException`, leaving every attachment the asset does hold
+        // where it is. Wording for this miss is pinned by no recording or doc, so it is
+        // derived from the request: it names the attachment and the asset it was looked for
+        // on, the way this surface words a miss inside an asset.
+        if asset.remove_attachment(&input.attachment_name).is_none() {
+            return Err(DeleteAttachmentErrorModeled::EntityNotFoundException(
+                EntityNotFoundException {
+                    message: Some(format!(
+                        "Attachment {} not found on asset {}",
+                        input.attachment_name, input.asset_identifier
+                    )),
+                    from_federation_source: None,
+                },
+            )
+            .into());
+        }
+        ::tracing::info!(
+            operation = "DeleteAttachment",
+            asset = %input.asset_identifier,
+            attachment = %input.attachment_name,
+            "deleted an attachment from a Glue asset"
+        );
+
+        // The delete reports the asset it was addressed to, under BOTH names this surface
+        // carries it under — the modelled `AssetIdentifier` and the `Identifier` the
+        // recording shows beside it — so a caller that reads either correlates the answer
+        // with the asset it just changed; the two item members are echoed as the request
+        // sent them, which for a delete from the asset itself is nothing at all.
+        Ok(DeleteAttachmentOutput {
+            asset_identifier: Some(input.asset_identifier.clone()),
+            iterable_form_name: input.iterable_form_name.clone(),
+            item_identifier: input.item_identifier.clone(),
+            identifier: Some(input.asset_identifier.clone()),
+        })
     }
 }

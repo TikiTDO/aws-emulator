@@ -23,7 +23,16 @@ pub struct PutAttachmentInput {
     pub client_token: Option<String>,
 }
 
-#[smithy_macros::smithy(shape = "com.amazonaws.glue#PutAttachmentResponse")]
+/// `PutAttachment`'s response: the five members the model declares, in the model's own
+/// member order, and the asset the attachment was written onto appended last.
+///
+/// Member set and order from
+/// `smithy_query(query="operation", operation="PutAttachment")`, plus `AssetId` — a member
+/// the real service reports and the on-disk model omits, which is why the schema and the
+/// serializer come from `types/recorded_catalog_members.rs` rather than from the derive (see
+/// that module's note). It carries the asset the write was addressed to, exactly as the
+/// modelled `AssetIdentifier` beside it does, which is how the glossary term association
+/// reports the asset it changed under both of its names too.
 #[derive(Debug, Clone, Default)]
 pub struct PutAttachmentOutput {
     pub asset_identifier: Option<String>,
@@ -31,5 +40,55 @@ pub struct PutAttachmentOutput {
     pub item_identifier: Option<String>,
     pub attachment_name: Option<String>,
     pub form_type_id: Option<String>,
+    pub asset_id: Option<String>,
 }
+
+glue_schema_and_serializer!(
+    PutAttachmentOutput,
+    PUT_ATTACHMENT_OUTPUT_SCHEMA,
+    "com.amazonaws.glue#PutAttachmentResponse",
+    "com.amazonaws.glue",
+    "PutAttachmentResponse",
+    (
+        M_ASSET_IDENTIFIER,
+        asset_identifier,
+        "AssetIdentifier",
+        0,
+        opt,
+        string
+    ),
+    (
+        M_ITERABLE_FORM_NAME,
+        iterable_form_name,
+        "IterableFormName",
+        1,
+        opt,
+        string
+    ),
+    (
+        M_ITEM_IDENTIFIER,
+        item_identifier,
+        "ItemIdentifier",
+        2,
+        opt,
+        string
+    ),
+    (
+        M_ATTACHMENT_NAME,
+        attachment_name,
+        "AttachmentName",
+        3,
+        opt,
+        string
+    ),
+    (M_FORM_TYPE_ID, form_type_id, "FormTypeId", 4, opt, string),
+    (
+        M_ASSET_ID,
+        asset_id,
+        "AssetId",
+        5,
+        opt,
+        recorded("com.amazonaws.glue.recorded", string)
+    ),
+);
 

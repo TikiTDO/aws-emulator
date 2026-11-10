@@ -25,12 +25,11 @@ use std::sync::Arc;
 
 use serde_json::{json, Map, Value};
 use service_com_amazonaws_glue_awsglue::state::{
-    AssetEntry, ComAmazonawsGlueAwsglueState, CATALOG_RESOURCE_FORM_NAME,
-    CATALOG_RESOURCE_FORM_TYPE_ID, MAX_ASSETS,
+    AssetEntry, ComAmazonawsGlueAwsglueState, CATALOG_RESOURCE_FORM_NAME, MAX_ASSETS,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::wire::{call, emulator, emulator_on, error_code, ok};
+use crate::wire::{assert_catalog_form, call, emulator, emulator_on, error_code, ok};
 
 /// The longest `Identifier` the model accepts: "len 1..1087" on `AssetId`
 /// (`smithy_query shape=AssetId`), whose pattern `^[a-zA-Z0-9\-\:\/\.\_\*]+$` is what the
@@ -102,8 +101,9 @@ fn identifier_of_length(length: usize) -> String {
 /// stored, which is what a row's request names.
 ///
 /// Every read of an asset reports the catalog's own form on it beside them
-/// ([`CATALOG_RESOURCE_FORM_NAME`]), which this asserts on each read it is used on, so a
-/// row comparing the stored forms against the request it sent does not restate it.
+/// ([`CATALOG_RESOURCE_FORM_NAME`]), carrying the catalog's own document for the asset,
+/// which this asserts on each read it is used on ([`assert_catalog_form`]) so a row
+/// comparing the stored forms against the request it sent does not restate it.
 fn stored_forms(case: &str, read: &Value) -> Value {
     let mut forms = read
         .get("Forms")
@@ -111,11 +111,7 @@ fn stored_forms(case: &str, read: &Value) -> Value {
         .cloned()
         .unwrap_or_else(|| panic!("case {case}: GetAsset must report Forms, got {read}"));
     let catalog_form = forms.remove(CATALOG_RESOURCE_FORM_NAME);
-    assert_eq!(
-        catalog_form.as_ref(),
-        Some(&json!({ "FormTypeId": CATALOG_RESOURCE_FORM_TYPE_ID })),
-        "case {case}: every read must report the catalog's own form, got {read}"
-    );
+    assert_catalog_form(case, read, catalog_form.as_ref());
     Value::Object(forms)
 }
 

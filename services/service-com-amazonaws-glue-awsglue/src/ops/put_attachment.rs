@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op PutAttachment
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `PutAttachment`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`PutAttachment::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Attaches a form to the asset its `AssetIdentifier` names, under the request's
+//! `AttachmentName` ([`crate::state::AssetEntry::attachments`]), so a later `GetAsset` of
+//! that asset reports the attachment as the entry its name keys. "If an attachment with the
+//! same name already exists, it is overwritten", so one name holds one attachment however
+//! many writes land on it. The `FormTypeId` names a form type in the SAME store, by the
+//! `FormTypeId` the catalog minted for it or by the `FormTypeName` it was registered under,
+//! so a write naming an asset or a form type this account does not hold is refused with the
+//! modelled `EntityNotFoundException` rather than stored.
 //!
 //! ## Shape of an operation
 //!
@@ -173,18 +173,188 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `PutAttachment` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(PutAttachmentErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("PutAttachment"))
+        // Assets live in one per-account namespace, so nothing here depends on the
+        // request's Region.
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            // This operation models a server fault, so an unreachable store is reported
+            // as that rather than as a client error the caller could act on.
+            return Err(PutAttachmentErrorModeled::InternalServiceException(
+                InternalServiceException {
+                    message: Some("the Glue asset store is unavailable".into()),
+                },
+            )
+            .into());
+        };
+
+        // "The identifier of the item within the iterable form. Required when
+        // iterableFormName is specified" (`ItemIdentifier`), and the form name is what says
+        // the attachment "targets an item within the iterable form rather than the asset
+        // itself" (`IterableFormName`): the two name ONE target together, so a request
+        // carrying one without the other names no target at all and is refused with the
+        // modelled `InvalidInputException` rather than being read as an attachment to the
+        // asset. Worded as the association that targets the same pair words it
+        // (`src/ops/associate_glossary_terms.rs`), so one surface refuses the pair one way.
+        match (
+            input.iterable_form_name.as_deref(),
+            input.item_identifier.as_deref(),
+        ) {
+            (Some(_), None) => {
+                return Err(PutAttachmentErrorModeled::InvalidInputException(
+                    InvalidInputException {
+                        message: Some(crate::state::item_identifier_required_message()),
+                        from_federation_source: None,
+                    },
+                )
+                .into());
+            }
+            (None, Some(_)) => {
+                return Err(PutAttachmentErrorModeled::InvalidInputException(
+                    InvalidInputException {
+                        message: Some(crate::state::iterable_form_name_required_message()),
+                        from_federation_source: None,
+                    },
+                )
+                .into());
+            }
+            _ => {}
+        }
+
+        let mut store = state.lock();
+
+        // "The identifier of the form type for this attachment": the form type resolves
+        // against this store's form types, exactly as the form type a form of an asset
+        // names does (`src/ops/put_asset.rs`), so a write naming a form type that was never
+        // registered is refused with the modelled `EntityNotFoundException` rather than
+        // stored. It is resolved before the asset because the ASSET is then resolved once,
+        // mutably, and the write lands on that same record: no recording or doc pins which
+        // of the two misses a request carrying both is refused with.
+        if store.form_type_by_reference(&input.form_type_id).is_none() {
+            return Err(PutAttachmentErrorModeled::EntityNotFoundException(
+                EntityNotFoundException {
+                    message: Some(crate::state::form_type_not_found_message(
+                        &input.form_type_id,
+                    )),
+                    from_federation_source: None,
+                },
+            )
+            .into());
+        }
+
+        // An attachment that names an ITEM targets that item inside one of the asset's
+        // iterable forms. Nothing writes an iterable form onto an asset, so such a request
+        // names an entity that does not exist and is refused with the same modelled miss the
+        // asset's own resolution answers with, in the one wording this surface refuses that
+        // target with (`crate::state::iterable_form_not_found_message`).
+        if let Some(iterable_form_name) = input.iterable_form_name.as_deref() {
+            return Err(PutAttachmentErrorModeled::EntityNotFoundException(
+                EntityNotFoundException {
+                    message: Some(crate::state::iterable_form_not_found_message(
+                        iterable_form_name,
+                        &input.asset_identifier,
+                    )),
+                    from_federation_source: None,
+                },
+            )
+            .into());
+        }
+
+        // "The unique identifier of the asset to attach the form to": the attachment is
+        // written ONTO an asset, so a write naming an asset this account holds none of
+        // addresses an entity that does not exist and is refused with the modelled
+        // `EntityNotFoundException`, worded the one way the catalog's asset surface words a
+        // miss (`crate::state::asset_not_found_message`). The record is resolved mutably,
+        // under the lock the whole write runs under, so the record the refusals were decided
+        // against is the record this write lands on.
+        let Some(asset) = store.asset_mut(&input.asset_identifier) else {
+            return Err(PutAttachmentErrorModeled::EntityNotFoundException(
+                EntityNotFoundException {
+                    message: Some(crate::state::asset_not_found_message(
+                        &input.asset_identifier,
+                    )),
+                    from_federation_source: None,
+                },
+            )
+            .into());
+        };
+
+        // "A unique, case-sensitive identifier that you provide to ensure the idempotency of
+        // the request" (`ClientToken`): a retry of the very same write — same asset, same
+        // attachment name, same token — is answered with the record that write already
+        // stored, so the retry neither rewrites the attachment nor replaces its content. The
+        // request's references are resolved FIRST, so a retry is served only while the write
+        // it retries is one this catalog would still serve: a retry naming an asset or a
+        // form type the store no longer holds is refused like any other write naming an
+        // entity that does not exist.
+        if let Some(token) = input.client_token.as_deref() {
+            if let Some(stored) = asset
+                .attachment(&input.attachment_name)
+                .filter(|attachment| attachment.client_token.as_deref() == Some(token))
+            {
+                let form_type_id = stored.form_type_id.clone();
+                return Ok(attachment_response(&input, form_type_id));
+            }
+        }
+
+        // "If an attachment with the same name already exists, it is overwritten": a write
+        // under a name the asset already holds replaces that record, and one under a free
+        // name adds it — up to the attachments one asset may hold
+        // (`crate::state::MAX_ASSET_ATTACHMENTS`). This operation models no limit error, so
+        // past that ceiling the write is refused with the closest client error it does model
+        // rather than with a server fault, which an SDK would retry.
+        let Some(stored) = asset.put_attachment(
+            &input.attachment_name,
+            crate::state::AssetAttachment {
+                form_type_id: input.form_type_id.clone(),
+                content: input.content.clone(),
+                client_token: input.client_token.clone(),
+            },
+        ) else {
+            return Err(PutAttachmentErrorModeled::InvalidInputException(
+                InvalidInputException {
+                    message: Some(format!(
+                        "An asset cannot hold more than {} attachments",
+                        crate::state::MAX_ASSET_ATTACHMENTS
+                    )),
+                    from_federation_source: None,
+                },
+            )
+            .into());
+        };
+        let form_type_id = stored.form_type_id.clone();
+        ::tracing::info!(
+            operation = "PutAttachment",
+            asset = %input.asset_identifier,
+            attachment = %input.attachment_name,
+            form_type = %form_type_id,
+            "attached a form to a Glue asset"
+        );
+
+        // The write reports the attachment now on the record: the asset it was written to,
+        // the name it is keyed by and the form type it names, read off that record, so a
+        // later `GetAsset` of that asset reports the same entry under the same name. The two
+        // item members are echoed as the request sent them, which for an attachment to the
+        // asset itself is nothing at all.
+        Ok(attachment_response(&input, form_type_id))
     }
 }
+
+/// The modelled response for a stored attachment: the asset and the attachment name the
+/// request addressed, the form type the record holds, and the two item members echoed as the
+/// request sent them — so a write that stored an attachment and the retry of that write
+/// report one answer.
+///
+/// The asset is reported under BOTH names this surface carries it under, the modelled
+/// `AssetIdentifier` and the `AssetId` the recording shows beside it, so a caller that reads
+/// either correlates the answer with the asset it just changed.
+fn attachment_response(input: &PutAttachmentInput, form_type_id: String) -> PutAttachmentOutput {
+    PutAttachmentOutput {
+        asset_identifier: Some(input.asset_identifier.clone()),
+        iterable_form_name: input.iterable_form_name.clone(),
+        item_identifier: input.item_identifier.clone(),
+        attachment_name: Some(input.attachment_name.clone()),
+        form_type_id: Some(form_type_id),
+        asset_id: Some(input.asset_identifier.clone()),
+    }
+}
+

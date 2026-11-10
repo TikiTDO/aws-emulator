@@ -500,6 +500,44 @@ pub fn unassociable_glossary_term_message(identifier: &str) -> String {
     catalog_refusal_document(&format!("Glossary term not found: {identifier}"))
 }
 
+/// The message this surface refuses a request that names an `IterableFormName` without the
+/// `ItemIdentifier` beside it with: the value of that refusal's
+/// `InvalidInputException$Message`.
+///
+/// "The identifier of the item within the iterable form. Required when iterableFormName is
+/// specified" (`ItemIdentifier`), and the form name is what says the request targets an item
+/// "rather than the asset itself" (`IterableFormName`), so the two name ONE target together
+/// and a request carrying one without the other names no target at all.
+///
+/// One copy, shared by every operation of this surface that takes the pair — the glossary
+/// term association, the attachment write and the attachment delete — so three of them
+/// cannot disagree about how the one bad request is worded.
+pub fn item_identifier_required_message() -> String {
+    "ItemIdentifier is required when IterableFormName is specified".to_string()
+}
+
+/// The same for the other half of that pair: an `ItemIdentifier` named without the
+/// `IterableFormName` the item lives in.
+pub fn iterable_form_name_required_message() -> String {
+    "IterableFormName is required when ItemIdentifier is specified".to_string()
+}
+
+/// The message this surface refuses a request that targets an item inside an iterable form
+/// an asset does not carry with: the value of that refusal's
+/// `EntityNotFoundException$Message`.
+///
+/// Nothing writes an iterable form onto an asset — the model binds no operation that stores
+/// one, so every asset this store holds carries none — so such a request names an entity
+/// that does not exist. The wording is pinned by no recording or doc, so it is derived from
+/// the request: it names the iterable form and the asset it was looked for on, which are its
+/// two variable parts.
+///
+/// One copy, shared by every operation of this surface that takes that target, so none of
+/// them can disagree about how the one miss is worded.
+pub fn iterable_form_not_found_message(iterable_form_name: &str, asset_identifier: &str) -> String {
+    format!("Iterable form {iterable_form_name} not found on asset {asset_identifier}")
+}
+
 /// How many forms one asset may hold.
 ///
 /// The same ceiling the model puts on the forms of an ASSET TYPE — "len 1..100" on
@@ -575,7 +613,55 @@ pub struct AssetEntry {
     /// asset's forms and carries no glossary term member at all, so the association
     /// surface is the only writer.
     pub glossary_terms: Vec<String>,
+    /// The attachments on this asset, keyed by the `AttachmentName` each was written under,
+    /// as the form type the attachment was created against and the document it carries.
+    ///
+    /// "Additional attachments on the asset for more context, keyed by attachment name"
+    /// (`GetAssetOutput$Attachments`): `PutAttachment` is the writer, and "if an attachment
+    /// with the same name already exists, it is overwritten", so one name holds one
+    /// attachment however many writes land on it, and the map never grows past
+    /// [`MAX_ASSET_ATTACHMENTS`]. Ordered by attachment name, so two reads of one asset
+    /// report its attachments in one order.
+    ///
+    /// A put of the ASSET does not touch them: `PutAsset` sets an asset's forms and carries
+    /// no attachment member at all, so the attachment surface is the only writer.
+    pub attachments: BTreeMap<String, AssetAttachment>,
 }
+
+/// One attachment held on an asset: the form `PutAttachment` attached to it under an
+/// `AttachmentName`.
+///
+/// Every member of the modelled attachment is held here — the form type it was created
+/// against and its JSON content — beside the idempotency token of the write that last
+/// stored it, so a read reports the attachment the last write stored and a retry of that
+/// write is answered rather than stored twice.
+#[derive(Debug, Clone)]
+pub struct AssetAttachment {
+    /// "The identifier of the form type for this attachment"
+    /// (`PutAttachmentRequest$FormTypeId`), stored exactly as the write addressed it —
+    /// either the minted `FormTypeId` or the `FormTypeName` the form type was registered
+    /// under, the two forms [`ComAmazonawsGlueAwsglueState::form_type_by_reference`]
+    /// resolves — so a read reports the identifier the client wrote.
+    pub form_type_id: String,
+    /// "The JSON content of the form, conforming to the schema of the specified form type"
+    /// (`PutAttachmentRequest$Content`), stored exactly as the write sent the text; a read
+    /// of the asset reports the DOCUMENT that text carries ([`compact_json_content`]).
+    pub content: String,
+    /// The `ClientToken` of the write that last stored this attachment, when it carried one,
+    /// so a retry of that very write is answered with this record rather than rewriting it.
+    pub client_token: Option<String>,
+}
+
+/// How many attachments one asset may hold.
+///
+/// The attachment map is reported as an `AssetFormMap`, which carries no length of its own
+/// (`smithy_query shape=AssetFormMap`), so the ceiling is the one the model puts on the
+/// forms of the asset TYPE an asset is an instance of, exactly as the forms of an asset are
+/// bounded by it ([`MAX_ASSET_FORMS`]). A read reports every attachment TWICE, as the keyed
+/// entry and as the entry of the list beside it
+/// ([`AssetEntry::attachments_map`], [`AssetEntry::attachment_form_list`]), so this bound is
+/// what keeps the answer to one small read proportional to it.
+pub const MAX_ASSET_ATTACHMENTS: usize = MAX_ASSET_FORMS;
 
 impl AssetEntry {
     /// The record a put stores for an identifier this store does not hold yet: the
@@ -600,6 +686,7 @@ impl AssetEntry {
             updated_at: now,
             client_token,
             glossary_terms: Vec::new(),
+            attachments: BTreeMap::new(),
         }
     }
 
@@ -721,19 +808,129 @@ impl AssetEntry {
     }
 
     /// The catalog's own form on this asset, as every read of it reports it: the form type
-    /// the catalog names it with ([`CATALOG_RESOURCE_FORM_TYPE_ID`]).
+    /// the catalog names it with ([`CATALOG_RESOURCE_FORM_TYPE_ID`]) and, as its content,
+    /// the catalog's own document for the asset ([`Self::catalog_resource_document`]).
     ///
     /// Recorded behaviour, not a record of this store: the form and its form type are what
     /// the recorded reads of an asset carry (see [`CATALOG_RESOURCE_FORM_NAME`]), and no
     /// operation of this surface writes or clears one.
-    ///
-    /// It carries NO content. The content of a form is a document, and this emulator holds
-    /// no document for this one, so it reports none rather than one of its own invention.
     fn catalog_resource_form(&self) -> AssetFormEntry {
         AssetFormEntry {
             form_type_id: Some(CATALOG_RESOURCE_FORM_TYPE_ID.to_string()),
-            content: None,
+            content: Some(self.catalog_resource_document()),
         }
+    }
+
+    /// The document the catalog's OWN form on this asset carries: the asset's resource
+    /// members — its name, and its description when the asset holds one — as a JSON object,
+    /// name first.
+    ///
+    /// The form names the catalog's `Resource` form type, so what it carries is the
+    /// catalog's own record of the asset as a RESOURCE, which is the pair of members the
+    /// asset surface stores for it. It is computed from the record on each read rather than
+    /// stored, so it cannot drift from the `Name` and `Description` the same read reports:
+    /// a put that renames the asset or drops its description moves this document with it,
+    /// and an asset with no description carries a document with no `description` member
+    /// rather than a null one.
+    ///
+    /// `serde_json` renders each value, so a name or a description carrying a quote, a
+    /// backslash or a control character still yields a well-formed document; the members
+    /// are laid out here rather than through a map so the order is the catalog's and not
+    /// the alphabet's.
+    fn catalog_resource_document(&self) -> String {
+        let name = serde_json::Value::String(self.name.clone()).to_string();
+        match &self.description {
+            Some(description) => {
+                let description = serde_json::Value::String(description.clone()).to_string();
+                format!("{{\"name\":{name},\"description\":{description}}}")
+            }
+            None => format!("{{\"name\":{name}}}"),
+        }
+    }
+
+    /// The attachment this asset holds under `name`, or `None` when it holds none under
+    /// that name.
+    pub fn attachment(&self, name: &str) -> Option<&AssetAttachment> {
+        self.attachments.get(name)
+    }
+
+    /// This record's attachments as the modelled `AssetFormMap` a read of the asset reports,
+    /// keyed by attachment name: each entry the form type the attachment was created against
+    /// and the content rendered from the JSON document the write supplied, exactly as a
+    /// stored form's content is rendered ([`compact_json_content`]).
+    ///
+    /// Always a map, EMPTY for an asset no attachment has been written to: the member is how
+    /// a client reads which attachments an asset carries, so "none" is reported as the empty
+    /// map rather than by leaving the member out.
+    pub fn attachments_map(&self) -> HashMap<String, AssetFormEntry> {
+        self.reported_attachments().collect()
+    }
+
+    /// The same attachments as the LIST a read answers with beside the map, in
+    /// attachment-name order: one named entry per attachment, exactly as the form list
+    /// mirrors the form map ([`Self::reported_form_list`]).
+    ///
+    /// The same entries as [`Self::attachments_map`], so the two answers cannot disagree
+    /// about one attachment. What the recorded reads pin about this list is its SIZE — one
+    /// entry per attachment the asset holds, and none at all for an asset no attachment has
+    /// reached — so each entry states the attachment it stands for the way the form list
+    /// beside the map states a form: its name, its form type and its document, rather than an
+    /// object saying nothing about the attachment it is there for.
+    pub fn attachment_form_list(&self) -> Vec<AssetFormRecord> {
+        self.reported_attachments()
+            .map(|(name, attachment)| AssetFormRecord {
+                form_name: Some(name),
+                form_type_id: attachment.form_type_id,
+                content: attachment.content,
+            })
+            .collect()
+    }
+
+    /// The stored attachments as a read reports each of them. Ordered by attachment name, so
+    /// the map and the list a read reports follow one order.
+    fn reported_attachments(&self) -> impl Iterator<Item = (String, AssetFormEntry)> + '_ {
+        self.attachments.iter().map(|(name, attachment)| {
+            (
+                name.clone(),
+                AssetFormEntry {
+                    form_type_id: Some(attachment.form_type_id.clone()),
+                    content: Some(compact_json_content(&attachment.content)),
+                },
+            )
+        })
+    }
+
+    /// Write `attachment` onto this asset under `name`, reporting the record the asset holds
+    /// afterwards, or `None` when the asset holds no attachment under that name yet and one
+    /// more would take it past [`MAX_ASSET_ATTACHMENTS`].
+    ///
+    /// "If an attachment with the same name already exists, it is overwritten"
+    /// (`PutAttachment`), so a write under a name the asset already holds REPLACES that
+    /// record and leaves the count where it is — which is why the ceiling is only consulted
+    /// for a name the asset does not hold yet, and why a client can rewrite an attachment
+    /// however full the asset is.
+    pub fn put_attachment(
+        &mut self,
+        name: &str,
+        attachment: AssetAttachment,
+    ) -> Option<&AssetAttachment> {
+        if !self.attachments.contains_key(name) && self.attachments.len() >= MAX_ASSET_ATTACHMENTS
+        {
+            return None;
+        }
+        self.attachments.insert(name.to_string(), attachment);
+        self.attachments.get(name)
+    }
+
+    /// Remove the attachment this asset holds under `name`, reporting the record that was
+    /// removed, or `None` when the asset holds no attachment under that name.
+    ///
+    /// The name resolves exactly as a read of the attachment resolves one
+    /// ([`Self::attachment`]) — it is the attachment map's own key — so a delete reaches the
+    /// entry a read of the asset reports under that name, and the attachments the asset
+    /// holds under every other name are left where they are.
+    pub fn remove_attachment(&mut self, name: &str) -> Option<AssetAttachment> {
+        self.attachments.remove(name)
     }
 }
 

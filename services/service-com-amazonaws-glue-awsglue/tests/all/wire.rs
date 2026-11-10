@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use serde_json::Value;
+use service_com_amazonaws_glue_awsglue::state::CATALOG_RESOURCE_FORM_TYPE_ID;
 use smithy_server_runtime::MultiServiceRouter;
 
 /// This emulator's account id, which is also the default `CatalogId`.
@@ -136,6 +137,51 @@ pub fn error_message(body: &Value) -> String {
 /// both forms address the record.
 pub fn qualified_asset_type_id(name: &str) -> String {
     format!("glue_{ACCOUNT_ID}::{name}")
+}
+
+/// Assert that `form` is the catalog's OWN form on the asset `read` reports: it names the
+/// catalog's own form type and carries, as its content, the catalog's resource document for
+/// that asset — the `Name` and, when the asset has one, the `Description` the SAME read
+/// reports.
+///
+/// One copy, shared: every suite that reads an asset back sees that form beside the forms
+/// the asset's own puts stored, and what each of them checks is that the document agrees
+/// with the record the same read reports. The exact TEXT of the document, member order
+/// included, is pinned by `tests/all/asset_attachments.rs`.
+pub fn assert_catalog_form(case: &str, read: &Value, form: Option<&Value>) {
+    let form = form.unwrap_or_else(|| {
+        panic!("case {case}: every read of an asset must report the catalog's own form, got {read}")
+    });
+    assert_eq!(
+        form.get("FormTypeId").and_then(Value::as_str),
+        Some(CATALOG_RESOURCE_FORM_TYPE_ID),
+        "case {case}: the catalog's own form must name the catalog's own form type, got {form}"
+    );
+
+    let content = form
+        .get("Content")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("case {case}: the catalog's own form must carry its document, got {form}"));
+    let document: Value = serde_json::from_str(content).unwrap_or_else(|error| {
+        panic!("case {case}: the document must be JSON, got {content:?} ({error})")
+    });
+
+    let mut expected = serde_json::Map::new();
+    expected.insert(
+        "name".to_string(),
+        read.get("Name")
+            .cloned()
+            .unwrap_or_else(|| panic!("case {case}: the read must report the asset's Name, got {read}")),
+    );
+    if let Some(description) = read.get("Description") {
+        expected.insert("description".to_string(), description.clone());
+    }
+    assert_eq!(
+        document,
+        Value::Object(expected),
+        "case {case}: the catalog's own form must carry the asset's resource document, got \
+         {content:?} for {read}"
+    );
 }
 
 /// The names in a `GetTables` `TableList`, in the order the service returned them.

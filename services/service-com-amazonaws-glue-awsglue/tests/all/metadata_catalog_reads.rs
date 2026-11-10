@@ -27,7 +27,7 @@ use serde_json::{json, Map, Value};
 use service_com_amazonaws_glue_awsglue::state::MAX_ASSET_FORMS;
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::wire::{call, emulator, error_code, ok, qualified_asset_type_id};
+use crate::wire::{assert_catalog_form, call, emulator, error_code, ok, qualified_asset_type_id};
 
 /// How many characters the identifier the catalog mints for a glossary or a glossary term
 /// carries, and the alphabet it draws them from: 14 lowercase base-36 characters. `GlossaryId`
@@ -36,9 +36,8 @@ use crate::wire::{call, emulator, error_code, ok, qualified_asset_type_id};
 const CATALOG_ENTITY_ID_LENGTH: usize = 14;
 
 /// The form name the catalog's OWN form on an asset carries, which every read of an asset
-/// reports beside the forms a put stored, and the form type that form names.
+/// reports beside the forms a put stored.
 const CATALOG_RESOURCE_FORM_NAME: &str = "catalog::Resource";
-const CATALOG_RESOURCE_FORM_TYPE_ID: &str = "Resource";
 
 /// Create a glossary and answer the whole response.
 async fn create_glossary(router: &MultiServiceRouter, request: &Value) -> Value {
@@ -609,16 +608,13 @@ async fn a_read_of_an_asset_reports_every_collection_it_can_carry() {
         );
 
         // The forms map carries the asset's own forms and the catalog's own form, which
-        // names the catalog's own form type and carries no content of its own.
+        // names the catalog's own form type and carries the catalog's own document for the
+        // asset.
         let reported_forms = read
             .get("Forms")
             .and_then(Value::as_object)
             .unwrap_or_else(|| panic!("case {case}: the read must report Forms, got {read}"));
-        assert_eq!(
-            reported_forms.get(CATALOG_RESOURCE_FORM_NAME),
-            Some(&json!({ "FormTypeId": CATALOG_RESOURCE_FORM_TYPE_ID })),
-            "case {case}: every read must report the catalog's own form, got {read}"
-        );
+        assert_catalog_form(case, &read, reported_forms.get(CATALOG_RESOURCE_FORM_NAME));
         let sent_names: BTreeSet<&String> = forms
             .as_object()
             .expect("the row sends a map")

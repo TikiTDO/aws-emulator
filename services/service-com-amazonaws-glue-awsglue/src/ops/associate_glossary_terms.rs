@@ -209,7 +209,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // itself" (`IterableFormName`): the two name ONE target together, so a request
         // carrying one without the other names no target at all and is refused with the
         // modelled `InvalidInputException` rather than being read as an association to the
-        // asset.
+        // asset, in the one wording this surface refuses that pair with
+        // (`crate::state::item_identifier_required_message`).
         match (
             input.iterable_form_name.as_deref(),
             input.item_identifier.as_deref(),
@@ -217,10 +218,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             (Some(_), None) => {
                 return Err(AssociateGlossaryTermsErrorModeled::InvalidInputException(
                     InvalidInputException {
-                        message: Some(
-                            "ItemIdentifier is required when IterableFormName is specified"
-                                .to_string(),
-                        ),
+                        message: Some(crate::state::item_identifier_required_message()),
                         from_federation_source: None,
                     },
                 )
@@ -229,10 +227,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             (None, Some(_)) => {
                 return Err(AssociateGlossaryTermsErrorModeled::InvalidInputException(
                     InvalidInputException {
-                        message: Some(
-                            "IterableFormName is required when ItemIdentifier is specified"
-                                .to_string(),
-                        ),
+                        message: Some(crate::state::iterable_form_name_required_message()),
                         from_federation_source: None,
                     },
                 )
@@ -284,15 +279,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // iterable forms. Nothing writes an iterable form onto an asset — the model binds
         // no operation that stores one, so every asset this store holds carries none — so
         // such a request names an entity that does not exist and is refused with the same
-        // modelled miss the asset's own resolution answers with. Wording for this slice is
-        // pinned by no recording or doc, so it is derived from the request: it names the
-        // iterable form and the asset it was looked for on.
+        // modelled miss the asset's own resolution answers with, in the one wording this
+        // surface refuses that target with
+        // (`crate::state::iterable_form_not_found_message`).
         if let Some(iterable_form_name) = input.iterable_form_name.as_deref() {
             return Err(AssociateGlossaryTermsErrorModeled::EntityNotFoundException(
                 EntityNotFoundException {
-                    message: Some(format!(
-                        "Iterable form {iterable_form_name} not found on asset {}",
-                        input.asset_identifier
+                    message: Some(crate::state::iterable_form_not_found_message(
+                        iterable_form_name,
+                        &input.asset_identifier,
                     )),
                     from_federation_source: None,
                 },
