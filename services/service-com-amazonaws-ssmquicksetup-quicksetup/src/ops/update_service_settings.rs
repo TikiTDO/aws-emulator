@@ -66,6 +66,11 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+/// The validation path of the member this operation's role ARN arrives on: the model's
+/// member name in the lowerCamel spelling every validation clause of this endpoint names
+/// a member by (`aws_smithy_schema_server::constraints::path::member`).
+const EXPLORER_ENABLING_ROLE_ARN_PATH: &str = "explorerEnablingRoleArn";
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -173,9 +178,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })?;
 
         // `IAMRoleArn` carries an `@arnReference` to `AWS::IAM::Role` and no modelled
-        // `@pattern`, so the boundary validator admits any text and what that reference
-        // says the value IS is checked here — the one place that rule lives for every
-        // `IAMRoleArn` member of this service.
+        // `@pattern`, so the boundary validator admits any text and the form that
+        // reference names is applied here — `crate::state::iam_role_arn_rejection` is the
+        // one place that rule lives for every `IAMRoleArn` member of this service.
         let Some(role_arn) = input.explorer_enabling_role_arn else {
             // Every member of this input is optional and only what the request carries
             // is written, so an update naming nothing writes nothing: the region's
@@ -185,12 +190,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Ok(UpdateServiceSettingsOutput);
         };
         if let Some(why) =
-            crate::state::iam_role_arn_rejection("ExplorerEnablingRoleArn", &role_arn)
+            crate::state::iam_role_arn_rejection(EXPLORER_ENABLING_ROLE_ARN_PATH, &role_arn)
         {
-            return Err(UpdateServiceSettingsErrorModeled::ValidationException(
-                ValidationException { message: Some(why) },
-            )
-            .into());
+            // A restatement of a VALUE CONSTRAINT belongs to the layer that states every
+            // other one of this endpoint's, so it travels in that layer's shape — whose
+            // single member is the lowercase `message` a boundary refusal carries —
+            // rather than in this service's own modelled `ValidationException`, which is
+            // what carries a sentence of the service's OWN (a resource that is not there,
+            // a value its stored state disagrees with).
+            return Err(crate::scaffolded::Scaffolded::validation(why));
         }
 
         let region = crate::state::request_region(ctx.parts());

@@ -119,7 +119,10 @@ pub(crate) fn error_code(body: &Value) -> String {
         .to_string()
 }
 
-/// The `Message` a refusal carries.
+/// The `Message` a refusal carries: the member this service's own modelled
+/// `ValidationException` / `ResourceNotFoundException` state their sentence in. A refusal
+/// of the layer in FRONT of the service names its member in lowercase, so a suite that
+/// asserts one of those reads it at its own call site rather than through this helper.
 pub(crate) fn error_message(body: &Value) -> String {
     body.get("Message")
         .and_then(Value::as_str)

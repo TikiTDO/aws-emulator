@@ -657,7 +657,7 @@ async fn a_read_and_an_empty_update_change_nothing_a_later_caller_sees() {
 /// A value that is not an IAM role ARN is refused with the modelled 400
 /// `ValidationException` — never stored, and never a 501 — because `IAMRoleArn`
 /// carries an `@arnReference` to `AWS::IAM::Role`. The rows differ along which part
-/// of the ARN form is wrong.
+/// of the form that reference names is wrong.
 #[tokio::test]
 async fn a_value_that_is_not_an_iam_role_arn_is_refused_and_stored_settings_survive() {
     let router = emulator();
@@ -667,17 +667,25 @@ async fn a_value_that_is_not_an_iam_role_arn_is_refused_and_stored_settings_surv
         update_settings(&router, "us-west-2", &json!({ "ExplorerEnablingRoleArn": good })).await;
     assert_eq!(status, 200, "the first update must succeed, got {status} / {answer:?}");
 
-    let cases: [(&str, &str); 8] = [
+    let cases: [(&str, &str); 9] = [
         ("empty", ""),
         ("not an ARN at all", "QuickSetupExplorerRole"),
         ("an ARN prefix only", "arn:aws:iam"),
         ("an IAM user, not a role", "arn:aws:iam::000000000000:user/bob"),
         ("another service", "arn:aws:ssm:us-west-2:000000000000:role/Explorer"),
         ("an empty partition", "arn::iam::000000000000:role/Explorer"),
-        ("a role with no name", "arn:aws:iam::000000000000:role/"),
         (
-            "too many fields",
-            "arn:aws:iam::000000000000:role/Explorer:extra:more",
+            "a partition the ARN formats do not publish",
+            "arn:aws-moon:iam::000000000000:role/Explorer",
+        ),
+        (
+            // An IAM ARN carries no Region of its own.
+            "a Region in the IAM field",
+            "arn:aws:iam:us-west-2:000000000000:role/Explorer",
+        ),
+        (
+            "an account that is not twelve digits",
+            "arn:aws:iam::12345:role/Explorer",
         ),
     ];
 

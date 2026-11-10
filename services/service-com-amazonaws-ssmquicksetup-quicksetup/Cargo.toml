@@ -25,6 +25,12 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# The maintained regular-expression engine, so the form an `IAMRoleArn` member's
+# `@arnReference` names — which the model states as a reference rather than as a
+# `@pattern`, so the boundary validator cannot apply it — is matched by the same engine
+# the boundary validator runs a modelled `@pattern` through, rather than by a hand-rolled
+# restatement of the expression the refusal advertises.
+regex = "1.13"
 # Encodes/decodes the opaque `NextToken` the list operations hand out.
 hex = { workspace = true }
 # The IAM store a definition's `LocalDeploymentAdministrationRoleArn` is resolved against,

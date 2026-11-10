@@ -299,8 +299,10 @@ pub struct QuickSetupTypeEntry {
     /// operation="UpdateConfigurationDefinition")`) — a major and an optional minor
     /// of up to three digits each. Each type's template is versioned independently,
     /// so one type's history advances without the others', which is why the version
-    /// lives per entry rather than once for the whole catalog. Never empty; the
-    /// newest entry is what [`Self::latest_version`] reports.
+    /// lives per entry rather than once for the whole catalog. A history is not
+    /// contiguous: a revision is published out of band, so this carries the versions
+    /// the service offers rather than every number between the first and the newest.
+    /// Never empty; the newest entry is what [`Self::latest_version`] reports.
     pub versions: &'static [&'static str],
     /// Every parameter a configuration definition of this type must provide, in the
     /// order the documented table states them.
@@ -421,8 +423,9 @@ impl QuickSetupTypeEntry {
     }
 }
 
-/// The Quick Setup configuration types this service publishes, in a fixed order so
-/// two reads of the catalog report the same list.
+/// The Quick Setup configuration types this service publishes, ordered by `Type` —
+/// which is the order [`QUICK_SETUP_TYPE_CATALOG`] is published in, so two reads of the
+/// catalog report the same list in that order.
 ///
 /// Source: the configuration types this service's own model documents, from
 /// `smithy_query(query="doc", shape="ConfigurationDefinitionInput",
@@ -430,7 +433,11 @@ impl QuickSetupTypeEntry {
 /// `<name> (Type: AWSQuickSetupType-<type>)`, one per supported type (the doc text
 /// renders `AWS` as `Amazon Web Services`). `AWSQuickSetupType-SSM` is the Quick
 /// Setup default configuration type, which that member's tables do not itemise; it
-/// is published too because configuration definitions name it.
+/// is published too because configuration definitions name it. A type the service
+/// offers that this model revision's tables do not itemise at all is published the same
+/// way — the catalog is versioned out of band from the model, so the model's tables
+/// bound neither the membership nor the versions (which is also why `Type` is modelled
+/// as a patterned string rather than an enum).
 ///
 /// This list is both the DISCOVERY catalog `ListQuickSetupTypes` publishes and the
 /// set of configuration types a configuration definition may name: Quick Setup
@@ -453,20 +460,28 @@ pub const QUICK_SETUP_TYPE_CATALOG: &[QuickSetupTypeEntry] = &[
     // Conformance Packs
     QuickSetupTypeEntry {
         type_: "AWSQuickSetupType-CFGCPacks",
-        versions: &["1.0", "1.1"],
+        versions: &["1.0", "1.1", "3.0"],
         required_parameters: &[RequiredParameter { key: "CPackNames", when: RequiredWhen::Always }],
     },
     // Config Recording
     QuickSetupTypeEntry {
         type_: "AWSQuickSetupType-CFGRecording",
-        versions: &["1.0", "1.1", "1.2"],
+        versions: &["1.0", "1.1", "1.2", "3.1"],
         // Its table marks every entry of its own `(Optional)`.
+        required_parameters: &[],
+    },
+    // CloudWatch agent configuration
+    QuickSetupTypeEntry {
+        type_: "AWSQuickSetupType-CWASetup",
+        versions: &["1.0", "1.3"],
+        // A type this model revision's parameter tables do not itemise, so nothing but
+        // the parameters common to every definition is documented for it.
         required_parameters: &[],
     },
     // Default Host Management Configuration
     QuickSetupTypeEntry {
         type_: "AWSQuickSetupType-DHMC",
-        versions: &["1.0", "1.1"],
+        versions: &["1.0", "1.1", "2.1"],
         required_parameters: &[RequiredParameter {
             key: PARAMETER_TARGET_ORGANIZATIONAL_UNITS,
             when: RequiredWhen::Always,
@@ -475,14 +490,14 @@ pub const QUICK_SETUP_TYPE_CATALOG: &[QuickSetupTypeEntry] = &[
     // DevOps Guru
     QuickSetupTypeEntry {
         type_: "AWSQuickSetupType-DevOpsGuru",
-        versions: &["1.0"],
+        versions: &["1.0", "3.0"],
         // Its table marks every entry of its own `(Optional)`.
         required_parameters: &[],
     },
     // Distributor
     QuickSetupTypeEntry {
         type_: "AWSQuickSetupType-Distributor",
-        versions: &["1.0", "1.1"],
+        versions: &["1.0", "1.1", "4.1"],
         required_parameters: &[
             RequiredParameter { key: "PackagesToInstall", when: RequiredWhen::Always },
             RequiredParameter { key: "TargetTagKey", when: TARGET_TYPE_IS_TAGS },
@@ -490,10 +505,18 @@ pub const QUICK_SETUP_TYPE_CATALOG: &[QuickSetupTypeEntry] = &[
             RequiredParameter { key: "ResourceGroupName", when: TARGET_TYPE_IS_RESOURCE_GROUPS },
         ],
     },
+    // Just-in-time node access
+    QuickSetupTypeEntry {
+        type_: "AWSQuickSetupType-JITNA",
+        versions: &["1.0", "1.1"],
+        // A type this model revision's parameter tables do not itemise, so nothing but
+        // the parameters common to every definition is documented for it.
+        required_parameters: &[],
+    },
     // Patch Policy
     QuickSetupTypeEntry {
         type_: "AWSQuickSetupType-PatchPolicy",
-        versions: &["1.0", "1.1", "2.0"],
+        versions: &["1.0", "1.1", "2.0", "2.6"],
         required_parameters: &[
             RequiredParameter { key: "PatchPolicyName", when: RequiredWhen::Always },
             RequiredParameter { key: "SelectedPatchBaselines", when: RequiredWhen::Always },
@@ -505,7 +528,7 @@ pub const QUICK_SETUP_TYPE_CATALOG: &[QuickSetupTypeEntry] = &[
     // Resource Explorer
     QuickSetupTypeEntry {
         type_: "AWSQuickSetupType-ResourceExplorer",
-        versions: &["1.0", "1.1"],
+        versions: &["1.0", "1.1", "2.2"],
         required_parameters: &[
             RequiredParameter { key: "SelectedAggregatorRegion", when: RequiredWhen::Always },
             RequiredParameter { key: "ReplaceExistingAggregator", when: RequiredWhen::Always },
@@ -518,7 +541,7 @@ pub const QUICK_SETUP_TYPE_CATALOG: &[QuickSetupTypeEntry] = &[
     // Quick Setup default configuration
     QuickSetupTypeEntry {
         type_: "AWSQuickSetupType-SSM",
-        versions: &["1.0"],
+        versions: &["1.0", "3.0"],
         // The default configuration type, whose own table the model does not itemise:
         // nothing but the parameters common to every definition is documented for it.
         required_parameters: &[],
@@ -526,7 +549,7 @@ pub const QUICK_SETUP_TYPE_CATALOG: &[QuickSetupTypeEntry] = &[
     // Change Manager
     QuickSetupTypeEntry {
         type_: "AWSQuickSetupType-SSMChangeMgr",
-        versions: &["1.0", "1.1"],
+        versions: &["1.0", "1.1", "2.2"],
         required_parameters: &[
             RequiredParameter { key: "DelegatedAccountId", when: RequiredWhen::Always },
             RequiredParameter { key: "JobFunction", when: RequiredWhen::Always },
@@ -539,7 +562,7 @@ pub const QUICK_SETUP_TYPE_CATALOG: &[QuickSetupTypeEntry] = &[
     // Host Management
     QuickSetupTypeEntry {
         type_: "AWSQuickSetupType-SSMHostMgmt",
-        versions: &["1.0", "1.1", "2.0"],
+        versions: &["1.0", "1.1", "2.0", "5.1"],
         // Its table marks every entry of its own `(Optional)` — including the three
         // targeting keys the Distributor and Patch Policy tables mark `(Required)`.
         required_parameters: &[],
@@ -547,7 +570,7 @@ pub const QUICK_SETUP_TYPE_CATALOG: &[QuickSetupTypeEntry] = &[
     // OpsCenter
     QuickSetupTypeEntry {
         type_: "AWSQuickSetupType-SSMOpsCenter",
-        versions: &["1.0", "1.1"],
+        versions: &["1.0", "1.1", "1.6"],
         required_parameters: &[
             RequiredParameter { key: "DelegatedAccountId", when: RequiredWhen::Always },
             RequiredParameter {
@@ -559,7 +582,7 @@ pub const QUICK_SETUP_TYPE_CATALOG: &[QuickSetupTypeEntry] = &[
     // Resource Scheduler
     QuickSetupTypeEntry {
         type_: "AWSQuickSetupType-Scheduler",
-        versions: &["1.0", "2.0"],
+        versions: &["1.0", "2.0", "4.0"],
         required_parameters: &[
             RequiredParameter { key: "TargetTagKey", when: RequiredWhen::Always },
             RequiredParameter { key: "TargetTagValue", when: RequiredWhen::Always },
@@ -1000,6 +1023,29 @@ pub fn deployment_targets<P: ConfigurationParameters + ?Sized>(
         .collect()
 }
 
+/// How many account-and-Region deployments the parameter set `parameters` names — what
+/// [`deployment_targets`] would build from it, counted rather than built.
+///
+/// The fan-out is the PRODUCT of the accounts and the Regions a definition names, so the
+/// count is that product: `accounts.len().max(1)` (a definition naming no account is
+/// deployed in the one account this emulator serves, exactly as [`deployment_targets`]
+/// builds it) times `regions.len()`. Arithmetic rather than a built list because both
+/// factors come from ONE request's parameter values, whose length is all the model bounds:
+/// building the product to measure it would allocate the very fan-out
+/// [`MAX_DEPLOYMENT_TARGETS`] exists to refuse. `saturating_mul`, so a product past
+/// `usize` reports the largest count rather than wrapping to a small one.
+///
+/// The one place the count lives, so every bound read against it — the per-definition
+/// [`MAX_DEPLOYMENT_TARGETS`] and the store's own
+/// [`configuration_capacity_rejection`] — counts the same deployments the service then
+/// performs.
+pub fn deployment_target_count<P: ConfigurationParameters + ?Sized>(parameters: &P) -> usize {
+    let targets = deployment_target_parameters(parameters);
+    let regions = comma_separated(targets.regions).len();
+    let accounts = comma_separated(targets.accounts).len().max(1);
+    accounts.saturating_mul(regions)
+}
+
 /// Why the parameter set a configuration definition of `type_` holds cannot be served,
 /// or `None` when it can.
 ///
@@ -1024,8 +1070,9 @@ pub fn deployment_targets<P: ConfigurationParameters + ?Sized>(
 /// account-and-Region deployments one definition fans out to is bounded by
 /// [`MAX_DEPLOYMENT_TARGETS`]. The one place the rule lives, so a create and an update
 /// refuse the same parameter sets — and, counting the deployments
-/// [`deployment_targets`] would build from the same parameters, with the same
-/// `local_account` default a definition naming no account is deployed in, refuse exactly
+/// [`deployment_targets`] would build from the same parameters
+/// ([`deployment_target_count`], which counts the single account a definition naming
+/// none is deployed in the same way that fan-out does), refuse exactly
 /// the sets that cannot be deployed. `member` labels the request member the parameters
 /// arrived on, so a refusal stating one of this service's own bounds names what the
 /// caller sent.
@@ -1038,7 +1085,6 @@ pub fn configuration_parameters_rejection<P: ConfigurationParameters + ?Sized>(
     member: &str,
     parameters: &P,
     type_: &str,
-    local_account: &str,
 ) -> Option<String> {
     let entry = quick_setup_type_entry(type_);
     let target_parameters = deployment_target_parameters(parameters);
@@ -1090,10 +1136,11 @@ pub fn configuration_parameters_rejection<P: ConfigurationParameters + ?Sized>(
     if let Some(missing) = entry.and_then(|entry| entry.missing_required_parameter(parameters)) {
         return Some(missing_parameter_message(missing));
     }
-    // The bound is read off the deployments themselves rather than off a formula over
-    // the parameter values, so what is counted here is exactly what the definition is
-    // deployed to: whatever a parameter set fans out to, it fans out to that here too.
-    let targets = deployment_targets(parameters, local_account).len();
+    // The deployments are COUNTED rather than built ([`deployment_target_count`]): the
+    // count is the same one the definition fans out to, so whatever a parameter set fans
+    // out to is what is bounded here, and a set naming more deployments than this
+    // service performs is refused without that fan-out ever being allocated.
+    let targets = deployment_target_count(parameters);
     (targets > MAX_DEPLOYMENT_TARGETS).then(|| {
         format!(
             "{member} names {targets} account and Region deployments, more than the \
@@ -1692,6 +1739,17 @@ impl ComAmazonawsSsmquicksetupQuicksetupState {
             self.next_uuid & 0xffff_ffff_ffff,
         )
     }
+    /// The service-generated id a freshly deployed configuration is handed out under:
+    /// the digits of a fresh uuid ([`Self::fresh_uuid`]) with no separators, which is
+    /// the form [`is_configuration_id`] admits.
+    ///
+    /// Minted through that one generator, so two ids one store hands out can never
+    /// collide, and read back through that one form check, so every id this service
+    /// reports is an id a later request may name.
+    pub fn fresh_configuration_id(&mut self) -> String {
+        self.fresh_uuid().replace('-', "")
+    }
+
     /// The next configuration-definition id: a decimal, which satisfies the modelled
     /// `^[a-z0-9-]{1,20}$` id pattern and is unique for every id this store can hand
     /// out (the counter saturates at `u64::MAX`, which no store this emulator can hold
@@ -1847,7 +1905,7 @@ impl ComAmazonawsSsmquicksetupQuicksetupState {
             if deployed.contains(target) {
                 continue;
             }
-            let id = self.fresh_uuid();
+            let id = self.fresh_configuration_id();
             let configuration =
                 ConfigurationRecord::deployed(id, manager_arn, definition, target, now);
             self.configurations
@@ -1917,41 +1975,113 @@ impl ComAmazonawsSsmquicksetupQuicksetupState {
     }
 }
 
-/// Why the value of an `IAMRoleArn` member is unacceptable, or `None` when it is an
-/// IAM role ARN.
+/// The expression the value of an `IAMRoleArn` member has to match, written the way a
+/// whole-value `@pattern` is: anchored at both ends.
 ///
 /// `IAMRoleArn` is modelled as a plain string carrying
-/// `@aws.api#arnReference(type: "AWS::IAM::Role")` and no `@pattern` or `@length`, so
-/// the boundary validator admits any text; what the reference says the value IS, this
-/// checks: the six-field ARN form `arn:<partition>:iam:<region>:<account>:role/<name>`
-/// with the `iam` service and a `role` resource. The region and account fields are not
-/// constrained here — an IAM ARN leaves the region empty and the account may be any
-/// account the caller can name a role in — so only the parts the reference fixes are
-/// required.
+/// `@aws.api#arnReference(type: "AWS::IAM::Role")` and no `@pattern` or `@length`
+/// (`smithy_query(query="shape", shape="IAMRoleArn")`), so the boundary validator admits
+/// any text and the form that reference names has to be stated here. It is the ARN form
+/// of an IAM role, from the AWS General Reference's IAM ARN formats: the `iam` service
+/// with no Region of its own, a twelve-digit account, the `role` resource and the role's
+/// path and name — in any partition whose name that reference publishes (`aws` and the
+/// `-cn`, `-us-gov`, `-iso*` and `-eusc` partitions).
+pub const IAM_ROLE_ARN_PATTERN: &str =
+    r"^arn:aws(-cn|-us-gov|-iso(-[a-z])?|-eusc)?:iam::\d{12}:role/?[a-zA-Z_0-9+=,.@\-_/]+.*$";
+
+/// [`IAM_ROLE_ARN_PATTERN`] compiled once, by the same regular-expression engine the
+/// boundary validator runs a modelled `@pattern` through, so a value is judged by the
+/// expression the refusal advertises rather than by a restatement of it.
+static IAM_ROLE_ARN: ::std::sync::LazyLock<::regex::Regex> = ::std::sync::LazyLock::new(|| {
+    ::regex::Regex::new(IAM_ROLE_ARN_PATTERN).expect("the IAM role ARN form is a valid expression")
+});
+
+/// Why the value of an `IAMRoleArn` member is unacceptable, or `None` when it matches
+/// [`IAM_ROLE_ARN_PATTERN`].
 ///
 /// The one place the rule lives, so every `IAMRoleArn` member of this service refuses
 /// the same values: `UpdateServiceSettings$ExplorerEnablingRoleArn` and
 /// `ConfigurationDefinitionInput$LocalDeploymentAdministrationRoleArn`.
 ///
-/// The message names the member and the requirement, the way the boundary
-/// validator's own refusals do, and renders the offending value only where
-/// [`echoed_clause`] allows.
-pub fn iam_role_arn_rejection(member: &str, value: &str) -> Option<String> {
-    let fields: Vec<&str> = value.split(':').collect();
-    let well_formed = match fields.as_slice() {
-        ["arn", partition, "iam", _region, _account, resource] => {
-            !partition.is_empty()
-                && resource
-                    .strip_prefix("role/")
-                    .is_some_and(|name| !name.is_empty())
-        }
-        _ => false,
-    };
-    (!well_formed).then(|| {
+/// `path` is the member's VALIDATION PATH, and the message is
+/// [`value_constraint_message`]'s: a value outside the form a member's own shape names
+/// is refused in the words every other constraint refusal of this endpoint carries.
+pub fn iam_role_arn_rejection(path: &str, value: &str) -> Option<String> {
+    (!IAM_ROLE_ARN.is_match(value))
+        .then(|| value_constraint_message(path, value, IAM_ROLE_ARN_PATTERN))
+}
+
+/// The message the boundary layer states for `value` at `path` being outside `pattern`:
+/// the counted envelope over one clause naming the member path, the value submitted and
+/// the expression it had to match.
+///
+/// Nothing about the sentence is written here. The clause and the requirement half are
+/// the framework's own ([`::aws_smithy_schema_server::Violation::message`]), the
+/// envelope around it and the quoting of the expression — without the anchor pair a
+/// whole-value pattern is wrapped in — are the cross-service validation renderings' (the
+/// same two `crate::service` answers `override_refusal` on). So a constraint this service
+/// applies ITSELF, because its model states the form as a reference rather than as a
+/// `@pattern`, is refused in exactly the words a constraint the centralized walk could
+/// apply is.
+///
+/// The value is bounded by [`echoed_value`] before it reaches the clause, which is the
+/// contract the framework's own violations carry.
+pub fn value_constraint_message(path: &str, value: &str, pattern: &str) -> String {
+    let clause = ::aws_smithy_schema_server::Violation {
+        path: path.to_string(),
+        kind: ::aws_smithy_schema_server::ViolationKind::Pattern(
+            ::service_common::validation::unanchored(pattern),
+        ),
+        value: Some(echoed_value(value)),
+        // No `IAMRoleArn` member of this model takes its data from a `@sensitive` shape
+        // ([`SENSITIVE_MEMBERS`]), so the clause states the value the request sent.
+        sensitive: false,
+    }
+    .message();
+    ::service_common::validation_message::envelope_over(::std::slice::from_ref(&clause))
+        .unwrap_or(clause)
+}
+
+/// How many hex digits a configuration's service-generated id carries.
+pub const CONFIGURATION_ID_DIGITS: usize = 32;
+
+/// Whether `id` is in the form this service's configuration ids take.
+///
+/// A configuration's `Id` is "a service generated identifier for the configuration"
+/// (`smithy_query(query="shape", shape="ConfigurationSummary")`) and the model gives it
+/// no `@pattern` anywhere — not on the output members that report one and not on the
+/// `@httpLabel` that takes one back, whose own
+/// `^[a-zA-Z0-9-_/:]{1,100}$` is the generic form of a path segment rather than the form
+/// of this id. So the form is the one this service MINTS
+/// ([`ComAmazonawsSsmquicksetupQuicksetupState::fresh_configuration_id`]): the
+/// [`CONFIGURATION_ID_DIGITS`] hex digits of a uuid, written with no separators. Hex is
+/// case-insensitive, so an id differing from a minted one only in the case of its digits
+/// is still in the form (it simply names no configuration).
+///
+/// The one place the form lives, so what this service hands out and what it accepts back
+/// cannot drift apart.
+pub fn is_configuration_id(id: &str) -> bool {
+    id.len() == CONFIGURATION_ID_DIGITS && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Why a configuration id a request carried cannot name a configuration at all, or
+/// `None` when it is in the form [`is_configuration_id`] describes.
+///
+/// A service-generated id that is not in the service's own id form names no
+/// configuration this service could ever have minted, so it is a fault in the request's
+/// input rather than a fact about what the store holds: it is refused BEFORE any lookup,
+/// with the modelled `ValidationException`, and never reaches the not-found path.
+///
+/// The model declares `ValidationException` with a single `Message` member and states no
+/// text for it, so the wording is the service's own: the fixed text `Configuration id `
+/// and ` has invalid format.` around the id the REQUEST carried, bounded by
+/// [`echoed_value`] the way every caller-supplied value this service echoes is. Nothing
+/// else varies.
+pub fn configuration_id_rejection(id: &str) -> Option<String> {
+    (!is_configuration_id(id)).then(|| {
         format!(
-            "{member} must be the ARN of an IAM role \
-             (arn:<partition>:iam::<account>:role/<name>){}",
-            echoed_clause(member, value)
+            "Configuration id {} has invalid format.",
+            echoed_value(id)
         )
     })
 }

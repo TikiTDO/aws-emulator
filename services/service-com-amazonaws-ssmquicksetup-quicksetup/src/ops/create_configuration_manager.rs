@@ -129,21 +129,21 @@ impl From<CreateConfigurationManagerErrorModeled> for CreateConfigurationManager
 /// documented for its own `Type` requires of it, because the definition deploys that
 /// type's service-owned template with the parameters it provides
 /// (`crate::state::configuration_parameters_rejection`, which counts those pairs the
-/// way the handler below deploys them, from `local_account` for a definition naming no
-/// account). A definition that deploys LOCALLY must also name the role such a
+/// way the handler below deploys them). A definition that deploys LOCALLY must also
+/// name the role such a
 /// deployment is administered with
 /// (`crate::state::local_deployment_rejection`). The
 /// remaining checks are
 /// the store's own bounds on collections the model gives no length (see
 /// `crate::state`'s `MAX_*` constants), the provider-reserved tag-key namespace a
-/// caller may not assign into (`crate::state::reserved_tag_key_rejection`), and the
-/// `IAMRoleArn` form of
-/// `LocalDeploymentAdministrationRoleArn`, which the model states as an
-/// `@arnReference` rather than as a `@pattern` the boundary could enforce.
-fn definitions_rejection(
-    input: &CreateConfigurationManagerInput,
-    local_account: &str,
-) -> Option<String> {
+/// caller may not assign into (`crate::state::reserved_tag_key_rejection`).
+///
+/// The `IAMRoleArn` form of `LocalDeploymentAdministrationRoleArn` is NOT one of these:
+/// it is a VALUE CONSTRAINT on a member — one the model states as an `@arnReference`
+/// rather than as a `@pattern` the boundary could enforce — so it is restated in the
+/// boundary layer's own words and shape instead ([`role_arn_rejection`]), and ahead of
+/// every rule here.
+fn definitions_rejection(input: &CreateConfigurationManagerInput) -> Option<String> {
     if input.configuration_definitions.is_empty() {
         return Some(
             "ConfigurationDefinitions must carry at least one configuration definition"
@@ -201,7 +201,6 @@ fn definitions_rejection(
                     "ConfigurationDefinitions.Parameters",
                     &definition.parameters,
                     &definition.r#type,
-                    local_account,
                 )
             })
     })
@@ -244,24 +243,40 @@ fn definitions_rejection(
                 )
             })
     })
-    .or_else(|| {
-        // `LocalDeploymentAdministrationRoleArn` is an `IAMRoleArn`, whose
-        // `@arnReference` to `AWS::IAM::Role` the model states with no `@pattern` to
-        // enforce it; `crate::state::iam_role_arn_rejection` is the one place that
-        // rule lives, shared with every other `IAMRoleArn` member of this service.
-        input
-            .configuration_definitions
-            .iter()
-            .filter_map(|definition| {
-                definition.local_deployment_administration_role_arn.as_deref()
-            })
-            .find_map(|arn| {
-                crate::state::iam_role_arn_rejection(
-                    "ConfigurationDefinitions.LocalDeploymentAdministrationRoleArn",
-                    arn,
-                )
-            })
-    })
+}
+
+/// Why a definition's `LocalDeploymentAdministrationRoleArn` is unacceptable, or `None`
+/// when every definition this create carries names a role ARN of the form that member's
+/// shape requires.
+///
+/// `LocalDeploymentAdministrationRoleArn` is an `IAMRoleArn`, whose `@arnReference` to
+/// `AWS::IAM::Role` the model states with no `@pattern` to enforce it;
+/// `crate::state::iam_role_arn_rejection` is the one place that rule lives, shared with
+/// every other `IAMRoleArn` member of this service, and it states the refusal in the
+/// boundary layer's own envelope — so the member is named by its VALIDATION PATH, which
+/// for a member of a list element carries that element's 1-based position and the
+/// collection step (`aws_smithy_schema_server::constraints::path`), exactly as the
+/// centralized walk spells the path of a modelled constraint on the same member.
+fn role_arn_rejection(input: &CreateConfigurationManagerInput) -> Option<String> {
+    input
+        .configuration_definitions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, definition)| {
+            definition
+                .local_deployment_administration_role_arn
+                .as_deref()
+                .map(|arn| (index, arn))
+        })
+        .find_map(|(index, arn)| {
+            crate::state::iam_role_arn_rejection(
+                &format!(
+                    "configurationDefinitions.{}.member.localDeploymentAdministrationRoleArn",
+                    index + 1
+                ),
+                arn,
+            )
+        })
 }
 
 /// The `CreateConfigurationManager` operation.
@@ -323,7 +338,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx.parts());
         let account = ::engine::emulator_account_id().to_string();
 
-        if let Some(why) = definitions_rejection(&input, &account) {
+        // A restatement of a VALUE CONSTRAINT travels in the shape the boundary layer
+        // states every other one of this endpoint's in — whose single member is the
+        // lowercase `message` such a refusal carries — rather than in this service's own
+        // modelled `ValidationException`, which carries the sentences of the service's
+        // OWN rules below. It is asked FIRST, for the same reason: a constraint on a
+        // member's value is judged where every other constraint of this endpoint is, ahead
+        // of the service's own rules — which is also the order `UpdateConfigurationDefinition`
+        // asks the two in, so the two write paths answer one request alike.
+        if let Some(why) = role_arn_rejection(&input) {
+            return Err(crate::scaffolded::Scaffolded::validation(why));
+        }
+
+        if let Some(why) = definitions_rejection(&input) {
             return Err(CreateConfigurationManagerErrorModeled::ValidationException(
                 ValidationException { message: Some(why) },
             )
@@ -405,13 +432,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Each definition deploys one configuration per account and Region its
         // parameters target, so the configurations ONE create adds are the sum of those
         // fan-outs: the store's own bound on them is read before anything is deployed
-        // and before any id is minted, so a create past it stores nothing at all.
+        // and before any id is minted, so a create past it stores nothing at all. The
+        // fan-outs are COUNTED rather than built (`crate::state::deployment_target_count`),
+        // so nothing is allocated for a definition the bound refuses.
         let planned_deployments: usize = input
             .configuration_definitions
             .iter()
-            .map(|definition| {
-                crate::state::deployment_targets(&definition.parameters, &account).len()
-            })
+            .map(|definition| crate::state::deployment_target_count(&definition.parameters))
             .sum();
         if let Some(why) = crate::state::configuration_capacity_rejection(
             store.configurations.len(),

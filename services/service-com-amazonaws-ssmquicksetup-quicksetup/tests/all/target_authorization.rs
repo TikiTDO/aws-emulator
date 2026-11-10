@@ -421,11 +421,18 @@ async fn an_unserved_target_is_refused_by_the_authorization_stage() {
     }
 
     // The other edge of the rule: a route whose label is no ARN keeps resolving that
-    // label itself. `GetConfiguration`'s label is a configuration id, so an id naming no
-    // stored configuration is the handler's own modelled refusal — and one outside that
-    // label's `@pattern` is the constraint walk's 400, which only a stage in front of the
+    // label itself. `GetConfiguration`'s label is a configuration id, so an id of the
+    // form this service mints that names no stored configuration is the handler's own
+    // modelled refusal — and one outside that form, like one outside the label's
+    // `@pattern`, is a 400 about the request's input, which only a stage in front of the
     // walk could preempt.
-    let (status, answer) = call(&router, "GET", "/getConfiguration/no-such-config", None).await;
+    let (status, answer) = call(
+        &router,
+        "GET",
+        &format!("/getConfiguration/{}", "0".repeat(32)),
+        None,
+    )
+    .await;
     assert_eq!(
         status, 404,
         "a configuration id naming nothing stays the modelled 404, got {status} / {answer:?}"

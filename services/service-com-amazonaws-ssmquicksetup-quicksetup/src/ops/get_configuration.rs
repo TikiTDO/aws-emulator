@@ -6,6 +6,11 @@
 //! exactly as the store holds it — and the modelled 404 when the store holds no such
 //! configuration (it never existed, or the manager that owned it was deleted).
 //!
+//! The id's FORM is judged first, ahead of the store: `ConfigurationId` carries a value
+//! this service generated, so one that is not in the form this service mints
+//! ([`crate::state::configuration_id_rejection`]) names no configuration that could
+//! ever have existed and is the modelled 400 rather than the 404.
+//!
 //! Reporting, not mutating (`@readonly`): the only write it makes is materialising the
 //! status changes the clock already owes (see
 //! [`crate::state::ComAmazonawsSsmquicksetupQuicksetupState::settle`]), so a read
@@ -169,6 +174,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the endpoint of the Region whose manager deployed it, so the Region this
         // request was signed for is part of the lookup.
         let region = crate::state::request_region(ctx.parts());
+
+        // The id's FORM is judged before anything is looked up: `ConfigurationId` names
+        // a value this service generated, so text that is not in the form this service
+        // mints names no configuration it could ever have minted — a fault in the
+        // request's input, which is the modelled 400 rather than the 404 a well-formed
+        // id the store does not hold earns. `crate::state` is the one place that form and
+        // that sentence live.
+        if let Some(why) = crate::state::configuration_id_rejection(&input.configuration_id) {
+            return Err(GetConfigurationErrorModeled::ValidationException(
+                ValidationException { message: Some(why) },
+            )
+            .into());
+        }
+
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             GetConfigurationErrorModeled::InternalServerException(InternalServerException {
                 message: Some("the configuration manager store is unavailable".to_string()),

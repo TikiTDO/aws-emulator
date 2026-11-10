@@ -111,7 +111,8 @@ async fn update_service_settings(router: &MultiServiceRouter, role_arn: &str) ->
     call(router, "PUT", "/serviceSettings", Some(&body)).await
 }
 
-/// The refusal was the modelled 400 `ValidationException` and named `member`.
+/// The refusal was the modelled 400 `ValidationException`, stating its sentence in this
+/// service's OWN `Message` member, and named `member`.
 fn assert_validation_refusal(case: &str, member: &str, status: u16, answer: &Value) -> String {
     assert_eq!(
         status, 400,
@@ -126,6 +127,34 @@ fn assert_validation_refusal(case: &str, member: &str, status: u16, answer: &Val
     assert!(
         message.contains(member),
         "case {case:?}: the refusal must name the member {member:?}, got {message:?}"
+    );
+    message
+}
+
+/// The refusal was the 400 the layer in FRONT of the service answers a value outside a
+/// member's own constraint with — the same status and code, and its sentence in the
+/// LOWERCASE `message` member that layer names — and named `path`, the member's validation
+/// path.
+fn assert_constraint_refusal(case: &str, path: &str, status: u16, answer: &Value) -> String {
+    assert_eq!(
+        status, 400,
+        "case {case:?}: expected 400, got {status} / {answer:?}"
+    );
+    assert_eq!(
+        error_code(answer),
+        "ValidationException",
+        "case {case:?}: expected ValidationException, got {answer:?}"
+    );
+    let message = answer
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            panic!("case {case:?}: expected the lowercase message member, got {answer:?}")
+        })
+        .to_string();
+    assert!(
+        message.contains(path),
+        "case {case:?}: the refusal must name the member path {path:?}, got {message:?}"
     );
     message
 }
@@ -286,15 +315,16 @@ async fn a_non_sensitive_member_refusal_names_the_refused_value() {
     );
 
     // An `IAMRoleArn` that is not the ARN of a role, on each of the two members that
-    // take one.
+    // take one. Such a refusal restates a VALUE CONSTRAINT, so it names the member by
+    // the validation path the boundary layer names one by.
     let malformed_role_arn = "arn:aws:iam::123456789012:user/not-a-role";
     let mut definition = published_definition();
     definition["LocalDeploymentAdministrationRoleArn"] = json!(malformed_role_arn);
     let case = "a malformed administration role ARN";
     let (status, answer) = create_definition(&router, definition, None).await;
-    let message = assert_validation_refusal(
+    let message = assert_constraint_refusal(
         case,
-        "ConfigurationDefinitions.LocalDeploymentAdministrationRoleArn",
+        "configurationDefinitions.1.member.localDeploymentAdministrationRoleArn",
         status,
         &answer,
     );
@@ -305,7 +335,7 @@ async fn a_non_sensitive_member_refusal_names_the_refused_value() {
 
     let case = "a malformed explorer-enabling role ARN";
     let (status, answer) = update_service_settings(&router, malformed_role_arn).await;
-    let message = assert_validation_refusal(case, "ExplorerEnablingRoleArn", status, &answer);
+    let message = assert_constraint_refusal(case, "explorerEnablingRoleArn", status, &answer);
     assert!(
         message.contains(&format!("'{malformed_role_arn}'")),
         "case {case:?}: the refusal must name the refused ARN, got {message:?}"

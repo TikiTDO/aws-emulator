@@ -90,6 +90,13 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+/// The validation path of the member this operation's role ARN arrives on: the model's
+/// member name in the lowerCamel spelling every validation clause of this endpoint names
+/// a member by (`aws_smithy_schema_server::constraints::path::member`). It is a member of
+/// this operation's own input, so the path carries no collection step — unlike the same
+/// member inside `CreateConfigurationManager`'s list of definitions.
+const LOCAL_DEPLOYMENT_ADMINISTRATION_ROLE_ARN_PATH: &str = "localDeploymentAdministrationRoleArn";
+
 /// Why this update cannot be served, or `None` when it can.
 ///
 /// `TypeVersion`'s `^\d{1,3}(\.\d{1,3})?$|^LATEST$` pattern,
@@ -102,7 +109,8 @@ use super::types::*;
 /// * `LocalDeploymentAdministrationRoleArn` is an `IAMRoleArn`, whose
 ///   `@arnReference` to `AWS::IAM::Role` the model states with no `@pattern` to enforce
 ///   it; [`crate::state::iam_role_arn_rejection`] is the one place that rule lives,
-///   shared with every other `IAMRoleArn` member of this service.
+///   shared with every other `IAMRoleArn` member of this service, and it names the
+///   member by the validation path the centralized walk would have named it by.
 ///
 /// `TypeVersion` and `Parameters` are not checked here: both are judged against what
 /// the STORED definition holds — the versions a configuration version may name are the
@@ -116,7 +124,10 @@ fn update_rejection(input: &UpdateConfigurationDefinitionInput) -> Option<String
         .local_deployment_administration_role_arn
         .as_deref()
         .and_then(|arn| {
-            crate::state::iam_role_arn_rejection("LocalDeploymentAdministrationRoleArn", arn)
+            crate::state::iam_role_arn_rejection(
+                LOCAL_DEPLOYMENT_ADMINISTRATION_ROLE_ARN_PATH,
+                arn,
+            )
         })
 }
 
@@ -142,12 +153,10 @@ fn update_rejection(input: &UpdateConfigurationDefinitionInput) -> Option<String
 ///   what the parameter set is judged against;
 ///   [`crate::state::configuration_parameters_rejection`] is the one place
 ///   that rule lives, shared with the create that stores a definition, and it counts the
-///   very deployments the fan-out below performs — hence the `local_account`
-///   default, which it needs to count them.
+///   very deployments the fan-out below performs.
 fn held_parameters_rejection(
     held: &::std::collections::BTreeMap<String, String>,
     type_: &str,
-    local_account: &str,
 ) -> Option<String> {
     let parameters = held.len();
     if parameters > crate::state::MAX_PARAMETERS {
@@ -157,7 +166,7 @@ fn held_parameters_rejection(
             crate::state::MAX_PARAMETERS
         ));
     }
-    crate::state::configuration_parameters_rejection("Parameters", held, type_, local_account)
+    crate::state::configuration_parameters_rejection("Parameters", held, type_)
 }
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
@@ -270,12 +279,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })?;
 
         if let Some(why) = update_rejection(&input) {
-            return Err(
-                UpdateConfigurationDefinitionErrorModeled::ValidationException(
-                    ValidationException { message: Some(why) },
-                )
-                .into(),
-            );
+            // A restatement of a VALUE CONSTRAINT travels in the shape the boundary layer
+            // states every other one of this endpoint's in — whose single member is the
+            // lowercase `message` such a refusal carries — rather than in this service's
+            // own modelled `ValidationException`, which carries the sentences of this
+            // service's own rules.
+            return Err(crate::scaffolded::Scaffolded::validation(why));
         }
 
         let now = ::std::time::SystemTime::now();
@@ -361,11 +370,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // update the store cannot take changes nothing. The Region is the manager's own:
         // only the endpoint that created a manager serves it.
         if let Some(parameters) = held_parameters.as_ref() {
-            if let Some(why) = held_parameters_rejection(
-                parameters,
-                &definition.type_,
-                ::engine::emulator_account_id(),
-            ) {
+            if let Some(why) = held_parameters_rejection(parameters, &definition.type_) {
                 return Err(
                     UpdateConfigurationDefinitionErrorModeled::ValidationException(
                         ValidationException { message: Some(why) },
@@ -373,9 +378,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .into(),
                 );
             }
-            let planned =
-                crate::state::deployment_targets(parameters, ::engine::emulator_account_id())
-                    .len();
+            let planned = crate::state::deployment_target_count(parameters);
             if let Some(why) =
                 crate::state::configuration_capacity_rejection(held_configurations, planned)
             {

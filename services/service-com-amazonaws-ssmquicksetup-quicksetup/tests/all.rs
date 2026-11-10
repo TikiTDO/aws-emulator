@@ -19,6 +19,8 @@
 mod configuration_definition_id_lookup;
 #[path = "all/configuration_definitions.rs"]
 mod configuration_definitions;
+#[path = "all/configuration_id_format.rs"]
+mod configuration_id_format;
 #[path = "all/configuration_manager_teardown.rs"]
 mod configuration_manager_teardown;
 #[path = "all/configuration_managers.rs"]
@@ -39,6 +41,8 @@ mod deployment_target_required;
 mod deployment_targets;
 #[path = "all/first_class_parameters.rs"]
 mod first_class_parameters;
+#[path = "all/iam_role_arn_pattern.rs"]
+mod iam_role_arn_pattern;
 #[path = "all/idempotent_mutations.rs"]
 mod idempotent_mutations;
 #[path = "all/list_tags_for_resource.rs"]
@@ -57,6 +61,8 @@ mod page_token_region_scope;
 mod pagination_tokens;
 #[path = "all/partial_parameter_updates.rs"]
 mod partial_parameter_updates;
+#[path = "all/published_type_catalog.rs"]
+mod published_type_catalog;
 #[path = "all/quick_setup_type_versions.rs"]
 mod quick_setup_type_versions;
 #[path = "all/region_scoping.rs"]

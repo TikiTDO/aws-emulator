@@ -1818,10 +1818,15 @@ async fn a_stored_configuration_is_read_back_by_its_service_generated_id() {
     }
 }
 
-/// A configuration the store does not hold is the modelled 404, whatever the form of
-/// the id asked for: one reclaimed with the manager that owned it, and well-formed ids
-/// of every size the `ConfigurationId` pattern `^[a-zA-Z0-9-_/:]{1,100}$` admits (from
-/// `smithy_query(query="operation",operation="GetConfiguration")`) that no create minted.
+/// A configuration the store does not hold is the modelled 404 when the id asked for is
+/// one this service could have handed out — the form
+/// `crate::state::is_configuration_id` describes: one reclaimed with the manager that
+/// owned it, and ids of that form no create minted. The rows differ along the digits and
+/// their case, which is everything that form leaves free. An id OUTSIDE that form never
+/// reaches the lookup (`tests/all/configuration_id_format.rs` pins the 400 it earns),
+/// and one past the `ConfigurationId` pattern `^[a-zA-Z0-9-_/:]{1,100}$` (from
+/// `smithy_query(query="operation",operation="GetConfiguration")`) is refused at the
+/// modelled boundary.
 #[tokio::test]
 async fn a_configuration_the_store_does_not_hold_is_the_modelled_404() {
     let router = emulator();
@@ -1862,15 +1867,15 @@ async fn a_configuration_the_store_does_not_hold_is_the_modelled_404() {
 
     let cases: Vec<(&str, String)> = vec![
         ("reclaimed with its manager", reclaimed),
+        ("digits no create minted", "0".repeat(32)),
         (
-            "a uuid no create minted",
-            "00000000-0000-4000-8000-000000000000".to_string(),
+            "every hex digit",
+            "0123456789abcdef0123456789abcdef".to_string(),
         ),
-        ("the shortest id the pattern admits", "a".to_string()),
-        ("the longest id the pattern admits", "c".repeat(100)),
         (
-            "an id carrying every character class the pattern admits",
-            "Ab9-_/:".to_string(),
+            // Hex is case-insensitive, so this is the form too.
+            "the same digits in upper case",
+            "0123456789ABCDEF0123456789ABCDEF".to_string(),
         ),
     ];
 
