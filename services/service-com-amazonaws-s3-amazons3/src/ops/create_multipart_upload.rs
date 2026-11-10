@@ -665,6 +665,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // And that key has to let THIS caller have a data key for the object: "the requester
+        // must also have permissions for the kms:GenerateDataKey action for the
+        // CreateMultipartUpload API" (`UploadPart`'s own documentation of the permissions an
+        // SSE-KMS multipart upload needs), because the data key every part write and the
+        // finished object are encrypted under is minted at the initiation. The decision is
+        // the one a one-shot write of the same object is made with
+        // ([`crate::state::sse_kms::data_key_refusal`]), under the encryption context the
+        // finished object would be read back with, and a caller it refuses is answered S3's
+        // `AccessDenied` carrying KMS's sentence with no upload initiated.
+        if let Some(denial) = crate::state::sse_kms::data_key_refusal(
+            &*self.engine,
+            ctx,
+            &crate::state::request_region(ctx.parts()),
+            crate::state::sse_kms::EncryptedObject {
+                bucket: &input.bucket,
+                key: &input.key,
+                encryption: &encryption,
+            },
+        ) {
+            return Err(crate::scaffolded::Scaffolded::unmodeled(
+                crate::state::ACCESS_DENIED_CODE,
+                crate::state::ACCESS_DENIED_STATUS,
+                denial,
+            ));
+        }
+
         let upload = crate::state::MultipartUpload {
             key: input.key.clone(),
             // Read here, where the upload comes into being, so `Initiated` is the moment

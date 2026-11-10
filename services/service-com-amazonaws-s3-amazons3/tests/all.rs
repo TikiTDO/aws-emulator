@@ -345,6 +345,8 @@ mod served_envelope_values;
 mod service_set_tag_keys;
 #[path = "all/signature_refusal_wording.rs"]
 mod signature_refusal_wording;
+#[path = "all/sse_kms_data_key_authorization.rs"]
+mod sse_kms_data_key_authorization;
 #[path = "all/sse_kms_decrypt_authorization.rs"]
 mod sse_kms_decrypt_authorization;
 #[path = "all/state_roundtrip.rs"]

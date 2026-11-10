@@ -803,7 +803,13 @@ async fn an_sse_kms_read_is_served_only_to_a_caller_the_objects_key_permits_the_
 
     for row in rows {
         let case = row.case;
-        let (key_id, key_arn) = emulator.key(case, row.policy.as_deref()).await;
+        // The key is created carrying its DEFAULT policy and the object written under that,
+        // and the row's document attached AFTERWARDS: a write of an SSE-KMS object mints its
+        // data key under the key too, so a policy written for the READ under test says
+        // nothing about who may write and the staging write is made while the account's own
+        // credential still reaches the key — the order the real service is exercised in,
+        // where a key policy is narrowed around objects that already exist.
+        let (key_id, key_arn) = emulator.key(case, None).await;
         let names_key = row.algorithm == SSE_KMS;
         emulator
             .put_object(
@@ -814,6 +820,9 @@ async fn an_sse_kms_read_is_served_only_to_a_caller_the_objects_key_permits_the_
                 row.bucket_key,
             )
             .await;
+        if let Some(document) = &row.policy {
+            emulator.put_key_policy(case, &key_id, document).await;
+        }
 
         let (access_key_id, principal) = &row.reader;
         let read = emulator.get_object(access_key_id, row.object_key).await;
@@ -863,56 +872,66 @@ async fn an_sse_kms_read_is_served_only_to_a_caller_the_objects_key_permits_the_
 }
 
 #[tokio::test]
-async fn a_key_id_whose_account_segment_is_no_account_opens_nothing() {
+async fn a_key_id_whose_account_segment_is_no_account_encrypts_nothing() {
     // `KeyId` takes a key ARN, `arn:<partition>:kms:<region>:<account>:key/<id>`
     // (`smithy_query(query="doc",shape="DecryptRequest",member="KeyId")`). An ARN whose
     // account segment is not an account id names no account, so no account's permission can
     // cover the key it addresses: KMS refuses such an identifier for want of permission
-    // before it looks up anything, and nothing can open the object's bytes under it.
-    let case = "an SSE-KMS object whose stored key id names no account";
+    // before it looks up anything. No data key can be minted under it, so the write that
+    // would be encrypted under it is refused and leaves nothing at the key — there is no
+    // stored object for a later read to be refused the plaintext of.
+    let case = "an SSE-KMS write naming a key id that names no account";
     let emulator = Emulator::new();
     emulator.create_bucket().await;
     let object_key = "no-account-key-id";
-    emulator
-        .put_object(
-            case,
-            object_key,
-            SSE_KMS,
-            Some("arn:aws:kms:us-east-1:not-an-account:key/0d8a1e3f-1111-4a1b-9c2d-5e6f70819203"),
-            false,
+    let written = emulator
+        .s3(
+            ACCOUNT_KEY,
+            "PUT",
+            &format!("/{BUCKET}/{object_key}"),
+            &[
+                ("x-amz-server-side-encryption", SSE_KMS),
+                (
+                    "x-amz-server-side-encryption-aws-kms-key-id",
+                    "arn:aws:kms:us-east-1:not-an-account:key/0d8a1e3f-1111-4a1b-9c2d-5e6f70819203",
+                ),
+            ],
+            BODY,
         )
         .await;
-
-    let read = emulator.get_object(ACCOUNT_KEY, object_key).await;
     assert_eq!(
-        read.status, 403,
-        "case {case:?}: the read must be refused with HTTP 403, got {} with body {:?}",
-        read.status,
-        body_text(&read)
+        written.status, 403,
+        "case {case:?}: the write must be refused with HTTP 403, got {} with body {:?}",
+        written.status,
+        body_text(&written)
     );
     assert_eq!(
-        read.error_code(),
+        written.error_code(),
         ACCESS_DENIED,
         "case {case:?}: expected the {ACCESS_DENIED:?} code, got {:?}",
-        body_text(&read)
+        body_text(&written)
     );
     // KMS's sentence for a refusal that can report NOTHING about the resource — not even
     // whether it exists — written out here rather than built from the service's own helper.
     let expected = format!(
-        "User: arn:aws:iam::{}:user/emulator is not authorized to perform: {DECRYPT_ACTION} on \
-         this resource because the resource does not exist in this Region, no resource-based \
-         policies allow access, or a resource-based policy explicitly denies access",
+        "User: arn:aws:iam::{}:user/emulator is not authorized to perform: \
+         kms:GenerateDataKey on this resource because the resource does not exist in this \
+         Region, no resource-based policies allow access, or a resource-based policy \
+         explicitly denies access",
         engine::emulator_account_id()
     );
     assert_eq!(
-        read.error_message(),
+        written.error_message(),
         expected,
         "case {case:?}: expected KMS's sentence for an identifier it cannot authorize, got {:?}",
-        read.error_message()
+        written.error_message()
     );
-    assert!(
-        !read.body.as_ref().windows(BODY.len()).any(|at| at == BODY),
-        "case {case:?}: a refused read must not carry the object's bytes, got {:?}",
+
+    let read = emulator.get_object(ACCOUNT_KEY, object_key).await;
+    assert_eq!(
+        read.status, 404,
+        "case {case:?}: a refused write must store nothing, got {} with body {:?}",
+        read.status,
         body_text(&read)
     );
 }

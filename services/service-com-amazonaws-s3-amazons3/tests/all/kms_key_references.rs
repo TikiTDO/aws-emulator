@@ -75,7 +75,14 @@ pub(crate) fn router_with_kms() -> MultiServiceRouter {
 
 /// One KMS call over the shared engine. KMS is an awsJson1_1 service reached by
 /// `X-Amz-Target: TrentService.<Operation>`.
-async fn kms(router: &MultiServiceRouter, operation: &str, body: &Value) -> (u16, Value) {
+///
+/// `pub(crate)`: the SSE-KMS data-key suite beside this one drives its keys and key policies
+/// through this one dispatcher rather than building a second one.
+pub(crate) async fn kms(
+    router: &MultiServiceRouter,
+    operation: &str,
+    body: &Value,
+) -> (u16, Value) {
     let request = http::Request::builder()
         .method("POST")
         .uri(format!("https://kms.{REGION}.amazonaws.com/"))
@@ -340,9 +347,10 @@ async fn a_write_naming_a_key_kms_holds_is_stored_under_that_reference() {
     }
 }
 
-/// One row of the other-endpoints table: the case, the reference the write names, whether S3
-/// refuses the write for it, and the status a read of that object then answers.
-type OtherEndpointRow = (&'static str, String, bool, u16);
+/// One row of the other-endpoints table: the case, the reference the write names, the status
+/// and error code S3 answers that write with (`None` for a write it serves), and the status a
+/// read of that object then answers.
+type OtherEndpointRow = (&'static str, String, Option<(u16, &'static str)>, u16);
 
 #[tokio::test]
 async fn a_reference_of_another_endpoint_is_refused_and_one_kms_declines_unresolved_is_not() {
@@ -352,49 +360,49 @@ async fn a_reference_of_another_endpoint_is_refused_and_one_kms_declines_unresol
 
     // A key ARN "addresses one key in one Region of one account", so a reference naming
     // ANOTHER endpoint's key names no key here and is refused exactly as an unminted one is.
-    // A reference KMS declines BEFORE it resolves anything is NOT refused here: an ARN whose
-    // account segment is not an account id, and an ARN that is no KMS key or alias ARN at all,
-    // are refused for want of permission rather than for absence, which is a different relay
-    // from this one and is left to the path that owns it. The rows pin that division so the
-    // scope of this refusal is deliberate.
+    // A reference KMS declines BEFORE it resolves anything is refused for want of PERMISSION
+    // rather than for absence — the data key the write needs cannot be minted under it, so
+    // the write is refused with KMS's own denial sentence on S3's `AccessDenied` channel
+    // instead of the not-found relay — and an identifier that is no key reference at all
+    // resolves to no key of this account and is served. The rows pin that division so the
+    // scope of each refusal is deliberate.
     let rows: [OtherEndpointRow; 5] = [
         (
             "a key ARN of another account at this endpoint",
             format!("arn:aws:kms:{REGION}:111122223333:key/{unminted}"),
-            true,
+            Some((400, KMS_NOT_FOUND_CODE)),
             404,
         ),
         (
             "a key ARN of another Region",
             format!("arn:aws:kms:eu-west-1:{}:key/{unminted}", engine::emulator_account_id()),
-            true,
+            Some((400, KMS_NOT_FOUND_CODE)),
             404,
         ),
         (
             "an alias ARN of another account",
             format!("arn:aws:kms:{REGION}:111122223333:alias/ledger"),
-            true,
+            Some((400, KMS_NOT_FOUND_CODE)),
             404,
         ),
         (
-            // Served by the write, and then refused by the READ for the same want of
-            // permission: KMS declines such an identifier before it resolves anything, which
-            // is the decision every read of an SSE-KMS object's bytes already makes
-            // (`state::sse_kms::decrypt_refusal`).
+            // Refused for want of permission: KMS declines such an identifier before it
+            // resolves anything, so it can mint no data key for the write
+            // (`state::sse_kms::data_key_refusal`), and nothing is stored.
             "an ARN whose account segment is not an account id",
             format!("arn:aws:kms:{REGION}:not-an-account:key/{unminted}"),
-            false,
-            403,
+            Some((403, "AccessDenied")),
+            404,
         ),
         (
             "an ARN that is no KMS key or alias ARN at all",
             "arn:aws:s3:::ledger".to_string(),
-            false,
+            None,
             200,
         ),
     ];
 
-    for (index, (case, reference, refused, read_expected)) in rows.iter().enumerate() {
+    for (index, (case, reference, refusal, read_expected)) in rows.iter().enumerate() {
         let key = format!("other-endpoint/{index}.bin");
         let written = put_object(
             &router,
@@ -410,18 +418,18 @@ async fn a_reference_of_another_endpoint_is_refused_and_one_kms_declines_unresol
             ],
         )
         .await;
-        let expected = if *refused { 400 } else { 200 };
+        let expected = refusal.map_or(200, |(status, _)| status);
         assert_eq!(
             written.status, expected,
             "case {case:?}: expected HTTP {expected} for {reference:?}, got {} with body {:?}",
             written.status,
             text(&written)
         );
-        if *refused {
+        if let Some((_, code)) = refusal {
             assert_eq!(
                 written.error_code(),
-                KMS_NOT_FOUND_CODE,
-                "case {case:?}: expected the code {KMS_NOT_FOUND_CODE:?}, got {:?}",
+                *code,
+                "case {case:?}: expected the code {code:?}, got {:?}",
                 written.error_code()
             );
             assert!(

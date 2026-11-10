@@ -46,8 +46,12 @@
 //!
 //! The other half of this module is about a WRITE rather than a read: an object S3 is asked
 //! to encrypt under a named customer key is encrypted under a data key KMS mints for that
-//! key, so the reference is resolved against KMS before anything is stored and a reference
-//! KMS holds no key for refuses the write ([`missing_key_refusal`]).
+//! key, so the write performs `kms:GenerateDataKey` on it and a caller the key's authorities
+//! refuse that action to is refused the write, with nothing stored
+//! ([`data_key_refusal`] — the same decision as the read's, asked of the write's action); and
+//! the reference itself is resolved against KMS before anything is stored, so a reference
+//! KMS holds no key for refuses the write for want of a key rather than of permission
+//! ([`missing_key_refusal`]).
 //!
 //! What is NOT decided here: a read that serves no bytes. "A HEAD request has the same
 //! options as a GET operation on an object" (`HeadObject`'s own documentation) except that
@@ -62,6 +66,15 @@ use ::service_com_amazonaws_kms_trentservice::state as kms_store;
 
 /// The KMS operation a read that serves an SSE-KMS object's bytes performs on its key.
 const DECRYPT_OPERATION: &str = "Decrypt";
+
+/// The KMS operation a WRITE that stores an SSE-KMS object performs on its key: the data
+/// key the object's bytes are encrypted under is one KMS mints under that key.
+///
+/// "You must also have the kms:GenerateDataKey and kms:Decrypt permissions in IAM
+/// identity-based policies and KMS key policies for the KMS key" (`HeadObject`'s own
+/// documentation of what an SSE-KMS object needs), the first of the two being what the write
+/// side of that pair performs.
+const GENERATE_DATA_KEY_OPERATION: &str = "GenerateDataKey";
 
 /// This service's endpoint prefix, the first label of its regional endpoint
 /// (`smithy_query(query="service_info")` reports `endpointPrefix: "s3"`) — which is what
@@ -117,6 +130,55 @@ pub fn decrypt_refusal<Eng: Send + Sync + 'static>(
     region: &str,
     object: EncryptedObject<'_>,
 ) -> Option<String> {
+    key_use_refusal(engine, ctx, region, object, DECRYPT_OPERATION)
+}
+
+/// Why KMS refuses to mint the data key `object` would be encrypted under for the principal
+/// this request speaks for, or `None` when the write may be stored.
+///
+/// Every write that stores an object under a customer-managed KMS key is encrypted under a
+/// data key KMS mints for it, so the write performs `kms:GenerateDataKey` on that key — as
+/// the caller and through this service's own path — before anything is recorded. A caller no
+/// authority in force reaches that action for is refused, and nothing is written: the
+/// refusal is the same `AccessDenied` (HTTP 403) a read's refusal is, carrying the sentence
+/// KMS worded for it.
+///
+/// `object` is the object as the write WOULD store it: its bucket, its key and the
+/// encryption configuration the write settled on — the write's own members, or the bucket's
+/// default encryption configuration for a write that named none — so the encryption context
+/// the data key is bound to is the one the stored object would be read back under
+/// ([`EncryptedObject`] and [`encryption_context`] are shared with the read side for exactly
+/// that reason, which is what makes an S3 Bucket Key observable: a key policy scoped to the
+/// bucket's ARN admits a bucket-key write and withholds a write of the same bytes with the
+/// Bucket Key off, whose data key is bound to the object's own ARN).
+///
+/// What is NOT refused here is what the read side does not refuse either: an object that is
+/// not SSE-KMS, a key AWS manages (whose policy AWS manages for the service that owns it),
+/// and a reference this endpoint resolves no key for — the absence of a key is
+/// [`missing_key_refusal`]'s relay rather than a want of permission.
+pub fn data_key_refusal<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    object: EncryptedObject<'_>,
+) -> Option<String> {
+    key_use_refusal(engine, ctx, region, object, GENERATE_DATA_KEY_OPERATION)
+}
+
+/// Why the authorities in force on `object`'s KMS key refuse `operation` to the principal
+/// this request speaks for, or `None` when the call may be served.
+///
+/// ONE decision for both sides of the envelope — the `kms:GenerateDataKey` a write performs
+/// and the `kms:Decrypt` a read performs — so a key's policy, its grants and the caller's
+/// identity policies cannot be read one way for a write and another for a read, and the two
+/// are judged under the same encryption context.
+fn key_use_refusal<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    object: EncryptedObject<'_>,
+    operation: &str,
+) -> Option<String> {
     if !object.encryption.uses_kms() {
         return None;
     }
@@ -132,7 +194,7 @@ pub fn decrypt_refusal<Eng: Send + Sync + 'static>(
         // permission before any key is looked up, with KMS's own sentence for it, so the
         // object's bytes cannot be opened under it at all.
         kms_store::KeyRef::UnauthorizedAccount => {
-            return Some(kms_store::unauthorized_account_message(DECRYPT_OPERATION))
+            return Some(kms_store::unauthorized_account_message(operation))
         }
         kms_store::KeyRef::NotFound | kms_store::KeyRef::MalformedArn => return None,
     };
@@ -144,10 +206,7 @@ pub fn decrypt_refusal<Eng: Send + Sync + 'static>(
         &store,
         region,
         key,
-        kms_store::authorization::RequestedUse::through_service(
-            DECRYPT_OPERATION,
-            &via_service(region),
-        ),
+        kms_store::authorization::RequestedUse::through_service(operation, &via_service(region)),
         Some(&encryption_context(&object)),
         None,
     )

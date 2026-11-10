@@ -652,15 +652,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutObject<Eng> {
         let stored_under = {
             let store = state.lock();
             match store.bucket(&input.bucket) {
-                Some(bucket) if requested.names_no_member() => {
-                    bucket.default_object_encryption().kms_key_id
-                }
+                Some(bucket) if requested.names_no_member() => bucket.default_object_encryption(),
                 // A bucket this emulator does not hold is answered below, where the write is;
                 // nothing about a key is decided for it.
-                _ => requested.kms_key_id.clone(),
+                _ => requested.clone(),
             }
         };
-        if let Some(key_id) = stored_under.as_deref() {
+        if let Some(key_id) = stored_under.kms_key_id.as_deref() {
             if let Some(relay) = crate::state::sse_kms::missing_key_refusal(
                 &*self.engine,
                 &crate::state::request_region(ctx.parts()),
@@ -672,6 +670,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutObject<Eng> {
                     relay,
                 ));
             }
+        }
+
+        // And whether the KEY lets THIS caller have a data key for the object at all. The
+        // bytes of an SSE-KMS object are encrypted under a data key KMS mints for its key, so
+        // the write performs `kms:GenerateDataKey` on that key — as this request's caller and
+        // through this service's own path — and a caller the key's authorities refuse that
+        // action to is refused the write with KMS's own denial sentence on S3's `AccessDenied`
+        // channel, with nothing stored ([`crate::state::sse_kms`] carries the rule and makes
+        // the decision for both halves of the envelope). The configuration asked about is the
+        // one the object would be STORED under, resolved above, so the data key is bound to
+        // the encryption context the stored object is read back under: the bucket's ARN for a
+        // write using an S3 Bucket Key and the object's own otherwise. A write under any other
+        // encryption asks KMS nothing.
+        if let Some(denial) = crate::state::sse_kms::data_key_refusal(
+            &*self.engine,
+            ctx,
+            &crate::state::request_region(ctx.parts()),
+            crate::state::sse_kms::EncryptedObject {
+                bucket: &input.bucket,
+                key: &input.key,
+                encryption: &stored_under,
+            },
+        ) {
+            return Err(crate::scaffolded::Scaffolded::unmodeled(
+                ACCESS_DENIED_CODE,
+                ACCESS_DENIED_STATUS,
+                denial,
+            ));
         }
 
         let mut store = state.lock();

@@ -925,6 +925,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CopyObject<Eng> {
             ));
         }
 
+        // And the DESTINATION object's own key has to let this caller have a data key for it:
+        // a copy writes a new object, whose bytes are encrypted under a data key KMS mints
+        // under whichever key the copy is stored under, so the copy performs
+        // `kms:GenerateDataKey` on it exactly as a `PutObject` of the same object does and
+        // through the same seam ([`crate::state::sse_kms::data_key_refusal`]). A caller the
+        // key's authorities refuse that action to is answered S3's `AccessDenied` carrying
+        // KMS's sentence and nothing is written — the destination's encryption context being
+        // the one the copied object would be read back under.
+        if let Some(denial) = crate::state::sse_kms::data_key_refusal(
+            &*self.engine,
+            ctx,
+            &crate::state::request_region(ctx.parts()),
+            crate::state::sse_kms::EncryptedObject {
+                bucket: &input.bucket,
+                key: &input.key,
+                encryption: &encryption,
+            },
+        ) {
+            return Err(crate::scaffolded::Scaffolded::unmodeled(
+                ACCESS_DENIED_CODE,
+                ACCESS_DENIED_STATUS,
+                denial,
+            ));
+        }
+
         // Taken again for the write, now that the cross-service decision above is made.
         let mut store = state.lock();
 

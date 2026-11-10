@@ -215,9 +215,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The write needs nothing from the request beyond its deserialized input.
-        let _ = ctx;
-
         // "The account ID of the expected bucket owner. If the account ID that you provide
         // doesn't match the actual owner of the bucket, the request fails with the HTTP
         // status code 403 Forbidden (access denied)"
@@ -249,9 +246,50 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(crate::scaffolded::Scaffolded::invalid_version_id(rejected));
         }
 
-        // The ENCRYPTION the request asks for, and the object it asks for it on, are both
-        // resolved before anything is written: the address comes first, because what the
-        // call can say about the request's own members depends on the object it names.
+        // The ONE encryption type this operation's payload can name: `ObjectEncryption` is
+        // a union whose only member is `SSEKMS`
+        // (`smithy_query(query="shape",shape="ObjectEncryption")`), which carries the KMS
+        // key ARN the object is re-encrypted under and, optionally, the S3 Bucket Key
+        // setting to apply with it.
+        let ObjectEncryption::Ssekms(requested) = &input.object_encryption;
+        let updated = crate::state::ObjectEncryption {
+            sse_algorithm: Some(crate::state::KMS_SSE_ALGORITHMS[0].to_string()),
+            kms_key_id: Some(requested.kms_key_arn.clone()),
+            // The request names no encryption context, and the configuration is replaced
+            // in full, so the object carries none afterwards.
+            kms_encryption_context: None,
+            bucket_key_enabled: requested.bucket_key_enabled,
+            // The configuration is replaced in full with the SSE-KMS one named above, so the
+            // object carries no customer-provided key afterwards either.
+            ..crate::state::ObjectEncryption::default()
+        };
+
+        // Re-encrypting an object under a customer-managed key needs a data key KMS mints
+        // under THAT key — "to use this operation, you must have the following permissions:
+        // s3:UpdateObjectEncryption kms:Encrypt kms:Decrypt kms:GenerateDataKey kms:ReEncrypt*"
+        // (this operation's own documentation) — so the call performs `kms:GenerateDataKey`
+        // on the key it re-encrypts TO, as this request's caller and through this service's
+        // own path, exactly as a write that stores the object under that key does and through
+        // the same seam ([`crate::state::sse_kms::data_key_refusal`]). A caller the key's
+        // authorities refuse that action to is answered S3's `AccessDenied` — the class this
+        // operation already models — carrying KMS's sentence, and the object's encryption is
+        // left exactly as it was. Asked with NO guard of this service held, because it reads
+        // another service's store through the shared engine.
+        if let Some(denial) = crate::state::sse_kms::data_key_refusal(
+            &*self.engine,
+            ctx,
+            &crate::state::request_region(ctx.parts()),
+            crate::state::sse_kms::EncryptedObject {
+                bucket: &input.bucket,
+                key: &input.key,
+                encryption: &updated,
+            },
+        ) {
+            return Err(access_denied(denial));
+        }
+
+        // The object the call asks for it on is resolved next: what the call can say about
+        // the request's own members depends on the object it names.
         let mut store = state.lock();
         let Some(bucket) = store.bucket(&input.bucket) else {
             return Err(UpdateObjectEncryptionErrorModeled::NoSuchBucket(NoSuchBucket {}).into());
@@ -285,24 +323,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             Some(_) => {}
         }
-
-        // The ONE encryption type this operation's payload can name: `ObjectEncryption` is
-        // a union whose only member is `SSEKMS`
-        // (`smithy_query(query="shape",shape="ObjectEncryption")`), which carries the KMS
-        // key ARN the object is re-encrypted under and, optionally, the S3 Bucket Key
-        // setting to apply with it.
-        let ObjectEncryption::Ssekms(requested) = &input.object_encryption;
-        let updated = crate::state::ObjectEncryption {
-            sse_algorithm: Some(crate::state::KMS_SSE_ALGORITHMS[0].to_string()),
-            kms_key_id: Some(requested.kms_key_arn.clone()),
-            // The request names no encryption context, and the configuration is replaced
-            // in full, so the object carries none afterwards.
-            kms_encryption_context: None,
-            bucket_key_enabled: requested.bucket_key_enabled,
-            // The configuration is replaced in full with the SSE-KMS one named above, so the
-            // object carries no customer-provided key afterwards either.
-            ..crate::state::ObjectEncryption::default()
-        };
 
         match store.replace_object_encryption(&input.bucket, &input.key, version_id, updated) {
             Some(crate::state::ObjectEncryptionWrite::Applied) => {}
@@ -369,7 +389,7 @@ fn no_such_object(version_id: Option<&str>) -> UpdateObjectEncryptionError {
 /// Through the unmodelled channel rather than the modeled shape: `AccessDenied` declares no
 /// `message` member, so a modeled one would go out with the error code's generic sentence
 /// instead of the one this operation publishes for the reason it denied the call.
-fn access_denied(message: &'static str) -> UpdateObjectEncryptionError {
+fn access_denied(message: impl Into<String>) -> UpdateObjectEncryptionError {
     crate::scaffolded::Scaffolded::unmodeled(ACCESS_DENIED_CODE, ACCESS_DENIED_STATUS, message)
 }
 
