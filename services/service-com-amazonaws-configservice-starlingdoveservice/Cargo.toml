@@ -42,6 +42,16 @@ aws-sdk-sqs = { version = "1", default-features = false }
 # Config records is published to that topic with `Publish`
 # (`state::change_notification`).
 aws-sdk-sns = { version = "1", default-features = false }
+# The AWS SDK for IAM, driven over the same in-process callback: a running configuration
+# recorder observes this account's IAM roles through IAM's own API, and an account-wide
+# managed rule reads the account's password policy from it (`state::observed_iam`), so
+# neither is read from another crate's state.
+aws-sdk-iam = { version = "1", default-features = false }
+# The AWS SDK for AWS Lambda, driven over the same callback: a Config Custom Lambda rule is
+# evaluated by the function the account points the rule at, so Config INVOKES that function
+# and the function delivers its verdict back with `PutEvaluations`
+# (`state::custom_lambda_rule`).
+aws-sdk-lambda = { version = "1", default-features = false }
 # The AWS SDK for Amazon Web Services Systems Manager, driven over the same in-process
 # callback: a remediation configuration's target is an SSM automation document, so whether
 # that document exists is asked of Systems Manager's own document registry
@@ -102,6 +112,14 @@ service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 # configuration's TARGET: the document the configuration names exists only if Systems
 # Manager's own registry holds it, so without SSM mounted there is nothing to ask.
 service-com-amazonaws-ssm-amazonssm = { workspace = true }
+# Lambda is mounted beside Config where the suite is about a Custom Lambda rule: Config
+# INVOKES the function the rule names and the function's own run delivers the verdict back
+# with `PutEvaluations`, so without Lambda mounted there is no evaluator to invoke.
+service-com-amazonaws-lambda-awsgirapiservice = { workspace = true }# `zip`: a function's deployment package — the .zip archive that suite writes in memory —
+# is uploaded the way a caller uploads one.
+zip = { version = "9", default-features = false, features = ["deflate"] }
+# `base64`: a deployment package travels as base64 in `CreateFunction`'s `Code.ZipFile`.
+base64 = "0.22"
 
 [lints]
 workspace = true

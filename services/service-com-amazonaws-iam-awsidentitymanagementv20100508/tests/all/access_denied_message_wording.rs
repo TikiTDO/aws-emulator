@@ -344,6 +344,19 @@ fn cases(policy_arn: &str) -> Vec<Case> {
             reason: no_allow("iam:GetCredentialReport"),
             details: true,
         },
+        // The account's password policy is decided on the same account-wide resource, and
+        // its refusal ENDS at the reason: nothing has been observed answering the pointer
+        // for this action, so it takes the documented sentence.
+        Case {
+            case: "implicit deny reading the account's password policy",
+            policies: Vec::new(),
+            action: "GetAccountPasswordPolicy",
+            params: Vec::new(),
+            iam_action: "iam:GetAccountPasswordPolicy",
+            named_as: "*".to_string(),
+            reason: no_allow("iam:GetAccountPasswordPolicy"),
+            details: false,
+        },
         // A caller holding a document that grants something ELSE: the same withholding,
         // reached with a document in force rather than none. Which wording the refusal
         // takes is the action's, so these two rows differ from their no-document twins

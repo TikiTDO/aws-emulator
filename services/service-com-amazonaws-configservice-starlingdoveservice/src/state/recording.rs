@@ -47,9 +47,14 @@ pub const SQS_QUEUE_RESOURCE_TYPE: &str = "AWS::SQS::Queue";
 /// The resource types this emulator's configuration recorder can OBSERVE: the ones
 /// whose service it serves and whose configuration that service's own API reports.
 /// A recorder records the intersection of these and the resource types its recording
-/// group names, so a recording group of `allSupported` records exactly these.
-pub const OBSERVABLE_RESOURCE_TYPES: [&str; 2] =
-    [S3_BUCKET_RESOURCE_TYPE, SQS_QUEUE_RESOURCE_TYPE];
+/// group names, so a recording group of `allSupported` records exactly these — less the
+/// GLOBAL types, which such a group covers only when it asks for them
+/// ([`super::observed_iam::is_global_resource_type`]).
+pub const OBSERVABLE_RESOURCE_TYPES: [&str; 3] = [
+    S3_BUCKET_RESOURCE_TYPE,
+    SQS_QUEUE_RESOURCE_TYPE,
+    super::observed_iam::IAM_ROLE_RESOURCE_TYPE,
+];
 
 /// The queue attributes a configuration item records as an Amazon SQS queue's
 /// CONFIGURATION, in the spelling Amazon SQS names them by.
@@ -79,6 +84,12 @@ const RECORDED_QUEUE_ATTRIBUTES: [&str; 16] = [
     "SqsManagedSseEnabled",
     "VisibilityTimeout",
 ];
+
+/// The attribute Amazon SQS reports a queue's own ARN under
+/// (`com.amazonaws.sqs#QueueAttributeName`), which is what the queue's configuration item
+/// carries as its `arn`. It is one of [`RECORDED_QUEUE_ATTRIBUTES`] as well, because it is
+/// part of how the queue is configured.
+const QUEUE_ARN_ATTRIBUTE: &str = "QueueArn";
 
 /// How long after the call that makes one due Config runs the next
 /// recording-and-evaluation pass.
@@ -230,7 +241,11 @@ fn bucket_encryption_verdict(recorded: &RecordedConfiguration) -> &'static str {
 
 /// The `ComplianceType` a managed rule's check places a resource at: a check the
 /// resource satisfies is `COMPLIANT`, one it does not is `NON_COMPLIANT`.
-fn verdict(satisfied: bool) -> &'static str {
+///
+/// Visible to the whole state module because the rules whose subject is the ACCOUNT
+/// (`super::account_rule`) place it the same way: one statement of what a satisfied check
+/// amounts to.
+pub(super) fn verdict(satisfied: bool) -> &'static str {
     if satisfied {
         COMPLIANCE_TYPE_COMPLIANT
     } else {
@@ -271,6 +286,17 @@ struct RecordedResource {
 
 /// Whether a rule with `scope` covers the RECORDED resource `resource`: the rules
 /// that can place THIS resource at a verdict.
+fn scope_covers_recorded(scope: Option<&Scope>, resource: &RecordedResource) -> bool {
+    scope_covers(
+        scope,
+        &resource.resource_type,
+        &resource.resource_id,
+        &resource.tags,
+    )
+}
+
+/// Whether a rule with `scope` covers the recorded resource of type `resource_type` with
+/// id `resource_id`, whose configuration item was recorded with `tags`.
 ///
 /// A rule with no scope covers every recorded resource; a scope narrows by resource
 /// type, by resource id and by the TAGS the configuration item was recorded with
@@ -279,7 +305,16 @@ struct RecordedResource {
 /// narrowing further and only "if you also specify a tag key"). `ServicePrincipals`
 /// narrows nothing: it is "populated only if the service-linked rule is created by a
 /// service" and names the services the rule is FOR, not the resources it evaluates.
-fn scope_covers_recorded(scope: Option<&Scope>, resource: &RecordedResource) -> bool {
+///
+/// Visible to the whole state module because WHICH resources a rule covers is one
+/// question: the evaluation Config performs itself asks it, and so does the invocation of
+/// a change-triggered rule's own evaluator (`super::custom_lambda_rule`).
+pub(super) fn scope_covers(
+    scope: Option<&Scope>,
+    resource_type: &str,
+    resource_id: &str,
+    tags: &BTreeMap<String, String>,
+) -> bool {
     let Some(scope) = scope else {
         return true;
     };
@@ -287,18 +322,18 @@ fn scope_covers_recorded(scope: Option<&Scope>, resource: &RecordedResource) -> 
         .compliance_resource_types
         .as_deref()
         .filter(|types| !types.is_empty())
-        .is_none_or(|types| types.iter().any(|scoped| scoped == &resource.resource_type));
+        .is_none_or(|types| types.iter().any(|scoped| scoped == resource_type));
     let covers_id = scope
         .compliance_resource_id
         .as_deref()
         .filter(|id| !id.is_empty())
-        .is_none_or(|id| id == resource.resource_id);
+        .is_none_or(|id| id == resource_id);
     let covers_tag = scope
         .tag_key
         .as_deref()
         .filter(|key| !key.is_empty())
         .is_none_or(|key| {
-            resource.tags.get(key).is_some_and(|held| {
+            tags.get(key).is_some_and(|held| {
                 scope
                     .tag_value
                     .as_deref()
@@ -313,14 +348,32 @@ impl ComAmazonawsConfigserviceStarlingdoveserviceState {
     /// Note the recording-and-evaluation pass this account owes next, due
     /// [`RECORDING_PASS_DUE_AFTER`] from `now`.
     ///
-    /// Only a recorder that is RECORDING owes one — Config observes nothing while every
-    /// recorder is stopped — so an account whose recorders are all stopped owes none,
-    /// which is also what ends the pump.
+    /// A pass is owed while a recorder is RECORDING — Config observes nothing while every
+    /// recorder is stopped — and while any rule is still owed the evaluation pass a write
+    /// or an on-demand call invoked, because "when you create a rule, Config evaluates
+    /// your resources against the rule automatically" (`PutConfigRule`) whether or not a
+    /// recorder is running. An account that owes neither owes no pass, which is also what
+    /// ends the pump.
     pub fn owe_recording_pass(&mut self, now: SystemTime) {
-        self.recording_pass_due = self
-            .recording_recorder()
-            .is_some()
-            .then(|| now + RECORDING_PASS_DUE_AFTER);
+        let owed = self.recording_recorder().is_some() || self.owes_rule_evaluation(now);
+        self.recording_pass_due = owed.then(|| now + RECORDING_PASS_DUE_AFTER);
+    }
+
+    /// Whether any rule of this account is still owed an evaluation pass — one a write or
+    /// an on-demand call invoked that has not fallen due yet — or still owes the
+    /// invocation of the evaluator that delivers its verdicts
+    /// ([`super::custom_lambda_rule`]).
+    ///
+    /// A pass that is PAST its due instant is one the next pass runs, and that pass is
+    /// already due; a rule this emulator has no implementation for records nothing when it
+    /// runs, so nothing is owed for it after that. That is what ends the pump: an account
+    /// whose recorders are stopped and whose rules have all had their pass owes no further
+    /// work.
+    fn owes_rule_evaluation(&self, now: SystemTime) -> bool {
+        self.config_rules.values().any(|rule| {
+            rule.state == CONFIG_RULE_STATE_ACTIVE
+                && (rule.evaluation.in_progress(now) || rule.owes_evaluator_invocation())
+        })
     }
 
     /// Claim the right to run this store's passes, answering `false` when a pump
@@ -351,25 +404,41 @@ impl ComAmazonawsConfigserviceStarlingdoveserviceState {
 
     /// Take the pass the clock has made due as of `now`, as the resource types the
     /// recording recorder records and this emulator can observe; `None` when no pass is
-    /// due yet or no recorder is recording.
+    /// due yet.
     ///
     /// Taking it clears the due instant, so one due pass runs once however many pumps
-    /// ask for it.
+    /// ask for it. The list is EMPTY while no recorder is recording: nothing is observed
+    /// then, and the pass is still the one that evaluates the rules the account owes a
+    /// verdict for.
+    ///
+    /// A GLOBAL resource type is observed only where the recording group asks for the
+    /// global resource types (`RecordingGroup$includeGlobalResourceTypes`) or names that
+    /// type itself, which is what a group of `allSupported` alone does not cover
+    /// (`PutConfigurationRecorder`: "Default is to record all supported resource types,
+    /// excluding the global IAM resource types").
     pub fn take_due_recording_pass(&mut self, now: SystemTime) -> Option<Vec<&'static str>> {
         if self.recording_pass_due.is_none_or(|due| now < due) {
             return None;
         }
-        let recorder = self.recording_recorder()?;
-        let group = recorder.recording_group.clone();
         self.recording_pass_due = None;
+        let Some(recorder) = self.recording_recorder() else {
+            return Some(Vec::new());
+        };
+        let group = recorder.recording_group.clone();
         Some(
             OBSERVABLE_RESOURCE_TYPES
                 .into_iter()
                 .filter(|resource_type| match group.as_ref() {
                     // A recorder stored without a recording group records every
                     // supported resource type, as a group of `allSupported` does.
-                    None => true,
-                    Some(group) => super::group_records_resource_type(group, resource_type),
+                    None => !super::observed_iam::is_global_resource_type(resource_type),
+                    Some(group) => {
+                        super::group_records_resource_type(group, resource_type)
+                            && super::observed_iam::group_records_global_resource_type(
+                                group,
+                                resource_type,
+                            )
+                    }
                 })
                 .collect(),
         )
@@ -417,16 +486,21 @@ impl ComAmazonawsConfigserviceStarlingdoveserviceState {
         recorded
     }
 
-    /// Evaluate the account's rules over the recorded resources in their scope as of
-    /// `now`, recording one result per rule and resource, and answer the verdicts that
-    /// CHANGED.
+    /// Evaluate the account's rules as of `now` — the managed rules over the recorded
+    /// resources in their scope, and the account-wide managed rules over the account's own
+    /// configuration `account` where the pass observed it — recording one result per rule
+    /// and subject, and answer the verdicts that CHANGED.
     ///
     /// A rule is evaluated when it is `ACTIVE`, when the pass it is owed has fallen due
     /// ([`super::RuleEvaluationEntry::in_progress`]) and when this emulator has its
-    /// implementation ([`MANAGED_RULES`]); anything else records nothing, so a rule
-    /// whose logic is not here keeps reporting `INSUFFICIENT_DATA` rather than a
-    /// synthesised verdict.
-    pub fn evaluate_recorded_resources(&mut self, now: SystemTime) -> Vec<ComplianceChange> {
+    /// implementation ([`MANAGED_RULES`], [`super::account_rule::ACCOUNT_MANAGED_RULES`]);
+    /// anything else records nothing, so a rule whose logic is not here keeps reporting
+    /// `INSUFFICIENT_DATA` rather than a synthesised verdict.
+    pub fn evaluate_rules(
+        &mut self,
+        account: Option<&super::ObservedAccount>,
+        now: SystemTime,
+    ) -> Vec<ComplianceChange> {
         // The configuration items the recorder has captured, copied out so the rules
         // below can be walked mutably. A resource whose deletion is recorded is no
         // longer there to evaluate, and one no configuration item has been recorded for
@@ -462,6 +536,14 @@ impl ComAmazonawsConfigserviceStarlingdoveserviceState {
                 continue;
             }
             let Some(managed) = managed_rule_of(&rule.source) else {
+                // A rule whose subject is the ACCOUNT is placed from the account's own
+                // configuration instead, which this pass has only where that
+                // configuration could be read (`super::account_rule`).
+                if super::account_managed_rule_of(&rule.source).is_some() {
+                    if let Some(account) = account {
+                        changes.extend(rule.evaluate_against_account(account, now));
+                    }
+                }
                 continue;
             };
             // The instant Config invoked the pass this rule is owed, which the result
@@ -490,23 +572,9 @@ impl ComAmazonawsConfigserviceStarlingdoveserviceState {
                     )
                 };
                 // The rule's own writer records it, which is what keeps a rule's results
-                // bounded; the verdict it REPLACES is read first, because that is what
-                // the notification reports the resource changed FROM.
-                let replaced = rule.evaluation_results.get(&result.key()).cloned();
-                rule.record_evaluation_result(result.clone());
-                // A verdict that did not change is not a compliance change: the
-                // evaluation is recorded again, and nobody is notified.
-                let changed = replaced
-                    .as_ref()
-                    .is_none_or(|previous| previous.compliance_type != result.compliance_type);
-                if changed {
-                    changes.push(ComplianceChange {
-                        rule_name: rule.name.clone(),
-                        rule_arn: rule.arn.clone(),
-                        new_result: result,
-                        old_result: replaced,
-                    });
-                }
+                // bounded and decides whether the verdict MOVED — the verdict it replaces
+                // is what a notification reports the resource changed from.
+                changes.extend(rule.record_verdict(result));
             }
             // The pass this rule was owed has now evaluated the resources in its scope.
             rule.evaluation.settle(now);
@@ -551,7 +619,23 @@ pub async fn run_due_recording_pass<Eng: Send + Sync + 'static>(
                 observed.push((resource_type, queues));
             }
         }
+        if resource_type == super::observed_iam::IAM_ROLE_RESOURCE_TYPE {
+            if let Some(roles) = super::observed_iam::observed_iam_roles(callback, region, now).await
+            {
+                observed.push((resource_type, roles));
+            }
+        }
     }
+
+    // The ACCOUNT's own configuration, read only while this account holds a rule whose
+    // subject is the account: a rule nothing asks about costs no read, and an account
+    // whose configuration could not be read leaves those rules unevaluated rather than
+    // placed at a verdict nothing computed.
+    let account = if state.lock().evaluates_account_rules() {
+        super::observed_iam::observed_account(callback, region).await
+    } else {
+        None
+    };
 
     let (recorded, changes) = {
         let mut store = state.lock();
@@ -559,8 +643,19 @@ pub async fn run_due_recording_pass<Eng: Send + Sync + 'static>(
         for (resource_type, entries) in observed {
             recorded.extend(store.record_observed(resource_type, entries, now));
         }
-        (recorded, store.evaluate_recorded_resources(now))
+        // A configuration item this pass RECORDED triggers the rules whose scope covers
+        // the resource it is about, which is what owes their evaluators an invocation
+        // (`super::custom_lambda_rule`).
+        store.owe_change_triggered_invocations(&recorded, now);
+        (recorded, store.evaluate_rules(account.as_ref(), now))
     };
+
+    // The evaluators Config has to INVOKE for the rules it does not evaluate itself: a
+    // Custom Lambda rule is evaluated by the function the account points it at, which
+    // delivers its verdict back with `PutEvaluations` (`super::custom_lambda_rule`). The
+    // invocations happen with the store's guard released, because the function they run
+    // calls back into this same emulator.
+    super::invoke_due_rule_evaluators(callback, engine, region).await;
 
     // Each configuration item the pass recorded is streamed to the delivery channel's
     // Amazon SNS topic, which is what a consumer subscribed to that topic receives.
@@ -767,6 +862,9 @@ async fn observed_s3_buckets(
             // the resource name of its configuration item.
             resource_id: name.to_string(),
             resource_name: Some(name.to_string()),
+            // A bucket's ARN is the one its name derives (`recorded_resource_arn`), and
+            // no S3 read above reports one, so none is stored for it.
+            arn: None,
             deleted_at: None,
             // The schema version of a configuration item Config itself recorded is not
             // one a caller supplied, and this emulator has no catalogue of them, so none
@@ -849,6 +947,13 @@ async fn observed_sqs_queues(
                 );
             }
         }
+        // The `QueueArn` attribute Amazon SQS itself reports for the queue, which is the
+        // ARN its configuration item carries: an ARN the owning service stated is the one
+        // the resource has.
+        let queue_arn = attributes
+            .iter()
+            .find(|(attribute, _)| attribute.as_str() == QUEUE_ARN_ATTRIBUTE)
+            .map(|(_, value)| value.clone());
         // `ListQueueTags`' `Tags`: the tags a rule's scope can narrow by.
         let tags: BTreeMap<String, String> = client
             .list_queue_tags()
@@ -865,6 +970,8 @@ async fn observed_sqs_queues(
             resource_type: SQS_QUEUE_RESOURCE_TYPE.to_string(),
             resource_id: queue_url.to_string(),
             resource_name: Some(name.to_string()),
+            // The ARN Amazon SQS reported for the queue.
+            arn: queue_arn,
             deleted_at: None,
             // The schema version of a configuration item Config itself recorded is not one
             // a caller supplied, and this emulator has no catalogue of them, so none is

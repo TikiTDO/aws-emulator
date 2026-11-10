@@ -75,6 +75,7 @@ pub mod generate_organizations_access_report_types;
 pub mod generate_service_last_accessed_details_types;
 pub mod get_access_key_last_used_types;
 pub mod get_account_authorization_details_types;
+pub mod get_account_password_policy_types;
 pub mod get_account_properties_types;
 pub mod get_context_keys_for_custom_policy_types;
 pub mod get_context_keys_for_principal_policy_types;
@@ -312,6 +313,7 @@ pub use generate_service_last_accessed_details_types::*;
 pub use get_access_key_last_used_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use get_account_authorization_details_types::*;
+pub use get_account_password_policy_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use get_account_properties_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]

@@ -690,12 +690,31 @@ pub const GET_CONFORMANCE_PACK_COMPLIANCE_SUMMARY_PAGE_SIZE: usize = 5;
 /// conformance packs that do not exist") for the `missing` names of a request that
 /// named packs this account and Region does not hold.
 ///
-/// The message is BUILT FROM THE REQUEST: the fixed sentence names the class of
-/// failure, and the names it lists are the ones the caller sent that resolved to no
-/// pack, in the order they were sent.
+/// RECORDED behaviour: the fixed sentence is "No such conformance pack exists.
+/// Conformance Pack(s): ", and what follows it is BUILT FROM THE REQUEST — the names the
+/// caller sent that resolved to no pack, in the order they were sent. An operation that
+/// takes a LIST of pack names renders them as the list they are, bracketed
+/// ([`no_such_conformance_pack_list_message`]); the operations that name ONE pack render
+/// that name bare, which is this spelling.
 pub fn no_such_conformance_pack_message(missing: &[String]) -> String {
     format!(
-        "One or more conformance packs are not valid. Name(s): {}",
+        "{NO_SUCH_CONFORMANCE_PACK_SENTENCE}{}",
+        missing.join(", ")
+    )
+}
+
+/// The fixed text every `NoSuchConformancePackException` of this service carries, before
+/// the names the request asked about. ONE statement of it, so the two renderings below
+/// cannot word the one refusal two ways.
+pub const NO_SUCH_CONFORMANCE_PACK_SENTENCE: &str =
+    "No such conformance pack exists. Conformance Pack(s): ";
+
+/// [`no_such_conformance_pack_message`] as the operations that take a LIST of conformance
+/// pack names render it: the same fixed sentence, and the names the request sent rendered
+/// as the list they are, inside square brackets.
+pub fn no_such_conformance_pack_list_message(missing: &[String]) -> String {
+    format!(
+        "{NO_SUCH_CONFORMANCE_PACK_SENTENCE}[{}]",
         missing.join(", ")
     )
 }
@@ -2763,6 +2782,21 @@ pub use select_query::*;
 // its names as `crate::state::<name>`.
 pub mod recording;
 pub use recording::*;
+
+// What a pass OBSERVES in IAM — this account's roles, and the account's own password
+// policy — lives in `state/observed_iam.rs`, re-exported here for the same reason.
+pub mod observed_iam;
+pub use observed_iam::*;
+
+// The managed rules whose subject is the ACCOUNT rather than a recorded resource live in
+// `state/account_rule.rs`, re-exported here for the same reason.
+pub mod account_rule;
+pub use account_rule::*;
+
+// How Config invokes the EVALUATOR of a rule it does not evaluate itself lives in
+// `state/custom_lambda_rule.rs`, re-exported here for the same reason.
+pub mod custom_lambda_rule;
+pub use custom_lambda_rule::*;
 
 // How a RECORDED resource is resolved to its own ARN — the one member of a
 // configuration item that carries it — lives in `state/resource_arn.rs`, re-exported

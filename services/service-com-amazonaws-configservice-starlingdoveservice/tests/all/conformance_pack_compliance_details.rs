@@ -467,7 +467,7 @@ async fn a_request_the_report_cannot_serve_is_refused() {
             "a pack this account holds none of",
             request("ghost", &json!({})),
             "NoSuchConformancePackException",
-            Some("One or more conformance packs are not valid. Name(s): ghost".to_string()),
+            Some("No such conformance pack exists. Conformance Pack(s): ghost".to_string()),
         ),
         (
             "a rule name nothing holds",

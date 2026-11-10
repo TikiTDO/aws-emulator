@@ -195,5 +195,15 @@ mod delivery_channel_recorder_role;
 mod validation_clause_quotes_the_submitted_value;
 #[path = "all/registry_resource_types_and_remediation_targets.rs"]
 mod registry_resource_types_and_remediation_targets;
+#[path = "all/conformance_pack_rule_evaluation.rs"]
+mod conformance_pack_rule_evaluation;
+#[path = "all/recorder_discovers_iam_roles.rs"]
+mod recorder_discovers_iam_roles;
+#[path = "all/conformance_pack_deletion.rs"]
+mod conformance_pack_deletion;
+#[path = "all/custom_lambda_rule_evaluation.rs"]
+mod custom_lambda_rule_evaluation;
+#[path = "all/pack_rule_evaluates_a_recorded_resource.rs"]
+mod pack_rule_evaluates_a_recorded_resource;
 #[path = "all/read_paths_and_assigned_ids.rs"]
 mod read_paths_and_assigned_ids;

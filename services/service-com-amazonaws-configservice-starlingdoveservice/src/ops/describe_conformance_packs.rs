@@ -248,6 +248,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // resolves to no pack is REFUSED rather than skipped, and the refusal names every
         // such name the request carried, so a caller can fix them all at once. The check
         // is over the whole request, so which page is being served does not change it.
+        // This operation takes a LIST of names, which is how its refusal renders them
+        // ([`crate::state::no_such_conformance_pack_list_message`]).
         let missing: Vec<String> = names
             .iter()
             .filter(|name| !store.conformance_packs.contains_key(*name))
@@ -257,7 +259,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(
                 DescribeConformancePacksErrorModeled::NoSuchConformancePackException(
                     NoSuchConformancePackException {
-                        message: Some(crate::state::no_such_conformance_pack_message(&missing)),
+                        message: Some(crate::state::no_such_conformance_pack_list_message(
+                            &missing,
+                        )),
                     },
                 )
                 .into(),

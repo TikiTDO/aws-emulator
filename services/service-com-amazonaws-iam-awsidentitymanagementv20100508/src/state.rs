@@ -1426,7 +1426,7 @@ pub struct LoginProfileRecord {
 ///
 /// Every member the write carries is held, not only the ones a password check reads: the
 /// policy is what the account CONFIGURED, and the operation that reports it back —
-/// `GetAccountPasswordPolicy`, which this emulator does not route yet — reports all of
+/// `GetAccountPasswordPolicy` (`crate::ops::get_account_password_policy`) — reports all of
 /// them, so the members about expiry, reuse and self-service are stored for that reader
 /// rather than dropped on the floor.
 #[derive(Debug, Clone, PartialEq, Eq)]

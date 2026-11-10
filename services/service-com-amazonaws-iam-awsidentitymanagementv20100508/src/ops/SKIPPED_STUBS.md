@@ -41,3 +41,10 @@ operation is no longer modeled-but-unwired.
 `src/ops/types/get_credential_report_types.rs`, and is wired in from its own
 `//! @op GetCredentialReport` header. Its decline line above likewise records only that the
 generator did not emit it.
+
+`GetAccountPasswordPolicy` — the READ of the account password policy
+`UpdateAccountPasswordPolicy` writes — is hand-authored the same way, in
+`src/ops/get_account_password_policy.rs` with its shapes in
+`src/ops/types/get_account_password_policy_types.rs`, and is wired in from its own
+`//! @op GetAccountPasswordPolicy` header. Its decline line above likewise records only
+that the generator did not emit it.

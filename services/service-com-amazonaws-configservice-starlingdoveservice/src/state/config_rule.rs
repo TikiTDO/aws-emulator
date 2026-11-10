@@ -212,6 +212,15 @@ pub struct RuleEvaluationEntry {
     /// so it is the record of WHICH rule and which invocation a delivery belongs to.
     /// `None` for a rule Config evaluates itself, which delivers nothing back.
     pub result_token: Option<String>,
+    /// The `ResultToken` of the pass whose EVALUATOR Config has already invoked
+    /// ([`super::custom_lambda_rule`]).
+    ///
+    /// A rule whose verdicts are delivered back is evaluated by invoking the function the
+    /// account pointed it at, and that invocation is owed ONCE per pass Config invoked:
+    /// this is the record of which pass has had its invocation made, so the in-process
+    /// pump does not invoke the function again for the same pass. It stays set when the
+    /// pass settles, because the invocation it names has happened.
+    pub dispatched_token: Option<String>,
 }
 
 impl RuleEvaluationEntry {
@@ -421,6 +430,29 @@ impl ConfigRuleEntry {
             };
             self.evaluation_results.remove(&key);
         }
+    }
+
+    /// Record `result` as this rule's verdict on the resource it names, and answer the
+    /// compliance CHANGE it amounts to — the verdict that now holds and the one it
+    /// replaced — or `None` when the verdict did not change.
+    ///
+    /// Every writer that EVALUATES a rule goes through here, so "the verdict changed" is
+    /// one statement: the verdict it replaces is read before the write, because that is
+    /// what a compliance-change notification reports the resource changed FROM, and a
+    /// verdict that did not change notifies nobody while the evaluation itself is still
+    /// recorded.
+    pub fn record_verdict(&mut self, result: EvaluationResultEntry) -> Option<ComplianceChange> {
+        let replaced = self.evaluation_results.get(&result.key()).cloned();
+        self.record_evaluation_result(result.clone());
+        let changed = replaced
+            .as_ref()
+            .is_none_or(|previous| previous.compliance_type != result.compliance_type);
+        changed.then(|| ComplianceChange {
+            rule_name: self.name.clone(),
+            rule_arn: self.arn.clone(),
+            new_result: result,
+            old_result: replaced,
+        })
     }
 
     /// Whether `DescribeConfigRuleEvaluationStatus` reports a status for this rule.

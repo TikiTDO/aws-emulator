@@ -28,7 +28,7 @@
 
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::user_lifecycle::{call, call_signed_by, element, error_code, router};
+use crate::user_lifecycle::{call, call_signed_by, element, elements, error_code, router};
 
 /// The awsQuery error code the administrative writes answer a password the policy does not
 /// admit with: `PasswordPolicyViolationException`'s own `awsQueryError` code
@@ -594,6 +594,209 @@ async fn every_published_symbol_satisfies_the_symbol_rule() {
             message, SYMBOL_RULE_MESSAGE,
             "case {outside:?}: expected the refusal to spell the published set out, got \
              {message:?}"
+        );
+    }
+}
+
+/// The error code a read of a policy the account never set answers with, from
+/// `NoSuchEntityException`'s own `awsQueryError` code
+/// (`smithy_query(query="operation", operation="GetAccountPasswordPolicy")`), carried with
+/// HTTP 404.
+const NO_SUCH_ENTITY_CODE: &str = "NoSuchEntity";
+
+/// One `GetAccountPasswordPolicy`: the operation takes no input at all.
+async fn read_policy(router: &MultiServiceRouter) -> (u16, String) {
+    call(router, "GetAccountPasswordPolicy", &[]).await
+}
+
+/// The value the response reports for the member `tag`, or `None` when it carries that
+/// member not at all — which is how an unset optional member of `PasswordPolicy` is
+/// reported.
+fn member(body: &str, tag: &str) -> Option<String> {
+    let found = elements(body, tag);
+    assert!(
+        found.len() <= 1,
+        "expected at most one <{tag}> in the response, got {}: {body}",
+        found.len()
+    );
+    found.into_iter().next()
+}
+
+/// RULE: `GetAccountPasswordPolicy` reports the password policy the account CONFIGURED —
+/// every member as `UpdateAccountPasswordPolicy` left it, with `ExpirePasswords` derived
+/// from the expiry age it set ("Returns true if MaxPasswordAge contains a value greater
+/// than 0") — and an account that has never set a policy has none to read, which is the
+/// modelled `NoSuchEntity` naming the account the policy would belong to.
+///
+/// The rows differ along what the account configured: nothing at all (the documented
+/// defaults a write with no parameters leaves), a minimum length, each character class, an
+/// expiry age, a reuse count, self-service, hard expiry, and every member at once.
+#[tokio::test]
+async fn the_account_password_policy_is_read_back_as_the_account_configured_it() {
+    // An account that never set a policy: the read is refused rather than answering a
+    // policy of defaults.
+    let empty_account = router();
+    let (status, body) = read_policy(&empty_account).await;
+    assert_eq!(
+        status, 404,
+        "case \"no policy at all\": expected HTTP 404 for a policy nothing set, got \
+         {status}: {body}"
+    );
+    let code = error_code(&body);
+    assert_eq!(
+        code, NO_SUCH_ENTITY_CODE,
+        "case \"no policy at all\": expected the code {NO_SUCH_ENTITY_CODE}, got {code:?}: \
+         {body}"
+    );
+    let message = element(&body, "Message");
+    assert_eq!(
+        message,
+        format!(
+            "The Password Policy with domain name {} cannot be found.",
+            engine::emulator_account_id()
+        ),
+        "case \"no policy at all\": expected the refusal to name the account, got {message:?}"
+    );
+
+    // One row per shape of policy a write can leave behind: the parameters it carries, and
+    // the members the read has to report for it.
+    type Row = (
+        &'static str,
+        &'static [(&'static str, &'static str)],
+        &'static [(&'static str, &'static str)],
+    );
+    let rows: [Row; 9] = [
+        (
+            "a write carrying no parameter at all",
+            &[],
+            &[
+                ("MinimumPasswordLength", "6"),
+                ("RequireSymbols", "false"),
+                ("RequireNumbers", "false"),
+                ("RequireUppercaseCharacters", "false"),
+                ("RequireLowercaseCharacters", "false"),
+                ("AllowUsersToChangePassword", "false"),
+                ("ExpirePasswords", "false"),
+            ],
+        ),
+        (
+            "a minimum length",
+            &[("MinimumPasswordLength", "24")],
+            &[("MinimumPasswordLength", "24"), ("ExpirePasswords", "false")],
+        ),
+        (
+            "the published floor of the minimum length",
+            &[("MinimumPasswordLength", "6")],
+            &[("MinimumPasswordLength", "6")],
+        ),
+        (
+            "the published ceiling of the minimum length",
+            &[("MinimumPasswordLength", "128")],
+            &[("MinimumPasswordLength", "128")],
+        ),
+        (
+            "every character class required",
+            &[
+                ("RequireSymbols", "true"),
+                ("RequireNumbers", "true"),
+                ("RequireUppercaseCharacters", "true"),
+                ("RequireLowercaseCharacters", "true"),
+            ],
+            &[
+                ("RequireSymbols", "true"),
+                ("RequireNumbers", "true"),
+                ("RequireUppercaseCharacters", "true"),
+                ("RequireLowercaseCharacters", "true"),
+            ],
+        ),
+        (
+            "an expiry age, which is what makes passwords expire",
+            &[("MaxPasswordAge", "90")],
+            &[("MaxPasswordAge", "90"), ("ExpirePasswords", "true")],
+        ),
+        (
+            "a reuse count",
+            &[("PasswordReusePrevention", "24")],
+            &[
+                ("PasswordReusePrevention", "24"),
+                ("ExpirePasswords", "false"),
+            ],
+        ),
+        (
+            "self-service password changes",
+            &[("AllowUsersToChangePassword", "true")],
+            &[("AllowUsersToChangePassword", "true")],
+        ),
+        (
+            "every member at once",
+            &[
+                ("MinimumPasswordLength", "14"),
+                ("RequireSymbols", "true"),
+                ("RequireNumbers", "true"),
+                ("RequireUppercaseCharacters", "true"),
+                ("RequireLowercaseCharacters", "true"),
+                ("AllowUsersToChangePassword", "true"),
+                ("MaxPasswordAge", "45"),
+                ("PasswordReusePrevention", "12"),
+                ("HardExpiry", "true"),
+            ],
+            &[
+                ("MinimumPasswordLength", "14"),
+                ("RequireSymbols", "true"),
+                ("RequireNumbers", "true"),
+                ("RequireUppercaseCharacters", "true"),
+                ("RequireLowercaseCharacters", "true"),
+                ("AllowUsersToChangePassword", "true"),
+                ("MaxPasswordAge", "45"),
+                ("PasswordReusePrevention", "12"),
+                ("HardExpiry", "true"),
+                ("ExpirePasswords", "true"),
+            ],
+        ),
+    ];
+
+    for (case, written, expected) in rows {
+        // One router per row, so each row reads back only what its own write left.
+        let router = router();
+        let policy: Vec<(&str, String)> = written
+            .iter()
+            .map(|(name, value)| (*name, (*value).to_string()))
+            .collect();
+        set_policy(&router, case, &policy).await;
+
+        let (status, body) = read_policy(&router).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: expected the configured policy to be served, got {status}: {body}"
+        );
+        for (tag, value) in expected {
+            assert_eq!(
+                member(&body, tag).as_deref(),
+                Some(*value),
+                "case {case:?}: expected <{tag}> to be {value:?}, got {body}"
+            );
+        }
+        // A member the write did not name is reported as the account holds it, never as a
+        // value this read invented: an expiry age and a reuse count the account never set
+        // are absent, which is the documented default under which passwords never expire
+        // and reuse is not prevented.
+        for absent in ["MaxPasswordAge", "PasswordReusePrevention"] {
+            if expected.iter().any(|(tag, _)| *tag == absent) {
+                continue;
+            }
+            assert_eq!(
+                member(&body, absent),
+                None,
+                "case {case:?}: expected <{absent}> to be absent, got {body}"
+            );
+        }
+
+        // The read is a REPORT: reading again answers the same policy.
+        let (again_status, again) = read_policy(&router).await;
+        assert_eq!(
+            (again_status, element(&again, "MinimumPasswordLength")),
+            (status, element(&body, "MinimumPasswordLength")),
+            "case {case:?}: a second read must answer the same policy, got {again}"
         );
     }
 }

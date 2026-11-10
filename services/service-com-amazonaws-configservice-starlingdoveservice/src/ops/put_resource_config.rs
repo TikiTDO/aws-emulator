@@ -366,6 +366,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 resource_id: input.resource_id.clone(),
                 resource_name: input.resource_name.clone(),
                 deleted_at: None,
+                // `PutResourceConfig` records the type, the id, the name, the schema
+                // version and the configuration document, and nothing else: no call
+                // carries the resource's ARN, so the item's own is derived from the type
+                // and the id ([`crate::state::recorded_resource_arn`]).
+                arn: None,
                 schema_version_id: Some(input.schema_version_id.clone()),
                 configuration: Some(input.configuration.clone()),
                 tags: input.tags.clone().unwrap_or_default().into_iter().collect(),

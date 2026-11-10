@@ -131,3 +131,23 @@ impl ConformancePackEntry {
         }
     }
 }
+
+impl ComAmazonawsConfigserviceStarlingdoveserviceState {
+    /// Drop the resources ONE conformance pack's deployment created, named by
+    /// [`ConformancePackEntry::deployed_rule_names`].
+    ///
+    /// A pack's resources are the Config rules its template declared and the remediation
+    /// actions declared for them, so this is the ONE statement of what goes when a pack's
+    /// deployment is undone: `DeleteConformancePack` removes them with the pack ("all the
+    /// Config rules, remediation actions, and all evaluation results within that
+    /// conformance pack" — a rule's evaluation results live on the rule, so removing the
+    /// rule removes them), and a REDEPLOY of the same pack removes exactly these before
+    /// creating what the new template declares. Nothing else in the account's rules is
+    /// touched.
+    pub fn remove_conformance_pack_resources(&mut self, rule_names: &[String]) {
+        for rule_name in rule_names {
+            self.config_rules.remove(rule_name);
+            self.remediation_configurations.remove(rule_name);
+        }
+    }
+}

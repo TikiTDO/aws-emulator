@@ -205,7 +205,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             crate::scaffolded::Scaffolded::validation(crate::state::STATE_UNAVAILABLE)
         })?;
@@ -290,6 +289,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 rule.mint_evaluation_result_token(now);
             }
         }
+        drop(store);
+
+        // The pass this call invoked is run by the in-process pump, which is also what
+        // INVOKES the evaluator of a rule whose verdicts are delivered back to Config
+        // (`crate::state::custom_lambda_rule`): the work is owed from here whether or not
+        // a recorder is recording.
+        crate::state::drive_recorder_clock(ctx, &self.engine, &crate::state::request_region(ctx));
 
         Ok(StartConfigRulesEvaluationOutput {})
     }

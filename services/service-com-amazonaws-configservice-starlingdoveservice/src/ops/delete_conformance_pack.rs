@@ -1,15 +1,33 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteConformancePack
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteConformancePack`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteConformancePack::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Removes a conformance pack and the resources ITS deployment created: "deletes the
+//! specified conformance pack and all the Config rules, remediation actions, and all
+//! evaluation results within that conformance pack."
+//!
+//! What this handler enforces, and where each rule comes from:
+//!
+//! * a pack's own resources are the Config rules its deployment created and the
+//!   remediation actions deployed beside them
+//!   ([`crate::state::ComAmazonawsConfigserviceStarlingdoveserviceState::remove_conformance_pack_resources`],
+//!   the ONE statement of what a pack holds, which a redeploy of the same pack replaces
+//!   through as well), and a rule's evaluation results live ON the rule, so removing the
+//!   rule removes them with it;
+//! * `NoSuchConformancePackException` for a name this account and Region holds no pack
+//!   for, worded as every pack read words that refusal
+//!   ([`crate::state::no_such_conformance_pack_message`]), so a delete of a pack that is
+//!   already gone is refused rather than reported as a deletion of nothing;
+//! * `ResourceInUseException` for a pack whose deployment workflow has not settled —
+//!   "a conformance pack creation, update, and deletion is in progress. Try your request
+//!   again later" — which is the same refusal, worded the same way
+//!   ([`crate::state::conformance_pack_workflow_in_progress_message`]), that a second
+//!   deployment of a pack in flight gets.
+//!
+//! The deletion itself is what this call performs: the pack and its resources are gone
+//! when it answers, so nothing holds a `DELETE_IN_PROGRESS` state afterwards and an
+//! independent read of the pack — `DescribeConformancePacks`, its status, or either of
+//! its compliance reads — refuses the name as a pack that does not exist.
 //!
 //! ## Shape of an operation
 //!
@@ -174,18 +192,53 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteConformancePack` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteConformancePackErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteConformancePack"))
+        // `ctx` carries request metadata only; what is removed is decided by the pack
+        // this account holds under the requested name.
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            crate::scaffolded::Scaffolded::validation(crate::state::STATE_UNAVAILABLE)
+        })?;
+
+        let name = input.conformance_pack_name;
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+
+        // A name this account and Region holds no pack for names nothing to delete.
+        let Some(pack) = store.conformance_packs.get(&name) else {
+            return Err(
+                DeleteConformancePackErrorModeled::NoSuchConformancePackException(
+                    NoSuchConformancePackException {
+                        message: Some(crate::state::no_such_conformance_pack_message(
+                            ::std::slice::from_ref(&name),
+                        )),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // "A conformance pack creation, update, and deletion is in progress. Try your
+        // request again later" (`ResourceInUseException`): a pack whose deployment has
+        // not settled is held by that workflow, so this call refuses rather than
+        // removing resources the deployment is still creating.
+        if pack.state_at(now) == crate::state::CONFORMANCE_PACK_STATE_CREATE_IN_PROGRESS {
+            return Err(DeleteConformancePackErrorModeled::ResourceInUseException(
+                ResourceInUseException {
+                    message: Some(crate::state::conformance_pack_workflow_in_progress_message(
+                        &name,
+                    )),
+                },
+            )
+            .into());
+        }
+
+        // The resources the pack's deployment created go with it: the Config rules it
+        // deployed (and the evaluation results recorded on each of them) and the
+        // remediation actions deployed for those rules.
+        let deployed = pack.deployed_rule_names.clone();
+        store.remove_conformance_pack_resources(&deployed);
+        store.conformance_packs.remove(&name);
+
+        Ok(DeleteConformancePackOutput)
     }
 }

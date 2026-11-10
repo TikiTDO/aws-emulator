@@ -1341,8 +1341,8 @@ async fn an_unimplemented_operation_still_answers_not_implemented() {
     let emulator = Emulator::new();
     let (status, code) = emulator
         .refused(
-            "DeleteConformancePack",
-            &json!({ "ConformancePackName": "pack-000" }),
+            "DeleteOrganizationConformancePack",
+            &json!({ "OrganizationConformancePackName": "pack-000" }),
         )
         .await;
     assert_eq!(

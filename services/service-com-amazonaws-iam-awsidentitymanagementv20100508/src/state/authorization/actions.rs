@@ -214,6 +214,9 @@ pub const PUT_ACCOUNT_PROPERTIES: &str = "iam:PutAccountProperties";
 /// `iam:UpdateAccountPasswordPolicy`.
 pub const UPDATE_ACCOUNT_PASSWORD_POLICY: &str = "iam:UpdateAccountPasswordPolicy";
 
+/// `iam:GetAccountPasswordPolicy`.
+pub const GET_ACCOUNT_PASSWORD_POLICY: &str = "iam:GetAccountPasswordPolicy";
+
 /// `iam:CreateAccountAlias`.
 pub const CREATE_ACCOUNT_ALIAS: &str = "iam:CreateAccountAlias";
 

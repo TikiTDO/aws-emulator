@@ -26,6 +26,16 @@ pub struct DiscoveredResourceEntry {
     /// (`ResourceIdentifier$resourceDeletionTime`: "The time that the resource was
     /// deleted").
     pub deleted_at: Option<SystemTime>,
+    /// The ARN the OWNING service reported for this resource, for an observation that
+    /// carried one (`ConfigurationItem$arn`: "Amazon Resource Name (ARN) associated with
+    /// the resource").
+    ///
+    /// A recorder that reads a resource from its own service's API is told that resource's
+    /// ARN by the service that mints it, and an ARN a service stated is the one the
+    /// configuration item reports; `None` for a resource nothing handed one over, whose
+    /// ARN is DERIVED from the type and the id that identify it ([`recorded_resource_arn`])
+    /// instead.
+    pub arn: Option<String>,
     /// The `SchemaVersionId` the resource's configuration item was recorded under,
     /// for a resource whose configuration state `PutResourceConfig` recorded.
     pub schema_version_id: Option<String>,
@@ -106,11 +116,12 @@ impl DiscoveredResourceEntry {
     /// blocks a recorder captures beside the configuration itself — carries the ones
     /// recorded for this resource, and is absent when none was.
     ///
-    /// The resource's own `arn` is the ARN of the resource this item records, derived
-    /// from the type and the id that identify it in the Region the item is reported
-    /// under ([`recorded_resource_arn`]) — it is the only member of the item that
-    /// carries the resource's ARN, since `resourceId` and `resourceName` carry the bare
-    /// id and name.
+    /// The resource's own `arn` is the ARN of the resource this item records — the one
+    /// the owning service reported for it where the observation carried one
+    /// ([`Self::arn`]), else the one derived from the type and the id that identify it in
+    /// the Region the item is reported under ([`recorded_resource_arn`]) — and it is the
+    /// only member of the item that carries the resource's ARN, since `resourceId` and
+    /// `resourceName` carry the bare id and name.
     ///
     /// Two members stay unset because nothing in this emulator knows them:
     /// `availabilityZone` belongs to the service that owns the resource, and
@@ -139,7 +150,12 @@ impl DiscoveredResourceEntry {
             configuration_item_capture_time: self.last_recorded_at.map(timestamp),
             configuration_item_status: Some(self.configuration_item_status().to_string()),
             configuration_state_id: self.configuration_state_id(),
-            arn: recorded_resource_arn(&self.resource_type, &self.resource_id, aws_region),
+            // The ARN the owning service reported, where the observation carried one;
+            // otherwise the one the type and the id derive.
+            arn: self
+                .arn
+                .clone()
+                .or_else(|| recorded_resource_arn(&self.resource_type, &self.resource_id, aws_region)),
             resource_type: Some(self.resource_type.clone()),
             resource_id: Some(self.resource_id.clone()),
             resource_name: self.resource_name.clone(),

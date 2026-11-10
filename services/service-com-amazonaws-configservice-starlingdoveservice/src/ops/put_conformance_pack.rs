@@ -57,14 +57,16 @@
 //! the modelled `CREATE_FAILED` state with the reason
 //! (`ConformancePackStatusReason`) rather than as a completion of work nothing performed.
 //!
-//! What the deployment does NOT do is evaluate those rules against resources: an
-//! evaluation result is recorded by the evaluation writers, which are scaffolded, so the
-//! pack's rules report the `INSUFFICIENT_DATA` of a rule nothing has evaluated — and the
-//! conformance pack compliance surface that would roll that up
-//! (`DescribeConformancePackCompliance`, `GetConformancePackComplianceDetails`,
-//! `GetConformancePackComplianceSummary`, `ListConformancePackComplianceScores`) is
-//! still scaffolded under its own stub issues, so nothing reports a compliance result
-//! that nothing produced.
+//! What the deployment does NOT do is evaluate those rules itself: the evaluation is the
+//! pass Config owes a rule it has just created ("when you create a rule, Config evaluates
+//! your resources against the rule automatically", `PutConfigRule`), which the in-process
+//! pump runs ([`crate::state::drive_recorder_clock`]) — so a rule whose implementation
+//! this emulator has is placed at a verdict a span after this call answers, and the pack's
+//! own compliance surface (`DescribeConformancePackCompliance`,
+//! `GetConformancePackComplianceDetails`, `GetConformancePackComplianceSummary`) reports
+//! those results. A rule whose implementation this emulator does not have records no
+//! verdict at all rather than a synthesised one, and reports the `INSUFFICIENT_DATA` of a
+//! rule nothing has evaluated.
 //!
 //! ## Shape of an operation
 //!
@@ -1029,45 +1031,43 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // The resources a previous deployment of THIS pack created are the ones it
             // replaces: the redeploy drops them before creating what the new template
             // declares, and touches nothing else in the account's rules.
-            for rule_name in &previously_deployed {
-                store.config_rules.remove(rule_name);
-                store.remediation_configurations.remove(rule_name);
-            }
+            store.remove_conformance_pack_resources(&previously_deployed);
             for rule in rules {
                 let rule_name = crate::state::conformance_pack_rule_name(&rule.declared_name, &id);
                 let rule_id = crate::state::mint_config_rule_id();
                 let rule_arn = crate::state::config_rule_arn(&region, &rule_id);
-                store.config_rules.insert(
-                    rule_name.clone(),
-                    crate::state::ConfigRuleEntry {
-                        name: rule_name.clone(),
-                        arn: rule_arn,
-                        id: rule_id,
-                        description: rule.description.clone(),
-                        scope: rule.scope.clone(),
-                        source: rule.source.clone(),
-                        input_parameters: rule.input_parameters.clone(),
-                        maximum_execution_frequency: rule.maximum_execution_frequency.clone(),
-                        state: crate::state::CONFIG_RULE_STATE_ACTIVE.to_string(),
-                        evaluation_modes: crate::state::default_evaluation_modes(),
-                        rule_evaluation_visibility: Some(
-                            crate::state::RULE_EVALUATION_VISIBILITY_EXTERNAL.to_string(),
-                        ),
-                        // The pack deployed this rule through Config's own
-                        // service-linked role, which is what `CreatedBy` reports.
-                        created_by: Some(
-                            crate::state::CONFORMANCE_PACK_SERVICE_PRINCIPAL.to_string(),
-                        ),
-                        created_at: now,
-                        // A pack's rule carries no tags of the caller's: the tags the
-                        // request names are the PACK's.
-                        tags: crate::state::TagSet::new(),
-                        evaluation_results: ::std::collections::BTreeMap::new(),
-                        // Config evaluates a rule as soon as it is created, with no call
-                        // from the caller; the pass completes a span later.
-                        evaluation: crate::state::RuleEvaluationEntry::invoked_at(now),
-                    },
-                );
+                let mut entry = crate::state::ConfigRuleEntry {
+                    name: rule_name.clone(),
+                    arn: rule_arn,
+                    id: rule_id,
+                    description: rule.description.clone(),
+                    scope: rule.scope.clone(),
+                    source: rule.source.clone(),
+                    input_parameters: rule.input_parameters.clone(),
+                    maximum_execution_frequency: rule.maximum_execution_frequency.clone(),
+                    state: crate::state::CONFIG_RULE_STATE_ACTIVE.to_string(),
+                    evaluation_modes: crate::state::default_evaluation_modes(),
+                    rule_evaluation_visibility: Some(
+                        crate::state::RULE_EVALUATION_VISIBILITY_EXTERNAL.to_string(),
+                    ),
+                    // The pack deployed this rule through Config's own
+                    // service-linked role, which is what `CreatedBy` reports.
+                    created_by: Some(crate::state::CONFORMANCE_PACK_SERVICE_PRINCIPAL.to_string()),
+                    created_at: now,
+                    // A pack's rule carries no tags of the caller's: the tags the
+                    // request names are the PACK's.
+                    tags: crate::state::TagSet::new(),
+                    evaluation_results: ::std::collections::BTreeMap::new(),
+                    // Config evaluates a rule as soon as it is created, with no call
+                    // from the caller; the pass completes a span later.
+                    evaluation: crate::state::RuleEvaluationEntry::invoked_at(now),
+                };
+                // The pass that evaluation is carries a `ResultToken` where the rule the
+                // template declared is one whose verdicts are DELIVERED back to Config —
+                // a Custom Lambda rule — exactly as the pass a `PutConfigRule` write
+                // invokes does, so such a rule's own evaluator is invoked for it too.
+                entry.mint_evaluation_result_token(now);
+                store.config_rules.insert(rule_name.clone(), entry);
                 deployed_rule_names.push(rule_name);
             }
 
@@ -1118,6 +1118,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 tags,
             },
         );
+        drop(store);
+
+        // Config evaluates a rule it has just created, with no call from the caller, so
+        // the rules this deployment created are evaluated by the in-process pump the way
+        // `PutConfigRule`'s are — which is what gives the pack's own compliance surface
+        // results to report.
+        crate::state::drive_recorder_clock(ctx, &self.engine, &region);
 
         Ok(PutConformancePackOutput {
             conformance_pack_arn: Some(arn),

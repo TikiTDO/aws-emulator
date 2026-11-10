@@ -7,9 +7,10 @@
 //! resource" (`ConfigurationItem$arn`; `BaseConfigurationItem$arn`: "The Amazon
 //! Resource Name (ARN) of the resource"), and it is the ONLY member of the item that
 //! carries one — `resourceId` and `resourceName` carry the bare id and the bare name.
-//! Nothing in the inventory stores an ARN, because nothing a recorder observes hands
-//! it one to store, so the member is DERIVED here from the two members that identify
-//! the resource:
+//! An observation the OWNING service handed an ARN over for keeps that ARN on the
+//! inventory entry ([`super::DiscoveredResourceEntry::arn`]), because an ARN the service
+//! that mints it stated is the one its resource has. For every other recorded resource
+//! the member is DERIVED here from the two members that identify it:
 //!
 //! * the ARN's service field is the ARN namespace of the service that OWNS the
 //!   resource type (the type's middle segment names that service);

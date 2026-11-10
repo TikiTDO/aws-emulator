@@ -24,8 +24,9 @@ use crate::config_setup_and_rule_loop::Emulator;
 use crate::conformance_packs::{pack_from_body, past_the_deployment, rule_template};
 
 /// How Config words `NoSuchConformancePackException` for the names a request carried
-/// that resolve to no pack: the fixed sentence, then the names themselves.
-const NO_SUCH_PACK_SENTENCE: &str = "One or more conformance packs are not valid. Name(s): ";
+/// that resolve to no pack: the fixed sentence, then the names themselves — which THIS
+/// operation, the one that takes a LIST of pack names, renders inside square brackets.
+const NO_SUCH_PACK_SENTENCE: &str = "No such conformance pack exists. Conformance Pack(s): ";
 
 /// The pack details of a `DescribeConformancePacks` response.
 fn described(case: &str, body: &Value) -> Vec<Value> {
@@ -373,7 +374,7 @@ async fn a_name_no_pack_exists_for_is_refused_naming_every_such_name() {
         );
         assert_eq!(
             parsed["message"].as_str(),
-            Some(format!("{NO_SUCH_PACK_SENTENCE}{missing}").as_str()),
+            Some(format!("{NO_SUCH_PACK_SENTENCE}[{missing}]").as_str()),
             "case {case:?}: expected the refusal to name {missing:?}, got {parsed}"
         );
     }

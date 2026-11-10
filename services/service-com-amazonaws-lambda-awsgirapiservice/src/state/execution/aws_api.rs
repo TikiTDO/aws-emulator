@@ -466,6 +466,40 @@ pub const APIS: &[Api] = &[
         protocol: Protocol::RestJson(&APPCONFIG),
         answer_model: Some(&APPCONFIG_ANSWERS),
     },
+    // `services/service-com-amazonaws-configservice-starlingdoveservice/smithy-model/
+    // com-amazonaws-configservice-starlingdoveservice.json`: awsJson1_1, sigv4Name `config`,
+    // endpointPrefix `config`, sdkId `Config Service`, service shape `StarlingDoveService`.
+    //
+    // A function that is an AWS Config RULE'S OWN EVALUATOR has to reach this service: Config
+    // invokes the function with a `ResultToken` and the function reports what it found with
+    // `PutEvaluations`, which "is required in every Lambda function that is invoked by an
+    // Config rule" — so a handler that cannot reach Config cannot deliver the verdict it was
+    // invoked to produce. Reading the recorded configuration it judges (the resource reads and
+    // the Config query language) is the same surface.
+    Api {
+        sdk_token: "config",
+        signing_name: "config",
+        endpoint_prefix: "config",
+        model: Some(CONFIG_MODEL),
+        protocol: Protocol::AwsJson {
+            target_prefix: "StarlingDoveService",
+            json_version: "1.1",
+        },
+        answer_model: Some(&CONFIG_ANSWERS),
+    },
+    // The same service under the token its own SDK id gives it, as EventBridge and CloudWatch
+    // Logs are above: `Config Service` run together is `configservice`.
+    Api {
+        sdk_token: "configservice",
+        signing_name: "config",
+        endpoint_prefix: "config",
+        model: Some(CONFIG_MODEL),
+        protocol: Protocol::AwsJson {
+            target_prefix: "StarlingDoveService",
+            json_version: "1.1",
+        },
+        answer_model: Some(&CONFIG_ANSWERS),
+    },
 ];
 
 /// Whether `named` and `asked` name the ONE service.
@@ -589,6 +623,10 @@ pub(super) const APPCONFIG_MODEL: &str = include_str!(
     "../../../../service-com-amazonaws-appconfig-amazonappconfig/smithy-model/\
      com-amazonaws-appconfig-amazonappconfig.json"
 );
+pub(super) const CONFIG_MODEL: &str = include_str!(
+    "../../../../service-com-amazonaws-configservice-starlingdoveservice/smithy-model/\
+     com-amazonaws-configservice-starlingdoveservice.json"
+);
 
 /// AWS X-Ray's own model, which a call to it is bound by, embedded exactly as the API
 /// Gateway model below is and for the same reason: the wire facts of its operations are that
@@ -677,6 +715,10 @@ static APPCONFIGDATA_ANSWERS: super::blob_members::ServiceModel =
     };
 static APPCONFIG_ANSWERS: super::blob_members::ServiceModel = super::blob_members::ServiceModel {
     source: APPCONFIG_MODEL,
+    plan: ::std::sync::OnceLock::new(),
+};
+static CONFIG_ANSWERS: super::blob_members::ServiceModel = super::blob_members::ServiceModel {
+    source: CONFIG_MODEL,
     plan: ::std::sync::OnceLock::new(),
 };
 

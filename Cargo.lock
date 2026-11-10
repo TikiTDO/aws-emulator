@@ -11034,6 +11034,8 @@ dependencies = [
  "aws-emulator-smithy-schema-server",
  "aws-emulator-smithy-server-runtime",
  "aws-sdk-eventbridge",
+ "aws-sdk-iam",
+ "aws-sdk-lambda",
  "aws-sdk-s3",
  "aws-sdk-sns",
  "aws-sdk-sqs",
@@ -11041,6 +11043,7 @@ dependencies = [
  "aws-smithy-runtime-api",
  "aws-smithy-schema 0.2.1",
  "aws-smithy-types",
+ "base64 0.22.1",
  "bytes",
  "flate2",
  "hex",
@@ -11050,6 +11053,7 @@ dependencies = [
  "serde_json",
  "service-com-amazonaws-eventbridge-awsevents",
  "service-com-amazonaws-iam-awsidentitymanagementv20100508",
+ "service-com-amazonaws-lambda-awsgirapiservice",
  "service-com-amazonaws-s3-amazons3",
  "service-com-amazonaws-sns-amazonsimplenotificationservice",
  "service-com-amazonaws-sqs-amazonsqs",
@@ -11061,6 +11065,7 @@ dependencies = [
  "tracing",
  "uuid",
  "yaml-rust2",
+ "zip",
 ]
 
 [[package]]
