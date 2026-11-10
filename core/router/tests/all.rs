@@ -1325,3 +1325,8 @@ mod sql_engine_single_locked_copy;
 // CloudFormation, EventBridge Pipes, IAM and Amazon SQS at once.
 #[path = "all/cloudformation_deployed_pipe_delivery.rs"]
 mod cloudformation_deployed_pipe_delivery;
+// client of a stack-deployed state machine gets — the ARN the stack publishes, the failure an
+// execution role this account's IAM cannot answer for produces, and the abort a stop records —
+// which spans CloudFormation, Step Functions and IAM at once.
+#[path = "all/cloudformation_sfn_absent_role_and_stop.rs"]
+mod cloudformation_sfn_absent_role_and_stop;
