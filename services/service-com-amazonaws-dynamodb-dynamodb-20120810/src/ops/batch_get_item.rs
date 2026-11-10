@@ -275,7 +275,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         .as_ref()
                         .is_some_and(|names| !names.is_empty())
                 }),
-                PROJECTION_EXPRESSION_SET,
             )],
             &[(
                 PROJECTION_EXPRESSION,
@@ -485,7 +484,3 @@ fn lift(error: crate::state::RequestError) -> BatchGetItemError {
 
 /// The input member a projection travels in, which is what its refusals name.
 const PROJECTION_EXPRESSION: &str = "ProjectionExpression";
-
-/// The same member as the expression generation's whole answer to `AttributesToGet`:
-/// what the legacy member's documentation says to use instead of it.
-const PROJECTION_EXPRESSION_SET: &[&str] = &[PROJECTION_EXPRESSION];

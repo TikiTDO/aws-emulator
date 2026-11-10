@@ -955,6 +955,63 @@ async fn the_mixed_parameter_message_names_each_side_in_declared_order() {
             "ConditionExpression",
             true,
         ),
+        // A legacy member beside an expression member that states something ELSE is
+        // refused just the same: what the service holds against a request is the two
+        // GENERATIONS, not a legacy member beside the one that replaced it, so a
+        // projection in one generation and a filter in the other collide too.
+        (
+            "a Query stating its key condition the legacy way and its projection the new way",
+            "Query",
+            json!({
+                "TableName": TABLE,
+                "KeyConditions": {
+                    "pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "k1"}]},
+                },
+                "ProjectionExpression": "a",
+            }),
+            "KeyConditions",
+            "ProjectionExpression",
+            false,
+        ),
+        (
+            "a Scan stating its filter the legacy way and its projection the new way",
+            "Scan",
+            json!({
+                "TableName": TABLE,
+                "ScanFilter": filter_entries(&["a"]),
+                "ProjectionExpression": "a",
+            }),
+            "ScanFilter",
+            "ProjectionExpression",
+            false,
+        ),
+        (
+            "a Query stating its filter the legacy way and its key condition the new way",
+            "Query",
+            json!({
+                "TableName": TABLE,
+                "KeyConditionExpression": "pk = :k",
+                "ExpressionAttributeValues": {":k": {"S": "k1"}},
+                "QueryFilter": filter_entries(&["a", "b"]),
+            }),
+            "QueryFilter",
+            "KeyConditionExpression",
+            false,
+        ),
+        (
+            "a write stating its condition the legacy way and its update the new way",
+            "UpdateItem",
+            json!({
+                "TableName": TABLE,
+                "Key": {"pk": {"S": "k1"}, "sk": {"S": "s1"}},
+                "UpdateExpression": "SET c = :z",
+                "ExpressionAttributeValues": {":z": {"S": "z"}},
+                "Expected": expected_entries(&["nothere", "alsonot"]),
+            }),
+            "Expected",
+            "UpdateExpression",
+            true,
+        ),
     ];
 
     for (case, operation, request, legacy, expression, enveloped) in rows {
@@ -976,57 +1033,56 @@ async fn the_mixed_parameter_message_names_each_side_in_declared_order() {
         );
     }
 
-    // What COLLIDES is a legacy member beside the expression member that replaced it —
-    // the two ways of saying one thing. A request carrying a member of each generation
-    // that say DIFFERENT things is served, so the rows above are the pair being refused
-    // rather than the generations being held apart at large.
+    // A request that stays inside ONE generation is served, whichever generation it
+    // picked: the rule is about carrying members of BOTH, not about carrying a legacy
+    // member at all.
     for (case, operation, request) in [
         (
-            "a Query stating its key condition the legacy way and its projection the new way",
+            "a Query stating both its key condition and its projection the legacy way",
             "Query",
             json!({
                 "TableName": TABLE,
                 "KeyConditions": {
                     "pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "k1"}]},
                 },
-                "ProjectionExpression": "a",
+                "AttributesToGet": ["a"],
             }),
         ),
         (
-            "a Scan stating its filter the legacy way and its projection the new way",
+            "a Scan stating both its filter and its projection the legacy way",
             "Scan",
             json!({
                 "TableName": TABLE,
-                "ScanFilter": filter_entries(&["a"]),
+                "ScanFilter": filter_entries(&["a", "b"]),
+                "ConditionalOperator": "AND",
+                "AttributesToGet": ["a"],
+            }),
+        ),
+        (
+            "a Scan stating both its filter and its projection the expression way",
+            "Scan",
+            json!({
+                "TableName": TABLE,
+                "FilterExpression": "attribute_exists(a)",
                 "ProjectionExpression": "a",
             }),
         ),
         (
-            "a Query stating its filter the legacy way and its key condition the new way",
-            "Query",
-            json!({
-                "TableName": TABLE,
-                "KeyConditionExpression": "pk = :k",
-                "ExpressionAttributeValues": {":k": {"S": "k1"}},
-                "QueryFilter": filter_entries(&["a", "b"]),
-            }),
-        ),
-        (
-            "a write stating its condition the legacy way and its update the new way",
+            "a write stating both its condition and its update the expression way",
             "UpdateItem",
             json!({
                 "TableName": TABLE,
                 "Key": {"pk": {"S": "k1"}, "sk": {"S": "s1"}},
                 "UpdateExpression": "SET c = :z",
+                "ConditionExpression": "attribute_exists(pk)",
                 "ExpressionAttributeValues": {":z": {"S": "z"}},
-                "Expected": expected_entries(&["nothere", "alsonot"]),
             }),
         ),
     ] {
         let (status, answered) = call(&router, operation, request).await;
         assert_eq!(
             status, 200,
-            "case {case:?}: two members that say different things are served, got {status} with \
+            "case {case:?}: a request inside one generation is served, got {status} with \
              {answered}"
         );
     }

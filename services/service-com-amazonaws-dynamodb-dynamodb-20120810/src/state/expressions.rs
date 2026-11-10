@@ -2971,71 +2971,45 @@ fn states_write_intent(member: &str) -> bool {
     ENVELOPED_EXPRESSION_MEMBERS.contains(&member) || ENVELOPED_LEGACY_MEMBERS.contains(&member)
 }
 
-/// One non-expression member of a request, as a caller states it: its name, whether the
-/// request carried it, and the expression member(s) that state the SAME thing — the ones
-/// its own documentation says to use instead ("This is a legacy parameter. Use `<member>`
-/// instead").
-///
-/// Most legacy members name exactly one replacement. `ConditionalOperator` names every
-/// expression member its operation declares, because it has no counterpart of its own: it
-/// says how the entries of a legacy MAP are combined, and the expression generation states
-/// that inside the expression itself, so a request carrying it and any expression member
-/// states its intent in both generations at once. That is wider than the one member its
-/// own doc points at (`FilterExpression` for a read, `ConditionExpression` for a write)
-/// because it is what the service is OBSERVED to refuse: a `Scan` carrying
-/// `ConditionalOperator` beside a `ProjectionExpression` alone — no filter of either
-/// generation — is answered with this sentence naming those two members, which the
-/// narrower reading would serve. `tests/all/legacy_conditional_operator_refusals.rs`
-/// pins that case.
-pub type LegacyParameter<'m> = (&'m str, bool, &'m [&'m str]);
+/// One member of a request, as a caller states it: its name and whether the request
+/// carried it. BOTH generations are stated this way, because the two sides are held
+/// against each other whole and neither side's entry needs to name the other's
+/// ([`check_expression_parameter_mix`]): "This is a legacy parameter. Use `<member>`
+/// instead" says which member supersedes a legacy one, not which member it may not be
+/// sent beside.
+pub type StatedParameter<'m> = (&'m str, bool);
 
-/// Hold a request's two generations of parameters apart: a request that states ONE thing
-/// through a legacy member AND through an expression member that states the same thing is
-/// refused before either is read.
+/// Hold a request's two generations of parameters apart: a request that carries ANY
+/// non-expression (legacy) member AND ANY expression member is refused before either side
+/// is read.
 ///
-/// What COLLIDES is a PAIR — the legacy member and its replacement, the two ways of
-/// saying one thing — not the two generations at large: a request may carry a member of
-/// each generation when they say DIFFERENT things, and that is served. It is the pair and
-/// not the generations because that is what the service is OBSERVED to do: a `Query`
-/// carrying the legacy `KeyConditions` map beside a `ProjectionExpression` — a key
-/// condition and a projection, two different asks — is SERVED, and so is the symmetric
-/// `Scan` carrying `AttributesToGet` beside a `FilterExpression`, while every request
-/// that states ONE of those things twice is refused. The "Use `<member>` instead"
-/// sentence names which members are the two ways of saying one thing; the served calls
-/// are what says the rest of a request's members are not held against each other.
-/// `tests/all/legacy_conditional_operator_refusals.rs` and
-/// `tests/all/request_validation_refusals.rs` pin both sides of that line.
-///
-/// Once any pair does collide, the refusal NAMES THE WHOLE OF EACH SIDE
-/// ([`expression_conflict_between`]), so a caller sees every member of both generations
-/// its request carried rather than the one pair that was noticed.
+/// What COLLIDES is the two GENERATIONS, not a pair of members that say one thing: a
+/// request picks the expression members or the legacy ones they replaced and states its
+/// whole intent in that one generation. So a `Scan` carrying the legacy `AttributesToGet`
+/// beside a `FilterExpression` — a projection and a filter, two different asks, one in
+/// each generation — is refused exactly like a `Scan` that projects both ways, and the
+/// sentence it is refused with names the WHOLE of each side it carried
+/// ([`expression_conflict_between`]) rather than any one pair, which is what makes it a
+/// rule about the generations: a caller is told every member it has to drop.
+/// `tests/all/expression_parameter_generations.rs` pins the cross-member cases.
 ///
 /// Each entry pairs a member's name with whether the request carried it, so the caller
-/// states the members its own operation declares — the legacy ones with their
-/// replacements, and the expression ones — IN THE ORDER THAT OPERATION'S INPUT SHAPE
-/// DECLARES THEM ([`expression_conflict_between`]), and this states the rule once for all
-/// of them.
+/// states the members its own operation declares — the legacy ones and the expression
+/// ones — IN THE ORDER THAT OPERATION'S INPUT SHAPE DECLARES THEM
+/// ([`expression_conflict_between`]), and this states the rule once for all of them.
 pub fn check_expression_parameter_mix(
-    legacy: &[LegacyParameter<'_>],
-    expression: &[(&str, bool)],
+    legacy: &[StatedParameter<'_>],
+    expression: &[StatedParameter<'_>],
 ) -> Result<(), RequestError> {
-    let carried_legacy: Vec<&str> = legacy
-        .iter()
-        .filter(|(_, sent, _)| *sent)
-        .map(|(member, _, _)| *member)
-        .collect();
-    let carried_expression: Vec<&str> = expression
-        .iter()
-        .filter(|(_, sent)| *sent)
-        .map(|(member, _)| *member)
-        .collect();
-    let states_one_thing_twice = legacy.iter().any(|(_, sent, replacements)| {
-        *sent
-            && replacements
-                .iter()
-                .any(|replacement| carried_expression.contains(replacement))
-    });
-    if !states_one_thing_twice {
+    fn carried<'m>(side: &[StatedParameter<'m>]) -> Vec<&'m str> {
+        side.iter()
+            .filter(|(_, sent)| *sent)
+            .map(|(member, _)| *member)
+            .collect()
+    }
+    let carried_legacy = carried(legacy);
+    let carried_expression = carried(expression);
+    if carried_legacy.is_empty() || carried_expression.is_empty() {
         return Ok(());
     }
     Err(expression_conflict_between(
@@ -3134,6 +3108,33 @@ pub fn check_legacy_condition_values<'v>(
     Ok(())
 }
 
+/// Hold every value the legacy `Expected` map carries — each entry's `Value` and every
+/// element of its `AttributeValueList` — to the documented value rules.
+///
+/// `Expected` is the THIRD place one write request can carry an attribute value, beside
+/// the `Item` it stores and the `ExpressionAttributeValues` its expression binds, and
+/// every one of them bounds the work the request can ask for, so the three are held to
+/// one bound ([`check_attribute_value`]) before anything walks them. Stated here as the
+/// one reader of that map's values, so a handler bounding its own request's values and
+/// [`check_write_condition`] cannot read them two different ways.
+pub fn check_expected_condition_values(
+    expected: Option<&HashMap<String, ExpectedAttributeValue>>,
+) -> Result<(), RequestError> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    check_legacy_condition_values(
+        EXPECTED_MEMBER,
+        expected.iter().flat_map(|(name, condition)| {
+            condition
+                .value
+                .iter()
+                .chain(condition.attribute_value_list.iter().flatten())
+                .map(move |value| (name.as_str(), value))
+        }),
+    )
+}
+
 /// Whether the condition a conditional write states is satisfied by the stored item.
 ///
 /// One entry point for all three single-item writes: each states its condition the
@@ -3207,16 +3208,7 @@ pub fn check_write_condition(
             )?;
             // Every value the map compares against is held to the documented value rules,
             // before the stored item is read against any of them.
-            check_legacy_condition_values(
-                EXPECTED_MEMBER,
-                expected.iter().flat_map(|(name, condition)| {
-                    condition
-                        .value
-                        .iter()
-                        .chain(condition.attribute_value_list.iter().flatten())
-                        .map(move |value| (name.as_str(), value))
-                }),
-            )?;
+            check_expected_condition_values(Some(expected))?;
             conditional_operator_any(conditional_operator)?;
             for (name, condition) in expected {
                 // Read against NO item: every refusal an entry earns is a fact of the

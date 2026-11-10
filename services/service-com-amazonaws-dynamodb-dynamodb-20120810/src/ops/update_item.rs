@@ -339,20 +339,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         .attribute_updates
                         .as_ref()
                         .is_some_and(|map| !map.is_empty()),
-                    &["UpdateExpression"],
                 ),
                 (
                     "Expected",
                     input.expected.as_ref().is_some_and(|map| !map.is_empty()),
-                    &["ConditionExpression"],
                 ),
-                (
-                    "ConditionalOperator",
-                    input.conditional_operator.is_some(),
-                    // The member has no expression counterpart of its own, so it states
-                    // its intent twice beside ANY expression member.
-                    &["UpdateExpression", "ConditionExpression"],
-                ),
+                ("ConditionalOperator", input.conditional_operator.is_some()),
             ],
             &[
                 ("UpdateExpression", input.update_expression.is_some()),
@@ -387,6 +379,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 crate::state::check_attribute_value(update.0, value).map_err(lift)?;
             }
         }
+        // The legacy `Expected` map carries values the same way, so it is bounded here
+        // beside the others rather than only where the condition is read.
+        crate::state::check_expected_condition_values(input.expected.as_ref()).map_err(lift)?;
 
         // "This is a legacy parameter. Use UpdateExpression instead"
         // (`UpdateItem$AttributeUpdates`): a request states its update one way or the

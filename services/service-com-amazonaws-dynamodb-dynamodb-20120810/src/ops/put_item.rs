@@ -357,16 +357,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 (
                     "Expected",
                     input.expected.as_ref().is_some_and(|map| !map.is_empty()),
-                    &["ConditionExpression"],
                 ),
-                (
-                    "ConditionalOperator",
-                    input.conditional_operator.is_some(),
-                    // The member has no expression counterpart of its own, so it states
-                    // its intent twice beside the expression member this operation
-                    // declares.
-                    &["ConditionExpression"],
-                ),
+                ("ConditionalOperator", input.conditional_operator.is_some()),
             ],
             &[("ConditionExpression", input.condition_expression.is_some())],
         )
@@ -404,10 +396,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::check_attribute_value(attribute, value).map_err(lift)?;
         }
         // A value the condition compares against is held to the same limits, for the
-        // same reason: both terms bound the work this request can ask for.
+        // same reason: both terms bound the work this request can ask for. All THREE
+        // places one request carries a value are bounded here — the item, the values an
+        // expression binds, and the values the legacy `Expected` map compares against —
+        // so none of them reaches the walk that reads it unbounded.
         for (placeholder, value) in input.expression_attribute_values.iter().flatten() {
             crate::state::check_attribute_value(placeholder, value).map_err(lift)?;
         }
+        crate::state::check_expected_condition_values(input.expected.as_ref()).map_err(lift)?;
 
         // Numbers are canonicalized BEFORE the item is sized, keyed or stored, so
         // every figure reported below — the capacity billed, the item-collection key

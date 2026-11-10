@@ -381,7 +381,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         //
         // A request states its intent through the expression members or through the
         // legacy ones they replaced, never through both: the whole of each side is
-        // named, and the check runs before either side is read.
+        // named, and the check runs before either side is read. Each side is listed in
+        // the order THIS operation's input shape declares its members
+        // (`smithy_query(query="operation", operation="Scan")`), which is the order the
+        // sentence states them in ([`crate::state::expression_conflict_between`]).
         crate::state::check_expression_parameter_mix(
             &[
                 (
@@ -390,23 +393,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         .attributes_to_get
                         .as_ref()
                         .is_some_and(|names| !names.is_empty()),
-                    &["ProjectionExpression"],
                 ),
                 (
                     "ScanFilter",
                     input.scan_filter.as_ref().is_some_and(|map| !map.is_empty()),
-                    &["FilterExpression"],
                 ),
-                (
-                    "ConditionalOperator",
-                    input.conditional_operator.is_some(),
-                    // The member has no expression counterpart of its own, so it states
-                    // its intent twice beside EITHER expression member — wider than the
-                    // `FilterExpression` its doc points at, because a request carrying it
-                    // beside a projection expression ALONE is observed to be refused with
-                    // this sentence ([`crate::state::LegacyParameter`]).
-                    &["ProjectionExpression", "FilterExpression"],
-                ),
+                ("ConditionalOperator", input.conditional_operator.is_some()),
             ],
             &[
                 (

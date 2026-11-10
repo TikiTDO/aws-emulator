@@ -315,16 +315,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 (
                     "Expected",
                     input.expected.as_ref().is_some_and(|map| !map.is_empty()),
-                    &["ConditionExpression"],
                 ),
-                (
-                    "ConditionalOperator",
-                    input.conditional_operator.is_some(),
-                    // The member has no expression counterpart of its own, so it states
-                    // its intent twice beside the expression member this operation
-                    // declares.
-                    &["ConditionExpression"],
-                ),
+                ("ConditionalOperator", input.conditional_operator.is_some()),
             ],
             &[("ConditionExpression", input.condition_expression.is_some())],
         )
@@ -356,10 +348,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // A value a condition compares against is held to the same limits a stored
         // value is: the documented nesting depth, and this emulator's own ceiling on
-        // the members one set may carry. Both bound the work this request can ask for.
+        // the members one set may carry. Both bound the work this request can ask for,
+        // whichever generation the condition is stated in — the values an expression
+        // binds and the ones the legacy `Expected` map compares against alike.
         for (placeholder, value) in input.expression_attribute_values.iter().flatten() {
             crate::state::check_attribute_value(placeholder, value).map_err(lift)?;
         }
+        crate::state::check_expected_condition_values(input.expected.as_ref()).map_err(lift)?;
         // Every fact of the REQUEST the condition carries is settled before the table is
         // looked up ([`crate::state::check_write_condition`]).
         crate::state::check_write_condition(

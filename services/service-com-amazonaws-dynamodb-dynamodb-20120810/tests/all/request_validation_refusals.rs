@@ -1203,27 +1203,58 @@ async fn a_request_states_its_intent_one_way() {
         );
     }
 
-    // A legacy member beside an expression member that states something ELSE is two
-    // different asks, not one stated twice, and is served: the legacy projection with a
-    // filter expression, and the legacy filter with a projection expression.
-    for (case, request) in [
+    // A legacy member beside an expression member that states something ELSE is refused
+    // just the same: it is the two GENERATIONS a request may not mix, not a legacy member
+    // beside the one that replaced it, so the legacy projection beside a filter
+    // expression — and the legacy filter beside a projection expression — collide too,
+    // each naming the whole of both sides.
+    for (case, request, legacy, expression) in [
         (
             "the legacy projection beside a filter expression",
             json!({"TableName": "Generations", "AttributesToGet": ["a"],
                    "FilterExpression": "attribute_exists(a)"}),
+            "AttributesToGet",
+            "FilterExpression",
         ),
         (
             "the legacy filter beside a projection expression",
             json!({"TableName": "Generations",
                    "ScanFilter": {"a": {"ComparisonOperator": "NOT_NULL"}},
                    "ProjectionExpression": "a"}),
+            "ScanFilter",
+            "ProjectionExpression",
+        ),
+    ] {
+        let stated = refusal(&router, case, "Scan", request).await;
+        assert_eq!(
+            stated,
+            format!(
+                "Can not use both expression and non-expression parameters in the same request: \
+                 Non-expression parameters: {{{legacy}}} Expression parameters: {{{expression}}}"
+            ),
+            "case {case:?}: expected both sides to be named, got {stated:?}"
+        );
+    }
+
+    // A request that stays inside ONE generation is served, whichever it picked: what is
+    // refused is carrying members of both.
+    for (case, request) in [
+        (
+            "both the projection and the filter stated the legacy way",
+            json!({"TableName": "Generations", "AttributesToGet": ["a"],
+                   "ScanFilter": {"a": {"ComparisonOperator": "NOT_NULL"}}}),
+        ),
+        (
+            "both stated the expression way",
+            json!({"TableName": "Generations", "ProjectionExpression": "a",
+                   "FilterExpression": "attribute_exists(a)"}),
         ),
     ] {
         let (status, answered) = call(&router, "Scan", request).await;
         assert_eq!(
             status, 200,
-            "case {case:?}: two members that state different things are served, got {status} \
-             with {answered}"
+            "case {case:?}: a request inside one generation is served, got {status} with \
+             {answered}"
         );
     }
 }

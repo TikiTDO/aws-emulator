@@ -380,7 +380,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         .attributes_to_get
                         .as_ref()
                         .is_some_and(|names| !names.is_empty()),
-                    &[PROJECTION_EXPRESSION],
                 ),
                 (
                     "KeyConditions",
@@ -388,7 +387,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         .key_conditions
                         .as_ref()
                         .is_some_and(|map| !map.is_empty()),
-                    &["KeyConditionExpression"],
                 ),
                 (
                     "QueryFilter",
@@ -396,22 +394,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         .query_filter
                         .as_ref()
                         .is_some_and(|map| !map.is_empty()),
-                    &["FilterExpression"],
                 ),
-                (
-                    "ConditionalOperator",
-                    input.conditional_operator.is_some(),
-                    // The member has no expression counterpart of its own, so it states
-                    // its intent twice beside ANY expression member — wider than the
-                    // `FilterExpression` its doc points at, because a request carrying it
-                    // beside a projection expression ALONE is observed to be refused with
-                    // this sentence ([`crate::state::LegacyParameter`]).
-                    &[
-                        PROJECTION_EXPRESSION,
-                        "FilterExpression",
-                        "KeyConditionExpression",
-                    ],
-                ),
+                ("ConditionalOperator", input.conditional_operator.is_some()),
             ],
             &[
                 (

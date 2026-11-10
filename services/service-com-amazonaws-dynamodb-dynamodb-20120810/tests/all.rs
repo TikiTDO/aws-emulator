@@ -67,6 +67,8 @@ mod enum_value_set_order;
 mod endpoint_discovery;
 #[path = "all/export_conflicts_and_capacity_no_ops.rs"]
 mod export_conflicts_and_capacity_no_ops;
+#[path = "all/expression_parameter_generations.rs"]
+mod expression_parameter_generations;
 #[path = "all/expression_refusal_families.rs"]
 mod expression_refusal_families;
 #[path = "all/expression_rules_and_write_admission.rs"]
