@@ -86,6 +86,10 @@ use crate::state::{
 /// The zone a destination's time fields are rendered in.
 pub mod time_zone;
 
+/// Converting a buffer's records to the format a `DataFormatConversionConfiguration` asks
+/// for, against the column information of the Glue table it binds.
+pub mod format_conversion;
+
 /// Bytes in one MiB: `BufferingHints$SizeInMBs` buffers "to the specified size, in MiBs".
 const BYTES_PER_MIB: usize = 1024 * 1024;
 
@@ -382,11 +386,31 @@ struct DeliveryFailure {
     /// What the `firehose:error-output-type` namespace of an `ErrorOutputPrefix` expands
     /// to for this failure, and the prefix a destination configuring none gets.
     output_type: &'static str,
-    /// The `errorCode` the error-output document names.
+    /// The failure code the error-output document names, under the member
+    /// [`Self::reported_member_names`] gives it.
     error_code: &'static str,
-    /// The `errorMessage` the error-output document names. An example, not a wire
-    /// contract: what a consumer keys off is the code beside it.
+    /// The failure message the error-output document names, under the member
+    /// [`Self::reported_member_names`] gives it. An example, not a wire contract: what a
+    /// consumer keys off is the code beside it.
     error_message: &'static str,
+}
+
+impl DeliveryFailure {
+    /// The two members this failure's error-output document carries its code and its message
+    /// under.
+    ///
+    /// A record the destination's DATA FORMAT CONVERSION failed on is reported under
+    /// `lastErrorCode` / `lastErrorMessage` — the conversion's own error output names the
+    /// LAST attempt's failure beside the Data Catalog table it was made against — and every
+    /// other failure under `errorCode` / `errorMessage`. Keyed off the failure's own output
+    /// type, so the two conversion failures cannot drift apart from each other.
+    fn reported_member_names(self) -> (&'static str, &'static str) {
+        if self.output_type == FORMAT_CONVERSION_FAILED_OUTPUT_TYPE {
+            ("lastErrorCode", "lastErrorMessage")
+        } else {
+            ("errorCode", "errorMessage")
+        }
+    }
 }
 
 /// The failure of a record whose PARTITION KEYS could not be determined: the
@@ -419,6 +443,40 @@ const PROCESSING_FAILED: DeliveryFailure = DeliveryFailure {
     error_code: "DataProcessing.ProcessingFailed",
     error_message: "this record is not what the destination's data processing reads",
 };
+
+/// The failure of a record the destination's own DATA FORMAT CONVERSION could not read:
+/// with a `DataFormatConversionConfiguration` in force the records are deserialized from
+/// JSON into the columns of the Glue table the configuration binds, and a record that is
+/// not one JSON object of values those columns hold is not a row that conversion can write
+/// ([`format_conversion`]).
+///
+/// Such a record is not dropped and does not stop its well-formed siblings from being
+/// delivered: it is written under the destination's `ErrorOutputPrefix` with the record's
+/// own bytes, which is what makes a schema mismatch something a consumer of that prefix can
+/// both see and re-drive.
+const FORMAT_CONVERSION_FAILED: DeliveryFailure = DeliveryFailure {
+    output_type: FORMAT_CONVERSION_FAILED_OUTPUT_TYPE,
+    error_code: "DataFormatConversion.ParseError",
+    error_message: "this record could not be deserialized into the columns of the destination's \
+                    schema",
+};
+
+/// The failure of a record whose destination converts its data format but whose bound
+/// SCHEMA could not be read at all: the Data Catalog holds no such table, or the table
+/// carries no column information, so there are no columns to convert against
+/// (`SchemaConfiguration` "specifies the Amazon Web Services Glue table that contains the
+/// column information that constitutes your data schema").
+const FORMAT_CONVERSION_SCHEMA_MISSING: DeliveryFailure = DeliveryFailure {
+    output_type: FORMAT_CONVERSION_FAILED_OUTPUT_TYPE,
+    error_code: "DataFormatConversion.InvalidSchema",
+    error_message: "the schema the destination converts to could not be read from the Data \
+                    Catalog",
+};
+
+/// What the `firehose:error-output-type` namespace expands to for a record the destination's
+/// data format conversion could not place, and the prefix those records get when the
+/// destination configures no `ErrorOutputPrefix`.
+const FORMAT_CONVERSION_FAILED_OUTPUT_TYPE: &str = "format-conversion-failed";
 
 /// The failure of a buffer the HTTP endpoint ANSWERED, but not with a success status — the
 /// destination raised rather than acknowledged the delivery.
@@ -526,6 +584,10 @@ pub struct S3Target {
     /// `CustomTimeZone` names, and UTC where the destination kind carries no such member or
     /// names none ([`DeliveryTimeZone`]).
     pub time_zone: DeliveryTimeZone,
+    /// The data format conversion in force for this location — the one its
+    /// `DataFormatConversionConfiguration` asks for ([`format_conversion`]) — and `None`
+    /// where the records are delivered as the producer's own bytes.
+    pub conversion: Option<format_conversion::FormatConversion>,
 }
 
 /// One HTTP endpoint destination a stream's buffer is delivered to, with everything the
@@ -671,6 +733,9 @@ fn plain_target(config: &S3DestinationConfiguration) -> Option<S3Target> {
         // A plain `S3DestinationConfiguration` carries no `CustomTimeZone` member at all,
         // so a location read through here is named in the default zone.
         time_zone: DeliveryTimeZone::default(),
+        // Nor a `DataFormatConversionConfiguration`: only an EXTENDED Amazon S3 destination
+        // carries one, so a location read through here delivers the records' own bytes.
+        conversion: None,
     })
 }
 
@@ -791,6 +856,9 @@ pub fn s3_targets(config: &DestinationConfigKind) -> Vec<S3Target> {
                     ),
                     kms_key_arn: kms_key_arn(config.encryption_configuration.as_ref()),
                     time_zone: DeliveryTimeZone::of(config.custom_time_zone.as_deref()),
+                    conversion: format_conversion::FormatConversion::of(
+                        config.data_format_conversion_configuration.as_ref(),
+                    ),
                 });
             }
             if backs_up_all_records(config.s3_backup_mode.as_ref()) {
@@ -1297,7 +1365,7 @@ pub async fn deliver_due<Eng: Send + Sync + 'static>(
         // one document, and the documents the domain did not take are parked in the
         // destination's Amazon S3 backup beside whatever the Amazon S3 locations get.
         for (ordinal, search) in delivery.searches.iter().enumerate() {
-            match index_documents(engine, &delivery, search, now) {
+            match index_documents(engine, &delivery, search, now).await {
                 Delivered::Indexed(failures) if failures.is_empty() => {}
                 Delivered::Indexed(failures) => {
                     match search_backup_object(&delivery, search, &failures, now, ordinal) {
@@ -1342,7 +1410,7 @@ pub async fn deliver_due<Eng: Send + Sync + 'static>(
         // A delivery this emulator could not WORK OUT right now — an encoder that refused
         // the body — is owed again, exactly like one the destination could not take:
         // nothing of it is written and nothing of it is lost.
-        let Some(mut objects) = objects_of(&delivery, now).await else {
+        let Some(mut objects) = objects_of(engine, &delivery, now).await else {
             let mut store = state.lock();
             restore(&mut store, delivery, now);
             continue;
@@ -1604,7 +1672,10 @@ fn backup_object(
     let target = endpoint.backup.as_ref()?;
     let prefix = error_output_prefix(target, failure, now).ok()?;
     let records: Vec<&StoredRecord> = delivery.records.iter().collect();
-    let (body, extension) = compressed(error_payload(&records, failure, now), target)?;
+    let (body, extension) = compressed(
+        error_payload(&records, failure, now, None, &BTreeMap::new()),
+        target,
+    )?;
     Some(DeliveredObject {
         bucket: target.bucket.clone(),
         key: format!(
@@ -1668,7 +1739,13 @@ enum Delivered {
 /// written again under the SAME id ([`document_id`]), which is why Firehose's own id is
 /// "stable across multiple delivery attempts" — the second write replaces the first rather
 /// than adding a copy.
-fn index_documents<Eng: Send + Sync + 'static>(
+///
+/// ASYNC because a buffer holds as many records as its byte budget allows and each one is a
+/// write: the loop hands the runtime back between documents, so a timeout or a cancellation
+/// can land while a long buffer is being indexed instead of the whole run holding the
+/// worker. The domain's own store is locked by each write and never across one of those
+/// yields.
+async fn index_documents<Eng: Send + Sync + 'static>(
     engine: &Eng,
     delivery: &PendingDelivery,
     search: &SearchTarget,
@@ -1679,6 +1756,7 @@ fn index_documents<Eng: Send + Sync + 'static>(
     let index_name = rotated_index(search, now);
     let mut failures = Vec::new();
     for record in &delivery.records {
+        ::tokio::task::yield_now().await;
         let document_id = document_id(search, record);
         let write = ingest::DocumentWrite {
             domain: &search.domain,
@@ -1788,6 +1866,11 @@ fn rotated_index(search: &SearchTarget, now: SystemTime) -> String {
 /// so a consumer of the backup learns which index refused it and why, and still holds the
 /// record's own bytes. `None` when the backup cannot be worked out at all, in which case
 /// the records stay owed rather than being dropped.
+///
+/// The buffer's records are indexed by their `RecordId` ONCE, so resolving every failure
+/// back to the record it is about is one pass over the failures and not one pass over the
+/// buffer per failure: a domain that is not reachable fails every record of the buffer at
+/// once, and the records a buffer may hold are bounded by a byte budget rather than a count.
 fn search_backup_object(
     delivery: &PendingDelivery,
     search: &SearchTarget,
@@ -1797,13 +1880,15 @@ fn search_backup_object(
 ) -> Option<DeliveredObject> {
     let target = search.backup.as_ref()?;
     let prefix = search_error_prefix(target, now).ok()?;
+    let records: ::std::collections::HashMap<&str, &StoredRecord> = delivery
+        .records
+        .iter()
+        .map(|record| (record.record_id.as_str(), record))
+        .collect();
     let documents: Vec<String> = failures
         .iter()
         .map(|failure| {
-            let record = delivery
-                .records
-                .iter()
-                .find(|record| record.record_id == failure.record_id);
+            let record = records.get(failure.record_id.as_str()).copied();
             search_error_envelope(record, failure, now).to_string()
         })
         .collect();
@@ -1989,7 +2074,16 @@ fn write_objects<Eng: Send + Sync + 'static>(engine: &Eng, objects: Vec<Delivere
 ///
 /// `None` when the delivery could not be worked out at all right now and is owed again
 /// (see [`grouped`]), so the caller puts it back rather than writing part of it.
-async fn objects_of(delivery: &PendingDelivery, now: SystemTime) -> Option<Vec<DeliveredObject>> {
+///
+/// `engine` is the one shared engine every mounted service reaches its state through: a
+/// location whose destination converts its data format reads the bound Glue table's columns
+/// out of the Data Catalog through it ([`format_conversion`]). This service's own store is
+/// NOT locked here, so the two are never held at once.
+async fn objects_of<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    delivery: &PendingDelivery,
+    now: SystemTime,
+) -> Option<Vec<DeliveredObject>> {
     let mut objects = Vec::new();
     // What the records of THIS delivery may inflate to, over every location they go to:
     // charged down as they are processed, so one flush cannot hold more than the budget
@@ -2017,22 +2111,62 @@ async fn objects_of(delivery: &PendingDelivery, now: SystemTime) -> Option<Vec<D
             }
         }
         // Each object of this location, with the bytes it carries: a delivered one holds
-        // what the destination's processing left of its records' data, and an error-output
-        // one holds the error document of each record that could not be placed — including
+        // what the destination's processing left of its records' data — in the format its
+        // conversion configuration asks for, where one is in force — and an error-output
+        // one holds the error document of each record that could not be placed, including
         // one the processing itself could not read.
-        let mut bodies: Vec<(String, Vec<u8>)> = Vec::with_capacity(writing.len());
+        let mut bodies: Vec<(String, ObjectBody)> = Vec::with_capacity(writing.len());
+        // Why one particular record failed, by its record id: the data format conversion
+        // reads each record against the bound columns, so what failed is a statement about
+        // THAT record (the column and the value it carried there) rather than one wording
+        // for every record of the group.
+        let mut faults: BTreeMap<String, String> = BTreeMap::new();
         for (prefix, records) in writing {
-            let (body, unprocessable) = payload(&records, target, &mut inflation_budget).await;
+            let (processed, unprocessable) =
+                processed_records(&records, target, &mut inflation_budget).await;
             if !unprocessable.is_empty() {
                 failed
                     .entry(PROCESSING_FAILED)
                     .or_default()
                     .extend(unprocessable);
             }
-            // A group whose every record the processing dropped or could not read leaves no
-            // object behind: an empty object is not something a delivery writes.
-            if !body.is_empty() {
-                bodies.push((prefix, body));
+            let Some(conversion) = target.conversion.as_ref() else {
+                let body = concatenated(&processed, target.append_delimiter);
+                // A group whose every record the processing dropped or could not read leaves
+                // no object behind: an empty object is not something a delivery writes.
+                if !body.is_empty() {
+                    bodies.push((prefix, ObjectBody::Records(body)));
+                }
+                continue;
+            };
+            match format_conversion::convert(engine, conversion, &processed).await {
+                format_conversion::Converted::Rows {
+                    body,
+                    failed: unconvertible,
+                } => {
+                    if !unconvertible.is_empty() {
+                        let records = failed.entry(FORMAT_CONVERSION_FAILED).or_default();
+                        for (record, fault) in unconvertible {
+                            faults.insert(record.record_id.clone(), fault);
+                            records.push(record);
+                        }
+                    }
+                    if !body.is_empty() {
+                        bodies.push((prefix, ObjectBody::Converted(body)));
+                    }
+                }
+                // No schema to convert against: every record of the group is a failed
+                // record, so the whole group goes to the error output rather than being
+                // delivered unconverted.
+                format_conversion::Converted::NoSchema => {
+                    failed
+                        .entry(FORMAT_CONVERSION_SCHEMA_MISSING)
+                        .or_default()
+                        .extend(processed.iter().map(|(record, _)| *record));
+                }
+                // What this emulator cannot serialize is not a record it drops or
+                // mislabels: the whole delivery is owed again instead.
+                format_conversion::Converted::Unwritable => return None,
             }
         }
         for (failure, records) in failed {
@@ -2048,13 +2182,45 @@ async fn objects_of(delivery: &PendingDelivery, now: SystemTime) -> Option<Vec<D
                 );
                 return None;
             };
-            bodies.push((prefix, error_payload(&records, failure, now)));
+            // A record the data format conversion failed on names the table that conversion
+            // was made against; one that failed for any other reason was measured against
+            // no table.
+            let catalog_table = target
+                .conversion
+                .as_ref()
+                .filter(|_| failure.output_type == FORMAT_CONVERSION_FAILED_OUTPUT_TYPE)
+                .map(format_conversion::FormatConversion::data_catalog_table);
+            bodies.push((
+                prefix,
+                ObjectBody::Records(error_payload(
+                    &records,
+                    failure,
+                    now,
+                    catalog_table.as_ref(),
+                    &faults,
+                )),
+            ));
         }
         for (prefix, body) in bodies {
             let name = object_name(delivery, now, target.time_zone, objects.len());
             // An encoder that refused the body is not a record this delivery drops: the
             // whole delivery is owed again instead.
-            let (body, extension) = compressed(body, target)?;
+            let (body, extension) = match body {
+                ObjectBody::Records(body) => compressed(body, target)?,
+                // A converted object is not compressed again: the serializer compressed
+                // the object's own blocks (`ParquetSerDe$Compression`), which is the
+                // compression a destination converting its data format configures. Its
+                // name still carries a configured `FileExtension`, which "will override
+                // the default file extension" whatever wrote the object.
+                ObjectBody::Converted(body) => (
+                    body,
+                    target
+                        .file_extension
+                        .clone()
+                        .filter(|extension| !extension.is_empty())
+                        .unwrap_or_default(),
+                ),
+            };
             objects.push(DeliveredObject {
                 bucket: target.bucket.clone(),
                 key: format!("{prefix}{name}{extension}"),
@@ -2064,6 +2230,16 @@ async fn objects_of(delivery: &PendingDelivery, now: SystemTime) -> Option<Vec<D
         }
     }
     Some(objects)
+}
+
+/// The bytes one object of a delivery carries, and how its name is settled.
+enum ObjectBody {
+    /// The records' own data, or the error documents of the records that failed: an object
+    /// the destination's `CompressionFormat` encodes.
+    Records(Vec<u8>),
+    /// The columnar file the destination's data format conversion wrote, which carries its
+    /// own compression.
+    Converted(Vec<u8>),
 }
 
 /// The expanded `ErrorOutputPrefix` a record whose delivery failed is written under.
@@ -2722,10 +2898,9 @@ fn scalar_object(value: &::serde_json::Value) -> Option<BTreeMap<String, String>
     Some(keys)
 }
 
-/// The data one object carries: its records in arrival order, each as the destination's
-/// data processing left it ([`crate::state::cloudwatch_logs_pipeline`]), with the delimiter
-/// that processing asks for between them — and, beside it, the records the processing could
-/// not read, which the caller writes to the error output instead.
+/// What the destination's data processing left of each record, in arrival order — and,
+/// beside it, the records the processing could not read, which the caller writes to the
+/// error output instead.
 ///
 /// A record the processing DROPPED (an envelope carrying no log event of the account) is in
 /// neither: it was processed, and what processing it left is nothing.
@@ -2735,15 +2910,20 @@ fn scalar_object(value: &::serde_json::Value) -> Option<BTreeMap<String, String>
 /// bounded and not only each record on its own
 /// ([`crate::state::cloudwatch_logs_pipeline::MAX_INFLATED_BYTES_PER_DELIVERY`]).
 ///
+/// Each record is kept BESIDE what processing left of it, because what an object carries is
+/// not always those bytes concatenated: a destination converting its data format writes one
+/// row per record ([`format_conversion`]) and names the records whose own data could not be
+/// converted, which needs the record itself.
+///
 /// ASYNC because processing is the one CPU-bound step of a delivery: the loop hands the
 /// runtime back between records, so a timeout or a cancellation can land while a long buffer
 /// is being processed instead of the whole run holding the worker.
-async fn payload<'r>(
+async fn processed_records<'r>(
     records: &[&'r StoredRecord],
     target: &S3Target,
     budget: &mut u64,
-) -> (Vec<u8>, Vec<&'r StoredRecord>) {
-    let mut body = Vec::new();
+) -> (Vec<(&'r StoredRecord, Vec<u8>)>, Vec<&'r StoredRecord>) {
+    let mut processed = Vec::with_capacity(records.len());
     let mut unprocessable = Vec::new();
     let processing = target.cloudwatch_logs.runs();
     for record in records {
@@ -2755,17 +2935,26 @@ async fn payload<'r>(
             target.cloudwatch_logs,
             budget,
         ) {
-            Processed::Record(data) => {
-                body.extend_from_slice(&data);
-                if target.append_delimiter {
-                    body.extend_from_slice(RECORD_DELIMITER);
-                }
-            }
+            Processed::Record(data) => processed.push((*record, data)),
             Processed::Dropped => {}
             Processed::Failed => unprocessable.push(*record),
         }
     }
-    (body, unprocessable)
+    (processed, unprocessable)
+}
+
+/// The data one object carries when the destination converts nothing: its records in
+/// arrival order, each as the destination's data processing left it, with the delimiter that
+/// processing asks for between them.
+fn concatenated(processed: &[(&StoredRecord, Vec<u8>)], append_delimiter: bool) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (_, data) in processed {
+        body.extend_from_slice(data);
+        if append_delimiter {
+            body.extend_from_slice(RECORD_DELIMITER);
+        }
+    }
+    body
 }
 
 /// The data an ERROR OUTPUT object carries: the error-output document of each record that
@@ -2775,36 +2964,74 @@ async fn payload<'r>(
 /// Firehose writes a document naming the failure and carrying the record's own bytes, so a
 /// consumer of the error prefix can both diagnose and re-drive it. One document per line,
 /// so an object holding several is read a document at a time.
-fn error_payload(records: &[&StoredRecord], failure: DeliveryFailure, now: SystemTime) -> Vec<u8> {
+///
+/// `catalog_table` is the Data Catalog table the failure was measured against, which the
+/// document of a record the destination's data format conversion failed on names beside the
+/// failure itself ([`format_conversion::FormatConversion::data_catalog_table`]); a failure
+/// of any other kind was not measured against a table and names none. `faults` carries, by
+/// record id, what failed for ONE record where that is known, which is the message its own
+/// document states instead of the failure class's general one.
+fn error_payload(
+    records: &[&StoredRecord],
+    failure: DeliveryFailure,
+    now: SystemTime,
+    catalog_table: Option<&::serde_json::Value>,
+    faults: &BTreeMap<String, String>,
+) -> Vec<u8> {
     let documents: Vec<String> = records
         .iter()
-        .map(|record| error_envelope(record, failure, now).to_string())
+        .map(|record| {
+            error_envelope(
+                record,
+                failure,
+                now,
+                catalog_table,
+                faults
+                    .get(&record.record_id)
+                    .map_or(failure.error_message, String::as_str),
+            )
+            .to_string()
+        })
         .collect();
     documents.join("\n").into_bytes()
 }
 
 /// The error-output document of one record: how the delivery failed, when it was attempted
 /// and the record's own data, under the member names Firehose's error output carries
-/// (`errorCode`, `errorMessage`, `attemptsMade`, `arrivalTimestamp`,
-/// `attemptEndingTimestamp`, `rawData`).
+/// (`attemptsMade`, `arrivalTimestamp`, `attemptEndingTimestamp`, `rawData`, and the code
+/// and message pair [`DeliveryFailure::reported_member_names`] names).
 ///
 /// `rawData` is the record's data base64-encoded, exactly as the put carried it on the
 /// wire, so nothing of the record is lost by the failure. The two timestamps are epoch
 /// MILLISECONDS: `arrivalTimestamp` is when the record was ingested and
-/// `attemptEndingTimestamp` when this delivery attempt ended.
+/// `attemptEndingTimestamp` when this delivery attempt ended. A record the destination's
+/// data format conversion failed on also names the Data Catalog table that conversion reads
+/// its columns from (`dataCatalogTable`), because WHICH schema the record did not match is
+/// what a consumer of that failure diagnoses it by. `message` is what failed: the failure
+/// class's own wording, or what failed for THIS record where the failure is about the
+/// record's own data.
 fn error_envelope(
     record: &StoredRecord,
     failure: DeliveryFailure,
     now: SystemTime,
+    catalog_table: Option<&::serde_json::Value>,
+    message: &str,
 ) -> ::serde_json::Value {
-    ::serde_json::json!({
+    let mut envelope = ::serde_json::json!({
         "attemptsMade": 1,
         "arrivalTimestamp": epoch_millis(record.received_at),
-        "errorCode": failure.error_code,
-        "errorMessage": failure.error_message,
         "attemptEndingTimestamp": epoch_millis(now),
         "rawData": ::aws_smithy_types::base64::encode(&record.data),
-    })
+    });
+    if let Some(members) = envelope.as_object_mut() {
+        let (code, reported_message) = failure.reported_member_names();
+        members.insert(code.to_string(), failure.error_code.into());
+        members.insert(reported_message.to_string(), message.into());
+        if let Some(table) = catalog_table {
+            members.insert("dataCatalogTable".to_string(), table.clone());
+        }
+    }
+    envelope
 }
 
 /// `at` as epoch milliseconds, which is how the error-output document carries an instant.

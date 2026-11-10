@@ -50,6 +50,17 @@ service-com-amazonaws-kinesis-kinesis-20131202 = { workspace = true }
 # into an index of an Amazon OpenSearch Service domain, and the one such domain store in
 # this emulator is that service's: a delivered document is written there.
 service-com-amazonaws-opensearch-amazonopensearchservice = { workspace = true }
+# A destination whose `DataFormatConversionConfiguration` is in force converts its records
+# against the column information of the Glue table its `SchemaConfiguration` binds, and the
+# one Data Catalog in this emulator is that service's: the columns are read from there.
+service-com-amazonaws-glue-awsglue = { workspace = true }
+# The Apache implementation of the Parquet format, which writes the object a destination
+# with a `ParquetSerDe` serializer delivers. Pure Rust, like the codecs below: `snap` is the
+# serializer's default `SNAPPY` compression and `flate2` its `GZIP` one.
+parquet = { version = "60", default-features = false, features = [
+    "snap",
+    "flate2-rust_backend",
+] }
 # The UTC calendar fields the `IndexRotationPeriod` suffix of a destination index carries —
 # including the ISO week a `OneWeek` rotation names — read from a maintained date library
 # rather than computed here.

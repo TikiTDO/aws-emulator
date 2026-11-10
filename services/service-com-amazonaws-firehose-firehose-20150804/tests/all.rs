@@ -59,6 +59,8 @@ mod encryption_conflict_messages;
 mod enum_value_set_order;
 #[path = "all/error_output_prefix_resolution.rs"]
 mod error_output_prefix_resolution;
+#[path = "all/format_conversion_delivery.rs"]
+mod format_conversion_delivery;
 #[path = "all/http_endpoint_delivery.rs"]
 mod http_endpoint_delivery;
 #[path = "all/kinesis_source_ingestion.rs"]

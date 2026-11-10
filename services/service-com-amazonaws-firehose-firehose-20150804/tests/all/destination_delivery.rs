@@ -99,6 +99,12 @@ impl Emulator {
                 &engine,
             )),
         );
+        // A destination converting its data format reads the column information of the Glue
+        // table its `SchemaConfiguration` binds out of the Data Catalog, so the suite that
+        // drives such a destination needs the Glue service mounted here as well.
+        router.register_service(
+            service_com_amazonaws_glue_awsglue::EmulatedService::new(Arc::clone(&engine)),
+        );
         Self { router, engine }
     }
 
