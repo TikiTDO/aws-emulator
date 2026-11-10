@@ -884,6 +884,21 @@ pub const KNOWLEDGE_BASE_CONFIGURATION_MEMBERS: [(&str, &str); 4] = [
     ("MANAGED", "managedKnowledgeBaseConfiguration"),
 ];
 
+/// The values of an enumerated type as this service LISTS them in a
+/// `Member must satisfy enum value set: [ … ]` clause: the order the front door
+/// walks its own table of the admissible values, which is that table's buckets in
+/// ascending order rather than the order the model declares the type in
+/// (`service_common::validation_message::hashed_enum_order`).
+///
+/// A handler that judges a discriminator the request boundary cannot — a `type` that
+/// names which sibling member carries its details — states the same clause the
+/// boundary states, so it lists the set the same way; the order is derived from the
+/// values themselves, so it belongs to the enumerated TYPE and nothing here pins one
+/// type's listing.
+fn stated_value_set(admitted: &[&str]) -> String {
+    ::service_common::validation_message::hashed_enum_order(admitted).join(", ")
+}
+
 /// Why a `knowledgeBaseConfiguration` (with its `storageConfiguration`) cannot
 /// back a knowledge base. Each variant is a bad request, answered with the
 /// modelled `ValidationException`.
@@ -913,7 +928,7 @@ impl KnowledgeBaseConfigurationProblem {
                 format!(
                     "Value '{value}' at 'knowledgeBaseConfiguration.type' failed to satisfy \
                      constraint: Member must satisfy enum value set: [{}]",
-                    admitted.join(", ")
+                    stated_value_set(&admitted)
                 )
             }
             Self::MissingConfigurationMember {
@@ -1210,7 +1225,7 @@ impl DataSourceConfigurationProblem {
                 format!(
                     "Value '{value}' at 'dataSourceConfiguration.type' failed to satisfy \
                      constraint: Member must satisfy enum value set: [{}]",
-                    admitted.join(", ")
+                    stated_value_set(&admitted)
                 )
             }
             Self::MissingConfigurationMember {

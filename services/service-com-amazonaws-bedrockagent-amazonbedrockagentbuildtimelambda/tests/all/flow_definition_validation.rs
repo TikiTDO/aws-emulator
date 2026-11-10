@@ -31,12 +31,17 @@ const EXECUTION_ROLE: &str =
     "arn:aws:iam::000000000000:role/service-role/AmazonBedrockExecutionRoleForFlows";
 
 /// One HTTP answer from the emulator, parsed.
+///
+/// `pub(crate)`, with the seams a sibling suite reads it through, so the suite that
+/// asserts WHICH ORDER an enumerated type's value set is listed in
+/// (`tests/all/enum_value_set_order.rs`) reads a refusal exactly the way this one does
+/// instead of growing a second copy of the harness.
 #[derive(Debug)]
-struct Answer {
-    status: u16,
+pub(crate) struct Answer {
+    pub(crate) status: u16,
     /// The restJson1 error shape name, from `x-amzn-errortype` or the body's
     /// `__type`; `None` on a success.
-    error_type: Option<String>,
+    pub(crate) error_type: Option<String>,
     body: Value,
 }
 
@@ -50,7 +55,7 @@ impl Answer {
     }
 
     /// The `message` a refusal carries.
-    fn message(&self, case: &str) -> String {
+    pub(crate) fn message(&self, case: &str) -> String {
         self.member(&["message"])
             .as_str()
             .unwrap_or_else(|| panic!("case {case}: the refusal carries no message: {:?}", self.body))
@@ -60,12 +65,12 @@ impl Answer {
 
 /// The emulator under test: one router over one shared engine, exactly as the
 /// production router mounts this service.
-struct Emulator {
+pub(crate) struct Emulator {
     router: MultiServiceRouter,
 }
 
 impl Emulator {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
         let mut router = MultiServiceRouter::new();
         router.set_request_authentication(false);
@@ -73,7 +78,7 @@ impl Emulator {
         Self { router }
     }
 
-    async fn call(&self, method: &str, uri: &str, body: Option<Value>) -> Answer {
+    pub(crate) async fn call(&self, method: &str, uri: &str, body: Option<Value>) -> Answer {
         let bytes = body
             .map(|value| Bytes::from(serde_json::to_vec(&value).expect("serialize request body")))
             .unwrap_or_default();
@@ -1065,7 +1070,8 @@ async fn validating_a_definition_changes_no_stored_flow() {
 /// A value the MODEL refuses never reaches the validator: it is a bad request, and
 /// the refusal names the member path and the requirement it broke — withholding the
 /// value when the model marks it `@sensitive` (`FlowDefinition` is) and echoing it
-/// when it does not.
+/// when it does not. An enumerated type's value set is listed in the order the table
+/// of those values is walked, which `enum_value_set_order.rs` is about.
 ///
 /// The rows differ along what the rule generalises over: the constraint class (an
 /// enum value set, a `@pattern`), whether the member sits inside a `@sensitive`
@@ -1123,9 +1129,10 @@ async fn a_refusal_withholds_a_sensitive_or_self_describing_value() {
             uri: "/flows/validate-definition".to_string(),
             body: Some(json!({ "definition": unknown_node_type })),
             expected: "1 validation error detected: Value at 'definition.nodes.2.member.type' \
-                 failed to satisfy constraint: Member must satisfy enum value set: [Input, \
-                 Output, KnowledgeBase, Condition, Lex, Prompt, LambdaFunction, Storage, Agent, \
-                 Retrieval, Iterator, Collector, InlineCode, Loop, LoopInput, LoopController]"
+                 failed to satisfy constraint: Member must satisfy enum value set: \
+                 [LoopController, Output, Loop, Prompt, Agent, LoopInput, InlineCode, Input, \
+                 Collector, Iterator, KnowledgeBase, Retrieval, Storage, Condition, \
+                 LambdaFunction, Lex]"
                 .to_string(),
             withheld: "NotARealFlowNodeType",
         },

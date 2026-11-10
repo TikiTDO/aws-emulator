@@ -24,8 +24,12 @@
 //!   correctly. The default returns `None`, so every request resolves through the
 //!   generated routing table. Return `Some(op)` to route one yourself.
 //! - `override_refusal` — how this service words a request the framework refused
-//!   before any handler ran. The default returns `None`, keeping the framework's
-//!   wording. See the inline note on that method for how to reword.
+//!   before any handler ran. This service states them AWS's way: the framework's
+//!   envelope and clauses, with the value dropped from a clause about a `@sensitive`
+//!   member and an enumerated type's value set listed in the order the table of those
+//!   values is walked rather than in the order the model declares them
+//!   (`service_common::validation_message::in_hashed_enum_order`). See the inline note
+//!   on that method.
 //! - `override_routing_error` — how this service words a request that reached it
 //!   but named no modeled operation. The default returns `None`, so the entry
 //!   renders the protocol-correct default (query -> 400 InvalidAction, awsJson ->
@@ -136,8 +140,31 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // to disclose. Everything else — the envelope, the member path, the
         // `@pattern` expression and every other requirement — stays exactly as the
         // framework worded it.
+        //
+        // One ORDER is this service's too: an enumerated type's admissible values are
+        // listed in the order this front door walks its OWN table of them — a table
+        // keyed on each value's text, so the listing is that table's buckets in
+        // ascending order (`in_hashed_enum_order`) — and not in the order the model
+        // declares them. Each violation goes through that re-ordering BEFORE the
+        // envelope words it, so only the values move: the member path, the echoed
+        // value and every requirement's wording keep coming from the one place that
+        // writes them, and every other violation class comes back untouched. The order
+        // is derived from the values themselves, so it belongs to the enumerated TYPE:
+        // every member of every operation targeting one enum is listed alike, at
+        // whatever depth and in whatever binding the value arrived, and an enum the
+        // model gains needs nothing added here.
+        let restated = match refusal {
+            Refusal::Invalid(violations) => std::borrow::Cow::Owned(Refusal::Invalid(
+                violations
+                    .iter()
+                    .map(service_common::validation_message::in_hashed_enum_order)
+                    .collect(),
+            )),
+            // Not a constraint refusal, so it carries no value set to re-order.
+            other => std::borrow::Cow::Borrowed(other),
+        };
         service_common::validation_message::aws_validation_refusal_withholding_with(
-            refusal,
+            &restated,
             // The expression a `@pattern` clause advertises is the model's own, as the
             // framework already quotes it: nothing recorded for this service shows it
             // quoted any other way, so only the value half below is restated.

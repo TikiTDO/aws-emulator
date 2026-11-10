@@ -19,6 +19,8 @@ mod client_error_fidelity;
 mod data_source_lifecycle;
 #[path = "all/delete_removes_the_resource.rs"]
 mod delete_removes_the_resource;
+#[path = "all/enum_value_set_order.rs"]
+mod enum_value_set_order;
 #[path = "all/flow_alias_deployment.rs"]
 mod flow_alias_deployment;
 #[path = "all/flow_definition_validation.rs"]
