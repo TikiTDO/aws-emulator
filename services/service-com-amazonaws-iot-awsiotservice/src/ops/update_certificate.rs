@@ -1,15 +1,29 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateCertificate
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateCertificate`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateCertificate::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Moves the certificate the store holds under the requested id
+//! ([`crate::state::ComAmazonawsIotAwsiotserviceState::certificates`]) to the requested
+//! status, so every later reader of that store reports the new one:
+//! `DescribeCertificate` answers it, and `DeleteCertificate` stops refusing a certificate
+//! a caller has just deactivated.
+//!
+//! The decision and the write are the one rule the state enforces
+//! ([`crate::state::ComAmazonawsIotAwsiotserviceState::update_certificate_status`]) —
+//! "Updates the status of the specified certificate. This operation is idempotent" — and
+//! this handler maps its refusal onto the modelled error class: an id the account holds no
+//! certificate under is `ResourceNotFoundException` (HTTP 404), and a `newStatus` AWS IoT
+//! uses internally is `InvalidRequestException` (HTTP 400) — a class and a sentence this
+//! emulator chooses from the documented rule, because AWS publishes the rule ("Setting the
+//! status to PENDING_TRANSFER or PENDING_ACTIVATION will result in an exception being
+//! thrown") without the wording or the class it states it in.
+//!
+//! Whether the caller MAY update the certificate is not decided here: this emulator
+//! evaluates no permissions for any operation, so the modelled `UnauthorizedException` is
+//! unreachable from this handler, as are the throttling and service-health refusals. So is
+//! the modelled `CertificateStateException`, which is the class a refusal that depends on
+//! the certificate's CURRENT status answers with: every status this operation admits may
+//! be set from every other one, because it is what a caller sets the status with.
 //!
 //! ## Shape of an operation
 //!
@@ -143,6 +157,36 @@ impl From<UpdateCertificateErrorModeled> for UpdateCertificateError {
     }
 }
 
+/// Record this state-changing call for attribution: the operation, the identity the
+/// request PRESENTED (the SigV4 access key id, a public identifier and never a secret),
+/// the request target, the certificate and status the call named and how the call ended.
+///
+/// The status a certificate carries is what decides whether a device may connect with it,
+/// so who moved it and when is not recoverable from the record afterwards — only the
+/// status it ended on is. Every request-derived field goes through
+/// [`crate::state::audit_field`], which bounds it and strips the control characters that
+/// would otherwise forge a second record; the subscriber supplies the timestamp.
+fn audit(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    certificate_id: &str,
+    new_status: &str,
+    outcome: &'static str,
+) {
+    let parts = ctx.parts();
+    ::tracing::info!(
+        target: "emulator::audit",
+        service = ctx.identity().signing_name(),
+        operation = "UpdateCertificate",
+        access_key_id = %crate::state::audit_field(&::engine::extract_akid(&parts.headers)),
+        request_target =
+            %crate::state::audit_field(&format!("{} {}", parts.method, parts.uri.path())),
+        certificate_id = %crate::state::audit_field(certificate_id),
+        new_status = %crate::state::audit_field(new_status),
+        outcome,
+        "state-changing operation"
+    );
+}
+
 /// The `UpdateCertificate` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -179,18 +223,59 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateCertificate` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateCertificateErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateCertificate"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            UpdateCertificateErrorModeled::InternalFailureException(InternalFailureException {
+                message: Some("the IoT emulator has no state store attached".to_string()),
+            })
+        })?;
+
+        // The whole write is the status of one record, keyed by the id that is the
+        // certificate's identity, so it happens under one lock: no caller can observe the
+        // certificate between the status the call read and the status it left.
+        let updated = state.lock().update_certificate_status(
+            &input.certificate_id,
+            &input.new_status,
+            ::std::time::SystemTime::now(),
+        );
+
+        // What the call DID: the status a reader sees afterwards is the end of the move
+        // and not the move itself.
+        audit(
+            ctx,
+            &input.certificate_id,
+            &input.new_status,
+            match &updated {
+                Ok(_) => "updated",
+                Err(crate::state::CertificateStatusUpdateRefusal::NotFound(_)) => {
+                    "no-such-certificate"
+                }
+                Err(crate::state::CertificateStatusUpdateRefusal::InternalStatus(_)) => {
+                    "internal-status"
+                }
+            },
+        );
+
+        // Each refusal is reported as the error class the model declares for it, with the
+        // one sentence the state words it in, rather than as a hollow success.
+        if let Err(refusal) = updated {
+            let message = Some(refusal.message().to_string());
+            return Err(match refusal {
+                crate::state::CertificateStatusUpdateRefusal::NotFound(_) => {
+                    UpdateCertificateErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException { message },
+                    )
+                }
+                crate::state::CertificateStatusUpdateRefusal::InternalStatus(_) => {
+                    UpdateCertificateErrorModeled::InvalidRequestException(
+                        InvalidRequestException { message },
+                    )
+                }
+            }
+            .into());
+        }
+
+        // The operation's output shape is `Unit`: a successful update reports nothing, and
+        // the status it left is read back through `DescribeCertificate`.
+        Ok(UpdateCertificateOutput)
     }
 }

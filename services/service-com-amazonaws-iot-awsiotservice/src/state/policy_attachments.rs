@@ -110,8 +110,7 @@ impl PolicyTargetRefusal {
 
 /// The message a reader or writer of one policy refuses a name the account holds no
 /// policy under with, worded the way AWS IoT words a missing resource — "<resource>
-/// <name> does not exist", as [`super::missing_certificate_message`] and
-/// [`super::missing_role_alias_message`] do.
+/// <name> does not exist", as [`super::missing_role_alias_message`] does.
 pub fn missing_policy_message(policy_name: &str) -> String {
     format!("Policy {policy_name} does not exist")
 }

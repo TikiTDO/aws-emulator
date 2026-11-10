@@ -2764,10 +2764,12 @@ pub use thing_group_update::{ThingGroupUpdate, ThingGroupUpdateRefusal};
 // re-exported here so a handler reaches them as `crate::state::<name>`.
 pub mod certificates;
 pub use certificates::{
-    certificate_arn, certificate_id, mint_keys_and_certificate, missing_certificate_message,
+    active_certificate_deletion_message, attached_policies_deletion_message, certificate_arn,
+    certificate_id, internal_certificate_status_message, mint_keys_and_certificate,
+    missing_certificate_message, CertificateDeletionRefusal, CertificateStatusUpdateRefusal,
     MintedKeysAndCertificate, RegisteredCertificate, CERTIFICATE_MODE_DEFAULT,
-    CERTIFICATE_STATUS_ACTIVE, CERTIFICATE_STATUS_INACTIVE, FIRST_CERTIFICATE_CUSTOMER_VERSION,
-    MAX_CERTIFICATES,
+    CERTIFICATE_STATUS_ACTIVE, CERTIFICATE_STATUS_INACTIVE, CERTIFICATE_STATUS_REVOKED,
+    FIRST_CERTIFICATE_CUSTOMER_VERSION, INTERNAL_CERTIFICATE_STATUSES, MAX_CERTIFICATES,
 };
 
 // WHICH POLICIES are attached to which target — what a policy target is, how one is

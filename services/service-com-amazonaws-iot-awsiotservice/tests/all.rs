@@ -17,6 +17,10 @@ mod account_audit_configuration;
 mod authorizer_registry;
 #[path = "all/bulk_thing_registration.rs"]
 mod bulk_thing_registration;
+#[path = "all/certificate_deletion.rs"]
+mod certificate_deletion;
+#[path = "all/certificate_status_update.rs"]
+mod certificate_status_update;
 #[path = "all/command_execution_listing.rs"]
 mod command_execution_listing;
 #[path = "all/command_execution_read.rs"]
