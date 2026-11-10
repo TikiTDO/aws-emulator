@@ -153,6 +153,10 @@ mod sagemaker_create_admission;
 // tail and the sorted `s…` span (where the other sagemaker suites land) are both regions
 #[path = "all/sagemaker_execution_role_admission.rs"]
 mod sagemaker_execution_role_admission;
+// Declared in this same head region, for the reason the entries above record: the appended
+// tail and the sorted `s…` span (where the other sagemaker suites land) are both regions
+#[path = "all/sagemaker_pipeline_role_resolution.rs"]
+mod sagemaker_pipeline_role_resolution;
 // the sorted `g…` span (beside the other greengrass/glue suites) are both regions
 #[path = "all/greengrass_signing_name_routing.rs"]
 mod greengrass_signing_name_routing;

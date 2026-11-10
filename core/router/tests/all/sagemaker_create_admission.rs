@@ -19,7 +19,7 @@
 //! service).
 //!
 //! The rows span what each rule generalises over: for the role, the operation that takes it
-//! (five creates, each of a different resource kind), the trust policy's shape, where the
+//! (three creates, each of a different resource kind), the trust policy's shape, where the
 //! role lives (the default path and a path), which account the ARN names, and whether the
 //! role was ever created; for the image, whether the registry holds the repository, whether
 //! the repository holds the tag, and the tag-versus-digest form of the path.
@@ -180,11 +180,35 @@ pub(crate) fn trust_policy(effect: &str, action: &str, service: &str) -> String 
     )
 }
 
-/// One IAM role the table needs, as `CreateRole` parameters.
-struct RoleFixture {
-    role_name: &'static str,
-    path: Option<&'static str>,
-    policy: String,
+/// One IAM role a suite needs, as `CreateRole` parameters.
+///
+/// Shared with the sibling SageMaker suites (`sagemaker_pipeline_role_resolution`), so a
+/// role fixture is declared and held one way across them.
+pub(crate) struct RoleFixture {
+    pub(crate) role_name: &'static str,
+    pub(crate) path: Option<&'static str>,
+    pub(crate) policy: String,
+}
+
+/// Hold `fixture` in this account's IAM, failing the suite if IAM refuses it.
+pub(crate) fn create_role(
+    router: &smithy_server_runtime::MultiServiceRouter,
+    runtime: &tokio::runtime::Runtime,
+    fixture: &RoleFixture,
+) {
+    let mut parameters = vec![
+        ("RoleName", fixture.role_name),
+        ("AssumeRolePolicyDocument", fixture.policy.as_str()),
+    ];
+    if let Some(path) = fixture.path {
+        parameters.push(("Path", path));
+    }
+    let (status, body) = iam(router, runtime, "CreateRole", &parameters);
+    assert_eq!(
+        status, 200,
+        "setup: CreateRole {}: got {status} {body}",
+        fixture.role_name
+    );
 }
 
 /// The roles the rows below name: trust policies differing in the shape AWS accepts for
@@ -305,11 +329,14 @@ fn image_uri(repository: &str, tag: &str) -> String {
     format!("{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/{repository}:{tag}")
 }
 
-/// The five creates the role rule is driven over, one per resource kind.
+/// The creates the role rule is driven over, one per resource kind.
 ///
 /// `CreateNotebookInstance` is NOT among them: the hosting reading it takes — accept a role
 /// this account's IAM holds nothing under, and fail the resource instead — is driven by
-/// `sagemaker_execution_role_admission` beside the other creates that take it.
+/// `sagemaker_execution_role_admission` beside the other creates that take it. Neither is
+/// `CreatePipeline`: registering a pipeline assumes nothing, so it resolves no role at all
+/// and the resolution belongs to the run that performs a step as it — driven by
+/// `sagemaker_pipeline_role_resolution`.
 fn creates_under_a_role() -> Vec<CreateUnderARole> {
     vec![
         CreateUnderARole {
@@ -377,28 +404,6 @@ fn creates_under_a_role() -> Vec<CreateUnderARole> {
             read_body: |name| json!({ "JobName": name, "JobCategory": "AgentRFT" }),
             refusal: could_not_assume,
         },
-        CreateUnderARole {
-            operation: "CreatePipeline",
-            body: |name, role| {
-                json!({
-                    "PipelineName": name,
-                    "RoleArn": role,
-                    "ClientRequestToken": format!("{name}-token-0000"),
-                    "PipelineDefinition": json!({
-                        "Version": "2020-12-01",
-                        "Steps": [{
-                            "Name": "step-one",
-                            "Type": "Condition",
-                            "Arguments": {},
-                        }],
-                    })
-                    .to_string(),
-                })
-            },
-            reader: "DescribePipeline",
-            read_body: |name| json!({ "PipelineName": name }),
-            refusal: could_not_assume,
-        },
     ]
 }
 
@@ -416,19 +421,7 @@ fn a_sagemaker_create_is_accepted_only_for_a_role_iam_holds_and_sagemaker_may_as
                 .expect("a current-thread runtime");
 
             for fixture in role_fixtures() {
-                let mut parameters = vec![
-                    ("RoleName", fixture.role_name),
-                    ("AssumeRolePolicyDocument", fixture.policy.as_str()),
-                ];
-                if let Some(path) = fixture.path {
-                    parameters.push(("Path", path));
-                }
-                let (status, body) = iam(&router, &runtime, "CreateRole", &parameters);
-                assert_eq!(
-                    status, 200,
-                    "setup: CreateRole {}: got {status} {body}",
-                    fixture.role_name
-                );
+                create_role(&router, &runtime, &fixture);
             }
 
             for (index, role) in role_cases().iter().enumerate() {

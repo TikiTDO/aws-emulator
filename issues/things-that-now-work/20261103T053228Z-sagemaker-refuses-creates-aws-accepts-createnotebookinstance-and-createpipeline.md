@@ -52,3 +52,11 @@ Cause 2:
 2. Call CreatePipeline(PipelineName=<name>, ClientRequestToken=<uuid>, RoleArn=<arn of a role that was never created>, PipelineDefinition=<that definition>).
 Observed: 400 ValidationException "Could not assume role ...". Expected: 200 with PipelineArn; StartPipelineExecution accepted; the execution and its sole step end 'Failed' with a step FailureReason naming the missing role, and no message is delivered to the queue.
 Equivalently: run behavioral check sagemaker.create-pipeline-missing-role-not-found.
+
+## Resolution
+Both causes are fixed: no create refuses a well-formed RoleArn for a role nobody holds.
+
+* Cause 1 (CreateNotebookInstance): the create resolves only a role this account's IAM HOLDS whose trust document withholds the SageMaker principal; a role IAM holds nothing under is accepted and the instance settles NotebookInstanceStatus 'Failed' with the FailureReason naming the role.
+* Cause 2 (CreatePipeline): the create admits the RoleArn on its modelled shape alone. The role is resolved where a step is performed as it — StartPipelineExecution — and the reason travels on the run, so the execution settles PipelineExecutionStatus 'Failed' and its step reports StepStatus 'Failed' with a FailureReason naming the role and stating that it does not exist.
+
+Still open, and NOT part of these two causes: a pipeline execution performs no step work (no SQS callback message is delivered for a healthy Callback step, no step reaches 'Executing', nothing reaches 'Succeeded'), so the behavioral check sagemaker.create-pipeline-missing-role-not-found still fails on its control pipeline. That step executor is issue 20261024T160943Z-sagemaker-runs-no-job-work-processing-pipeline-step.md (cause 2), which owns this same trace, together with the still-scaffolded SendPipelineExecutionStepSuccess / SendPipelineExecutionStepFailure.

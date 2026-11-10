@@ -14,6 +14,12 @@
 //! [`crate::state::PIPELINE_EXECUTION_NOT_RUN`] as its reason, rather than a `Succeeded`
 //! status for work nothing ran.
 //!
+//! The pipeline's `RoleArn` is resolved HERE, because this is where a step would be
+//! performed as it: a run whose role this account's IAM answers nothing against is
+//! started just the same, and carries the reason the step that needed the role failed
+//! with ([`crate::state::execution_role_failure_reason`]), which the clock then reports
+//! as the run's and the step's `FailureReason`.
+//!
 //! Every member the run persists is bounded by the model — `PipelineParameters` at
 //! `len 0..200` of `len 0..1024` values, the display name and description by their own
 //! lengths — and the one member whose generated type carries no length,
@@ -219,6 +225,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx);
         let now = ::std::time::SystemTime::now();
 
+        // The steps of this run are performed AS the pipeline's role, so the role is
+        // resolved HERE — where it is used — and not when the pipeline was registered: a
+        // pipeline whose role is created after it runs under a role that resolves. The
+        // role is read off the stored pipeline and the guard is dropped again before IAM
+        // is asked, because that question reaches another service. A run whose role
+        // resolves to nothing is still started, and carries the reason the step the role
+        // was needed for fails with (see `crate::state::admission`).
+        //
+        // Nothing is asked for a request that performs no new run: an unknown pipeline is
+        // refused below, and a retry of the very call that started a run answers that
+        // run's ARN, so neither reaches a step.
+        let pipeline_role = {
+            let store = state.lock();
+            let replay = store
+                .pipeline_execution_by_token(&name, &input.client_request_token)
+                .is_some();
+            match store.pipelines.get(&name) {
+                Some(pipeline) if !replay => Some(pipeline.role_arn.clone()),
+                _ => None,
+            }
+        };
+        let role_failure_reason = match &pipeline_role {
+            None => None,
+            Some(role_arn) => {
+                crate::state::execution_role_failure_reason(ctx, &region, role_arn).await
+            }
+        };
+
         let mut store = state.lock();
 
         let Some(pipeline) = store.pipelines.get(&name) else {
@@ -255,6 +289,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
         let pipeline_arn = pipeline.arn.clone();
         let definition = pipeline.definition.clone();
+        // The reason was resolved against the role the pipeline carried a moment ago, with
+        // the guard dropped. It travels on this run only if the pipeline STILL carries that
+        // very role, so a pipeline whose role changed in between is never failed over a
+        // value its runs are no longer performed as; the next start resolves the new one.
+        let role_failure_reason = role_failure_reason
+            .filter(|_| pipeline_role.as_deref() == Some(pipeline.role_arn.as_str()));
         // `ParallelismConfiguration`'s doc: this configuration, if specified, "overrides
         // the parallelism configuration of the parent pipeline for this specific run" —
         // so the run carries its own when it names one and the pipeline's otherwise.
@@ -384,6 +424,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 creation_time: now,
                 last_modified_time: now,
                 ends_at: now + crate::state::PIPELINE_EXECUTION_ENDS_AFTER,
+                role_failure_reason,
             },
         );
         // `DescribePipeline`'s `LastRunTime` is when the pipeline was last run, which is

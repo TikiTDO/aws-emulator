@@ -131,8 +131,8 @@ pub use job_config_schema::{
 pub mod admission;
 pub use admission::{
     could_not_access_model_data, could_not_assume_role, could_not_find_model_data,
-    execution_role_is_unassumable, no_s3_objects_found, vpc_placement_refusal,
-    SECURITY_GROUPS_NOT_SPECIFIED, SERVICE_PRINCIPAL,
+    execution_role_failure_reason, execution_role_is_unassumable, no_s3_objects_found,
+    vpc_placement_refusal, SECURITY_GROUPS_NOT_SPECIFIED, SERVICE_PRINCIPAL,
 };
 
 /// The Amazon S3 ACCESS slice: the one reading of an Amazon S3 location a request names and
@@ -1451,6 +1451,17 @@ pub struct PipelineExecution {
     pub creation_time: SystemTime,
     pub last_modified_time: SystemTime,
     pub ends_at: SystemTime,
+    /// Why the step that needed the pipeline's role could not be performed AS it, as the
+    /// start call resolved the role against this account's IAM
+    /// ([`admission::execution_role_failure_reason`]), or `None` when IAM answered
+    /// nothing against it.
+    ///
+    /// Resolved when the run STARTS, which is when the role is used, and carried on the
+    /// run rather than on the pipeline: a pipeline whose role is created after it is
+    /// registered runs under a role that resolves, so nothing about the role is settled
+    /// before a run begins. It is what [`PipelineExecution::settle_status`] reports as the
+    /// failed run's reason, so the step the role was needed for carries it too.
+    pub role_failure_reason: Option<String>,
 }
 
 impl PipelineExecution {
@@ -1461,15 +1472,20 @@ impl PipelineExecution {
     /// no difference to the result. `LastModifiedTime` takes the instant the move was
     /// due, not "now", so it is stable across later reads.
     ///
-    /// The terminal status is [`PIPELINE_EXECUTION_STATUS_FAILED`] with
-    /// [`PIPELINE_EXECUTION_NOT_RUN`]: see that constant for why an execution this
-    /// emulator accepted cannot end `Succeeded`.
+    /// The terminal status is [`PIPELINE_EXECUTION_STATUS_FAILED`]. Its reason is the
+    /// run's own `role_failure_reason` where the role its steps had to be performed as
+    /// resolved to nothing, and [`PIPELINE_EXECUTION_NOT_RUN`] otherwise: see that
+    /// constant for why an execution this emulator accepted cannot end `Succeeded`.
     ///
     /// Answers whether the transition happened on this call, so the caller can record it.
     pub fn settle_status(&mut self, now: SystemTime) -> bool {
         if self.status == PIPELINE_EXECUTION_STATUS_EXECUTING && now >= self.ends_at {
             self.status = PIPELINE_EXECUTION_STATUS_FAILED.to_string();
-            self.failure_reason = Some(PIPELINE_EXECUTION_NOT_RUN.to_string());
+            self.failure_reason = Some(
+                self.role_failure_reason
+                    .clone()
+                    .unwrap_or_else(|| PIPELINE_EXECUTION_NOT_RUN.to_string()),
+            );
             self.last_modified_time = self.ends_at;
             return true;
         }

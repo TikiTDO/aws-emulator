@@ -197,6 +197,8 @@ mod pipeline_definition_diagnosis;
 mod pipeline_execution;
 #[path = "all/pipeline_lifecycle.rs"]
 mod pipeline_lifecycle;
+#[path = "all/pipeline_role_resolution.rs"]
+mod pipeline_role_resolution;
 #[path = "all/presigned_notebook_instance_url.rs"]
 mod presigned_notebook_instance_url;
 #[path = "all/processing_job_lifecycle.rs"]

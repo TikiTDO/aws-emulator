@@ -14,6 +14,10 @@
 //! yet, so that form answers the scaffold's 501 rather than persisting a pipeline with
 //! no definition.
 //!
+//! The `RoleArn` is admitted on its modelled shape alone: creating a pipeline registers a
+//! definition and assumes nothing, so a role nothing holds yet is stored as given and
+//! resolved when a run of the pipeline needs it (`StartPipelineExecution`).
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -203,14 +207,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let region = crate::state::request_region(ctx);
-        // The pipeline's executions RUN AS the role the request names, so the role is
-        // settled before anything is stored and before the store is locked: only what the
-        // emulator's OWN IAM ANSWERED is refused (see `crate::state::admission`).
-        if crate::state::execution_role_is_unassumable(ctx, &region, &input.role_arn).await {
-            return Err(crate::scaffolded::Scaffolded::validation(
-                crate::state::could_not_assume_role(&input.role_arn),
-            ));
-        }
+        // The role is NOT resolved here: creating a pipeline only REGISTERS a definition,
+        // and nothing assumes the role until a step of an execution runs as it. So the
+        // value is admitted on its modelled shape alone (`RoleArn`, len 20..2048 and the
+        // IAM role ARN pattern), whatever this account's IAM holds under it, and the
+        // resolution happens where the role is used — `StartPipelineExecution`, which
+        // settles the execution and its steps into the modelled `Failed` status carrying
+        // the reason (see `crate::state::execution_role_failure_reason`).
         let arn = crate::state::resource_arn(
             &region,
             crate::state::PIPELINE_ARN_KIND,

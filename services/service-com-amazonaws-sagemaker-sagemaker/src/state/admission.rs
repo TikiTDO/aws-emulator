@@ -143,6 +143,48 @@ pub fn unable_to_assume_role_with_arn(role_arn: &str) -> String {
     format!("Unable to assume role with RoleArn {role_arn}")
 }
 
+/// How work that had to be performed AS a role this account holds NOTHING under reports why
+/// it could not be: the role ARN AS THE CALLER SENT IT, and the fact that no such role
+/// exists — there is no trust document to describe when the role itself is absent.
+///
+/// The two halves are what the recorded step failure for a role nobody holds states: the
+/// ARN the request supplied, and that it does not exist. The ARN is taken from the request,
+/// so nothing of any one run is written here.
+///
+/// A role resolved when the work RUNS rather than when the resource was registered answers
+/// on the work, so this is a step's own reason rather than a refusal of a call.
+#[must_use]
+pub fn role_does_not_exist(role_arn: &str) -> String {
+    format!("Role {role_arn} does not exist.")
+}
+
+/// Why work performed AS `role_arn` could not be performed at all, as this emulator's own
+/// IAM answers about that role — or `None` when IAM answered nothing against it, which is
+/// every case the two readings above stay silent about.
+///
+/// The two answers are worded apart because they are different facts: a role this account
+/// holds nothing under does not exist ([`role_does_not_exist`]), while a role it does hold
+/// whose trust document withholds [`SERVICE_PRINCIPAL`] exists and cannot be assumed
+/// ([`unable_to_assume_role_with_arn`]). Which of the two it is is settled by asking the
+/// narrower reading only once the wider one has answered, so a role IAM is content with
+/// costs ONE in-process `GetRole` and only the failing path costs a second.
+///
+/// This is the resolution for the operations AWS does not resolve the role at: the call is
+/// accepted and the failure travels on the resource or the run the role was needed for.
+pub async fn execution_role_failure_reason(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    role_arn: &str,
+) -> Option<String> {
+    if !execution_role_is_unassumable(ctx, region, role_arn).await {
+        return None;
+    }
+    if held_execution_role_is_unassumable(ctx, region, role_arn).await {
+        return Some(unable_to_assume_role_with_arn(role_arn));
+    }
+    Some(role_does_not_exist(role_arn))
+}
+
 /// The FIRST of `role_arns` this emulator's own IAM answers is unassumable
 /// ([`execution_role_is_unassumable`]), or `None` when it answers that about none of them.
 ///
