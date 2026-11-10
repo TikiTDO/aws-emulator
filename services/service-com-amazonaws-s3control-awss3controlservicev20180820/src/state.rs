@@ -28,6 +28,8 @@ use aws_smithy_schema::{Schema, ShapeId, ShapeType};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Publishing an access point's DATA PATH into the object store that serves it.
+pub mod access_point_routes;
 /// Reading a job's manifest and rendering what its run writes back — the
 /// derivations the worker below runs over, held apart from it because they are
 /// pure functions of a manifest, a filter and a set of task outcomes.

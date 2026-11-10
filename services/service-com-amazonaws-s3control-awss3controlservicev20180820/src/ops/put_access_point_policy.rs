@@ -211,7 +211,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // Stored verbatim: `GetAccessPointPolicy` answers the document the
         // caller sent, not a re-serialized form of it.
-        record.policy = Some(input.policy.clone());
+        let replaced = record.policy.replace(input.policy.clone());
+        let arn = record.arn.clone();
+        // And the document now governs the access point's DATA PATH: the store that serves
+        // Amazon S3's object operations judges a request addressed to the access point by
+        // the policy in force on it, so the document is published there
+        // ([`crate::state::access_point_routes`]) — which is what makes an access point
+        // policy enforced from the moment it is put. Published with this service's own guard
+        // released, which is the lock order that module states — and a document that could
+        // not be published is not reported as stored either: the record keeps the policy it
+        // carried, so the caller's next read finds the access point exactly as it was.
+        drop(store);
+        if !crate::state::access_point_routes::publish_policy(
+            &*self.engine,
+            &arn,
+            Some(input.policy.clone()),
+        ) {
+            if let Some(state) = crate::state::service_state(&*self.engine) {
+                if let Some(record) = state.lock().access_points.get_mut(&key) {
+                    record.policy = replaced;
+                }
+            }
+            return Err(crate::state::state_unavailable());
+        }
         Ok(PutAccessPointPolicyOutput)
     }
 }

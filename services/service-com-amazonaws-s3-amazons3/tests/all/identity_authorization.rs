@@ -118,7 +118,12 @@ async fn iam(router: &MultiServiceRouter, action: &str, params: &[(&str, &str)])
 
 /// Percent-encode one `application/x-www-form-urlencoded` component, through the crate this
 /// service already percent-encodes with rather than by hand.
-fn form_encode(value: &str) -> String {
+///
+/// `pub(crate)`: every suite of this test binary that drives an awsQuery service needs the
+/// same encoding — and an access point ARN travelling as ONE path segment needs it too
+/// ([`super::access_point_data_plane`]) — so there is one encoder here rather than a copy per
+/// suite.
+pub(crate) fn form_encode(value: &str) -> String {
     ::percent_encoding::utf8_percent_encode(value, ::percent_encoding::NON_ALPHANUMERIC)
         .to_string()
 }

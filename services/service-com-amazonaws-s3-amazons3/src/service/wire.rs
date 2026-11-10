@@ -216,12 +216,19 @@ const SERVED_OUTPUT_ROOT_ELEMENTS: &[(&str, &str, &str)] = &[(
 /// [`JSON_PAYLOAD_OUTPUT_OPERATIONS`].
 pub const JSON_PAYLOAD_CONTENT_TYPE: &str = "application/json";
 
-/// Whether a name is a bucket this emulator holds — the one question an ADDRESS cannot
-/// answer from its own shape (see [`super::addressed_in_host`]).
+/// Whether a name is an address this emulator serves a bucket's objects at — the one
+/// question an ADDRESS cannot answer from its own shape (see [`super::addressed_in_host`]).
 ///
 /// A closure rather than an engine, so this file names no engine type and holds no store of
 /// its own: `super`'s constructor captures the one shared engine it was handed.
 pub type BucketLookup = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// Which ACCESS POINT an address reaches, when it reaches one — the other thing an address
+/// cannot answer from its own shape (see [`crate::state::access_points`]).
+///
+/// A closure for the same reason as [`BucketLookup`], over the same shared engine.
+pub type AccessPointLookup =
+    Arc<dyn Fn(&str) -> Option<crate::state::access_points::AccessPointRoute> + Send + Sync>;
 
 /// This service's wire protocol: `restXml` exactly as the model declares it, with an
 /// unwrapped output document for the operations the model marks as carrying one.
@@ -236,6 +243,9 @@ pub struct UnwrappedXmlRestXml {
     /// [`super::addressed_in_host`] for the rule and [`Self::with_buckets`] for where the
     /// answer comes from.
     holds_bucket: Option<BucketLookup>,
+    /// Which access point an address reaches, for the request-scoped note the decision on
+    /// an access point path is taken from. See [`Self::with_access_points`].
+    addressed_access_point: Option<AccessPointLookup>,
 }
 
 /// Hand-written because the bucket lookup is a closure, which carries no `Debug` of its own;
@@ -245,6 +255,10 @@ impl ::std::fmt::Debug for UnwrappedXmlRestXml {
         f.debug_struct("UnwrappedXmlRestXml")
             .field("inner", &self.inner)
             .field("holds_bucket", &self.holds_bucket.is_some())
+            .field(
+                "addressed_access_point",
+                &self.addressed_access_point.is_some(),
+            )
             .finish()
     }
 }
@@ -265,6 +279,7 @@ impl UnwrappedXmlRestXml {
                 .with_namespace(S3_XML_NAMESPACE)
                 .with_no_error_wrapping(NO_ERROR_WRAPPING),
             holds_bucket: None,
+            addressed_access_point: None,
         }
     }
 
@@ -280,12 +295,89 @@ impl UnwrappedXmlRestXml {
     }
 
     /// The bucket a virtual-hosted-style `request` addresses in its host, when it is one —
-    /// see [`super::addressed_in_host`].
+    /// see [`super::addressed_in_host`]. The LABEL as the host spelled it, which is an
+    /// access point's address when the request was addressed to one.
     fn addressed_in_host(&self, request: &Request) -> Option<String> {
         let holds_bucket = self.holds_bucket.as_ref()?;
         let host = super::request_host_of(request)?;
         super::addressed_in_host(host, request_path(request.uri()), &**holds_bucket)
             .map(str::to_string)
+    }
+
+    /// The same protocol, able to resolve the ACCESS POINT an address reaches.
+    ///
+    /// Taken as an [`AccessPointLookup`] for the same reason as [`Self::with_buckets`]'s
+    /// closure. A protocol built WITHOUT it resolves no access point, which is what a
+    /// protocol constructed outside a service (a unit test of the codec) has.
+    pub fn with_access_points(mut self, addressed_access_point: AccessPointLookup) -> Self {
+        self.addressed_access_point = Some(addressed_access_point);
+        self
+    }
+
+    /// The access point `request` was addressed THROUGH, when its address reaches one: the
+    /// first label of its host for a virtual-hosted-style request — the form every AWS SDK
+    /// rewrites an access point ARN into — else the first segment of its path, which is
+    /// where an access point's ARN or alias arrives when a client sends one.
+    fn addressed_access_point(
+        &self,
+        request: &Request,
+    ) -> Option<crate::state::access_points::AccessPointRoute> {
+        let addressed_access_point = self.addressed_access_point.as_ref()?;
+        let address = self.addressed_in_host(request).or_else(|| {
+            super::first_path_segment(request_path(request.uri()))
+                .map(super::sigv4::percent_decoded)
+        })?;
+        addressed_access_point(&address)
+    }
+
+    /// The request's address in the PATH-STYLE form every route of this service is bound in
+    /// (`/{Bucket}`, `/{Bucket}/{Key+}`), when that is not the path the request arrived
+    /// with — `None` when it already is.
+    ///
+    /// Two forms are not. A VIRTUAL-HOSTED-STYLE request names the address in its host and
+    /// leaves its path as the key alone, so the bucket that address reaches goes back in
+    /// front of it ([`super::path_with_bucket`]). And a request whose first path segment is
+    /// an ACCESS POINT's address addresses the bucket that access point fronts, so that
+    /// bucket replaces the segment ([`super::access_point_addressed_path`], the one reading
+    /// of that rewrite, which also decides which requests an access point serves at all).
+    fn path_style_path(&self, request: &Request) -> Option<String> {
+        let path = request_path(request.uri());
+        if let Some(label) = self.addressed_in_host(request) {
+            // An access point's endpoint label addresses the bucket it fronts, for a request
+            // that access point's data plane serves; a request it does not serve addresses
+            // no object of it, so it is not resolved to that bucket at all.
+            let bucket = match self.addressed_access_point(request) {
+                Some(route) => {
+                    if !super::access_point_serves(request.method(), path) {
+                        return None;
+                    }
+                    route.bucket
+                }
+                None => label,
+            };
+            return Some(super::path_with_bucket(&bucket, path));
+        }
+        let addressed_access_point = self.addressed_access_point.as_ref()?;
+        super::access_point_addressed_path(request.method(), path, &**addressed_access_point)
+    }
+
+    /// The access point this request is SERVED through: the one its address reaches, when
+    /// the access point's data plane serves the request at all.
+    ///
+    /// Read off the REWRITE rather than deciding again: the bucket the labels bind from is
+    /// the fronted bucket exactly for a request the access point serves
+    /// ([`Self::path_style_path`]), so a request whose address reaches one and whose bound
+    /// path still names that address is not one it serves — and the decision taken on such a
+    /// request is not taken over the access point's resources either.
+    fn served_access_point(
+        &self,
+        request: &Request,
+    ) -> Option<crate::state::access_points::AccessPointRoute> {
+        let route = self.addressed_access_point(request)?;
+        let path_style = self.path_style_path(request)?;
+        super::first_path_segment(&path_style)
+            .is_some_and(|segment| segment == route.bucket)
+            .then_some(route)
     }
 }
 
@@ -2454,6 +2546,24 @@ impl ServerProtocol for UnwrappedXmlRestXml {
         // [`ALLOW_HEADER`]).
         forget_any_unanswered_validators();
         forget_any_unanswered_allowed_methods();
+        // The ACCESS POINT this request was addressed THROUGH, when its address reaches one
+        // ([`Self::addressed_access_point`]), recorded for the decision taken on the path it
+        // names: an access point has a policy of its own, and that policy governs the
+        // requests made through the access point and no others
+        // ([`crate::state::access_points`], and
+        // [`crate::service::request_authorization::denial`] for the decision). Recorded for
+        // EVERY request this service reads, so a request addressed to a bucket directly
+        // records `None` rather than leaving the previous request's note behind.
+        let through_access_point = self.served_access_point(request);
+        crate::state::access_points::remember(through_access_point.clone());
+        // The request's address in the PATH-STYLE form every route of this service is bound
+        // in ([`Self::path_style_path`]), which is the path the three notes below and the
+        // `@httpLabel` members are read from: a virtual-hosted-style request's bucket comes
+        // back in front of its key, and an access point's address becomes the bucket it
+        // fronts.
+        let path_style = self
+            .path_style_path(request)
+            .unwrap_or_else(|| request_path(request.uri()).to_string());
         // The BUCKET this request addresses, recorded for the one thing that needs it once
         // the handler has returned: the `BucketName` a bucket-scoped error document names
         // the bucket by when the refusal did not name one itself
@@ -2462,18 +2572,15 @@ impl ServerProtocol for UnwrappedXmlRestXml {
         // always its own request's — a request that addresses no bucket (`GET /`) records
         // nothing rather than leaving the previous one's note behind.
         //
-        // It is the bucket of the request's address in either form: the first label of the
-        // host for a virtual-hosted-style request ([`super::addressed_in_host`]), else the
-        // first segment of the path, which is the `{Bucket}` label every bucket-scoped
+        // It is the bucket the request's address REACHES, in either form: the first label of
+        // the host for a virtual-hosted-style request ([`super::addressed_in_host`]), else
+        // the first segment of the path, which is the `{Bucket}` label every bucket-scoped
         // route binds. A name S3 can address no bucket by ([`super::names_a_bucket`]) names
         // no bucket at all and is not recorded: the element is a bucket's name, not an echo
         // of arbitrary request text — and such a request is refused for the NAME anyway
         // (`crate::service::invalid_bucket_name`).
-        let addressed_bucket = self
-            .addressed_in_host(request)
-            .or_else(|| {
-                super::first_path_segment(request_path(request.uri())).map(str::to_string)
-            })
+        let addressed_bucket = super::first_path_segment(&path_style)
+            .map(str::to_string)
             .filter(|name| super::names_a_bucket(name));
         crate::state::addressed_bucket::remember(addressed_bucket.as_deref());
         // And the OBJECT it addresses, for the `<Key>` and `<VersionId>` an object-scoped
@@ -2481,10 +2588,6 @@ impl ServerProtocol for UnwrappedXmlRestXml {
         // address in PATH-STYLE form, so a virtual-hosted-style request (whose path is the
         // key alone) records the same key a path-style one does. A request that addresses a
         // bucket or the service root records nothing.
-        let path_style = match self.addressed_in_host(request) {
-            Some(bucket) => super::path_with_bucket(&bucket, request_path(request.uri())),
-            None => request_path(request.uri()).to_string(),
-        };
         crate::state::addressed_bucket::remember_object(addressed_object(
             &path_style,
             request_query(request.uri()),
@@ -2521,23 +2624,23 @@ impl ServerProtocol for UnwrappedXmlRestXml {
             return Err(ProtocolError::Invalid(vec![violation]));
         }
         // The PATH the `@httpLabel` members are bound from, when it is not the path the
-        // request arrived with. A VIRTUAL-HOSTED-STYLE request names its bucket in the host
-        // and leaves its path as the key alone, so the bucket is put back in front of it —
-        // the same normalization the routing seam resolved the operation from
+        // request arrived with — the PATH-STYLE address resolved above
+        // ([`Self::path_style_path`]): a virtual-hosted-style request names its bucket in
+        // the host and leaves its path as the key alone, so the bucket is put back in front
+        // of it — the same normalization the routing seam resolved the operation from
         // (`super::Service::override_operation`), so the operation that was matched binds the
-        // bucket that was addressed. And a key that ENDS in a slash keeps it, as an escape
-        // the label's own decode undoes ([`key_trailing_slashes_escaped`]), in either address
-        // form. `None` for a request that needs neither, whose path already IS the path the
-        // labels bind from.
-        let host_style_path = self
-            .addressed_in_host(request)
-            .map(|bucket| super::path_with_bucket(&bucket, request_path(request.uri())));
+        // bucket that was addressed — and a request addressed to an ACCESS POINT binds the
+        // bucket that access point fronts. And a key that ENDS in a slash keeps it, as an
+        // escape the label's own decode undoes ([`key_trailing_slashes_escaped`]), in either
+        // address form. `None` for a request that needs neither, whose path already IS the
+        // path the labels bind from.
+        let addressed_path = self.path_style_path(request);
         let bound_path = key_trailing_slashes_escaped(
-            host_style_path
+            addressed_path
                 .as_deref()
                 .unwrap_or_else(|| request_path(request.uri())),
         )
-        .or(host_style_path);
+        .or(addressed_path);
         // The HEADERS the bound members are read from, normalized where a value the request
         // carried is not one the framework's codec reads as the request meant it — a MODE
         // spelled in another case, a percent-encoded copy source, an HTTP-date, and the one

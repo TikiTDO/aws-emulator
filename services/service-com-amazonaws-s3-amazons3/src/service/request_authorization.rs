@@ -240,6 +240,26 @@ pub fn request_caller<Eng: Send + Sync + 'static>(
 /// the condition keys this request carries a value for
 /// ([`authorization::ObjectWriteContext`], [`authorization::read_conditions`]). The decision
 /// is the module docs' rule.
+///
+/// ## A request made through an ACCESS POINT
+///
+/// An access point is a named data path onto one bucket, with a policy of its own, and that
+/// policy is in force on the requests made THROUGH the access point and on no others
+/// ("access point policies … are evaluated in addition to the bucket policy", Amazon S3 User
+/// Guide, *Managing data access with Amazon S3 access points*). So for a request whose
+/// address reached one ([`crate::state::access_points`] records which), this decision is
+/// taken over TWO resources — the bucket-scoped `resource` the operation asked about, and
+/// the access point's own resource for the same object
+/// ([`crate::state::access_points::AccessPointRoute::resource_for`])
+/// — against THREE documents: the identity's, the bucket's, and the access point's.
+///
+/// The rule is IAM's own, unchanged: an explicit `Deny` about the request in ANY of the
+/// three refuses it, whatever any grant says — which is what makes an access point policy
+/// that denies a role refuse that role's reads through the access point while its reads
+/// addressed to the bucket are untouched, because no note is recorded for those and the
+/// access point's policy is not among the documents in force on them. A grant is needed for
+/// the path the request took: an `Allow` naming either resource, in the caller's
+/// identity-based documents, in the bucket's policy or in the access point's.
 #[must_use]
 pub fn denial(
     caller: &Caller,
@@ -248,45 +268,94 @@ pub fn denial(
     resource: &str,
     conditions: &[(String, String)],
 ) -> Option<String> {
-    let refusal = |reason: &str| Some(state::authorization_denial(&caller.arn, action, resource, reason));
+    // The access point this request was addressed THROUGH, when its address reached one.
+    let through = crate::state::access_points::addressed();
+    // What a refusal names as the resource: the access point's own for a request that came
+    // through one, which is the resource the decision about that path was taken over.
+    let named = through
+        .as_ref()
+        .map_or_else(|| resource.to_string(), |route| route.resource_for(resource));
+    let refusal = |reason: &str| Some(state::authorization_denial(&caller.arn, action, &named, reason));
     let prepared = policy.map(iam::PreparedDocument::read);
+    let access_point_policy = through
+        .as_ref()
+        .and_then(|route| route.policy.as_deref())
+        .map(iam::PreparedDocument::read);
     // The condition context the decision is taken over: what the REQUEST carried, plus the
     // global keys this gate holds for every request (who the caller is, which account it and
     // the resource belong to), so a statement written over one of those decides rather than
-    // standing undecided.
+    // standing undecided. A request that came through an access point also answers the two
+    // keys naming it, which is what a bucket policy that delegates to its access points is
+    // written over.
     let mut context = conditions.to_vec();
     context.extend(authorization::global_conditions(&caller.identity_arn));
+    if let Some(route) = &through {
+        context.extend(authorization::access_point_conditions(route));
+    }
     let conditions: &[(String, String)] = &context;
+    // Every resource this request addresses: the bucket-scoped one the operation asked
+    // about, and the access point's own when the request came through one.
+    let mut addressed = vec![resource.to_string()];
+    if named != resource {
+        addressed.push(named.clone());
+    }
 
-    // An explicit deny wins over every grant, including the account's own credential.
-    if let Some(prepared) = &prepared {
-        let denied_spellings = caller.denied_spellings();
-        let denying = iam::Request::new(action, resource, &denied_spellings)
-            .with_context(conditions)
-            .with_published_keys(PUBLISHED_CONDITION_KEYS);
-        if authorization::deny_is_decided(
-            &iam::resource_outcome_prepared(prepared, &denying),
-            PUBLISHED_CONDITION_KEYS,
-        ) {
+    // An explicit deny wins over every grant, including the account's own credential — in
+    // the bucket's own policy, and in the policy of the access point the request came
+    // through.
+    let denied_spellings = caller.denied_spellings();
+    for document in [prepared.as_ref(), access_point_policy.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        let denies = addressed.iter().any(|resource| {
+            let denying = request_over(action, resource, &denied_spellings, conditions);
+            authorization::deny_is_decided(
+                &iam::resource_outcome_prepared(document, &denying),
+                PUBLISHED_CONDITION_KEYS,
+            )
+        });
+        if denies {
             return refusal(state::RESOURCE_POLICY_DENY_REASON);
         }
     }
-    let granting = iam::Request::new(action, resource, &caller.principals)
-        .with_context(conditions)
-        .with_published_keys(PUBLISHED_CONDITION_KEYS);
     let documents = iam::prepare_documents(&caller.documents);
-    let identity_said = iam::identity_outcome_prepared(&documents, &granting);
-    if authorization::deny_is_decided(&identity_said, PUBLISHED_CONDITION_KEYS) {
+    let identity_said: Vec<iam::Outcome> = addressed
+        .iter()
+        .map(|resource| {
+            iam::identity_outcome_prepared(
+                &documents,
+                &request_over(action, resource, &caller.principals, conditions),
+            )
+        })
+        .collect();
+    if identity_said
+        .iter()
+        .any(|said| authorization::deny_is_decided(said, PUBLISHED_CONDITION_KEYS))
+    {
         return refusal(IDENTITY_POLICY_DENY_REASON);
     }
-    if identity_said.decision == Decision::Allowed || caller.identity_is_unbounded() {
+    if identity_said
+        .iter()
+        .any(|said| said.decision == Decision::Allowed)
+        || caller.identity_is_unbounded()
+    {
         return None;
     }
-    // A grant in the BUCKET's own policy names this principal directly, which is a
-    // permission of its own (see the module docs).
-    if prepared.is_some_and(|prepared| {
-        iam::resource_outcome_prepared(&prepared, &granting).decision == Decision::Allowed
-    }) {
+    // A grant in the BUCKET's own policy — or in the policy of the access point the request
+    // came through — names this principal directly, which is a permission of its own (see
+    // the module docs).
+    let granted = |document: &iam::PreparedDocument| {
+        addressed.iter().any(|resource| {
+            iam::resource_outcome_prepared(
+                document,
+                &request_over(action, resource, &caller.principals, conditions),
+            )
+            .decision
+                == Decision::Allowed
+        })
+    };
+    if prepared.as_ref().is_some_and(granted) || access_point_policy.as_ref().is_some_and(granted) {
         return None;
     }
     refusal(&format!(
@@ -297,6 +366,23 @@ pub fn denial(
 /// The reason clause IAM publishes for a request an identity-based document explicitly
 /// denies — the identity half of [`state::RESOURCE_POLICY_DENY_REASON`].
 const IDENTITY_POLICY_DENY_REASON: &str = "with an explicit deny in an identity-based policy";
+
+/// One decision's request: `action` on `resource`, asked for the principal spellings
+/// `principals`, in the condition context `conditions`.
+///
+/// One place, so every leg of [`denial`] — the deny legs and the grant legs, over the bucket
+/// resource and over the access point's own — asks about the same request and publishes the
+/// same keys ([`PUBLISHED_CONDITION_KEYS`]).
+fn request_over<'a>(
+    action: &'a str,
+    resource: &'a str,
+    principals: &'a [String],
+    conditions: &'a [(String, String)],
+) -> iam::Request<'a> {
+    iam::Request::new(action, resource, principals)
+        .with_context(conditions)
+        .with_published_keys(PUBLISHED_CONDITION_KEYS)
+}
 
 /// [`denial`], for one of the three operations that read, write or remove the BUCKET POLICY
 /// itself.

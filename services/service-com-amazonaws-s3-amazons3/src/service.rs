@@ -271,6 +271,25 @@ fn holds_bucket_in<Eng: Send + Sync + 'static>(engine: &Eng, name: &str) -> bool
         .is_some_and(|state| state.lock().bucket(name).is_some())
 }
 
+/// The bucket an ADDRESS reaches: the bucket itself when this emulator holds one under that
+/// name, else the bucket the ACCESS POINT that address reaches fronts — "Amazon S3 access
+/// points are named network endpoints that are attached to buckets that you can use to
+/// perform S3 object operations" (Amazon S3 User Guide, *Managing data access with Amazon S3
+/// access points*), so an address that names an access point addresses the bucket behind it.
+/// `None` for an address that reaches neither.
+///
+/// [`crate::state::access_points`] carries WHICH addresses reach one access point. One
+/// reader for every seam that resolves an address — this service's own seams and the wire
+/// layer's — so they cannot disagree about which bucket a request reaches. Read-only, and
+/// it holds no guard when it answers.
+fn addressed_bucket_in<Eng: Send + Sync + 'static>(engine: &Eng, address: &str) -> Option<String> {
+    if holds_bucket_in(engine, address) {
+        return Some(address.to_string());
+    }
+    crate::state::access_points::addressed_access_point_in(engine, address)
+        .map(|route| route.bucket)
+}
+
 /// Whether `host` carries a BUCKET as its first label, by shape alone: a host of at least
 /// two labels whose first could be a bucket name.
 ///
@@ -283,8 +302,10 @@ fn host_style_label(host: &str) -> Option<&str> {
     (!rest.is_empty() && bucket_name_shaped(label)).then_some(label)
 }
 
-/// The bucket a VIRTUAL-HOSTED-STYLE request addresses in `host`, when it is one —
-/// `holds_bucket` answering whether a name is a bucket this emulator holds.
+/// The ADDRESS a VIRTUAL-HOSTED-STYLE request carries in the first label of `host`, when it
+/// carries one — `addresses_a_bucket` answering whether a name is an address this emulator
+/// serves a bucket's objects at (a bucket it holds, or an access point that fronts one; see
+/// [`addressed_bucket_in`]).
 ///
 /// "Both the virtual-hosted-style requests and the path-style requests are supported"
 /// (`GetObject`'s own documentation): a path-style request carries the bucket as the first
@@ -311,13 +332,13 @@ fn host_style_label(host: &str) -> Option<&str> {
 pub(crate) fn addressed_in_host<'h>(
     host: &'h str,
     path: &str,
-    holds_bucket: &dyn Fn(&str) -> bool,
+    addresses_a_bucket: &dyn Fn(&str) -> bool,
 ) -> Option<&'h str> {
     let label = host_style_label(host)?;
-    if !holds_bucket(label) {
+    if !addresses_a_bucket(label) {
         return None;
     }
-    if first_path_segment(path).is_some_and(holds_bucket) {
+    if first_path_segment(path).is_some_and(addresses_a_bucket) {
         return None;
     }
     Some(label)
@@ -336,6 +357,52 @@ pub(crate) fn path_with_bucket(bucket: &str, path: &str) -> String {
         "" | "/" => format!("/{bucket}"),
         path => format!("/{bucket}{path}"),
     }
+}
+
+/// Whether an ACCESS POINT's data plane serves a request of `method` whose path, after the
+/// access point's own address, is `rest`.
+///
+/// An access point is "attached to [a bucket] that you can use to perform S3 object
+/// operations" (Amazon S3 User Guide, *Managing data access with Amazon S3 access points*):
+/// the objects of the bucket it fronts are its surface. So a request that addresses an OBJECT
+/// through the access point reaches that bucket, and so does a GET or a HEAD of the access
+/// point itself — the listings of its objects, and the HEAD that reports the bucket behind
+/// it. A WRITE or a DELETE that names no object addresses no object of the access point at
+/// all — creating a bucket, deleting one and writing its configuration are not an access
+/// point's operations — so such a request is NOT resolved to the fronted bucket: it is
+/// answered about the address it named, which is what keeps a bucket-level call made to an
+/// access point from reaching the bucket behind it.
+pub(crate) fn access_point_serves(method: &str, rest: &str) -> bool {
+    if !rest.trim_start_matches('/').is_empty() {
+        return true;
+    }
+    method.eq_ignore_ascii_case(http::Method::GET.as_str())
+        || method.eq_ignore_ascii_case(http::Method::HEAD.as_str())
+}
+
+/// `path` with the bucket an ACCESS POINT fronts in front of the key, for a PATH-STYLE
+/// request whose first segment is that access point's address (its ARN or its alias) rather
+/// than a bucket's name — `resolve` answering which access point an address reaches.
+///
+/// `None` for a path whose first segment reaches no access point, and for a request that
+/// access point's data plane does not serve ([`access_point_serves`]).
+///
+/// The ONE reading of that rewrite, so this service's own addressing seam
+/// ([`EmulatedService::path_style_path`]) and the wire layer's
+/// (`wire::UnwrappedXmlRestXml::path_style_path`) cannot drift on which bucket a request
+/// reaches.
+pub(crate) fn access_point_addressed_path(
+    method: &str,
+    path: &str,
+    resolve: &dyn Fn(&str) -> Option<crate::state::access_points::AccessPointRoute>,
+) -> Option<String> {
+    let segment = first_path_segment(path)?;
+    let rest = &path[path.find(segment)? + segment.len()..];
+    if !access_point_serves(method, rest) {
+        return None;
+    }
+    let route = resolve(&sigv4::percent_decoded(segment))?;
+    Some(path_with_bucket(&route.bucket, rest))
 }
 
 /// The query parameters a LEGACY presigned URL carries its credential in: the access key
@@ -1181,17 +1248,28 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
         // What the wire layer asks when it has to tell a virtual-hosted-style address from a
-        // path-style one ([`addressed_in_host`]): whether a name is a bucket this emulator
-        // holds. The closure captures the SAME shared engine every operation reads, so the
-        // answer is the store's rather than a copy of it; it is read-only.
+        // path-style one ([`addressed_in_host`]): whether a name is an address this emulator
+        // serves a bucket's objects at. The closure captures the SAME shared engine every
+        // operation reads, so the answer is the store's rather than a copy of it; it is
+        // read-only.
         let buckets = Arc::clone(&engine);
-        let holds_bucket: wire::BucketLookup =
-            Arc::new(move |name: &str| holds_bucket_in(&*buckets, name));
+        let addresses_a_bucket: wire::BucketLookup =
+            Arc::new(move |name: &str| addressed_bucket_in(&*buckets, name).is_some());
+        // And which ACCESS POINT an address reaches, when it reaches one: the wire layer
+        // resolves the address ONCE per request, so every `{Bucket}` label binds the bucket
+        // the request reaches and the decision taken on it knows the access point it came
+        // through ([`crate::state::access_points`]). Read-only, over the same engine.
+        let access_points = Arc::clone(&engine);
+        let addressed_access_point: wire::AccessPointLookup = Arc::new(move |name: &str| {
+            crate::state::access_points::addressed_access_point_in(&*access_points, name)
+        });
         Self {
             entry: crate::ServiceDefinition::new(Arc::clone(&engine)),
             door: front_door(&engine),
             engine,
-            protocol: UnwrappedXmlRestXml::new().with_buckets(holds_bucket),
+            protocol: UnwrappedXmlRestXml::new()
+                .with_buckets(addresses_a_bucket)
+                .with_access_points(addressed_access_point),
         }
     }
 
@@ -1206,22 +1284,44 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
         self.door.get(key)
     }
 
-    /// Whether `name` is a bucket this emulator holds — the question an ADDRESS resolves
-    /// against (see [`addressed_in_host`]). Read-only: the guard is taken, the answer is
-    /// read, and nothing is written.
-    fn holds_bucket(&self, name: &str) -> bool {
-        holds_bucket_in(&*self.engine, name)
+    /// Whether `name` is an address this emulator serves a bucket's objects at — a bucket it
+    /// holds, or an access point that fronts one — the question an ADDRESS resolves against
+    /// (see [`addressed_in_host`] and [`addressed_bucket_in`]). Read-only: the guard is
+    /// taken, the answer is read, and nothing is written.
+    fn addresses_a_bucket(&self, name: &str) -> bool {
+        addressed_bucket_in(&*self.engine, name).is_some()
     }
 
-    /// The bucket a VIRTUAL-HOSTED-STYLE request names in the first label of its host, when
-    /// it is one ([`addressed_in_host`]) — the one place both routing seams below ask that
-    /// question, so the route a request resolves and the address its refusal is judged
-    /// against cannot disagree about which bucket was named. `path` is the request's own
-    /// path, which the caller has already read and which the answer depends on (a path-style
-    /// request names its bucket there, and is never read out of the host).
-    fn host_addressed_bucket<'r>(&self, req: &'r RtRequest, path: &str) -> Option<&'r str> {
+    /// The bucket a VIRTUAL-HOSTED-STYLE request REACHES through the first label of its host,
+    /// when that label is an address of one ([`addressed_in_host`]) — the one place both
+    /// routing seams below ask that question, so the route a request resolves and the address
+    /// its refusal is judged against cannot disagree about which bucket was named. `path` is
+    /// the request's own path, which the caller has already read and which the answer depends
+    /// on (a path-style request names its bucket there, and is never read out of the host).
+    ///
+    /// The bucket, not the label: an access point's endpoint label addresses the bucket that
+    /// access point fronts, so what goes back in front of the key is the bucket every route
+    /// of this service binds its `{Bucket}` label from.
+    fn host_addressed_bucket(&self, req: &RtRequest, path: &str) -> Option<String> {
         let host = request_host_of(req)?;
-        addressed_in_host(host, path, &|name| self.holds_bucket(name))
+        let label = addressed_in_host(host, path, &|name| self.addresses_a_bucket(name))?;
+        if holds_bucket_in(&*self.engine, label) {
+            return Some(label.to_string());
+        }
+        // An ACCESS POINT's endpoint label: the bucket it fronts is reached only by a request
+        // that access point's data plane serves ([`access_point_serves`]); the whole path is
+        // the key for this address form, so that is what decides it.
+        let route = crate::state::access_points::addressed_access_point_in(&*self.engine, label)?;
+        access_point_serves(req.method(), path).then_some(route.bucket)
+    }
+
+    /// `path` with the bucket its own first segment REACHES in front of it, for a PATH-STYLE
+    /// request whose first segment is an access point's address rather than a bucket's name —
+    /// `None` for every other request, whose path already names the bucket it reaches.
+    fn access_point_addressed_path(&self, method: &str, path: &str) -> Option<String> {
+        access_point_addressed_path(method, path, &|address| {
+            crate::state::access_points::addressed_access_point_in(&*self.engine, address)
+        })
     }
 
     /// The address `req` names, in the PATH-STYLE form every route of this service is bound
@@ -1230,11 +1330,19 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// of it ([`path_with_bucket`], the same normalization [`Service::override_operation`]
     /// routes from); a path-style request's path already is that form and is borrowed
     /// unchanged.
+    ///
+    /// An ACCESS POINT's address names the bucket it fronts, in either form: the host label
+    /// of its endpoint resolves through [`Self::host_addressed_bucket`], and its ARN or its
+    /// alias in the first path segment through [`Self::access_point_addressed_path`] — so
+    /// every seam of this service reads the bucket the request REACHES.
     fn path_style_path<'r>(&self, req: &'r RtRequest) -> Cow<'r, str> {
         let path = wire::request_path(req.uri());
         match self.host_addressed_bucket(req, path) {
-            Some(bucket) => Cow::Owned(path_with_bucket(bucket, path)),
-            None => Cow::Borrowed(path),
+            Some(bucket) => Cow::Owned(path_with_bucket(&bucket, path)),
+            None => match self.access_point_addressed_path(req.method(), path) {
+                Some(addressed) => Cow::Owned(addressed),
+                None => Cow::Borrowed(path),
+            },
         }
     }
 
@@ -1677,7 +1785,9 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
             // named) out of this branch.
             Some(key) => request_host(parts)
                 .and_then(|host| {
-                    addressed_in_host(host, parts.uri.path(), &|name| self.holds_bucket(name))
+                    addressed_in_host(host, parts.uri.path(), &|name| {
+                        self.addresses_a_bucket(name)
+                    })
                 })
                 .is_some_and(|bucket| key == bucket),
             // A request whose ONLY credential is a query-string one the framework's routing
@@ -1705,7 +1815,7 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
             None => {
                 carries_legacy_presigned_credential(&parts.uri)
                     || first_path_segment(parts.uri.path())
-                        .is_some_and(|segment| self.holds_bucket(segment))
+                        .is_some_and(|segment| self.addresses_a_bucket(segment))
             }
         };
         claimed
@@ -1797,7 +1907,7 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         let Some(bucket) = self.host_addressed_bucket(req, wire::request_path(req.uri())) else {
             return self.front_door_operation(req);
         };
-        let rewritten = with_path_style_address(req, bucket)?;
+        let rewritten = with_path_style_address(req, &bucket)?;
         // The ENTRY's protocol, which is the one carrying this service's model-derived
         // routes (this file's own `self.protocol` serializes and deserializes; it was built
         // with no route table, because routing is the entry's job).

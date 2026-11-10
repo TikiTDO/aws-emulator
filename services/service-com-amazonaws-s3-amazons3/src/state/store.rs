@@ -116,6 +116,26 @@ pub struct ComAmazonawsS3Amazons3State {
     /// cursor into a position the caller chose. Private: [`Self::page_token_key`] is the
     /// one way to it, and it hands back a copy of the key rather than the key's bytes.
     pub(super) page_tokens: ::service_common::page_tokens::PageTokenKey,
+    /// The ACCESS POINTS that front this store's buckets, by access point ARN.
+    ///
+    /// An access point is a named data path onto ONE bucket, so the record a request
+    /// addressed to it is served and judged by belongs to the store that serves the data
+    /// plane rather than to the service that creates the resource — which writes it here,
+    /// exactly as it writes a bucket's tag set here. See `state/access_points.rs` for the
+    /// record, the addresses that reach one, and the bound on how many are held.
+    ///
+    /// Private: the methods in that file are the only way in or out, so the ceiling cannot
+    /// be applied in one place and skipped in another.
+    pub(super) access_points: BTreeMap<String, access_points::AccessPointRoute>,
+    /// The index of the ADDRESSES that reach each access point other than its ARN — its
+    /// alias and the first label of its endpoint host — as `address -> access point ARN`.
+    ///
+    /// An index rather than a second record: the route itself is held once, under its ARN,
+    /// and this is what lets the address EVERY request carries be resolved by one lookup
+    /// instead of a scan. Written only by the two methods in `state/access_points.rs` that
+    /// record and forget a route, so it holds exactly the addresses of the routes above and
+    /// is bounded with them.
+    pub(super) access_point_addresses: BTreeMap<String, String>,
 }
 
 impl Default for ComAmazonawsS3Amazons3State {
@@ -141,6 +161,8 @@ impl Default for ComAmazonawsS3Amazons3State {
             completed_renames: BTreeMap::new(),
             metadata_namespace_tables: BTreeSet::new(),
             page_tokens: ::service_common::page_tokens::PageTokenKey::new(),
+            access_points: BTreeMap::new(),
+            access_point_addresses: BTreeMap::new(),
         };
         store.record_published_buckets();
         store

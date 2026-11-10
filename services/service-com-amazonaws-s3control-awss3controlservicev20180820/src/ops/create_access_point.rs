@@ -242,7 +242,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             access_point_arn: Some(record.arn.clone()),
             alias: Some(record.alias.clone()),
         };
-        store.access_points.insert(key, record);
+        store.access_points.insert(key.clone(), record.clone());
+        // The access point is a DATA PATH as well as a resource: the store that serves
+        // Amazon S3's object operations is where a request addressed to it is resolved and
+        // judged, so the path is published there before this call reports the access point
+        // as created ([`crate::state::access_point_routes`]). Published with this service's
+        // own guard released, which is the lock order that module states — and a create
+        // whose path could not be published leaves no record behind, so nothing is reported
+        // as created that no request could reach.
+        drop(store);
+        if !crate::state::access_point_routes::publish(&*self.engine, &record) {
+            if let Some(state) = crate::state::service_state(&*self.engine) {
+                state.lock().access_points.remove(&key);
+            }
+            return Err(crate::state::state_unavailable());
+        }
         Ok(output)
     }
 }

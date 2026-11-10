@@ -77,7 +77,13 @@ pub async fn call(
 ) -> Result<Answer, Refusal> {
     let input = Input::read(body)?;
     let observed = Observed::default();
-    let client = client(callback, identity, region, observed.clone());
+    let client = client(
+        callback,
+        identity,
+        region,
+        observed.clone(),
+        input.text("Bucket")?.as_deref(),
+    );
     match operation {
         "GetObject" => get_object(&client, &input, &observed).await,
         "HeadObject" => head_object(&client, &input, &observed).await,
@@ -97,7 +103,14 @@ pub async fn call(
 /// identity this invocation was given.
 ///
 /// Path-style addressing is what the emulated S3 service routes on (its operations are
-/// bound under a `{Bucket}` path label). The transport is in-process, so everything a
+/// bound under a `{Bucket}` path label) — except for an ACCESS POINT, which is not addressed
+/// that way at all: AWS's endpoint rules resolve an access point ARN in the `Bucket` field to
+/// the access point's own endpoint host (`<name>-<account-id>.s3-accesspoint.<region>…`) and
+/// refuse it path-style, so a call whose bucket is one is left to the client's own
+/// addressing and arrives at that host, which the emulated service resolves. `bucket` is
+/// what the handler put in that field, for exactly that decision.
+///
+/// The transport is in-process, so everything a
 /// network client needs and this one cannot have — retries, timeouts, identity caching and
 /// stalled-stream protection, each of which needs a sleep implementation the callback
 /// transport is not given — is switched off.
@@ -106,12 +119,13 @@ fn client(
     identity: Option<&CallerIdentity>,
     region: &str,
     observed: Observed,
+    bucket: Option<&str>,
 ) -> Client {
     let config = ::aws_sdk_s3::Config::builder()
         .behavior_version(::aws_sdk_s3::config::BehaviorVersion::latest())
         .region(::aws_sdk_s3::config::Region::new(region.to_string()))
         .endpoint_url(format!("https://s3.{region}.amazonaws.com"))
-        .force_path_style(true)
+        .force_path_style(!bucket.is_some_and(addresses_an_access_point))
         .http_client(callback.http_client())
         .interceptor(observed)
         .retry_config(::aws_sdk_s3::config::retry::RetryConfig::disabled())
@@ -133,6 +147,18 @@ fn client(
     Client::from_conf(config.build())
 }
 
+/// The resource type an S3 ACCESS POINT's ARN names
+/// (`arn:<partition>:s3:<region>:<account-id>:accesspoint/<name>`).
+const ACCESS_POINT_RESOURCE_TYPE: &str = "accesspoint";
+
+/// Whether what the handler put in the `Bucket` field is an ACCESS POINT's ARN — "you can
+/// use the access point ARN in place of the bucket name" — read through the workspace's one
+/// ARN parse rather than by matching on the text.
+fn addresses_an_access_point(bucket: &str) -> bool {
+    ::service_common::arn::parse(bucket)
+        .is_some_and(|arn| arn.resource_type() == ACCESS_POINT_RESOURCE_TYPE)
+}
+
 /// The URL a presigned object request carries its own signature in.
 ///
 /// The URL is built AND signed by the S3 client this module holds, with the same identity
@@ -152,7 +178,13 @@ pub async fn presigned(
     expires_in: ::std::time::Duration,
 ) -> Result<String, Refusal> {
     let input = Input::read(body)?;
-    let client = client(callback, identity, region, Observed::default());
+    let client = client(
+        callback,
+        identity,
+        region,
+        Observed::default(),
+        input.text("Bucket")?.as_deref(),
+    );
     let config = ::aws_sdk_s3::presigning::PresigningConfig::expires_in(expires_in)
         .map_err(|error| Refusal::NotMade(error.to_string()))?;
     let signed = match operation {

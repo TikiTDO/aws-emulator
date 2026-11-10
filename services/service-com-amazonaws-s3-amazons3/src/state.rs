@@ -29,6 +29,9 @@ use std::time::{Duration, SystemTime};
 
 use md5::{Digest, Md5};
 
+// The ACCESS POINTS that front this store's buckets — which bucket each one reaches and the
+// policy it is judged by — live in `state/access_points.rs`.
+pub mod access_points;
 // The bucket a request ADDRESSES, which is what a bucket-scoped refusal that did not name
 // a bucket itself is named by — see `state/addressed_bucket.rs`.
 pub(crate) mod addressed_bucket;

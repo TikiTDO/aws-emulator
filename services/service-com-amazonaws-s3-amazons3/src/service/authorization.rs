@@ -119,6 +119,19 @@ const PRINCIPAL_ACCOUNT_KEY: &str = "aws:PrincipalAccount";
 /// account this emulator serves rather than parsed out of the resource.
 const RESOURCE_ACCOUNT_KEY: &str = "aws:ResourceAccount";
 
+/// The two condition keys that name the ACCESS POINT a request was made through: its ARN
+/// ("s3:DataAccessPointArn") and the account that owns it ("s3:DataAccessPointAccount"),
+/// both of S3's own published list (Amazon S3 User Guide, *Amazon S3 condition key
+/// examples*).
+///
+/// They are what a bucket policy DELEGATES access control to its access points with — a
+/// statement admitting any principal "when" the call came through an access point of the
+/// bucket's own account — so this gate answers them for a request that came through one and
+/// reports them ABSENT for one addressed to the bucket directly, which is exactly the
+/// difference such a statement is written over.
+const DATA_ACCESS_POINT_ARN_KEY: &str = "s3:DataAccessPointArn";
+const DATA_ACCESS_POINT_ACCOUNT_KEY: &str = "s3:DataAccessPointAccount";
+
 /// Every condition key a request judged here carries a value for when its member is present,
 /// and so DECLARES this service models — the keys whose absence from the context is decided
 /// ("the request carries none") rather than unknown. Every other key keeps the undecided
@@ -140,6 +153,8 @@ pub const PUBLISHED_CONDITION_KEYS: &[&str] = &[
     MAX_KEYS_KEY,
     PREFIX_KEY,
     DELIMITER_KEY,
+    DATA_ACCESS_POINT_ARN_KEY,
+    DATA_ACCESS_POINT_ACCOUNT_KEY,
     RESOURCE_ACCOUNT_KEY,
     PRINCIPAL_ARN_KEY,
     PRINCIPAL_ACCOUNT_KEY,
@@ -166,6 +181,8 @@ pub const CALLER_FREE_CONDITION_KEYS: &[&str] = &[
     MAX_KEYS_KEY,
     PREFIX_KEY,
     DELIMITER_KEY,
+    DATA_ACCESS_POINT_ARN_KEY,
+    DATA_ACCESS_POINT_ACCOUNT_KEY,
     RESOURCE_ACCOUNT_KEY,
 ];
 
@@ -217,6 +234,26 @@ pub fn global_conditions(identity_arn: &str) -> Vec<(String, String)> {
         context.push((PRINCIPAL_ACCOUNT_KEY.to_string(), account));
     }
     context
+}
+
+/// The two keys naming the ACCESS POINT `route` a request came through
+/// ([`DATA_ACCESS_POINT_ARN_KEY`], [`DATA_ACCESS_POINT_ACCOUNT_KEY`]), for the decision
+/// taken on that request.
+///
+/// Only a request that really came through an access point carries them: both keys are
+/// published ([`PUBLISHED_CONDITION_KEYS`]), so a request addressed to the bucket directly
+/// answers them as absent and a statement conditioned on them does not admit it.
+#[must_use]
+pub fn access_point_conditions(
+    route: &crate::state::access_points::AccessPointRoute,
+) -> Vec<(String, String)> {
+    vec![
+        (DATA_ACCESS_POINT_ARN_KEY.to_string(), route.arn.clone()),
+        (
+            DATA_ACCESS_POINT_ACCOUNT_KEY.to_string(),
+            route.account_id.clone(),
+        ),
+    ]
 }
 
 /// The number of keys a listing returns when the request names no `max-keys`: "sets the

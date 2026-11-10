@@ -1293,6 +1293,12 @@ mod opensearch_domain_vpc_placement;
 // handed nothing more.
 #[path = "all/cloudformation_stack_update_redirects_a_schedule.rs"]
 mod cloudformation_stack_update_redirects_a_schedule;
+// Declared in the appended tail: an S3 ACCESS POINT POLICY that denies a Lambda function's
+// execution role, enforced on the data path that function's own reads take — the access
+// point created and its policy put through S3 Control's own API, both reads made by the
+// running handler, and the same key still served by bucket name.
+#[path = "all/s3_access_point_policy_denial.rs"]
+mod s3_access_point_policy_denial;
 // Declared here, in this same head region, for the reason the entry above records: what
 // LAMBDA makes of an access point EFS minted, which neither crate's own test target can
 // ask, since the ARN has to cross from one service to the other.

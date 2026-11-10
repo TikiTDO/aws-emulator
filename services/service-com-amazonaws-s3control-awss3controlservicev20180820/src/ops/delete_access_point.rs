@@ -172,8 +172,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut store = state.lock();
         // The policy lives on the record, so removing the record removes the
         // policy with it — a later `GetAccessPointPolicy` is `NoSuchAccessPoint`.
-        if store.access_points.remove(&key).is_none() {
+        let Some(removed) = store.access_points.remove(&key) else {
             return Err(crate::state::no_such_access_point(&input.name));
+        };
+        // And the DATA PATH the access point was: the addresses that reached it stop
+        // resolving in the store that serves Amazon S3's object operations at the moment the
+        // resource stops existing ([`crate::state::access_point_routes`]). Withdrawn with
+        // this service's own guard released, which is the lock order that module states —
+        // and a path that could not be withdrawn is not reported as deleted either: the
+        // record stays, so the access point a request can still reach is one this service
+        // still reports.
+        drop(store);
+        if !crate::state::access_point_routes::withdraw(&*self.engine, &removed.arn) {
+            if let Some(state) = crate::state::service_state(&*self.engine) {
+                state.lock().access_points.insert(key, removed);
+            }
+            return Err(crate::state::state_unavailable());
         }
         Ok(DeleteAccessPointOutput)
     }

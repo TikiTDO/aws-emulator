@@ -182,7 +182,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Clearing the document returns the access point to the state it was
         // created in — carrying no policy — which is also the state a repeat of
         // this call asks for, so the second one succeeds as well as the first.
-        record.policy = None;
+        let removed = record.policy.take();
+        let arn = record.arn.clone();
+        // And the policy in force on the access point's DATA PATH goes with it: the store
+        // that serves Amazon S3's object operations judges a request addressed to the access
+        // point by the document it holds, so a removed document stops governing those
+        // requests at the moment this call removes it
+        // ([`crate::state::access_point_routes`]). Published with this service's own guard
+        // released, which is the lock order that module states — and a removal that could
+        // not be published is not reported as made either: the record keeps the document it
+        // carried, so a document still in force on that path is still readable.
+        drop(store);
+        if !crate::state::access_point_routes::publish_policy(&*self.engine, &arn, None) {
+            if let Some(state) = crate::state::service_state(&*self.engine) {
+                if let Some(record) = state.lock().access_points.get_mut(&key) {
+                    record.policy = removed;
+                }
+            }
+            return Err(crate::state::state_unavailable());
+        }
         Ok(DeleteAccessPointPolicyOutput)
     }
 }

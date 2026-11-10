@@ -11,6 +11,8 @@
 // `tests/all.rs` is a test-target CRATE ROOT, so a bare `mod` resolves to a SIBLING
 // (`tests/state_roundtrip.rs`) — which the layout check refuses. The `#[path]` is what
 // points it into `tests/all/`.
+#[path = "all/access_point_data_plane.rs"]
+mod access_point_data_plane;
 #[path = "all/anonymous_object_reads.rs"]
 mod anonymous_object_reads;
 #[path = "all/aws_published_sample_data.rs"]
