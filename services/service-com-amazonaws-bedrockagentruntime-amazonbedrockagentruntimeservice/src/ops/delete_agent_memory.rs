@@ -1,15 +1,26 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteAgentMemory
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteAgentMemory`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteAgentMemory::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! ## What this handler does
+//!
+//! `DeleteAgentMemory` removes what the memory of ONE alias of an agent holds:
+//!
+//! * the agent and its alias belong to the Bedrock Agent build-time plane, so an alias
+//!   that plane holds nothing for is the modelled `ResourceNotFoundException` (HTTP 404)
+//!   ([`crate::state::agent_memory`]) — the same resolution `GetAgentMemory` makes;
+//! * WHAT is removed is what the request names: `memoryId` alone empties that memory,
+//!   `sessionId` alone removes that session's summary from every memory of the alias,
+//!   both together remove that one session from that one memory, and neither removes
+//!   every memory the alias holds;
+//! * the operation is `@idempotent`
+//!   (`smithy_query(query="operation",operation="DeleteAgentMemory")`), so a repeat of a
+//!   delete that already happened is the same accepted answer (HTTP 202) and not a
+//!   not-found: the alias, not the memory, is the resource the request addresses.
+//!
+//! The authorization decision is made BEFORE the alias is looked up, so an unauthorized
+//! caller is refused the same way whether or not the alias exists — which is what lets a
+//! client tell a permissions problem from a missing agent.
 //!
 //! ## Shape of an operation
 //!
@@ -162,18 +173,80 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteAgentMemory` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteAgentMemoryErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteAgentMemory"))
+        use crate::state::agent_memory as memory;
+
+        // Authorization is decided against the agent alias the call empties — the resource
+        // an identity-based policy for `bedrock:DeleteAgentMemory` names — and before any
+        // store is read, so an unauthorized call is answered the same way whether or not
+        // that alias exists.
+        let resource = memory::alias_resource_arn(ctx, &input.agent_id, &input.agent_alias_id);
+        if let Err(denied) = crate::state::authorize(&*self.engine, ctx, Self::NAME, &resource) {
+            return Err(DeleteAgentMemoryErrorModeled::AccessDeniedException(denied).into());
+        }
+        if let Err(refusal) =
+            memory::alias_of_agent(&*self.engine, &input.agent_id, &input.agent_alias_id)
+        {
+            return Err(match refusal {
+                memory::AliasRefusal::StoreUnavailable => unavailable(),
+                memory::AliasRefusal::NotFound => {
+                    DeleteAgentMemoryErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException {
+                            message: Some(memory::alias_not_found_message()),
+                        },
+                    )
+                    .into()
+                }
+            });
+        }
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(unavailable());
+        };
+        let mut guard = state.lock();
+        // The memories of THIS alias, and no other: a memory is kept per alias, so one
+        // alias's delete never reaches another's.
+        let addressed: Vec<memory::MemoryKey> = guard
+            .agent_memories
+            .keys()
+            .filter(|(agent_id, alias_id, memory_id)| {
+                agent_id == &input.agent_id
+                    && alias_id == &input.agent_alias_id
+                    && input
+                        .memory_id
+                        .as_ref()
+                        .is_none_or(|named| named == memory_id)
+            })
+            .cloned()
+            .collect();
+        for key in addressed {
+            match input.session_id.as_deref() {
+                // No session named: the whole memory goes.
+                None => {
+                    guard.agent_memories.remove(&key);
+                }
+                // One session named: only that session's summary goes, and a memory left
+                // with no summary is no longer held at all.
+                Some(session_id) => {
+                    if let Some(held) = guard.agent_memories.get_mut(&key) {
+                        held.retain(|summary| summary.session_id != session_id);
+                        if held.is_empty() {
+                            guard.agent_memories.remove(&key);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(DeleteAgentMemoryOutput {})
     }
 }
+
+/// The modelled server error for a store this engine does not carry: never a success,
+/// because nothing was deleted and nothing can be said about the memory.
+fn unavailable() -> DeleteAgentMemoryError {
+    DeleteAgentMemoryErrorModeled::InternalServerException(InternalServerException {
+        message: Some("the agent memory store is unavailable".to_string()),
+        reason: None,
+    })
+    .into()
+}
+

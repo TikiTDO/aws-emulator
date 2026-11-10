@@ -20,6 +20,14 @@ service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 # service writes no part of either.
 service-com-amazonaws-bedrockagent-amazonbedrockagentbuildtimelambda = { workspace = true }
 service-com-amazonaws-s3vectors-s3vectors = { workspace = true }
+# The objects a knowledge base's documents were ingested from, from the service that owns
+# them: `GetDocumentContent` reports the content type and the length of the one it hands a
+# caller a URL for. Read-only.
+service-com-amazonaws-s3-amazons3 = { workspace = true }
+# The base-model catalogue a prompt optimization resolves its `targetModelId` against, and
+# the one sentence this emulator answers an inference surface with, from the Bedrock
+# Runtime data plane that owns both. Read-only: this service writes no part of it.
+service-com-amazonaws-bedrockruntime-amazonbedrockfrontendservice = { workspace = true }
 engine = { workspace = true }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }
@@ -43,9 +51,9 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
-# The retrieval test seeds the objects a data source is crawled from, and follows a
-# citation back to one, through S3 itself.
-service-com-amazonaws-s3-amazons3 = { workspace = true }
+# Decodes one `application/vnd.amazon.eventstream` frame, so the prompt-optimization suite
+# reads the response stream back the way an SDK's decoder does.
+aws-smithy-eventstream = "0.60"
 
 [lints]
 workspace = true

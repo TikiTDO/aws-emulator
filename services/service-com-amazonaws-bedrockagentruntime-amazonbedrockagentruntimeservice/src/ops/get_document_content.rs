@@ -1,15 +1,40 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetDocumentContent
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetDocumentContent`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetDocumentContent::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! ## What this handler does
+//!
+//! `GetDocumentContent` answers WHERE to fetch the content of one document a knowledge
+//! base's data source ingested, and what that content is:
+//!
+//! * the knowledge base, the data source and the document are the Bedrock Agent
+//!   build-time plane's, so each one it does not hold is the modelled
+//!   `ResourceNotFoundException` (HTTP 404) ([`crate::state::document_content`]);
+//! * `presignedUrl` is a SigV4 query-signed URL for the source object itself, signed by
+//!   this emulator (`ctx.url_signer()`), so a client that follows it reads the very bytes
+//!   the ingestion read — the URL leads back here and never to the real service;
+//! * `mimeType` and `documentContentLength` are the object store's own content type and
+//!   byte count for that object, never guessed from the identifier.
+//!
+//! This operation is `@readonly`
+//! (`smithy_query(query="operation",operation="GetDocumentContent")`) and writes nothing a
+//! later caller can observe. Authorization is decided BEFORE any store is read, so an
+//! unauthorized caller is refused the same way whether or not the document exists.
+//!
+//! ## What it refuses rather than answers
+//!
+//! * `outputFormat: EXTRACTED` — the parsed-text rendering of a document is produced by a
+//!   document parser, and none runs in this emulator, so there is no extracted content to
+//!   hand out and no object holding one;
+//! * `userContext` — access-control filtering needs the per-document ACLs nothing in this
+//!   emulator holds, so a content read cannot be narrowed to the documents one user may
+//!   read;
+//! * a document whose bytes were pushed INLINE into the build-time plane rather than taken
+//!   from an object store: it lives at no address, so no URL could lead a caller to it.
+//!
+//! Each is the modelled `ValidationException`, because a plausible-looking success — a URL
+//! that leads nowhere, or content the caller asked to have filtered — is worse than an
+//! error.
 //!
 //! ## Shape of an operation
 //!
@@ -166,18 +191,148 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetDocumentContent` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetDocumentContentErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetDocumentContent"))
+        use crate::state::document_content as content;
+
+        // The request is read in full BEFORE anything is looked up: a leg this service
+        // cannot compute is refused whatever the stores hold, and that refusal depends on
+        // the request alone, so it says nothing about which documents exist.
+        if input.user_context.is_some() {
+            return Err(refuse(
+                "userContext: this service applies no per-document access control to a \
+                 content read, so a read for one user cannot be narrowed to the documents \
+                 that user may read; omit userContext to read an ingested document"
+                    .to_string(),
+            ));
+        }
+        match input.output_format.as_deref() {
+            None | Some(content::OUTPUT_FORMAT_RAW) => {}
+            Some(content::OUTPUT_FORMAT_EXTRACTED) => {
+                return Err(refuse(format!(
+                    "outputFormat: {} is not an output format this service holds a \
+                     document in — no document parser runs here, so the parsed text of a \
+                     document does not exist to be handed out; ask for {} to read the \
+                     document as it was ingested",
+                    content::OUTPUT_FORMAT_EXTRACTED,
+                    content::OUTPUT_FORMAT_RAW
+                )));
+            }
+            Some(other) => {
+                return Err(refuse(format!(
+                    "outputFormat: {other:?} is not an output format of a document. \
+                     Supported formats: {}",
+                    content::OUTPUT_FORMAT_RAW
+                )));
+            }
+        }
+
+        // Authorization is decided against the knowledge base the call reads — the resource
+        // an identity-based policy for `bedrock:GetDocumentContent` names — and before any
+        // store is read, so an unauthorized call is answered the same way whether or not
+        // that document exists.
+        let resource = crate::state::knowledge_base_retrieval::knowledge_base_resource_arn(
+            ctx,
+            &input.knowledge_base_id,
+        );
+        if let Err(denied) = crate::state::authorize(&*self.engine, ctx, Self::NAME, &resource) {
+            return Err(GetDocumentContentErrorModeled::AccessDeniedException(denied).into());
+        }
+
+        // An identifier that names a knowledge base of another account, region or partition
+        // names none this call can read, so it is answered not-found rather than reduced to
+        // a bare id that would resolve in the caller's own place.
+        let knowledge_base_id = crate::state::knowledge_base_retrieval::
+            knowledge_base_id_from_identifier(
+                &input.knowledge_base_id,
+                &crate::state::request_region(ctx),
+            );
+        let found = match knowledge_base_id {
+            Some(knowledge_base_id) => content::document_content(
+                &*self.engine,
+                knowledge_base_id,
+                &input.data_source_id,
+                &input.document_id,
+            ),
+            None => Err(content::ContentRefusal::UnknownKnowledgeBase),
+        };
+        let knowledge_base_id = knowledge_base_id.unwrap_or(&input.knowledge_base_id);
+        let document = match found {
+            Ok(document) => document,
+            Err(content::ContentRefusal::StoreUnavailable) => {
+                return Err(GetDocumentContentErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: Some("the knowledge base store is unavailable".to_string()),
+                        reason: None,
+                    },
+                )
+                .into())
+            }
+            Err(content::ContentRefusal::NotInObjectStore) => {
+                return Err(refuse(format!(
+                    "documentId: the content of {} travelled in the ingestion that took it \
+                     in rather than living in an object store, so this service holds no \
+                     address a pre-signed URL could lead to",
+                    input.document_id
+                )))
+            }
+            Err(refusal) => {
+                return Err(GetDocumentContentErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(content::not_found_message(
+                            &refusal,
+                            knowledge_base_id,
+                            &input.data_source_id,
+                            &input.document_id,
+                        )),
+                    },
+                )
+                .into())
+            }
+        };
+
+        // The URL leads back to THIS emulator: a SigV4 query-signed `GetObject` on the
+        // object the ingestion read, signed by the framework's own signer, so the client
+        // that follows it reads the document from the object store that holds it.
+        let path = format!("/{}/{}", document.bucket, document.key);
+        let signed = ctx
+            .url_signer()
+            .sign(
+                smithy_server_runtime::SignedUrlRequest::new(
+                    ::http::Method::GET,
+                    S3_SIGNING_NAME,
+                    &path,
+                ),
+                PRESIGNED_URL_LIFETIME,
+            )
+            .map_err(|error| {
+                GetDocumentContentErrorModeled::InternalServerException(InternalServerException {
+                    message: Some(format!(
+                        "the document's content could not be addressed: {error}"
+                    )),
+                    reason: None,
+                })
+            })?;
+
+        Ok(GetDocumentContentOutput {
+            mime_type: document.mime_type,
+            presigned_url: signed.as_str().to_string(),
+            document_content_length: Some(document.length),
+        })
     }
+}
+
+/// How long the URL a content read hands out stays valid: "The URL expires after 5
+/// minutes", as the modelled `presignedUrl` member documents.
+const PRESIGNED_URL_LIFETIME: ::std::time::Duration = ::std::time::Duration::from_secs(5 * 60);
+
+/// The signing name of the service that serves the object a document was ingested from, so
+/// the signed URL verifies against the store that holds it.
+const S3_SIGNING_NAME: &str = "s3";
+
+/// This operation's modelled `ValidationException` (HTTP 400), naming the member that was
+/// wrong and what it requires — the caller has to fix the request from this text alone.
+fn refuse(message: String) -> GetDocumentContentError {
+    GetDocumentContentErrorModeled::ValidationException(ValidationException {
+        message: Some(message),
+    })
+    .into()
 }

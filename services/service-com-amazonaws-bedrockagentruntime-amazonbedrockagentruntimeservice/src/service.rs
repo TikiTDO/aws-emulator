@@ -45,6 +45,7 @@ use smithy_server_runtime::{http, ErasedOperation, Refusal, Refused, Service};
 use std::sync::Arc;
 
 use crate::ops::invoke_inline_agent::{self, InvokeInlineAgent};
+use crate::ops::optimize_prompt::{self, OptimizePrompt};
 
 /// The `@pattern` this service PUBLISHES for a member whose on-disk model records a STALE
 /// spelling of the same constraint, keyed by the stale text the generated schema carries.
@@ -106,15 +107,16 @@ fn quoted_pattern(modelled: &str) -> String {
 /// Generic over the engine type `Eng` so this file names no concrete engine; the
 /// router builds one shared engine and hands it to `new`.
 ///
-/// Besides the generated entry it holds `InvokeInlineAgent`. That operation is NOT in the
-/// entry's routing table in a servable form: the generated `ErasedOperation` shim of an
-/// operation whose output is a `@streaming` union declines the request (it cannot drive
-/// `serialize_as_event_stream<P>` through an object-safe `run`), so it is held here behind
-/// an [`EventStreamRoute`] and routed by [`EmulatedService::override_operation`] — which
-/// the router consults FIRST, before the generated table.
+/// Besides the generated entry it holds `InvokeInlineAgent` and `OptimizePrompt`. Neither
+/// is in the entry's routing table in a servable form: the generated `ErasedOperation` shim
+/// of an operation whose output is a `@streaming` union declines the request (it cannot
+/// drive `serialize_as_event_stream<P>` through an object-safe `run`), so each is held here
+/// behind an [`EventStreamRoute`] and routed by [`EmulatedService::override_operation`] —
+/// which the router consults FIRST, before the generated table.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
     entry: crate::ServiceDefinition<Eng>,
     invoke_inline_agent: EventStreamRoute<InvokeInlineAgent<Eng>>,
+    optimize_prompt: EventStreamRoute<OptimizePrompt<Eng>>,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -124,7 +126,8 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
             entry: crate::ServiceDefinition::new(engine.clone()),
-            invoke_inline_agent: EventStreamRoute(InvokeInlineAgent::new(engine)),
+            invoke_inline_agent: EventStreamRoute(InvokeInlineAgent::new(engine.clone())),
+            optimize_prompt: EventStreamRoute(OptimizePrompt::new(engine)),
         }
     }
 }
@@ -170,13 +173,16 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         &self,
         req: &aws_smithy_runtime_api::http::Request,
     ) -> Option<&dyn ErasedOperation> {
-        // `InvokeInlineAgent`, which the generated routing table cannot serve: its output
-        // is a `@streaming` union, so the generated shim declines the request. Routed by
-        // the one route the operation itself recognises (`invoke_inline_agent::addresses`),
-        // so nothing else is touched — every other request resolves through the generated
-        // table.
+        // `InvokeInlineAgent` and `OptimizePrompt`, which the generated routing table
+        // cannot serve: each one's output is a `@streaming` union, so the generated shim
+        // declines the request. Each is routed by the one route the operation itself
+        // recognises (`<operation>::addresses`), so nothing else is touched — every other
+        // request resolves through the generated table.
         if invoke_inline_agent::addresses(req) {
             return Some(&self.invoke_inline_agent);
+        }
+        if optimize_prompt::addresses(req) {
+            return Some(&self.optimize_prompt);
         }
         None
     }

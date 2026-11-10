@@ -1,15 +1,25 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetAgentMemory
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetAgentMemory`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetAgentMemory::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! ## What this handler does
+//!
+//! `GetAgentMemory` reports the sessions stored in the memory of ONE alias of an agent,
+//! under the memory id the request names:
+//!
+//! * the agent and its alias belong to the Bedrock Agent build-time plane, so their
+//!   existence is read there and never assumed from the request: an alias that plane holds
+//!   nothing for is the modelled `ResourceNotFoundException` (HTTP 404)
+//!   ([`crate::state::agent_memory`]);
+//! * the summaries themselves come from this service's own store, exactly as whatever
+//!   recorded them left them. An alias that has held no session has an EMPTY memory, which
+//!   is a success carrying no `memoryContents` entry rather than a not-found;
+//! * the answer is paged on `maxItems`, and a `nextToken` resumes the same memory in the
+//!   same order.
+//!
+//! This operation is `@readonly`
+//! (`smithy_query(query="operation",operation="GetAgentMemory")`) and writes nothing a
+//! later caller can observe.
 //!
 //! ## Shape of an operation
 //!
@@ -175,18 +185,146 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetAgentMemory` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetAgentMemoryErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetAgentMemory"))
+        use crate::state::agent_memory as memory;
+
+        // The request is read in full BEFORE anything is looked up, so a refusal about the
+        // request alone says nothing about which agents exist.
+        if input.memory_type != memory::SESSION_SUMMARY_MEMORY_TYPE {
+            return Err(refuse(format!(
+                "memoryType: {:?} is not a kind of memory this service keeps. Supported \
+                 types: {}",
+                input.memory_type,
+                memory::SESSION_SUMMARY_MEMORY_TYPE
+            )));
+        }
+        let page = page_size(input.max_items);
+        let scope = memory_scope(Self::NAME, &input);
+        let resume = match input.next_token.as_deref() {
+            None => 0,
+            Some(token) => crate::state::decode_next_token(&scope, token).ok_or_else(|| {
+                refuse(
+                    "nextToken is not a pagination token this listing issued: a token \
+                     resumes the memory of the agent alias and memory id it was issued for"
+                        .to_string(),
+                )
+            })?,
+        };
+
+        // Authorization is decided against the agent alias the call reads — the resource an
+        // identity-based policy for `bedrock:GetAgentMemory` names — and before any store
+        // is read, so an unauthorized call is answered the same way whether or not that
+        // alias exists.
+        let resource = memory::alias_resource_arn(ctx, &input.agent_id, &input.agent_alias_id);
+        if let Err(denied) = crate::state::authorize(&*self.engine, ctx, Self::NAME, &resource) {
+            return Err(GetAgentMemoryErrorModeled::AccessDeniedException(denied).into());
+        }
+        if let Err(refusal) = memory::alias_of_agent(
+            &*self.engine,
+            &input.agent_id,
+            &input.agent_alias_id,
+        ) {
+            return Err(alias_refusal(refusal));
+        }
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(unavailable());
+        };
+        let guard = state.lock();
+        let held = guard
+            .agent_memories
+            .get(&memory::memory_key(
+                &input.agent_id,
+                &input.agent_alias_id,
+                &input.memory_id,
+            ))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+
+        // The page the request asked for, resumed where the cursor it carried left off; a
+        // request that named no page size takes the whole memory from there.
+        let start = usize::try_from(resume).unwrap_or(usize::MAX).min(held.len());
+        let reported = &held[start..];
+        let reported = &reported[..page.unwrap_or(reported.len()).min(reported.len())];
+        let next = start + reported.len();
+        Ok(GetAgentMemoryOutput {
+            memory_contents: Some(
+                reported
+                    .iter()
+                    .map(|summary| {
+                        Memory::sessionSummary(MemorySessionSummary {
+                            memory_id: Some(summary.memory_id.clone()),
+                            session_id: Some(summary.session_id.clone()),
+                            session_start_time: Some(summary.session_start_time),
+                            session_expiry_time: Some(summary.session_expiry_time),
+                            summary_text: Some(summary.summary_text.clone()),
+                        })
+                    })
+                    .collect(),
+            ),
+            // A token only where there is a further page: the last page of a listing
+            // carries none, which is how a client knows it has seen the whole memory.
+            next_token: (next < held.len())
+                .then(|| crate::state::encode_next_token(&scope, u64::try_from(next).unwrap_or(u64::MAX))),
+        })
     }
+}
+
+/// This operation's modelled `ValidationException` (HTTP 400), naming the member that was
+/// wrong and what it requires.
+fn refuse(message: String) -> GetAgentMemoryError {
+    GetAgentMemoryErrorModeled::ValidationException(ValidationException {
+        message: Some(message),
+    })
+    .into()
+}
+
+/// The modelled server error for a store this engine does not carry: never a not-found and
+/// never an empty success, because nothing can be said about the memory at all.
+fn unavailable() -> GetAgentMemoryError {
+    GetAgentMemoryErrorModeled::InternalServerException(InternalServerException {
+        message: Some("the agent memory store is unavailable".to_string()),
+        reason: None,
+    })
+    .into()
+}
+
+/// The refusal an alias the Bedrock Agent plane holds nothing for earns, worded once for
+/// both memory operations ([`crate::state::agent_memory::alias_not_found_message`]).
+fn alias_refusal(refusal: crate::state::agent_memory::AliasRefusal) -> GetAgentMemoryError {
+    match refusal {
+        crate::state::agent_memory::AliasRefusal::StoreUnavailable => unavailable(),
+        crate::state::agent_memory::AliasRefusal::NotFound => {
+            GetAgentMemoryErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+                message: Some(crate::state::agent_memory::alias_not_found_message()),
+            })
+            .into()
+        }
+    }
+}
+
+/// How many summaries one response carries: `maxItems`, or `None` when the request names
+/// none and the whole memory is reported.
+///
+/// The model declares `maxItems` with `range 1..1000` and NO default
+/// (`smithy_query(query="operation",operation="GetAgentMemory")`), so a request that names
+/// no page size is not truncated at a size this service invented, and a value outside that
+/// range never reaches here — the boundary validator refuses it before the handler runs.
+fn page_size(max_items: Option<i32>) -> Option<usize> {
+    max_items
+        .and_then(|requested| usize::try_from(requested).ok())
+        .filter(|requested| *requested > 0)
+}
+
+/// The scope a `nextToken` of this listing is bound to: the listing itself and the memory
+/// it was issued for, so a token minted for one alias or memory id is refused on another
+/// rather than resuming at an unrelated offset (`crate::state::pagination_scope`).
+fn memory_scope(listing: &str, input: &GetAgentMemoryInput) -> String {
+    crate::state::pagination_scope(
+        listing,
+        &format!(
+            "{}/{}/{}",
+            input.agent_id, input.agent_alias_id, input.memory_id
+        ),
+        None,
+    )
 }

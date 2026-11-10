@@ -272,22 +272,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the resource an identity-based policy for `bedrock:Retrieve` names — and before
         // the store is read, so an unauthorized call is answered the same way whether or
         // not that knowledge base exists.
-        let resource = knowledge_base_resource_arn(ctx, &input.knowledge_base_id);
+        let resource = retrieval::knowledge_base_resource_arn(ctx, &input.knowledge_base_id);
         if let Err(denied) = crate::state::authorize(&*self.engine, ctx, Self::NAME, &resource) {
             return Err(RetrieveErrorModeled::AccessDeniedException(denied).into());
         }
 
         // The retrieval itself: the chunks of the knowledge base's bound index nearest to
-        // the query, narrowed by the filter and cut to the page the request asked for.
-        let knowledge_base_id =
-            retrieval::knowledge_base_id_from_identifier(&input.knowledge_base_id);
-        let retrieved = retrieval::nearest_chunks(
-            &*self.engine,
-            knowledge_base_id,
-            &query,
-            search.results,
-            search.filter,
+        // the query, narrowed by the filter and cut to the page the request asked for. An
+        // identifier that names a knowledge base of another account, region or partition
+        // names none this call can read, so it is answered not-found rather than reduced to
+        // a bare id that would resolve in the caller's own place.
+        let knowledge_base_id = retrieval::knowledge_base_id_from_identifier(
+            &input.knowledge_base_id,
+            &crate::state::request_region(ctx),
         );
+        let retrieved = match knowledge_base_id {
+            Some(knowledge_base_id) => retrieval::nearest_chunks(
+                &*self.engine,
+                knowledge_base_id,
+                &query,
+                search.results,
+                search.filter,
+            ),
+            None => Err(retrieval::RetrievalRefusal::UnknownKnowledgeBase),
+        };
         let retrieved = match retrieved {
             Ok(retrieved) => retrieved,
             Err(retrieval::RetrievalRefusal::UnknownKnowledgeBase) => {
@@ -500,26 +508,4 @@ fn results_bound(number_of_results: Option<i32>) -> usize {
         .and_then(|requested| usize::try_from(requested).ok())
         .filter(|requested| *requested > 0)
         .unwrap_or(DEFAULT_NUMBER_OF_RESULTS)
-}
-
-/// The resource an identity-based policy for `bedrock:Retrieve` names: the knowledge base
-/// the call retrieves from.
-///
-/// An identifier that is already a knowledge-base ARN IS that resource; a bare id names
-/// the knowledge base of that id in the region the caller signed for and this emulator's
-/// account — the same ARN the Bedrock Agent plane mints for it. Built without a store
-/// lookup, so the decision is made before, and independently of, whether the knowledge
-/// base exists.
-fn knowledge_base_resource_arn(
-    ctx: &smithy_server_runtime::OperationContext<'_>,
-    identifier: &str,
-) -> String {
-    if identifier.starts_with("arn:") {
-        return identifier.to_string();
-    }
-    ::engine::emulator_arn(
-        crate::state::ARN_NAMESPACE,
-        &crate::state::request_region(ctx),
-        &format!("knowledge-base/{identifier}"),
-    )
 }

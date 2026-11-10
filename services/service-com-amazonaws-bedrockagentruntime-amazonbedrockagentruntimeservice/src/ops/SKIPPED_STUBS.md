@@ -34,5 +34,11 @@ routes a request to it through `Service::override_operation` behind
 `service_common::event_stream::EventStreamRoute`, because the GENERATED
 `ErasedOperation` shim of a `@streaming`-output operation declines the request. So its
 own input is validated against the model, and the response stream — the part nobody has
-written — answers the scaffold's 501. The other five are still unwired.
+written — answers the scaffold's 501.
+
+`OptimizePrompt` is written by hand in `ops/optimize_prompt.rs`, with its shapes in
+`ops/types/optimize_prompt_types.rs`, and is routed the same way. It is IMPLEMENTED:
+its request is validated against the model and its answer is the
+`OptimizedPromptStream`'s two events, framed through
+`service_common::event_stream::frame_event`. The other four are still unwired.
 

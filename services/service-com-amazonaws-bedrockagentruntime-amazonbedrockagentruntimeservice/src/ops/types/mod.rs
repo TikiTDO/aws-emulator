@@ -42,6 +42,7 @@ pub mod list_invocation_steps_types;
 pub mod list_invocations_types;
 pub mod list_sessions_types;
 pub mod list_tags_for_resource_types;
+pub mod optimize_prompt_types;
 pub mod put_invocation_step_types;
 pub mod rerank_types;
 pub mod retrieve_and_generate_types;
@@ -95,6 +96,8 @@ pub use list_invocations_types::*;
 pub use list_sessions_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use list_tags_for_resource_types::*;
+#[allow(ambiguous_glob_reexports, unused_imports)]
+pub use optimize_prompt_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use put_invocation_step_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]

@@ -31,11 +31,23 @@
 //! * [`knowledge_base_retrieval`] — which chunks of which ingested source a knowledge
 //!   base holds, and where each one came from;
 //! * [`retrieval_filter`] — which of those chunks a request's `filter` admits.
+//!
+//! The MEMORY of an agent alias is this plane's own ([`agent_memory`]): the summaries of
+//! the sessions an alias held live in the store below, while the agent and the alias they
+//! belong to are the build-time plane's, so that submodule is where both memory
+//! operations resolve an alias and word the refusal for one nothing holds.
 
+/// See the module docs: what an agent alias's memory holds, and how the two memory
+/// operations resolve the alias they address.
+pub mod agent_memory;
+/// See the module docs: where the content of one ingested document lives.
+pub mod document_content;
 /// See the module docs: what a knowledge-base retrieval may report.
 pub mod knowledge_base_retrieval;
 /// See the module docs: which chunks a retrieval's `filter` admits.
 pub mod retrieval_filter;
+/// See the module docs: the model a prompt optimization is asked to optimize for.
+pub mod target_model;
 
 use std::collections::BTreeMap;
 use std::time::SystemTime;
@@ -179,6 +191,12 @@ pub struct Session {
 pub struct ComAmazonawsBedrockagentruntimeAmazonbedrockagentruntimeserviceState {
     /// Every live session, keyed by its bare `sessionId` UUID.
     pub sessions: BTreeMap<String, Session>,
+    /// The memory of every agent alias this plane has recorded a session into, keyed by
+    /// the alias and the memory id ([`agent_memory::MemoryKey`]). `GetAgentMemory` reports
+    /// what it holds and `DeleteAgentMemory` removes from it; a key it holds nothing for
+    /// is an alias that has held no session, which is an empty memory rather than a
+    /// missing resource. See [`agent_memory`] for what writes a summary.
+    pub agent_memories: BTreeMap<agent_memory::MemoryKey, Vec<agent_memory::SessionSummaryRecord>>,
     /// Monotonic counter handing out [`InvocationStepRecord::order`] values.
     pub order_counter: u64,
 }

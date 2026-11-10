@@ -94,14 +94,48 @@ pub struct RetrievedChunk {
     pub metadata: BTreeMap<String, Document>,
 }
 
-/// The knowledge base a `knowledgeBaseId` input names: the identifier itself when it is a
-/// bare id, else the id inside a knowledge-base ARN — the two forms the modelled
-/// `KnowledgeBaseIdentifier` pattern admits.
-pub fn knowledge_base_id_from_identifier(identifier: &str) -> &str {
-    identifier
-        .rsplit_once("knowledge-base/")
-        .map_or(identifier, |(_, id)| id)
+/// The knowledge base a `knowledgeBaseId` input names, for a request signed for `region`.
+///
+/// The modelled `KnowledgeBaseIdentifier` admits two forms: a bare 10-character id, which
+/// names the knowledge base of that id in the caller's own account and region, and a
+/// knowledge-base ARN. An ARN identifies ONE resource in ONE place, so it names a knowledge
+/// base this call can read only when its partition, its service, its region and its account
+/// are the ones this emulator would have minted for the caller: `None` for an ARN of
+/// another partition, another region, another account or another service, so such a value
+/// is never reduced to a bare id that resolves in the caller's place. The caller's
+/// authorization was decided against the resource the ARN names
+/// ([`knowledge_base_resource_arn`]), and this is what keeps the read keyed to the same
+/// place that decision was made for.
+///
+/// Read through the ONE ARN parse this tree has (`service_common::arn`), against an ARN
+/// this emulator itself mints, so nothing here spells an ARN form of its own.
+pub fn knowledge_base_id_from_identifier<'identifier>(
+    identifier: &'identifier str,
+    region: &str,
+) -> Option<&'identifier str> {
+    if !identifier.starts_with("arn:") {
+        return Some(identifier);
+    }
+    let named = ::service_common::arn::parse(identifier)?;
+    let own = ::engine::emulator_arn(
+        crate::state::ARN_NAMESPACE,
+        region,
+        &format!("{KNOWLEDGE_BASE_RESOURCE_TYPE}/own"),
+    );
+    let own = ::service_common::arn::parse(&own)?;
+    if named.partition != own.partition
+        || named.vendor != own.vendor
+        || named.region != own.region
+        || named.account != own.account
+    {
+        return None;
+    }
+    ::service_common::arn::resource_id_of_type(identifier, KNOWLEDGE_BASE_RESOURCE_TYPE)
+        .filter(|id| !id.is_empty())
 }
+
+/// The resource type a knowledge base's ARN addresses.
+const KNOWLEDGE_BASE_RESOURCE_TYPE: &str = "knowledge-base";
 
 /// The `ResourceNotFoundException` message a retrieval answers when the Bedrock Agent
 /// plane holds no knowledge base the request's identifier names. The identifier the
@@ -115,6 +149,29 @@ pub fn knowledge_base_id_from_identifier(identifier: &str) -> &str {
 /// so a later recording of this refusal is what would settle it.
 pub fn knowledge_base_not_found_message(identifier: &str) -> String {
     format!("Could not find knowledge base {identifier}.")
+}
+
+/// The resource an identity-based policy for a knowledge-base operation of this plane
+/// names: the knowledge base the call reads.
+///
+/// An identifier that is already a knowledge-base ARN IS that resource; a bare id names
+/// the knowledge base of that id in the region the caller signed for and this emulator's
+/// account — the same ARN the Bedrock Agent plane mints for it. Built without a store
+/// lookup, so a decision made with it is made before, and independently of, whether the
+/// knowledge base exists. Shared by every operation of this service addressed at a
+/// knowledge base, so they all authorize against the same resource.
+pub fn knowledge_base_resource_arn(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    identifier: &str,
+) -> String {
+    if identifier.starts_with("arn:") {
+        return identifier.to_string();
+    }
+    ::engine::emulator_arn(
+        crate::state::ARN_NAMESPACE,
+        &crate::state::request_region(ctx),
+        &format!("knowledge-base/{identifier}"),
+    )
 }
 
 /// The chunks of `knowledge_base_id` nearest to `query`, most relevant first, at most
