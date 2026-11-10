@@ -331,11 +331,42 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
         };
 
+        // Handing a job out is what mints the credentials its worker reads and writes the
+        // pipeline's artifacts with (`state::mint_artifact_credentials`), for a job that
+        // carries artifacts at all. Two rules keep the credential store bounded, and this
+        // is the one path that applies them: a job's credentials are minted ONCE, so a
+        // re-dispatch of a job that still carries them mints nothing; and the credentials
+        // the clock has already ended are released here first — a release owed at the same
+        // instant whether or not anybody polled. A credential the store declines to record
+        // (the job was retired meanwhile, or the store is at its bound) is released again
+        // rather than left behind.
+        for access_key_id in state.lock().due_artifact_credentials(now) {
+            let _ = ctx.credential_store().delete(&access_key_id);
+        }
+        let mut jobs = Vec::with_capacity(leased.len());
+        for mut job in leased {
+            if job.needs_artifact_credentials() && job.artifact_credentials.is_none() {
+                if let Some(credentials) = crate::state::mint_artifact_credentials(ctx) {
+                    let recorded = state.lock().set_artifact_credentials(
+                        &job.job_id,
+                        credentials.clone(),
+                        now + crate::state::ARTIFACT_CREDENTIAL_LIFETIME,
+                    );
+                    if recorded {
+                        job.artifact_credentials = Some(credentials);
+                    } else {
+                        let _ = ctx.credential_store().delete(&credentials.access_key_id);
+                    }
+                }
+            }
+            jobs.push(job.to_job());
+        }
+
         Ok(PollForJobsOutput {
             // The list is always reported, empty when nothing is waiting: a worker
             // loop reads `jobs` on every answer, so an empty poll is an empty LIST
             // rather than a missing member.
-            jobs: Some(leased.iter().map(crate::state::JobRecord::to_job).collect()),
+            jobs: Some(jobs),
         })
     }
 }

@@ -144,17 +144,10 @@ impl Emulator {
     }
 }
 
-/// Percent-encode one form value the way an awsQuery body carries it.
+/// Percent-encode one form value the way an awsQuery body carries it — the shared
+/// harness's rule (`pipeline_lifecycle::form_encode`), not a second copy.
 fn form_encode(value: &str) -> String {
-    value
-        .bytes()
-        .map(|byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (byte as char).to_string()
-            }
-            _ => format!("%{byte:02X}"),
-        })
-        .collect()
+    crate::pipeline_lifecycle::form_encode(value)
 }
 
 /// The ARN of the role IAM holds.
@@ -531,8 +524,13 @@ async fn a_declaration_past_a_quota_is_refused_before_it_is_walked() {
                     "name": "Source",
                     "actions": [{
                         "name": "Src",
+                        // A `Custom`-owned source action type: the bound this row is
+                        // about is the EMULATOR's own per-action artifact cap
+                        // (`MAX_ARTIFACTS_PER_ACTION`), and an action type the service
+                        // publishes would be refused ahead of it by its own published
+                        // artifact maximum (`state::validate_action_type`).
                         "actionTypeId": {
-                            "category": "Source", "owner": "AWS", "provider": "S3",
+                            "category": "Source", "owner": "Custom", "provider": "MySource",
                             "version": "1"
                         },
                         "configuration": {"S3Bucket": "b", "S3ObjectKey": "k"},

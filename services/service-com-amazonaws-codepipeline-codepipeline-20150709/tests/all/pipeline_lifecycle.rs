@@ -132,6 +132,49 @@ impl Emulator {
         );
         response
     }
+
+    /// The `(status, code, message)` of a refusal: the awsJson `__type` without the
+    /// model's namespace, and the message the error carries.
+    ///
+    /// `pub(crate)` on the shared harness so the suites built on this `Emulator` read one
+    /// refusal the same way rather than each growing a copy.
+    pub(crate) async fn refusal(&self, operation: &str, body: &Value) -> (u16, String, String) {
+        let (status, response) = self.call(operation, body).await;
+        let code = response
+            .get("__type")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("{operation}: expected an error body, got {response}"))
+            .rsplit('#')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let message = response
+            .get("message")
+            .or_else(|| response.get("Message"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        (status, code, message)
+    }
+}
+
+/// Percent-encode one `application/x-www-form-urlencoded` component, leaving only
+/// RFC 3986's unreserved characters literal — what an awsQuery body carries.
+///
+/// `pub(crate)` on the shared harness: a suite that drives ANOTHER service of this
+/// emulator over its query protocol (IAM, which this service's role check and its
+/// authorization gate read) encodes a form value the same way, so the rule lives here
+/// once.
+pub(crate) fn form_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 /// The smallest declaration that is a pipeline: a source stage, and one stage that acts

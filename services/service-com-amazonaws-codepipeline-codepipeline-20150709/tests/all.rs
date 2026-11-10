@@ -47,6 +47,8 @@ mod custom_action_job_results;
 mod custom_action_jobs;
 #[path = "all/custom_action_types.rs"]
 mod custom_action_types;
+#[path = "all/declaration_action_type_rules.rs"]
+mod declaration_action_type_rules;
 #[path = "all/declaration_structure_rules.rs"]
 mod declaration_structure_rules;
 #[path = "all/delete_custom_action_type.rs"]
@@ -91,8 +93,12 @@ mod source_revision_overrides;
 mod stage_condition_overrides;
 #[path = "all/stage_condition_rules.rs"]
 mod stage_condition_rules;
+#[path = "all/stage_transition_authorization.rs"]
+mod stage_transition_authorization;
 #[path = "all/stage_transitions.rs"]
 mod stage_transitions;
+#[path = "all/tag_removal_and_refusal_wording.rs"]
+mod tag_removal_and_refusal_wording;
 #[path = "all/state_change_events.rs"]
 mod state_change_events;
 #[path = "all/state_roundtrip.rs"]

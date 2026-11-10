@@ -45,6 +45,53 @@ use super::{
     JOB_STATUS_IN_PROGRESS, JOB_STATUS_QUEUED, JOB_STATUS_SUCCEEDED, TERMINAL_JOB_STATUSES,
 };
 
+/// The temporary credentials a job's worker reads and writes the pipeline's artifacts
+/// with, minted in the emulator's own credential store so the emulator accepts the calls
+/// a worker signs with them.
+///
+/// `JobData$artifactCredentials` / `ThirdPartyJobData$artifactCredentials` are "temporary
+/// credentials that are issued by Amazon Web Services Secure Token Service" that "can be
+/// used to access input and output artifacts in the S3 bucket used to store artifact for
+/// the pipeline", and `GetJobDetails` documents that CodePipeline "returns temporary
+/// credentials for the S3 bucket used to store artifacts for the pipeline, if the action
+/// requires access to that S3 bucket for input or output artifacts" — so a worker that is
+/// handed a job carrying artifacts is handed credentials for them, and one whose action
+/// touches no artifact is not.
+///
+/// Neither the id nor the secrets are chosen here: the credential store mints them, which
+/// is what makes a request signed with them one this emulator serves. `None` when the
+/// store minted a credential without the secrets a caller would have to sign with, in
+/// which case the credential is released again and the job is handed out without them
+/// rather than with material nothing can use.
+///
+/// Two limits of what this emulator can mint, stated rather than hidden: the credential
+/// store holds no policies, so the session carries no scope of its own — it is not
+/// confined to the artifact bucket the way the STS session AWS issues is — and nothing
+/// revokes it at the instant a job finishes. Its life is bounded instead:
+/// [`super::ARTIFACT_CREDENTIAL_LIFETIME`] after the dispatch the store releases it
+/// ([`super::ComAmazonawsCodepipelineCodepipeline20150709State::due_artifact_credentials`]),
+/// and a job's credentials are minted once, so a worker polling in a loop leaves nothing
+/// behind.
+pub fn mint_artifact_credentials(
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+) -> Option<crate::ops::types::AWSSessionCredentials> {
+    use ::emulator_server::aws_credentials::{AWS_SESSION, SECRET_ACCESS_KEY, SESSION_TOKEN};
+
+    let minted = ctx.credential_store().create(&AWS_SESSION);
+    let (Some(secret_access_key), Some(session_token)) = (
+        minted.secret(SECRET_ACCESS_KEY).map(str::to_string),
+        minted.secret(SESSION_TOKEN).map(str::to_string),
+    ) else {
+        let _ = ctx.credential_store().delete(&minted.id);
+        return None;
+    };
+    Some(crate::ops::types::AWSSessionCredentials {
+        access_key_id: minted.id,
+        secret_access_key,
+        session_token,
+    })
+}
+
 /// The `ActionExecutionStatus` an action reaches when its worker reports success, from
 /// the model's enum (`smithy_query query="shape" shape="ActionExecutionStatus"` ->
 /// `InProgress`, `Abandoned`, `Succeeded`, `Failed`).

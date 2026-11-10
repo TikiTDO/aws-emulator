@@ -162,6 +162,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // Authorization comes before every input check and every lookup, as AWS decides
+        // it: the resource is the ARN of the STAGE the request names — the resource type
+        // this action operates on — computed rather than looked up, so a caller holding no
+        // grant cannot learn from the refusal whether that pipeline or stage exists. The
+        // same gate the paired `DisableStageTransition` applies — one transition plane,
+        // one decision.
+        if let Some(message) = crate::state::identity_authorization::refusal(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &crate::state::identity_authorization::stage_resource(
+                &crate::state::request_region(&ctx.parts().headers),
+                &input.pipeline_name,
+                &input.stage_name,
+            ),
+        ) {
+            return Err(crate::scaffolded::Scaffolded::access_denied(message));
+        }
+
         // `transitionType` targets the `StageTransitionType` enum, so a value outside
         // it names no transition at all: refused with the modelled
         // `ValidationException` naming the member and the values it accepts.

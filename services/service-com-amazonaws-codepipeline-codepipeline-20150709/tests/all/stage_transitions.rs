@@ -232,18 +232,17 @@ async fn disabling_one_transition_changes_only_that_transitions_reported_state()
                     .await;
 
                 let state = emulator.pipeline_state("demo").await;
-                for (index, stage) in stages.iter().enumerate() {
+                for stage in &stages {
                     let disabled_here =
                         transition_type == "Inbound" && stage == target;
                     let reported = inbound_transition(&state, stage);
-                    // A stage reports an inbound transition when one exists (every
-                    // stage after the first) or when a caller changed one for it.
-                    let expected_present = index > 0 || disabled_here;
-                    assert_eq!(
+                    // EVERY stage reports its inbound transition state, the first
+                    // stage's included: the member states whether the transition into
+                    // the stage is enabled, which is a fact every stage has.
+                    assert!(
                         reported.is_some(),
-                        expected_present,
-                        "case {case:?}: stage {stage} inboundTransitionState \
-                         presence: expected {expected_present}, got {state}"
+                        "case {case:?}: stage {stage} reports no \
+                         inboundTransitionState, got {state}"
                     );
                     let Some(reported) = reported else { continue };
                     assert_eq!(
@@ -326,7 +325,7 @@ async fn transitions_are_independent_and_the_last_change_wins() {
     let state = emulator.pipeline_state("demo").await;
     assert_eq!(
         inbound_enablement(&state, &stages),
-        vec![None, Some(false), Some(true), Some(false)],
+        vec![Some(true), Some(false), Some(true), Some(false)],
         "case \"two disabled, one untouched\": got {state}"
     );
 
@@ -370,7 +369,7 @@ async fn transitions_are_independent_and_the_last_change_wins() {
     let state = emulator.pipeline_state("demo").await;
     assert_eq!(
         inbound_enablement(&state, &stages),
-        vec![None, Some(true), Some(true), Some(false)],
+        vec![Some(true), Some(true), Some(true), Some(false)],
         "case \"one re-enabled\": got {state}"
     );
 }
@@ -446,7 +445,7 @@ async fn the_stored_reason_spans_disabled_reasons_modelled_class() {
         let state = emulator.pipeline_state("demo").await;
         assert_eq!(
             inbound_enablement(&state, &["Source", "Build"]),
-            vec![None, Some(true)],
+            vec![Some(true), Some(true)],
             "case {case:?}: a refused call persists nothing, got {state}"
         );
     }
@@ -518,7 +517,7 @@ async fn a_transition_that_names_no_stored_target_is_refused() {
             let state = emulator.pipeline_state("demo").await;
             assert_eq!(
                 inbound_enablement(&state, &["Source", "Build"]),
-                vec![None, Some(true)],
+                vec![Some(true), Some(true)],
                 "case {case:?} on {operation}: a refused call persists nothing, got {state}"
             );
         }
@@ -616,7 +615,7 @@ async fn deleting_a_pipeline_forgets_its_transitions() {
     let state = emulator.pipeline_state("demo").await;
     assert_eq!(
         inbound_enablement(&state, &stages),
-        vec![None, Some(true)],
+        vec![Some(true), Some(true)],
         "a recreated pipeline carries no transition the deleted one disabled, got {state}"
     );
     assert_eq!(

@@ -495,9 +495,9 @@ async fn an_update_drops_the_transitions_of_the_stages_it_no_longer_declares() {
         "no reason from the dropped stage may survive the update, got {state}"
     );
     assert_eq!(
-        state["stageStates"][0]["inboundTransitionState"],
-        Value::Null,
-        "the first stage has no inbound transition to report, got {state}"
+        state["stageStates"][0]["inboundTransitionState"]["enabled"],
+        json!(true),
+        "the first stage reports its inbound transition, enabled, got {state}"
     );
 }
 

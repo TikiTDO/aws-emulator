@@ -191,8 +191,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // Structural defects the model's own constraints cannot express, refused with
-        // the error shape each one is modelled as.
-        if let Err(problem) = crate::state::validate_declaration(&input.pipeline) {
+        // the error shape each one is modelled as. The declaration is judged in the
+        // REGION the request was signed for, because an action type is published per
+        // Region.
+        let region = crate::state::request_region(&ctx.parts().headers);
+        if let Err(problem) = crate::state::validate_declaration(&input.pipeline, &region) {
             let message = Some(problem.message().to_string());
             return Err(match problem {
                 crate::state::DeclarationProblem::Structure(_) => {
@@ -230,7 +233,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let name = input.pipeline.name.clone();
 
-        let region = crate::state::request_region(&ctx.parts().headers);
         let arn = ::engine::emulator_arn(crate::state::ARN_SERVICE, &region, &name);
         // Tags created with the pipeline are judged by the same rule every operation
         // that sets tags on a resource of this service applies

@@ -672,16 +672,15 @@ pub fn stage_states(
         .declaration
         .stages
         .iter()
-        .enumerate()
-        .map(|(index, stage)| {
+        .map(|stage| {
             let run = entered.get(stage.name.as_str()).copied();
             let inbound = waiting.get(stage.name.as_str()).copied();
             // Only the INBOUND transition is what this member reports
             // (`StageState$inboundTransitionState`); the outbound one governs leaving
-            // the stage and the model binds no member to it here. The rule for WHICH
-            // stages report one lives on the stored pipeline, so the two views of a
+            // the stage and the model binds no member to it here. The rule for what a
+            // stage reports lives on the stored pipeline, so the two views of a
             // stage cannot disagree.
-            let inbound_transition = pipeline.inbound_transition_state(index, &stage.name);
+            let inbound_transition = pipeline.inbound_transition_state(&stage.name);
             StageState {
                 stage_name: Some(stage.name.clone()),
                 inbound_execution: inbound.map(|record| crate::ops::types::StageExecution {
@@ -690,7 +689,7 @@ pub fn stage_states(
                     r#type: Some(record.execution_type.clone()),
                 }),
                 inbound_executions: None,
-                inbound_transition_state: inbound_transition,
+                inbound_transition_state: Some(inbound_transition),
                 // Every declared action is reported, whether or not an execution has
                 // reached it: the one that has run carries its action execution, and the
                 // one that has not carries only its name, because there is no outcome

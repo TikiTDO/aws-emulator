@@ -159,10 +159,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The pipeline's ARN and its creation instant are fixed at create time, so
-        // this call reads no request metadata: the region a request names cannot move
-        // a stored resource.
-        let _ = ctx;
+        // The pipeline's ARN and its creation instant are fixed at create time, so this
+        // call reads request metadata only for the REGION the declaration is judged in:
+        // an action type is published per Region, and the region a request names cannot
+        // move a stored resource.
+        let region = crate::state::request_region(&ctx.parts().headers);
         let state = crate::state::require_state(&*self.engine)?;
 
         // The same role rule a create is held to: `PipelineDeclaration$roleArn` is the
@@ -203,7 +204,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         }
-        if let Err(problem) = crate::state::validate_declaration(&input.pipeline) {
+        if let Err(problem) = crate::state::validate_declaration(&input.pipeline, &region) {
             let message = Some(problem.message().to_string());
             return Err(match problem {
                 crate::state::DeclarationProblem::Structure(_) => {

@@ -32,7 +32,8 @@ use crate::ops::types::{
     ActionExecutionDetail, ActionExecutionInput, ActionExecutionOutput, ActionExecutionResult,
     ActionRevision, ActionType,
     ActionTypeDeclaration, ActionTypeId, ActionTypeIdentifier, ActionTypeProperty,
-    ActionTypeSettings, Artifact, ArtifactDetail, ArtifactDetails, ArtifactLocation, Condition,
+    ActionTypeSettings, Artifact, ArtifactDetail, ArtifactDetails, ArtifactLocation,
+    AWSSessionCredentials, Condition,
     ConditionExecution,
     ConditionState, CurrentRevision, EncryptionKey, ErrorDetails, ExecutionDetails,
     ExecutionTrigger,
@@ -66,11 +67,27 @@ mod action_types;
 /// The action types the service PROVIDES itself, with the artifact counts, configuration
 /// properties and deep links each provider documents.
 mod built_in_catalog;
+/// Resolving the action type a declared action names, and the artifact arity that
+/// resolution decides for it.
+mod action_type_resolution;
+/// Whether the calling principal's own identity-based IAM policies allow the action a
+/// request asks for.
+pub mod identity_authorization;
+/// The job records a worker polls for: a `Custom` action's job and a `ThirdParty`
+/// integration's, and how each is reported.
+mod job_records;
+pub use job_records::*;
 // Named rather than a glob, so what `crate::state` publishes stays explicit — the same
 // way the re-exports below name what they take.
 pub use action_types::{validate_action_type_declaration, ActionTypeKey, ActionTypeRecord};
 pub use built_in_catalog::{
     BuiltInActionType, BuiltInConfigurationProperty, BUILT_IN_ACTION_TYPES,
+};
+pub use action_type_resolution::{
+    action_type_identity, action_type_is_published, artifact_count_message,
+    built_in_action_type, duplicate_stage_name_message, region_identity,
+    unknown_action_type_message, validate_action_type, ACTION_OWNER_AWS,
+    AWS_ACTION_TYPES_WITHOUT_DETAIL,
 };
 
 pub use driver::advance;
@@ -81,7 +98,10 @@ pub use execution::{
     MAX_CONCURRENT_EXECUTIONS_PER_PIPELINE, MAX_EXTRACTED_BYTES, STATUS_FAILED, STATUS_STOPPED,
     STATUS_SUCCEEDED, STATUS_SUPERSEDED, TRANSITION_INBOUND, TRANSITION_OUTBOUND,
 };
-pub use jobs::{JobProblem, MAX_OUTPUT_VARIABLES_BYTES, MAX_OUTPUT_VARIABLE_VALUE_BYTES};
+pub use jobs::{
+    mint_artifact_credentials, JobProblem, MAX_OUTPUT_VARIABLES_BYTES,
+    MAX_OUTPUT_VARIABLE_VALUE_BYTES,
+};
 pub use rules::{
     record_rule_execution_into, RuleExecutionLog, RuleExecutionRecord,
     MAX_RULE_EXECUTIONS_PER_PIPELINE,
@@ -254,6 +274,25 @@ pub const MAX_OUTSTANDING_NONCES: usize = 64;
 /// such figure; it is this emulator's, sized like
 /// [`MAX_EXECUTION_HISTORY_PER_PIPELINE`].
 pub const MAX_QUEUED_JOBS: usize = 1000;
+
+/// How long the artifact credentials a dispatch mints for a job worker last.
+///
+/// `JobData$artifactCredentials` is a set of "temporary credentials that are issued by
+/// Amazon Web Services Secure Token Service" and AWS publishes no lifetime for the ones a
+/// CodePipeline job carries, so the figure is this emulator's own: long enough that a
+/// worker which polls, acknowledges and then moves the job's artifacts is never cut off
+/// mid-job, and short enough that the credential store's entries stay tied to the jobs
+/// still in play rather than to every job ever dispatched. What is NOT chosen is that a
+/// credential is released once it is due.
+pub const ARTIFACT_CREDENTIAL_LIFETIME: Duration = Duration::from_secs(60 * 60);
+
+/// The most artifact credentials this service holds minted at one time.
+///
+/// One per queued job is all a dispatch can need ([`MAX_QUEUED_JOBS`], since a job's
+/// credentials are minted once), so this is that bound: past it nothing further is minted
+/// and the job is handed out without credentials rather than leaving behind material the
+/// release path has lost track of.
+pub const MAX_ARTIFACT_CREDENTIALS: usize = MAX_QUEUED_JOBS;
 
 /// The `ArtifactLocationType` an artifact of this service's artifact store carries:
 /// the model declares exactly one value
@@ -644,6 +683,23 @@ pub struct ComAmazonawsCodepipelineCodepipeline20150709State {
     /// [`enqueue_job_into`], the same path the driver takes while it holds only this
     /// field), which is where the [`MAX_QUEUED_JOBS`] bound lives.
     pub jobs: JobQueue,
+    /// The artifact credentials this service has minted for job workers and not yet
+    /// released: the access key id of each, with the instant its life ends.
+    ///
+    /// A dispatch mints the credentials a job's worker reads and writes the pipeline's
+    /// artifacts with ([`jobs::mint_artifact_credentials`]), and the emulator's credential
+    /// store holds every credential ever created until something deletes it — so without a
+    /// record of what was minted, and when it falls due, a polling worker would leave
+    /// material behind on every dispatch. Two rules keep the set bounded, and both live on
+    /// this field: a job's credentials are minted ONCE (a re-dispatch of a job that still
+    /// carries them mints nothing), and a credential is RELEASED once the clock has made it
+    /// due — a write owed at the same instant whether or not anybody calls, which
+    /// [`Self::due_artifact_credentials`] materialises for the caller that next reaches the
+    /// store. At most [`MAX_ARTIFACT_CREDENTIALS`] are held at a time.
+    ///
+    /// Write it through [`Self::set_artifact_credentials`] and
+    /// [`Self::due_artifact_credentials`]; nothing else adds or removes an entry.
+    artifact_credentials: BTreeMap<String, SystemTime>,
     /// The rule executions of each pipeline's stage conditions, oldest first — what
     /// `ListRuleExecutions` reports.
     ///
@@ -883,6 +939,71 @@ impl ComAmazonawsCodepipelineCodepipeline20150709State {
     /// it waits in is not something the caller knows or states.
     pub fn job(&self, job_id: &str) -> Option<&JobRecord> {
         self.jobs.values().flatten().find(|job| job.job_id == job_id)
+    }
+
+    /// Record the artifact credentials a dispatch minted for the job `job_id`, due for
+    /// release at `due`, so every later read of that job reports the credentials that
+    /// dispatch published.
+    ///
+    /// Answers whether the store took them: `false` when it holds no such job any more (it
+    /// was retired between the dispatch and this write) or when it already holds
+    /// [`MAX_ARTIFACT_CREDENTIALS`] of them — either way the caller releases the credential
+    /// it had minted rather than leaving it behind.
+    pub fn set_artifact_credentials(
+        &mut self,
+        job_id: &str,
+        credentials: AWSSessionCredentials,
+        due: SystemTime,
+    ) -> bool {
+        if self.artifact_credentials.len() >= MAX_ARTIFACT_CREDENTIALS {
+            return false;
+        }
+        let access_key_id = credentials.access_key_id.clone();
+        match self
+            .jobs
+            .values_mut()
+            .flatten()
+            .find(|job| job.job_id == job_id)
+        {
+            Some(job) => {
+                job.artifact_credentials = Some(credentials);
+                self.artifact_credentials.insert(access_key_id, due);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The artifact credentials whose life the clock has ended by `now`: each access key
+    /// id is REMOVED from the store and answered, so the caller — which is the one that
+    /// holds the credential store — deletes it there and no id is released twice.
+    ///
+    /// The job that carried them keeps nothing it could hand out again: a job whose
+    /// credentials were released is re-dispatched with freshly minted ones.
+    pub fn due_artifact_credentials(&mut self, now: SystemTime) -> Vec<String> {
+        let due: Vec<String> = self
+            .artifact_credentials
+            .iter()
+            .filter(|(_, ends)| **ends <= now)
+            .map(|(access_key_id, _)| access_key_id.clone())
+            .collect();
+        for access_key_id in &due {
+            self.artifact_credentials.remove(access_key_id);
+            if let Some(job) = self.jobs.values_mut().flatten().find(|job| {
+                job.artifact_credentials
+                    .as_ref()
+                    .is_some_and(|held| held.access_key_id == *access_key_id)
+            }) {
+                job.artifact_credentials = None;
+            }
+        }
+        due
+    }
+
+    /// How many artifact credentials this store holds minted, of at most
+    /// [`MAX_ARTIFACT_CREDENTIALS`].
+    pub fn artifact_credential_count(&self) -> usize {
+        self.artifact_credentials.len()
     }
 
     /// Drop every queued job whose action is no longer waiting for a worker.
@@ -1884,6 +2005,15 @@ fn is_region_token(region: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
+/// The message `InvalidWebhookFilterPatternException` carries: the fixed sentence that
+/// refusal states, over the `jsonPath` the request sent.
+///
+/// The variable part is the filter's own expression, taken from the request — the value
+/// the caller has to fix — and nothing else of the definition is named.
+pub fn invalid_filter_pattern_message(json_path: &str) -> String {
+    format!("Request contains invalid filter pattern: {json_path}")
+}
+
 /// Refuse a `WebhookDefinition` whose filters or authentication parameters cannot
 /// describe a webhook.
 ///
@@ -1909,12 +2039,11 @@ pub fn validate_webhook_definition(
     // (`smithy_query query="shape" shape="WebhookFilters,JsonPath"`), so at most five
     // strings of at most 150 characters each are parsed per request — no part of the
     // request body's size reaches the parser.
-    for (index, filter) in definition.filters.iter().enumerate() {
+    for filter in &definition.filters {
         if ::serde_json_path::JsonPath::parse(&filter.json_path).is_err() {
-            return Err(WebhookProblem::FilterPattern(format!(
-                "filters[{index}].jsonPath {:?} is not a JsonPath expression",
-                filter.json_path
-            )));
+            return Err(WebhookProblem::FilterPattern(
+                invalid_filter_pattern_message(&filter.json_path),
+            ));
         }
     }
 
@@ -2222,25 +2351,20 @@ impl Pipeline {
         }
     }
 
-    /// The inbound `TransitionState` to report for the stage at `index`.
+    /// The inbound `TransitionState` to report for the stage named `stage_name`.
     ///
-    /// An inbound transition is the edge artifacts cross INTO a stage from the stage
-    /// before it, so the first stage has none to report — unless a caller has
-    /// changed one for it, in which case the state that call persisted is what the
-    /// reader reports rather than silently dropping it.
+    /// EVERY stage of a pipeline reports one: `StageState$inboundTransitionState` is "the
+    /// state of the inbound transition, which is either enabled or disabled", a fact
+    /// every stage has — the transition into the FIRST stage included, which
+    /// `DisableStageTransition` and `EnableStageTransition` address by `stageName` like
+    /// any other stage's and whose state a reader therefore has to be able to observe. It
+    /// is enabled until a call disables it.
     ///
     /// The ONE place this rule lives: `GetPipelineState` reports a stage through
     /// [`execution::stage_states`], which reads it from here, so the stored-pipeline
     /// view and the execution view cannot disagree about it.
-    pub fn inbound_transition_state(
-        &self,
-        index: usize,
-        stage_name: &str,
-    ) -> Option<TransitionState> {
-        let changed = self
-            .transitions
-            .contains_key(&(stage_name.to_string(), TRANSITION_TYPE_INBOUND.to_string()));
-        (index > 0 || changed).then(|| self.transition_state(stage_name, TRANSITION_TYPE_INBOUND))
+    pub fn inbound_transition_state(&self, stage_name: &str) -> TransitionState {
+        self.transition_state(stage_name, TRANSITION_TYPE_INBOUND)
     }
 
     /// The declaration at `version`, or the current one when `version` is absent.
@@ -2466,6 +2590,33 @@ pub fn validate_tags(tags: &[Tag], resource: &str) -> Result<(), TagProblem> {
     Ok(())
 }
 
+/// Refuse a list of tag KEYS no resource of this service can be asked about.
+///
+/// The same rules [`validate_tags`] holds a tag SET to, read on the keys alone: a key in
+/// the namespace AWS reserves is not a key a caller may name at all, and a key named twice
+/// leaves the request stating one removal twice. `UntagResource` is the operation that
+/// names keys without values, and it models `InvalidTagsException` for exactly this.
+pub fn validate_tag_keys(keys: &[String], resource: &str) -> Result<(), TagProblem> {
+    if keys.len() > MAX_TAGS_PER_RESOURCE {
+        return Err(TagProblem::TooMany(too_many_tags_message(resource)));
+    }
+    let mut seen = BTreeSet::new();
+    for key in keys {
+        if is_reserved_tag_key(key) {
+            return Err(TagProblem::Invalid(format!(
+                "tagKeys names the key {key} in the reserved {RESERVED_TAG_KEY_PREFIX} \
+                 namespace"
+            )));
+        }
+        if !seen.insert(key.as_str()) {
+            return Err(TagProblem::Invalid(format!(
+                "tagKeys names the key {key} more than once"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Refuse an action type's `configurationProperties` list that the service's own
 /// documented rules rule out, reporting why. `Ok(())` means the list is storable.
 ///
@@ -2639,474 +2790,6 @@ pub fn action_type_declaration_not_found_message(id: &ActionTypeId) -> String {
          doesn't exist. To create an action type, contact the CodePipeline service team.",
         id.owner, id.category, id.provider, id.version
     )
-}
-
-/// One job waiting for a CUSTOM action's job worker — what `PollForJobs` hands out.
-///
-/// `PollForJobs` "is valid only for action types with Custom in the owner field":
-/// CodePipeline does not run a custom action, the account's own job worker does. So
-/// when an execution reaches such an action the execution plane queues this record and
-/// the action stays `InProgress` until a worker reports its result; what the worker
-/// needs to do the work (the action's configuration, the artifacts it consumes and the
-/// ones it is to produce, the pipeline it belongs to) is captured here from the
-/// declaration the execution pinned, so the job a poll reports is computed from stored
-/// state rather than from the poll.
-#[derive(Debug, Clone)]
-pub struct JobRecord {
-    /// The job's id, matching `JobId`'s modelled pattern
-    /// (`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`).
-    pub job_id: String,
-    /// The custom action type whose worker this job waits for.
-    pub action_type: ActionTypeId,
-    /// The pipeline the action belongs to.
-    pub pipeline_name: String,
-    /// That pipeline's ARN — `JobData$pipelineContext` documents that it "includes
-    /// pipelineArn and pipelineExecutionId for custom jobs".
-    pub pipeline_arn: String,
-    /// The execution that reached the action.
-    pub pipeline_execution_id: String,
-    /// The stage that contains the action.
-    pub stage_name: String,
-    /// The declared action's name.
-    pub action_name: String,
-    /// The id the action's execution is reported under.
-    pub action_execution_id: String,
-    /// Where the action sits in its execution's plan: the stage's index.
-    pub stage: usize,
-    /// Where the action sits in that stage: the action's index.
-    pub action: usize,
-    /// The action's `configuration`, with the execution's variables resolved — what
-    /// `JobData$actionConfiguration` reports, and what a `queryParam` poll selects on.
-    pub configuration: BTreeMap<String, String>,
-    /// The artifacts supplied to the job, at the artifact-store locations the earlier
-    /// actions produced them in.
-    pub input_artifacts: Vec<Artifact>,
-    /// The artifacts the job is to produce, at the artifact-store locations they are
-    /// to be written to.
-    pub output_artifacts: Vec<Artifact>,
-    /// The customer managed key the pipeline's artifact store declares, when it
-    /// declares one: the worker needs it to read and write those artifacts.
-    pub encryption_key: Option<EncryptionKey>,
-    /// A `JobStatus` value: where the job is between being queued and a worker
-    /// reporting its outcome.
-    pub status: String,
-    /// The `nonce` the newest poll published for this job, or `None` while no poll
-    /// has reported it. The worker presents it to `AcknowledgeJob`.
-    pub nonce: Option<String>,
-    /// Every nonce a poll has published for this job while it was still waiting to be
-    /// claimed, oldest first — each of them still claims it.
-    ///
-    /// A redelivery does not invalidate the nonce of an earlier dispatch: the nonce is
-    /// there so that "the job is being worked on by only one job worker", and what
-    /// settles which worker that is is the ACKNOWLEDGEMENT, so until one of them
-    /// claims the job every nonce issued for it reaches it ([`Self::admits_nonce`])
-    /// and the claim closes the whole set ([`Self::claim`]). Bounded by
-    /// [`MAX_OUTSTANDING_NONCES`]: a job may be re-dispatched once per lease for as
-    /// long as no worker claims it, so the set is trimmed oldest-first rather than
-    /// grown per poll.
-    pub outstanding_nonces: Vec<String>,
-    /// When the claim the newest poll granted lapses, so the job may be reported to
-    /// another worker again (see [`JOB_POLL_LEASE`]).
-    pub leased_until: Option<SystemTime>,
-    /// The continuation token the last result supplied, identifying a custom action
-    /// still in progress.
-    pub continuation_token: Option<String>,
-    /// When the job was queued — the order the jobs of one action type are handed out
-    /// in, and which job the [`MAX_QUEUED_JOBS`] bound drops first.
-    pub queued_at: SystemTime,
-    /// When this job's status last changed.
-    pub last_status_change: SystemTime,
-}
-
-impl JobRecord {
-    /// A job of `action_type` queued at `now`, with nothing of a pipeline recorded
-    /// against it yet.
-    ///
-    /// The job starts at [`JOB_STATUS_QUEUED`] and unleased: it is waiting for a
-    /// worker, and no worker owns its outcome until one polls for it and
-    /// acknowledges it. The execution plane fills in the pipeline context it queues
-    /// the job with.
-    pub fn new(job_id: impl Into<String>, action_type: ActionTypeId, now: SystemTime) -> Self {
-        Self {
-            job_id: job_id.into(),
-            action_type,
-            pipeline_name: String::new(),
-            pipeline_arn: String::new(),
-            pipeline_execution_id: String::new(),
-            stage_name: String::new(),
-            action_name: String::new(),
-            action_execution_id: String::new(),
-            stage: 0,
-            action: 0,
-            configuration: BTreeMap::new(),
-            input_artifacts: Vec::new(),
-            output_artifacts: Vec::new(),
-            encryption_key: None,
-            status: JOB_STATUS_QUEUED.to_string(),
-            nonce: None,
-            outstanding_nonces: Vec::new(),
-            leased_until: None,
-            continuation_token: None,
-            queued_at: now,
-            last_status_change: now,
-        }
-    }
-
-    /// This job as `PollForJobs` reports it to the worker it was just handed to.
-    pub fn to_job(&self) -> Job {
-        Job {
-            id: Some(self.job_id.clone()),
-            data: Some(self.to_data()),
-            nonce: self.nonce.clone(),
-            // "The ID of the Amazon Web Services account to use when performing the
-            // job": the account the pipeline lives in, which is the one account this
-            // emulator serves.
-            account_id: Some(::engine::emulator_account_id().to_string()),
-        }
-    }
-
-    /// This job as `GetJobDetails` reports it.
-    ///
-    /// The same job, read back: `JobDetails` carries everything `Job` does except the
-    /// `nonce`, which is the claim one poll granted rather than a property of the job.
-    pub fn to_details(&self) -> crate::ops::types::JobDetails {
-        crate::ops::types::JobDetails {
-            id: Some(self.job_id.clone()),
-            data: Some(self.to_data()),
-            account_id: Some(::engine::emulator_account_id().to_string()),
-        }
-    }
-
-    /// What a worker needs to perform this job, as `JobData` models it.
-    pub fn to_data(&self) -> JobData {
-        JobData {
-            action_type_id: Some(self.action_type.clone()),
-            action_configuration: Some(ActionConfiguration {
-                configuration: (!self.configuration.is_empty()).then(|| {
-                    self.configuration
-                        .iter()
-                        .map(|(name, value)| (name.clone(), value.clone()))
-                        .collect()
-                }),
-            }),
-            pipeline_context: Some(PipelineContext {
-                pipeline_name: Some(self.pipeline_name.clone()),
-                stage: Some(StageContext {
-                    name: Some(self.stage_name.clone()),
-                }),
-                action: Some(ActionContext {
-                    name: Some(self.action_name.clone()),
-                    action_execution_id: Some(self.action_execution_id.clone()),
-                }),
-                pipeline_arn: Some(self.pipeline_arn.clone()),
-                pipeline_execution_id: Some(self.pipeline_execution_id.clone()),
-            }),
-            input_artifacts: optional_list(self.input_artifacts.clone()),
-            output_artifacts: optional_list(self.output_artifacts.clone()),
-            // `artifactCredentials` is an STS session SCOPED to the artifact bucket
-            // ("temporary credentials that are issued by Amazon Web Services Secure
-            // Token Service"). This emulator's credential store holds no policies, so
-            // a session it minted would carry no scope at all — it would authorize
-            // every request of every service, which is not what this member stands
-            // for — and nothing would revoke it either: a job is released by paths
-            // with no credential store in reach (its execution being evicted, its
-            // pipeline deleted, the queue bound dropping it). So no credential is
-            // invented here and the member is absent; a worker reaches the artifact
-            // locations above with the credential it already signs its calls with.
-            artifact_credentials: None,
-            continuation_token: self.continuation_token.clone(),
-            encryption_key: self.encryption_key.clone(),
-        }
-    }
-
-    /// Whether this job may be handed to a polling worker at `now`: it is still
-    /// waiting for one, and no claim on it is in force.
-    pub fn is_available(&self, now: SystemTime) -> bool {
-        self.status == JOB_STATUS_QUEUED
-            && self.leased_until.is_none_or(|until| until <= now)
-    }
-
-    /// Hand this job to the worker that is polling: mint the `nonce` that worker
-    /// presents to `AcknowledgeJob`, and hold the job for [`JOB_POLL_LEASE`].
-    ///
-    /// The nonce is minted per lease and is unpredictable, so the claim it grants
-    /// cannot be taken by a worker that was never handed the job. A job that is handed
-    /// out again after its lease lapsed carries a FRESH nonce, and the earlier one
-    /// stays outstanding: a redelivery does not take the job away from the worker that
-    /// was handed it first (see [`Self::outstanding_nonces`]).
-    pub fn lease(&mut self, now: SystemTime) {
-        let nonce = random_uuid_v4();
-        self.outstanding_nonces.push(nonce.clone());
-        let overflow = self
-            .outstanding_nonces
-            .len()
-            .saturating_sub(MAX_OUTSTANDING_NONCES);
-        self.outstanding_nonces.drain(..overflow);
-        self.nonce = Some(nonce);
-        self.leased_until = Some(now + JOB_POLL_LEASE);
-    }
-
-    /// Whether `nonce` is one of the values that still claims this job.
-    ///
-    /// Every nonce a poll published for the job while it was unclaimed does, and none
-    /// does once a claim has closed them ([`Self::claim`]).
-    pub fn admits_nonce(&self, nonce: &str) -> bool {
-        self.outstanding_nonces
-            .iter()
-            .any(|issued| issued == nonce)
-    }
-
-    /// Record that the worker presenting `nonce` has claimed this job: it is being
-    /// worked on by that worker, and the nonces of every other dispatch stop claiming
-    /// it, which is what makes the claim exclusive.
-    pub fn claim(&mut self, nonce: &str, now: SystemTime) {
-        self.status = JOB_STATUS_IN_PROGRESS.to_string();
-        self.nonce = Some(nonce.to_string());
-        self.outstanding_nonces.clear();
-        self.last_status_change = now;
-    }
-
-    /// Put this job back to waiting for a worker, with no claim outstanding: the
-    /// nonces of the claim that has just ended reach it no more, and the next poll
-    /// mints the one that does.
-    pub fn release(&mut self) {
-        self.nonce = None;
-        self.leased_until = None;
-        self.outstanding_nonces.clear();
-    }
-
-    /// Whether this job's action configuration satisfies a poll's `queryParam` pair.
-    ///
-    /// `PollForJobs` documents it: "only jobs whose action configuration matches the
-    /// mapped value are returned". A poll that supplied no pair selects every job.
-    pub fn matches_query(&self, query: Option<(&str, &str)>) -> bool {
-        query.is_none_or(|(name, value)| {
-            self.configuration.get(name).map(String::as_str) == Some(value)
-        })
-    }
-}
-
-/// What `JobNotFoundException` states where a call asks the service to CONFIRM or
-/// REPORT a job it is not holding — the custom-action acknowledge/details family
-/// (`AcknowledgeJob`, `GetJobDetails`): the id the caller asked for bare, and nothing
-/// else about the store.
-///
-/// One source per family, so the operations of a family cannot drift on what a missing
-/// job is reported as; the family that REPORTS a result words it with the id quoted
-/// ([`job_result_not_found_message`]) and the partner plane closes it with a period
-/// ([`third_party_job_not_found_message`]), so the templates are separate rather than
-/// shared.
-pub fn job_not_found_message(job_id: &str) -> String {
-    format!("Job with id {job_id} does not exist")
-}
-
-/// What `JobNotFoundException` states where a WORKER reports a result for a job the
-/// service is not holding — the put-result family (`PutJobSuccessResult`,
-/// `PutJobFailureResult`): the same statement with the id quoted.
-pub fn job_result_not_found_message(job_id: &str) -> String {
-    format!("Job with id '{job_id}' does not exist")
-}
-
-/// What `JobNotFoundException` states on the THIRD-PARTY job plane — the operations a
-/// partner's worker calls (`AcknowledgeThirdPartyJob`,
-/// `PutThirdPartyJobSuccessResult`, `PutThirdPartyJobFailureResult`): the id quoted,
-/// and the statement closed with a period.
-///
-/// The partner plane states this condition in its own words, which is why it is a
-/// third template beside the two the custom-action plane uses: the wording belongs to
-/// the operation family that answers, so no family may be worded from another's.
-pub fn third_party_job_not_found_message(job_id: &str) -> String {
-    format!("Job with id '{job_id}' does not exist.")
-}
-
-/// What `InvalidNonceException` states: the job the nonce was presented for.
-///
-/// The nonce itself is not repeated back — the caller already holds it, and the
-/// condition is about the JOB, which either admits no nonce any more (a worker has
-/// claimed it) or never published this one. One source, so every operation that
-/// refuses a nonce words it the same way.
-pub fn invalid_nonce_message(job_id: &str) -> String {
-    format!("Invalid nonce for job id {job_id}")
-}
-
-/// One artifact of a job, named and placed where its bytes live — or, for an artifact
-/// the job is still to produce, where they are to be written.
-///
-/// `ArtifactLocation` is how `JobData` tells a worker where to read and write: the
-/// artifact store is an S3 bucket, so the location is the bucket and object key the
-/// execution plane assigned the artifact.
-pub fn job_artifact(name: &str, location: &ArtifactRef) -> Artifact {
-    Artifact {
-        name: Some(name.to_string()),
-        revision: location.revision.clone(),
-        location: Some(ArtifactLocation {
-            r#type: Some(ARTIFACT_LOCATION_TYPE_S3.to_string()),
-            s3_location: Some(S3ArtifactLocation {
-                bucket_name: location.bucket.clone(),
-                object_key: location.key.clone(),
-            }),
-        }),
-    }
-}
-
-/// One third-party job waiting for a partner's job worker.
-#[derive(Debug, Clone)]
-pub struct ThirdPartyJobRecord {
-    /// The job's id in CodePipeline, matching `ThirdPartyJob$jobId`'s modelled pattern
-    /// (`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`).
-    pub job_id: String,
-    /// The `clientId` a worker is given for the job, matching
-    /// `ThirdPartyJob$clientId`'s modelled pattern (the same uuid form). It is the
-    /// first half of the `clientId`/`clientToken` pair the model documents: the
-    /// worker presents the matching `clientToken` to `GetThirdPartyJobDetails` and
-    /// `AcknowledgeThirdPartyJob`.
-    pub client_id: String,
-    /// The `clientToken` half of that pair: the token a worker's call has to carry
-    /// to reach this job, as every third-party operation's `clientToken` member
-    /// documents ("used to verify that the calling entity is allowed access to the
-    /// job and its details"). `ClientToken` carries no modelled pattern, so this is
-    /// an opaque value minted with the job.
-    pub client_token: String,
-    /// The job's current `Nonce`: "a system-generated random number that CodePipeline
-    /// uses to ensure that the job is being worked on by only one job worker"
-    /// (`AcknowledgeThirdPartyJob$nonce`), which a worker reads off
-    /// `GetThirdPartyJobDetails` and presents to `AcknowledgeThirdPartyJob`. Minted
-    /// with the job and well inside `Nonce`'s modelled 1..50 length, so a queued job
-    /// always has exactly one value that admits a worker to it.
-    pub nonce: String,
-    /// A `JobStatus` value: where the job is between being queued and a worker
-    /// reporting its outcome.
-    pub status: String,
-    /// The continuation token the last successful result supplied, identifying a
-    /// partner action still in progress. `PutThirdPartyJobSuccessResult$continuationToken`
-    /// documents that "future jobs use this token to identify the running instance
-    /// of the action", and that "when the action is complete, no continuation token
-    /// should be supplied" — so an absent token here means the action finished with
-    /// this job.
-    pub continuation_token: Option<String>,
-    /// The revision the worker reported as current for the artifact it worked on.
-    pub current_revision: Option<CurrentRevision>,
-    /// The execution details the worker reported with its result.
-    pub execution_details: Option<ExecutionDetails>,
-    /// The failure the worker reported for this job, when it reported one.
-    ///
-    /// `PutThirdPartyJobFailureResult$failureDetails` is "information about failure
-    /// details" — the `FailureType` the worker chose, its message, and the external
-    /// execution id of the run that failed — so it is the outcome of a failed job and
-    /// is retained with it, exactly as [`Self::execution_details`] retains what a
-    /// successful result reported. `None` means no failure has been reported for this
-    /// job.
-    pub failure_details: Option<FailureDetails>,
-    /// When this job's status last changed.
-    pub last_status_change: SystemTime,
-}
-
-impl ThirdPartyJobRecord {
-    /// A record of the job identified by `job_id`, to be served to the worker holding
-    /// `client_id` — what the action-execution plane queues when an execution reaches
-    /// a partner action.
-    ///
-    /// The job starts at [`JOB_STATUS_QUEUED`]: it is waiting for a worker, and no
-    /// worker owns its outcome until one acknowledges it. The `clientToken` half of
-    /// the pair is minted here, so a queued job always has the one token that
-    /// reaches it, and so is the `nonce` that admits one worker to it.
-    ///
-    /// Both come from [`random_uuid_v4`], whose bits are hash-seed material rather
-    /// than a CSPRNG's: they are FIXTURE-GRADE values that make one queued job's
-    /// token and nonce distinct from another's, not a secret an attacker is kept out
-    /// by. Nothing in this emulator is protected by them — the store is in-memory and
-    /// per-process, and a real worker credential is minted by the emulator's
-    /// credential store, never here — so the `clientToken`/`nonce` check they feed is
-    /// the service's modelled behaviour, not an authorization boundary.
-    pub fn new(job_id: impl Into<String>, client_id: impl Into<String>) -> Self {
-        Self {
-            job_id: job_id.into(),
-            client_id: client_id.into(),
-            client_token: random_uuid_v4(),
-            nonce: random_uuid_v4(),
-            status: JOB_STATUS_QUEUED.to_string(),
-            continuation_token: None,
-            current_revision: None,
-            execution_details: None,
-            failure_details: None,
-            last_status_change: SystemTime::now(),
-        }
-    }
-
-    /// This job as `PollForThirdPartyJobs` reports it.
-    pub fn to_job(&self) -> ThirdPartyJob {
-        ThirdPartyJob {
-            client_id: Some(self.client_id.clone()),
-            job_id: Some(self.job_id.clone()),
-        }
-    }
-
-    /// Whether a job worker may still report a result for this job.
-    ///
-    /// Only a job the worker has acknowledged and not yet completed: a job still
-    /// being handed out (`Created`, `Queued`, `Dispatched`) has no worker that owns
-    /// its outcome, and one that already reached a terminal status (`Succeeded`,
-    /// `Failed`, `TimedOut`) has an outcome that cannot be replaced.
-    pub fn accepts_result(&self) -> bool {
-        self.status == JOB_STATUS_IN_PROGRESS
-    }
-
-    /// Whether this job's work has ended ([`TERMINAL_JOB_STATUSES`]).
-    pub fn is_terminal(&self) -> bool {
-        TERMINAL_JOB_STATUSES.contains(&self.status.as_str())
-    }
-
-    /// Whether `nonce` is the value that admits a worker to this job.
-    ///
-    /// The job's current nonce, and only while the job is still live: the nonce is
-    /// there to "ensure that the job is being worked on by only one job worker", and a
-    /// job whose work has ended is being worked on by none, so no nonce admits it.
-    pub fn admits_nonce(&self, nonce: &str) -> bool {
-        !self.is_terminal() && self.nonce == nonce
-    }
-
-    /// Record that a job worker has confirmed receipt of this job, which is what
-    /// `AcknowledgeThirdPartyJob` does: the job is now being worked on, so it carries
-    /// [`JOB_STATUS_IN_PROGRESS`] and its outcome is that worker's to report
-    /// ([`Self::accepts_result`]).
-    ///
-    /// Idempotent: the worker holding the nonce may repeat the acknowledgement, and a
-    /// job already `InProgress` stays exactly where it is — including the instant it
-    /// last changed, since nothing about it changed.
-    pub fn acknowledge(&mut self, now: SystemTime) {
-        if self.status != JOB_STATUS_IN_PROGRESS {
-            self.status = JOB_STATUS_IN_PROGRESS.to_string();
-            self.last_status_change = now;
-        }
-    }
-
-    /// Record a worker's successful result: the job reaches
-    /// [`JOB_STATUS_SUCCEEDED`] and keeps what the worker reported with it.
-    pub fn record_success(
-        &mut self,
-        continuation_token: Option<String>,
-        current_revision: Option<CurrentRevision>,
-        execution_details: Option<ExecutionDetails>,
-        now: SystemTime,
-    ) {
-        self.status = JOB_STATUS_SUCCEEDED.to_string();
-        self.continuation_token = continuation_token;
-        self.current_revision = current_revision;
-        self.execution_details = execution_details;
-        self.last_status_change = now;
-    }
-
-    /// Record a worker's failure for this job: the job reaches [`JOB_STATUS_FAILED`]
-    /// and keeps the `failureDetails` the worker reported with it.
-    ///
-    /// The job's work has ended, so the status is terminal ([`Self::is_terminal`]) and
-    /// no later report for the same job is accepted ([`Self::accepts_result`]): the
-    /// outcome recorded here is the one a reader answers from.
-    pub fn record_failure(&mut self, failure: FailureDetails, now: SystemTime) {
-        self.status = JOB_STATUS_FAILED.to_string();
-        self.failure_details = Some(failure);
-        self.last_status_change = now;
-    }
 }
 
 /// One stored pipeline execution.
@@ -4285,6 +3968,28 @@ pub fn stage_not_found_message(pipeline_name: &str, stage_name: &str) -> String 
     format!("Pipeline '{pipeline_name}' does not have a stage with name '{stage_name}'")
 }
 
+/// The message `StageNotRetryableException` carries, for every reason a stage cannot be
+/// retried now.
+///
+/// ONE sentence for the whole class: the service states the three conditions that make a
+/// retry impossible together — the stage holds no failed action, the execution has been
+/// superseded, or the declaration changed since the actions failed — rather than
+/// disclosing which it was, so a caller reads the same text whichever branch refused it.
+/// The variable parts come from the request: the stage, the pipeline and the execution it
+/// named.
+pub fn stage_not_retryable_message(
+    pipeline_name: &str,
+    stage_name: &str,
+    pipeline_execution_id: &str,
+) -> String {
+    format!(
+        "The stage named {stage_name} in the {pipeline_name} pipeline can't be retried \
+         now. Either it contains no failed actions, the execution \
+         '{pipeline_execution_id}' is already superseded, or the pipeline definition has \
+         changed since the action(s) failed."
+    )
+}
+
 /// The message `ActionNotFoundException` carries, for every operation that raises it.
 ///
 /// The same rule one level in: an action name is only ever resolved within one stage of
@@ -4444,6 +4149,12 @@ pub fn arn_resource(resource_arn: &str) -> String {
 ///   two actions under one name ([`duplicate_action_name_message`]): that is a defect
 ///   of the action declaration, and is refused before the artifact walk, whose own
 ///   rules the repeated action would otherwise be reported against.
+/// * a STAGE is addressed by its name too, so one pipeline cannot declare two stages
+///   under one name ([`duplicate_stage_name_message`]) — a defect of the stage
+///   declaration, refused before the whole-pipeline laws below, which could not say
+///   which of two indistinguishable stages they were about.
+/// * every action's `actionTypeId` is resolved, and the artifact bounds the action type
+///   publishes are held to ([`validate_action_type`]).
 /// * an `inputArtifacts` entry must name an artifact some EARLIER action outputs (an
 ///   earlier stage, or the same stage at a lower `runOrder`): an action cannot consume
 ///   an artifact nothing produces, and two actions cannot output the same name.
@@ -4457,6 +4168,7 @@ pub fn arn_resource(resource_arn: &str) -> String {
 ///   carrying them while declaring V1 is a contradiction.
 pub fn validate_declaration(
     declaration: &PipelineDeclaration,
+    region: &str,
 ) -> Result<(), DeclarationProblem> {
     let has_store = declaration.artifact_store.is_some();
     let has_stores = declaration
@@ -4557,6 +4269,22 @@ pub fn validate_declaration(
         )));
     }
 
+    // One pipeline cannot declare two stages under one name: a stage is ADDRESSED by its
+    // name (`GetPipelineState`'s `stageStates[].stageName`, `DisableStageTransition` and
+    // `EnableStageTransition`'s `stageName`, a stage's transition and condition records),
+    // so a repeated name leaves every stage-addressed call ambiguous. Judged before the
+    // whole-pipeline laws below, because a declaration whose stages cannot be told apart
+    // is refused for that rather than for what one of those indistinguishable stages
+    // holds. A SET, so the walk stays linear in the declared stage count.
+    let mut stage_names: BTreeSet<&str> = BTreeSet::new();
+    for stage in &declaration.stages {
+        if !stage_names.insert(stage.name.as_str()) {
+            return Err(DeclarationProblem::Stage(duplicate_stage_name_message(
+                &stage.name,
+            )));
+        }
+    }
+
     // The WHOLE-PIPELINE rules come before the per-stage and per-action ones: a
     // declaration the pipeline-level laws refuse is refused for that, whatever any one
     // stage of it also gets wrong, so a stage that happens to be empty does not hide the
@@ -4630,6 +4358,16 @@ pub fn validate_declaration(
                     &stage.name,
                 )));
             }
+        }
+    }
+
+    // Every action's own `actionTypeId` is resolved IN THE REGION the request was signed
+    // for, and what that resolution publishes about the action's artifacts is held to: a
+    // defect of one action declaration, judged per action by the one rule for it
+    // (`action_type_resolution`).
+    for stage in &declaration.stages {
+        for action in &stage.actions {
+            validate_action_type(action, region)?;
         }
     }
 

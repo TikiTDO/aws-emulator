@@ -37,7 +37,8 @@ use std::time::{Duration, Instant, SystemTime};
 use serde_json::{json, Value};
 use service_com_amazonaws_codepipeline_codepipeline_20150709::ops::types::ActionTypeId;
 use service_com_amazonaws_codepipeline_codepipeline_20150709::state::{
-    ComAmazonawsCodepipelineCodepipeline20150709State, JobRecord, JOB_POLL_LEASE,
+    ComAmazonawsCodepipelineCodepipeline20150709State, JobRecord, ARTIFACT_CREDENTIAL_LIFETIME,
+    JOB_POLL_LEASE,
 };
 use service_com_amazonaws_codepipeline_codepipeline_20150709::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
@@ -643,10 +644,16 @@ async fn an_execution_reaching_a_custom_action_queues_a_job_for_its_worker() {
         (Some("BuildArtifact"), Some(artifact_bucket(pipeline).as_str())),
         "case \"a queued job\": expected the artifact the job is to produce, got {job}"
     );
-    assert!(
-        job["data"].get("artifactCredentials").is_none(),
-        "case \"a queued job\": no credential is minted for a job, got {job}"
-    );
+    // The worker is handed the credentials it reads and writes those artifacts with:
+    // minted by the dispatch, never chosen by this service, and all three members the
+    // model requires of a session.
+    let credentials = &job["data"]["artifactCredentials"];
+    for member in ["accessKeyId", "secretAccessKey", "sessionToken"] {
+        assert!(
+            credentials[member].as_str().is_some_and(|value| !value.is_empty()),
+            "case \"a queued job\": expected artifactCredentials.{member}, got {job}"
+        );
+    }
 
     // Read back: the job the poll reported is the job the store holds, reached through
     // `GetJobDetails` by the id the worker was given. `JobDetails` carries no nonce —
@@ -1062,4 +1069,153 @@ async fn a_job_whose_action_was_abandoned_is_not_handed_out() {
         (REFUSAL_STATUS, "JobNotFoundException"),
         "case \"an abandoned action\": expected the job to be gone, got {response}"
     );
+}
+
+/// RULE: handing a job to a worker is what mints the temporary credentials that worker
+/// reads and writes the pipeline's artifacts with — for a job that carries artifacts at
+/// all — and every later read of the job reports the credentials that dispatch published.
+///
+/// The rows differ along what the rule generalises over: whether the job's action carries
+/// artifacts (both lists, one of them, neither), which is what decides whether the worker
+/// needs credentials for the artifact store.
+#[tokio::test]
+async fn a_dispatched_job_carries_the_artifact_credentials_its_worker_needs() {
+    /// The three members `AWSSessionCredentials` requires, as the model names them.
+    const SESSION_MEMBERS: [&str; 3] = ["accessKeyId", "secretAccessKey", "sessionToken"];
+
+    // (case, the custom action's inputArtifacts, its outputArtifacts, credentials expected)
+    let rows: Vec<(&str, Vec<&str>, Vec<&str>, bool)> = vec![
+        (
+            "an action that reads and writes an artifact",
+            vec!["SourceArtifact"],
+            vec!["BuildArtifact"],
+            true,
+        ),
+        (
+            "an action that only reads one",
+            vec!["SourceArtifact"],
+            vec![],
+            true,
+        ),
+        (
+            "an action that only writes one",
+            vec![],
+            vec!["BuildArtifact"],
+            true,
+        ),
+        ("an action that touches none", vec![], vec![], false),
+    ];
+
+    let mut minted: BTreeSet<String> = BTreeSet::new();
+    for (case, inputs, outputs, expected) in rows {
+        let emulator = Emulator::new();
+        let pipeline = "job-credentials";
+        emulator.bucket(&artifact_bucket(pipeline)).await;
+        emulator.bucket("source-bucket").await;
+        emulator
+            .put_object("source-bucket", "source.zip", b"job bytes")
+            .await;
+        let action_type = emulator.register("Build", "MyWorker", json!([])).await;
+        let mut declaration = custom_action_pipeline(
+            pipeline,
+            &action_type,
+            json!({"Command": "build"}),
+        );
+        let artifacts = |names: &[&str]| -> Value {
+            Value::Array(names.iter().map(|name| json!({"name": name})).collect())
+        };
+        declaration["pipeline"]["stages"][1]["actions"][0]["inputArtifacts"] =
+            artifacts(&inputs);
+        declaration["pipeline"]["stages"][1]["actions"][0]["outputArtifacts"] =
+            artifacts(&outputs);
+        emulator.ok("CreatePipeline", &declaration).await;
+
+        let job = emulator.poll_until_job(&action_type).await;
+        let id = job["id"].as_str().unwrap_or_default().to_string();
+        let credentials = job["data"].get("artifactCredentials").cloned();
+        if !expected {
+            assert!(
+                credentials.is_none(),
+                "case {case:?}: a job whose action touches no artifact needs no \
+                 credentials, got {job}"
+            );
+            continue;
+        }
+        let credentials = credentials.unwrap_or_else(|| {
+            panic!("case {case:?}: expected artifactCredentials on the job, got {job}")
+        });
+        for member in SESSION_MEMBERS {
+            assert!(
+                credentials[member]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty()),
+                "case {case:?}: expected a non-empty {member}, got {credentials}"
+            );
+        }
+        // The credential is this dispatch's own: no two jobs are handed the same one.
+        let access_key_id = credentials["accessKeyId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            minted.insert(access_key_id.clone()),
+            "case {case:?}: expected a credential of its own, got {access_key_id:?} again"
+        );
+
+        // Read back: the job the store holds reports the credentials THIS dispatch
+        // published, not a fresh set per read.
+        for attempt in 0..2 {
+            let details = emulator.ok("GetJobDetails", &json!({"jobId": id})).await;
+            assert_eq!(
+                details["jobDetails"]["data"]["artifactCredentials"], credentials,
+                "case {case:?}: read {attempt} must report the dispatched credentials, \
+                 got {details}"
+            );
+        }
+
+        // A job's credentials are minted ONCE: once its claim lapses and the job is
+        // dispatched again, the worker is handed the same credentials and the store holds
+        // no second one for it.
+        tokio::time::sleep(JOB_POLL_LEASE + Duration::from_millis(100)).await;
+        let again = emulator.poll_until_job(&action_type).await;
+        assert_eq!(
+            again["data"]["artifactCredentials"], credentials,
+            "case {case:?}: a re-dispatched job keeps its credentials, got {again}"
+        );
+        let held = emulator.store().lock().artifact_credential_count();
+        assert_eq!(
+            held, 1,
+            "case {case:?}: expected one minted credential for one job, got {held}"
+        );
+
+        // The release half of that bound: a credential whose life the clock has ended is
+        // answered to the caller that holds the credential store — once, and the job stops
+        // carrying it, so the store's entries stay tied to the jobs still in play. The
+        // instant is computed, not slept for: the lifetime is an hour.
+        let ended = SystemTime::now() + ARTIFACT_CREDENTIAL_LIFETIME + Duration::from_secs(1);
+        let released = emulator.store().lock().due_artifact_credentials(ended);
+        assert_eq!(
+            released,
+            vec![credentials["accessKeyId"].as_str().unwrap_or_default().to_string()],
+            "case {case:?}: expected the due credential to be released, got {released:?}"
+        );
+        let after = emulator.store().lock().artifact_credential_count();
+        assert_eq!(
+            after, 0,
+            "case {case:?}: a released credential is removed from the store, got {after}"
+        );
+        let again = emulator.store().lock().due_artifact_credentials(ended);
+        assert!(
+            again.is_empty(),
+            "case {case:?}: a credential is released once, got {again:?}"
+        );
+        let details = emulator.ok("GetJobDetails", &json!({"jobId": id})).await;
+        assert!(
+            details["jobDetails"]["data"]
+                .get("artifactCredentials")
+                .is_none(),
+            "case {case:?}: a job whose credentials were released carries none, got \
+             {details}"
+        );
+    }
 }

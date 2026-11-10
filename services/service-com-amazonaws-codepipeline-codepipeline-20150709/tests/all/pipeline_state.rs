@@ -251,35 +251,28 @@ async fn the_state_reports_every_stored_stage_and_action_in_order() {
                  action, in order, got {reported}"
             );
 
-            // An inbound transition exists only where an execution transitions INTO
-            // the stage: the first stage is entered directly.
-            if position == 0 {
-                assert!(
-                    reported.get("inboundTransitionState").is_none(),
-                    "case {label:?} stage {stage:?}: the first stage has no inbound \
-                     transition, got {reported}"
-                );
-            } else {
-                let transition = reported
-                    .get("inboundTransitionState")
-                    .unwrap_or_else(|| panic!(
-                        "case {label:?} stage {stage:?}: expected an inbound transition \
-                         state, got {reported}"
-                    ));
-                assert_eq!(
-                    transition["enabled"].as_bool(),
-                    Some(true),
-                    "case {label:?} stage {stage:?}: a transition no call has disabled is \
-                     enabled, got {transition}"
-                );
-                assert!(
-                    transition.get("disabledReason").is_none()
-                        && transition.get("lastChangedAt").is_none()
-                        && transition.get("lastChangedBy").is_none(),
-                    "case {label:?} stage {stage:?}: an enabled transition carries no \
-                     disable metadata, got {transition}"
-                );
-            }
+            // EVERY stage reports the state of the transition INTO it, the first
+            // stage's included: a transition no call has disabled is enabled and
+            // carries no disable metadata.
+            let transition = reported
+                .get("inboundTransitionState")
+                .unwrap_or_else(|| panic!(
+                    "case {label:?} stage {stage:?}: expected an inbound transition \
+                     state, got {reported}"
+                ));
+            assert_eq!(
+                transition["enabled"].as_bool(),
+                Some(true),
+                "case {label:?} stage {stage:?}: a transition no call has disabled is \
+                 enabled, got {transition}"
+            );
+            assert!(
+                transition.get("disabledReason").is_none()
+                    && transition.get("lastChangedAt").is_none()
+                    && transition.get("lastChangedBy").is_none(),
+                "case {label:?} stage {stage:?}: an enabled transition carries no \
+                 disable metadata, got {transition}"
+            );
 
             // Creating a pipeline RUNS it once, and ENTERING a stage is itself a
             // clock-owed step (`state::execution::ACTION_STEP`), so at the instant this

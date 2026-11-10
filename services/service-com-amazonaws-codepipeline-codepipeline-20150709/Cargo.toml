@@ -71,6 +71,12 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# Whether the caller's identity-based policies allow a stage-transition call is decided
+# from the documents IAM holds for that principal and the session STS resolves the
+# request's access key id to (the STS registry above), read through those services' own
+# state accessors rather than from a second copy of them here
+# (`state::identity_authorization`).
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 # Parses a webhook filter's `jsonPath` so `PutWebhook` refuses one that is not a
 # JsonPath expression, rather than this crate hand-writing the grammar.
 serde_json_path = "0.7"
@@ -88,7 +94,6 @@ base64 = "0.22"
 # engine, because the execution engine performs its actions' work through them and
 # CreatePipeline checks the role in IAM.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
-service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 service-com-amazonaws-codecommit-codecommit-20150413 = { workspace = true }
 service-com-amazonaws-lambda-awsgirapiservice = { workspace = true }
 # EventBridge and SQS are mounted beside codepipeline in the state-change event suite,

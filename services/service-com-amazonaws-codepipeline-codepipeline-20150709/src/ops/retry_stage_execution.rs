@@ -186,25 +186,59 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
             // "You can retry a stage that has failed without having to run a pipeline
             // again from the beginning" — and only for the LATEST execution of the
-            // pipeline: an older one is what `NotLatestPipelineExecutionException`
-            // reports.
-            let latest = state
+            // pipeline. Which refusal an OLDER one carries is what the two errors are
+            // worded for: `NotLatestPipelineExecutionException` is "[t]he stage has failed
+            // in a later run of the pipeline and the pipelineExecutionId associated with
+            // the request is out of date", so it states a later run that failed at THIS
+            // stage; an older execution no later run failed at that stage in has simply
+            // been superseded, which is one of the three conditions
+            // `StageNotRetryableException` states together.
+            let ids = state
                 .executions_by_pipeline
                 .get(&input.pipeline_name)
-                .and_then(|ids| ids.last().cloned());
-            if latest.as_deref() != Some(input.pipeline_execution_id.as_str()) {
-                return Err(
-                    RetryStageExecutionErrorModeled::NotLatestPipelineExecutionException(
-                        NotLatestPipelineExecutionException {
-                            message: Some(format!(
-                                "Pipeline execution {} is not the latest execution of \
-                                 pipeline {}, so its stages cannot be retried",
-                                input.pipeline_execution_id, input.pipeline_name
-                            )),
-                        },
-                    )
-                    .into(),
-                );
+                .cloned()
+                .unwrap_or_default();
+            if ids.last().map(String::as_str) != Some(input.pipeline_execution_id.as_str()) {
+                // Everything the pipeline ran AFTER the execution the request named. An
+                // id this pipeline never ran has nothing after it: it is not an execution
+                // a later run superseded at a stage either.
+                let later = ids
+                    .iter()
+                    .position(|id| *id == input.pipeline_execution_id)
+                    .map(|position| &ids[position + 1..])
+                    .unwrap_or_default();
+                let failed_later = later.iter().any(|id| {
+                    state.executions.get(id).is_some_and(|record| {
+                        record.stages.iter().any(|stage| {
+                            stage.name == input.stage_name
+                                && stage.status.as_deref() == Some(crate::state::STATUS_FAILED)
+                        })
+                    })
+                });
+                if failed_later {
+                    return Err(
+                        RetryStageExecutionErrorModeled::NotLatestPipelineExecutionException(
+                            NotLatestPipelineExecutionException {
+                                message: Some(format!(
+                                    "Pipeline execution {} is not the latest execution of \
+                                     pipeline {}, so its stages cannot be retried",
+                                    input.pipeline_execution_id, input.pipeline_name
+                                )),
+                            },
+                        )
+                        .into(),
+                    );
+                }
+                return Err(RetryStageExecutionErrorModeled::StageNotRetryableException(
+                    StageNotRetryableException {
+                        message: Some(crate::state::stage_not_retryable_message(
+                            &input.pipeline_name,
+                            &input.stage_name,
+                            &input.pipeline_execution_id,
+                        )),
+                    },
+                )
+                .into());
             }
 
             // Unreachable: the id just matched the pipeline's latest execution, so the
@@ -245,10 +279,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             if stage.status.as_deref() != Some(crate::state::STATUS_FAILED) {
                 return Err(RetryStageExecutionErrorModeled::StageNotRetryableException(
                     StageNotRetryableException {
-                        message: Some(format!(
-                            "Stage '{}' of pipeline execution {} is not in a failed state, \
-                             so it cannot be retried",
-                            input.stage_name, input.pipeline_execution_id
+                        message: Some(crate::state::stage_not_retryable_message(
+                            &input.pipeline_name,
+                            &input.stage_name,
+                            &input.pipeline_execution_id,
                         )),
                     },
                 )

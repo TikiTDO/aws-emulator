@@ -9,6 +9,14 @@
 //! or a stage its stored declaration does not declare, is refused with the modelled
 //! not-found error instead of persisting a transition nothing can run.
 //!
+//! A transition gates the artifacts of a pipeline the CALLER may not own, so the call is
+//! decided against the calling principal's own identity-based IAM policies FIRST
+//! ([`crate::state::identity_authorization`]), on the ARN of the STAGE the request names —
+//! the resource type this action operates on — and before anything the request names is
+//! resolved: a principal no policy allows `codepipeline:DisableStageTransition` for is
+//! refused with the common `AccessDeniedException` and the stored transition is left
+//! exactly as it was.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -165,7 +173,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // Authorization comes before every input check and every lookup, as AWS decides
+        // it: the resource is the ARN of the STAGE the request names — the resource type
+        // this action operates on — computed rather than looked up, so a caller holding no
+        // grant cannot learn from the refusal whether that pipeline or stage exists.
+        if let Some(message) = crate::state::identity_authorization::refusal(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &crate::state::identity_authorization::stage_resource(
+                &crate::state::request_region(&ctx.parts().headers),
+                &input.pipeline_name,
+                &input.stage_name,
+            ),
+        ) {
+            return Err(crate::scaffolded::Scaffolded::access_denied(message));
+        }
+
         // `transitionType` targets the `StageTransitionType` enum, so a value outside
         // it names no transition at all: refused with the modelled
         // `ValidationException` naming the member and the values it accepts.
