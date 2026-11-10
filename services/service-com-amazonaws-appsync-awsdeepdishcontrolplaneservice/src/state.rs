@@ -25,6 +25,14 @@ pub use schema_types::*;
 mod schema_creation;
 pub use schema_creation::*;
 
+/// The introspection schema of a GraphQL API: the two representations its type system
+/// is reported in, and the refusal for an API that holds no schema at all.
+mod introspection_schema;
+pub use introspection_schema::*;
+
+/// The merge of a source API's schema into the Merged API it is associated with.
+mod schema_merge;
+
 /// The resolvers attached to a GraphQL API's fields, and how one is kept, addressed and
 /// reported.
 mod resolvers;
@@ -128,6 +136,15 @@ pub struct GraphqlApiRecord {
     /// [`Self::types`], so the API's schema and its types are read under one lock and
     /// cannot disagree.
     pub schema: Option<SchemaCreationRecord>,
+    /// The schema document the last SUCCESSFUL creation installed, or `None` while no
+    /// creation of this API has ever succeeded.
+    ///
+    /// Kept beside [`Self::types`] because a schema document declares more than types: a
+    /// `schema` definition binding the root operation types and the directives the
+    /// schema defines declare no type, so they are not in that map, and the introspection
+    /// schema reports them. It is written only when a creation SUCCEEDS, so a later
+    /// document that failed to be created cannot be reported as this API's schema.
+    pub schema_document: Option<String>,
 }
 
 impl GraphqlApiRecord {
@@ -1887,9 +1904,9 @@ impl ComAmazonawsAppsyncAwsdeepdishcontrolplaneserviceState {
         // applied before the merges: a record that is gone has no status to settle.
         self.source_api_associations
             .retain(|_, association| !association.deletion_due(now));
-        for association in self.source_api_associations.values_mut() {
-            association.settle(now);
-        }
+        // The merges the clock owes are performed with the schema creations they depend
+        // on, in that order (`settle_schema_creations`).
+        self.settle_schema_creations(now);
     }
 
     /// Apply every API-association transition the clock owes at `now`, so a custom

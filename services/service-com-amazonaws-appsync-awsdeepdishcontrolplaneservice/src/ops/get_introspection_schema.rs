@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetIntrospectionSchema
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetIntrospectionSchema`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetIntrospectionSchema::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -71,6 +62,10 @@
 //! * `NotFoundException` (HTTP 404) — The resource specified in the request was not found.
 //!   Check the resource, and then try again.
 //! * `UnauthorizedException` (HTTP 401) — You aren't authorized to perform this operation.
+//! * `BadRequestException` (HTTP 400) — widened in through `extra_errors` (see below): an
+//!   `apiId` that cannot name an API at all is a malformed request rather than a missing
+//!   resource, which is how every other operation of this service that takes an `apiId`
+//!   answers it.
 
 #[allow(unused_imports)]
 use super::types::*;
@@ -86,9 +81,18 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-appsync-awsdeepdishcont
 // here — hence the `GetIntrospectionSchemaError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.appsync#GetIntrospectionSchema")]
+//
+// `BadRequestException` is widened in through `extra_errors`: this SERVICE models the
+// shape with `httpError` 400 and every other operation that addresses a resource by
+// `apiId` refuses a value that is no API id with it, but this operation's own `errors`
+// list omits it.
+#[smithy_macros::operation_error(
+    "com.amazonaws.appsync#GetIntrospectionSchema",
+    extra_errors = ["BadRequestException"]
+)]
 #[derive(Debug)]
 pub enum GetIntrospectionSchemaErrorModeled {
+    BadRequestException(BadRequestException),
     GraphQLSchemaException(GraphQLSchemaException),
     InternalFailureException(InternalFailureException),
     NotFoundException(NotFoundException),
@@ -146,18 +150,65 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetIntrospectionSchema` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetIntrospectionSchemaErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetIntrospectionSchema"))
+        // A read reports what is stored; nothing of the request's metadata changes what
+        // this answer is.
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(GetIntrospectionSchemaErrorModeled::InternalFailureException(
+                InternalFailureException {
+                    message: Some("the appsync store is unavailable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+
+        // An `apiId` that is not an API id at all is a malformed request, not a
+        // missing resource (see `crate::state::is_api_id`).
+        if !crate::state::is_api_id(&input.api_id) {
+            return Err(GetIntrospectionSchemaErrorModeled::BadRequestException(
+                BadRequestException {
+                    message: Some(crate::state::invalid_api_id_message(&input.api_id)),
+                    ..Default::default()
+                },
+            )
+            .into());
+        }
+
+        let now = std::time::SystemTime::now();
+        let mut guard = state.lock();
+
+        // The only write this read makes: a schema creation the CLOCK already made due
+        // installed the types its document declares, and the merge that carries a source
+        // API's types onto a Merged API was owed at this instant too, whether or not
+        // anybody called — so both are materialised before the schema is reported rather
+        // than being left for the next caller to observe differently.
+        guard.settle_schema_creations(now);
+
+        // A schema is a property OF a GraphQL API, so an API this account does not hold
+        // has none to introspect.
+        let Some(api) = guard.graphql_apis.get(&input.api_id) else {
+            return Err(GetIntrospectionSchemaErrorModeled::NotFoundException(
+                NotFoundException {
+                    message: Some(crate::state::API_NOT_FOUND_MESSAGE.to_string()),
+                },
+            )
+            .into());
+        };
+
+        // Rendered from the type system the API holds, in the representation the request
+        // asked for; an API that holds none has no valid GraphQL schema to report, which
+        // is what `GraphQLSchemaException` says. A request that names no
+        // `includeDirectives` asks for none.
+        let schema = api
+            .introspection_schema(&input.format, input.include_directives.unwrap_or(false))
+            .map_err(|message| {
+                GetIntrospectionSchemaErrorModeled::GraphQLSchemaException(GraphQLSchemaException {
+                    message: Some(message),
+                })
+            })?;
+
+        Ok(GetIntrospectionSchemaOutput {
+            schema: Some(schema),
+        })
     }
 }

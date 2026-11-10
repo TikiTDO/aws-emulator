@@ -148,12 +148,16 @@ impl TypeRecord {
     /// This type as a GraphQL introspection `__Type`: the JSON representation of a
     /// GraphQL type, as the introspection system defines it.
     ///
+    /// Reached by the whole SCHEMA's introspection too (`super::introspection_schema`),
+    /// so one type reported on its own and the same type reported as part of the schema
+    /// cannot disagree.
+    ///
     /// Every member is taken from the stored definition, and every type REFERENCE is
     /// resolved against the types the API holds plus the schema's built-in scalars
     /// ([`BUILT_IN_SCALARS`]) — so an interface reports the object types that implement
     /// it, and a reference to a type nothing has defined carries its name with no kind
     /// rather than a kind the schema does not support.
-    fn introspection(&self, api_types: &BTreeMap<String, TypeRecord>) -> Value {
+    pub(crate) fn introspection(&self, api_types: &BTreeMap<String, TypeRecord>) -> Value {
         let parsed = &self.parsed;
         let has_fields = parsed.kind == OBJECT_KIND || parsed.kind == INTERFACE_KIND;
         json!({
@@ -592,7 +596,7 @@ fn field_definitions(fields: Option<cst::FieldsDefinition>) -> Vec<FieldDefiniti
 }
 
 /// One argument or input field as its parsed form.
-fn input_value_definition(input: cst::InputValueDefinition) -> InputValueDefinition {
+pub(crate) fn input_value_definition(input: cst::InputValueDefinition) -> InputValueDefinition {
     InputValueDefinition {
         name: input
             .name()
@@ -695,7 +699,7 @@ fn field_json(field: &FieldDefinition, api_types: &BTreeMap<String, TypeRecord>)
 }
 
 /// One argument or input field as introspection's `__InputValue`.
-fn input_value_json(
+pub(crate) fn input_value_json(
     input: &InputValueDefinition,
     api_types: &BTreeMap<String, TypeRecord>,
 ) -> Value {
@@ -819,9 +823,13 @@ pub struct DeclaredType {
 /// document rather than against the request's text.
 #[derive(Debug, Clone)]
 pub enum SchemaDocumentError {
-    /// The document is not well-formed GraphQL, carrying the parser's own account of
-    /// the first thing wrong with it.
-    Unparseable(String),
+    /// The document is not well-formed GraphQL: reading it as GraphQL stops at this
+    /// line and column — the line counted from one and the column from zero, the way
+    /// the service's own diagnostic states a position.
+    Unparseable {
+        line: usize,
+        column: usize,
+    },
     /// The document declares no type at all, so it defines no schema.
     NoTypeDeclared,
     /// The document declares a type that carries no name.
@@ -832,55 +840,128 @@ pub enum SchemaDocumentError {
     /// The document extends a type it never declares, which leaves the extension's
     /// members on no type.
     ExtendedTypeNotDeclared(String),
-    /// A type of the document references a type name nothing declares and that is no
-    /// scalar every schema holds, so the reference resolves to no type.
-    UndefinedTypeReferenced {
-        /// The type whose definition carries the reference.
-        type_name: String,
-        /// The name it references.
-        referenced: String,
-    },
+    /// Types of the document reference names nothing declares and that are no scalar
+    /// every schema holds, so those references resolve to no type — every one of them,
+    /// in the order the document writes them, because the schema has as many problems as
+    /// it has unresolved references.
+    UndefinedTypesReferenced(Vec<UndefinedTypeReference>),
     /// The document declares more types than an API can hold ([`TYPES_PER_API`]), so
     /// the type system it defines does not fit on one API.
     MoreTypesThanTheQuota(usize),
 }
 
+/// One reference of a schema document that resolves to no type.
+#[derive(Debug, Clone)]
+pub struct UndefinedTypeReference {
+    /// The type whose definition carries the reference.
+    pub type_name: String,
+    /// The name it references.
+    pub referenced: String,
+}
+
+/// The text a document that is not well-formed GraphQL is reported with: the parser's
+/// own error list, naming the position in the document where reading it stops.
+///
+/// Recorded behaviour supplies this sentence — an API whose schema was never created is
+/// answered with the parse of its EMPTY document — and everything but the line and the
+/// column is fixed text. The line is counted from one and the column from zero, which is
+/// where that recorded diagnostic puts an empty document's origin ([`DOCUMENT_ORIGIN`]).
+pub fn invalid_syntax_detail(line: usize, column: usize) -> String {
+    format!(
+        "errors=[InvalidSyntaxError{{ message=Invalid Syntax ,locations=\
+         [SourceLocation{{line={line}, column={column}}}]}}]"
+    )
+}
+
+/// The text a document whose TYPE SYSTEM does not hold together is reported with: how
+/// many problems the schema has, and each problem on its own line.
+///
+/// Recorded behaviour supplies the envelope and the problem sentence for a field whose
+/// type the schema does not define ([`SchemaDocumentError::detail`]).
+pub fn schema_problems_detail(problems: &[String]) -> String {
+    format!(
+        "Found {} problem(s) with the schema:\n{}",
+        problems.len(),
+        problems.join("\n")
+    )
+}
+
+/// The line and column `index` falls at in `document`: the line counted from one and the
+/// column from zero, the way the service's own diagnostic states a position
+/// ([`DOCUMENT_ORIGIN`]).
+fn source_location(document: &str, index: usize) -> (usize, usize) {
+    let Some(read) = document.get(..index) else {
+        return DOCUMENT_ORIGIN;
+    };
+    let line = read.matches('\n').count() + 1;
+    let column = read
+        .rsplit_once('\n')
+        .map_or(read, |(_, last)| last)
+        .chars()
+        .count();
+    (line, column)
+}
+
+/// A GraphQL document's own origin, as the position the service's diagnostic states:
+/// line one, column zero. Reading an EMPTY document — the document an API that holds no
+/// schema has — stops there, which is the position recorded behaviour reports for it.
+pub const DOCUMENT_ORIGIN: (usize, usize) = (1, 0);
+
 impl SchemaDocumentError {
     /// The detail a failed schema creation reports: what about the document has to be
-    /// fixed, in one sentence.
+    /// fixed.
     ///
     /// This is the `details` of the schema status, "Detailed information about the
-    /// status of the schema creation operation"; the parser's and the type system's own
-    /// account of the first thing wrong is carried through, so the caller can fix the
-    /// document from the status alone.
+    /// status of the schema creation operation", and it is what the schema itself is
+    /// reported as invalid with when a later call asks for it
+    /// (`GraphqlApiRecord::introspection_schema`), so the two cannot disagree about one
+    /// document. A document that does not PARSE is reported as the parser's error list
+    /// ([`invalid_syntax_detail`]); one that parses but defines no type system that
+    /// holds together is reported as that system's problems
+    /// ([`schema_problems_detail`]).
     pub fn detail(&self) -> String {
         match self {
-            Self::Unparseable(detail) => {
-                format!("Unable to parse the schema document: {detail}")
-            }
+            Self::Unparseable { line, column } => invalid_syntax_detail(*line, *column),
+            _ => schema_problems_detail(&self.problems()),
+        }
+    }
+
+    /// The problems the type system this document defines has, one sentence each.
+    ///
+    /// The sentence for a reference the schema does not define is the service's own
+    /// (recorded behaviour); the remaining grounds — none of which a recording states —
+    /// name the document and what about it has to be fixed.
+    fn problems(&self) -> Vec<String> {
+        match self {
+            // Reading the document failed before any type system was read out of it, so
+            // it has no type-system problem to report; the parse is reported instead
+            // (see `detail`).
+            Self::Unparseable { line, column } => vec![invalid_syntax_detail(*line, *column)],
             Self::NoTypeDeclared => {
-                "The schema document declares no GraphQL type.".to_string()
+                vec!["The schema document declares no GraphQL type.".to_string()]
             }
             Self::TypeWithoutName => {
-                "The schema document declares a type without a name.".to_string()
+                vec!["The schema document declares a type without a name.".to_string()]
             }
-            Self::TypeDeclaredTwice(name) => {
-                format!("The schema document declares the type {name} more than once.")
-            }
-            Self::ExtendedTypeNotDeclared(name) => format!(
+            Self::TypeDeclaredTwice(name) => vec![format!(
+                "The schema document declares the type {name} more than once."
+            )],
+            Self::ExtendedTypeNotDeclared(name) => vec![format!(
                 "The schema document extends the type {name}, which it does not declare."
-            ),
-            Self::UndefinedTypeReferenced {
-                type_name,
-                referenced,
-            } => format!(
-                "The type {type_name} references the type {referenced}, which the schema \
-                 document does not declare."
-            ),
-            Self::MoreTypesThanTheQuota(declared) => format!(
+            )],
+            Self::UndefinedTypesReferenced(references) => references
+                .iter()
+                .map(|reference| {
+                    format!(
+                        "The field type '{}' is not present when resolving type '{}'.",
+                        reference.referenced, reference.type_name
+                    )
+                })
+                .collect(),
+            Self::MoreTypesThanTheQuota(declared) => vec![format!(
                 "The schema document declares {declared} types, more than the \
                  {TYPES_PER_API} an API can hold."
-            ),
+            )],
         }
     }
 }
@@ -912,7 +993,8 @@ pub fn parse_schema_document(definition: &str) -> Result<Vec<DeclaredType>, Sche
         .token_limit(DEFINITION_TOKEN_LIMIT)
         .parse();
     if let Some(error) = tree.errors().next() {
-        return Err(SchemaDocumentError::Unparseable(error.message().to_string()));
+        let (line, column) = source_location(definition, error.index());
+        return Err(SchemaDocumentError::Unparseable { line, column });
     }
 
     // Declaration order is the document's, which is the order introspection reports a
@@ -969,7 +1051,9 @@ pub fn parse_schema_document(definition: &str) -> Result<Vec<DeclaredType>, Sche
 
     // Every type reference of the finished type system has to resolve, so a document
     // that names a type it does not define is refused rather than stored as a schema
-    // whose fields resolve to nothing.
+    // whose fields resolve to nothing. EVERY unresolved reference is collected: the
+    // schema has as many problems as it has of them, and the detail states each.
+    let mut undefined: Vec<UndefinedTypeReference> = Vec::new();
     for name in &order {
         let Some(entry) = declared.get(name) else {
             continue;
@@ -979,11 +1063,14 @@ pub fn parse_schema_document(definition: &str) -> Result<Vec<DeclaredType>, Sche
             {
                 continue;
             }
-            return Err(SchemaDocumentError::UndefinedTypeReferenced {
+            undefined.push(UndefinedTypeReference {
                 type_name: name.clone(),
                 referenced,
             });
         }
+    }
+    if !undefined.is_empty() {
+        return Err(SchemaDocumentError::UndefinedTypesReferenced(undefined));
     }
 
     Ok(order
@@ -1014,7 +1101,7 @@ impl TypeDefinition {
     /// A list or non-null reference is a wrapper around a named one (`[Post!]!`), so
     /// what is reported is the NAME at its root — the only part that has to resolve to a
     /// declared type.
-    fn referenced_types(&self) -> Vec<String> {
+    pub(crate) fn referenced_types(&self) -> Vec<String> {
         let mut referenced: Vec<String> = Vec::new();
         referenced.extend(self.interfaces.iter().cloned());
         referenced.extend(self.members.iter().cloned());

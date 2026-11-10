@@ -179,6 +179,37 @@ fn member_refusal(violations: &[Violation]) -> Option<Refused> {
     })
 }
 
+/// The member every operation of this service names a reporting format in: the
+/// `OutputType` `GetIntrospectionSchema` renders a schema under and the
+/// `TypeDefinitionFormat` every type operation reports a definition in
+/// (`smithy_query(query="shape", shape="OutputType,TypeDefinitionFormat")` — both
+/// enumerate `SDL` and `JSON`).
+const FORMAT_MEMBER: &str = "format";
+
+/// AppSync's own refusal for a `format` whose value is outside the enumerated set the
+/// member's type declares: its `BadRequestException`, naming the member and the rejected
+/// value — the one value the caller has to change, and the one the service does echo.
+///
+/// The framework's generic report would name `ValidationException`, a shape no operation
+/// of this service models, so a client matching on `BadRequestException` would never
+/// fire. Every OTHER member whose enumerated value set a request falls outside keeps the
+/// framework's wording with the rejected value lifted out
+/// ([`without_rejected_enum_values`]).
+fn format_refusal(violations: &[Violation]) -> Option<Refused> {
+    violations.iter().find_map(|violation| {
+        if violated_member(&violation.path) != FORMAT_MEMBER
+            || !matches!(violation.kind, ViolationKind::EnumValue(_))
+        {
+            return None;
+        }
+        let value = violation.value.as_deref()?;
+        Some(Refused {
+            code: BAD_REQUEST_CODE.to_string(),
+            message: format!("Invalid {FORMAT_MEMBER} {value} given"),
+        })
+    })
+}
+
 /// The framework's aggregated constraint report with the rejected value lifted out of
 /// every ENUM clause, or `None` when no clause echoes one.
 ///
@@ -344,13 +375,16 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         //   models;
         // * a value outside an enumerated type's value set names the member path and
         //   the permitted values WITHOUT echoing the rejected value
-        //   (`without_rejected_enum_values`), under the framework's own code.
+        //   (`without_rejected_enum_values`), under the framework's own code — except
+        //   for the `format` a report is asked in, which the service refuses by naming
+        //   the member and the rejected value (`format_refusal`).
         //
         // Every other refusal — a length, a pattern — keeps the framework's wording
         // and code.
         match refusal {
             Refusal::Invalid(violations) => resource_arn_refusal(violations)
                 .or_else(|| member_refusal(violations))
+                .or_else(|| format_refusal(violations))
                 .or_else(|| without_rejected_enum_values(violations)),
             // Authentication refusals, and any refusal kind added later, keep the
             // framework's wording.

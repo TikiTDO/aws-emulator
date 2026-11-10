@@ -158,6 +158,10 @@ impl GraphqlApiRecord {
         let (status, details) = match outcome {
             Some(SchemaCreationOutcome::Created(types)) => {
                 self.types = types;
+                // The document itself is kept too: it declares what the type map cannot
+                // hold — the root operation types a `schema` definition binds and the
+                // directives the schema defines — which the introspection schema reports.
+                self.schema_document = self.schema.as_ref().map(|schema| schema.definition.clone());
                 (SCHEMA_SUCCESS, SCHEMA_SUCCESS_DETAIL.to_string())
             }
             Some(SchemaCreationOutcome::Failed(detail)) => (SCHEMA_FAILED, detail),
@@ -188,9 +192,16 @@ impl super::ComAmazonawsAppsyncAwsdeepdishcontrolplaneserviceState {
     /// Apply every schema creation the clock owes at `now`, so an API reports the same
     /// schema — and the same types — to every caller whether or not another call touched
     /// it first.
+    ///
+    /// The merges the clock owes are performed straight after, because a merge carries
+    /// the types the creations above install and is due only once the source API's
+    /// creation is ([`Self::settle_due_merges`]): the two dues are one schema transition
+    /// of the APIs they touch, so every caller that materialises one materialises both
+    /// and no two reads can disagree about a merged type.
     pub fn settle_schema_creations(&mut self, now: SystemTime) {
         for api in self.graphql_apis.values_mut() {
             api.settle_schema_creation(now);
         }
+        self.settle_due_merges(now);
     }
 }

@@ -85,6 +85,8 @@ mod graphql_api_lifecycle;
 mod graphql_api_update;
 #[path = "all/graphql_types.rs"]
 mod graphql_types;
+#[path = "all/introspection_schema.rs"]
+mod introspection_schema;
 #[path = "all/list_apis.rs"]
 mod list_apis;
 #[path = "all/merged_api_association_topology.rs"]

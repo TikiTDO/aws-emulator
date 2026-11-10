@@ -307,8 +307,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             types: std::collections::BTreeMap::new(),
             resolvers: std::collections::BTreeMap::new(),
             // No schema creation has run for a fresh API either:
-            // `StartSchemaCreation` is what schedules one.
+            // `StartSchemaCreation` is what schedules one, and a fresh API holds no
+            // schema document because no creation of it has succeeded.
             schema: None,
+            schema_document: None,
         };
 
         guard.graphql_apis.insert(api_id.clone(), record);

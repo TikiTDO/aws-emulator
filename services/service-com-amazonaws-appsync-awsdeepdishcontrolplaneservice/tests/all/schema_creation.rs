@@ -493,8 +493,8 @@ struct Failure {
     document: &'static [u8],
     /// The detail the status must carry, written out here rather than read off the
     /// service's own code, so a change of wording is caught rather than followed. A
-    /// document the parser rejects carries the parser's own account of the first thing
-    /// wrong, so only the sentence in front of it is pinned.
+    /// document the parser rejects carries the position reading it stopped at, so only
+    /// the text in front of that position is pinned.
     detail: &'static str,
     /// Whether `detail` is the whole text or only its beginning.
     whole_detail: bool,
@@ -514,38 +514,51 @@ fn failures() -> Vec<Failure> {
         Failure {
             label: "a document GraphQL cannot parse",
             document: b"type Query {\n  hello: String\n",
-            detail: "Unable to parse the schema document: ",
+            detail: "errors=[InvalidSyntaxError{ message=Invalid Syntax ,locations=\
+                     [SourceLocation{line=",
             whole_detail: false,
         },
         Failure {
             label: "a document declaring no type",
             document: b"schema {\n  query: Query\n}\n",
-            detail: "The schema document declares no GraphQL type.",
+            detail: "Found 1 problem(s) with the schema:\n\
+                     The schema document declares no GraphQL type.",
             whole_detail: true,
         },
         Failure {
             label: "a name declared twice",
             document: b"type Query {\n  hello: String\n}\ntype Query {\n  goodbye: String\n}\n",
-            detail: "The schema document declares the type Query more than once.",
+            detail: "Found 1 problem(s) with the schema:\n\
+                     The schema document declares the type Query more than once.",
             whole_detail: true,
         },
         Failure {
             label: "an extension of a type the document does not declare",
             document: b"type Query {\n  hello: String\n}\nextend type Post {\n  id: ID!\n}\n",
-            detail: "The schema document extends the type Post, which it does not declare.",
+            detail: "Found 1 problem(s) with the schema:\n\
+                     The schema document extends the type Post, which it does not declare.",
             whole_detail: true,
         },
         Failure {
             label: "a reference to a type nothing defines",
             document: b"type Query {\n  post: Post\n}\n",
-            detail: "The type Query references the type Post, which the schema document does not \
-                     declare.",
+            detail: "Found 1 problem(s) with the schema:\n\
+                     The field type 'Post' is not present when resolving type 'Query'.",
+            whole_detail: true,
+        },
+        Failure {
+            label: "two references to types nothing defines",
+            document: b"type Query {\n  post: Post\n  author: Person\n}\n",
+            detail: "Found 2 problem(s) with the schema:\n\
+                     The field type 'Post' is not present when resolving type 'Query'.\n\
+                     The field type 'Person' is not present when resolving type 'Query'.",
             whole_detail: true,
         },
         Failure {
             label: "a payload that is not text",
             document: &[0x74, 0x79, 0x70, 0x65, 0xff, 0xfe],
-            detail: "Unable to parse the schema document: ",
+            detail: "errors=[InvalidSyntaxError{ message=Invalid Syntax ,locations=\
+                     [SourceLocation{line=",
             whole_detail: false,
         },
     ]
@@ -804,7 +817,8 @@ async fn a_document_at_the_type_quota_is_created_and_one_past_it_fails() {
                     Some(state::SCHEMA_FAILED),
                     Some(
                         format!(
-                            "The schema document declares {declared} types, more than the {} an \
+                            "Found 1 problem(s) with the schema:\n\
+                             The schema document declares {declared} types, more than the {} an \
                              API can hold.",
                             state::TYPES_PER_API
                         )
