@@ -39,6 +39,13 @@
 //! need a trained model of WHO a face belongs to (`SearchUsersByImage`, …) stay
 //! unimplemented 501s.
 //!
+//! The same rule governs the LABELS of a submitted image in [`label_detection`]: no
+//! classifier over a label taxonomy runs here, so the entities it reports are the ones the
+//! same geometric detector measured — a face, and the person it is part of — while the
+//! properties of the image itself (its quality, its dominant colours and the two sides of
+//! its foreground/background split) are measured off the decoded pixels and reported in
+//! full.
+//!
 //! Where an operation PARTITIONS the faces of a submitted image by an identity nothing here
 //! holds, the detector still answers for the part it measured: `RecognizeCelebrities`
 //! reports every face it measured as an unrecognized face — the side the operation itself
@@ -53,6 +60,7 @@
 pub mod face_detection;
 pub mod idempotency;
 pub mod image_source;
+pub mod label_detection;
 pub mod modeled_error;
 
 use std::collections::BTreeMap;

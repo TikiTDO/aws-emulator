@@ -378,6 +378,15 @@ pub fn faces_in_image(bytes: &[u8]) -> Result<Vec<FaceDetail>, UnreadableImage> 
 /// CPU-bound: a request path reaches it through [`measured_faces_in_submitted_image`],
 /// which runs it on the blocking pool.
 pub fn measured_faces_in_image(bytes: &[u8]) -> Result<Vec<MeasuredFace>, UnreadableImage> {
+    Ok(measured_faces_in_decoded_image(&decoded_image(bytes)?))
+}
+
+/// The frame one image's bytes decode to, in the format the bytes themselves name and
+/// bounded so a small file cannot decode into a large one.
+///
+/// This is the one decode every analysis of a submitted image goes through, so an image is
+/// accepted, refused and bounded identically whatever is being measured off it.
+pub fn decoded_image(bytes: &[u8]) -> Result<::image::DynamicImage, UnreadableImage> {
     let Some(format) = image_format(bytes) else {
         return Err(UnreadableImage::invalid_format());
     };
@@ -392,16 +401,33 @@ pub fn measured_faces_in_image(bytes: &[u8]) -> Result<Vec<MeasuredFace>, Unread
     let decoded = reader(bytes, format, true)
         .decode()
         .map_err(|_| UnreadableImage::invalid_format())?;
-    let gray = decoded.into_luma8();
-    // The ceiling again, on the frame that was actually decoded: every scan below is sized
-    // from THIS image, so the budget must not depend on the header having agreed with it.
-    if over_ceiling(gray.width(), gray.height()) {
-        return Err(oversized(gray.width(), gray.height()));
+    // The ceiling again, on the frame that was actually decoded: every scan sized from THIS
+    // image must not depend on the header having agreed with it.
+    if over_ceiling(decoded.width(), decoded.height()) {
+        return Err(oversized(decoded.width(), decoded.height()));
     }
+    Ok(decoded)
+}
+
+/// The faces in an already decoded frame, each with its measured appearance: what an
+/// analysis that measures something ELSE off the same frame reuses, so one image is decoded
+/// once however many of its properties are reported.
+///
+/// CPU-bound, like [`measured_faces_in_image`], which is this with the decode in front.
+pub fn measured_faces_in_decoded_image(decoded: &::image::DynamicImage) -> Vec<MeasuredFace> {
+    let gray = decoded.to_luma8();
     if gray.width() == 0 || gray.height() == 0 {
-        return Ok(Vec::new());
+        return Vec::new();
     }
-    Ok(faces(&Pixels::of(gray)))
+    faces(&Pixels::of(gray))
+}
+
+/// The faces in an already decoded frame, as the details an operation reports.
+pub fn faces_in_decoded_image(decoded: &::image::DynamicImage) -> Vec<FaceDetail> {
+    measured_faces_in_decoded_image(decoded)
+        .into_iter()
+        .map(|face| face.detail)
+        .collect()
 }
 
 /// Whether an image of these dimensions is past what this emulator analyses.

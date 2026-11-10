@@ -29,6 +29,8 @@ mod face_detection;
 mod face_search_by_image;
 #[path = "all/image_content_refusal.rs"]
 mod image_content_refusal;
+#[path = "all/label_detection.rs"]
+mod label_detection;
 #[path = "all/photographic_enrolment.rs"]
 mod photographic_enrolment;
 #[path = "all/projects.rs"]
