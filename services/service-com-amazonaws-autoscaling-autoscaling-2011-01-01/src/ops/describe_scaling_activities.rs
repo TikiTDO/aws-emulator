@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeScalingActivities
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeScalingActivities`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeScalingActivities::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the scaling activities this service has recorded for the account
+//! ([`crate::state::StoredActivity`]) — every capacity change writes one, so the log is
+//! the record of what the groups of the account actually did. The activities still in
+//! progress are reported first and the rest newest-started first, limited to the ones
+//! the request's criteria admit, and paged. A REPORTING operation — it writes only what
+//! the clock had already made due, through
+//! [`crate::state::AutoScalingState::materialize_due`].
 //!
 //! ## Shape of an operation
 //!
@@ -104,6 +103,8 @@
 //!   EC2 Auto Scaling resource (for example, an Auto Scaling group, instance, or load
 //!   balancer).
 
+use ::std::time::SystemTime;
+
 #[allow(unused_imports)]
 use super::types::*;
 
@@ -176,18 +177,361 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeScalingActivities` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeScalingActivitiesErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeScalingActivities"))
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                DescribeScalingActivitiesErrorModeled::ResourceContentionFault(
+                    ResourceContentionFault {
+                        message: Some(
+                            "the Auto Scaling store is not mounted on this engine".to_string(),
+                        ),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // The requested cursor: the offset it decodes to, and the token itself, kept so
+        // a later refusal can name the token the caller actually submitted. The cursor is
+        // read before any criterion, because a token this service never issued names no
+        // page of any list, however the request asked for it to be filtered.
+        let (offset, token) = match input.next_token.clone() {
+            None => (0, String::new()),
+            Some(token) => match crate::state::decode_next_token(&token) {
+                Some(offset) => (offset, token),
+                None => {
+                    return Err(DescribeScalingActivitiesErrorModeled::InvalidNextToken(
+                        InvalidNextToken {
+                            message: Some(crate::state::invalid_next_token_message(&token)),
+                        },
+                    )
+                    .into())
+                }
+            },
+        };
+
+        // `MaxRecords` has a documented range; a page size outside it is refused,
+        // not quietly reshaped.
+        if let Some(max_records) = crate::state::max_records_out_of_range(input.max_records) {
+            return Err(crate::scaffolded::Scaffolded::validation_error(
+                crate::state::max_records_violation_message(max_records),
+            ));
+        }
+
+        // "Array Members: Maximum number of 50 IDs": a request naming more activities
+        // than one call may name is refused rather than silently truncated.
+        let wanted_ids = input.activity_ids.unwrap_or_default();
+        if wanted_ids.len() > crate::state::MAX_ACTIVITY_IDS_PER_CALL {
+            return Err(crate::scaffolded::Scaffolded::validation_error(
+                crate::state::too_many_activity_ids_message(wanted_ids.len()),
+            ));
+        }
+
+        let group_name = input.auto_scaling_group_name;
+        // Every criterion is checked BEFORE a single activity is matched — and before the
+        // store is locked at all — so an unusable one is refused rather than quietly
+        // selecting nothing, and the criteria the walk below applies are a fixed-size
+        // value however many filters the request spent stating them.
+        let criteria =
+            ActivityCriteria::read(&input.filters.unwrap_or_default(), group_name.is_some())
+                .map_err(crate::scaffolded::Scaffolded::validation_error)?;
+        // "Indicates whether to include scaling activity from deleted Auto Scaling
+        // groups" (`IncludeDeletedGroups`): the activities of a group the account no
+        // longer holds are reported only when the request asks for them.
+        let include_deleted_groups = input.include_deleted_groups.unwrap_or(false);
+
+        let now = SystemTime::now();
+        let mut state = state.lock();
+        state.materialize_due(&*self.engine, now);
+        let state = &*state;
+
+        // A name that names neither a group the account holds nor a group it has
+        // recorded an activity for names nothing at all: the read is refused by that
+        // name rather than reporting an empty log for a group that never existed. A
+        // group that has since been deleted still has its own activities, so its name
+        // keeps naming something.
+        if let Some(name) = group_name.as_deref() {
+            if !state.groups.contains_key(name)
+                && !state
+                    .activities
+                    .iter()
+                    .any(|activity| activity.auto_scaling_group_name == name)
+            {
+                return Err(crate::scaffolded::Scaffolded::validation_error(
+                    crate::state::absent_group_message(name),
+                ));
+            }
+        }
+
+        // "Only activities started within the last six weeks can be returned": the
+        // window is the clock's, so it is applied to every read.
+        let earliest = now.checked_sub(crate::state::ACTIVITY_WINDOW);
+        // The store holds the activities oldest first, so reversing it reports them by
+        // start time, newest first.
+        let mut matching: Vec<Activity> = state
+            .activities
+            .iter()
+            .rev()
+            .filter(|activity| {
+                group_name
+                    .as_deref()
+                    .is_none_or(|name| activity.auto_scaling_group_name == name)
+            })
+            // "If unknown activity IDs are requested, they are ignored with no error":
+            // the ids select, they do not have to resolve.
+            .filter(|activity| wanted_ids.is_empty() || wanted_ids.contains(&activity.activity_id))
+            .filter(|activity| earliest.is_none_or(|earliest| activity.start_time >= earliest))
+            .filter(|activity| criteria.admits(activity))
+            .filter_map(|activity| {
+                let group_held = state.groups.contains_key(&activity.auto_scaling_group_name);
+                (group_held || include_deleted_groups).then(|| activity_view(activity, group_held))
+            })
+            .collect();
+        // "Activities are sorted by start time. Activities still in progress are
+        // described first" (`ActivitiesType$Activities`): a stable sort by that one key
+        // keeps each half in the start-time order collected above.
+        matching.sort_by_key(|activity| {
+            u8::from(activity.status_code != crate::state::ACTIVITY_IN_PROGRESS)
+        });
+
+        // A token this service issued always points inside the list it was issued for;
+        // one that points past the end was not issued for this list. Only a decoded
+        // token reaches a non-zero offset, so `token` is the one submitted.
+        if offset > 0 && offset >= matching.len() {
+            return Err(DescribeScalingActivitiesErrorModeled::InvalidNextToken(
+                InvalidNextToken {
+                    message: Some(crate::state::invalid_next_token_message(&token)),
+                },
+            )
+            .into());
+        }
+        let (activities, next_token) = crate::state::page(
+            &matching,
+            offset,
+            // This operation's own documented default page size, which is larger than
+            // the one the name-ordered describes take.
+            Some(
+                input
+                    .max_records
+                    .unwrap_or(crate::state::DEFAULT_ACTIVITY_MAX_RECORDS),
+            ),
+        );
+
+        Ok(DescribeScalingActivitiesOutput {
+            activities,
+            next_token,
+        })
+    }
+}
+
+// The filter types this operation documents
+// (smithy_query(query="doc",shape="DescribeScalingActivitiesType",member="Filters")).
+const FILTER_START_TIME_LOWER_BOUND: &str = "StartTimeLowerBound";
+const FILTER_START_TIME_UPPER_BOUND: &str = "StartTimeUpperBound";
+const FILTER_STATUS: &str = "Status";
+
+/// The refusal a filter entry carrying no `Name` draws: it says nothing about WHICH
+/// criterion it applies, so the attribute is required rather than defaulted. The same
+/// sentence every filtering read of this service states.
+const FILTER_NAME_REQUIRED: &str = "The filter criteria isn't valid. The Name attribute is \
+     required to specify the type of filter being applied.";
+
+/// The refusal a filter carrying no value draws: a filter selects by the values it
+/// carries, so one carrying none selects nothing and cannot be applied.
+const FILTER_VALUES_REQUIRED: &str = "The filter criteria isn't valid. The Values attribute \
+     and one or more filter values are required.";
+
+/// The refusal a `Status` filter without a group name draws: the model documents that
+/// this filter "can only be used in combination with the AutoScalingGroupName
+/// parameter".
+const STATUS_FILTER_NEEDS_GROUP: &str = "The filter criteria isn't valid. The Status filter \
+     can only be used in combination with the AutoScalingGroupName parameter.";
+
+/// The refusal a filter naming no documented type draws, listing the types that exist.
+fn unknown_filter_name_message() -> String {
+    format!(
+        "The filter criteria isn't valid. Valid filter types for the Name attribute of \
+         filters are: {FILTER_START_TIME_LOWER_BOUND}, {FILTER_START_TIME_UPPER_BOUND} and \
+         {FILTER_STATUS}."
+    )
+}
+
+/// The refusal a `Status` filter value outside the modelled status codes draws. The
+/// REQUIREMENT is that it names the value the caller sent, which is the only thing the
+/// caller can act on; the surrounding wording is the sentence family this service states
+/// an unusable filter criterion with.
+fn invalid_status_value_message(value: &str) -> String {
+    format!(
+        "The filter criteria isn't valid. '{value}' isn't a valid value for the \
+         {FILTER_STATUS} filter."
+    )
+}
+
+/// The refusal a start-time bound that names no instant draws, naming the filter and the
+/// value the caller sent on the same footing as [`invalid_status_value_message`].
+fn invalid_start_time_message(name: &str, value: &str) -> String {
+    format!(
+        "The filter criteria isn't valid. The {name} filter value '{value}' isn't an ISO \
+         8601 formatted timestamp."
+    )
+}
+
+/// What a request's `Filters` select, read once for the whole read.
+///
+/// The values of ONE filter are joined with OR and the filters themselves with AND, as
+/// every filtering read of this service joins them: two bounds of the same kind tighten
+/// each other, while two values of one bound widen it.
+///
+/// Every criterion collapses to a FIXED-SIZE value here, whatever a request spends on
+/// stating it: two instants and a set the modelled status codes bound
+/// ([`SCALING_ACTIVITY_STATUS_CODE_VALUES`] is what a value must come from). So the
+/// filters are read once, before the log is walked, and the work of the walk itself does
+/// not grow with them.
+#[derive(Debug, Default)]
+struct ActivityCriteria {
+    /// The earliest start time the bounds admit, in seconds since the epoch.
+    not_before: Option<f64>,
+    /// The latest start time the bounds admit, in seconds since the epoch.
+    not_after: Option<f64>,
+    /// The status codes every `Status` filter admits — the INTERSECTION of their values,
+    /// since the filters are joined with AND — or `None` when the request states none.
+    statuses: Option<::std::collections::BTreeSet<String>>,
+}
+
+impl ActivityCriteria {
+    /// Read the criteria a request's filters state, or the sentence the request is
+    /// refused with.
+    ///
+    /// `names_a_group` is whether the request also names an Auto Scaling group, which
+    /// the `Status` filter may only be used together with.
+    fn read(filters: &[Filter], names_a_group: bool) -> Result<Self, String> {
+        let mut criteria = Self::default();
+        for filter in filters {
+            let name = filter.name.as_deref().ok_or(FILTER_NAME_REQUIRED)?;
+            let values = filter.values.clone().unwrap_or_default();
+            if values.is_empty() {
+                return Err(FILTER_VALUES_REQUIRED.to_string());
+            }
+            match name {
+                FILTER_STATUS => {
+                    if !names_a_group {
+                        return Err(STATUS_FILTER_NEEDS_GROUP.to_string());
+                    }
+                    // "For valid StatusCode values, see Activity": a value outside the
+                    // modelled status codes names no status an activity can be in.
+                    if let Some(unknown) = values.iter().find(|value| {
+                        !SCALING_ACTIVITY_STATUS_CODE_VALUES.contains(&value.as_str())
+                    }) {
+                        return Err(invalid_status_value_message(unknown));
+                    }
+                    criteria.statuses = Some(match criteria.statuses {
+                        // The first filter admits its own values; a later one admits only
+                        // the ones it names TOO.
+                        None => values.into_iter().collect(),
+                        Some(held) => values
+                            .into_iter()
+                            .filter(|value| held.contains(value))
+                            .collect(),
+                    });
+                }
+                FILTER_START_TIME_LOWER_BOUND => {
+                    let bound = loosest_bound(name, &values, f64::min)?;
+                    criteria.not_before =
+                        Some(criteria.not_before.map_or(bound, |held| held.max(bound)));
+                }
+                FILTER_START_TIME_UPPER_BOUND => {
+                    let bound = loosest_bound(name, &values, f64::max)?;
+                    criteria.not_after =
+                        Some(criteria.not_after.map_or(bound, |held| held.min(bound)));
+                }
+                _ => return Err(unknown_filter_name_message()),
+            }
+        }
+        Ok(criteria)
+    }
+
+    /// Whether one stored activity satisfies every criterion.
+    fn admits(&self, activity: &crate::state::StoredActivity) -> bool {
+        let started = seconds_since_epoch(activity.start_time);
+        self.not_before.is_none_or(|bound| started >= bound)
+            && self.not_after.is_none_or(|bound| started <= bound)
+            && self
+                .statuses
+                .as_ref()
+                .is_none_or(|admitted| admitted.contains(&activity.status_code))
+    }
+}
+
+/// The bound ONE start-time filter states: every value is read as an instant, and
+/// `widen` keeps the one that admits the most activities, because a filter's values are
+/// joined with OR.
+fn loosest_bound(name: &str, values: &[String], widen: fn(f64, f64) -> f64) -> Result<f64, String> {
+    let mut bound: Option<f64> = None;
+    for value in values {
+        let at =
+            parse_start_time_bound(value).ok_or_else(|| invalid_start_time_message(name, value))?;
+        bound = Some(bound.map_or(at, |held| widen(held, at)));
+    }
+    bound.ok_or_else(|| FILTER_VALUES_REQUIRED.to_string())
+}
+
+/// The instant a start-time bound names, in seconds since the epoch, or `None` when the
+/// text names none.
+///
+/// "StartTimeLowerBound and StartTimeUpperBound accept ISO 8601 formatted timestamps.
+/// Timestamps without a timezone offset are assumed to be UTC" (the operation's own
+/// documentation for `Filters`). The calendar conversion comes from the maintained
+/// library, which reads the `Z` form; the numeric offset ISO 8601 also admits is read
+/// through the ONE reader of that offset every service with a text timestamp shares, and
+/// text declaring no zone is read as UTC.
+fn parse_start_time_bound(value: &str) -> Option<f64> {
+    let (civil, offset_secs) =
+        ::service_common::rfc3339::split_utc_offset(value).unwrap_or((value, 0));
+    let parsed = ::aws_smithy_types::DateTime::from_str(
+        &format!("{civil}Z"),
+        ::aws_smithy_types::date_time::Format::DateTime,
+    )
+    .ok()?;
+    Some(parsed.as_secs_f64() - offset_secs as f64)
+}
+
+/// A stored instant in seconds since the epoch, through the one conversion this service
+/// reports its timestamps with.
+fn seconds_since_epoch(time: SystemTime) -> f64 {
+    crate::state::to_date_time(time).as_secs_f64()
+}
+
+/// The `Activity` the service reports for a stored activity.
+///
+/// `group_held` is whether the account still holds the group the activity belongs to,
+/// which is what `AutoScalingGroupState` reports: a group deleted since the activity was
+/// recorded is reported deleted on every activity of its own.
+fn activity_view(activity: &crate::state::StoredActivity, group_held: bool) -> Activity {
+    Activity {
+        activity_id: activity.activity_id.clone(),
+        auto_scaling_group_name: activity.auto_scaling_group_name.clone(),
+        auto_scaling_group_arn: activity.auto_scaling_group_arn.clone(),
+        description: activity.description.clone(),
+        cause: activity.cause.clone(),
+        start_time: crate::state::to_date_time(activity.start_time),
+        end_time: activity.end_time.map(crate::state::to_date_time),
+        status_code: activity.status_code.clone(),
+        // "If an attempt to launch instances failed, the StatusCode value is Failed or
+        // Cancelled and the StatusMessage element in the response indicates the cause of
+        // the failure" (this operation's own documentation): the sentence the failed
+        // activity recorded IS that cause, and an activity that did not fail has none.
+        status_message: (activity.status_code == crate::state::ACTIVITY_FAILED)
+            .then(|| activity.description.clone())
+            .flatten(),
+        progress: Some(activity.progress),
+        details: activity.details.clone(),
+        auto_scaling_group_state: Some(if group_held {
+            activity
+                .auto_scaling_group_state
+                .clone()
+                .unwrap_or_else(|| crate::state::GROUP_STATE_IN_SERVICE.to_string())
+        } else {
+            crate::state::GROUP_STATE_DELETED.to_string()
+        }),
     }
 }

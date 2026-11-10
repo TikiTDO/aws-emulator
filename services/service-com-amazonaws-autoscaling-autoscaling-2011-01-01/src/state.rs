@@ -277,6 +277,33 @@ pub const MAX_TARGET_GROUPS_PER_CALL: usize = 10;
 /// six weeks, so a retention bound is the shape of the real behaviour too.
 pub const MAX_RETAINED_ACTIVITIES: usize = 10_000;
 
+/// How far back a read of the scaling activities reaches.
+///
+/// From the model's own documentation for `DescribeScalingActivitiesType$ActivityIds`:
+/// "Only activities started within the last six weeks can be returned regardless of the
+/// activity IDs specified" — stated again on each of the start-time filters, so it is a
+/// window the read itself applies rather than a property of any one criterion.
+pub const ACTIVITY_WINDOW: Duration = Duration::from_secs(6 * 7 * 24 * 60 * 60);
+
+/// The most activity ids one read of the scaling activities may name.
+///
+/// From the model's own documentation for `DescribeScalingActivitiesType$ActivityIds`:
+/// "Array Members: Maximum number of 50 IDs." The member carries no modelled length, so
+/// the bound is the service's own and is checked by the handler.
+pub const MAX_ACTIVITY_IDS_PER_CALL: usize = 50;
+
+/// The message a read of the scaling activities refuses more than
+/// [`MAX_ACTIVITY_IDS_PER_CALL`] ids with: the standard sentence this service states for
+/// a member value outside its bounds, naming the member as the wire names it and the
+/// bound the request missed.
+pub fn too_many_activity_ids_message(count: usize) -> String {
+    format!(
+        "1 validation error detected: Value with {count} items at 'activityIds' failed to \
+         satisfy constraint: Member must have length less than or equal to \
+         {MAX_ACTIVITY_IDS_PER_CALL}"
+    )
+}
+
 /// A stored launch configuration — the `LaunchConfiguration` resource.
 ///
 /// NOTHING in this crate constructs one: `CreateLaunchConfiguration` is refused
@@ -2096,3 +2123,11 @@ pub const MAX_MAX_RECORDS: usize = 100;
 /// The smallest `MaxRecords` a request may ask for: a page holds items, so it holds at
 /// least one.
 pub const MIN_MAX_RECORDS: i32 = 1;
+
+/// `MaxRecords` when a read of the scaling activities omits it.
+///
+/// From the model's own documentation for `DescribeScalingActivitiesType$MaxRecords`:
+/// "The default value is 100 and the maximum value is 100" — a larger default than the
+/// name-ordered describes take, so that operation names it where it pages.
+pub const DEFAULT_ACTIVITY_MAX_RECORDS: i32 = 100;
+
