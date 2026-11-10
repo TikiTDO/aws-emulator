@@ -46,6 +46,25 @@ service-common = { path = "../common" }
 # (`state::task_events`). Only the generated client is needed — the emulator supplies the
 # transport, so the SDK's own HTTPS stack is left out.
 aws-sdk-eventbridge = { version = "1", default-features = false }
+# The AWS SDK for CloudWatch Logs, driven over the same in-process callback: the `awslogs`
+# log driver a container definition configures delivers that container's output to the log
+# group it names, through that service's own API (`state::container_logs`), so what a client
+# reads back with `GetLogEvents` is what the log service stored.
+aws-sdk-cloudwatchlogs = { version = "1", default-features = false }
+# `brush-parser`: the POSIX/bash TOKENIZER AND GRAMMAR a container's `command` is read with
+# (`state::container_shell`). The PARSER only: it is a library that computes over data in
+# process — it builds a syntax tree and runs nothing, opens nothing and reaches nothing — so
+# what EXECUTES a container's program is this crate's own session, whose catalog of
+# session-local utilities (output, status, variables, signal handlers, waits), bounds and
+# fail-closed default are stated in that module. Its EXECUTING half, `brush-core`, is
+# deliberately NOT taken: an engine resolves a command against the host's `PATH`, starts a
+# host process for it and opens the host files a redirection names, with no seam to confine
+# any of that, so taking it would hand a caller's task definition the host. It compiles no C
+# and the tree it locks carries no advisory (it is already in this workspace's lock file, for
+# `service-com-amazonaws-codebuild-codebuild-20161006`, which reads a buildspec's command
+# lines with it); its `peg` dependency is a procedural macro, so that part of it runs on the
+# BUILDER's machine at build time, as every macro in this workspace does.
+brush-parser = { version = "0.4", default-features = false }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }
 aws-smithy-schema-server = { workspace = true }
@@ -55,8 +74,11 @@ emulator-telemetry = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 aws-smithy-types = { workspace = true }
 # `time`: the clock pump that publishes a task's transitions as they fall due waits for the
-# earliest due instant the store holds (`state::task_events::drive_task_clock`).
-tokio = { workspace = true, features = ["time"] }
+# earliest due instant the store holds (`state::task_events::drive_task_clock`), and a
+# container's program waits for the seconds a `sleep` in it names
+# (`state::container_shell`). `rt`: both of those, and each container's run, are in-process
+# tasks spawned onto the runtime serving the request.
+tokio = { workspace = true, features = ["time", "rt"] }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
@@ -74,6 +96,10 @@ hex = { workspace = true }
 # mounted there is nothing for the publication to reach.
 service-com-amazonaws-eventbridge-awsevents = { workspace = true }
 service-com-amazonaws-sqs-amazonsqs = { workspace = true }
+# CloudWatch Logs is mounted beside Amazon ECS on one engine for the same reason: the
+# `awslogs` log driver delivers a container's output to that service, and the suite reads it
+# back with that service's own `GetLogEvents`.
+service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
 # `percent-encoding`: RFC 3986 percent-encoding for the `application/x-www-form-urlencoded`
 # body the test harness posts to Amazon EC2 Auto Scaling's awsQuery endpoint, so the group a
 # capacity provider binds onto is created through that service's own API.

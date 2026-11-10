@@ -199,6 +199,12 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
         }
         self.advance_service_deployments(now);
         self.settle_services(now);
+        // The scheduler's steady-state work: a service that is short of the tasks its
+        // caller asked it to maintain has the shortfall placed, which was owed from the
+        // instant it fell short ([`super::service_steady_state`]). Run AFTER the stops this
+        // pass materialised, so a task that has just reached `STOPPED` is already out of
+        // the count its replacement is weighed against.
+        self.maintain_service_task_counts(now);
         // Every status a task moved into during THIS pass becomes an event here, under the
         // same lock that materialised it. A transition the clock owes is observable for one
         // span only, so a pass that materialises one and a later writer that supersedes it
@@ -2960,9 +2966,12 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
     ///
     /// This is the ECS service scheduler's job — the `CreateService` doc: "Runs and
     /// maintains your desired number of tasks from a specified task definition" — and it
-    /// runs on the call that CHANGES what the service wants, never on a read. A task of
-    /// a superseded deployment is no longer wanted, so a new deployment replaces the
-    /// task set it inherited.
+    /// runs both on the call that CHANGES what the service wants and on the clock pass that
+    /// keeps the count the caller asked for
+    /// ([`Self::maintain_service_task_counts`]): maintaining it is continuous work, so a
+    /// task that stopped is replaced without a further call. A task of a superseded
+    /// deployment is no longer wanted, so a new deployment replaces the task set it
+    /// inherited.
     ///
     /// A placement the cluster cannot satisfy places NOTHING and records WHY on the
     /// service's event stream instead (see [`Self::record_placement_failure`]): the

@@ -47,6 +47,8 @@ mod container_instance_not_found;
 mod container_instances;
 #[path = "all/container_reservation_refusals.rs"]
 mod container_reservation_refusals;
+#[path = "all/container_runtime.rs"]
+mod container_runtime;
 #[path = "all/continue_service_deployment_validation.rs"]
 mod continue_service_deployment_validation;
 #[path = "all/daemon_reference_family_refusals.rs"]

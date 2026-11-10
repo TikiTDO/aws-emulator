@@ -626,6 +626,10 @@ pub fn drive_task_clock<Eng: Send + Sync + 'static>(
     let Ok(runtime) = ::tokio::runtime::Handle::try_current() else {
         return;
     };
+    // The container data plane is settled BEFORE the pump's claim is taken, so a door that
+    // finds a pump already running still has the containers of the task it just wrote
+    // started or signalled ([`super::settle_container_runtime`]).
+    super::settle_container_runtime(ctx.callback(), engine, region);
     let Some(generation) = state.lock().start_task_clock_pump() else {
         return;
     };
@@ -658,6 +662,11 @@ pub fn drive_task_clock<Eng: Send + Sync + 'static>(
             // that wrote a status settles, owed here for the statuses NO door wrote
             // ([`super::settle_load_balancer_targets`]).
             super::settle_load_balancer_targets(&*engine);
+            // A task the clock has just started is one whose containers are now running, and
+            // one it has just stopped is one whose containers are signalled: the same side
+            // effect the door that wrote a status settles, owed here for the statuses NO
+            // door wrote ([`super::settle_container_runtime`]).
+            super::settle_container_runtime(&callback, &engine, &region);
             publish_pending(&callback, &*engine, &region).await;
         }
         if capped {

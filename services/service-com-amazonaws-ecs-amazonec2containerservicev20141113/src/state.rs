@@ -60,10 +60,24 @@
 //! service's event stream
 //! ([`ComAmazonawsEcsAmazonec2containerservicev20141113State::placement_capacity_reason`]);
 //! the desired count is the caller's and does not move because the scheduler could not
-//! meet it. The scheduler's steady-state work beyond that —
-//! replacing a task somebody else stopped, re-placing a daemon's task when a container
-//! instance registers later — is not modelled: nothing runs between calls, and a
-//! reporting operation may not place a task nobody asked for.
+//! meet it. Keeping that count is CONTINUOUS work, not work one call does: a service that
+//! holds fewer tasks than it wants — because one of its tasks was stopped, failed or ended
+//! — has the shortfall placed by the clock pass
+//! ([`ComAmazonawsEcsAmazonec2containerservicev20141113State::maintain_service_task_counts`],
+//! see [`service_steady_state`]), which is why a stopped SERVICE task is replaced and a
+//! stopped STANDALONE task is not. The scheduler's steady-state work beyond that —
+//! re-placing a daemon's task when a container instance registers later — is not modelled.
+//!
+//! ## The containers that RUN
+//!
+//! A task that reaches `RUNNING` is a task whose containers are running: the program each
+//! container's `entryPoint`/`command` names is performed in this process
+//! ([`container_shell`]), what it writes goes to the log driver its definition configures
+//! ([`container_logs`]) and the status it ends with is that container's `exitCode`
+//! ([`container_runtime`]). `StopTask` sends such a container the stop signal, which is
+//! what its own `trap` handler answers. A container whose launch names no command at all
+//! runs nothing: the image's own entry point is what would run, and this emulator holds no
+//! image, so no output and no exit code is invented for it.
 //!
 //! ## The rollouts that WAIT
 //!
@@ -230,6 +244,24 @@ pub use load_balancer_targets::*;
 /// clock pump that publishes the transitions nobody is waiting on a call for.
 mod task_events;
 pub use task_events::*;
+
+/// What a container's `command` DOES: the session one container's program runs in, and the
+/// output and exit status running it produces.
+mod container_shell;
+pub use container_shell::*;
+
+/// The `awslogs` log driver: where the output of a container that runs is delivered.
+mod container_logs;
+pub use container_logs::*;
+
+/// The container data plane: which containers are running, what signal a stop sends them,
+/// and the exit code a run records.
+mod container_runtime;
+pub use container_runtime::*;
+
+/// The service scheduler's steady state: the replacement a service's stopped task earns,
+/// and the standalone task that earns none.
+mod service_steady_state;
 
 /// The region an ARN carries when the request is unsigned (so it has no SigV4
 /// credential scope to read a region from). `emulator_arn`'s own documented default.
@@ -3840,4 +3872,9 @@ pub struct ComAmazonawsEcsAmazonec2containerservicev20141113State {
     /// The running pump's task handle, kept so the pump it replaces is aborted rather than
     /// merely forgotten (see [`Self::set_task_clock_pump`]).
     task_clock_pump: Option<::tokio::task::JoinHandle<()>>,
+    /// `containerArn` -> the RUN behind that container of that task: the program this
+    /// emulator is performing for it and the signals a stop sends it (see
+    /// [`container_runtime`]). An entry exists only while the container's program is being
+    /// run, so the map is the set of containers that are really executing.
+    container_runs: HashMap<String, ContainerRun>,
 }
