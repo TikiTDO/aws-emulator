@@ -195,6 +195,8 @@ mod multipart_upload_completion;
 mod multipart_upload_event_notifications;
 #[path = "all/multipart_upload_initiation.rs"]
 mod multipart_upload_initiation;
+#[path = "all/multipart_upload_initiation_order.rs"]
+mod multipart_upload_initiation_order;
 #[path = "all/multipart_upload_listing.rs"]
 mod multipart_upload_listing;
 #[path = "all/notification_destination_validation.rs"]

@@ -4,7 +4,7 @@
 //! IMPLEMENTED: this is the read-back for the multipart uploads ONE BUCKET has in
 //! progress — it reports the uploads `CreateMultipartUpload` recorded in this service's
 //! state ([`crate::state::MultipartUpload`]), in key order and, within one key, in
-//! upload-id order, filtered by `prefix`, rolled up by `delimiter` and paged by
+//! initiation order, filtered by `prefix`, rolled up by `delimiter` and paged by
 //! `max-uploads` from the position `key-marker`/`upload-id-marker` names, and refuses a
 //! bucket this emulator does not hold with `NoSuchBucket`.
 //!
@@ -359,17 +359,46 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let prefix = input.prefix.clone().unwrap_or_default();
         let delimiter = input.delimiter.clone().unwrap_or_default();
 
-        // The bucket keys its uploads by upload id, but a listing is paged by KEY first:
-        // the `key-marker` / `upload-id-marker` pair resumes at "the multipart upload after
-        // which listing should begin", keys lexicographically and then upload ids
-        // lexicographically within one key — so the entries are ordered by that pair before
-        // the page is cut.
+        // "the multipart uploads are sorted based on two criteria: Key-based sorting -
+        // Multipart uploads are initially sorted in ascending order based on their object
+        // keys. Time-based sorting - For uploads that share the same object key, they are
+        // further sorted in ascending order based on the upload initiation time. Among
+        // uploads with the same key, the one that was initiated first will appear before the
+        // ones that were initiated later" (this operation's own documentation, "Sorting of
+        // multipart uploads in response" for a general purpose bucket). The bucket keys its
+        // uploads by the opaque id the initiation minted, which says nothing about WHEN an
+        // upload was initiated, so the second criterion is read off the recorded instant
+        // (`MultipartUpload$Initiated`); the id breaks a tie between two uploads recorded at
+        // the same instant, so one bucket's listing is a total order and two reads report
+        // the same page.
         let mut in_progress: Vec<(&str, &str, &crate::state::MultipartUpload)> = bucket
             .multipart_uploads()
             .iter()
             .map(|(upload_id, upload)| (upload.key.as_str(), upload_id.as_str(), upload))
             .collect();
-        in_progress.sort_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)));
+        in_progress.sort_by(|left, right| {
+            (left.0, left.2.initiated_at, left.1).cmp(&(right.0, right.2.initiated_at, right.1))
+        });
+
+        // Where the `key-marker` / `upload-id-marker` pair resumes, as a position in the
+        // order just computed: "Together with key-marker, specifies the multipart upload
+        // after which listing should begin" (`ListMultipartUploadsRequest$UploadIdMarker`)
+        // names the entry a previous page last reported, so the next page begins after THAT
+        // entry of this order — which is what makes a walk report every upload exactly once
+        // whatever the page size, now that the order is not the ids' own. `None` when the
+        // pair names no upload this bucket still holds, where there is no position to read
+        // and the id comparison below stands in for it.
+        let resume_after: Option<(::std::time::SystemTime, &str)> = match (
+            input.key_marker.as_deref(),
+            input.upload_id_marker.as_deref(),
+        ) {
+            (Some(marker), Some(id_marker)) => bucket
+                .multipart_uploads()
+                .get_key_value(id_marker)
+                .filter(|(_, marked)| marked.key == marker)
+                .map(|(id, marked)| (marked.initiated_at, id.as_str())),
+            _ => None,
+        };
 
         let mut uploads: Vec<MultipartUpload> = Vec::new();
         let mut common_prefixes: Vec<String> = Vec::new();
@@ -444,16 +473,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     continue;
                 }
 
-                // "Any multipart uploads for a key equal to the key-marker might also be
-                // included, provided those multipart uploads have upload IDs
-                // lexicographically greater than the specified upload-id-marker"
-                // (`ListMultipartUploadsRequest$UploadIdMarker`) — within the marker's own
-                // key, the ids at or below the id marker are the previous page's.
+                // "Together with key-marker, specifies the multipart upload after which
+                // listing should begin" (`ListMultipartUploadsRequest$UploadIdMarker`):
+                // within the marker's own key, the marked upload and everything this
+                // listing orders BEFORE it belong to the previous page. The member's
+                // companion sentence — "any multipart uploads for a key equal to the
+                // key-marker might be included in the list only if they have an upload ID
+                // lexicographically greater than the specified upload-id-marker" — is the
+                // comparison left when the marked upload is no longer held and so has no
+                // position to resume after.
                 if let (Some(marker), Some(id_marker)) = (
                     input.key_marker.as_deref(),
                     input.upload_id_marker.as_deref(),
                 ) {
-                    if key == marker && upload_id <= id_marker {
+                    let reported_already = match resume_after {
+                        Some(position) => (upload.initiated_at, upload_id) <= position,
+                        None => upload_id <= id_marker,
+                    };
+                    if key == marker && reported_already {
                         continue;
                     }
                 }

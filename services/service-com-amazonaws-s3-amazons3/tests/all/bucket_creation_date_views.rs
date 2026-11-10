@@ -66,9 +66,14 @@ async fn creation_date(router: &MultiServiceRouter, region: &str, bucket: &str) 
 /// The instant a reported `CreationDate` names, as `(seconds, nanoseconds)` — compared
 /// rather than the rendered text, because a renderer may trim a fractional zero and two
 /// instants an instant apart would then not order by their spelling.
-fn instant_of(reported: &str) -> (i64, u32) {
+///
+/// `pub(crate)`: every suite that orders two reported instants reads them through this one
+/// parser (the multipart initiation-order suite,
+/// [`super::multipart_upload_initiation_order`], among them) rather than taking the
+/// timestamp apart itself.
+pub(crate) fn instant_of(reported: &str) -> (i64, u32) {
     let date = DateTime::from_str(reported, Format::DateTime)
-        .unwrap_or_else(|_| panic!("a reported CreationDate must be a date-time, got {reported:?}"));
+        .unwrap_or_else(|_| panic!("a reported instant must be a date-time, got {reported:?}"));
     (date.secs(), date.subsec_nanos())
 }
 

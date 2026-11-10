@@ -10,7 +10,8 @@
 //! The rules under test, each asserted over a SET of inputs rather than one request:
 //!
 //! 1. A listing reports every multipart upload the named bucket has IN PROGRESS and
-//!    nothing else — one entry per upload, ordered by key and then by upload id, each
+//!    nothing else — one entry per upload, ordered by key and then by initiation time (the
+//!    order [`super::multipart_upload_initiation_order`] spans case by case), each
 //!    carrying the id the initiation minted, the key it was initiated for, the instant it
 //!    was initiated, the storage class and checksum configuration the initiation settled,
 //!    and the account's owner and initiator. "An in-progress multipart upload is a
@@ -179,6 +180,24 @@ impl UploadListing {
             .map(|entry| (Self::entry(entry, "Key"), Self::entry(entry, "UploadId")))
             .collect()
     }
+
+    /// Every reported upload as `(key, upload id, Initiated)`, in response order.
+    ///
+    /// `pub(crate)`: the initiation-order suite
+    /// ([`super::multipart_upload_initiation_order`]) reads the instant each entry reports
+    /// through this one reader rather than slicing the document a second way.
+    pub(crate) fn dated_entries(&self) -> Vec<(String, String, String)> {
+        self.uploads
+            .iter()
+            .map(|entry| {
+                (
+                    Self::entry(entry, "Key"),
+                    Self::entry(entry, "UploadId"),
+                    Self::entry(entry, "Initiated"),
+                )
+            })
+            .collect()
+    }
 }
 
 /// Read an upload listing with an XML reader rather than by slicing the body — the same
@@ -267,7 +286,11 @@ pub(crate) fn upload_listing_of(answer: &Answer) -> UploadListing {
 }
 
 /// A listing that must have succeeded, read into [`UploadListing`].
-async fn listing(
+///
+/// `pub(crate)`: the initiation-order suite
+/// ([`super::multipart_upload_initiation_order`]) reads its pages through this one helper
+/// rather than keeping a second copy of the 200 assertion.
+pub(crate) async fn listing(
     router: &MultiServiceRouter,
     name: &str,
     case: &str,
@@ -296,7 +319,7 @@ struct UploadCase {
 /// the key (a flat name, several nesting depths, a name that is a PREFIX of another, one
 /// key carrying TWO uploads, a non-ASCII name), the storage class and checksum
 /// configuration the initiation settles, and the ORDER the uploads are initiated in, which
-/// is deliberately neither key order nor the order the listing must report.
+/// is deliberately not key order.
 ///
 /// Each storage class is a value of the model's own `StorageClass` enum and each checksum
 /// algorithm a value of its `ChecksumAlgorithm` enum
@@ -382,7 +405,7 @@ async fn initiate_all(
 }
 
 #[tokio::test]
-async fn every_upload_in_progress_reads_back_in_key_then_upload_id_order() {
+async fn every_upload_in_progress_reads_back_in_key_then_initiation_order() {
     let router = router();
     let name = "multipart-listing-bucket";
     bucket(&router, name).await;
@@ -407,18 +430,19 @@ async fn every_upload_in_progress_reads_back_in_key_then_upload_id_order() {
             .collect::<Vec<_>>()
     );
 
-    // The order the listing owes: by key, then by upload id within one key.
+    // The order the listing owes: by key, then by initiation time within one key — a
+    // STABLE sort by key of the initiation sequence, which is the order `recorded` is in.
     let mut expected: Vec<(String, String)> = recorded
         .iter()
         .map(|(key, id, _, _, _)| (key.clone(), id.clone()))
         .collect();
-    expected.sort();
+    expected.sort_by(|left, right| left.0.cmp(&right.0));
 
     let page = listing(&router, name, "no selection at all", "").await;
     assert_eq!(
         page.entries(),
         expected,
-        "case {:?}: expected the uploads in key then upload-id order, got {:?}",
+        "case {:?}: expected the uploads in key then initiation order, got {:?}",
         "no selection at all",
         page.entries()
     );
@@ -509,14 +533,15 @@ async fn a_listing_selects_by_prefix_and_rolls_up_a_delimiter() {
     bucket(&router, name).await;
     let recorded = initiate_all(&router, name).await;
 
-    // The uploads of `keys`, in the order the listing owes them.
+    // The uploads of `keys`, in the order the listing owes them: by key, then by initiation
+    // time within one key, which a stable sort by key of the initiation sequence is.
     let uploads_of = |keys: &[&str]| -> Vec<(String, String)> {
         let mut wanted: Vec<(String, String)> = recorded
             .iter()
             .filter(|(key, _, _, _, _)| keys.contains(&key.as_str()))
             .map(|(key, id, _, _, _)| (key.clone(), id.clone()))
             .collect();
-        wanted.sort();
+        wanted.sort_by(|left, right| left.0.cmp(&right.0));
         wanted
     };
 
@@ -639,7 +664,7 @@ async fn paging_reports_every_upload_exactly_once() {
         .iter()
         .map(|(key, id, _, _, _)| (key.clone(), id.clone()))
         .collect();
-    expected.sort();
+    expected.sort_by(|left, right| left.0.cmp(&right.0));
 
     // The rows differ along the page size: one entry at a time, sizes that do not divide
     // the total, exactly the total, and far more than the total.

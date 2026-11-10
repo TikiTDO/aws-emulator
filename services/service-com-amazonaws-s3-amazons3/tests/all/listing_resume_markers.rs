@@ -375,7 +375,8 @@ async fn an_upload_listing_resumes_from_its_markers_in_either_rendering() {
             let upload_id = initiate(&router, bucket_name, key, &[]).await;
             initiated.push(((*key).to_string(), upload_id));
         }
-        // Key order, then upload-id order, which is the order a listing reports.
+        // Key order, which is the order a listing reports — no key here carries two
+        // uploads, so the within-one-key order plays no part in these rows.
         initiated.sort();
 
         let verbatim =
