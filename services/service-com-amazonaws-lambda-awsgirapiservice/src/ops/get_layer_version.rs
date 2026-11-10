@@ -190,7 +190,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .layer(&region, &name)
             .and_then(|record| {
                 let version = record.versions.get(&input.version_number)?;
-                Some(record.version_detail(version))
+                Some(record.version_detail(ctx, version))
             })
             .ok_or_else(|| {
                 GetLayerVersionErrorModeled::ResourceNotFoundException(ResourceNotFoundException {

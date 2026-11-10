@@ -313,7 +313,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(published) = store
             .layer(&region, &name)
             .and_then(|record| Some((record, record.versions.get(&version_number)?)))
-            .map(|(record, published)| record.version_detail(published))
+            .map(|(record, published)| record.version_detail(ctx, published))
         else {
             return Err(PublishLayerVersionErrorModeled::ServiceException(ServiceException {
                 r#type: None,

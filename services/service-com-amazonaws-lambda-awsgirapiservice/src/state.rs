@@ -2804,10 +2804,19 @@ impl LayerRecord {
 
     /// The `GetLayerVersionResponse` the wire reports for one of this layer's versions,
     /// built entirely out of what is stored.
+    ///
+    /// `ctx` is what the archive's `Content$Location` is announced against: the link is one
+    /// the caller follows, so it is presigned for the base URL this emulator is reached on
+    /// (see [`layer_archive_location`]).
     #[must_use]
-    pub fn version_detail(&self, version: &LayerVersionRecord) -> GetLayerVersionOutput {
+    pub fn version_detail(
+        &self,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
+        version: &LayerVersionRecord,
+    ) -> GetLayerVersionOutput {
         GetLayerVersionOutput {
             content: Some(version.content(layer_archive_location(
+                ctx,
                 &self.region,
                 &self.name,
                 version.version,
@@ -3666,24 +3675,6 @@ pub fn resolve_capacity_provider<'a>(
     Ok(record)
 }
 
-/// The download location a layer version's `Content$Location` reports ("A link to the
-/// layer archive in Amazon S3 that is valid for 10 minutes").
-///
-/// Lambda keeps the archive in its own per-region bucket and vends a URL into it. Every
-/// segment here comes from stored state — the layer's region, its name and the version
-/// number — so two reads of one published version report the same location, and no read
-/// changes what a later one sees.
-///
-/// The URL is one this emulator ANSWERS, exactly as [`code_location_url`] is.
-#[must_use]
-pub fn layer_archive_location(region: &str, name: &str, version: i64) -> String {
-    format!(
-        "https://{host}{DOWNLOAD_PATH_PREFIX}/{account}/{name}-{version}",
-        host = download_host(region, DOWNLOAD_BUCKET_LAYERS),
-        account = ::engine::emulator_account_id(),
-    )
-}
-
 /// The bare layer name a `LayerName` names.
 ///
 /// The model documents the member as "The name or Amazon Resource Name (ARN) of the
@@ -3771,158 +3762,6 @@ pub fn request_region(ctx: &smithy_server_runtime::OperationContext<'_>) -> Stri
         .map(|scope| scope.region)
         .unwrap_or_else(|| DEFAULT_REGION.to_string())
 }
-
-/// The download location `GetFunction` reports for a .zip file archive package.
-///
-/// Lambda keeps the archive in its own per-region task bucket and vends a URL into it.
-/// Every segment here comes from stored state — the function's region, its name and
-/// the revision the stored code belongs to — so two reads of an unchanged function
-/// report the same location, and a new revision reports a new one.
-///
-/// The URL is one this emulator ANSWERS: [`parse_download_target`] reads it back and
-/// `crate::service` serves the stored bytes from it.
-#[must_use]
-pub fn code_location_url(region: &str, name: &str, revision_id: &str) -> String {
-    format!(
-        "https://{host}{DOWNLOAD_PATH_PREFIX}/{account}/{name}-{revision_id}",
-        host = download_host(region, DOWNLOAD_BUCKET_TASKS),
-        account = ::engine::emulator_account_id(),
-    )
-}
-
-/// The bucket label of the per-region store a function's deployment PACKAGE is served
-/// from, as [`code_location_url`] spells it.
-pub const DOWNLOAD_BUCKET_TASKS: &str = "tasks";
-
-/// The bucket label of the per-region store a LAYER version's archive is served from, as
-/// [`layer_archive_location`] spells it.
-pub const DOWNLOAD_BUCKET_LAYERS: &str = "layers";
-
-/// The path prefix every download URL this service hands out carries.
-pub const DOWNLOAD_PATH_PREFIX: &str = "/snapshots";
-
-/// The host a download URL of `bucket` is addressed to in `region`.
-///
-/// ONE place states the form, so the URL this service hands out and the request it
-/// claims back cannot disagree about it (see [`is_download_host`]).
-#[must_use]
-pub fn download_host(region: &str, bucket: &str) -> String {
-    format!("awslambda-{region}-{bucket}.s3.{region}.amazonaws.com")
-}
-
-/// The Region and the bucket label of a download host this service publishes, or `None`
-/// when `host` is not one.
-///
-/// The host's first label names no emulated service, so the router cannot resolve a
-/// target from it: recognising it here is what routes a fetch of a URL this service
-/// HANDED OUT back to this service rather than to its `UnknownService` answer. Any
-/// userinfo and port are stripped first, because a `Host` header may carry them.
-///
-/// The Region is part of the answer because both published stores are PER-REGION (see
-/// [`download_host`]): a layer archive is held under the Region it was published into, so
-/// the object a URL names is not resolved by its key alone.
-#[must_use]
-pub fn download_region_and_bucket(host: &str) -> Option<(String, &'static str)> {
-    let host = host.rsplit('@').next().unwrap_or(host);
-    let host = host.split(':').next().unwrap_or(host);
-    let rest = host.strip_prefix("awslambda-")?;
-    [DOWNLOAD_BUCKET_TASKS, DOWNLOAD_BUCKET_LAYERS]
-        .into_iter()
-        .find_map(|bucket| {
-            rest.split_once(&format!("-{bucket}.s3."))
-                .and_then(|(region, tail)| {
-                    Some((region.to_string(), tail.strip_suffix(".amazonaws.com")?))
-                })
-                .filter(|(region, tail)| !region.is_empty() && tail == region)
-                .map(|(region, _)| (region, bucket))
-        })
-}
-
-/// The bucket label of a download host this service publishes, or `None` when `host` is
-/// not one; the Region half is [`download_region_and_bucket`]'s.
-#[must_use]
-pub fn download_bucket_of_host(host: &str) -> Option<&'static str> {
-    download_region_and_bucket(host).map(|(_, bucket)| bucket)
-}
-
-/// Whether `host` is one of the download hosts this service publishes.
-#[must_use]
-pub fn is_download_host(host: &str) -> bool {
-    download_bucket_of_host(host).is_some()
-}
-
-/// What a download URL this service handed out names.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DownloadTarget {
-    /// A function's deployment package, at the revision the location was reported for.
-    FunctionPackage {
-        /// The bare function name.
-        name: String,
-        /// The revision the reported location belongs to, which is the unpublished
-        /// configuration's or one published version's.
-        revision_id: String,
-    },
-    /// One layer version's archive.
-    LayerArchive {
-        /// The Region the archive is held in, which the download host names: a layer is
-        /// a regional resource, so this is part of WHICH archive is named.
-        region: String,
-        /// The bare layer name.
-        name: String,
-        /// The version number.
-        version: i64,
-    },
-}
-
-/// The object a download request names, or `None` when it names none this service
-/// publishes.
-///
-/// Read from the SAME two parts the URL is built from — the host's bucket label and the
-/// path — so a URL [`code_location_url`] or [`layer_archive_location`] minted resolves
-/// here and nothing else does.
-#[must_use]
-pub fn parse_download_target(host: &str, path: &str) -> Option<DownloadTarget> {
-    let (region, bucket) = download_region_and_bucket(host)?;
-    let rest = path
-        .strip_prefix(DOWNLOAD_PATH_PREFIX)?
-        .strip_prefix('/')?;
-    let (account, key) = rest.split_once('/')?;
-    if account != ::engine::emulator_account_id() || key.contains('/') {
-        return None;
-    }
-    let key = smithy_server_runtime::percent_decode(key);
-    // The key is `<name>-<suffix>`, and a name may itself hold `-`, so the SUFFIX is
-    // what is peeled off: a revision id is a UUID, whose rendering is a fixed width, and
-    // a layer version is the decimal number the archive location carried.
-    match bucket {
-        DOWNLOAD_BUCKET_TASKS => {
-            let split = key.len().checked_sub(UUID_RENDERED_LEN)?;
-            // `get` rather than `split_at`: the key is UNTRUSTED input, and a byte offset
-            // that falls inside a multi-byte character is not a split point — it answers
-            // `None` here instead of panicking.
-            let (name, revision_id) = (key.get(..split)?, key.get(split..)?);
-            if ::uuid::Uuid::parse_str(revision_id).is_err() {
-                return None;
-            }
-            Some(DownloadTarget::FunctionPackage {
-                name: name.strip_suffix('-')?.to_string(),
-                revision_id: revision_id.to_string(),
-            })
-        }
-        _ => {
-            let (name, version) = key.rsplit_once('-')?;
-            Some(DownloadTarget::LayerArchive {
-                region,
-                name: name.to_string(),
-                version: version.parse::<i64>().ok().filter(|version| *version > 0)?,
-            })
-        }
-    }
-}
-
-/// How many characters a UUID's canonical rendering takes, which is the width
-/// [`mint_revision_id`] produces and so the width a download key's revision suffix has.
-const UUID_RENDERED_LEN: usize = 36;
 
 /// The deployment package bytes this emulator holds for `code`, or `None` when it holds
 /// none (an S3 object or a container image it does not resolve).
@@ -4888,3 +4727,9 @@ pub use package_code::*;
 /// `/2017-03-31/tags/{Resource}` operations; see the module's own header.
 mod resource_tags;
 pub use resource_tags::*;
+
+/// WHERE a layer version's archive and a function's deployment package are downloaded
+/// from: the presigned URL a read announces for one, and the object a request to that URL
+/// names; see the module's own header.
+pub mod download_location;
+pub use download_location::*;

@@ -201,7 +201,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .layer(&named_region, &name)
             .and_then(|record| {
                 let held = record.versions.get(&version)?;
-                Some(record.version_detail(held))
+                Some(record.version_detail(ctx, held))
             })
             .ok_or_else(no_such_layer_version)?;
         Ok(layer_version(detail))

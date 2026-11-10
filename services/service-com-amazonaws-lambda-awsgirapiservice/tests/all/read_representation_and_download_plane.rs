@@ -237,6 +237,14 @@ async fn fetch(router: &MultiServiceRouter, method: &str, url: &str) -> Answer {
     }
 }
 
+/// The `scheme://host[:port]` an announced URL is addressed to, which is the base URL this
+/// emulator is reached on.
+fn announced_base(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or_default();
+    let host = rest.split('/').next().unwrap_or_default();
+    format!("{scheme}://{host}")
+}
+
 /// One row of the qualifier table: how the read addresses the function, and whether that
 /// identity is the unqualified one.
 struct ConcurrencyCase {
@@ -1106,12 +1114,14 @@ async fn an_announced_download_url_serves_the_stored_bytes() {
     // The unpublished version's OLD location addressed a package the store no longer
     // holds, and a key this service publishes no object at names none either: both are
     // the download plane's own 404, never the router's "no such service".
+    let absent = format!(
+        "{base}/awslambda-{REGION}-tasks/snapshots/{ACCOUNT}\
+         /absent-00000000-0000-4000-8000-000000000000",
+        base = announced_base(&latest_location),
+    );
     for (case, url) in [
         ("a replaced revision", latest_location.as_str()),
-        (
-            "a key this service publishes no object at",
-            "https://awslambda-us-east-1-tasks.s3.us-east-1.amazonaws.com/snapshots/000000000000/absent-00000000-0000-4000-8000-000000000000",
-        ),
+        ("a key this service publishes no object at", absent.as_str()),
     ] {
         let answer = fetch(&router, "GET", url).await;
         assert_eq!(

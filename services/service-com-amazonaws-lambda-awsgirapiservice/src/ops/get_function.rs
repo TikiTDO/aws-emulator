@@ -206,7 +206,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         Ok(GetFunctionOutput {
             configuration: Some(record.configuration(&version, &config)),
-            code: Some(record.code_location(&version)),
+            code: Some(record.code_location(ctx, &version)),
             // Tags are function-level rather than version-level, so every qualifier
             // reports the same ones; an untagged function reports none at all.
             tags: (!record.tags.is_empty()).then(|| {

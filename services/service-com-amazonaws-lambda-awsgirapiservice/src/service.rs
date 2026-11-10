@@ -45,14 +45,14 @@
 //! `GetFunction` hands out `Code$Location`, "A presigned URL that you can use to download
 //! the deployment package", and `GetLayerVersion` hands out `Content$Location`, "A link to
 //! the layer archive in Amazon S3"; a URL this service announces is a promise that a
-//! caller can follow it. Both are addressed to the per-region download hosts this service
-//! publishes (`crate::state::is_download_host`), under
-//! `crate::state::DOWNLOAD_PATH_PREFIX`, which name no modelled operation. Two seams
-//! carry them, the same pair any emulated data plane uses:
+//! caller can follow it, so each one is presigned against the base URL this emulator is
+//! reached on and carries the object's S3 address — the per-region bucket and the key
+//! under it — in its PATH (`crate::state::download_object_path`), a path space no modelled
+//! operation binds. Two seams carry them, the same pair any emulated data plane uses:
 //!
-//! - [`Service::can_handle`] also claims a request addressed to those published hosts,
-//!   whose first label names no service, so the router does not answer `UnknownService`
-//!   for a URL this service handed out;
+//! - [`Service::can_handle`] also claims a request addressed to an object of those
+//!   published stores, so a URL this service handed out is not answered as a request
+//!   naming no operation;
 //! - [`Service::override_operation`] serves it, through [`Downloads`], which the router
 //!   reaches BEFORE authentication — which is what lets a presigned URL be followed
 //!   without a signature, as a presigned URL is.
@@ -629,8 +629,8 @@ where
 ///
 /// This is the data plane behind the URLs `GetFunction` and `GetLayerVersion` announce.
 /// It is NOT a modelled operation — AWS serves those objects from a presigned S3 URL, and
-/// this emulator serves them from the host it published in that URL, because a URL it
-/// announces has to resolve. It only READS.
+/// this emulator serves them at the path it published in that URL, on its OWN endpoint,
+/// because a URL it announces has to be one a caller can reach. It only READS.
 struct Downloads<Eng> {
     engine: Arc<Eng>,
 }
@@ -699,41 +699,26 @@ const NO_SUCH_KEY_MESSAGE: &str = "The specified key does not exist.";
 /// What it says for a method a download does not answer.
 const METHOD_NOT_ALLOWED_MESSAGE: &str = "The specified method is not allowed against this resource.";
 
-/// The object a request to a download host names, or `None` when it names none.
+/// The object a download request names, or `None` when it names none.
 ///
-/// The host comes from the request, because it is what says WHICH of the two published
-/// stores the path addresses; both are read by `crate::state`, so the URL this service
-/// mints and the request it serves cannot disagree about either. The path is taken by
-/// `service_common`'s one reader of a request URI, so this plane and every other service's
-/// claim read a URI the same way.
+/// The PATH is what says which object is addressed — the published store's bucket and the
+/// key under it — and `crate::state` reads it back from the same two parts it builds the
+/// announced URL out of, so the URL this service mints and the request it serves cannot
+/// disagree about either. The path is taken by `service_common`'s one reader of a request
+/// URI, so this plane and every other service's claim read a URI the same way.
 fn request_target(req: &RtRequest) -> Option<crate::state::DownloadTarget> {
-    crate::state::parse_download_target(
-        &request_authority(req)?,
-        service_common::request_path(req.uri()),
-    )
+    crate::state::parse_download_target(service_common::request_path(req.uri()))
 }
 
-/// Whether the request is addressed to one of the download hosts this service publishes.
+/// Whether the request addresses an object in one of the published download stores.
 ///
-/// The HOST is what makes a request this plane's, rather than the path: a path that host
-/// publishes no object at is answered by the plane as the object it does not hold, not by
-/// the router as an unrouted request.
-fn names_download_host(req: &RtRequest) -> bool {
-    request_authority(req).is_some_and(|host| crate::state::is_download_host(&host))
-}
-
-/// The authority a request is addressed to: its `Host` header, or the URI authority when
-/// the request carries one instead.
-fn request_authority(req: &RtRequest) -> Option<String> {
-    req.headers()
-        .get("host")
-        .map(str::to_string)
-        .or_else(|| {
-            req.uri()
-                .parse::<::http::Uri>()
-                .ok()
-                .and_then(|uri| uri.authority().map(|authority| authority.as_str().to_string()))
-        })
+/// The PATH is what makes a request this plane's: a URL this service announced is addressed
+/// to its own endpoint, which every modelled operation is addressed to as well, so the
+/// published bucket the path opens with is what tells the two apart. The KEY is not part of
+/// that reading, so a key naming no object this store holds is answered by the plane as the
+/// object it does not hold, not by the router as a request naming no operation.
+fn addresses_download_object(req: &RtRequest) -> bool {
+    crate::state::addresses_download_store(service_common::request_path(req.uri()))
 }
 
 /// Serve one stored object: its own bytes, under its own length.
@@ -778,13 +763,11 @@ fn download_status(code: u16) -> StatusCode {
     StatusCode::try_from(code).expect("the download plane's statuses are valid constants")
 }
 
-/// The `Host` header of a buffered request, or the URI authority when the request is
-/// HTTP/2 (which carries `:authority` on the URI instead of a `Host` header).
-fn request_host(parts: &http::request::Parts) -> Option<&str> {
-    match parts.headers.get("host").and_then(|host| host.to_str().ok()) {
-        Some(host) => Some(host),
-        None => parts.uri.authority().map(http::uri::Authority::as_str),
-    }
+/// [`addresses_download_object`] for the buffered request `can_handle` is handed, read by
+/// the same rule, so the claim and the serving seam cannot disagree about which requests
+/// belong to this plane.
+fn claims_download_object(parts: &http::request::Parts) -> bool {
+    crate::state::addresses_download_store(parts.uri.path())
 }
 
 impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
@@ -820,11 +803,11 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
             crate::ROUTE_PATH_SEGMENTS,
             None,
         ) && claims_shared_tagging_path(parts)
-            // And a request addressed to one of the DOWNLOAD hosts this service publishes
-            // its presigned URLs under, whose first label names no service at all:
-            // without this the router answers `UnknownService` for a URL this service
-            // handed out. See the module docs.
-            || request_host(parts).is_some_and(crate::state::is_download_host)
+            // And a request addressed to an object in one of the DOWNLOAD stores this
+            // service publishes its presigned URLs into, which is a path space of its own
+            // that no modelled operation binds: without this the router answers a URL this
+            // service handed out as a request naming no operation. See the module docs.
+            || claims_download_object(parts)
             // And a request addressed to a FUNCTION URL this service holds, for the same
             // reason: the endpoint `CreateFunctionUrlConfig` handed out names no service
             // in its first label either, and a client that cannot resolve that host
@@ -847,10 +830,10 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // The download plane is the one such request: a fetch of a URL this service
         // announced names no modelled operation at all, so there is no routing key to
         // resolve for it (see the module docs). Every method addressed to a published
-        // download host reaches the plane, which decides the method itself: a read is
+        // download object reaches the plane, which decides the method itself: a read is
         // served and anything else is refused as a method, rather than falling through to
         // the router's answer for an unrouted request.
-        if names_download_host(req) {
+        if addresses_download_object(req) {
             return Some(&self.downloads as &dyn ErasedOperation);
         }
         // And a request to a FUNCTION URL this service holds, which names no modelled

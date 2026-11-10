@@ -39,6 +39,8 @@ mod alias_update_not_found_sentence;
 mod alias_version_not_found_sentence;
 #[path = "all/alias_write_not_found_sentence.rs"]
 mod alias_write_not_found_sentence;
+#[path = "all/announced_download_locations.rs"]
+mod announced_download_locations;
 #[path = "all/async_delivery.rs"]
 mod async_delivery;
 #[path = "all/async_invocation.rs"]

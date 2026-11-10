@@ -1005,8 +1005,16 @@ impl FunctionRecord {
     /// A published version keeps its own package and its own revision, so the location
     /// reported for it addresses THAT package and keeps serving it after the unpublished
     /// version's code is replaced.
+    ///
+    /// `ctx` is what the package's `Code$Location` is announced against: the member is "A
+    /// presigned URL that you can use to download the deployment package", so it is
+    /// presigned for the base URL this emulator is reached on (see [`code_location_url`]).
     #[must_use]
-    pub fn code_location(&self, version: &str) -> FunctionCodeLocation {
+    pub fn code_location(
+        &self,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
+        version: &str,
+    ) -> FunctionCodeLocation {
         let config = self.config_of(version).unwrap_or(&self.config);
         let code = self.code_of(version);
         if let Some(image_uri) = &code.image_uri {
@@ -1027,6 +1035,7 @@ impl FunctionRecord {
         FunctionCodeLocation {
             repository_type: Some(REPOSITORY_TYPE_S3.to_string()),
             location: Some(code_location_url(
+                ctx,
                 &self.region,
                 &config.name,
                 &config.revision_id,
