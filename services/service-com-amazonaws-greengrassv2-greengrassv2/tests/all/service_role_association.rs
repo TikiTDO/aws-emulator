@@ -41,7 +41,11 @@ const SERVICE_ROLE_PATH: &str = "/greengrass/servicerole";
 
 /// The emulator front door with only this service mounted, over ONE shared engine —
 /// exactly how `core/router` assembles it.
-fn emulator() -> MultiServiceRouter {
+///
+/// This suite owns the service-role harness for the crate: the read-side suite
+/// `tests/all/service_role_read_is_a_pure_report.rs` drives these same helpers, so a
+/// service-role request is built and read exactly one way here.
+pub(crate) fn emulator() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
@@ -79,19 +83,19 @@ async fn call(router: &MultiServiceRouter, method: &str, body: Vec<u8>) -> (u16,
 }
 
 /// `AssociateServiceRoleToAccount` for `role_arn`.
-async fn associate(router: &MultiServiceRouter, role_arn: &str) -> (u16, Value) {
+pub(crate) async fn associate(router: &MultiServiceRouter, role_arn: &str) -> (u16, Value) {
     let body = serde_json::to_vec(&serde_json::json!({ "RoleArn": role_arn }))
         .expect("a serializable request body");
     call(router, "PUT", body).await
 }
 
 /// `GetServiceRoleForAccount`.
-async fn get_role(router: &MultiServiceRouter) -> (u16, Value) {
+pub(crate) async fn get_role(router: &MultiServiceRouter) -> (u16, Value) {
     call(router, "GET", Vec::new()).await
 }
 
 /// `DisassociateServiceRoleFromAccount`.
-async fn disassociate(router: &MultiServiceRouter) -> (u16, Value) {
+pub(crate) async fn disassociate(router: &MultiServiceRouter) -> (u16, Value) {
     call(router, "DELETE", Vec::new()).await
 }
 
@@ -101,7 +105,7 @@ fn member(body: &Value, key: &str) -> Value {
 }
 
 /// A string member of a JSON object, or the empty string when absent.
-fn text(body: &Value, key: &str) -> String {
+pub(crate) fn text(body: &Value, key: &str) -> String {
     body.get(key)
         .and_then(Value::as_str)
         .unwrap_or_default()
@@ -110,7 +114,7 @@ fn text(body: &Value, key: &str) -> String {
 
 /// The current instant in whole epoch seconds, which is the resolution a reported
 /// instant carries.
-fn now_seconds() -> i64 {
+pub(crate) fn now_seconds() -> i64 {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -124,7 +128,7 @@ fn now_seconds() -> i64 {
 /// the window `[opened, closed]` the calling test measured around the call — so the
 /// instant is a reading of the clock rather than a fabricated or echoed value. Answers
 /// the instant in epoch seconds.
-fn instant_within(case: &str, rendered: &str, opened: i64, closed: i64) -> i64 {
+pub(crate) fn instant_within(case: &str, rendered: &str, opened: i64, closed: i64) -> i64 {
     let parsed = DateTime::from_str(rendered, Format::DateTime).unwrap_or_else(|error| {
         panic!("case {case:?}: expected an RFC 3339 instant, got {rendered:?} ({error})")
     });
@@ -154,7 +158,7 @@ fn instant_within(case: &str, rendered: &str, opened: i64, closed: i64) -> i64 {
 /// `aws-service-role` path, a long role name (the IAM role-name limit is 64 characters),
 /// and a role in another partition and region, which an account's association is not
 /// keyed by.
-fn role_arn_rows() -> Vec<(&'static str, String)> {
+pub(crate) fn role_arn_rows() -> Vec<(&'static str, String)> {
     vec![
         (
             "a role at the root path",
