@@ -39,7 +39,7 @@ use super::wire::{child, child_text, document};
 const REGION: &str = "us-east-1";
 
 /// Long enough past [`TRANSITION_DELAY`] that a move the clock owes is certainly due.
-fn past_the_transition() -> Duration {
+pub(crate) fn past_the_transition() -> Duration {
     TRANSITION_DELAY + Duration::from_millis(250)
 }
 
@@ -52,8 +52,9 @@ async fn invoke(
     call(router, REGION, action, params).await
 }
 
-/// The form fields of one `CreateVpnConnectionRoute` request.
-fn route_params(vpn_connection_id: &str, destination_cidr_block: &str) -> Vec<(String, String)> {
+/// The form fields of one `CreateVpnConnectionRoute` request — and of the
+/// `DeleteVpnConnectionRoute` the delete suite sends, whose two members are the same two.
+pub(crate) fn route_params(vpn_connection_id: &str, destination_cidr_block: &str) -> Vec<(String, String)> {
     vec![
         (
             "VpnConnectionId".to_string(),
@@ -109,14 +110,20 @@ type BoundCase = (String, Vec<(String, String)>, u16);
 
 /// One static route as this suite compares them: the destination block, the source and
 /// the state, which is every member `VpnStaticRoute` has.
-type Route = (String, String, String);
+///
+/// `pub(crate)` so the delete suite in [`super::delete_vpn_connection_route`] compares the
+/// routes of a connection the way this one does rather than reading them a second way.
+pub(crate) type Route = (String, String, String);
 
 /// One reported connection: its `VpnConnectionId` and the routes it carries.
 type ReportedConnection = (String, Vec<Route>);
 
 /// The static routes the store holds for `vpn_connection_id` right now, as
 /// (destination block, source, state) triples in the order they are stored.
-fn stored_routes(engine: &engine::InMemoryEngine, vpn_connection_id: &str) -> Vec<Route> {
+pub(crate) fn stored_routes(
+    engine: &engine::InMemoryEngine,
+    vpn_connection_id: &str,
+) -> Vec<Route> {
     engine
         .state::<Ec2State>()
         .lock()
@@ -170,7 +177,7 @@ fn reported(case: &str, body: &str) -> Vec<ReportedConnection> {
 }
 
 /// The routes `DescribeVpnConnections` reports for `vpn_connection_id`.
-async fn described_routes(
+pub(crate) async fn described_routes(
     case: &str,
     router: &MultiServiceRouter,
     vpn_connection_id: &str,

@@ -586,6 +586,12 @@ impl ComAmazonawsEc2Amazonec2State {
         // A VPN static route `CreateVpnConnectionRoute` answered as `pending` is
         // `available` once its due instant has passed, whether or not anybody called — the
         // same contract as a `pending` VPC's move above.
+        //
+        // The bytes the routes that reached `deleted` below held, released once the walk is
+        // over: a deleted route has LEFT its connection, so what it charged the store's
+        // caller-chosen byte budget is given back, exactly as a deprovisioned IPAM pool CIDR
+        // gives its own back.
+        let mut released_route_bytes = 0usize;
         for record in self.vpn_connections.values_mut() {
             let VpnConnectionRecord {
                 view,
@@ -608,6 +614,24 @@ impl ComAmazonawsEc2Amazonec2State {
                 let Some(state) = pending.due_by(now).map(str::to_string) else {
                     return true;
                 };
+                // A route `DeleteVpnConnectionRoute` left `deleting` has reached the terminal
+                // `deleted` at the instant that write recorded for it, and a deleted route is
+                // one the connection no longer carries: it LEAVES the route set at that
+                // instant, whether or not anybody called again.
+                if state == VPN_STATE_DELETED {
+                    if let Some(routes) = view.routes.as_mut() {
+                        routes.retain(|route| {
+                            let doomed = route.destination_cidr_block.as_deref()
+                                == Some(destination_cidr_block.as_str());
+                            if doomed {
+                                released_route_bytes += destination_cidr_block.len();
+                            }
+                            !doomed
+                        });
+                    }
+                    // The removal is applied once; nothing is owed on this route any more.
+                    return false;
+                }
                 if let Some(route) = view.routes.iter_mut().flatten().find(|route| {
                     route.destination_cidr_block.as_deref()
                         == Some(destination_cidr_block.as_str())
@@ -618,6 +642,7 @@ impl ComAmazonawsEc2Amazonec2State {
                 false
             });
         }
+        self.release_stored_bytes(released_route_bytes);
         // A customer gateway written in a non-terminal `CustomerGateway$State` reaches the
         // state recorded for it once its due instant has passed, whether or not anybody
         // called — the same contract as the VPN connection's own move above.

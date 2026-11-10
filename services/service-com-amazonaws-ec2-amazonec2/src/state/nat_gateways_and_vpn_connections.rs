@@ -2080,6 +2080,41 @@ pub fn invalid_vpn_connection_id_not_found<E>(vpn_connection_id: &str) -> Scaffo
     )
 }
 
+/// Refuse a VPN connection id this account holds no connection for, as the DELETE of one of
+/// its static routes answers it: HTTP 400 [`INVALID_VPN_CONNECTION_ID`], naming the id the
+/// request asked about and nothing else.
+///
+/// The SAME code as [`invalid_vpn_connection_id`] with one clause fewer, and the recorded
+/// wire corpus is why: EC2 names the account the lookup was made in only when the static
+/// route is being CREATED, so the two wordings of this one code are kept apart rather than
+/// folded into one. The id is the request's own.
+pub fn invalid_vpn_connection_id_on_route_delete<E>(vpn_connection_id: &str) -> Scaffolded<E> {
+    Scaffolded::service_error(
+        INVALID_VPN_CONNECTION_ID,
+        400,
+        format!("The specified VpnConnection ({vpn_connection_id}) does not exist"),
+    )
+}
+
+/// Refuse a destination block the named VPN connection carries no static route for: HTTP 400
+/// [`INVALID_ROUTE_NOT_FOUND`], the code this crate already answers a route it cannot resolve
+/// inside the resource that holds it with, worded the way that class is worded here
+/// ([`local_gateway_route_not_found`]) — the destination the request named and the connection
+/// it is not a route of.
+pub fn vpn_static_route_not_found<E>(
+    vpn_connection_id: &str,
+    destination_cidr_block: &str,
+) -> Scaffolded<E> {
+    Scaffolded::service_error(
+        INVALID_ROUTE_NOT_FOUND,
+        400,
+        format!(
+            "The route '{destination_cidr_block}' does not exist in the VPN connection \
+             '{vpn_connection_id}'"
+        ),
+    )
+}
+
 /// Refuse a static route create that would take one connection past
 /// [`MAX_VPN_STATIC_ROUTES`]: HTTP 400 [`ROUTE_LIMIT_EXCEEDED`].
 pub fn vpn_route_limit_exceeded<E>(vpn_connection_id: &str) -> Scaffolded<E> {
@@ -2218,6 +2253,45 @@ impl VpnConnectionRecord {
         );
         route
     }
+
+    /// Start the deletion of this connection's static route for `destination_cidr_block` and
+    /// answer it as it now stands — `None` when the connection carries no route for that
+    /// block, in which case nothing was written.
+    ///
+    /// `deleting` and `deleted` are both `VpnState` members, so a route a delete has been
+    /// asked for is left in the TRANSIENT state with the clock owing it the terminal one, the
+    /// same arrangement as the connection's own ([`Self::begin_deletion`]). Reaching
+    /// [`VPN_STATE_DELETED`] takes the route OUT of the connection's route set
+    /// ([`ComAmazonawsEc2Amazonec2State::materialize_due_transitions`]), which is what gives
+    /// the bytes it held back to the store's budget: a deleted route is one the connection no
+    /// longer carries. A route already on its way out is left exactly as it is, so repeating
+    /// the request neither reports a second deletion nor postpones the first by restarting its
+    /// due instant.
+    ///
+    /// Reach it through
+    /// [`ComAmazonawsEc2Amazonec2State::begin_vpn_static_route_deletion`], the one write path
+    /// for it.
+    pub(super) fn begin_static_route_deletion(
+        &mut self,
+        destination_cidr_block: &str,
+    ) -> Option<VpnStaticRoute> {
+        let route = self.view.routes.iter_mut().flatten().find(|route| {
+            route.destination_cidr_block.as_deref() == Some(destination_cidr_block)
+        })?;
+        if matches!(
+            route.state.as_deref().unwrap_or_default(),
+            VPN_STATE_DELETING | VPN_STATE_DELETED
+        ) {
+            return Some(route.clone());
+        }
+        route.state = Some(VPN_STATE_DELETING.to_string());
+        let deleting = route.clone();
+        self.route_moves.insert(
+            destination_cidr_block.to_string(),
+            PendingStateMove::starting_now(VPN_STATE_DELETED),
+        );
+        Some(deleting)
+    }
 }
 
 /// The store's VPN connections, and the one way a connection and a static route are
@@ -2314,5 +2388,23 @@ impl ComAmazonawsEc2Amazonec2State {
             self.add_stored_bytes(destination_cidr_block.len());
         }
         Some(route)
+    }
+
+    /// Start the deletion of the static route for `destination_cidr_block` on the connection
+    /// `vpn_connection_id` names and answer it as it now stands — or `None` when this account
+    /// holds no such connection or the connection carries no route for that block, in which
+    /// case nothing was written.
+    ///
+    /// The ONE place a static route's deletion is started, so the state it moves to and the
+    /// instant its removal falls due cannot be built two ways — the other end of the life
+    /// [`Self::put_vpn_static_route`] begins.
+    pub fn begin_vpn_static_route_deletion(
+        &mut self,
+        vpn_connection_id: &str,
+        destination_cidr_block: &str,
+    ) -> Option<VpnStaticRoute> {
+        self.vpn_connections
+            .get_mut(vpn_connection_id)?
+            .begin_static_route_deletion(destination_cidr_block)
     }
 }

@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteVpnConnectionRoute
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteVpnConnectionRoute`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteVpnConnectionRoute::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Takes one static route back out of a Site-to-Site VPN connection this account holds.
+//!
+//! The route lives ON the connection, in the `Routes` member of the modelled `VpnConnection`
+//! the store keeps ([`crate::state::VpnConnectionRecord`]), so this delete is the other end
+//! of the life `CreateVpnConnectionRoute` begins: it is started through
+//! [`crate::state::ComAmazonawsEc2Amazonec2State::begin_vpn_static_route_deletion`], which
+//! leaves the route in the non-terminal `deleting` `VpnState` with the clock owing it
+//! `deleted` — the instant at which it leaves the connection's route set, so a later
+//! `DescribeVpnConnections` reports this write itself rather than a second copy of it.
 //!
 //! ## Shape of an operation
 //!
@@ -22,13 +23,8 @@
 //!
 //! The engine is held on `self` (constructor-injected), NOT passed per request — so
 //! engine access is guaranteed by the time any request runs. Reach the store through
-//! [`crate::state::service_state`] and read and write it through the guard it hands back:
-//!
-//! ```ignore
-//!     let state = crate::state::service_state(&*self.engine)
-//!         .ok_or(/* a modelled server error */)?;
-//!     state.lock().your_field = /* ... */;
-//! ```
+//! [`crate::state::require_service_state`] and read and write it through the guard it
+//! hands back.
 //!
 //! `ctx` ([`smithy_server_runtime::OperationContext`]) carries request metadata only —
 //! headers, URI, method, and anything middleware placed in `ctx.parts().extensions`.
@@ -148,18 +144,100 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteVpnConnectionRoute` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteVpnConnectionRouteErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteVpnConnectionRoute"))
+        // `ctx` carries request metadata only; this operation reads none of it - a VPN
+        // connection is named by id, which is unique across Regions in this store. The
+        // store is reached through the engine held on `self`.
+        let _ = ctx;
+        use crate::state;
+
+        // Both members are modelled `@required` AND `@clientOptional`, so an EMPTY value
+        // reaches the handler rather than being refused at the boundary. EC2 answers that
+        // with `MissingParameter`, which is a different claim from "no such connection".
+        if input.vpn_connection_id.is_empty() {
+            return Err(state::missing_parameter(
+                "The request must contain the parameter vpnConnectionId",
+            ));
+        }
+        if input.destination_cidr_block.is_empty() {
+            return Err(state::missing_parameter(
+                "The request must contain the parameter destinationCidrBlock",
+            ));
+        }
+
+        // "The CIDR block associated with the local subnet of the customer network"
+        // (`DeleteVpnConnectionRouteRequest$DestinationCidrBlock`): a value that is not a
+        // CIDR block of either family at all is refused before the connection is looked up,
+        // and the block is read in the canonical form this service STORES every CIDR member
+        // in - the one reading that makes a destination block identify ONE route of a
+        // connection, so a delete resolves the route a create wrote however either spelled
+        // the block.
+        let destination_cidr_block = state::canonical_vpn_static_route_cidr(
+            &input.destination_cidr_block,
+        )
+        .map_err(|_: state::CidrProblem| {
+            state::invalid_parameter_value(format!(
+                "Value ({requested}) for parameter destinationCidrBlock is invalid. \
+                 This is not a valid CIDR block.",
+                requested = input.destination_cidr_block,
+            ))
+        })?;
+
+        let state_handle = state::require_service_state(&*self.engine)?;
+        let mut store = state_handle.lock();
+        // The clock first: every move it already owed was due at its instant whether or not
+        // anybody called, so what this call does is decided from the state the connection and
+        // its routes are ACTUALLY in - a route whose own deletion has already fallen due is
+        // one this connection no longer carries.
+        store.materialize_due_transitions();
+
+        let Some(record) = store.vpn_connection(&input.vpn_connection_id) else {
+            return Err(state::invalid_vpn_connection_id_on_route_delete(
+                &input.vpn_connection_id,
+            ));
+        };
+
+        // A connection on its way out has no static route to take away: `deleting` and
+        // `deleted` are the `VpnState` members of a connection whose tunnels are being, or
+        // have been, torn down, so there is nothing left for a route to be programmed out of
+        // - the same rule the create of a route applies to the same surface.
+        if matches!(
+            record.state(),
+            state::VPN_STATE_DELETING | state::VPN_STATE_DELETED
+        ) {
+            return Err(state::incorrect_state(format!(
+                "The VPN connection '{vpn_connection_id}' is in state '{connection_state}', \
+                 which is not a state in which a static route can be deleted",
+                vpn_connection_id = input.vpn_connection_id,
+                connection_state = record.state(),
+            )));
+        }
+
+        // "Deletes the specified static route associated with a VPN connection"
+        // (`DeleteVpnConnectionRoute`): a block the connection carries no route for is a
+        // refusal rather than a no-op, which is how a caller tells "no such connection" from
+        // "no such route in it".
+        if record.route(&destination_cidr_block).is_none() {
+            return Err(state::vpn_static_route_not_found(
+                &input.vpn_connection_id,
+                &destination_cidr_block,
+            ));
+        }
+
+        // The write itself: `deleting` now, with the clock owing the route's removal from the
+        // connection. The lookups above have already established both the connection and the
+        // route are there, so `None` here would mean the store changed under the lock; it is
+        // answered with the same refusal rather than reported as a success that wrote nothing.
+        if store
+            .begin_vpn_static_route_deletion(&input.vpn_connection_id, &destination_cidr_block)
+            .is_none()
+        {
+            return Err(state::invalid_vpn_connection_id_on_route_delete(
+                &input.vpn_connection_id,
+            ));
+        }
+
+        // The operation's modelled output shape is `Unit`, so a success carries nothing
+        // beyond the status.
+        Ok(DeleteVpnConnectionRouteOutput)
     }
 }

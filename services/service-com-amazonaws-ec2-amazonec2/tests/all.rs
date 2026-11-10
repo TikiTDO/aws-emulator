@@ -713,6 +713,12 @@ mod classic_link_instances;
 // landings insert their two lines, and these two already lost a serialized squash merge at
 #[path = "all/delete_vpn_connection.rs"]
 mod delete_vpn_connection;
+// What `DeleteVpnConnectionRoute` takes out of the Site-to-Site VPN connection it names,
+// what it refuses, and what the clock then owes the route it left `deleting`. Declared HERE,
+// beside the connection-delete suite it shares its fixtures with, for the reason that suite
+// gives: the head and the tail of this list are where concurrent ec2 landings insert lines.
+#[path = "all/delete_vpn_connection_route.rs"]
+mod delete_vpn_connection_route;
 // What `CreateSnapshots` makes of the volumes one instance holds — one snapshot each, the
 // two exclusions, the tags, and the refusals. Declared in the MIDDLE of the list for the
 // reason the suite above gives: the head and the tail are both where concurrent ec2 landings
