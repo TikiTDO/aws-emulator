@@ -35,10 +35,12 @@ const DESCRIBE_SOURCES: &str = "DescribeDeliverySources";
 const VALIDATION: &str = "ValidationException";
 
 /// The `DeliveryDestinationType`s the model's enum names
-/// (`smithy_query(query="shape",shape="DeliveryDestinationType")`), and the one of them that
-/// receives traces rather than log records.
+/// (`smithy_query(query="shape",shape="DeliveryDestinationType")`), the one of them that
+/// receives traces rather than log records, and the order the enum DECLARES them in — which is
+/// the order one log type's templates are published in.
 const DESTINATION_TYPES: [&str; 4] = ["CWL", "FH", "S3", "XRAY"];
 const TRACE_DESTINATION_TYPE: &str = "XRAY";
+const DESTINATION_TYPE_ORDER: [&str; 4] = ["S3", "CWL", "FH", "XRAY"];
 
 /// The `OutputFormat`s the model's enum names
 /// (`smithy_query(query="shape",shape="OutputFormat")`).
@@ -50,13 +52,24 @@ const OUTPUT_FORMATS: [&str; 5] = ["json", "parquet", "plain", "raw", "w3c"];
 const TRACE_LOG_TYPE: &str = "TRACES";
 
 /// What the operation must publish for a delivery that can be written in a delimited format,
-/// and the fields every S3 delivery's suffix path may use whatever the log source — the
-/// account and Region it is made in first, the time partition of the object last, with the
-/// variables naming the sending resource between them. Spelled out here rather than imported,
-/// so an edit to either published set is caught instead of agreeing with itself.
+/// and the delimiter it defaults to: `FieldDelimiter` is modelled `@length 0..5`, so NO
+/// delimiter is a value in its own right and it is the default a template publishes.
 const FIELD_DELIMITERS: [&str; 3] = ["\t", " ", ","];
-const SUFFIX_PATH_ACCOUNT_FIELDS: [&str; 2] = ["accountid", "region"];
+const DEFAULT_FIELD_DELIMITER: &str = "";
+/// The variable field every S3 delivery's suffix path opens with, the Region it must also name,
+/// and the time partition every one of them closes with. Spelled out here rather than imported,
+/// so an edit to either published set is caught instead of agreeing with itself.
+const SUFFIX_PATH_ACCOUNT_FIELD: &str = "accountid";
+const SUFFIX_PATH_REGION_FIELD: &str = "region";
 const SUFFIX_PATH_TIME_FIELDS: [&str; 4] = ["yyyy", "MM", "dd", "HH"];
+
+/// The fields a template ALLOWS that a delivery created without a record field list does not
+/// carry: `allowedFields` is "the allowed fields that a caller can use in the recordFields
+/// parameter" while `defaultDeliveryConfigValues.recordFields` is "the default record fields
+/// that will be delivered when a list of record fields is not provided", so the default list is
+/// the allowed fields less these — except a mandatory one, which "must be present in the
+/// recordFields parameter" and so is always delivered.
+const FIELDS_NOT_DELIVERED_BY_DEFAULT: [&str; 2] = ["timestamp", "resource_id"];
 
 /// The IAM action, without its service prefix, that a template names as the permission a
 /// caller needs "to be able to successfully create a delivery source on the desired resource
@@ -69,7 +82,7 @@ const VENDED_LOGS_DELIVERY_ACTION: &str = "AllowVendedLogDeliveryForResource";
 /// `service|logType|resourceType|deliveryDestinationType`: a CloudFront access log delivered
 /// to S3, a WorkMail access-control log delivered to a log group, an Application Load
 /// Balancer access log delivered to Firehose, and an AgentCore trace delivered to X-Ray.
-const CATALOGUE_TEMPLATES: usize = 143;
+const CATALOGUE_TEMPLATES: usize = 179;
 const PINNED_TEMPLATES: [&str; 6] = [
     "cloudfront|ACCESS_LOGS|distribution|S3",
     "workmail|ACCESS_CONTROL_LOGS|organization|CWL",
@@ -116,20 +129,27 @@ fn key_of(template: &Value) -> String {
     .join("|")
 }
 
-/// Every template the published catalogue implies, keyed as [`key_of`] keys a reported one.
+/// Every template the published catalogue implies, keyed as [`key_of`] keys a reported one, in
+/// the order the catalogue publishes them.
 ///
 /// DERIVED here from the catalogue data (`CONFIGURATION_TEMPLATE_SOURCES`, whose service and
 /// log-type pairings come from the `logType` member of `PutDeliverySourceRequest`) by the rule
-/// under test: one template per log type per delivery destination type it can be sent to,
-/// where a TRACES log type goes to the X-Ray trace destination and every other log type goes
-/// to each of the other destination types the model names.
+/// under test: one template per log type per delivery destination type it can be sent to — the
+/// X-Ray trace destination receives a TRACES log type and nothing else, while every log type,
+/// traces included, can be delivered to each destination type that receives records — taken in
+/// the order the model's enum declares the destination types.
 fn catalogue() -> Vec<(String, String)> {
+    assert!(
+        DESTINATION_TYPE_ORDER.iter().all(|destination_type| DESTINATION_TYPES.contains(destination_type))
+            && DESTINATION_TYPE_ORDER.len() == DESTINATION_TYPES.len(),
+        "the published order names every destination type the model does, got {DESTINATION_TYPE_ORDER:?}"
+    );
     let mut templates: Vec<(String, String)> = Vec::new();
     for source in CONFIGURATION_TEMPLATE_SOURCES {
         for log_type in source.log_types {
             let log_type = log_type.log_type;
-            for destination_type in DESTINATION_TYPES {
-                if (destination_type == TRACE_DESTINATION_TYPE) != (log_type == TRACE_LOG_TYPE) {
+            for destination_type in DESTINATION_TYPE_ORDER {
+                if destination_type == TRACE_DESTINATION_TYPE && log_type != TRACE_LOG_TYPE {
                     continue;
                 }
                 templates.push((
@@ -142,7 +162,6 @@ fn catalogue() -> Vec<(String, String)> {
             }
         }
     }
-    templates.sort();
     templates
 }
 
@@ -297,8 +316,8 @@ async fn each_filter_selects_what_it_names_and_several_filters_narrow() {
             |key| key.starts_with("ses|") && field(key, 1) == "APPLICATION_LOGS",
         ),
         (
-            "a log type and a destination type nothing pairs",
-            json!({"logTypes": [TRACE_LOG_TYPE], "deliveryDestinationTypes": ["CWL"]}),
+            "a log type and a resource type nothing pairs",
+            json!({"logTypes": [TRACE_LOG_TYPE], "resourceTypes": ["organization"]}),
             |_key| false,
         ),
     ];
@@ -317,8 +336,8 @@ async fn each_filter_selects_what_it_names_and_several_filters_narrow() {
         );
     }
 
-    // Each destination type selects the templates that can be delivered to it, and only the
-    // trace destination carries the trace log type.
+    // Each destination type selects the templates that can be delivered to it, and the trace
+    // destination carries the trace log type alone.
     for destination_type in DESTINATION_TYPES {
         let case = format!("destination type {destination_type}");
         let reported = walk(
@@ -339,11 +358,13 @@ async fn each_filter_selects_what_it_names_and_several_filters_narrow() {
                 destination_type,
                 "case {case}: every selected template is for that destination type, got {key}"
             );
-            assert_eq!(
-                field(&key, 1) == TRACE_LOG_TYPE,
-                destination_type == TRACE_DESTINATION_TYPE,
-                "case {case}: traces are delivered to {TRACE_DESTINATION_TYPE} and log records are not, got {key}"
-            );
+            if destination_type == TRACE_DESTINATION_TYPE {
+                assert_eq!(
+                    field(&key, 1),
+                    TRACE_LOG_TYPE,
+                    "case {case}: the trace destination receives traces alone, got {key}"
+                );
+            }
         }
     }
 }
@@ -437,9 +458,9 @@ async fn every_template_derives_its_allowed_values_from_its_destination_type() {
                         .as_slice(),
                     "case {case}: expected the published delimiters {FIELD_DELIMITERS:?}, got {allowed:?}"
                 );
-                assert!(
-                    allowed.contains(default),
-                    "case {case}: the default delimiter {default:?} is one of {allowed:?}"
+                assert_eq!(
+                    default, DEFAULT_FIELD_DELIMITER,
+                    "case {case}: expected the default delimiter {DEFAULT_FIELD_DELIMITER:?}, got {default:?}"
                 );
                 for delimiter in allowed {
                     assert!(
@@ -471,14 +492,14 @@ async fn every_template_derives_its_allowed_values_from_its_destination_type() {
             "case {case}: suffix path fields are reported exactly for an S3 destination, got {suffix_fields:?}"
         );
         if let (Some(s3), Some(suffix_fields)) = (s3, suffix_fields) {
+            assert_eq!(
+                suffix_fields.first().map(String::as_str),
+                Some(SUFFIX_PATH_ACCOUNT_FIELD),
+                "case {case}: the published suffix path fields open with {SUFFIX_PATH_ACCOUNT_FIELD:?}, got {suffix_fields:?}"
+            );
             assert!(
-                suffix_fields.starts_with(
-                    &SUFFIX_PATH_ACCOUNT_FIELDS
-                        .iter()
-                        .map(|field| (*field).to_string())
-                        .collect::<Vec<String>>()
-                ),
-                "case {case}: the published suffix path fields open with {SUFFIX_PATH_ACCOUNT_FIELDS:?}, got {suffix_fields:?}"
+                suffix_fields.contains(&SUFFIX_PATH_REGION_FIELD.to_string()),
+                "case {case}: the published suffix path fields name {SUFFIX_PATH_REGION_FIELD:?}, got {suffix_fields:?}"
             );
             assert!(
                 suffix_fields.ends_with(
@@ -488,10 +509,6 @@ async fn every_template_derives_its_allowed_values_from_its_destination_type() {
                         .collect::<Vec<String>>()
                 ),
                 "case {case}: the published suffix path fields close with {SUFFIX_PATH_TIME_FIELDS:?}, got {suffix_fields:?}"
-            );
-            assert!(
-                suffix_fields.len() > SUFFIX_PATH_ACCOUNT_FIELDS.len() + SUFFIX_PATH_TIME_FIELDS.len(),
-                "case {case}: the published suffix path fields name the sending resource too, got {suffix_fields:?}"
             );
             let suffix_path = s3
                 .get("suffixPath")
@@ -515,7 +532,9 @@ async fn every_template_derives_its_allowed_values_from_its_destination_type() {
         }
 
         // The fields: a non-empty catalogue of what a delivery may carry, the default record
-        // field list is exactly that catalogue in order, and a mandatory field is one of them.
+        // field list is what a delivery carries when it names none — those allowed fields in
+        // order, less the ones that are allowed without being delivered by default — and a
+        // mandatory field is one of them.
         let allowed_fields = template
             .get("allowedFields")
             .and_then(Value::as_array)
@@ -524,16 +543,14 @@ async fn every_template_derives_its_allowed_values_from_its_destination_type() {
             !allowed_fields.is_empty(),
             "case {case}: allowedFields is not empty, got {allowed_fields:?}"
         );
-        let names: Vec<String> = allowed_fields
-            .iter()
-            .map(|field| {
-                field
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_else(|| panic!("case {case}: an allowed field carries a name, got {field}"))
-                    .to_string()
-            })
-            .collect();
+        let named = |field: &Value| {
+            field
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("case {case}: an allowed field carries a name, got {field}"))
+                .to_string()
+        };
+        let names: Vec<String> = allowed_fields.iter().map(named).collect();
         for name in &names {
             assert!(
                 (1..=MAX_FIELD_HEADER_CHARS).contains(&name.chars().count()),
@@ -541,9 +558,17 @@ async fn every_template_derives_its_allowed_values_from_its_destination_type() {
             );
         }
         let default_fields = strings(defaults, "recordFields", &case);
+        let expected_defaults: Vec<String> = allowed_fields
+            .iter()
+            .filter(|field| {
+                field.get("mandatory").and_then(Value::as_bool) == Some(true)
+                    || !FIELDS_NOT_DELIVERED_BY_DEFAULT.contains(&named(field).as_str())
+            })
+            .map(named)
+            .collect();
         assert_eq!(
-            default_fields, names,
-            "case {case}: the default record fields are the allowed fields in order, got {default_fields:?}"
+            default_fields, expected_defaults,
+            "case {case}: the default record fields are the allowed fields a delivery carries when it names none, got {default_fields:?}"
         );
         let mandatory: Vec<String> = allowed_fields
             .iter()

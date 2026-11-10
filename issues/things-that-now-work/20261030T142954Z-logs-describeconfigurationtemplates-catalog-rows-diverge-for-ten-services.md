@@ -122,3 +122,30 @@ Cause 10 (…#task#30): expected workmail ACCESS_CONTROL_LOGS 'S3' row with reco
 3. Fixture logs-catalog-describe-configuration-templates, step task#1 (representative) and steps task#2, task#3, task#4, task#5, task#10, task#11, task#14, task#18, task#30 (the other nine causes) each issue DescribeConfigurationTemplates with a service/logTypes/resourceTypes/deliveryDestinationTypes filter.
 4. Compare each response's configurationTemplates list against the recorded one: the emulator returns 200 but every row is CWL-only, omits allowedFieldDelimiters / allowedSuffixPathFields / defaultDeliveryConfigValues.fieldDelimiter / defaultDeliveryConfigValues.s3DeliveryConfiguration / s3TablesIntegration, collapses allowedOutputFormats to ["json"], and carries different recordFields, logType/resourceType keys and allowedFields.mandatory flags.
 5. Re-replay those ten fixture#step bindings to confirm a fix.
+
+## Resolution (what was fixed, and the residue that was not)
+
+Fixed, over the WHOLE catalogue rather than the cited rows:
+
+* a log type's templates are published one per delivery destination type, in the order the
+  model's `DeliveryDestinationType` enum declares them (`[S3, CWL, FH, XRAY]`), so every slice
+  opens with the S3 row; the X-Ray destination receives `TRACES` alone, while every log type —
+  traces included — is deliverable to each destination that receives records;
+* `defaultDeliveryConfigValues.recordFields` is the subset of `allowedFields` a delivery carries
+  when it names none (the allowed fields in order, less the record's own `timestamp` and the
+  sending resource's bare `resource_id`, and never less a mandatory field);
+* `defaultDeliveryConfigValues.fieldDelimiter` is the empty delimiter (`FieldDelimiter` is
+  modelled `@length 0..5`), not the first allowed one;
+* `allowedSuffixPathFields` and the default `s3DeliveryConfiguration.suffixPath` are published
+  per sender, including senders that name no resource variable and senders that partition by day;
+* the record schemas and `mandatory` flags of apigateway, autoloop, eks, events and workmail
+  access-control logs, the Bedrock agent-alias `TRACES` row, and the AgentCore `payments` and
+  `tools` rows the `logType` catalogue names.
+
+Residue, still diverging on replay (the key
+`logs|DescribeConfigurationTemplates|2xx->2xx|$.configurationTemplates[*]`): the recorded row
+COUNT of the aidevops (6), autoloop (21), eks (31) and events (18) slices, and the catalogue's
+internal row order WITHIN a service (the report states only each slice's first row). Both are
+recorded catalogue content that neither the model's `logType` catalogue enumerates nor this
+report states, so no rows were invented to reach a count. A later report that carries those rows
+should reopen this one.

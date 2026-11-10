@@ -539,6 +539,11 @@ pub const CWL_DELIVERY_DESTINATION_TYPE: &str = "CWL";
 /// the model's enum spells it (the `s3` vendor of [`DELIVERY_DESTINATION_VENDOR_TYPES`]).
 pub const S3_DELIVERY_DESTINATION_TYPE: &str = "S3";
 
+/// The `DeliveryDestinationType` of a delivery destination that receives a STREAM of records,
+/// as the model's enum spells it (the `firehose` vendor of
+/// [`DELIVERY_DESTINATION_VENDOR_TYPES`]).
+pub const STREAM_DELIVERY_DESTINATION_TYPE: &str = "FH";
+
 /// The one `OutputFormat` that carries a whole record on its own, needing neither a field
 /// order nor a delimiter to be read back. Spelled as the model's `OutputFormat` enum spells
 /// it ([`crate::ops::types::OUTPUT_FORMAT_VALUES`]).

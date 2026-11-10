@@ -7,12 +7,13 @@
 //! resource to ONE kind of destination may carry, and the two halves of that come from
 //! different places. The SENDING service decides the record — `allowedFields` is the schema
 //! of the records that log type carries, in the order `recordFields` restates them, with the
-//! fields a delivery may not drop marked mandatory, and the S3 Tables datasource is published
-//! for the log types that have one — so a template never advertises the
-//! CloudWatch-Logs-generated `@`-prefixed fields of an INGESTED event for a log type some
-//! other service sends. The DESTINATION decides the packaging — the output formats, the field
-//! delimiters and the S3 suffix path and its variables — so those follow from the destination
-//! type alone and from nothing about the request.
+//! fields a delivery may not drop marked mandatory, `recordFields` names the ones a delivery
+//! carries when it names none, and the S3 Tables datasource is published for the log types
+//! that have one — so a template never advertises the CloudWatch-Logs-generated `@`-prefixed
+//! fields of an INGESTED event for a log type some other service sends. The DESTINATION
+//! decides the packaging — the output formats, the field delimiters and the S3 suffix path and
+//! its variables — so those follow from the destination type alone and from nothing about the
+//! request.
 //!
 //! Every case drives the service the way a client does — `POST /` with
 //! `X-Amz-Target: Logs_20140328.<Operation>` through the router that mounts it — so what is
@@ -48,8 +49,10 @@ const STREAM_DESTINATION_FORMATS: [&str; 3] = ["plain", "json", "w3c"];
 const OBJECT_DESTINATION_FORMATS: [&str; 4] = ["plain", "json", "w3c", "parquet"];
 
 /// The field delimiters the operation publishes for a delivery that delivers in a delimited
-/// format, and the one a template defaults to (the first).
+/// format, and the one a template defaults to: `FieldDelimiter` is modelled `@length 0..5`, so
+/// NO delimiter is a value in its own right and it is the published default.
 const FIELD_DELIMITERS: [&str; 3] = ["\t", " ", ","];
+const DEFAULT_FIELD_DELIMITER: &str = "";
 
 /// One published log source, and the record schema of its log type: the field names in the
 /// order `recordFields` restates them, each paired with whether a delivery MUST carry it.
@@ -57,6 +60,15 @@ const FIELD_DELIMITERS: [&str; 3] = ["\t", " ", ","];
 /// Stated here rather than imported from the catalogue, so an edit to a published schema
 /// fails this suite instead of agreeing with itself.
 type Schema = &'static [(&'static str, bool)];
+
+/// The fields a template ALLOWS that a delivery created without a record field list does not
+/// carry: `allowedFields` is "the allowed fields that a caller can use in the recordFields
+/// parameter" while `defaultDeliveryConfigValues.recordFields` is "the default record fields
+/// that will be delivered when a list of record fields is not provided", so the default list is
+/// the allowed fields less these — except a mandatory one, which "must be present in the
+/// recordFields parameter" and so is always delivered.
+const FIELDS_NOT_DELIVERED_BY_DEFAULT: [&str; 2] = ["timestamp", "resource_id"];
+
 struct Row {
     service: &'static str,
     resource_type: &'static str,
@@ -90,9 +102,9 @@ const ROWS: &[Row] = &[
         log_type: "EXECUTION_LOGS",
         schema: &[
             ("timestamp", false),
-            ("resource_arn", true),
+            ("resource_arn", false),
             ("resource_id", false),
-            ("event_timestamp", true),
+            ("event_timestamp", false),
             ("api_id", false),
             ("stage", false),
             ("resource_path", false),
@@ -109,6 +121,7 @@ const ROWS: &[Row] = &[
             ("resource_arn", true),
             ("resource_id", false),
             ("event_timestamp", true),
+            ("log_timestamp", false),
             ("transformer_arn", false),
             ("object_identifier", false),
             ("event_identifier", false),
@@ -126,11 +139,18 @@ const ROWS: &[Row] = &[
             ("resource_id", false),
             ("event_timestamp", true),
             ("level", false),
-            ("logger", false),
+            ("stream", false),
+            ("message", false),
+            ("err", false),
+            ("error", false),
             ("controller", false),
+            ("controllerGroup", false),
             ("controllerKind", false),
             ("reconcileID", false),
-            ("message", true),
+            ("worker-count", false),
+            ("attempt", false),
+            ("delay", false),
+            ("totalItems", false),
         ],
     },
     Row {
@@ -141,13 +161,15 @@ const ROWS: &[Row] = &[
             ("timestamp", false),
             ("resource_arn", true),
             ("resource_id", false),
-            ("event_timestamp", true),
+            ("message_timestamp_ms", true),
             ("subscriber_name", false),
+            ("request_id", false),
             ("event_id", false),
             ("invocation_id", false),
             ("message_type", false),
             ("log_level", false),
-            ("payload", true),
+            ("details", false),
+            ("error", false),
         ],
     },
     // One event document, every field mandatory: a delivery that drops any part of it is not
@@ -233,10 +255,14 @@ const ROWS: &[Row] = &[
             ("timestamp", false),
             ("organization_arn", true),
             ("event_timestamp", true),
-            ("user_id", false),
-            ("protocol", false),
-            ("source_ip", false),
-            ("scope", false),
+            ("request_id", true),
+            ("user_id", true),
+            ("impersonator_id", false),
+            ("protocol", true),
+            ("source_ip", true),
+            ("user_agent", false),
+            ("scope", true),
+            ("rule_id", false),
             ("access_granted", true),
         ],
     },
@@ -333,10 +359,16 @@ async fn every_log_source_publishes_its_own_record_schema() {
                 .get("defaultDeliveryConfigValues")
                 .unwrap_or_else(|| panic!("case {case}: a template carries defaultDeliveryConfigValues, got {template}"));
             let default_fields = strings(defaults, "recordFields", &case);
-            let names: Vec<String> = expected.iter().map(|(name, _)| name.clone()).collect();
+            let delivered: Vec<String> = expected
+                .iter()
+                .filter(|(name, mandatory)| {
+                    *mandatory || !FIELDS_NOT_DELIVERED_BY_DEFAULT.contains(&name.as_str())
+                })
+                .map(|(name, _mandatory)| name.clone())
+                .collect();
             assert_eq!(
-                default_fields, names,
-                "case {case}: the default record fields are the allowed fields in order, got {default_fields:?}"
+                default_fields, delivered,
+                "case {case}: the default record fields are the allowed fields a delivery carries when it names none, got {default_fields:?}"
             );
         }
     }
@@ -446,8 +478,8 @@ async fn the_packaging_a_template_publishes_follows_from_its_destination_type() 
                 );
                 assert_eq!(
                     default_delimiter.as_deref(),
-                    expected_delimiters.first().map(String::as_str),
-                    "case {case}: the default delimiter is the first published one, got {default_delimiter:?}"
+                    Some(DEFAULT_FIELD_DELIMITER),
+                    "case {case}: expected the default delimiter {DEFAULT_FIELD_DELIMITER:?}, got {default_delimiter:?}"
                 );
             } else {
                 assert!(
@@ -459,53 +491,84 @@ async fn the_packaging_a_template_publishes_follows_from_its_destination_type() 
     }
 }
 
-/// An S3 delivery's object layout: the suffix path variables a template publishes name the
-/// account and Region the delivery is made in, the SENDING RESOURCE, and the time partition —
-/// and the default suffix path is written in those variables alone.
+/// An S3 delivery's object layout: the suffix path variables a template publishes open with the
+/// account the delivery is made in, name the Region it is made in and the SENDING RESOURCE — in
+/// the order that sender publishes them — and close with the time partition; and the default
+/// suffix path is written in those variables alone.
 #[tokio::test]
-async fn an_s3_templates_suffix_path_variables_name_the_sending_resource() {
+async fn an_s3_templates_suffix_path_variables_are_the_ones_its_sender_publishes() {
     let logs = Logs::new();
 
-    // (service, log type, resource type, the variables naming the resource, the default path)
-    let cases: [(&str, &str, &str, &[&str], &str); 5] = [
+    // (service, log type, resource type, the published variables, the default path): a sender
+    // whose resource takes two variables, two that publish the resource variable before the
+    // Region, one that publishes it after, and two that publish none at all — one of those
+    // partitioning its objects by the hour and one by the day.
+    let cases: [(&str, &str, &str, &[&str], &str); 6] = [
         (
             "apigateway",
             "EXECUTION_LOGS",
             "stages",
-            &["api_id", "stage"],
+            &[
+                "accountid", "region", "api_id", "stage", "yyyy", "MM", "dd", "HH",
+            ],
             "{region}/{api_id}/{stage}/",
         ),
         (
             "eks",
             "AUTO_MODE_LOAD_BALANCING_LOGS",
             "cluster",
-            &["cluster_id"],
+            &[
+                "accountid", "cluster_id", "region", "yyyy", "MM", "dd", "HH",
+            ],
             "{region}/{cluster_id}/{yyyy}/{MM}/{dd}/{HH}/",
         ),
         (
             "events",
             "ERROR_LOGS",
             "subscriber",
-            &["subscriber_name"],
+            &[
+                "accountid",
+                "subscriber_name",
+                "region",
+                "yyyy",
+                "MM",
+                "dd",
+                "HH",
+            ],
             "{region}/{subscriber_name}/{yyyy}/{MM}/{dd}/{HH}/",
         ),
         (
             "bedrock-agentcore",
             "APPLICATION_LOGS",
             "workload-identity",
-            &["workload_identity_id"],
+            &[
+                "accountid",
+                "region",
+                "workload_identity_id",
+                "yyyy",
+                "MM",
+                "dd",
+                "HH",
+            ],
             "{region}/{workload_identity_id}/{yyyy}/{MM}/{dd}/{HH}/",
         ),
         (
             "workmail",
             "ACCESS_CONTROL_LOGS",
             "organization",
-            &["organization_id"],
+            &["accountid", "region", "yyyy", "MM", "dd", "HH"],
             "{region}/{yyyy}/{MM}/{dd}/{HH}/",
+        ),
+        (
+            "elasticloadbalancing",
+            "ALB_CONNECTION_LOGS",
+            "loadbalancer",
+            &["accountid", "region", "yyyy", "MM", "dd", "HH"],
+            "{region}/{yyyy}/{MM}/{dd}/",
         ),
     ];
 
-    for (service, log_type, resource_type, resource_fields, suffix_path) in cases {
+    for (service, log_type, resource_type, suffix_fields, suffix_path) in cases {
         let case = format!("{service}|{log_type}|{resource_type}");
         let templates = slice(&logs, service, log_type, resource_type).await;
         let object_template = templates
@@ -515,13 +578,10 @@ async fn an_s3_templates_suffix_path_variables_name_the_sending_resource() {
             })
             .unwrap_or_else(|| panic!("case {case}: the catalogue publishes an S3 template, got {templates:?}"));
 
-        let mut expected: Vec<String> = vec!["accountid".to_string(), "region".to_string()];
-        expected.extend(resource_fields.iter().map(|field| (*field).to_string()));
-        expected.extend(
-            ["yyyy", "MM", "dd", "HH"]
-                .iter()
-                .map(|field| (*field).to_string()),
-        );
+        let expected: Vec<String> = suffix_fields
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect();
         let reported = strings(object_template, "allowedSuffixPathFields", &case);
         assert_eq!(
             reported, expected,

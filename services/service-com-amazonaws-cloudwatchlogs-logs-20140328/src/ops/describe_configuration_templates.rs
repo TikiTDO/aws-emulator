@@ -5,7 +5,8 @@
 //! Reports the service-managed catalogue of vended-log delivery configuration templates
 //! ([`crate::state::configuration_templates`]): every template whose service, log type,
 //! resource type and delivery destination type the request's filters select (or all of them,
-//! when it names no filter), in template order, one `limit`-sized page at a time.
+//! when it names no filter), in the order the catalogue publishes them, one `limit`-sized page
+//! at a time.
 //!
 //! Nothing here is an account's resource: no operation creates, updates or deletes a
 //! template, so this operation reads the catalogue and writes nothing, and two calls report
@@ -293,10 +294,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .filter(|template| selected(&input, template))
             .collect();
 
+        // A token names the LAST TEMPLATE the previous page reported, so the next page resumes
+        // at the position after it in this same enumeration. A token naming a template this
+        // enumeration does not hold is no position within it.
         let first = match &cursor {
-            Some(cursor) => matching.partition_point(|template| {
-                crate::state::configuration_template_key(template) <= cursor.after
-            }),
+            Some(cursor) => {
+                let after = matching.iter().position(|template| {
+                    crate::state::configuration_template_key(template) == cursor.after
+                });
+                match after {
+                    Some(index) => index.saturating_add(1),
+                    None => return Err(invalid(crate::state::INVALID_NEXT_TOKEN_MESSAGE)),
+                }
+            }
             None => 0,
         };
         // "Use this parameter to limit the number of configuration templates that are returned

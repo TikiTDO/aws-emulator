@@ -16,9 +16,12 @@
 //!
 //! * The SENDER decides the record: `allowedFields` is the schema of the records that log
 //!   type carries, in the order a caller restates them in `recordFields`, with the fields a
-//!   delivery may not drop marked mandatory. The fields a particular service puts in its
-//!   records are published by that service, so they are catalogue data here — one family per
-//!   log type — rather than anything this service can derive. They are never the
+//!   delivery may not drop marked mandatory. `recordFields` is "the default record fields that
+//!   will be delivered when a list of record fields is not provided" — a SUBSET of the allowed
+//!   fields, because a field a caller MAY name is not always one a delivery carries when it
+//!   names none ([`FIELDS_NOT_DELIVERED_BY_DEFAULT`]). The fields a particular service puts in
+//!   its records are published by that service, so they are catalogue data here — one family
+//!   per log type — rather than anything this service can derive. They are never the
 //!   CloudWatch-Logs-generated `@`-prefixed Insights fields: those are the fields of an event
 //!   INGESTED into a log group, not of a record a vending service sends.
 //! * The DESTINATION decides the packaging: the output formats it can be written in, whether
@@ -35,11 +38,21 @@
 //! ([`super::delivery_source_service`]) — so a caller that holds a delivery source can find
 //! the templates that apply to it, and each resource type is the resource kind within that
 //! service.
+//!
+//! ## The order they are published in
+//!
+//! The catalogue is reported in the order it is stated here — one row per kind of resource,
+//! each row's log types in turn, and for each log type one template per delivery destination
+//! type in the order the model's `DeliveryDestinationType` enum DECLARES its values
+//! ([`DELIVERY_DESTINATION_TYPE_ORDER`]), the object destination first. The order is published
+//! data rather than anything derived from a template's contents, and it is a total order over
+//! a catalogue nothing mutates, which is what makes `DescribeConfigurationTemplates`'s
+//! pagination cursor resume at a position that does not move.
 
 use super::{
     COLUMNAR_OUTPUT_FORMAT, CWL_DELIVERY_DESTINATION_TYPE, DELIMITED_OUTPUT_FORMATS,
-    S3_DELIVERY_DESTINATION_TYPE, STRUCTURED_OUTPUT_FORMAT, TRACE_DELIVERY_DESTINATION_TYPE,
-    TRACE_LOG_TYPE,
+    S3_DELIVERY_DESTINATION_TYPE, STREAM_DELIVERY_DESTINATION_TYPE, STRUCTURED_OUTPUT_FORMAT,
+    TRACE_DELIVERY_DESTINATION_TYPE, TRACE_LOG_TYPE,
 };
 
 /// The IAM action a caller needs on a resource "to be able to successfully create a delivery
@@ -50,30 +63,38 @@ use super::{
 pub const VENDED_LOGS_DELIVERY_ACTION: &str = "AllowVendedLogDeliveryForResource";
 
 /// The field delimiters a delivery that delivers in a delimited format may be configured
-/// with, and the one a template reports as its default (the first).
+/// with.
 ///
 /// `FieldDelimiter` is modelled only as a string of up to 5 characters and AWS publishes the
 /// permitted set through this operation alone: a tab, a space and a comma.
 pub const CONFIGURATION_TEMPLATE_FIELD_DELIMITERS: [&str; 3] = ["\t", " ", ","];
 
-/// The variable fields every S3 delivery's suffix path may use, whatever the log source: the
-/// account the delivery is made in and the Region it is made in.
+/// The field delimiter a delivery that delivers in a delimited format is given when the
+/// request names none: NO delimiter.
+///
+/// `FieldDelimiter` is modelled `@length 0..5`, so the empty string is a delimiter value in its
+/// own right, and it is the one a template publishes as its default: a caller that names none
+/// gets records written with no delimiter between their fields rather than with one this
+/// service chose for it.
+pub const CONFIGURATION_TEMPLATE_DEFAULT_FIELD_DELIMITER: &str = "";
+
+/// The variable fields an S3 delivery's suffix path may use, as ONE PUBLISHED LIST PER SENDER.
 ///
 /// `S3DeliveryConfiguration$suffixPath` documents that "the valid variables to use in the
 /// suffix path vary by log type" and that a caller finds them by calling this operation and
-/// reading `allowedSuffixPathFields`, so the set is published here. Every template's set is
-/// these, then the variables naming the sending RESOURCE
-/// ([`ConfigurationTemplateSource::suffix_path_resource_fields`]), then the time partition
-/// below.
-pub const SUFFIX_PATH_ACCOUNT_FIELDS: [&str; 2] = ["accountid", "region"];
+/// reading `allowedSuffixPathFields`, so each list is catalogue data. Every list opens with the
+/// account the delivery is made in, names the Region it is made in and the variables naming the
+/// sending RESOURCE — which of the two a sender states first is itself part of what it
+/// publishes, so the whole list is stated per row — and closes with the time partition of the
+/// object written, coarsest first.
+///
+/// This is the list of a sender that publishes no variable naming the sending resource at all.
+const ACCOUNT_SUFFIX_PATH_FIELDS: &[&str] = &["accountid", "region", "yyyy", "MM", "dd", "HH"];
 
-/// The variable fields every S3 delivery's suffix path may partition objects by time with,
-/// coarsest first.
-pub const SUFFIX_PATH_TIME_FIELDS: [&str; 4] = ["yyyy", "MM", "dd", "HH"];
-
-/// The suffix-path variable naming the sending resource that a log source publishes when it
-/// publishes no identifier of its own kind.
-const SUFFIX_PATH_RESOURCE_ID_FIELDS: [&str; 1] = ["resource_id"];
+/// The published list of a sender that names the sending resource with the generic resource
+/// variable, because it publishes no identifier of its own kind.
+const RESOURCE_ID_SUFFIX_PATH_FIELDS: &[&str] =
+    &["accountid", "region", "resource_id", "yyyy", "MM", "dd", "HH"];
 
 /// Whether a delivery to an S3 bucket writes Hive-compatible object prefixes by default.
 /// `enableHiveCompatiblePath` "causes the S3 objects that contain delivered logs to use a
@@ -105,6 +126,18 @@ const OBJECT_DESTINATION_OUTPUT_FORMATS: [&str; 4] = [
 /// present in the recordFields parameter").
 pub type TemplateField = (&'static str, bool);
 
+/// The fields of a record schema that a delivery created WITHOUT a record field list does not
+/// carry: the record's own ingestion timestamp, and the bare id of the sending resource that
+/// the resource ARN beside it already names.
+///
+/// `allowedFields` is "the allowed fields that a caller CAN use in the recordFields parameter"
+/// while `recordFields` is "the default record fields that WILL BE DELIVERED when a list of
+/// record fields is not provided": the default list is a subset of the allowed ones, and these
+/// two are allowed without being delivered by default. A field a delivery may not drop is
+/// delivered whatever this says, because a mandatory field "must be present in the
+/// recordFields parameter".
+const FIELDS_NOT_DELIVERED_BY_DEFAULT: [&str; 2] = ["timestamp", "resource_id"];
+
 /// The record schema of a log type whose records are the generic vended-log envelope of a
 /// newer sender: the record's own timestamp, the ARN and the id of the resource that sent it,
 /// and the instant of the event — the resource ARN and the event instant mandatory, because a
@@ -122,12 +155,13 @@ const AIDEVOPS_APPLICATION_FIELDS: &[TemplateField] = &[
 ];
 
 /// The record schema of an API Gateway stage's execution logs: the vended-log envelope, the
-/// stage and request dimensions of the call being logged, and the logged line itself.
+/// stage and request dimensions of the call being logged, and the logged line itself. The
+/// envelope is optional here — only the logged line may not be dropped.
 const APIGATEWAY_EXECUTION_FIELDS: &[TemplateField] = &[
     ("timestamp", false),
-    ("resource_arn", true),
+    ("resource_arn", false),
     ("resource_id", false),
-    ("event_timestamp", true),
+    ("event_timestamp", false),
     ("api_id", false),
     ("stage", false),
     ("resource_path", false),
@@ -135,13 +169,15 @@ const APIGATEWAY_EXECUTION_FIELDS: &[TemplateField] = &[
     ("payload", true),
 ];
 
-/// The record schema of an AutoLoop subscription's logs: the vended-log envelope, the
-/// identifiers of the transformer, object, event and trace the line belongs to, and the line.
+/// The record schema of an AutoLoop subscription's logs: the vended-log envelope, the instant
+/// the line itself was logged, the identifiers of the transformer, object, event and trace the
+/// line belongs to, and the line.
 const AUTOLOOP_FIELDS: &[TemplateField] = &[
     ("timestamp", false),
     ("resource_arn", true),
     ("resource_id", false),
     ("event_timestamp", true),
+    ("log_timestamp", false),
     ("transformer_arn", false),
     ("object_identifier", false),
     ("event_identifier", false),
@@ -180,34 +216,46 @@ const AGENTCORE_FIELDS: &[TemplateField] = &[
     ("spanId", false),
 ];
 
-/// The record schema of an EKS cluster's logs: the vended-log envelope plus the controller
-/// and reconciliation dimensions a cluster controller logs under, and the logged line.
+/// The record schema of an EKS cluster's logs: the vended-log envelope plus the controller and
+/// reconciliation dimensions a cluster controller logs under — the logged line, the error it
+/// reports, the controller that reconciled and the work queue it drained.
 const EKS_FIELDS: &[TemplateField] = &[
     ("timestamp", false),
     ("resource_arn", true),
     ("resource_id", false),
     ("event_timestamp", true),
     ("level", false),
-    ("logger", false),
+    ("stream", false),
+    ("message", false),
+    ("err", false),
+    ("error", false),
     ("controller", false),
+    ("controllerGroup", false),
     ("controllerKind", false),
     ("reconcileID", false),
-    ("message", true),
+    ("worker-count", false),
+    ("attempt", false),
+    ("delay", false),
+    ("totalItems", false),
 ];
 
 /// The record schema of an EventBridge subscriber's or event bus's logs: the vended-log
-/// envelope plus the subscriber, event and invocation the line belongs to, and the line.
+/// envelope, whose instant is the millisecond the message was handled, plus the subscriber, the
+/// request, the event and the invocation the line belongs to, and the line — its detail and the
+/// error it reports.
 const EVENTS_FIELDS: &[TemplateField] = &[
     ("timestamp", false),
     ("resource_arn", true),
     ("resource_id", false),
-    ("event_timestamp", true),
+    ("message_timestamp_ms", true),
     ("subscriber_name", false),
+    ("request_id", false),
     ("event_id", false),
     ("invocation_id", false),
     ("message_type", false),
     ("log_level", false),
-    ("payload", true),
+    ("details", false),
+    ("error", false),
 ];
 
 /// The record schema of an Application Load Balancer's access logs: the access-log record of
@@ -502,16 +550,20 @@ const MEDIATAILOR_FIELDS: &[TemplateField] = &[
 ];
 
 /// The record schema of a WorkMail organization's access-control logs: one access decision —
-/// the organization, the instant and the decision mandatory, the dimensions it was made on
-/// optional.
+/// the organization, the instant, the request it was made for, the identity it was made for and
+/// the decision mandatory, and the dimensions it was made on optional.
 const WORKMAIL_ACCESS_CONTROL_FIELDS: &[TemplateField] = &[
     ("timestamp", false),
     ("organization_arn", true),
     ("event_timestamp", true),
-    ("user_id", false),
-    ("protocol", false),
-    ("source_ip", false),
-    ("scope", false),
+    ("request_id", true),
+    ("user_id", true),
+    ("impersonator_id", false),
+    ("protocol", true),
+    ("source_ip", true),
+    ("user_agent", false),
+    ("scope", true),
+    ("rule_id", false),
     ("access_granted", true),
 ];
 
@@ -591,10 +643,10 @@ pub struct ConfigurationTemplateSource {
     /// `ConfigurationTemplate$resourceType` — the kind of resource of that service which
     /// sends the logs.
     pub resource_type: &'static str,
-    /// The variables naming the SENDING RESOURCE that an S3 delivery of these logs may use in
-    /// its suffix path, between the account fields and the time partition
-    /// ([`ConfigurationTemplateSource::suffix_path_fields`]).
-    pub suffix_path_resource_fields: &'static [&'static str],
+    /// `ConfigurationTemplate$allowedSuffixPathFields` — "the list of variable fields that can
+    /// be used in the suffix path of a delivery that delivers to an S3 bucket" of these logs,
+    /// as this sender publishes it ([`ACCOUNT_SUFFIX_PATH_FIELDS`]).
+    pub suffix_path_fields: &'static [&'static str],
     /// `defaultDeliveryConfigValues.s3DeliveryConfiguration.suffixPath` — the suffix path an
     /// S3 delivery of these logs is given when the request names none. Every variable in it
     /// is one the same template allows, because a default a caller cannot restate is no
@@ -606,31 +658,20 @@ pub struct ConfigurationTemplateSource {
 }
 
 impl ConfigurationTemplateSource {
-    /// The delivery destination types a delivery of `log_type` can be sent to: traces go to
-    /// an X-Ray trace delivery destination ([`TRACE_DELIVERY_DESTINATION_TYPE`], the kind
-    /// `PutDeliveryDestination` documents as needing no destination configuration), and log
-    /// records go to each of the other destination types the model's `DeliveryDestinationType`
-    /// names.
+    /// The delivery destination types a delivery of `log_type` can be sent to, in the order
+    /// the model's `DeliveryDestinationType` enum declares them
+    /// ([`DELIVERY_DESTINATION_TYPE_ORDER`]): the X-Ray trace delivery destination
+    /// ([`TRACE_DELIVERY_DESTINATION_TYPE`], the kind `PutDeliveryDestination` documents as
+    /// needing no destination configuration) receives TRACES and nothing else, while every log
+    /// type — traces included — can be delivered to each of the destination types that receive
+    /// records.
     pub fn delivery_destination_types(log_type: &str) -> Vec<String> {
-        crate::ops::types::DELIVERY_DESTINATION_TYPE_VALUES
+        DELIVERY_DESTINATION_TYPE_ORDER
             .iter()
             .filter(|destination_type| {
-                (**destination_type == TRACE_DELIVERY_DESTINATION_TYPE) == (log_type == TRACE_LOG_TYPE)
+                **destination_type != TRACE_DELIVERY_DESTINATION_TYPE || log_type == TRACE_LOG_TYPE
             })
             .map(|destination_type| (*destination_type).to_string())
-            .collect()
-    }
-
-    /// `ConfigurationTemplate$allowedSuffixPathFields` — "the list of variable fields that can
-    /// be used in the suffix path of a delivery that delivers to an S3 bucket" of these logs:
-    /// the account and Region the delivery is made in, the variables naming the sending
-    /// resource, and the time partition of the object written.
-    pub fn suffix_path_fields(&self) -> Vec<String> {
-        SUFFIX_PATH_ACCOUNT_FIELDS
-            .iter()
-            .chain(self.suffix_path_resource_fields.iter())
-            .chain(SUFFIX_PATH_TIME_FIELDS.iter())
-            .map(|field| (*field).to_string())
             .collect()
     }
 
@@ -651,11 +692,12 @@ impl ConfigurationTemplateSource {
 
     /// This row's template for one of its log types delivered to one kind of destination.
     ///
-    /// The record — `allowedFields` and the `recordFields` default that restates them in order
-    /// — comes from the LOG TYPE, whose sending service decides what a record carries. The
-    /// packaging is DERIVED from the destination type, because what a delivery may be
-    /// configured with is a property of what receives it: the formats it can be written in,
-    /// whether a field delimiter applies at all, and whether an S3 object layout applies.
+    /// The record — `allowedFields`, and the `recordFields` default naming those of them a
+    /// delivery carries when it names none — comes from the LOG TYPE, whose sending service
+    /// decides what a record carries. The packaging is DERIVED from the destination type,
+    /// because what a delivery may be configured with is a property of what receives it: the
+    /// formats it can be written in, whether a field delimiter applies at all, and whether an
+    /// S3 object layout applies.
     fn template(
         &self,
         log_type: &ConfigurationTemplateLogType,
@@ -671,13 +713,8 @@ impl ConfigurationTemplateSource {
                 suffix_path: Some(self.s3_suffix_path.to_string()),
                 enable_hive_compatible_path: Some(CONFIGURATION_TEMPLATE_DEFAULT_HIVE_COMPATIBLE_PATH),
             });
-        let field_delimiter = is_delimited.then(|| {
-            CONFIGURATION_TEMPLATE_FIELD_DELIMITERS
-                .first()
-                .copied()
-                .unwrap_or_default()
-                .to_string()
-        });
+        let field_delimiter =
+            is_delimited.then(|| CONFIGURATION_TEMPLATE_DEFAULT_FIELD_DELIMITER.to_string());
         crate::ops::types::ConfigurationTemplate {
             service: Some(self.service.to_string()),
             log_type: Some(log_type.log_type.to_string()),
@@ -685,13 +722,17 @@ impl ConfigurationTemplateSource {
             delivery_destination_type: Some(destination_type.to_string()),
             default_delivery_config_values: Some(
                 crate::ops::types::ConfigurationTemplateDeliveryConfigValues {
-                    // A delivery created without a field list delivers the whole record, so
-                    // the default is every field the log type carries, in the order a caller
-                    // would restate them in.
+                    // A delivery created without a field list carries the record the log type
+                    // sends, in the order a caller would restate them in, less the fields that
+                    // are allowed without being delivered by default
+                    // ([`FIELDS_NOT_DELIVERED_BY_DEFAULT`]).
                     record_fields: Some(
                         log_type
                             .fields
                             .iter()
+                            .filter(|(field, mandatory)| {
+                                *mandatory || !FIELDS_NOT_DELIVERED_BY_DEFAULT.contains(field)
+                            })
                             .map(|(field, _mandatory)| (*field).to_string())
                             .collect(),
                     ),
@@ -720,7 +761,12 @@ impl ConfigurationTemplateSource {
                     .map(|delimiter| (*delimiter).to_string())
                     .collect()
             }),
-            allowed_suffix_path_fields: writes_objects.then(|| self.suffix_path_fields()),
+            allowed_suffix_path_fields: writes_objects.then(|| {
+                self.suffix_path_fields
+                    .iter()
+                    .map(|field| (*field).to_string())
+                    .collect()
+            }),
             // The schema of "a configuration that can be set when calling PutDeliverySource":
             // no log type in this catalogue takes one, so none is reported.
             delivery_source_configuration: None,
@@ -788,6 +834,29 @@ const fn log_type_with_s3_tables(
 /// defaults to: the Region, the sending resource and the time partition.
 const RESOURCE_ID_SUFFIX_PATH: &str = "{region}/{resource_id}/{yyyy}/{MM}/{dd}/{HH}/";
 
+/// The suffix path an S3 delivery of a sender that partitions its objects by TIME ALONE
+/// defaults to: the Region the delivery is made in, then the hour the object covers.
+const TIME_SUFFIX_PATH: &str = "{region}/{yyyy}/{MM}/{dd}/{HH}/";
+
+/// The suffix path an S3 delivery of a sender that partitions its objects by DAY defaults to:
+/// the Region the delivery is made in, then the day the object covers.
+const DAILY_SUFFIX_PATH: &str = "{region}/{yyyy}/{MM}/{dd}/";
+
+/// The order one log type's templates are published in, one per delivery destination type: the
+/// order the model's `DeliveryDestinationType` enum DECLARES its values
+/// (`smithy_query(query="shape",shape="DeliveryDestinationType")` answers
+/// `[S3, CWL, FH, XRAY]`), so a slice of the catalogue opens with the template for the
+/// destination that writes objects rather than with whichever spelling sorts first.
+///
+/// Every value is one the model names
+/// ([`crate::ops::types::DELIVERY_DESTINATION_TYPE_VALUES`]), never a string typed here.
+const DELIVERY_DESTINATION_TYPE_ORDER: [&str; 4] = [
+    S3_DELIVERY_DESTINATION_TYPE,
+    CWL_DELIVERY_DESTINATION_TYPE,
+    STREAM_DELIVERY_DESTINATION_TYPE,
+    TRACE_DELIVERY_DESTINATION_TYPE,
+];
+
 /// The resources that can send vended logs, the log types each of them sends and the record
 /// schema of each — the catalogue `DescribeConfigurationTemplates` reports templates from.
 ///
@@ -796,14 +865,14 @@ pub const CONFIGURATION_TEMPLATE_SOURCES: &[ConfigurationTemplateSource] = &[
     ConfigurationTemplateSource {
         service: "aidevops",
         resource_type: "agent-space",
-        suffix_path_resource_fields: &SUFFIX_PATH_RESOURCE_ID_FIELDS,
+        suffix_path_fields: RESOURCE_ID_SUFFIX_PATH_FIELDS,
         s3_suffix_path: RESOURCE_ID_SUFFIX_PATH,
         log_types: &[log_type("APPLICATION_LOGS", AIDEVOPS_APPLICATION_FIELDS)],
     },
     ConfigurationTemplateSource {
         service: "amplify",
         resource_type: "app",
-        suffix_path_resource_fields: &["app_id"],
+        suffix_path_fields: &["accountid", "region", "app_id", "yyyy", "MM", "dd", "HH"],
         s3_suffix_path: "{region}/{app_id}/{yyyy}/{MM}/{dd}/{HH}/",
         log_types: &[
             log_type("ACCESS_LOGS", AMPLIFY_ACCESS_FIELDS),
@@ -813,31 +882,34 @@ pub const CONFIGURATION_TEMPLATE_SOURCES: &[ConfigurationTemplateSource] = &[
     ConfigurationTemplateSource {
         service: "apigateway",
         resource_type: "stages",
-        suffix_path_resource_fields: &["api_id", "stage"],
+        suffix_path_fields: &[
+            "accountid", "region", "api_id", "stage", "yyyy", "MM", "dd", "HH",
+        ],
         s3_suffix_path: "{region}/{api_id}/{stage}/",
         log_types: &[log_type("EXECUTION_LOGS", APIGATEWAY_EXECUTION_FIELDS)],
     },
     ConfigurationTemplateSource {
         service: "autoloop",
         resource_type: "subscription",
-        suffix_path_resource_fields: &SUFFIX_PATH_RESOURCE_ID_FIELDS,
-        s3_suffix_path: RESOURCE_ID_SUFFIX_PATH,
+        suffix_path_fields: ACCOUNT_SUFFIX_PATH_FIELDS,
+        s3_suffix_path: TIME_SUFFIX_PATH,
         log_types: &[log_type("ERROR_LOGS", AUTOLOOP_FIELDS)],
     },
     ConfigurationTemplateSource {
         service: "bedrock",
         resource_type: "agent-alias",
-        suffix_path_resource_fields: &SUFFIX_PATH_RESOURCE_ID_FIELDS,
-        s3_suffix_path: RESOURCE_ID_SUFFIX_PATH,
+        suffix_path_fields: RESOURCE_ID_SUFFIX_PATH_FIELDS,
+        s3_suffix_path: TIME_SUFFIX_PATH,
         log_types: &[
             log_type("APPLICATION_LOGS", BEDROCK_EVENT_FIELDS),
             log_type("EVENT_LOGS", BEDROCK_EVENT_FIELDS),
+            log_type(TRACE_LOG_TYPE, BEDROCK_EVENT_FIELDS),
         ],
     },
     ConfigurationTemplateSource {
         service: "bedrock",
         resource_type: "knowledge-base",
-        suffix_path_resource_fields: &SUFFIX_PATH_RESOURCE_ID_FIELDS,
+        suffix_path_fields: RESOURCE_ID_SUFFIX_PATH_FIELDS,
         s3_suffix_path: RESOURCE_ID_SUFFIX_PATH,
         log_types: &[
             log_type("APPLICATION_LOGS", BEDROCK_EVENT_FIELDS),
@@ -847,7 +919,15 @@ pub const CONFIGURATION_TEMPLATE_SOURCES: &[ConfigurationTemplateSource] = &[
     ConfigurationTemplateSource {
         service: "bedrock-agentcore",
         resource_type: "gateway",
-        suffix_path_resource_fields: &["gateway_id"],
+        suffix_path_fields: &[
+            "accountid",
+            "region",
+            "gateway_id",
+            "yyyy",
+            "MM",
+            "dd",
+            "HH",
+        ],
         s3_suffix_path: "{region}/{gateway_id}/{yyyy}/{MM}/{dd}/{HH}/",
         log_types: &[
             log_type("APPLICATION_LOGS", AGENTCORE_FIELDS),
@@ -857,7 +937,15 @@ pub const CONFIGURATION_TEMPLATE_SOURCES: &[ConfigurationTemplateSource] = &[
     ConfigurationTemplateSource {
         service: "bedrock-agentcore",
         resource_type: "memory",
-        suffix_path_resource_fields: &["memory_id"],
+        suffix_path_fields: &[
+            "accountid",
+            "region",
+            "memory_id",
+            "yyyy",
+            "MM",
+            "dd",
+            "HH",
+        ],
         s3_suffix_path: "{region}/{memory_id}/{yyyy}/{MM}/{dd}/{HH}/",
         log_types: &[
             log_type("APPLICATION_LOGS", AGENTCORE_FIELDS),
@@ -866,8 +954,26 @@ pub const CONFIGURATION_TEMPLATE_SOURCES: &[ConfigurationTemplateSource] = &[
     },
     ConfigurationTemplateSource {
         service: "bedrock-agentcore",
+        resource_type: "payments",
+        suffix_path_fields: RESOURCE_ID_SUFFIX_PATH_FIELDS,
+        s3_suffix_path: RESOURCE_ID_SUFFIX_PATH,
+        log_types: &[
+            log_type("APPLICATION_LOGS", AGENTCORE_FIELDS),
+            log_type(TRACE_LOG_TYPE, AGENTCORE_FIELDS),
+        ],
+    },
+    ConfigurationTemplateSource {
+        service: "bedrock-agentcore",
         resource_type: "runtime",
-        suffix_path_resource_fields: &["runtime_id"],
+        suffix_path_fields: &[
+            "accountid",
+            "region",
+            "runtime_id",
+            "yyyy",
+            "MM",
+            "dd",
+            "HH",
+        ],
         s3_suffix_path: "{region}/{runtime_id}/{yyyy}/{MM}/{dd}/{HH}/",
         log_types: &[
             log_type("APPLICATION_LOGS", AGENTCORE_FIELDS),
@@ -877,8 +983,27 @@ pub const CONFIGURATION_TEMPLATE_SOURCES: &[ConfigurationTemplateSource] = &[
     },
     ConfigurationTemplateSource {
         service: "bedrock-agentcore",
+        resource_type: "tools",
+        suffix_path_fields: RESOURCE_ID_SUFFIX_PATH_FIELDS,
+        s3_suffix_path: RESOURCE_ID_SUFFIX_PATH,
+        log_types: &[
+            log_type("APPLICATION_LOGS", AGENTCORE_FIELDS),
+            log_type("USAGE_LOGS", AGENTCORE_FIELDS),
+            log_type(TRACE_LOG_TYPE, AGENTCORE_FIELDS),
+        ],
+    },
+    ConfigurationTemplateSource {
+        service: "bedrock-agentcore",
         resource_type: "workload-identity",
-        suffix_path_resource_fields: &["workload_identity_id"],
+        suffix_path_fields: &[
+            "accountid",
+            "region",
+            "workload_identity_id",
+            "yyyy",
+            "MM",
+            "dd",
+            "HH",
+        ],
         s3_suffix_path: "{region}/{workload_identity_id}/{yyyy}/{MM}/{dd}/{HH}/",
         log_types: &[
             log_type("APPLICATION_LOGS", AGENTCORE_FIELDS),
@@ -888,14 +1013,30 @@ pub const CONFIGURATION_TEMPLATE_SOURCES: &[ConfigurationTemplateSource] = &[
     ConfigurationTemplateSource {
         service: "cloudfront",
         resource_type: "distribution",
-        suffix_path_resource_fields: &["distribution_id"],
+        suffix_path_fields: &[
+            "accountid",
+            "region",
+            "distribution_id",
+            "yyyy",
+            "MM",
+            "dd",
+            "HH",
+        ],
         s3_suffix_path: "{region}/{distribution_id}/{yyyy}/{MM}/{dd}/{HH}/",
         log_types: &[log_type("ACCESS_LOGS", CLOUDFRONT_ACCESS_FIELDS)],
     },
     ConfigurationTemplateSource {
         service: "eks",
         resource_type: "cluster",
-        suffix_path_resource_fields: &["cluster_id"],
+        suffix_path_fields: &[
+            "accountid",
+            "cluster_id",
+            "region",
+            "yyyy",
+            "MM",
+            "dd",
+            "HH",
+        ],
         s3_suffix_path: "{region}/{cluster_id}/{yyyy}/{MM}/{dd}/{HH}/",
         log_types: &[
             log_type("AUTO_MODE_BLOCK_STORAGE_LOGS", EKS_FIELDS),
@@ -914,8 +1055,8 @@ pub const CONFIGURATION_TEMPLATE_SOURCES: &[ConfigurationTemplateSource] = &[
     ConfigurationTemplateSource {
         service: "elasticloadbalancing",
         resource_type: "loadbalancer",
-        suffix_path_resource_fields: &SUFFIX_PATH_RESOURCE_ID_FIELDS,
-        s3_suffix_path: RESOURCE_ID_SUFFIX_PATH,
+        suffix_path_fields: ACCOUNT_SUFFIX_PATH_FIELDS,
+        s3_suffix_path: DAILY_SUFFIX_PATH,
         log_types: &[
             log_type_with_s3_tables("ALB_ACCESS_LOGS", ALB_ACCESS_FIELDS, "aws_alb", "access"),
             log_type_with_s3_tables(
@@ -931,7 +1072,15 @@ pub const CONFIGURATION_TEMPLATE_SOURCES: &[ConfigurationTemplateSource] = &[
     ConfigurationTemplateSource {
         service: "events",
         resource_type: "event-bus",
-        suffix_path_resource_fields: &["event_bus_name"],
+        suffix_path_fields: &[
+            "accountid",
+            "event_bus_name",
+            "region",
+            "yyyy",
+            "MM",
+            "dd",
+            "HH",
+        ],
         s3_suffix_path: "{region}/{event_bus_name}/{yyyy}/{MM}/{dd}/{HH}/",
         log_types: &[
             log_type("ERROR_LOGS", EVENTS_FIELDS),
@@ -941,7 +1090,15 @@ pub const CONFIGURATION_TEMPLATE_SOURCES: &[ConfigurationTemplateSource] = &[
     ConfigurationTemplateSource {
         service: "events",
         resource_type: "subscriber",
-        suffix_path_resource_fields: &["subscriber_name"],
+        suffix_path_fields: &[
+            "accountid",
+            "subscriber_name",
+            "region",
+            "yyyy",
+            "MM",
+            "dd",
+            "HH",
+        ],
         s3_suffix_path: "{region}/{subscriber_name}/{yyyy}/{MM}/{dd}/{HH}/",
         log_types: &[
             log_type("ERROR_LOGS", EVENTS_FIELDS),
@@ -951,14 +1108,14 @@ pub const CONFIGURATION_TEMPLATE_SOURCES: &[ConfigurationTemplateSource] = &[
     ConfigurationTemplateSource {
         service: "logs",
         resource_type: "log-group",
-        suffix_path_resource_fields: &SUFFIX_PATH_RESOURCE_ID_FIELDS,
+        suffix_path_fields: RESOURCE_ID_SUFFIX_PATH_FIELDS,
         s3_suffix_path: RESOURCE_ID_SUFFIX_PATH,
         log_types: &[log_type("INSIGHTS_QUERY_LOGS", INSIGHTS_QUERY_FIELDS)],
     },
     ConfigurationTemplateSource {
         service: "mediatailor",
         resource_type: "playbackConfiguration",
-        suffix_path_resource_fields: &SUFFIX_PATH_RESOURCE_ID_FIELDS,
+        suffix_path_fields: RESOURCE_ID_SUFFIX_PATH_FIELDS,
         s3_suffix_path: RESOURCE_ID_SUFFIX_PATH,
         log_types: &[
             log_type("AD_DECISION_SERVER_LOGS", MEDIATAILOR_FIELDS),
@@ -969,21 +1126,21 @@ pub const CONFIGURATION_TEMPLATE_SOURCES: &[ConfigurationTemplateSource] = &[
     ConfigurationTemplateSource {
         service: "s3",
         resource_type: "bucket",
-        suffix_path_resource_fields: &SUFFIX_PATH_RESOURCE_ID_FIELDS,
+        suffix_path_fields: RESOURCE_ID_SUFFIX_PATH_FIELDS,
         s3_suffix_path: RESOURCE_ID_SUFFIX_PATH,
         log_types: &[log_type("S3_SERVER_ACCESS_LOGS", S3_SERVER_ACCESS_FIELDS)],
     },
     ConfigurationTemplateSource {
         service: "securityhub",
         resource_type: "hubv2",
-        suffix_path_resource_fields: &SUFFIX_PATH_RESOURCE_ID_FIELDS,
+        suffix_path_fields: RESOURCE_ID_SUFFIX_PATH_FIELDS,
         s3_suffix_path: RESOURCE_ID_SUFFIX_PATH,
         log_types: &[log_type("SECURITY_FINDING_LOGS", SECURITY_FINDING_FIELDS)],
     },
     ConfigurationTemplateSource {
         service: "ses",
         resource_type: "mailmanager",
-        suffix_path_resource_fields: &SUFFIX_PATH_RESOURCE_ID_FIELDS,
+        suffix_path_fields: RESOURCE_ID_SUFFIX_PATH_FIELDS,
         s3_suffix_path: RESOURCE_ID_SUFFIX_PATH,
         log_types: &[
             log_type("APPLICATION_LOGS", SES_APPLICATION_FIELDS),
@@ -996,10 +1153,10 @@ pub const CONFIGURATION_TEMPLATE_SOURCES: &[ConfigurationTemplateSource] = &[
     ConfigurationTemplateSource {
         service: "workmail",
         resource_type: "organization",
-        suffix_path_resource_fields: &["organization_id"],
+        suffix_path_fields: ACCOUNT_SUFFIX_PATH_FIELDS,
         // WorkMail partitions its delivered objects by time alone, under the Region the
         // delivery was made in.
-        s3_suffix_path: "{region}/{yyyy}/{MM}/{dd}/{HH}/",
+        s3_suffix_path: TIME_SUFFIX_PATH,
         log_types: &[
             log_type("ACCESS_CONTROL_LOGS", WORKMAIL_ACCESS_CONTROL_FIELDS),
             log_type("AUTHENTICATION_LOGS", WORKMAIL_AUTHENTICATION_FIELDS),
@@ -1019,21 +1176,19 @@ pub const CONFIGURATION_TEMPLATE_SOURCES: &[ConfigurationTemplateSource] = &[
     },
 ];
 
-/// Every configuration template of this service, in [`configuration_template_key`] order.
+/// Every configuration template of this service, in the order the catalogue publishes them.
 ///
-/// One enumeration, built from [`CONFIGURATION_TEMPLATE_SOURCES`] on every call: the catalogue
-/// is service-managed — no operation creates, updates or deletes a template — so two calls
-/// report the same templates in the same order, and the order is what makes
-/// `DescribeConfigurationTemplates`'s pagination cursor resume at a position that does not
-/// move.
+/// One enumeration, built from [`CONFIGURATION_TEMPLATE_SOURCES`] on every call, row by row and
+/// within a row log type by log type and destination type by destination type (see this
+/// module's own documentation): the catalogue is service-managed — no operation creates,
+/// updates or deletes a template — so two calls report the same templates in the same order,
+/// and that order is what makes `DescribeConfigurationTemplates`'s pagination cursor resume at
+/// a position that does not move.
 pub fn configuration_templates() -> Vec<crate::ops::types::ConfigurationTemplate> {
-    let mut templates: Vec<crate::ops::types::ConfigurationTemplate> =
-        CONFIGURATION_TEMPLATE_SOURCES
-            .iter()
-            .flat_map(ConfigurationTemplateSource::templates)
-            .collect();
-    templates.sort_by_key(configuration_template_key);
-    templates
+    CONFIGURATION_TEMPLATE_SOURCES
+        .iter()
+        .flat_map(ConfigurationTemplateSource::templates)
+        .collect()
 }
 
 /// What identifies one configuration template: the four values that distinguish it from every
@@ -1041,8 +1196,8 @@ pub fn configuration_templates() -> Vec<crate::ops::types::ConfigurationTemplate
 /// character none of them admits (`Service` is `^[\w_-]*$`, `LogType` `^[\w]*$`,
 /// `ResourceType` `^[\w-_]*$`, and `DeliveryDestinationType` is an enum of letters).
 ///
-/// It is also the order templates are enumerated in, and the position a pagination cursor
-/// resumes after.
+/// It is what a pagination cursor names the position it resumes after, which is a position in
+/// the enumeration [`configuration_templates`] publishes rather than an order of its own.
 pub fn configuration_template_key(template: &crate::ops::types::ConfigurationTemplate) -> String {
     [
         template.service.as_deref().unwrap_or_default(),
