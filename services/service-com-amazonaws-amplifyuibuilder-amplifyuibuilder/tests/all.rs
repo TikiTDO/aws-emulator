@@ -35,6 +35,9 @@ mod component_reserved_property_name;
 #[path = "all/component_wire_fidelity.rs"]
 mod component_wire_fidelity;
 
+#[path = "all/emulator_store_bound_refusals.rs"]
+mod emulator_store_bound_refusals;
+
 #[path = "all/export_components.rs"]
 mod export_components;
 

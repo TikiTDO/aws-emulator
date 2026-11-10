@@ -57,12 +57,12 @@
 //! ## Errors
 //!
 //! * `InvalidParameterException` (HTTP 400) — An invalid or out-of-range value was supplied
-//!   for the input parameter.
+//!   for the input parameter. This is also how a write past this emulator's own bound on the
+//!   metadata store is refused: the `appId` and `environmentName` the request supplies name
+//!   an app environment outside the range the store can hold
+//!   (`crate::state::store_bound_reached`).
 //! * `UnauthorizedException` (HTTP 401) — You don't have permission to perform this
 //!   operation.
-//! * `ServiceQuotaExceededException` (HTTP 402) — widened in through `extra_errors` (see
-//!   below): the shape is this service's own, and it is how this emulator refuses a write
-//!   past its own bound on the metadata store.
 //! * `InternalServerException` (HTTP 500) — widened in through `extra_errors` (see below):
 //!   the shape is this service's own, and it is how an unreachable shared store is
 //!   reported, as in every sibling handler of this crate.
@@ -105,29 +105,30 @@ impl ::aws_smithy_schema::serde::SerializableStruct for PutMetadataFlagOutput {
 // here — hence the `PutMetadataFlagError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-// `InternalServerException` and `ServiceQuotaExceededException` are widened in
-// through `extra_errors`, both shapes this SERVICE models and both declared in
-// `types/shared_types.rs`:
+// `InternalServerException` is widened in through `extra_errors`, a shape this
+// SERVICE models and declares in `types/shared_types.rs`:
 //
 // * `InternalServerException` (HTTP 500) — an unreachable shared store is a
 //   server-side condition, not a malformed request, so it is reported as the
 //   server failure every sibling handler in this crate reports it as
 //   (`CreateComponent`, `GetComponent`, `UpdateComponent` all list it).
-// * `ServiceQuotaExceededException` (HTTP 402) — `appId` and `environmentName`
-//   are request-supplied `@httpLabel` values, so the metadata store this
-//   operation writes is bounded like the component store
-//   (`crate::state::METADATA_ENVIRONMENT_QUOTA`), and past that bound the write is
-//   refused rather than growing the state without end. `CreateComponent`, which
-//   lists the shape, uses it for the same emulator bound.
+//
+// Nothing else is widened in: a refusal of the REQUEST leaves this service naming
+// no shape the model does not declare for the operation, because this service
+// strips every error-type discriminator (`crate::service::untyped_errors`) and the
+// status is then all a client has to classify the answer by. The emulator's own
+// bound on the metadata store is refused with the modelled
+// `InvalidParameterException` (400) that `crate::state::store_bound_reached`
+// builds; `ServiceQuotaExceededException` (402) stays with the creates, whose
+// models declare it.
 #[smithy_macros::operation_error(
     "com.amazonaws.amplifyuibuilder#PutMetadataFlag",
-    extra_errors = ["InternalServerException", "ServiceQuotaExceededException"]
+    extra_errors = ["InternalServerException"]
 )]
 #[derive(Debug)]
 pub enum PutMetadataFlagErrorModeled {
     InternalServerException(InternalServerException),
     InvalidParameterException(InvalidParameterException),
-    ServiceQuotaExceededException(ServiceQuotaExceededException),
     UnauthorizedException(UnauthorizedException),
 }
 
@@ -219,15 +220,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // request naming a fresh pair would add an entry nothing releases. Past
         // the bound a write that would START an app environment's metadata is
         // refused; a write to one the store already holds always proceeds.
+        //
+        // The refusal is the modelled `InvalidParameterException` (400): the bound
+        // is the emulator's own, this operation's model declares no quota error,
+        // and the values the request supplies for `appId` and `environmentName`
+        // name an app environment outside the range the store can hold — which is
+        // the condition that shape documents. The sentence is the one every bound
+        // of this service refuses with (`crate::state::store_bound_reached`).
         if !store.can_hold_metadata_for(&key) {
-            return Err(PutMetadataFlagErrorModeled::ServiceQuotaExceededException(
-                ServiceQuotaExceededException {
-                    message: Some(format!(
-                        "this emulator already holds metadata for the maximum of {} app \
-                         environments",
-                        crate::state::METADATA_ENVIRONMENT_QUOTA
-                    )),
-                },
+            return Err(PutMetadataFlagErrorModeled::InvalidParameterException(
+                crate::state::store_bound_reached(
+                    "app environments with stored metadata",
+                    crate::state::METADATA_ENVIRONMENT_QUOTA,
+                ),
             )
             .into());
         }

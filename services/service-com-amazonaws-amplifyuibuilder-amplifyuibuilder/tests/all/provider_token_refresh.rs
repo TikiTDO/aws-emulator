@@ -21,7 +21,7 @@
 //! 5. `provider` targets the `TokenProviders` enum, so a provider the model does not
 //!    declare is refused with HTTP 400 and stores nothing.
 //! 6. The session store is bounded: past the emulator's own bound a refresh that would
-//!    start ANOTHER session is refused with HTTP 402, while a session the store already
+//!    start ANOTHER session is refused with HTTP 400, while a session the store already
 //!    holds still refreshes.
 
 use std::collections::BTreeSet;
@@ -422,8 +422,9 @@ async fn a_provider_the_model_does_not_declare_is_refused() {
 }
 
 /// Rule 6: the session store is bounded. Past the bound a refresh naming a session the
-/// store does not hold is refused with HTTP 402 — the quota shape `CreateComponent` uses
-/// for the same kind of bound — while a session already held still refreshes.
+/// store does not hold is refused with HTTP 400 — the `InvalidParameterException` this
+/// operation's model declares, see `tests/all/emulator_store_bound_refusals.rs` for the
+/// rule — while a session already held still refreshes.
 #[tokio::test]
 async fn the_token_session_store_is_bounded_by_its_quota() {
     let emulator = Emulator::new();
@@ -447,8 +448,8 @@ async fn the_token_session_store_is_bounded_by_its_quota() {
     ] {
         let refused = emulator.refresh(PROVIDER, token, client_id).await;
         assert_eq!(
-            refused.status, 402,
-            "case {case:?}: a refresh past the bound must be refused with HTTP 402, got {} with \
+            refused.status, 400,
+            "case {case:?}: a refresh past the bound must be refused with HTTP 400, got {} with \
              {:?}",
             refused.status, refused.body
         );

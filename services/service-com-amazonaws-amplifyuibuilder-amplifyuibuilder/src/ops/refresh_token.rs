@@ -71,10 +71,8 @@
 //!
 //! * `InvalidParameterException` (HTTP 400) — An invalid or out-of-range value was supplied
 //!   for the input parameter. This is also how a refresh token of no characters, which the
-//!   model admits, is refused.
-//! * `ServiceQuotaExceededException` (HTTP 402) — widened in through `extra_errors` (see
-//!   below): the shape is this service's own, and it is how this emulator refuses a
-//!   refresh past its own bound on the token-session store.
+//!   model admits, is refused, and how a refresh past this emulator's own bound on the
+//!   token-session store is refused (`crate::state::store_bound_reached`).
 //! * `InternalServerException` (HTTP 500) — widened in through `extra_errors` (see below):
 //!   the shape is this service's own, and it is how an unreachable shared store, or a
 //!   credential store that minted no secret, is reported — a condition on this service's
@@ -94,29 +92,29 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-amplifyuibuilder-amplif
 // here — hence the `RefreshTokenError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-// `InternalServerException` and `ServiceQuotaExceededException` are widened in through
-// `extra_errors`, both shapes this SERVICE models and both declared in
-// `types/shared_types.rs`:
+// `InternalServerException` is widened in through `extra_errors`, a shape this SERVICE
+// models and declares in `types/shared_types.rs`:
 //
 // * `InternalServerException` (HTTP 500) — an unreachable shared store, or a credential
 //   store that minted no secret to build an access token from, is a server-side
 //   condition rather than a malformed request, and it is the server failure every
 //   sibling handler in this crate reports (`CreateComponent`, `GetComponent`,
 //   `PutMetadataFlag` all list or widen it).
-// * `ServiceQuotaExceededException` (HTTP 402) — the session a refresh stores is keyed by
-//   request-supplied values, so the store is bounded like the component and metadata
-//   stores (`crate::state::PROVIDER_TOKEN_SESSION_QUOTA`), and past that bound a refresh
-//   that would start ANOTHER session is refused rather than growing the state without
-//   end.
+//
+// Nothing else is widened in: this service strips every error-type discriminator
+// (`crate::service::untyped_errors`), so the status is all a client has to classify a
+// refusal by, and a refusal of the REQUEST may therefore carry only a status this
+// operation's own model declares. The emulator's own bound on the session store is
+// refused with the modelled `InvalidParameterException` (400) that
+// `crate::state::store_bound_reached` builds.
 #[smithy_macros::operation_error(
     "com.amazonaws.amplifyuibuilder#RefreshToken",
-    extra_errors = ["InternalServerException", "ServiceQuotaExceededException"]
+    extra_errors = ["InternalServerException"]
 )]
 #[derive(Debug)]
 pub enum RefreshTokenErrorModeled {
     InternalServerException(InternalServerException),
     InvalidParameterException(InvalidParameterException),
-    ServiceQuotaExceededException(ServiceQuotaExceededException),
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
@@ -218,13 +216,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }) {
             Ok(access_token) => access_token,
             Err(crate::state::ProviderTokenRefusal::OverQuota) => {
-                return Err(RefreshTokenErrorModeled::ServiceQuotaExceededException(
-                    ServiceQuotaExceededException {
-                        message: Some(format!(
-                            "this emulator already holds the maximum of {} live token sessions",
-                            crate::state::PROVIDER_TOKEN_SESSION_QUOTA
-                        )),
-                    },
+                // The bound is the emulator's own and this operation's model declares
+                // no quota error, so the refusal is the modelled
+                // `InvalidParameterException` (400): the session the request names is
+                // outside the range the store can hold, which is the condition that
+                // shape documents.
+                return Err(RefreshTokenErrorModeled::InvalidParameterException(
+                    crate::state::store_bound_reached(
+                        "live token sessions",
+                        crate::state::PROVIDER_TOKEN_SESSION_QUOTA,
+                    ),
                 )
                 .into());
             }

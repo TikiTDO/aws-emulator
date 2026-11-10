@@ -24,7 +24,7 @@
 //!    (`smithy_query(query="shape",shape="TokenProviders")`), so any other provider is
 //!    refused and stores nothing.
 //! 6. The session store is bounded: past the emulator's own bound an exchange that would
-//!    start another session is refused with HTTP 402, and nothing is stored for it.
+//!    start another session is refused with HTTP 400, and nothing is stored for it.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -573,8 +573,8 @@ async fn a_provider_the_model_does_not_declare_is_refused() {
 }
 
 /// Rule 6: the session store is bounded. Past the emulator's own bound an exchange is
-/// refused with HTTP 402 — the quota shape `CreateComponent` uses for the same kind of
-/// bound — and stores nothing.
+/// refused with HTTP 400 — the `InvalidParameterException` this operation's model declares,
+/// see `tests/all/emulator_store_bound_refusals.rs` for the rule — and stores nothing.
 #[tokio::test]
 async fn the_token_session_store_is_bounded_by_its_quota() {
     let emulator = Emulator::new();
@@ -603,8 +603,8 @@ async fn the_token_session_store_is_bounded_by_its_quota() {
             .exchange(PROVIDER, code, "https://app.example.com/cb", client_id)
             .await;
         assert_eq!(
-            refused.status, 402,
-            "case {label:?}: an exchange past the bound must be refused with HTTP 402, got {} \
+            refused.status, 400,
+            "case {label:?}: an exchange past the bound must be refused with HTTP 400, got {} \
              with {:?}",
             refused.status, refused.body
         );

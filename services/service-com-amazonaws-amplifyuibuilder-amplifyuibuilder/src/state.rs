@@ -1971,6 +1971,37 @@ pub fn blank_refresh_token() -> InvalidParameterException {
     }
 }
 
+/// The refusal of a request that would grow one of this emulator's OWN stores
+/// past the bound it is held under, for an operation whose model declares no
+/// quota error.
+///
+/// The bounds the sentence quotes — [`METADATA_ENVIRONMENT_QUOTA`],
+/// [`PROVIDER_TOKEN_SESSION_QUOTA`] and the constants beside them — are the
+/// emulator's own, so AWS refuses nothing here and there is no wording of its
+/// own to reproduce. The SHAPE is what matters to a client: this service strips
+/// every error-type discriminator (see `crate::service::untyped_errors`), so the
+/// status is all a client has to classify a refusal by, and it may therefore only
+/// be a status the refusing operation's own model declares. Of the shapes
+/// `PutMetadataFlag`, `RefreshToken` and `ExchangeCodeForToken` each declare,
+/// `InvalidParameterException` (400) is the one whose documented condition — "an
+/// invalid or out-of-range value was supplied for the input parameter" — covers a
+/// request naming an app environment or a token session beyond the range the
+/// store can hold. An operation whose model declares a shape that fits this
+/// condition better answers that one instead: `CreateComponent` and the other
+/// creates declare `ServiceQuotaExceededException` (402), and `StartCodegenJob`
+/// declares `ThrottlingException` (429).
+///
+/// `held` names what the store already holds, and `bound` the maximum it holds of
+/// it; nothing from the request is interpolated, so the sentence stays the one
+/// machine-readable name this class has on an untyped refusal.
+pub fn store_bound_reached(held: &str, bound: usize) -> InvalidParameterException {
+    InvalidParameterException {
+        message: Some(format!(
+            "this emulator already holds the maximum of {bound} {held}"
+        )),
+    }
+}
+
 // The messages of this service's resource refusals.
 //
 // AmplifyUIBuilder answers a refused resource call with NO error-type

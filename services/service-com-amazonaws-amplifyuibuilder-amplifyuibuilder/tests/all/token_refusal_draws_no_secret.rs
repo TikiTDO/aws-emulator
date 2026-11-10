@@ -17,7 +17,7 @@
 //! 2. On the admitted path the draw still happens, exactly once, and a draw that yields no
 //!    secret is the server-side condition rather than a refusal of the request.
 //! 3. The order leaves every response alone: a token request past the bound is still
-//!    refused with HTTP 402 naming no error type, a refusal is answered identically however
+//!    refused with HTTP 400 naming no error type, a refusal is answered identically however
 //!    often it is repeated, it leaves the store exactly as it was, and a session the store
 //!    already holds still refreshes at the bound and takes a freshly drawn access token.
 
@@ -381,7 +381,7 @@ impl Emulator {
 }
 
 /// Rule 3: the order of the two steps changes no response. Past the bound both handlers
-/// still answer HTTP 402 with no error type, repeat that answer unchanged, leave the store
+/// still answer HTTP 400 with no error type, repeat that answer unchanged, leave the store
 /// exactly as it was, and still refresh a session the store already holds.
 #[tokio::test]
 async fn a_token_request_past_the_bound_is_refused_without_changing_the_store() {
@@ -418,9 +418,9 @@ async fn a_token_request_past_the_bound_is_refused_without_changing_the_store() 
                 emulator.exchange(value).await
             };
             assert_eq!(
-                refused.status, 402,
+                refused.status, 400,
                 "case {case:?} round {round}: a token request past the bound must be refused \
-                 with HTTP 402, got {} with {:?}",
+                 with HTTP 400, got {} with {:?}",
                 refused.status, refused.body
             );
             assert!(

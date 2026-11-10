@@ -286,8 +286,9 @@ async fn an_unknown_feature_name_is_refused() {
 
 /// The metadata store is bounded: `appId` and `environmentName` come from the request, so
 /// past the emulator's own bound a write that would START another app environment's
-/// metadata is refused (HTTP 402, the quota shape `CreateComponent` uses for the same kind
-/// of bound), while a write to an app environment the store already holds still succeeds.
+/// metadata is refused (HTTP 400, the `InvalidParameterException` this operation's model
+/// declares — see `tests/all/emulator_store_bound_refusals.rs` for the rule), while a write
+/// to an app environment the store already holds still succeeds.
 #[tokio::test]
 async fn the_metadata_store_is_bounded_by_its_quota() {
     let router = emulator();
@@ -311,8 +312,8 @@ async fn the_metadata_store_is_bounded_by_its_quota() {
     ] {
         let refused = put_flag(&router, app_id, environment, feature, "true").await;
         assert_eq!(
-            refused.status, 402,
-            "case {case:?}: a write past the bound must be refused with HTTP 402, got {} with \
+            refused.status, 400,
+            "case {case:?}: a write past the bound must be refused with HTTP 400, got {} with \
              {:?}",
             refused.status, refused.body
         );
