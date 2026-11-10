@@ -1080,6 +1080,13 @@ mod principal_id_format;
 // head of the list are where every new ec2 suite inserts its two lines.
 #[path = "all/aggregate_id_format.rs"]
 mod aggregate_id_format;
+// The settings of ONE principal, out of the same store `principal_id_format` writes and
+// reports for every principal. Declared beside its sibling suites rather than in sorted
+// position, for the reason the note at the head of this file gives: the sorted
+// neighbourhood and the head of the list are where every new ec2 suite inserts its two
+// lines.
+#[path = "all/identity_id_format.rs"]
+mod identity_id_format;
 // What `CreateRouteServerEndpoint` resolves before it writes, what it replays for a repeated
 // idempotency token, and what a dry run of it performs. Declared here rather than in sorted
 // position, for the reason the note at the head of this file gives: the sorted neighbourhood

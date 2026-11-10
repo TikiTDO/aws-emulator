@@ -789,6 +789,21 @@ pub fn invalid_parameter_value<E>(message: impl Into<String>) -> crate::scaffold
     crate::scaffolded::Scaffolded::service_error(INVALID_PARAMETER_VALUE, 400, message)
 }
 
+/// Refuse an ARN member that does not name a target the action can act on, the way EC2
+/// does: HTTP 400 [`INVALID_TARGET_ARN_UNKNOWN`], with the message EC2 words for it —
+/// [`INVALID_TARGET_ARN_MESSAGE_PREFIX`] followed by the ARN the request named.
+///
+/// This is the code for a member that takes an ARN — the ID format surface's
+/// `PrincipalArn` — rather than [`invalid_parameter_value`], which is for a value of any
+/// other kind, so every operation that takes one refuses it the same way.
+pub fn invalid_target_arn_unknown<E>(arn: &str) -> crate::scaffolded::Scaffolded<E> {
+    crate::scaffolded::Scaffolded::service_error(
+        INVALID_TARGET_ARN_UNKNOWN,
+        400,
+        format!("{INVALID_TARGET_ARN_MESSAGE_PREFIX}{arn}"),
+    )
+}
+
 /// Refuse a resource TYPE the action does not support, the way EC2 does: HTTP 400
 /// [`INVALID_RESOURCE_TYPE_UNKNOWN`] with its fixed message
 /// [`INVALID_RESOURCE_TYPE_MESSAGE`].

@@ -184,16 +184,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // "The ARN of the principal, which can be an IAM user, IAM role, or the root user.
         // Specify all to modify the ID format for all IAM users, IAM roles, and the root
         // user of the account" (`$PrincipalArn`) — anything else names no principal of
-        // this account, so it is refused instead of becoming a row nothing can ever read.
+        // this account, so it is refused instead of becoming a row nothing can ever read,
+        // with the code and the message EC2 answers a member that takes an ARN with.
         let principal = input.principal_arn.as_str();
         if principal != state::ALL_PRINCIPALS && !state::iam_principal_arn_is_well_formed(principal)
         {
-            return Err(state::invalid_parameter_value(format!(
-                "Invalid value '{principal}' for PrincipalArn. It must be '{all}', or the \
-                 ARN of the root user, an IAM user or an IAM role of account {account}",
-                all = state::ALL_PRINCIPALS,
-                account = ::engine::emulator_account_id(),
-            )));
+            return Err(state::invalid_target_arn_unknown(principal));
         }
 
         // "The type of resource: bundle | … | vpn-gateway. Alternatively, use the

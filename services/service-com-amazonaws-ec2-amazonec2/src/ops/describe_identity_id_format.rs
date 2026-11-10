@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeIdentityIdFormat
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeIdentityIdFormat`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeIdentityIdFormat::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! ## What this operation reports
+//!
+//! The longer-ID (17-character ID) settings of the ONE principal the request names, as one
+//! status per resource type that has such a setting
+//! ([`crate::state::LONGER_ID_RESOURCE_TYPES`], the catalog this operation's own `Resource`
+//! member publishes), or just the type that member names. The settings come from the same
+//! projection `DescribePrincipalIdFormat` reports every principal with
+//! ([`crate::state::ComAmazonawsEc2Amazonec2State::identity_id_formats`]), so the two
+//! operations cannot report one principal's setting two ways: a type past its opt-in
+//! period is permanently on, otherwise the principal's own explicit setting holds,
+//! otherwise it "defaults to the same ID settings as the root user"
+//! ([`crate::state::ComAmazonawsEc2Amazonec2State::use_long_ids_for`]).
+//!
+//! A REPORT: it writes nothing, so two calls with the same request answer the same thing.
+//! `ModifyIdentityIdFormat` is what writes a principal's preference.
 //!
 //! ## Shape of an operation
 //!
@@ -150,18 +157,48 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeIdentityIdFormat` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeIdentityIdFormatErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeIdentityIdFormat"))
+        use crate::state;
+
+        // The ID format settings are facts of the account's principals, and this store is
+        // per account (`crate::state`'s module docs), so nothing outside the request's own
+        // members is read and `ctx` carries nothing this operation needs. This request
+        // models no `DryRun` member, so there is no dry run to answer either.
+        let _ = ctx;
+
+        // "The ARN of the principal, which can be an IAM role, IAM user, or the root user"
+        // (`$PrincipalArn`) — anything else names no principal of this account, so it is
+        // refused instead of being answered with settings that belong to nobody, with the
+        // code and the message EC2 answers a member that takes an ARN with. Unlike
+        // `ModifyIdentityIdFormat`'s member, this one publishes no `all` wildcard: this
+        // request reports ONE principal's settings.
+        let principal = input.principal_arn.as_str();
+        if !state::iam_principal_arn_is_well_formed(principal) {
+            return Err(state::invalid_target_arn_unknown(principal));
+        }
+
+        // "The type of resource: bundle | conversion-task | …" (`$Resource`) narrows the
+        // report to that one type; a request that names none is answered with every type
+        // that has a longer-ID setting, in the catalog's one stable order. A word the
+        // model's own list does not hold is refused rather than ignored, so a misspelled
+        // one cannot read as "every type".
+        let resources: Vec<&'static str> = match input.resource.as_deref() {
+            None => state::LONGER_ID_RESOURCE_TYPES.to_vec(),
+            Some(requested) => vec![
+                state::longer_id_resource_type(requested)
+                    .ok_or_else(state::invalid_resource_type_unknown)?,
+            ],
+        };
+
+        let store = state::require_service_state(&*self.engine)?;
+
+        // A REPORT: the settings are read out of the store and nothing is written back, so
+        // this call cannot change what a later caller sees. A principal this store holds
+        // no explicit setting for is not an error — it "defaults to the same ID settings
+        // as the root user", which is what the projection answers for it.
+        let statuses = store.lock().identity_id_formats(principal, &resources);
+
+        Ok(DescribeIdentityIdFormatOutput {
+            statuses: Some(statuses),
+        })
     }
 }

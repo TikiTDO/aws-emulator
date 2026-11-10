@@ -799,8 +799,9 @@ async fn a_dry_run_flag_set_to_false_runs_the_describe() {
 /// The rows differ along what makes the request bad: a `PrincipalArn` that is not an IAM
 /// principal of this account (another account's root user, a resource that is not a
 /// principal, another service's ARN, an ARN with a Region, a bare word, an empty name),
-/// which carries `InvalidParameterValue`, and a `Resource` the modify's own list does not
-/// hold, which carries the resource-type code `InvalidResourceType.Unknown`.
+/// which carries the unknown-target-ARN code `InvalidTargetArn.Unknown`, and a `Resource`
+/// the modify's own list does not hold, which carries the resource-type code
+/// `InvalidResourceType.Unknown`.
 #[tokio::test]
 async fn a_bad_modify_is_refused_with_the_ec2_error_code_for_it() {
     let router = emulator();
@@ -812,37 +813,37 @@ async fn a_bad_modify_is_refused_with_the_ec2_error_code_for_it() {
             "another account's root user",
             "arn:aws:iam::123456789012:root".to_string(),
             "vpc",
-            ec2::state::INVALID_PARAMETER_VALUE,
+            ec2::state::INVALID_TARGET_ARN_UNKNOWN,
         ),
         (
             "an IAM resource that is not a principal",
             iam_arn("group/admins"),
             "vpc",
-            ec2::state::INVALID_PARAMETER_VALUE,
+            ec2::state::INVALID_TARGET_ARN_UNKNOWN,
         ),
         (
             "another service's ARN",
             iam_arn("vpc/vpc-1").replace(":iam:", ":ec2:"),
             "vpc",
-            ec2::state::INVALID_PARAMETER_VALUE,
+            ec2::state::INVALID_TARGET_ARN_UNKNOWN,
         ),
         (
             "an IAM ARN carrying a Region",
             iam_arn("root").replace("iam::", "iam:us-east-1:"),
             "vpc",
-            ec2::state::INVALID_PARAMETER_VALUE,
+            ec2::state::INVALID_TARGET_ARN_UNKNOWN,
         ),
         (
             "a bare word",
             "root".to_string(),
             "vpc",
-            ec2::state::INVALID_PARAMETER_VALUE,
+            ec2::state::INVALID_TARGET_ARN_UNKNOWN,
         ),
         (
             "a user ARN with no name",
             iam_arn("user/"),
             "vpc",
-            ec2::state::INVALID_PARAMETER_VALUE,
+            ec2::state::INVALID_TARGET_ARN_UNKNOWN,
         ),
         (
             "a resource type the modify list does not hold",
@@ -877,6 +878,16 @@ async fn a_bad_modify_is_refused_with_the_ec2_error_code_for_it() {
         );
         if code_expected == ec2::state::INVALID_RESOURCE_TYPE_UNKNOWN {
             assert_resource_type_message(case, &body);
+        } else {
+            // EC2's message for a refused ARN is its fixed `Invalid TargetArn:` followed by
+            // the value the request named, and nothing else.
+            let message = super::ec2_query::error_message(&body);
+            let expected = format!("{}{arn}", ec2::state::INVALID_TARGET_ARN_MESSAGE_PREFIX);
+            assert_eq!(
+                message, expected,
+                "case {case:?}: expected the message {expected:?}, got {message:?} with \
+                 body {body}"
+            );
         }
         let (after, _) = describe(&router, case, &[]).await;
         assert_eq!(

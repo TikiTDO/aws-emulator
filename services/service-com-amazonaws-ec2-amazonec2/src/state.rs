@@ -1149,6 +1149,11 @@
 //! writing a row per principal and per type that two operations could then disagree
 //! about. The resource-type key is a `&'static str` out of
 //! [`LONGER_ID_RESOURCE_TYPES`], so only a type the model publishes is ever stored.
+//! [`ComAmazonawsEc2Amazonec2State::identity_id_formats`] is the one projection of a
+//! principal's settings into the modelled `IdFormat` shape, which both
+//! `DescribeIdentityIdFormat` and the per-principal statuses of
+//! [`ComAmazonawsEc2Amazonec2State::principal_id_formats`] answer with, so no two
+//! operations report one principal's setting two ways.
 //!
 //! ## The default security group of a VPC
 //!

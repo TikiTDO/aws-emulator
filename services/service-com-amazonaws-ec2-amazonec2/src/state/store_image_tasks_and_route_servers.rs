@@ -1600,6 +1600,45 @@ impl ComAmazonawsEc2Amazonec2State {
             .unwrap_or(DEFAULT_USE_LONG_IDS)
     }
 
+    /// The statuses ONE principal is reported with for every type in `resources`:
+    /// "information about the ID format for the resources"
+    /// (`DescribeIdentityIdFormatResult$Statuses`), in the order `resources` gives.
+    ///
+    /// The one projection of a principal's settings into the modelled
+    /// [`crate::ops::types::IdFormat`] shape, so `DescribeIdentityIdFormat` and the
+    /// per-principal statuses of [`Self::principal_id_formats`] cannot report one
+    /// principal's setting two ways.
+    pub fn identity_id_formats(
+        &self,
+        arn: &str,
+        resources: &[&'static str],
+    ) -> Vec<crate::ops::types::IdFormat> {
+        self.id_formats_against_root(arn, resources, &root_principal_arn())
+    }
+
+    /// [`Self::identity_id_formats`] with the root user's ARN already in hand, so a caller
+    /// answering for many principals formats it ONCE rather than per principal.
+    fn id_formats_against_root(
+        &self,
+        arn: &str,
+        resources: &[&'static str],
+        root: &str,
+    ) -> Vec<crate::ops::types::IdFormat> {
+        resources
+            .iter()
+            .map(|resource| crate::ops::types::IdFormat {
+                // "The date in UTC at which you are permanently switched over to using
+                // longer IDs. If a deadline is not yet available for this resource type,
+                // this field is not returned" (`IdFormat$Deadline`): this emulator mints
+                // longer ids for every type already, so there is no future switch-over
+                // date to report for any of them.
+                deadline: None,
+                resource: Some((*resource).to_string()),
+                use_long_ids: Some(self.use_long_ids_against_root(arn, resource, root)),
+            })
+            .collect()
+    }
+
     /// The principals `DescribePrincipalIdFormat` reports, each with its setting for every
     /// type in `resources`.
     ///
@@ -1625,24 +1664,7 @@ impl ComAmazonawsEc2Amazonec2State {
             .into_iter()
             .map(|arn| crate::ops::types::PrincipalIdFormat {
                 arn: Some(arn.to_string()),
-                statuses: Some(
-                    resources
-                        .iter()
-                        .map(|resource| crate::ops::types::IdFormat {
-                            // "The date in UTC at which you are permanently switched over
-                            // to using longer IDs. If a deadline is not yet available for
-                            // this resource type, this field is not returned"
-                            // (`IdFormat$Deadline`): this emulator mints longer ids for
-                            // every type already, so there is no future switch-over date
-                            // to report for any of them.
-                            deadline: None,
-                            resource: Some((*resource).to_string()),
-                            use_long_ids: Some(self.use_long_ids_against_root(
-                                arn, resource, &root,
-                            )),
-                        })
-                        .collect(),
-                ),
+                statuses: Some(self.id_formats_against_root(arn, resources, &root)),
             })
             .collect()
     }

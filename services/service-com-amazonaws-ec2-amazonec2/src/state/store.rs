@@ -844,6 +844,19 @@ pub const INVALID_RESOURCE_TYPE_UNKNOWN: &str = "InvalidResourceType.Unknown";
 /// this service's refusals, whose message is built from the request.
 pub const INVALID_RESOURCE_TYPE_MESSAGE: &str = "Invalid resource type";
 
+/// The message EC2 answers [`INVALID_TARGET_ARN_UNKNOWN`] with: a fixed `Invalid TargetArn`
+/// followed by the ARN the request named, as recorded for the ID format surface's
+/// `PrincipalArn`. The refusal names the value at fault and nothing else — not the member it
+/// came from, and not the targets the member admits.
+pub const INVALID_TARGET_ARN_MESSAGE_PREFIX: &str = "Invalid TargetArn: ";
+
+/// EC2's error code for a request whose ARN member does not name a target the action can
+/// act on — "the specified ARN is invalid. For example, you might be using an ARN that is
+/// not supported for the action" (Amazon EC2 error codes). The code the ID format
+/// surface's `PrincipalArn` is held to, which is why it is distinct from
+/// [`INVALID_PARAMETER_VALUE`]: an ARN has a code of its own.
+pub const INVALID_TARGET_ARN_UNKNOWN: &str = "InvalidTargetArn.Unknown";
+
 /// EC2's error code for a request that named a volume id this account holds no EBS
 /// volume for.
 pub const INVALID_VOLUME_ID_NOT_FOUND: &str = "InvalidVolume.NotFound";
