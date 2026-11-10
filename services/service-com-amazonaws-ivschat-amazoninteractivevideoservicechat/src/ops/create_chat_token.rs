@@ -187,6 +187,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         {
             return Err(CreateChatTokenErrorModeled::ValidationException(
                 crate::state::field_validation_failed(
+                    Self::NAME,
                     "capabilities",
                     format!(
                         "capability {unknown} is not one of [{}].",

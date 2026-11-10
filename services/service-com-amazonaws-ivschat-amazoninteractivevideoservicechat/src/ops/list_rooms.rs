@@ -201,6 +201,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 None => {
                     return Err(ListRoomsErrorModeled::ValidationException(
                         crate::state::field_validation_failed(
+                            Self::NAME,
                             "nextToken",
                             "nextToken is not a pagination token this service issued.",
                         ),

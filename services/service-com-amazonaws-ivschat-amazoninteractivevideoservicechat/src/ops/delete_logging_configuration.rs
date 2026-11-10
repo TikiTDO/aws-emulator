@@ -180,6 +180,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         {
             return Err(DeleteLoggingConfigurationErrorModeled::ValidationException(
                 crate::state::field_validation_failed(
+                    Self::NAME,
                     "identifier",
                     format!(
                         "identifier {} does not name a logging configuration: it must be a \

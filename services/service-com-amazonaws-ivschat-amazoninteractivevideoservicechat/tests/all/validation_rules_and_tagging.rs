@@ -83,10 +83,23 @@ impl Emulator {
             .get("content-length")
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
+        // Every response header, lowercased: the error document suite reads the
+        // protocol's discriminator and the request id off them.
+        let headers: BTreeMap<String, String> = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_ascii_lowercase(),
+                    String::from_utf8_lossy(value.as_bytes()).to_string(),
+                )
+            })
+            .collect();
         Answer {
             status,
             body: response.into_body().to_vec(),
             content_length,
+            headers,
         }
     }
 
@@ -148,18 +161,24 @@ impl Emulator {
     }
 }
 
-/// One answer as a suite that cares about FRAMING reads it: the status, the raw body bytes
-/// and the length the answer states.
+/// One answer as a suite that cares about FRAMING reads it: the status, the raw body bytes,
+/// the length the answer states and the headers it carries.
 pub(crate) struct Answer {
     pub(crate) status: u16,
     pub(crate) body: Vec<u8>,
     pub(crate) content_length: Option<String>,
+    pub(crate) headers: BTreeMap<String, String>,
 }
 
 impl Answer {
     /// The body as text, for an assertion message.
     pub(crate) fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).to_string()
+    }
+
+    /// One response header, by its lowercased name.
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
+        self.headers.get(name).map(String::as_str)
     }
 }
 
@@ -508,7 +527,7 @@ async fn a_value_outside_a_modelled_range_is_refused_with_the_services_message_r
         );
         assert_eq!(
             body.pointer("/fieldList/0/name").and_then(Value::as_str),
-            Some(member),
+            Some(format!("{operation}.{member}").as_str()),
             "case {case:?}: expected fieldList to name the member, got {body}"
         );
     }
@@ -948,12 +967,14 @@ async fn the_tagging_operations_accept_an_ivschat_resource_arn_and_refuse_a_malf
                 "case {case:?} {operation}: expected ValidationException, got {body}"
             );
             assert!(
-                error_message(&body).contains("at 'resourceArn'"),
-                "case {case:?} {operation}: the refusal must name the member, got {body}"
+                error_message(&body)
+                    .starts_with(&format!("{operation}.resourceArn ")),
+                "case {case:?} {operation}: the refusal must name the operation and the \
+                 member, got {body}"
             );
             assert_eq!(
                 body.pointer("/fieldList/0/name").and_then(Value::as_str),
-                Some("resourceArn"),
+                Some(format!("{operation}.resourceArn").as_str()),
                 "case {case:?} {operation}: expected fieldList to name the member, got {body}"
             );
         }
@@ -967,7 +988,7 @@ async fn the_tagging_operations_accept_an_ivschat_resource_arn_and_refuse_a_malf
         )
         .await;
     assert!(
-        error_message(&body).contains("length less than or equal to 128"),
+        error_message(&body).contains("is required to have a maximum length of 128"),
         "an over-long ARN must be refused on the modelled 128-character bound, got {body}"
     );
 

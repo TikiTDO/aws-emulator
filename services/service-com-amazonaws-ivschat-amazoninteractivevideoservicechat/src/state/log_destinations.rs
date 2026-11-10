@@ -63,7 +63,7 @@ pub async fn unresolvable_destination(
             delivery_stream_is_absent(ctx, region, &firehose.delivery_stream_name).await
         }
     };
-    absent.then(|| destination_not_found(destination_name(destination)))
+    absent.then(|| resource_not_found(destination_name(destination)))
 }
 
 /// The name a destination gives the resource it logs to: whichever member of the union the
@@ -74,26 +74,6 @@ pub fn destination_name(destination: &DestinationConfiguration) -> &str {
         DestinationConfiguration::S3(s3) => &s3.bucket_name,
         DestinationConfiguration::cloudWatchLogs(logs) => &logs.log_group_name,
         DestinationConfiguration::Firehose(firehose) => &firehose.delivery_stream_name,
-    }
-}
-
-/// The modelled `ResourceNotFoundException` for a destination resource the service that
-/// owns it does not hold.
-///
-/// The `message` follows this service's single not-found rule, built from the request:
-/// `Resource: <the destination the caller named> not found`. `resourceId` is that name
-/// when it is one the member's `^[a-zA-Z0-9]+$` pattern admits and empty otherwise, since
-/// the modelled shape cannot carry a value outside its own pattern — a bucket, log group
-/// or stream name may carry dots, dashes and slashes that it does not.
-fn destination_not_found(name: &str) -> ResourceNotFoundException {
-    let resource_id = if !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric()) {
-        name.to_string()
-    } else {
-        String::new()
-    };
-    ResourceNotFoundException {
-        resource_id,
-        ..resource_not_found(name)
     }
 }
 
@@ -286,26 +266,24 @@ mod tests {
         S3DestinationConfiguration,
     };
 
-    /// Which name a refusal reports, and what it keeps in the pattern-constrained
-    /// `resourceId`, for each member of the modelled union.
+    /// Which name a refusal reports, and the `resourceId` it echoes it under, for each
+    /// member of the modelled union.
     #[test]
     fn a_refusal_names_the_destination_the_request_named() {
-        // (case, the destination, the name the refusal reports, its resourceId)
-        let cases: Vec<(&str, DestinationConfiguration, &str, &str)> = vec![
+        // (case, the destination, the name the refusal reports)
+        let cases: Vec<(&str, DestinationConfiguration, &str)> = vec![
             (
                 "an s3 bucket whose name carries dashes",
                 DestinationConfiguration::S3(S3DestinationConfiguration {
                     bucket_name: "chat-logs-bucket".to_string(),
                 }),
                 "chat-logs-bucket",
-                "",
             ),
             (
                 "an s3 bucket whose name is alphanumeric throughout",
                 DestinationConfiguration::S3(S3DestinationConfiguration {
                     bucket_name: "chatlogs2026".to_string(),
                 }),
-                "chatlogs2026",
                 "chatlogs2026",
             ),
             (
@@ -316,7 +294,6 @@ mod tests {
                     },
                 ),
                 "/aws/ivschat/room-logs",
-                "",
             ),
             (
                 "a firehose delivery stream",
@@ -324,16 +301,15 @@ mod tests {
                     delivery_stream_name: "chat.logs-stream".to_string(),
                 }),
                 "chat.logs-stream",
-                "",
             ),
         ];
-        for (case, destination, name, resource_id) in cases {
+        for (case, destination, name) in cases {
             let actual = destination_name(&destination);
             assert_eq!(
                 actual, name,
                 "case {case:?}: expected the destination name {name:?}, got {actual:?}"
             );
-            let refusal = destination_not_found(actual);
+            let refusal = resource_not_found(actual);
             let expected_message = format!("Resource: {name} not found");
             assert_eq!(
                 refusal.message, expected_message,
@@ -341,8 +317,8 @@ mod tests {
                 refusal.message
             );
             assert_eq!(
-                refusal.resource_id, resource_id,
-                "case {case:?}: expected resourceId {resource_id:?}, got {:?}",
+                refusal.resource_id, name,
+                "case {case:?}: expected the identifier echoed as resourceId, got {:?}",
                 refusal.resource_id
             );
         }

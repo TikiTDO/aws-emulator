@@ -176,6 +176,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         {
             return Err(DeleteRoomErrorModeled::ValidationException(
                 crate::state::field_validation_failed(
+                    Self::NAME,
                     "identifier",
                     format!(
                         "identifier {} does not name a room: it must be a room ARN.",

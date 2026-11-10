@@ -18,17 +18,25 @@ use std::time::{Duration, SystemTime};
 use ::aws_smithy_schema::serde::{SerdeError, SerializableStruct, ShapeSerializer};
 use ::aws_smithy_schema::{Schema, ShapeId, ShapeType, TraitMap};
 use ::aws_smithy_schema_server::constraints::{validate, LengthTrait, PatternTrait, Violation};
-use ::aws_smithy_schema_server::envelope;
 
 use crate::ops::types::{
     DestinationConfiguration, MessageReviewHandler, ResourceNotFoundException, ValidationException,
-    ValidationExceptionField, CREATE_LOGGING_CONFIGURATION_STATE_VALUES, RESOURCE_TYPE_VALUES,
+    CREATE_LOGGING_CONFIGURATION_STATE_VALUES, RESOURCE_TYPE_VALUES,
     UPDATE_LOGGING_CONFIGURATION_STATE_VALUES,
 };
 
 /// Resolving the destination a logging configuration logs to against the service that owns
 /// it, which is what a write that names one is gated on.
 pub mod log_destinations;
+
+/// How this service words a request it refuses because one member's value is wrong, and the
+/// modelled `ValidationException` that wording travels in.
+pub mod refusals;
+
+pub use refusals::{
+    check_range, field_validation_failed, member_path, missing_member_violation,
+    stated_validation_exception, violation_clause, FIELD_VALIDATION_FAILED,
+};
 
 /// `CreateRoom`/`UpdateRoom` default for `maximumMessageRatePerSecond`, from the model's
 /// own documentation of that member ("Maximum number of messages per second that can be
@@ -464,30 +472,59 @@ impl ComAmazonawsIvschatAmazoninteractivevideoservicechatState {
 /// echoed exactly as received — the full ARN, not the id extracted out of it — because
 /// that is the value the caller has to fix.
 ///
-/// `resourceType` is the modelled `ResourceType` enum's only value; `resourceId` is the
-/// id the identifier named, under either of this service's two resource identifiers — a
-/// room's or a logging configuration's — when it names one.
+/// `resourceId` is the identifier the caller sent, echoed exactly as received — the value
+/// the caller has to fix, and the same string the message names; `resourceType` is the
+/// token for the KIND of resource that identifier names ([`resource_type_of`]).
 pub fn resource_not_found(identifier: &str) -> ResourceNotFoundException {
     ResourceNotFoundException {
         message: format!("Resource: {identifier} not found"),
-        resource_id: ComAmazonawsIvschatAmazoninteractivevideoservicechatState::room_id_of(
-            identifier,
-        )
-        .or_else(|| {
-            ComAmazonawsIvschatAmazoninteractivevideoservicechatState::logging_configuration_id_of(
-                identifier,
-            )
-        })
-        .unwrap_or_default()
-        .to_string(),
-        // `RESOURCE_TYPE_VALUES` is the generated catalog of the modelled `ResourceType`
-        // enum; ROOM is the only member it carries.
-        resource_type: RESOURCE_TYPE_VALUES
-            .first()
-            .copied()
-            .unwrap_or("ROOM")
-            .to_string(),
+        resource_id: identifier.to_string(),
+        resource_type: resource_type_of(identifier),
     }
+}
+
+/// The `resourceType` token a refusal states for the kind of resource an identifier names:
+/// the modelled `ResourceType` value for that kind when the model declares one, and
+/// otherwise the resource-type element of the ARN as this service writes it there.
+///
+/// `RESOURCE_TYPE_VALUES` is the generated catalog of the modelled `ResourceType` enum and
+/// carries `ROOM` alone, so a room ARN is reported under that modelled token while a
+/// logging-configuration ARN — a kind the published enum does not carry — is reported
+/// under its own ARN element (`logging-configuration`), which is what the recorded
+/// refusals of each kind carry. An identifier that is not an ARN of this service at all
+/// names no kind, and takes the modelled value.
+fn resource_type_of(identifier: &str) -> String {
+    let element = arn_resource_type(identifier).unwrap_or_default();
+    RESOURCE_TYPE_VALUES
+        .iter()
+        .find(|modelled| modelled.eq_ignore_ascii_case(element))
+        .map(|modelled| (*modelled).to_string())
+        .unwrap_or_else(|| {
+            if element.is_empty() {
+                RESOURCE_TYPE_VALUES
+                    .first()
+                    .copied()
+                    .unwrap_or("ROOM")
+                    .to_string()
+            } else {
+                element.to_string()
+            }
+        })
+}
+
+/// The resource-type element of an ARN — `arn:<partition>:<service>:<region>:<account>:
+/// <resource-type>/<id>` — when `identifier` is an ARN in this service's own namespace,
+/// which is the only form the modelled identifier patterns of this service admit.
+fn arn_resource_type(identifier: &str) -> Option<&str> {
+    let fields: Vec<&str> = identifier.split(':').collect();
+    let [prefix, _partition, service, _region, _account, resource, ..] = fields.as_slice() else {
+        return None;
+    };
+    if !prefix.eq_ignore_ascii_case("arn") || *service != SERVICE_NAMESPACE {
+        return None;
+    }
+    let element = resource.split('/').next().unwrap_or_default();
+    (!element.is_empty()).then_some(element)
 }
 
 /// Render a page position as the opaque `nextToken` a paginated operation carries.
@@ -521,63 +558,6 @@ pub fn request_region(ctx: &smithy_server_runtime::OperationContext<'_>) -> Stri
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         })
         .unwrap_or_else(|| DEFAULT_REGION.to_string())
-}
-
-/// The modelled `ValidationException` for a request member this service refuses, with the
-/// member named in `fieldList` the way a field-level refusal reports it.
-pub fn field_validation_failed(field: &str, message: impl Into<String>) -> ValidationException {
-    let message = message.into();
-    ValidationException {
-        message: message.clone(),
-        // `VALIDATION_EXCEPTION_REASON_VALUES` is the generated catalog of the modelled
-        // `ValidationExceptionReason` enum; a bad member value is a field validation
-        // failure rather than OTHER.
-        reason: "FIELD_VALIDATION_FAILED".to_string(),
-        field_list: Some(vec![ValidationExceptionField {
-            name: field.to_string(),
-            message,
-        }]),
-    }
-}
-
-/// A numeric bound or submitted value as this service's validation layer renders it: the
-/// decimal form, so an integral value carries a `.0` (`180` reads as `180.0`).
-fn as_decimal(value: i32) -> String {
-    format!("{value}.0")
-}
-
-/// Refuse `value` when it sits outside `range`, the way this service's validation layer
-/// states a range violation, or pass it through.
-///
-/// The message is built entirely from the request: the operation, the member whose bound
-/// was violated, that modelled bound and the submitted value —
-/// `<Operation>.<member> is required to have a maximum value of <max>, found <value>` (and
-/// the symmetric `minimum` form below the lower bound), with both numbers in the decimal
-/// form [`as_decimal`] renders. A value ON either bound is accepted.
-pub fn check_range(
-    operation: &str,
-    member: &str,
-    value: i32,
-    range: ModelledRange,
-) -> Result<(), ValidationException> {
-    let bound = if value < range.min {
-        Some(("minimum", range.min))
-    } else if value > range.max {
-        Some(("maximum", range.max))
-    } else {
-        None
-    };
-    match bound {
-        None => Ok(()),
-        Some((kind, bound)) => Err(field_validation_failed(
-            member,
-            format!(
-                "{operation}.{member} is required to have a {kind} value of {}, found {}",
-                as_decimal(bound),
-                as_decimal(value)
-            ),
-        )),
-    }
 }
 
 // ===========================================================================
@@ -661,29 +641,20 @@ impl SerializableStruct for TaggedResource<'_> {
 /// Refuse a `resourceArn` that violates the member's length bound or its corrected
 /// pattern, or pass it through.
 ///
-/// The `Message` is the framework's own validation envelope, so a refusal made here reads
-/// like one made at the boundary; `reason` and `fieldList` are what the boundary cannot
-/// carry and the modelled shape requires.
-pub fn check_resource_arn(resource_arn: &str) -> Result<(), ValidationException> {
-    let violations: Vec<Violation> = validate(
-        &TaggedResource { resource_arn },
-        &TAGGED_RESOURCE_SCHEMA,
-    );
-    match envelope(&violations) {
+/// The violations come from the framework's own walk, and the refusal they are stated in is
+/// the one every member refusal of this service is stated in
+/// ([`stated_validation_exception`]): the operation, the member path, and the requirement
+/// the value failed — so a refusal made here reads exactly like one the walk at the request
+/// boundary found.
+pub fn check_resource_arn(
+    operation: &str,
+    resource_arn: &str,
+) -> Result<(), ValidationException> {
+    let violations: Vec<Violation> =
+        validate(&TaggedResource { resource_arn }, &TAGGED_RESOURCE_SCHEMA);
+    match stated_validation_exception(operation, &violations) {
         None => Ok(()),
-        Some(message) => Err(ValidationException {
-            message,
-            reason: "FIELD_VALIDATION_FAILED".to_string(),
-            field_list: Some(
-                violations
-                    .iter()
-                    .map(|violation| ValidationExceptionField {
-                        name: violation.path.clone(),
-                        message: violation.message(),
-                    })
-                    .collect(),
-            ),
-        }),
+        Some(refused) => Err(refused),
     }
 }
 

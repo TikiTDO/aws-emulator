@@ -155,7 +155,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::scaffolded::Scaffolded::not_implemented("TagResource")
         })?;
 
-        crate::state::check_resource_arn(&input.resource_arn)
+        crate::state::check_resource_arn(Self::NAME, &input.resource_arn)
             .map_err(TagResourceErrorModeled::ValidationException)?;
 
         let mut store = state.lock();
@@ -178,6 +178,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if tags.len() > crate::state::MAX_TAGS_PER_RESOURCE {
             return Err(TagResourceErrorModeled::ValidationException(
                 crate::state::field_validation_failed(
+                    Self::NAME,
                     "tags",
                     format!(
                         "a resource carries at most {} tags; this request would leave it with {}.",

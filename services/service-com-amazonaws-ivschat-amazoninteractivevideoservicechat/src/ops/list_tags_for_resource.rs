@@ -151,7 +151,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::scaffolded::Scaffolded::not_implemented("ListTagsForResource")
         })?;
 
-        crate::state::check_resource_arn(&input.resource_arn)
+        crate::state::check_resource_arn(Self::NAME, &input.resource_arn)
             .map_err(ListTagsForResourceErrorModeled::ValidationException)?;
 
         // A reporting operation: the store is read, never written.
