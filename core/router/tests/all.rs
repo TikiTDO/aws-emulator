@@ -1334,3 +1334,9 @@ mod cloudformation_sfn_absent_role_and_stop;
 // and the refusals Amazon Braket's own control plane answers for one it will not create.
 #[path = "all/cloudformation_provisions_braket_spending_limits.rs"]
 mod cloudformation_provisions_braket_spending_limits;
+// Declared in the appended tail, which is where every new suite inserts its lines: the TOPIC
+// destination of a bucket's notification configuration, from the grant S3 reads before it
+// records the container to an object event travelling through the topic onto a subscribed
+// queue — S3, SNS and SQS at once.
+#[path = "all/s3_object_events_fan_out_through_sns.rs"]
+mod s3_object_events_fan_out_through_sns;
