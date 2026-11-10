@@ -25,6 +25,10 @@ use crate::ops::types::KeyPairInfo;
 /// The prefix of every key pair id, as [`ComAmazonawsEc2Amazonec2State::next_id`] takes it:
 /// a key pair id is `key-` and 17 lowercase hexadecimal digits, the long form every EC2
 /// resource id this store mints takes.
+///
+/// What this store MINTS is that long form; what a REQUEST may name a key pair by is either
+/// form EC2 has issued ids in, which is why [`key_pair_id_is_well_formed`] reads an id
+/// through [`prefixed_id_is_well_formed`] and so accepts the 8-digit short form too.
 pub const KEY_PAIR_ID_PREFIX: &str = "key";
 
 /// The `ResourceType` a `CreateKeyPair` tag specification may name: the key pair it creates
@@ -134,6 +138,91 @@ pub fn key_pair_limit_exceeded<E>() -> Scaffolded<E> {
         400,
         format!("The maximum number of key pairs has been reached ({MAX_KEY_PAIRS})"),
     )
+}
+
+/// Refuse a value a request gave as a key pair ID that is not one: HTTP 400
+/// `InvalidParameterValue`, worded as EC2 words a value it cannot read as a key pair id —
+/// the fixed `Invalid value '…' for keyPairId.` with the REQUEST's own value in it, cut
+/// down to length by [`echoed_resource_id`] the way every echoed id of this crate is.
+///
+/// Separate from [`invalid_key_pair_id_not_found`], which is a well-formed id the account
+/// holds no key pair under: EC2 reads the FORM of an id before it looks one up, so a caller
+/// can tell a value that is not a key pair id from a key pair that is gone.
+pub fn invalid_key_pair_id_value<E>(key_pair_id: &str) -> Scaffolded<E> {
+    invalid_parameter_value(format!(
+        "Invalid value '{}' for keyPairId.",
+        echoed_resource_id(key_pair_id)
+    ))
+}
+
+/// Whether `key_pair_id` is a well-formed key pair id: `key-` and 8 or 17 lowercase
+/// hexadecimal digits, the two forms EC2 has issued resource ids in
+/// ([`prefixed_id_is_well_formed`], which every id kind of this crate without its own
+/// `@pattern` is read through — `smithy_query(query="shape",shape="KeyPairId")` is a plain
+/// `String`).
+pub fn key_pair_id_is_well_formed(key_pair_id: &str) -> bool {
+    prefixed_id_is_well_formed(KEY_PAIR_ID_PREFIX, key_pair_id)
+}
+
+/// How a request names the key pair it acts on: "the ID of the key pair"
+/// (`DeleteKeyPairRequest$KeyPairId`) or "the name of the key pair"
+/// (`DeleteKeyPairRequest$KeyName`), either alone or both together.
+///
+/// Read out of a request by [`key_pair_selector`] and resolved against the store by
+/// [`ComAmazonawsEc2Amazonec2State::key_pair_id_for_selector`], so the two steps every
+/// operation taking this pair performs — refusing an unreadable request and finding the key
+/// pair it names — are each written once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyPairSelector<'a> {
+    /// The key pair's id, the request naming no name.
+    Id(&'a str),
+    /// The key pair's name, the request naming no id.
+    Name(&'a str),
+    /// Both, which must name one and the same key pair.
+    IdAndName {
+        /// The id the request named.
+        key_pair_id: &'a str,
+        /// The name the request named beside it.
+        key_name: &'a str,
+    },
+}
+
+/// The key pair a request names, or the refusal EC2 answers for a request that names none
+/// it can read.
+///
+/// Both members are optional in the model, so a request naming NEITHER is refused
+/// `MissingParameter`, and each member it does name is read for its own form before any
+/// lookup: an id that is not a key pair id ([`invalid_key_pair_id_value`]) and a name
+/// outside what EC2 publishes for one ([`validate_key_pair_name`]) are complaints about the
+/// request, which is why they are answered whatever the store holds.
+///
+/// ec2Query carries an omitted member and an empty one identically, so an empty value names
+/// nothing either way.
+pub fn key_pair_selector<'a, E>(
+    key_pair_id: Option<&'a str>,
+    key_name: Option<&'a str>,
+) -> Result<KeyPairSelector<'a>, Scaffolded<E>> {
+    let key_pair_id = key_pair_id.filter(|value| !value.is_empty());
+    let key_name = key_name.filter(|value| !value.is_empty());
+    if let Some(key_pair_id) = key_pair_id {
+        if !key_pair_id_is_well_formed(key_pair_id) {
+            return Err(invalid_key_pair_id_value(key_pair_id));
+        }
+    }
+    if let Some(key_name) = key_name {
+        validate_key_pair_name(key_name)?;
+    }
+    match (key_pair_id, key_name) {
+        (None, None) => Err(missing_parameter(
+            "The request must contain either the parameter KeyName or KeyPairId",
+        )),
+        (Some(key_pair_id), None) => Ok(KeyPairSelector::Id(key_pair_id)),
+        (None, Some(key_name)) => Ok(KeyPairSelector::Name(key_name)),
+        (Some(key_pair_id), Some(key_name)) => Ok(KeyPairSelector::IdAndName {
+            key_pair_id,
+            key_name,
+        }),
+    }
 }
 
 /// One stored key pair: the modelled [`KeyPairInfo`] shape every report of a key pair
@@ -263,6 +352,49 @@ impl ComAmazonawsEc2Amazonec2State {
         let stored = record.clone();
         self.key_pairs.insert(key_pair_id, record);
         Some(stored)
+    }
+
+    /// The id of the key pair `selector` names, `None` when the account holds no key pair
+    /// it names at all.
+    ///
+    /// The ONE resolution of the two members a request may name a key pair with, so every
+    /// operation that takes both reads them the same way: an id names the key pair stored
+    /// under it, a name the one key pair holding it ([`Self::key_pair_id_for_name`]), and
+    /// the two given TOGETHER must name the SAME key pair — honouring the id and ignoring a
+    /// name that disagrees would act on a key pair the request did not ask for, which is
+    /// the reading [`resolve_security_group_id`] already gives that pair for a security
+    /// group. The name is compared byte for byte, key pair names being case-sensitive.
+    ///
+    /// Whether an answer of `None` is a refusal or nothing to do is the CALLER's question:
+    /// a read refuses it ([`invalid_key_pair_name_not_found`]), a delete has nothing left
+    /// to remove.
+    pub fn key_pair_id_for_selector<E>(
+        &self,
+        selector: KeyPairSelector<'_>,
+    ) -> Result<Option<String>, Scaffolded<E>> {
+        match selector {
+            KeyPairSelector::Id(key_pair_id) => Ok(self
+                .key_pairs
+                .get_key_value(key_pair_id)
+                .map(|(stored_id, _)| stored_id.clone())),
+            KeyPairSelector::Name(key_name) => Ok(self.key_pair_id_for_name(key_name)),
+            KeyPairSelector::IdAndName {
+                key_pair_id,
+                key_name,
+            } => {
+                let Some(record) = self.key_pairs.get(key_pair_id) else {
+                    // Nothing is stored under the id, so there is no key pair for the two
+                    // members to disagree about: the request names none.
+                    return Ok(None);
+                };
+                if record.info.key_name.as_deref() != Some(key_name) {
+                    return Err(invalid_parameter_combination(format!(
+                        "The key pair '{key_pair_id}' is not named '{key_name}'"
+                    )));
+                }
+                Ok(Some(key_pair_id.to_string()))
+            }
+        }
     }
 
     /// Take the key pair `key_pair_id` names out of the store and answer it as it was

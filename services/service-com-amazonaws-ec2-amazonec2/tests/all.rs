@@ -43,7 +43,6 @@ mod query_empty_list_members;
 // its documented filters and `LocalGatewayIds` do, the pages it cuts the store into, the
 // bounds on one request's match, and what it refuses. Declared beside `prefix_lists` for
 // the reason the note above gives: the sorted neighbourhood and the tail of this file are
-// where every new ec2 suite inserts its lines.
 #[path = "all/local_gateways.rs"]
 mod local_gateways;
 // `RunInstances` driven from a LAUNCH TEMPLATE: the version's parameters overlaid with the
@@ -116,8 +115,6 @@ mod published_parameter_limits;
 // in, an account has one default VPC per Region, a Region it has not opted into refuses every
 // request, an instance type is offered in some of a Region's zones and not others, and a
 // terminated instance has released its network. Declared beside `prefix_lists` for the reason
-// the note above gives: the sorted neighbourhood and the tail of this file are where every new
-// ec2 suite inserts its lines.
 #[path = "all/region_scoped_state.rs"]
 mod region_scoped_state;
 // What an Elastic IP association binds to and what both sides of it report: the interface
@@ -1084,7 +1081,6 @@ mod aggregate_id_format;
 // reports for every principal. Declared beside its sibling suites rather than in sorted
 // position, for the reason the note at the head of this file gives: the sorted
 // neighbourhood and the head of the list are where every new ec2 suite inserts its two
-// lines.
 #[path = "all/identity_id_format.rs"]
 mod identity_id_format;
 // What `CreateRouteServerEndpoint` resolves before it writes, what it replays for a repeated
@@ -1786,3 +1782,7 @@ mod spot_instance_request_cancellation;
 // ec2 suite lands, for the reason the note at the top records.
 #[path = "all/traffic_mirror_targets.rs"]
 mod traffic_mirror_targets;
+// `DeleteKeyPair`: the key pair a delete removes, the id it reports for it, what it refuses
+// and what a dry run of it leaves behind. Declared beside `prefix_lists` for the reason the
+#[path = "all/delete_key_pair.rs"]
+mod delete_key_pair;

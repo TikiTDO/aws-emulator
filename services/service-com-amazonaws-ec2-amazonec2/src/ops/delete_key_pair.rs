@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteKeyPair
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteKeyPair`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: removes the public key the account holds for the key pair the request
+//! names: by id, by name, or by both, and reports the id it removed.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteKeyPair::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -135,18 +130,67 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteKeyPair` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteKeyPairErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteKeyPair"))
+        use crate::state;
+
+        // Nothing about a key pair depends on the Region the request was signed for: the
+        // record carries no Region member and no ARN, so `ctx` is read for nothing here.
+        let _ = ctx;
+
+        // "The ID of the key pair" (`$KeyPairId`) and "the name of the key pair"
+        // (`$KeyName`): which key pair this call is about, read through the ONE reading of
+        // that pair this crate has — so a request naming neither, an id that is not a key
+        // pair id and a name outside what EC2 publishes for one are refused as complaints
+        // about the REQUEST, before anything is looked up.
+        let selector =
+            state::key_pair_selector(input.key_pair_id.as_deref(), input.key_name.as_deref())?;
+
+        // Both of this operation's own refusals so far read the REQUEST alone, and a delete
+        // of a key pair the account does not hold succeeds as well, so the flag is answered
+        // HERE: "checks whether you have the required permissions for the action, WITHOUT
+        // actually making the request … if you have the required permissions, the error
+        // response is DryRunOperation" (`$DryRun`). That is also where the recorded contract
+        // puts it for the operations this crate drives in
+        // `tests/all/dry_run_before_resource_lookup.rs` — the flag is answered once the
+        // request's own members have been read and BEFORE any state is resolved, even when a
+        // check that reads state would have refused the call. The only such check here is
+        // the one that asks whether an id and a name given together name the same stored key
+        // pair, so under the flag that pair is answered `DryRunOperation` rather than looked
+        // up. Nothing is removed either way.
+        if input.dry_run.unwrap_or(false) {
+            return Err(state::dry_run_operation());
+        }
+
+        let state_handle = state::require_service_state(&*self.engine)?;
+        let mut store = state_handle.lock();
+
+        let Some(key_pair_id) = store.key_pair_id_for_selector(selector)? else {
+            // "Deletes the specified key pair, by removing the public key from Amazon EC2"
+            // (`DeleteKeyPair`): EC2 holds no public key under what this request named, so
+            // the account is ALREADY in the state the call asked for and the delete reports
+            // that it succeeded — the same answer a caller deleting twice, or tearing down
+            // a key pair it never created, gets. No key pair was removed, so there is no
+            // id to report with it.
+            return Ok(DeleteKeyPairOutput {
+                r#return: Some(true),
+                key_pair_id: None,
+            });
+        };
+
+        // `remove_key_pair` is the one way a key pair stops being stored, and what gives
+        // the record's caller-supplied bytes back to the store's budget — so a later read
+        // resolves neither the id nor the name any more.
+        if store.remove_key_pair(&key_pair_id).is_none() {
+            return Err(state::internal_error(
+                "the key pair resolved a moment ago could not be removed",
+            ));
+        }
+
+        // "Is true if the request succeeds, and an error otherwise" (`$Return`), beside
+        // "the ID of the key pair" (`$KeyPairId`) — the id of the key pair this call
+        // removed, whether the request named it by id or by name.
+        Ok(DeleteKeyPairOutput {
+            r#return: Some(true),
+            key_pair_id: Some(key_pair_id),
+        })
     }
 }
