@@ -538,14 +538,16 @@ async fn a_tag_key_identifies_one_tag_and_a_write_sets_only_the_keys_it_names() 
 
 /// RULE: a tag write whose `Arn` is not the stored ARN of any resource is refused with
 /// the modelled `ResourceNotFoundException` — answered, like every not-found in this
-/// service, with HTTP 400 and the requested ARN in `Resource` alone — and writes
-/// nothing. `ListTagsForResource` models no not-found error, so the same ARN simply has
-/// no tags: HTTP 200, the ARN echoed, and an EMPTY `Tags`.
+/// service, with HTTP 400, the KIND the ARN names in `ResourceType` and that kind's own
+/// identifier in `Resource` — and writes nothing. `ListTagsForResource` models no
+/// not-found error, so the same ARN simply has no tags: HTTP 200, the ARN echoed, and an
+/// EMPTY `Tags`.
 ///
 /// The rows differ along WHY the ARN resolves to nothing: an id never minted, the right
 /// id in another region or under another account (the ARN is the identity, not the id),
-/// a kind the store holds no record of, an ARN of another service entirely, and the ARN
-/// of a resource that has been deleted.
+/// a kind the store holds no record of, an ARN of another service entirely (whose kind
+/// this service cannot name, so the whole ARN is what it reports), and the ARN of a
+/// resource that has been deleted.
 #[tokio::test]
 async fn a_tag_write_refuses_an_arn_no_stored_resource_answers_to() {
     let emulator = Emulator::new();
@@ -573,35 +575,61 @@ async fn a_tag_write_refuses_an_arn_no_stored_resource_answers_to() {
         answer.status, answer.body
     );
 
-    let cases: Vec<(&str, String)> = vec![
+    // (case, the ARN nothing answers to, the kind it names and the identifier it
+    // addresses that kind by — what the refusal reports in ResourceType and Resource).
+    let cases: Vec<(&str, String, &str, String)> = vec![
         (
             "a ServerId the store never minted",
             format!("arn:aws:transfer:{REGION}:{ACCOUNT}:server/s-fffffffffffffffff"),
+            "Server",
+            "s-fffffffffffffffff".to_string(),
         ),
         (
             "the stored resource's id in another region",
             format!("arn:aws:transfer:eu-west-1:{ACCOUNT}:server/{server_id}"),
+            "Server",
+            server_id.clone(),
         ),
         (
             "the stored resource's id under another account",
             format!("arn:aws:transfer:{REGION}:111122223333:server/{server_id}"),
+            "Server",
+            server_id.clone(),
         ),
         (
             "a user under a server that holds no such user",
             format!("arn:aws:transfer:{REGION}:{ACCOUNT}:user/{server_id}/absent-user"),
+            "User",
+            "absent-user".to_string(),
         ),
         (
             "a workflow nothing answers to",
             format!("arn:aws:transfer:{REGION}:{ACCOUNT}:workflow/w-00000000000000001"),
+            "Workflow",
+            "w-00000000000000001".to_string(),
         ),
         (
             "an ARN of another service entirely",
             "arn:aws:s3:::tag-plane-bucket".to_string(),
+            // No kind of this service: there is no identifier to decode out of another
+            // service's resource field, so the whole ARN is what is reported.
+            "Resource",
+            "arn:aws:s3:::tag-plane-bucket".to_string(),
         ),
-        ("the ARN of a deleted server", doomed.arn.clone()),
+        (
+            "the ARN of a deleted server",
+            doomed.arn.clone(),
+            "Server",
+            doomed
+                .arn
+                .rsplit('/')
+                .next()
+                .expect("the deleted server's ARN names its id")
+                .to_string(),
+        ),
     ];
 
-    for (case, missing) in &cases {
+    for (case, missing, resource_type, identifier) in &cases {
         let writes: [(&str, Value); 2] = [
             (
                 "TagResource",
@@ -630,9 +658,18 @@ async fn a_tag_write_refuses_an_arn_no_stored_resource_answers_to() {
                 .unwrap_or_default()
                 .to_string();
             assert_eq!(
-                &reported, missing,
-                "case {case:?}: expected {op} to report the requested ARN in Resource, \
-                 got {reported:?}"
+                &reported, identifier,
+                "case {case:?}: expected {op} to report the identifier {identifier:?} in \
+                 Resource, got {reported:?}"
+            );
+            let reported_type = member_of(&answer.body, "ResourceType")
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            assert_eq!(
+                &reported_type, resource_type,
+                "case {case:?}: expected {op} to report ResourceType {resource_type:?}, got \
+                 {reported_type:?}"
             );
             let message = member_of(&answer.body, "Message")
                 .as_str()

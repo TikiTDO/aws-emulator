@@ -161,3 +161,23 @@ mod ssh_public_key_body_validation;
 // `web_app_customization_write_guard`: one writer of a web app's customization at a time.
 #[path = "all/web_app_customization_write_guard.rs"]
 mod web_app_customization_write_guard;
+// The five suites below are appended for the same reason: the sorted list is where every
+// concurrent change inserts.
+// `agreement_deletion`: what removing an AS2 agreement leaves behind.
+#[path = "all/agreement_deletion.rs"]
+mod agreement_deletion;
+// `connector_protocol_gate`: which connector protocol each operation of the connector
+// plane can be asked of.
+#[path = "all/connector_protocol_gate.rs"]
+mod connector_protocol_gate;
+// `identity_center_dependency`: the IAM Identity Center instance a web app's application
+// is registered in.
+#[path = "all/identity_center_dependency.rs"]
+mod identity_center_dependency;
+// `service_stated_refusals`: the refusals whose whole message is the service's own fixed
+// text for the condition.
+#[path = "all/service_stated_refusals.rs"]
+mod service_stated_refusals;
+// `tag_plane_resource_kinds`: which kind of resource the tag plane reports as missing.
+#[path = "all/tag_plane_resource_kinds.rs"]
+mod tag_plane_resource_kinds;

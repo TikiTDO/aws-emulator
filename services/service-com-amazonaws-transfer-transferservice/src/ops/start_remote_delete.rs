@@ -181,6 +181,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let sftp_config = connector.sftp_config.clone();
         let connector_url = connector.url.clone();
 
+        // A remote delete acts on the partner's REMOTE SFTP SERVER ("deletes a file or
+        // directory on the remote SFTP server"), which an AS2 connector configures none
+        // of, so this operation is not supported for one — decided as soon as the
+        // connector resolves and before any path is read or any identifier minted
+        // (`crate::state::connector_protocol`).
+        if !st::connector_protocol::serves_remote_sftp_operations(connector) {
+            return Err(StartRemoteDeleteErrorModeled::InvalidRequestException(
+                st::connector_protocol::unsupported_for_as2_connector(
+                    st::connector_protocol::REMOTE_DELETE_UNSUPPORTED,
+                ),
+            )
+            .into());
+        }
+
         // The path is a documented ABSOLUTE path on the remote server; a relative one
         // names nothing there.
         if !st::is_absolute_remote_path(&input.delete_path) {

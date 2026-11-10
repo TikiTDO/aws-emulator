@@ -10,6 +10,9 @@
 //!    per file the request named, IN THE ORDER it named them, each `QUEUED` — the
 //!    `TransferTableStatus` for a file whose transfer has not run, which is the only
 //!    status this emulator can report for work it makes no outbound connection for.
+//!    Those results are reported for an SFTP connector's transfers; asked of an AS2
+//!    connector the operation is not supported at all (`crate::connector_protocol_gate`
+//!    is that rule's suite).
 //! 2. `StartRemoteMove` accepts a move the same way, and refuses a `SourcePath` or
 //!    `TargetPath` that is not an absolute path on the remote server with
 //!    `InvalidRequestException` (400) — the members document themselves as absolute
@@ -159,24 +162,25 @@ async fn walk_results(
 async fn a_transfers_results_report_every_named_file_in_submission_order() {
     let emulator = Emulator::new();
     let sftp = sftp_connector(&emulator, "the SFTP connector").await;
-    let as2 = as2_connector(&emulator, "the AS2 connector").await;
 
     let ten: Vec<String> = (0..10)
         .map(|index| format!("amzn-s3-demo-bucket/batch/file-{index}.edi"))
         .collect();
 
     // (case, connector, the request's path members, the file paths the results must
-    // report in order)
+    // report in order). Every row names an SFTP connector: the per-file results are
+    // reported for those, and `ListFileTransferResults` is not supported for an AS2
+    // connector at all.
     let rows: Vec<(&str, &String, Value, Vec<String>)> = vec![
         (
-            "one outbound file on an AS2 connector",
-            &as2,
+            "one outbound file",
+            &sftp,
             json!({"SendFilePaths": ["amzn-s3-demo-bucket/invoice.edi"]}),
             vec!["amzn-s3-demo-bucket/invoice.edi".to_string()],
         ),
         (
             "three outbound files, in the order the request names them",
-            &as2,
+            &sftp,
             json!({"SendFilePaths": [
                 "amzn-s3-demo-bucket/zeta.edi",
                 "amzn-s3-demo-bucket/alpha.edi",
@@ -412,6 +416,9 @@ async fn a_remote_move_requires_absolute_paths() {
 async fn a_request_that_addresses_nothing_is_refused() {
     let emulator = Emulator::new();
     let sftp = sftp_connector(&emulator, "the SFTP connector").await;
+    // A SECOND SFTP connector, so "a transfer another connector accepted" is a question
+    // about the records of a connector this operation IS supported for.
+    let other_sftp = sftp_connector(&emulator, "the other SFTP connector").await;
     let as2 = as2_connector(&emulator, "the AS2 connector").await;
     let accepted = emulator
         .call(
@@ -455,8 +462,14 @@ async fn a_request_that_addresses_nothing_is_refused() {
         (
             "a transfer accepted by ANOTHER connector",
             "ListFileTransferResults",
-            json!({"ConnectorId": &as2, "TransferId": &transfer_id}),
+            json!({"ConnectorId": &other_sftp, "TransferId": &transfer_id}),
             "ResourceNotFoundException",
+        ),
+        (
+            "results asked of an AS2 connector, which the operation does not support",
+            "ListFileTransferResults",
+            json!({"ConnectorId": &as2, "TransferId": &transfer_id}),
+            "InvalidRequestException",
         ),
         (
             "a transfer naming no file at all",

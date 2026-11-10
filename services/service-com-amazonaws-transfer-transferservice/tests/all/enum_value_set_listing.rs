@@ -43,8 +43,11 @@ const DECLARED_OVERWRITE_EXISTING: [&str; 2] = ["TRUE", "FALSE"];
 /// single-valued enum.
 const DECLARED_ENCRYPTION_TYPE: [&str; 1] = ["PGP"];
 
-/// `ProfileType` as the model declares it (`query="shape"`, shape `ProfileType`).
-const DECLARED_PROFILE_TYPE: [&str; 2] = ["LOCAL", "PARTNER"];
+/// The order this service lists `ProfileType`'s values in, which is what its
+/// enum-constraint refusals state. Like [`LISTED_WORKFLOW_STEP_TYPES`] it is a permutation
+/// of the value set the model declares (`model::PROFILE_TYPE_VALUES`, which declares
+/// `LOCAL, PARTNER`), asserted per row below, and is NOT any order the model carries.
+const LISTED_PROFILE_TYPES: [&str; 2] = ["PARTNER", "LOCAL"];
 
 /// `SigningAlg` as the model declares it (`query="shape"`, shape `SigningAlg`) — the other
 /// FIVE-valued enum of this model, so a listing cannot be applied by the size of a set.
@@ -159,6 +162,14 @@ async fn an_enum_clause_lists_the_value_set_in_the_order_this_service_lists_it()
             LISTED_WORKFLOW_STEP_TYPES.to_vec(),
             model::WORKFLOW_STEP_TYPE_VALUES,
         ),
+        (
+            "CreateProfile: ProfileType at the top level of the input",
+            "CreateProfile",
+            json!({"As2Id": "partner-as2-id", "ProfileType": "BOTH"}),
+            "profileType",
+            LISTED_PROFILE_TYPES.to_vec(),
+            model::PROFILE_TYPE_VALUES,
+        ),
         // ------------- enums this service publishes no listing for: the model's -------------
         (
             "CreateWorkflow: a DECRYPT step's EncryptionType, inside a nested structure",
@@ -183,14 +194,6 @@ async fn an_enum_clause_lists_the_value_set_in_the_order_this_service_lists_it()
             "steps.1.member.copyStepDetails.overwriteExisting",
             DECLARED_OVERWRITE_EXISTING.to_vec(),
             model::OVERWRITE_EXISTING_VALUES,
-        ),
-        (
-            "CreateProfile: ProfileType at the top level of the input",
-            "CreateProfile",
-            json!({"As2Id": "partner-as2-id", "ProfileType": "BOTH"}),
-            "profileType",
-            DECLARED_PROFILE_TYPE.to_vec(),
-            model::PROFILE_TYPE_VALUES,
         ),
         (
             "CreateConnector: SigningAlg, the other five-valued enum of this model",

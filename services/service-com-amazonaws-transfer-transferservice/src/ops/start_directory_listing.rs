@@ -213,6 +213,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let sftp_config = connector.sftp_config.clone();
         let connector_url = connector.url.clone();
 
+        // A directory listing is read from the partner's REMOTE SFTP SERVER
+        // ("retrieves a list of the contents of a directory from a remote SFTP
+        // server"), which an AS2 connector configures none of, so this operation is not
+        // supported for one — decided as soon as the connector resolves and before any
+        // path is read or any identifier minted
+        // (`crate::state::connector_protocol`).
+        if !st::connector_protocol::serves_remote_sftp_operations(connector) {
+            return Err(
+                StartDirectoryListingErrorModeled::InvalidRequestException(
+                    st::connector_protocol::unsupported_for_as2_connector(
+                        st::connector_protocol::DIRECTORY_LISTING_UNSUPPORTED,
+                    ),
+                )
+                .into(),
+            );
+        }
+
         // Each path is resolved from the root of the storage it belongs to, so a
         // relative one names no directory there.
         for (member, path) in [

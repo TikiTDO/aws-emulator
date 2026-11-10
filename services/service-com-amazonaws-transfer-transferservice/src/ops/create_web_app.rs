@@ -10,6 +10,13 @@
 //! `VpcEndpointId` of a VPC-hosted web app, and the IAM Identity Center application
 //! this create registers — so no reader re-applies a default.
 //!
+//! One refusal precedes the write: the IAM Identity Center application this create
+//! registers on the caller's behalf (`sso:CreateApplication`) has to be registrable at
+//! all, which it is only in an instance the account's Identity Center holds
+//! (`crate::state::identity_center`). A request naming any other instance is answered
+//! with the denial that dependent call carried — the modelled `AccessDeniedException` —
+//! and nothing is created.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -176,6 +183,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
         })?;
         let region = st::request_region(ctx.parts());
+
+        // The Identity Center application this create registers comes FIRST, before the
+        // store is even reached, so no capacity is taken and no identifier minted:
+        // `CreateWebApp` performs `sso:CreateApplication` on the caller's behalf in the
+        // instance the request names, and an instance the account's Identity Center does
+        // not hold has no application namespace to register one in, so the dependent
+        // call is denied. Transfer relays that denial on its modelled
+        // `AccessDeniedException` channel with the sentence the denied call carried,
+        // answered with the status the dependent call itself gave
+        // (`crate::state::DEPENDENT_REFUSAL_HTTP_STATUS`), and no web app is created.
+        let named_instance = match &input.identity_provider_details {
+            WebAppIdentityProviderDetails::IdentityCenterConfig(config) => {
+                config.instance_arn.clone()
+            }
+        };
+        if let Some(denied) = st::identity_center::sso_create_application_denied(
+            &*self.engine,
+            ctx.parts(),
+            named_instance.as_deref(),
+        ) {
+            return Err(st::dependent_refusal(
+                CreateWebAppErrorModeled::AccessDeniedException(denied),
+            ));
+        }
 
         let mut guard = state.lock();
 

@@ -88,6 +88,20 @@ pub(crate) const CERTIFICATE_IDS: [&str; 3] = [
 /// shape="ProfileType")` reports `[LOCAL, PARTNER]`).
 pub(crate) const PROFILE_TYPES: [&str; 2] = ["LOCAL", "PARTNER"];
 
+/// The IAM Identity Center instances the account holds in every suite of this crate.
+///
+/// A web app's Identity Center application can only be registered in an instance the
+/// account holds (`src/state/identity_center.rs`), so a suite that creates a web app
+/// names one of these — seeded into the Identity Center store the way that service's
+/// own `CreateInstance` writes them, which is where this service's gate reads them.
+/// An ARN outside this list names no instance of the account, which is the refusal
+/// `identity_center_dependency.rs` pins.
+pub(crate) const IDENTITY_CENTER_INSTANCES: [&str; 3] = [
+    "arn:aws:sso:::instance/ssoins-1234567890abcdef",
+    "arn:aws:sso:::instance/ins-abcdef0123456789",
+    "arn:aws:sso:::instance/ssoins-a.b-c.d-e.f-g1h2",
+];
+
 /// One emulator: the shared engine plus the transfer service mounted on a router.
 pub(crate) struct Emulator {
     router: MultiServiceRouter,
@@ -136,11 +150,44 @@ pub(crate) fn member_of<'a>(value: &'a Value, member: &str) -> &'a Value {
     value.get(member).unwrap_or(&NULL)
 }
 
+/// Put the account's IAM Identity Center instances into the Identity Center store in
+/// `engine`, exactly where that service's own `CreateInstance` writes them.
+///
+/// Seeded at mount, before any request, because a Transfer web app's Identity Center
+/// application is registered in an instance the ACCOUNT holds and a create naming any
+/// other instance is refused — so a suite about web apps needs the instances it names
+/// to exist, the same way it needs a server to exist before it creates a user.
+/// `ambient_instance_enabled` is set with them: the account's enablement is then
+/// decided, so the instances it holds are exactly these.
+fn seed_identity_center_instances(engine: &Arc<engine::InMemoryEngine>) {
+    use service_com_amazonaws_ssoadmin_swbexternalservice::state as identity_center;
+
+    let state = engine.state::<identity_center::ComAmazonawsSsoadminSwbexternalserviceState>();
+    let mut guard = state.lock();
+    for instance_arn in IDENTITY_CENTER_INSTANCES {
+        let instance_id = instance_arn
+            .rsplit('/')
+            .next()
+            .expect("the seeded instance ARN names an instance");
+        let instance = identity_center::Instance::active(
+            instance_id,
+            identity_center::SEED_IDENTITY_STORE_ID,
+            identity_center::SEED_INSTANCE_TYPE,
+            Some(identity_center::SEED_INSTANCE_NAME.to_string()),
+            ::aws_smithy_types::DateTime::from_secs(1_700_000_000),
+            REGION,
+        );
+        guard
+            .instances
+            .insert(instance.instance_arn.clone(), instance);
+    }
+    guard.ambient_instance_enabled = true;
+}
+
 impl Emulator {
     pub(crate) fn new() -> Self {
         Self::mounting(&[])
     }
-
     /// One emulator that also mounts the two services the CONNECTOR DATA PLANE reaches
     /// over the in-process callback: Secrets Manager, which holds the credentials an
     /// SFTP connector's session authenticates with, and Amazon S3, which holds the
@@ -154,6 +201,7 @@ impl Emulator {
     /// The transfer service, plus each `peers` entry, over ONE shared engine.
     fn mounting(peers: &[Peer]) -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+        seed_identity_center_instances(&engine);
         let mut router = MultiServiceRouter::new();
         router.set_request_authentication(false);
         router.register_service(

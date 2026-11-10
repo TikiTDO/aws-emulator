@@ -187,6 +187,14 @@ const VALUE_LISTINGS: &[&[&str]] = &[
     // `OnExceptionSteps[].Type`. It is the only enum of this model declaring these five
     // values, so this membership identifies it.
     &["DELETE", "DECRYPT", "CUSTOM", "COPY", "TAG"],
+    // `ProfileType`, reached by `CreateProfile.ProfileType` and
+    // `ListProfiles.ProfileType`. This service lists it `PARTNER, LOCAL` while the model
+    // declares it `LOCAL, PARTNER`
+    // (`smithy_query(query="shape",shape="com.amazonaws.transfer#ProfileType")`), which is
+    // the same kind of service-side listing `WorkflowStepType` carries above: no order
+    // derivable from the model produces it. It is the only enum of this model declaring
+    // these two values, so this membership identifies it.
+    &["PARTNER", "LOCAL"],
 ];
 
 /// Whether two value lists hold the same values, in whatever order each holds them.

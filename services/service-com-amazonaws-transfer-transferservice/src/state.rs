@@ -61,11 +61,19 @@
 pub mod authorization;
 pub mod connector_delivery;
 pub mod connector_plane;
+pub mod connector_protocol;
+pub mod identity_center;
 pub mod remote_storage;
 pub mod sftp_target;
 pub mod ssh_public_key_body;
+pub mod tagged_resource;
 pub mod web_app_customization;
 pub mod workflow_runs;
+
+/// Which kind of resource an ARN names: the tag plane's own concern, in
+/// [`tagged_resource`], re-exported here so every reader of this module's not-found
+/// payloads names them the way it always has.
+pub use tagged_resource::unknown_tagged_resource;
 
 /// One run of a workflow, and the store the runs live in: they are their own concern,
 /// in [`workflow_runs`], and re-exported here so every reader of this module's state
@@ -941,6 +949,24 @@ pub fn unknown_workflow(workflow_id: &str) -> ResourceNotFoundException {
 /// the one status decision through this function.
 pub fn not_found<E>(error: E) -> crate::scaffolded::Scaffolded<E> {
     crate::scaffolded::Scaffolded::modeled_with_status(error, RESOURCE_NOT_FOUND_HTTP_STATUS)
+}
+
+/// The HTTP status this service answers a refusal it RELAYS from a call it made to
+/// another service on the caller's behalf with.
+///
+/// The decision such a refusal reports was not taken by this service: it is the answer
+/// the dependent call itself got, and the recorded Transfer wire answers it with the
+/// status that call carried — HTTP **400** — rather than the `@httpError` of the shape
+/// this service relays it on. So the body is the model's own and only the status line
+/// follows the dependent call, exactly as [`RESOURCE_NOT_FOUND_HTTP_STATUS`] does for a
+/// not-found. A refusal this service decides ITSELF keeps its shape's modelled status
+/// (an identity-policy deny is answered 403), so the two are not confused.
+pub const DEPENDENT_REFUSAL_HTTP_STATUS: u16 = 400;
+
+/// Lift an operation's modelled variant for a RELAYED refusal into its error channel,
+/// answered with [`DEPENDENT_REFUSAL_HTTP_STATUS`].
+pub fn dependent_refusal<E>(error: E) -> crate::scaffolded::Scaffolded<E> {
+    crate::scaffolded::Scaffolded::modeled_with_status(error, DEPENDENT_REFUSAL_HTTP_STATUS)
 }
 
 /// The refusal for an `API_GATEWAY` identity provider whose `InvocationRole` could
@@ -2243,9 +2269,16 @@ impl ConnectorTransfer {
 /// ("you specify one or more `RetrieveFilePaths` to identify the files you want to
 /// transfer" inbound, "one or more `SendFilePaths`" outbound), so a request that names
 /// neither identifies nothing to transfer.
+///
+/// The service's own FIXED text for that condition, in its entirety: it reports that
+/// the list of files to transfer is empty and names no member, so the same sentence
+/// answers a request that named no list and one that named an empty one.
+pub const TRANSFER_NAMES_NO_FILE: &str = "Empty send file list";
+
+/// [`TRANSFER_NAMES_NO_FILE`] on the modelled `InvalidRequestException` channel.
 pub fn transfer_names_no_file() -> InvalidRequestException {
     InvalidRequestException {
-        message: required_member("SendFilePaths or RetrieveFilePaths"),
+        message: TRANSFER_NAMES_NO_FILE.to_string(),
     }
 }
 
@@ -2602,6 +2635,15 @@ pub fn read_host_key(material: &str) -> Option<HostKeyMaterial> {
     Some(host_key_material(&key))
 }
 
+/// The fixed `Message` the service answers private key MATERIAL it cannot read with.
+///
+/// It reports the defect — the key's format could not be read — and nothing else: no
+/// member name, and no expected encoding, so the one sentence answers every form of
+/// unreadable material and every member that carries key material
+/// ([`read_host_key`]'s callers). The accepted encodings are the operation's
+/// documentation's business, not this refusal's.
+pub const INVALID_HOST_KEY_FORMAT: &str = "Invalid host key format";
+
 /// Mint a host key for a new server.
 ///
 /// AWS generates a host key for a server whose host key it manages, and reports that
@@ -2648,6 +2690,18 @@ fn host_key_material(key: &::ssh_key::PrivateKey) -> HostKeyMaterial {
 // from the model's own names and its own closed value sets — never from a value the
 // caller chose.
 // =============================================================================
+
+/// The fixed `Message` the service answers a server configuration that hosts its
+/// endpoint in a VPC and names no `EndpointDetails` with.
+///
+/// `EndpointDetails` is "the virtual private cloud (VPC) endpoint settings that are
+/// configured for your server", whose `SubnetIds` are "required to host your server
+/// endpoint in your VPC", so the settings are what VPC hosting needs. The text is the
+/// service's own, FIXED for the condition in its entirety: it states the requirement
+/// VPC hosting carries and has no slot for the member, the `EndpointType` value or
+/// anything else the caller sent, so every endpoint type that hosts the endpoint in a
+/// VPC is refused with the same sentence.
+pub const ENDPOINT_DETAILS_REQUIRED_FOR_VPC: &str = "EndpointDetails required for VPC";
 
 /// "`<member>` must not be empty" — a collection member the model gives a non-empty
 /// minimum (`@length` min 1), required by a documented condition and sent empty or
@@ -2802,10 +2856,7 @@ impl ServerConfig<'_> {
             matches!(endpoint_type, ENDPOINT_TYPE_VPC | ENDPOINT_TYPE_VPC_ENDPOINT);
 
         if hosted_in_vpc && self.endpoint_details.is_none() {
-            return Some(required_when(
-                "EndpointDetails",
-                &format!("EndpointType is {endpoint_type}"),
-            ));
+            return Some(ENDPOINT_DETAILS_REQUIRED_FOR_VPC.to_string());
         }
 
         if let Some(details) = self.endpoint_details {
@@ -4583,31 +4634,25 @@ impl Certificate {
 /// per resource. `UntagResource` releases capacity again.
 pub const MAX_TAGS_PER_RESOURCE: usize = 50;
 
-/// `ResourceType` for a resource addressed by its ARN alone.
+/// `ResourceType` for a resource addressed by an ARN whose KIND this service does not
+/// hold.
 ///
-/// A tag write resolves its target by ARN, so when nothing in the store answers to
-/// that ARN the service has no kind to name for it: the ARN may name a kind this
-/// emulator does not hold, or no Transfer resource at all. This is the emulator's own
-/// token for that case, on the same capitalized convention as
-/// [`RESOURCE_TYPE_SERVER`]; the ARN the caller sent travels in `Resource`, never in
-/// the message.
+/// A tag write resolves its target by ARN, and the kind is decoded from the ARN itself
+/// ([`tagged_resource`]); when the ARN names no kind this service holds — another
+/// service's ARN, or a Transfer resource kind nothing here stores — there is no kind to
+/// name for it. This is the emulator's own token for that case, on the same capitalized
+/// convention as [`RESOURCE_TYPE_SERVER`]; the ARN the caller sent travels in
+/// `Resource`, never in the message.
 pub const RESOURCE_TYPE_RESOURCE: &str = "Resource";
 
-/// An ARN no stored resource answers to. Its own entry in the not-found table, like
-/// every other kind.
+/// An ARN no stored resource answers to, and whose resource KIND this service does not
+/// hold either. Its own entry in the not-found table, like every other kind; which kind
+/// an ARN names, and the entry that kind is reported with, is
+/// [`tagged_resource::unknown_tagged_resource`].
 pub const NOT_FOUND_TAGGED_RESOURCE: NotFoundResource = NotFoundResource {
     resource_type: RESOURCE_TYPE_RESOURCE,
     message: "Unknown resource",
 };
-
-/// The not-found payload for a tag write whose `Arn` names no stored resource.
-///
-/// Built through [`resource_not_found`] like every other not-found in this service,
-/// so the ARN travels in `Resource` alone and the `Message` is the fixed text for the
-/// condition.
-pub fn unknown_tagged_resource(arn: &str) -> ResourceNotFoundException {
-    resource_not_found(&NOT_FOUND_TAGGED_RESOURCE, arn)
-}
 
 /// The refusal for a tag write that would push a resource past
 /// [`MAX_TAGS_PER_RESOURCE`]: a FIXED text for the condition, with the bound it

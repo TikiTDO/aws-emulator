@@ -184,6 +184,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let sftp_config = connector.sftp_config.clone();
         let connector_url = connector.url.clone();
 
+        // A move acts on the partner's REMOTE SFTP SERVER ("moves or renames a file or
+        // directory on the remote SFTP server"), which an AS2 connector configures none
+        // of, so this operation is not supported for one — decided here, as soon as the
+        // connector resolves and before any path is read or any identifier minted, so
+        // nothing is accepted that nothing could ever carry out
+        // (`crate::state::connector_protocol`).
+        if !st::connector_protocol::serves_remote_sftp_operations(connector) {
+            return Err(StartRemoteMoveErrorModeled::InvalidRequestException(
+                st::connector_protocol::unsupported_for_as2_connector(
+                    st::connector_protocol::REMOTE_MOVE_UNSUPPORTED,
+                ),
+            )
+            .into());
+        }
+
         // Both paths are documented ABSOLUTE paths on the remote server; a relative
         // one names no file there.
         for (member, path) in [

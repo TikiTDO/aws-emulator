@@ -700,12 +700,12 @@ async fn start_file_transfer_on_a_created_connector_refuses_a_request_naming_no_
             .call("StartFileTransfer", json!({"ConnectorId": &connector_id}))
             .await,
     );
-    for member in ["SendFilePaths", "RetrieveFilePaths"] {
-        assert!(
-            message.contains(member),
-            "expected the refusal to name {member}, got {message:?}"
-        );
-    }
+    // The service's fixed text for that condition: it reports that the list of files to
+    // transfer is empty and names no member at all.
+    assert_eq!(
+        message, "Empty send file list",
+        "expected the service's fixed text for a transfer naming no file, got {message:?}"
+    );
 
     for (case, request) in [
         (

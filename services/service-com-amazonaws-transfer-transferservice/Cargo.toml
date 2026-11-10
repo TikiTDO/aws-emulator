@@ -37,6 +37,10 @@ service-common = { path = "../common" }
 # identity policies, and an API_GATEWAY invocation role's, out of it
 # (see `src/state/authorization.rs`).
 service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# The account's IAM Identity Center instances: a web app's Identity Center application
+# can only be registered in an instance the account holds, which that service's own
+# store is the authority on (see `src/state/identity_center.rs`).
+service-com-amazonaws-ssoadmin-swbexternalservice = { workspace = true }
 # Reads the PEM framing and the DER of the X.509 certificate `ImportCertificate`
 # carries, so the serial and validity period a certificate reader reports are the
 # certificate's own (see `src/state.rs`).

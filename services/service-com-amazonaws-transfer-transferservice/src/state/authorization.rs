@@ -151,6 +151,33 @@ pub fn explicit_deny<Eng: Send + Sync + 'static>(
         .then(|| not_authorized(&principal, &action, resource))
 }
 
+/// The IAM principal this request's credential speaks for, as a refusal names it.
+///
+/// The calling principal is the one that SIGNED: the access key id in the SigV4
+/// credential, resolved through the keys IAM minted, exactly as [`explicit_deny`]
+/// resolves it. A key IAM never minted belongs to no IAM user of the account's store —
+/// the emulator's own long-term credential — and that credential's principal is the one
+/// the account contract states for it
+/// ([`::service_common::caller_principal::ambient_user_arn`]), which is also the
+/// principal STS reports for it, so a client that reads its own identity sees the same
+/// value a refusal names it by.
+pub fn calling_principal<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    parts: &::http::request::Parts,
+) -> String {
+    let ambient = ::service_common::caller_principal::ambient_user_arn;
+    let Some(state) = iam_state(engine) else {
+        return ambient();
+    };
+    let guard = state.lock();
+    guard
+        .access_keys
+        .get(&::engine::extract_akid(&parts.headers))
+        .and_then(|record| guard.users.get(&record.user_key))
+        .map(|user| user.arn.clone())
+        .unwrap_or_else(ambient)
+}
+
 /// Whether the role `role_arn` names can invoke the API `url` names, according to
 /// the role's own stored identity policies.
 ///

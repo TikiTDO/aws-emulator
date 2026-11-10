@@ -192,13 +192,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let guard = state.lock();
 
         // The connector is resolved first — it is the resource the request is addressed
-        // at — and then the operation it holds under the id.
-        if !guard.connectors.contains_key(&input.connector_id) {
+        // at — and then, before anything INSIDE it, the protocol it configures: these
+        // results are reported for an SFTP connector's transfers, so an AS2 connector is
+        // one this operation is not supported for at all
+        // (`crate::state::connector_protocol`). The gate precedes the `TransferId`
+        // lookup because an operation the connector cannot be asked for is not a
+        // question about its records: a caller told its transfer is missing would retry
+        // or re-create it instead of learning the call is unsupported.
+        let Some(connector) = guard.connectors.get(&input.connector_id) else {
             return Err(st::not_found(
                 ListFileTransferResultsErrorModeled::ResourceNotFoundException(
                     st::unknown_connector(&input.connector_id),
                 ),
             ));
+        };
+        if !st::connector_protocol::serves_remote_sftp_operations(connector) {
+            return Err(
+                ListFileTransferResultsErrorModeled::InvalidRequestException(
+                    st::connector_protocol::unsupported_for_as2_connector(
+                        st::connector_protocol::LIST_FILE_TRANSFER_RESULTS_UNSUPPORTED,
+                    ),
+                )
+                .into(),
+            );
         }
         let Some(transfer) = guard
             .connector_transfers

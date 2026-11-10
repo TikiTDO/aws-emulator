@@ -181,11 +181,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // persisted: a body the emulator cannot parse as a private key has no
         // fingerprint and no algorithm to report, and neither may be invented, so the
         // import is refused with the modelled `InvalidRequestException` (HTTP 400) the
-        // model documents as "thrown when the client submits a malformed request".
+        // model documents as "thrown when the client submits a malformed request". The
+        // text is the service's own fixed one for malformed key material
+        // (`crate::state::INVALID_HOST_KEY_FORMAT`): it states that the format could
+        // not be read and names neither the member nor an expected encoding.
         let Some(imported) = st::read_host_key(&input.host_key_body) else {
             return Err(ImportHostKeyErrorModeled::InvalidRequestException(
                 InvalidRequestException {
-                    message: "HostKeyBody must be a private key in OpenSSH format".to_string(),
+                    message: st::INVALID_HOST_KEY_FORMAT.to_string(),
                 },
             )
             .into());

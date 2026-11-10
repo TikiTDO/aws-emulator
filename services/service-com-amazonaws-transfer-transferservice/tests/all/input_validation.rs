@@ -175,12 +175,15 @@ async fn endpoint_details_are_required_exactly_where_the_endpoint_type_hosts_in_
         (
             "VPC with no details",
             json!({"EndpointType": "VPC"}),
-            Some(vec!["EndpointDetails", "EndpointType is VPC"]),
+            // The service's fixed text for a VPC-hosted endpoint with no settings; it
+            // names neither the member nor the endpoint type, so both rows that host in
+            // a VPC are refused with the same sentence.
+            Some(vec!["EndpointDetails required for VPC"]),
         ),
         (
             "VPC_ENDPOINT with no details",
             json!({"EndpointType": "VPC_ENDPOINT"}),
-            Some(vec!["EndpointDetails", "EndpointType is VPC_ENDPOINT"]),
+            Some(vec!["EndpointDetails required for VPC"]),
         ),
         (
             "VPC with a VpcId",
@@ -664,8 +667,8 @@ fn enum_refusal_message(path: &str, allowed: &[&str]) -> String {
 }
 
 /// One row of the enum-refusal table: the case name, the operation, the request, the
-/// member path the message must name, the modelled value set, and the value the row
-/// sends for that member.
+/// member path the message must name, the value set as this service LISTS it, and the
+/// value the row sends for that member.
 type EnumCase<'a> = (&'a str, &'a str, Value, &'a str, Vec<&'a str>, &'a str);
 
 /// RULE: a value outside an enumerated member's modelled value set is refused with
@@ -680,14 +683,17 @@ type EnumCase<'a> = (&'a str, &'a str, Value, &'a str, Vec<&'a str>, &'a str);
 async fn an_enum_refusal_names_the_member_and_the_value_set_but_not_the_value() {
     let emulator = Emulator::new();
 
-    // (case, operation, request, member path, modelled value set, rejected value)
+    // (case, operation, request, member path, the value set as listed, rejected value)
     let cases: Vec<EnumCase<'_>> = vec![
         (
             "CreateProfile ProfileType",
             "CreateProfile",
             json!({"As2Id": "partner-as2-id", "ProfileType": "BOGUS"}),
             "profileType",
-            vec!["LOCAL", "PARTNER"],
+            // This service publishes its OWN listing of this enum's values
+            // (`crate::enum_value_set_listing` is that rule's suite); the model declares
+            // the same membership in the other order.
+            vec!["PARTNER", "LOCAL"],
             "BOGUS",
         ),
         (
