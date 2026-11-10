@@ -333,6 +333,8 @@ mod provisioned_concurrency_resolution;
 mod published_function_arn;
 #[path = "all/python_runtime_os_surface.rs"]
 mod python_runtime_os_surface;
+#[path = "all/python_tls_surface.rs"]
+mod python_tls_surface;
 #[path = "all/queue_message_count_snapshot.rs"]
 mod queue_message_count_snapshot;
 #[path = "all/read_representation_and_download_plane.rs"]

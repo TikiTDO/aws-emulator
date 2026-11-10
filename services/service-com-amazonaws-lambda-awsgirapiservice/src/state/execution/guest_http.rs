@@ -344,12 +344,13 @@ async fn dispatch(
 }
 
 /// The modules of the standard library this RUNTIME supplies in place of the frozen ones:
-/// the socket module a Python program expects its operating system to have, and the HTTP
-/// client that is built on one.
+/// the socket module a Python program expects its operating system to have, the HTTP
+/// client that is built on one, and the TLS layer a program imports beside them
+/// ([`super::guest_tls`]).
 ///
 /// Resolved before the frozen standard library and after the deployment package's own
-/// entries, so these are the `socket` and `http.client` a handler imports, and a package
-/// shipping its own still wins.
+/// entries, so these are the `socket`, `http.client` and `ssl` a handler imports, and a
+/// package shipping its own still wins.
 ///
 /// The socket module is [`SOCKET_SOURCE`] and the DATAGRAM half of it
 /// ([`super::xray_daemon::DATAGRAM_SOURCE`]) together: the names, the errors and the
@@ -373,6 +374,7 @@ pub fn runtime_stdlib_modules() -> Vec<PackageModule> {
         path: path.to_string(),
         source,
     })
+    .chain(super::guest_tls::runtime_stdlib_modules())
     .collect()
 }
 

@@ -82,6 +82,10 @@ mod idempotency_token;
 /// its own.
 pub mod guest_http;
 
+/// The TLS layer of the standard library a running Python handler imports, supplied beside
+/// the socket interface it is built on.
+pub mod guest_tls;
+
 /// The Amazon S3 half of that seam, whose own protocol binds a request per operation.
 mod aws_s3;
 
