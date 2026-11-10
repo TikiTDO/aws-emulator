@@ -1,0 +1,82 @@
+Issue-Severity: HIGH
+Issue-Corpus: simparity-behavioral-aws-v1
+Issue-Corpus-Kind: behavioral
+Issue-Trace-Ids: s3.sse-c-wrong-customer-key-rejected s3.put-object-encryption-type-mismatch s3.s3-ssec-and-endpoint-enforcement-ssec-copy-to-sse-s3-without-the-copy-source-key-rejected s3.s3-ssec-and-endpoint-enforcement-ssec-multipart-upload-round-trips-only-with-the-customer-key s3.s3-ssec-and-endpoint-enforcement-ssec-upload-part-copy-rekeys-an-ssec-source-into-a-multipart-object s3.s3-ssec-and-endpoint-enforcement-ssec-request-over-plain-http-rejected s3.s3-ssec-and-endpoint-enforcement-website-endpoint-serving-an-ssec-object-rejected
+Issue-Shape-Id: com.amazonaws.s3#AmazonS3
+Issue-Key: s3.sse-c-wrong-customer-key-rejected|run#13|AssertionError|assert exc is not None, (
+Issue-Key: s3.put-object-encryption-type-mismatch|_client_error#7|AssertionError|raise AssertionError(
+Issue-Key: s3.s3-ssec-and-endpoint-enforcement-ssec-copy-to-sse-s3-without-the-copy-source-key-rejected|_error#9|AssertionError|raise AssertionError("the call was expected to be refused and it succeeded")
+Issue-Key: s3.s3-ssec-and-endpoint-enforcement-ssec-multipart-upload-round-trips-only-with-the-customer-key|run#17|AssertionError|assert (code, status, msg) == ("InvalidRequest", 400, _INITIATE_ENCRYPTED), (
+Issue-Key: s3.s3-ssec-and-endpoint-enforcement-ssec-upload-part-copy-rekeys-an-ssec-source-into-a-multipart-object|run#16|AssertionError|assert (code, status, msg) == ("InvalidRequest", 400, _STORED_SSE), (
+Issue-Key: s3.s3-ssec-and-endpoint-enforcement-ssec-request-over-plain-http-rejected|_http#14|BadStatusLine|with _OPENER.open(req, timeout=60) as resp:
+Issue-Key: s3.s3-ssec-and-endpoint-enforcement-website-endpoint-serving-an-ssec-object-rejected|_website_base_url#12|CapabilityNotOffered|candidates = ctx.s3_website_urls(
+Issue-Commit: 41bd6c476a5fe40a474aadc7e47c434277d677d7
+
+# s3: 6 net-new causes in the SSE-C object plane and the endpoint surface — SSE-C writes AWS blocks are accepted, CopyObject needs no copy-source key, UploadPart's refusal is misworded, UploadPartCopy is still a 501 scaffold, no plaintext-HTTP and no website endpoint
+
+> _Note: this issue was identified against the code base at commit `41bd6c476a5fe40a474aadc7e47c434277d677d7`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
+
+## Operation
+PutObject
+
+## Description
+Six distinct net-new root causes under `### s3`, all reached through the server-side-encryption-with-customer-keys (SSE-C) surface and the two non-REST endpoints it is exercised over. Close all six before submitting.
+
+Cause 1 of 6: SSE-C writes that AWS blocks account-wide are accepted and stored.
+AWS: Smithy — PutObject and CreateMultipartUpload bind `SSECustomerAlgorithm` (`x-amz-server-side-encryption-customer-algorithm`), `SSECustomerKey` (`x-amz-server-side-encryption-customer-key`, sensitive) and `SSECustomerKeyMD5` (`x-amz-server-side-encryption-customer-key-MD5`). Recorded behavior: on a freshly created general-purpose bucket in this account and region both calls are refused HTTP 403 `<Code>AccessDenied</Code>`, and the message's FIXED text is "... is not authorized to perform: s3:PutObject on resource: \"<object ARN>\" because this bucket has blocked upload requests that specify Server Side Encryption with Customer provided keys (SSE-C). Please specify a different server-side encryption type." preceded by "User: <caller ARN>". Its VARIABLE parts are only the caller ARN (the signing principal, as GetCallerIdentity reports it) and the object ARN `arn:aws:s3:::<bucket>/<key>` taken from the request; a plain PutObject/GetObject on the same bucket succeeds, and after both refusals the bucket lists no object and no multipart upload.
+Emulator: both calls answer HTTP 200. CreateMultipartUpload echoes `SSECustomerAlgorithm: AES256`, `SSECustomerKeyMD5` and mints an `UploadId`; PutObject stores the object. Hypothesis: the bucket's blocked-encryption-types state exists (GetBucketEncryption already surfaces `BlockedEncryptionTypes {EncryptionType: [SSE-C]}` per open issue 20261103T040901Z) but is never consulted on the write path.
+Why: a client sees a write succeed that AWS refuses, so the account-wide SSE-C block is invisible; the fallback path a caller runs on AccessDenied (re-write under SSE-S3/SSE-KMS) never executes, and data lands under a customer key the service was supposed to reject.
+Fix: the SSE-C admission check in the PutObject and CreateMultipartUpload handlers — the bucket's blocked-encryption-types state consulted before the object is stored/the upload registered, and its AccessDenied mapping. Note: open issue 20261103T040901Z-s3-10-more-net-new-root-causes-sse.md lists s3.sse-c-wrong-customer-key-rejected under a Cause 1 that describes the OLD behaviour (501 NotImplemented); SSE-C now succeeds instead, so that description no longer matches and the replay key has moved.
+Traces: s3.sse-c-wrong-customer-key-rejected, s3.put-object-encryption-type-mismatch.
+
+Cause 2 of 6: CopyObject from an SSE-C source succeeds without the copy-source customer key.
+AWS: Smithy — CopyObject binds `CopySourceSSECustomerAlgorithm`/`CopySourceSSECustomerKey`/`CopySourceSSECustomerKeyMD5` (`x-amz-copy-source-server-side-encryption-customer-*`). Recorded behavior: copying an SSE-C-encrypted source WITHOUT those headers is refused HTTP 400 `<Code>InvalidRequest</Code>` with the fixed message "The object was stored using a form of Server Side Encryption. The correct parameters must be provided to retrieve the object."; with a WRONG copy-source key it is refused HTTP 400 `InvalidRequest` "The provided encryption parameters did not match the ones used originally."; in both cases the destination key does not exist afterwards (GetObject → `NoSuchKey` / "The specified key does not exist."). With the correct source key the copy succeeds, the destination is SSE-S3 (`x-amz-server-side-encryption: AES256`, no SSE-C headers) and offering the old customer key on a GET of the destination is refused 400 `InvalidRequest` "The encryption parameters are not applicable to this object."
+Emulator: the keyless CopyObject SUCCEEDS — "the call was expected to be refused and it succeeded" — producing a destination object from a source whose customer key was never presented.
+Why: the customer key stops being required to read the data: any caller holding s3:GetObject/s3:PutObject can launder an SSE-C object into a plainly readable copy, and the two distinct 400s that tell "no key" from "wrong key" are both unobservable.
+Fix: the CopyObject handler's copy-source SSE-C parameter validation and source decryption, evaluated before the destination object is written.
+Traces: s3.s3-ssec-and-endpoint-enforcement-ssec-copy-to-sse-s3-without-the-copy-source-key-rejected.
+
+Cause 3 of 6: UploadPart's SSE-C refusal carries the GetObject message instead of the initiate-bound one.
+AWS: Smithy — UploadPart binds the same three SSE-C headers. Recorded behavior: when CreateMultipartUpload requested SSE-C, every UploadPart must repeat the same parameters; a part sent without them is refused HTTP 400 `<Code>InvalidRequest</Code>` with the fixed message "The multipart upload initiate requested encryption. Subsequent part requests must include the appropriate encryption parameters." — the message has no variable parts.
+Emulator: the status and code are right (400 `InvalidRequest`) but the message is the read-path one, "The object was stored using a form of Server Side Encryption. The correct parameters must be provided to retrieve the object."
+Why: the message names the wrong failure class — the caller is told a stored object needs read parameters rather than that its own initiate bound encryption to every part, so the remediation it applies (re-reading with keys) does not address the failing call.
+Fix: the UploadPart handler's SSE-C parameter check must emit the initiate-bound message; the message is per-operation and must not be shared with the GetObject path.
+Traces: s3.s3-ssec-and-endpoint-enforcement-ssec-multipart-upload-round-trips-only-with-the-customer-key.
+
+Cause 4 of 6: UploadPartCopy with SSE-C headers is still an unimplemented scaffold answering 501.
+AWS: Smithy — UploadPartCopy `PUT /{Bucket}/{Key+}?x-id=UploadPartCopy` binds `SSECustomerAlgorithm`/`SSECustomerKey`/`SSECustomerKeyMD5` and `CopySourceSSECustomerAlgorithm`/`CopySourceSSECustomerKey`/`CopySourceSSECustomerKeyMD5`. Recorded behavior: UploadPartCopy from an SSE-C source WITHOUT the copy-source key is refused HTTP 400 `<Code>InvalidRequest</Code>` "The object was stored using a form of Server Side Encryption. The correct parameters must be provided to retrieve the object."; with it, the part is copied and re-encrypted under the destination upload's own customer key.
+Emulator: answers HTTP 501 `<Code>NotImplemented</Code>` with "operation UploadPartCopy with SSECustomerAlgorithm is scaffolded but not implemented in this emulator".
+Why: the whole SSE-C re-key / multipart-copy workflow is unreachable, and 501 NotImplemented is not a status this call's client-side error handling distinguishes, so the failure is attributed to the SDK rather than to the request.
+Fix: SSE-C support in the UploadPartCopy handler and its copy-source parameter validation. Open issue 20261103T040901Z-s3-10-more-net-new-root-causes-sse.md names the UploadPartCopy SSE-C scaffold in its Cause 1 but does not carry this check's replay key.
+Traces: s3.s3-ssec-and-endpoint-enforcement-ssec-upload-part-copy-rekeys-an-ssec-source-into-a-multipart-object.
+
+Cause 5 of 6: the S3 endpoint answers nothing over plaintext HTTP, so the SSE-C-over-HTTP refusal cannot exist.
+AWS: recorded behavior. The REST endpoint serves plain `http://` requests: a presigned GET of a non-SSE-C object over http:// returns HTTP 200 with the object's bytes. A request carrying SSE-C headers over http:// is refused HTTP 400 `<Code>InvalidArgument</Code>` with the fixed message "Requests specifying Server Side Encryption with Customer provided keys must be made over a secure connection.", leaks no object bytes, and writes nothing (the PUT target reads back `NoSuchKey`); the byte-identical request over https:// succeeds. Transport alone decides — no bucket policy is involved.
+Emulator: the http:// request receives no HTTP response at all; the client fails with `http.client.BadStatusLine` because the first bytes of the reply are not a status line (the port speaks only TLS). The non-SSE-C control GET over http:// already fails this way, so the SSE-C refusal is never reached.
+Why: every plaintext client gets an unparseable protocol error instead of either the object or S3's `<Error>` document, and no transport-sensitive behaviour (SSE-C over HTTP, aws:SecureTransport) can be exercised.
+Fix: serve plaintext HTTP on the S3 endpoint, and add the secure-transport check to the SSE-C request validation. Adjacent open issue 20261106T072814Z-iam-s3-a-plaintext-http-getobject-to-the.md covers the same area but does not carry this check's replay key.
+Traces: s3.s3-ssec-and-endpoint-enforcement-ssec-request-over-plain-http-rejected.
+
+Cause 6 of 6: no S3 website endpoint is published, so the website-endpoint refusal for an SSE-C object is unobservable.
+AWS: recorded behavior. A bucket configured for website hosting is reachable at its website endpoint; a GET of an object stored under SSE-C through that endpoint is refused (the website endpoint cannot carry customer keys), while non-SSE-C keys are served normally.
+Emulator: the run announces no website endpoint at all — the harness aborts with `CapabilityNotOffered: the emulator offers no S3 website endpoint (the run names no website endpoint template)`.
+Why: the entire website-hosting surface, including this refusal, does not exist for a client: static-site hosting cannot be exercised and the refusal that protects SSE-C objects from anonymous website reads can never be seen.
+Fix: publish and serve the S3 website endpoint (announced as a website host the emulator actually answers on). Open issue 20261109T220008Z-s3-7-net-new-causes-cors-preflight-answers.md already describes the unserved website endpoint and owns a sibling check with the identical symptom; this check carries a different replay key.
+Traces: s3.s3-ssec-and-endpoint-enforcement-website-endpoint-serving-an-ssec-object-rejected.
+
+## Evidence
+Cause 1 — s3.sse-c-wrong-customer-key-rejected: "AssertionError: PutObject with SSE-C headers succeeded; this account/region is expected to block SSE-C uploads account-wide" (expected 403 AccessDenied with the SSE-C-blocked message). s3.put-object-encryption-type-mismatch: "AssertionError: real AWS rejects this call, but it SUCCEEDED and returned {... 'HTTPStatusCode': 200, 'x-amz-server-side-encryption-customer-algorithm': 'AES256', 'SSECustomerAlgorithm': 'AES256', 'SSECustomerKeyMD5': '...', 'Key': 'ssec-multipart-object.bin', 'UploadId': '...'}" — the CreateMultipartUpload AWS refuses minted an upload id.
+Cause 2 — "AssertionError: the call was expected to be refused and it succeeded" raised on `s3.copy_object(Bucket=..., Key=dst, CopySource={src}, ServerSideEncryption='AES256')` with no CopySourceSSECustomerKey; expected InvalidRequest/400 "The object was stored using a form of Server Side Encryption. The correct parameters must be provided to retrieve the object."
+Cause 3 — "AssertionError: UploadPart with no SSE-C key into an SSE-C upload returned 'InvalidRequest'/400 ('The object was stored using a form of Server Side Encryption. The correct parameters must be provided to retrieve the object.'); expected InvalidRequest/400" with the message "The multipart upload initiate requested encryption. Subsequent part requests must include the appropriate encryption parameters."
+Cause 4 — "AssertionError: UploadPartCopy without the SOURCE key returned 'NotImplemented'/501 ('operation UploadPartCopy with SSECustomerAlgorithm is scaffolded but not implemented in this emulator'); expected InvalidRequest/400".
+Cause 5 — "File client.py, line 325, in _read_status / raise BadStatusLine(line) / http.client.BadStatusLine:  2" on the plain-http presigned GET control; expected HTTP 200 for the non-SSE-C object and 400 InvalidArgument "Requests specifying Server Side Encryption with Customer provided keys must be made over a secure connection." for the SSE-C one.
+Cause 6 — "simparity.behavioral.context.CapabilityNotOffered: the emulator offers no S3 website endpoint (the run names no website endpoint template: s3_website_url=, SIMPARITY_S3_WEBSITE_URL)".
+
+## Steps to Reproduce
+Boot the emulator and re-replay exactly the check ids in trace_ids. Representative manual repros:
+1. CreateBucket, then PutObject with x-amz-server-side-encryption-customer-algorithm=AES256 and a 32-byte customer key — expect 403 AccessDenied naming s3:PutObject on arn:aws:s3:::<bucket>/<key> and the SSE-C-blocked sentence; observe 200 and a stored object. Repeat with CreateMultipartUpload — expect the same 403; observe 200 and an UploadId.
+2. On a bucket where SSE-C is permitted, PutObject an SSE-C object, then CopyObject it to another key with ServerSideEncryption=AES256 and NO CopySourceSSECustomerKey — expect 400 InvalidRequest "The object was stored..." and no destination object; observe success. Repeat with a wrong CopySourceSSECustomerKey — expect 400 InvalidRequest "The provided encryption parameters did not match the ones used originally."
+3. CreateMultipartUpload with SSE-C, then UploadPart WITHOUT the SSE-C headers — expect 400 InvalidRequest "The multipart upload initiate requested encryption. Subsequent part requests must include the appropriate encryption parameters."; observe the stored-object message instead.
+4. UploadPartCopy from an SSE-C source without x-amz-copy-source-server-side-encryption-customer-key — expect 400 InvalidRequest; observe 501 NotImplemented.
+5. Presign a GetObject of a plain object, swap the scheme to http:// and fetch it — expect HTTP 200 with the bytes; observe an unparseable reply (BadStatusLine). Then presign an SSE-C GET, fetch over http:// with the SSE-C headers — expect 400 InvalidArgument "Requests specifying Server Side Encryption with Customer provided keys must be made over a secure connection."
+6. PutBucketWebsite, then resolve the bucket's website endpoint — expect a served website host; observe that no website endpoint is announced at all.
