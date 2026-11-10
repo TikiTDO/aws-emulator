@@ -20,6 +20,9 @@ mod data_catalog_delete;
 #[path = "all/data_catalog_lifecycle.rs"]
 mod data_catalog_lifecycle;
 
+#[path = "all/database_statements.rs"]
+mod database_statements;
+
 #[path = "all/engine_run_bound.rs"]
 mod engine_run_bound;
 

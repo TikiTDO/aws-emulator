@@ -1242,7 +1242,7 @@ async fn batch_get_query_execution_partitions_known_from_unknown_ids() {
         {
             assert_eq!(
                 entry["ErrorCode"].as_str(),
-                Some(state::ERROR_CODE_INVALID_INPUT),
+                Some(state::ERROR_CODE_QUERY_EXECUTION_NOT_FOUND),
                 "case {case:?}: an unprocessed id must carry the error code, got {entry:?}"
             );
             let id = entry["QueryExecutionId"].as_str().unwrap_or_default();
@@ -1385,10 +1385,12 @@ async fn sql_the_engine_refuses_fails_the_query_with_its_own_reason() {
 
     // (case, the SQL, the ErrorCategory it must report). Rows differ along WHY the query
     // fails: a name that is not there, a column that is not, syntax the engine cannot
-    // parse, a statement count a query execution does not run, and the three SQL
-    // constructs that would reach the host. The category follows WHOSE doing the failure
-    // was: SQL the engine refused is the caller's (2), while what this emulator's own
-    // confinement or bounds stopped is neither that nor the engine failing (3).
+    // compute, a statement count a query execution does not run, and the host-reaching
+    // constructs the engine's own confinement refuses. The category follows WHOSE doing
+    // the failure was: SQL the engine refused is the caller's (2), while what this
+    // emulator's own confinement or bounds stopped is neither that nor the engine failing
+    // (3). Text the GRAMMAR cannot read at all is not here: such a submission is refused
+    // before any execution is minted (see the rows below).
     let cases: Vec<(&str, &str, i64)> = vec![
         ("a table no catalog holds", "SELECT * FROM not_a_table", 2),
         (
@@ -1396,16 +1398,11 @@ async fn sql_the_engine_refuses_fails_the_query_with_its_own_reason() {
             "SELECT missing FROM (SELECT 1 AS n)",
             2,
         ),
-        ("syntax the engine cannot parse", "SELECT FROM WHERE", 2),
         ("more than one statement", "SELECT 1; SELECT 2", 3),
+        ("syntax the engine cannot parse", "SELECT FROM WHERE", 2),
         (
             "attaching a host file as a database",
             "ATTACH DATABASE 'host.db' AS stolen",
-            3,
-        ),
-        (
-            "writing the database out to a host file",
-            "VACUUM INTO 'host-copy.db'",
             3,
         ),
         (
@@ -1461,6 +1458,38 @@ async fn sql_the_engine_refuses_fails_the_query_with_its_own_reason() {
             refused["Message"].as_str(),
             Some(state::query_did_not_succeed(QUERY_STATE_FAILED).as_str()),
             "case {case:?}: unexpected message in {refused:?}"
+        );
+    }
+
+    // Text the grammar cannot read as a statement is refused at SUBMISSION, so no
+    // execution is minted for it and the engine is never handed it: the rows differ along
+    // what the text is — syntax of no statement at all, and host-reaching statements of
+    // another engine's dialect.
+    for (case, sql) in [
+        (
+            "a database name the DDL grammar does not read",
+            "CREATE DATABASE bad-name",
+        ),
+        (
+            "writing the database out to a host file",
+            "VACUUM INTO 'host-copy.db'",
+        ),
+    ] {
+        let (status, refused) = call(&router, "StartQueryExecution", &query(sql)).await;
+        assert_eq!(
+            status, 400,
+            "case {case:?}: text the grammar cannot read must be refused, got {status} \
+             with {refused:?}"
+        );
+        assert_eq!(
+            refused["ErrorCode"].as_str(),
+            Some("MALFORMED_QUERY"),
+            "case {case:?}: unexpected refusal class in {refused:?}"
+        );
+        assert_eq!(
+            refused["QueryExecutionId"].as_str(),
+            None,
+            "case {case:?}: a refused submission mints no execution, got {refused:?}"
         );
     }
 }

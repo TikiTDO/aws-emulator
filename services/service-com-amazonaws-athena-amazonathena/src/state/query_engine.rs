@@ -456,6 +456,10 @@ pub enum Outcome {
         /// The engine's message, with anything path-shaped redacted, or the emulator's
         /// own for a bound it holds a run to.
         message: String,
+        /// The execution's `StateChangeReason`, where what performed the statement
+        /// reports something other than [`Self::Failed::message`]; `None` where the two
+        /// are the same text.
+        reason: Option<String>,
         /// Whose doing the failure was, which is what the reported error category
         /// follows from.
         cause: FailureCause,
@@ -490,13 +494,16 @@ pub enum FailureCause {
     },
 }
 
-/// One run: what it produced, and how long the engine took.
+/// One run: what it produced, and how long each phase of it took.
 #[derive(Debug, Clone)]
 pub struct Completion {
     /// The rows, or the failure.
     pub outcome: Outcome,
     /// What the engine spent on it, reported as `EngineExecutionTimeInMillis`.
     pub engine_time: Duration,
+    /// What resolving the statement against the data catalog spent before the engine ran
+    /// it, reported as `QueryPlanningTimeInMillis`.
+    pub planning_time: Duration,
 }
 
 /// Run `sql` on the engine `handle` guards, with `parameters` bound to its placeholders
@@ -584,9 +591,11 @@ pub fn run_over(
         return Completion {
             outcome: Outcome::Failed {
                 message: failure.message(),
+                reason: None,
                 cause: failure.cause(),
             },
             engine_time: std::time::Duration::ZERO,
+            planning_time: std::time::Duration::ZERO,
         };
     }
 
@@ -635,12 +644,17 @@ pub fn run_over(
         },
         Err(failure) => Outcome::Failed {
             message: failure.message(),
+            reason: None,
             cause: failure.cause(),
         },
     };
     Completion {
         outcome,
         engine_time,
+        // The engine was handed SQL that names no catalog relation, so this run resolved
+        // nothing against the catalog; a statement whose relations WERE resolved is timed
+        // by the resolution that did it (see `super::catalog_sql::execute`).
+        planning_time: std::time::Duration::ZERO,
     }
 }
 

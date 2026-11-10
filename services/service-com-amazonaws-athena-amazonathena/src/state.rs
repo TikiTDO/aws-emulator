@@ -57,10 +57,10 @@ use ::service_com_amazonaws_glue_awsglue::ops::types::Column as GlueColumn;
 use ::service_com_amazonaws_glue_awsglue::state as glue_state;
 
 use crate::ops::types::{
-    Column, DataCatalog, EngineVersion, QueryExecution, QueryExecutionContext,
-    QueryExecutionStatistics, QueryExecutionStatus, ResultConfiguration, ResultReuseConfiguration,
-    ResultReuseInformation, TableMetadata, Tag, WorkGroup, WorkGroupConfiguration,
-    CONNECTION_TYPE_VALUES,
+    Column, DataCatalog, EngineVersion, ManagedQueryResultsConfiguration, QueryExecution,
+    QueryExecutionContext, QueryExecutionStatistics, QueryExecutionStatus, ResultConfiguration,
+    ResultReuseConfiguration, ResultReuseInformation, TableMetadata, Tag, WorkGroup,
+    WorkGroupConfiguration, CONNECTION_TYPE_VALUES,
 };
 
 /// The `WorkGroupState` a freshly created workgroup is in. One of
@@ -981,6 +981,10 @@ pub struct QueryExecutionRecord {
     /// The result configuration in force for this query, with `OutputLocation`
     /// resolved against the workgroup's own settings by the call that started it.
     pub result_configuration: ResultConfiguration,
+    /// The managed-results configuration this query ran under, when its workgroup keeps
+    /// its results in Athena's own storage rather than at an output location (see
+    /// [`resolved_managed_query_results`]).
+    pub managed_query_results: Option<ManagedQueryResultsConfiguration>,
     /// The result-reuse configuration the request carried, if any.
     pub result_reuse_configuration: Option<ResultReuseConfiguration>,
     /// The `ExecutionParameters` the request carried, in order.
@@ -998,6 +1002,9 @@ pub struct QueryExecutionRecord {
     pub outcome: Option<query_engine::Outcome>,
     /// What the engine spent running it, reported as `EngineExecutionTimeInMillis`.
     pub engine_time: Duration,
+    /// What resolving this query's statement against the data catalog spent before the
+    /// engine ran it, reported as `QueryPlanningTimeInMillis`.
+    pub planning_time: Duration,
     /// When the engine reported on this run, or `None` while it has not. With
     /// [`Self::engine_time`] behind it and [`Self::submitted_at`] in front of it, this is
     /// what the service's own pre-processing and publishing spans are measured between.
@@ -1107,7 +1114,7 @@ impl QueryExecutionRecord {
             QUERY_STATE_SUCCEEDED => self.result_set_at(now),
             QUERY_STATE_FAILED
                 if self.writes_text_output()
-                    && self.failure().is_some_and(|(_, cause)| {
+                    && self.failure().is_some_and(|(_, _, cause)| {
                         matches!(
                             cause,
                             query_engine::FailureCause::Sql
@@ -1188,11 +1195,15 @@ impl QueryExecutionRecord {
         }
     }
 
-    /// The message for why this query failed, and whose doing the failure was, if it
-    /// failed.
-    fn failure(&self) -> Option<(&str, query_engine::FailureCause)> {
+    /// The message for why this query failed, the `StateChangeReason` reported beside it
+    /// where the two differ, and whose doing the failure was, if it failed.
+    fn failure(&self) -> Option<(&str, Option<&str>, query_engine::FailureCause)> {
         match self.outcome.as_ref()? {
-            query_engine::Outcome::Failed { message, cause } => Some((message, *cause)),
+            query_engine::Outcome::Failed {
+                message,
+                reason,
+                cause,
+            } => Some((message, reason.as_deref(), *cause)),
             query_engine::Outcome::Succeeded { .. } => None,
         }
     }
@@ -1203,10 +1214,14 @@ impl QueryExecutionRecord {
         let failure = (state == QUERY_STATE_FAILED).then(|| self.failure()).flatten();
         let state_change_reason = match state {
             QUERY_STATE_CANCELLED => Some(QUERY_CANCELLED_BY_USER.to_string()),
-            QUERY_STATE_FAILED => failure.map(|(message, _)| message.to_string()),
+            // The reason a failed query reports is what performed the statement wrote
+            // about the failure, which for a DDL task is the task's own line and for
+            // every other class is the failure's own message.
+            QUERY_STATE_FAILED => failure
+                .map(|(message, reason, _)| reason.unwrap_or(message).to_string()),
             _ => None,
         };
-        let athena_error = failure.map(|(message, cause)| crate::ops::types::AthenaError {
+        let athena_error = failure.map(|(message, _, cause)| crate::ops::types::AthenaError {
             error_category: Some(match cause {
                 query_engine::FailureCause::Sql => ERROR_CATEGORY_USER,
                 query_engine::FailureCause::Emulator => ERROR_CATEGORY_OTHER,
@@ -1230,10 +1245,12 @@ impl QueryExecutionRecord {
             query_execution_id: Some(self.id.clone()),
             query: Some(self.query_string.clone()),
             statement_type: self.statement_type.clone(),
-            // Athena fills this only for a workgroup with managed query results, which
-            // this emulator does not store results through.
-            managed_query_results_configuration: None,
-            result_configuration: Some(self.reported_result_configuration(now)),
+            // The configuration a query whose results Athena keeps in its own storage ran
+            // under; a query that wrote them at an output location ran under none.
+            managed_query_results_configuration: self.managed_query_results.clone(),
+            result_configuration: (self.managed_query_results.is_none()
+                || self.result_configuration.output_location.is_some())
+            .then(|| self.reported_result_configuration(now)),
             result_reuse_configuration: Some(self.effective_result_reuse_configuration()),
             query_execution_context: Some(self.context.clone()),
             status: Some(QueryExecutionStatus {
@@ -1308,10 +1325,13 @@ impl QueryExecutionRecord {
             total_execution_time_in_millis: Some(millis_between(self.submitted_at, total_until)),
             query_queue_time_in_millis: Some(millis_between(self.submitted_at, queue_until)),
             service_pre_processing_time_in_millis: pre_processing,
-            // Athena reports the planning phase separately from the engine's own work.
-            // The engine here plans inside the run it reports one time for, so there is
-            // no planning span of its own to measure and none is reported.
-            query_planning_time_in_millis: None,
+            // Athena reports the planning phase separately from the engine's own work:
+            // "the number of milliseconds that Athena took to plan the query processing
+            // flow[,] includ[ing] the time spent retrieving table partitions from the data
+            // source". That is what resolving this statement against the data catalog
+            // spent, measured on the run itself, and it is reported from the moment the
+            // query is terminal, exactly as the engine's own span is.
+            query_planning_time_in_millis: terminal.then(|| millis_of(self.planning_time)),
             service_processing_time_in_millis: processing,
             // Every query here is RUN: no read of a result set is answered out of an
             // earlier query's results, so no run reused a previous result.
@@ -1350,10 +1370,13 @@ pub fn new_query_execution_id() -> String {
 /// queries using either this setting (client-side), or in the workgroup […] If none of
 /// them is set, Athena issues an error that no output location is provided. If workgroup
 /// settings override client-side settings, then the query uses the settings specified for
-/// the workgroup." So the workgroup's configuration replaces the request's whole
-/// configuration when the workgroup enforces its own, and otherwise the request's
-/// configuration stands with the workgroup's output location behind it. `None` when
-/// neither names one, which is the refusal the quoted sentence calls for.
+/// the workgroup." So a workgroup that enforces its own configuration replaces the
+/// request's whole configuration with the one it SPECIFIES, and otherwise the request's
+/// configuration stands with the workgroup's output location behind it. A workgroup that
+/// specifies no result configuration at all overrides nothing — there is no setting of its
+/// own to use — so the client's own stands even where the workgroup enforces its
+/// configuration. `None` when neither names a location, which is the refusal the quoted
+/// sentence calls for.
 pub fn resolved_result_configuration(
     requested: Option<ResultConfiguration>,
     work_group: Option<&WorkGroupRecord>,
@@ -1361,7 +1384,8 @@ pub fn resolved_result_configuration(
     let group = work_group.and_then(|record| record.configuration.result_configuration.clone());
     let enforced = work_group
         .and_then(|record| record.configuration.enforce_work_group_configuration)
-        .unwrap_or(false);
+        .unwrap_or(false)
+        && output_location(group.as_ref()).is_some();
     let resolved = if enforced {
         group.clone()
     } else {
@@ -1388,6 +1412,24 @@ fn output_location(configuration: Option<&ResultConfiguration>) -> Option<&str> 
         .and_then(|configuration| configuration.output_location.as_deref())
         .map(str::trim)
         .filter(|location| !location.is_empty())
+}
+
+/// The managed-results configuration a query in `work_group` runs under, when that
+/// workgroup stores its results in Athena's own storage rather than at an output location.
+///
+/// `ManagedQueryResultsConfiguration$Enabled` documents the rule: "If set to true, allows
+/// you to store query results in Athena owned storage. If set to false, workgroup member
+/// stores query results in location specified under
+/// `ResultConfiguration$OutputLocation`." So a query in such a workgroup needs no output
+/// location of its own — which is the second of the two ways the missing-location refusal
+/// ([`NO_OUTPUT_LOCATION`]) names — and the configuration it ran under is what a read of
+/// the execution reports.
+pub fn resolved_managed_query_results(
+    work_group: Option<&WorkGroupRecord>,
+) -> Option<ManagedQueryResultsConfiguration> {
+    work_group
+        .and_then(|record| record.configuration.managed_query_results_configuration.clone())
+        .filter(|managed| managed.enabled)
 }
 
 /// The message a query with nowhere to write its results is refused with: the error the
@@ -1641,6 +1683,7 @@ impl ComAmazonawsAthenaAmazonathenaState {
         };
         record.completion_due_at = record.completion_due_at.max(now);
         record.engine_time = completion.engine_time;
+        record.planning_time = record.planning_time.saturating_add(completion.planning_time);
         record.engine_reported_at = Some(now);
         record.outcome = Some(completion.outcome);
     }

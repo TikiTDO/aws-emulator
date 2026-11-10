@@ -184,7 +184,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let work_group = input
             .work_group
             .unwrap_or_else(|| crate::state::DEFAULT_WORK_GROUP.to_string());
-        let context = input.query_execution_context.unwrap_or_default();
+        let context = {
+            let mut context = input.query_execution_context.unwrap_or_default();
+            // The context a read of this execution reports: the database as the request
+            // wrote it, and the data catalog FOLDED — a data catalog name is resolved
+            // without regard to case, so the name Athena reports for the catalog a query
+            // ran against is the folded one, which is also the spelling its own catalog
+            // refusals name it by.
+            context.catalog = context.catalog.map(|catalog| catalog.to_ascii_lowercase());
+            context
+        };
         let execution_parameters = input.execution_parameters.unwrap_or_default();
 
         let Some(state) = crate::state::service_state(&*self.engine) else {
@@ -205,8 +214,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         // The statement is READ before any lock is taken — what it is, what it addresses
         // and how it runs; what it computes is the catalog's and the engine's own answer
-        // below.
+        // below. Reading it is the first half of PLANNING the query, so the span is
+        // measured; the other half is the resolution the run does against the catalog.
+        let planning_started = ::std::time::Instant::now();
         let reading = catalog_sql::statement::read(&query_string, &query_context);
+        let read_time = planning_started.elapsed();
+        // A submission is PARSED before it is accepted, so text that is not a statement
+        // of this language is refused here rather than accepted and failed later: no
+        // execution is minted for it, and the refusal carries the parser's own diagnostic
+        // for where the grammar stopped reading.
+        if reading.statements.is_none() {
+            return Err(StartQueryExecutionError::invalid_request(
+                catalog_sql::grammar::ERROR_CODE_MALFORMED_QUERY,
+                catalog_sql::grammar::malformed_statement(&query_string),
+            ));
+        }
+        // What the statement DECLARES is judged here too: a definition Athena could never
+        // perform is refused at submission rather than minted as an execution that fails.
+        // It is a refusal of the STATEMENT, so it carries the statement refusal class the
+        // grammar's own refusals do.
+        if let Some(message) = reading.declaration_refusal() {
+            return Err(StartQueryExecutionError::invalid_request(
+                catalog_sql::grammar::ERROR_CODE_MALFORMED_QUERY,
+                message,
+            ));
+        }
         let id = crate::state::new_query_execution_id();
         let submitted_at = SystemTime::now();
         // Everything that reads or writes the registry happens here, and the lock is
@@ -238,14 +270,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             // Nowhere to write the results is a refusal, not a query that runs: "If
             // none of them is set, Athena issues an error that no output location is
-            // provided." Resolved BEFORE the idempotency check below, so that check
-            // compares the configuration the query would really run under against the
-            // one the earlier call ran under.
-            let Some(result_configuration) = crate::state::resolved_result_configuration(
+            // provided." A workgroup that keeps its results in Athena's own storage is
+            // the other way that same sentence names of satisfying the rule, so a query
+            // in such a workgroup runs with no location of its own. Resolved BEFORE the
+            // idempotency check below, so that check compares the configuration the query
+            // would really run under against the one the earlier call ran under.
+            let managed_query_results =
+                crate::state::resolved_managed_query_results(group.as_ref());
+            let result_configuration = match crate::state::resolved_result_configuration(
                 input.result_configuration,
                 group.as_ref(),
-            ) else {
-                return Err(invalid_request(crate::state::NO_OUTPUT_LOCATION));
+            ) {
+                Some(result_configuration) => result_configuration,
+                None if managed_query_results.is_some() => ResultConfiguration::default(),
+                None => return Err(invalid_request(crate::state::NO_OUTPUT_LOCATION)),
             };
 
             // "If another StartQueryExecution request is received, the same response is
@@ -301,6 +339,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 work_group,
                 context,
                 result_configuration,
+                managed_query_results,
                 result_reuse_configuration: input.result_reuse_configuration,
                 execution_parameters: execution_parameters.clone(),
                 engine_version: crate::state::resolved_engine_version(
@@ -315,6 +354,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // Written by this same call, once the engine has reported.
                 outcome: None,
                 engine_time: Duration::ZERO,
+                // The reading above is planning this call already did; the resolution the
+                // run does against the catalog is added to it when the run reports.
+                planning_time: read_time,
                 engine_reported_at: None,
                 cancelled_at: None,
             };
@@ -349,9 +391,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 run.unwrap_or_else(|_| query_engine::Completion {
                     outcome: query_engine::Outcome::Failed {
                         message: UNREPORTED_RUN.to_string(),
+                        reason: None,
                         cause: query_engine::FailureCause::Emulator,
                     },
                     engine_time: Duration::ZERO,
+                    planning_time: Duration::ZERO,
                 })
             }
             // A query execution runs ONE statement, so text carrying another count is a
@@ -360,9 +404,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             Some(count) => query_engine::Completion {
                 outcome: query_engine::Outcome::Failed {
                     message: one_statement_only(count),
+                    reason: None,
                     cause: query_engine::FailureCause::Emulator,
                 },
                 engine_time: Duration::ZERO,
+                planning_time: Duration::ZERO,
             },
         };
 

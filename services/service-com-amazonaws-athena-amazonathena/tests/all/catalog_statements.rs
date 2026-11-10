@@ -268,10 +268,17 @@ async fn failed(
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert_eq!(
-        found["Status"]["StateChangeReason"].as_str(),
-        Some(message.as_str()),
-        "case {case:?}: the reason and the error message must be the same sentence, got \
+    // The reason a failed query reports is what PERFORMED the statement wrote about the
+    // failure, and the error message is the failure itself: for a statement the Hive DDL
+    // engine performs the reason is that engine's own task or compilation line with the
+    // metastore's message inside it, and for every other class the two are one sentence.
+    // Either way the reason states at least what the error message states.
+    let reason = found["Status"]["StateChangeReason"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        reason.contains(&message),
+        "case {case:?}: the reason must state what the error message states, got \
          {found:?}"
     );
     message

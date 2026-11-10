@@ -161,7 +161,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 Some(record) => executions.push(record.to_query_execution(now)),
                 None => unprocessed.push(UnprocessedQueryExecutionId {
                     query_execution_id: Some(id.clone()),
-                    error_code: Some(crate::state::ERROR_CODE_INVALID_INPUT.to_string()),
+                    // An id this account minted no execution under is its own refusal
+                    // class — a permanent miss a poller must stop on — and not a request
+                    // this service found otherwise wrong.
+                    error_code: Some(
+                        crate::state::ERROR_CODE_QUERY_EXECUTION_NOT_FOUND.to_string(),
+                    ),
                     error_message: Some(crate::state::query_execution_not_found(id)),
                 }),
             }

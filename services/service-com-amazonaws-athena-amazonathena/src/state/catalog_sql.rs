@@ -29,11 +29,15 @@
 pub mod data;
 /// The statements the Data Catalog performs.
 pub mod ddl;
+/// What Athena says about text its query grammar cannot read as a statement.
+pub mod grammar;
+/// The `CREATE DATABASE` clauses Hive's DDL grammar takes beyond the general parser.
+pub mod hive_database;
 /// What one submitted statement is, and the plan for running it.
 pub mod statement;
 
 use ::std::collections::{HashMap, HashSet};
-use ::std::time::{Instant, SystemTime};
+use ::std::time::{Duration, Instant, SystemTime};
 
 use ::service_com_amazonaws_glue_awsglue::state as glue_state;
 use ::service_com_amazonaws_s3_amazons3::state as s3_state;
@@ -55,9 +59,10 @@ pub const ERROR_CATEGORY_SYSTEM: i32 = 1;
 /// see [`ERROR_CATEGORY_SYSTEM`].
 pub const ERROR_CATEGORY_USER: i32 = 2;
 
-/// The `AthenaError$ErrorType` Athena publishes for the ALREADY-EXISTS class: a
-/// statement that would define a catalog object the catalog already holds.
-pub const ERROR_TYPE_ALREADY_EXISTS: i32 = 1006;
+/// The `AthenaError$ErrorType` Athena publishes for a DDL TASK the catalog's own
+/// metastore refused: a statement that would define an object the catalog already holds,
+/// and one that would drop a database that still holds tables.
+pub const ERROR_TYPE_DDL_TASK: i32 = 1006;
 
 /// The `AthenaError$ErrorType` Athena publishes for the NOT-FOUND class: a statement
 /// naming a table or a database the data catalog does not hold.
@@ -96,13 +101,18 @@ const ICEBERG_WITHOUT_METADATA_LOCATION: &str = "GENERIC_USER_ERROR: Detected Ic
 /// is resolved, and a chain longer than this is reported rather than followed.
 const MAX_VIEW_DEPTH: usize = 4;
 
-/// Why one statement did not run: the message Athena reports as both the execution's
-/// `StateChangeReason` and its `AthenaError$ErrorMessage`, and the classification that
-/// message belongs to.
+/// Why one statement did not run: the message Athena reports as the execution's
+/// `AthenaError$ErrorMessage`, the `StateChangeReason` it reports beside it where the two
+/// differ, and the classification that failure belongs to.
 #[derive(Debug, Clone)]
 pub struct Failure {
     /// The message, as Athena words it for this failure class.
     pub message: String,
+    /// The execution's `StateChangeReason`, where the engine that performed the statement
+    /// reports something other than the message itself — the Hive DDL engine reports the
+    /// TASK that failed and the metastore exception it wrapped. `None` where the two are
+    /// the same text, which is what every other failure class reports.
+    pub reason: Option<String>,
     /// Whose doing the failure was, and the error type Athena publishes for it.
     pub cause: FailureCause,
 }
@@ -114,6 +124,7 @@ impl Failure {
     pub fn emulator(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            reason: None,
             cause: FailureCause::Emulator,
         }
     }
@@ -123,6 +134,7 @@ impl Failure {
     pub fn user(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            reason: None,
             cause: FailureCause::Athena {
                 category: ERROR_CATEGORY_USER,
                 error_type: None,
@@ -134,11 +146,46 @@ impl Failure {
     fn classified(message: String, category: i32, error_type: i32) -> Self {
         Self {
             message,
+            reason: None,
             cause: FailureCause::Athena {
                 category,
                 error_type: Some(error_type),
             },
         }
+    }
+
+    /// A failure the Hive DDL engine's own TASK reports: the metastore exception's
+    /// `message` is what `AthenaError$ErrorMessage` carries, and the task line — the task
+    /// that failed, with the metastore `exception` it wrapped — is what the execution's
+    /// `StateChangeReason` carries, because that is what the DDL engine wrote about it.
+    fn ddl_task(message: String, exception: String) -> Self {
+        Self {
+            message,
+            reason: Some(format!("{DDL_TASK_FAILED} {exception}")),
+            cause: FailureCause::Athena {
+                category: ERROR_CATEGORY_USER,
+                error_type: Some(ERROR_TYPE_DDL_TASK),
+            },
+        }
+    }
+
+    /// A `CREATE DATABASE` names a database the catalog already holds.
+    pub fn database_already_exists(database: &str) -> Self {
+        Self::ddl_task(
+            format!("Database {database} already exists"),
+            format!("AlreadyExistsException(message:Database {database} already exists)"),
+        )
+    }
+
+    /// A `DROP DATABASE` without `CASCADE` names a database that still holds tables.
+    pub fn database_not_empty(database: &str) -> Self {
+        Self::ddl_task(
+            format!("Cannot drop database {database} as its not empty."),
+            format!(
+                "MetaException(message:Unable to drop database: \
+                 InvalidOperationException(message:Database {database} is not empty.))"
+            ),
+        )
     }
 
     /// The statement names a table the data catalog does not hold.
@@ -175,18 +222,40 @@ impl Failure {
         )
     }
 
-    /// The statement would define a table the data catalog already holds. The catalog's
-    /// own exception for that is what Athena's DDL engine surfaces, so it is that
-    /// exception's name and sentence.
-    pub fn table_already_exists() -> Self {
-        Self::classified(
+    /// The statement would define a table the data catalog already holds.
+    ///
+    /// The statement is one the HIVE DDL engine performs, so what it reports is that
+    /// engine's own: the metastore exception's message, with the task line that wrapped it
+    /// as the state change reason (see [`Self::ddl_task`]).
+    pub fn table_already_exists(target: &Relation) -> Self {
+        Self::ddl_task(
+            format!("Table {} already exists", target.table),
             format!(
-                "AlreadyExistsException: {}",
-                glue_state::messages::TABLE_ALREADY_EXISTS
+                "AlreadyExistsException(message:Table {} already exists)",
+                target.table
             ),
-            ERROR_CATEGORY_USER,
-            ERROR_TYPE_ALREADY_EXISTS,
         )
+    }
+
+    /// A statement the HIVE DDL engine performs names a database the catalog does not
+    /// hold.
+    ///
+    /// That engine resolves the name while it COMPILES the statement, so what it reports is
+    /// the semantic error of its own compilation rather than the query engine's planning
+    /// error ([`Self::schema_not_found_at`]), which is what a statement the query engine
+    /// plans reports instead.
+    pub fn hive_database_not_found(database: &str) -> Self {
+        Self {
+            message: format!("{DATABASE_DOES_NOT_EXIST}: {database}"),
+            reason: Some(format!(
+                "FAILED: SemanticException [Error {HIVE_DATABASE_NOT_EXISTS}]: \
+                 {DATABASE_DOES_NOT_EXIST}: {database}"
+            )),
+            cause: FailureCause::Athena {
+                category: ERROR_CATEGORY_USER,
+                error_type: Some(ERROR_TYPE_ENTITY_NOT_FOUND),
+            },
+        }
     }
 
     /// A plain `CREATE VIEW` names a view that already exists.
@@ -259,10 +328,25 @@ impl Failure {
     fn outcome(self) -> Outcome {
         Outcome::Failed {
             message: self.message,
+            reason: self.reason,
             cause: self.cause,
         }
     }
 }
+
+/// What the Hive DDL engine writes in front of the metastore exception a failed task
+/// wrapped: the task that failed and the return code it failed with. The text is the
+/// engine's own and carries nothing from the request; the exception after it is the one
+/// the metastore raised.
+const DDL_TASK_FAILED: &str =
+    "FAILED: Execution Error, return code 1 from org.apache.hadoop.hive.ql.exec.DDLTask.";
+
+/// What the Hive DDL engine says about a database it cannot resolve while compiling a
+/// statement, and the error number its own catalogue gives that semantic error.
+const DATABASE_DOES_NOT_EXIST: &str = "Database does not exist";
+
+/// The error number of [`DATABASE_DOES_NOT_EXIST`] in the Hive DDL engine's catalogue.
+const HIVE_DATABASE_NOT_EXISTS: i32 = 10_072;
 
 /// Run the statement `reading` planned, and report what it produced.
 ///
@@ -298,22 +382,38 @@ pub fn execute<Eng: Send + Sync + 'static>(
             Completion {
                 outcome,
                 engine_time: started.elapsed(),
+                // A catalog statement names no relation to resolve and reads no data: the
+                // whole of its run is the task the catalog performs, so the planning this
+                // run did is the READING of the statement, which the caller measured.
+                planning_time: Duration::ZERO,
             }
         }
         Plan::Relations(relational) => {
             let started = Instant::now();
             match resolved_sql(engine, handle, *relational, context) {
-                Ok(prepared) => query_engine::run_over(
-                    handle,
-                    &prepared.objects,
-                    &prepared.sql,
-                    reading.counts_rows,
-                    parameters,
-                    prepared.scanned_bytes,
-                ),
+                Ok(prepared) => {
+                    // Resolving the statement's relations against the catalog and reading
+                    // the objects at their locations is what Athena measures as the query
+                    // PLANNING phase — "the time spent retrieving table partitions from
+                    // the data source" — and it is over before the engine is handed the
+                    // SQL, so the two spans are measured separately rather than reported
+                    // as one.
+                    let planning_time = started.elapsed();
+                    let mut completion = query_engine::run_over(
+                        handle,
+                        &prepared.objects,
+                        &prepared.sql,
+                        reading.counts_rows,
+                        parameters,
+                        prepared.scanned_bytes,
+                    );
+                    completion.planning_time = planning_time;
+                    completion
+                }
                 Err(failure) => Completion {
                     outcome: failure.outcome(),
-                    engine_time: started.elapsed(),
+                    engine_time: Duration::ZERO,
+                    planning_time: started.elapsed(),
                 },
             }
         }
@@ -327,6 +427,11 @@ fn perform<Eng: Send + Sync + 'static>(
     now: SystemTime,
 ) -> Result<StoredResultSet, Failure> {
     let (catalog, at) = match statement {
+        CatalogStatement::CreateDatabase(database) => {
+            (database.target.catalog.clone(), database.target.at)
+        }
+        CatalogStatement::DropDatabase { target, .. } => (target.catalog.clone(), target.at),
+        CatalogStatement::ShowDatabases { catalog, .. } => (catalog.clone(), Position::START),
         CatalogStatement::CreateExternalTable(table) => {
             (table.target.catalog.clone(), table.target.at)
         }
@@ -350,6 +455,17 @@ fn perform<Eng: Send + Sync + 'static>(
     };
     let mut store = state.lock();
     match statement {
+        CatalogStatement::CreateDatabase(database) => {
+            ddl::create_database(&mut store, &catalog_id, database, now)
+        }
+        CatalogStatement::DropDatabase {
+            target,
+            if_exists,
+            cascade,
+        } => ddl::drop_database(&mut store, &catalog_id, target, *if_exists, *cascade),
+        CatalogStatement::ShowDatabases { filter, .. } => {
+            ddl::show_databases(&store, &catalog_id, filter.as_ref())
+        }
         CatalogStatement::CreateExternalTable(table) => {
             ddl::create_external_table(&mut store, &catalog_id, table, now)
         }

@@ -35,7 +35,7 @@ use super::query_engine::{STATEMENT_TYPE_DDL, STATEMENT_TYPE_DML, STATEMENT_TYPE
 /// recursive, so a caller-supplied statement must not be able to recurse them off the
 /// stack. A statement deeper than this does not parse, and is handed to the engine as
 /// text exactly as any other unparsable statement is.
-const MAX_PARSER_RECURSION: usize = 48;
+pub(super) const MAX_PARSER_RECURSION: usize = 48;
 
 /// How many tokens a submitted statement may carry before this emulator stops reading it
 /// as one of its own statements.
@@ -49,12 +49,16 @@ const MAX_PARSER_RECURSION: usize = 48;
 /// bounding the TOKENS bounds the depth, and tokenizing is a flat pass that can be done
 /// before anything recursive runs. A statement past this bound is not read here: it goes
 /// to the engine as text, under the engine's own expression-depth limit.
-const MAX_STATEMENT_TOKENS: usize = 2_048;
+pub(super) const MAX_STATEMENT_TOKENS: usize = 2_048;
 
 /// How many relations one statement may name. Each one is resolved against the catalog
 /// and may be materialised, so the work one statement can ask for is bounded.
 const MAX_RELATIONS: usize = 64;
 
+/// The `SubstatementType` of a statement that defines a database.
+pub const SUBSTATEMENT_CREATE_DATABASE: &str = "CREATE_DATABASE";
+/// The `SubstatementType` of a statement that drops a database.
+pub const SUBSTATEMENT_DROP_DATABASE: &str = "DROP_DATABASE";
 /// The `SubstatementType` of a statement that projects rows.
 pub const SUBSTATEMENT_SELECT: &str = "SELECT";
 /// The `SubstatementType` of a statement that writes rows into an existing table.
@@ -176,6 +180,37 @@ pub struct Reading {
     pub plan: Plan,
 }
 
+impl Reading {
+    /// Why this submission is refused AT SUBMISSION rather than run, if it is.
+    ///
+    /// Athena judges what a statement DECLARES when the statement is submitted, not when
+    /// it runs: a table over data that already exists has to say WHERE that data is, so a
+    /// definition that names no location names no table Athena could ever read, and the
+    /// submission itself is refused.
+    pub fn declaration_refusal(&self) -> Option<&'static str> {
+        let Plan::Catalog(statement) = &self.plan else {
+            return None;
+        };
+        match statement.as_ref() {
+            CatalogStatement::CreateExternalTable(table)
+                if table
+                    .location
+                    .as_deref()
+                    .map(str::trim)
+                    .is_none_or(str::is_empty) =>
+            {
+                Some(NO_TABLE_LOCATION)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The message a table definition that names no location is refused with. Wholly fixed
+/// text: it states the rule, and interpolates nothing from the statement.
+pub const NO_TABLE_LOCATION: &str =
+    "No location was specified for table. An S3 location must be specified";
+
 /// How one statement runs.
 #[derive(Debug)]
 pub enum Plan {
@@ -201,6 +236,26 @@ pub struct RelationalStatement {
 /// A statement whose whole effect is on the Data Catalog.
 #[derive(Debug)]
 pub enum CatalogStatement {
+    /// `CREATE DATABASE` / `CREATE SCHEMA`: registers a database — the container the
+    /// catalog holds tables in.
+    CreateDatabase(DatabaseStatement),
+    /// `DROP DATABASE` / `DROP SCHEMA`.
+    DropDatabase {
+        /// The database to drop.
+        target: Schema,
+        /// Whether the statement tolerates its absence.
+        if_exists: bool,
+        /// Whether the statement drops the tables the database still holds with it,
+        /// which is what `CASCADE` asks for.
+        cascade: bool,
+    },
+    /// `SHOW DATABASES` and `SHOW SCHEMAS`.
+    ShowDatabases {
+        /// The data catalog to list the databases of.
+        catalog: String,
+        /// The pattern the statement narrows its answer by, if it gave one.
+        filter: Option<RelationFilter>,
+    },
     /// `CREATE EXTERNAL TABLE`: registers a table over data that already exists.
     CreateExternalTable(ExternalTable),
     /// `CREATE [OR REPLACE] VIEW`: registers a view over a query.
@@ -245,6 +300,25 @@ pub enum RelationFilter {
     },
     /// A form that narrows by something other than a pattern, carrying it as written.
     Other(String),
+}
+
+/// A `CREATE DATABASE` or `CREATE SCHEMA` statement, as the catalog entry it defines.
+///
+/// A database and a schema are the SAME catalog object to Athena — its catalogs hold
+/// databases, and `SCHEMA` is the word the Presto-derived grammar uses for one — so both
+/// spellings read as this statement.
+#[derive(Debug, Clone)]
+pub struct DatabaseStatement {
+    /// The database it defines.
+    pub target: Schema,
+    /// Whether an existing database of that name leaves the statement successful.
+    pub if_not_exists: bool,
+    /// `LOCATION`, as submitted: where the data of the tables in it lives by default.
+    pub location: Option<String>,
+    /// The database `COMMENT`, which the catalog holds as its description.
+    pub comment: Option<String>,
+    /// The `DBPROPERTIES` / `WITH` entries, which the catalog holds as its parameters.
+    pub properties: Vec<(String, String)>,
 }
 
 /// A `CREATE EXTERNAL TABLE` statement, as the catalog entry it defines.
@@ -336,6 +410,30 @@ pub enum Projection {
 /// Read `sql` as the one statement it carries, and plan how to run it.
 pub fn read(sql: &str, context: &QueryContext) -> Reading {
     let Some(mut statements) = parse_statements(sql) else {
+        // A database definition carrying the clauses Hive's DDL grammar takes and the
+        // general parser does not read is still that statement, so it is read as one
+        // rather than handed to the engine as text (see [`super::hive_database`]).
+        if let Some(definition) = super::hive_database::read_database_definition(sql) {
+            return Reading {
+                statements: Some(1),
+                statement_type: Some(STATEMENT_TYPE_DDL),
+                substatement_type: Some(SUBSTATEMENT_CREATE_DATABASE),
+                counts_rows: false,
+                plan: Plan::Catalog(Box::new(CatalogStatement::CreateDatabase(
+                    DatabaseStatement {
+                        target: Schema {
+                            catalog: context.catalog.clone(),
+                            database: glue_state::fold_name(&definition.name),
+                            at: definition.at,
+                        },
+                        if_not_exists: definition.if_not_exists,
+                        location: definition.location,
+                        comment: definition.comment,
+                        properties: definition.properties,
+                    },
+                ))),
+            };
+        }
         return Reading {
             statements: None,
             statement_type: None,
@@ -588,14 +686,14 @@ fn substatement_type_of(statement: &SqlStatement) -> Option<&'static str> {
         // A schema and a database are the same object to Athena, whose catalogs hold
         // databases.
         SqlStatement::CreateDatabase { .. } | SqlStatement::CreateSchema { .. } => {
-            "CREATE_DATABASE"
+            SUBSTATEMENT_CREATE_DATABASE
         }
         SqlStatement::AlterTable { .. } => "ALTER_TABLE",
         SqlStatement::Truncate { .. } => "TRUNCATE_TABLE",
         SqlStatement::Drop { object_type, .. } => match object_type {
             ObjectType::Table => SUBSTATEMENT_DROP_TABLE,
             ObjectType::View => SUBSTATEMENT_DROP_VIEW,
-            ObjectType::Schema | ObjectType::Database => "DROP_DATABASE",
+            ObjectType::Schema | ObjectType::Database => SUBSTATEMENT_DROP_DATABASE,
             _ => return None,
         },
         SqlStatement::ShowTables { .. } => "SHOW_TABLES",
@@ -611,6 +709,73 @@ fn substatement_type_of(statement: &SqlStatement) -> Option<&'static str> {
 /// for, and what is the engine's own business.
 fn plan_of(statement: SqlStatement, context: &QueryContext) -> Plan {
     match &statement {
+        // A database is a CATALOG object: the statement defines, drops or lists the
+        // container the catalog holds tables in, and reads no data at all. A `SCHEMA` is
+        // the same object under the other spelling of the word.
+        SqlStatement::CreateDatabase {
+            db_name,
+            if_not_exists,
+            location,
+            ..
+        } => match database_statement(db_name, context) {
+            Some(target) => Plan::Catalog(Box::new(CatalogStatement::CreateDatabase(
+                DatabaseStatement {
+                    target,
+                    if_not_exists: *if_not_exists,
+                    location: location.clone(),
+                    comment: None,
+                    properties: Vec::new(),
+                },
+            ))),
+            None => Plan::Engine,
+        },
+        SqlStatement::CreateSchema {
+            schema_name,
+            if_not_exists,
+            options,
+            ..
+        } => match schema_statement_name(schema_name)
+            .and_then(|name| database_statement(name, context))
+        {
+            Some(target) => Plan::Catalog(Box::new(CatalogStatement::CreateDatabase(
+                DatabaseStatement {
+                    target,
+                    if_not_exists: *if_not_exists,
+                    location: None,
+                    comment: None,
+                    properties: options
+                        .iter()
+                        .flatten()
+                        .filter_map(key_value)
+                        .collect(),
+                },
+            ))),
+            None => Plan::Engine,
+        },
+        SqlStatement::Drop {
+            object_type: ObjectType::Database | ObjectType::Schema,
+            if_exists,
+            names,
+            cascade,
+            ..
+        } => match names.as_slice() {
+            [name] => match database_statement(name, context) {
+                Some(target) => Plan::Catalog(Box::new(CatalogStatement::DropDatabase {
+                    target,
+                    if_exists: *if_exists,
+                    cascade: *cascade,
+                })),
+                None => Plan::Engine,
+            },
+            _ => Plan::Engine,
+        },
+        SqlStatement::ShowDatabases { show_options, .. }
+        | SqlStatement::ShowSchemas { show_options, .. } => {
+            Plan::Catalog(Box::new(CatalogStatement::ShowDatabases {
+                catalog: context.catalog.clone(),
+                filter: filter_of(show_options),
+            }))
+        }
         // A table over data that already exists is a CATALOG entry: the statement
         // registers where the data lives and how to read it, and writes no rows.
         SqlStatement::CreateTable(create) if defines_an_external_table(create) => {
@@ -688,6 +853,39 @@ fn plan_of(statement: SqlStatement, context: &QueryContext) -> Plan {
                 relations,
             }))
         }
+    }
+}
+
+/// The database `name` addresses, given the catalog an unqualified name resolves
+/// against, or `None` for a name that addresses no catalog database.
+///
+/// The name is FOLDED the way the Data Catalog folds a database name, exactly as a
+/// relation's is ([`relation_of`]): that is the name the catalog is keyed by.
+fn database_statement(name: &ObjectName, context: &QueryContext) -> Option<Schema> {
+    let parts = idents_of(name);
+    let at = Position::of(parts.first()?);
+    let (catalog, database) = match parts.as_slice() {
+        [database] => (context.catalog.clone(), database.value.clone()),
+        [catalog, database] => (catalog.value.clone(), database.value.clone()),
+        _ => return None,
+    };
+    if database.is_empty() {
+        return None;
+    }
+    Some(Schema {
+        catalog,
+        database: glue_state::fold_name(&database),
+        at,
+    })
+}
+
+/// The name a `CREATE SCHEMA` defines, or `None` for a form that names no schema of its
+/// own — an authorization clause names the owner of the schema, not the schema.
+fn schema_statement_name(name: &::sqlparser::ast::SchemaName) -> Option<&ObjectName> {
+    use ::sqlparser::ast::SchemaName;
+    match name {
+        SchemaName::Simple(name) | SchemaName::NamedAuthorization(name, ..) => Some(name),
+        SchemaName::UnnamedAuthorization(..) => None,
     }
 }
 
@@ -1129,6 +1327,60 @@ mod tests {
         }
     }
 
+    /// Every form Athena's DDL engine takes a database definition in is READ as the
+    /// catalog statement it is: the rows differ along the quoting of the name, the
+    /// tolerance clause, and the options Hive's grammar lets a database carry.
+    #[test]
+    fn database_definitions_are_read_in_every_form_the_ddl_engine_takes() {
+        // (case, the statement)
+        let cases: Vec<(&str, &str)> = vec![
+            ("a back-quoted name", "CREATE DATABASE `shop-ddl`"),
+            (
+                "a back-quoted name it tolerates the presence of",
+                "CREATE DATABASE IF NOT EXISTS `shop-ddl`",
+            ),
+            (
+                "a description",
+                "CREATE DATABASE `shop-ddl` COMMENT 'the shop'",
+            ),
+            (
+                "a default location for the tables in it",
+                "CREATE DATABASE `shop-ddl` LOCATION 's3://bucket/shop/'",
+            ),
+            (
+                "properties",
+                "CREATE DATABASE `shop-ddl` WITH DBPROPERTIES ('owner' = 'shop')",
+            ),
+            (
+                "every clause at once",
+                "CREATE DATABASE IF NOT EXISTS `shop-ddl` COMMENT 'the shop' \
+                 LOCATION 's3://bucket/shop/' WITH DBPROPERTIES ('owner' = 'shop')",
+            ),
+        ];
+
+        let mut unread: Vec<(&str, String)> = Vec::new();
+        for (case, sql) in cases {
+            let reading = read(sql, &context());
+            let plan = match &reading.plan {
+                Plan::Catalog(statement) => match statement.as_ref() {
+                    CatalogStatement::CreateDatabase(database) => {
+                        database.target.database.clone()
+                    }
+                    other => format!("{other:?}"),
+                },
+                other => format!("{other:?}"),
+            };
+            if plan != "shop-ddl" {
+                unread.push((case, plan));
+            }
+        }
+        assert!(
+            unread.is_empty(),
+            "every form must be read as the database definition, and these were not: \
+             {unread:?}"
+        );
+    }
+
     /// Hive DDL and Presto DDL are both READ, and each lands on the plan that performs
     /// it: the rows differ along the grammar the statement is written in, how its name is
     /// qualified and quoted, and which catalog statement it is.
@@ -1136,6 +1388,42 @@ mod tests {
     fn catalog_statements_are_read_off_the_parse() {
         // (case, the statement, the plan it must land on)
         let cases: Vec<(&str, &str, &str)> = vec![
+            (
+                "Hive DDL defining a database with a back-quoted name",
+                "CREATE DATABASE `shop_ddl`",
+                "create database shop_ddl",
+            ),
+            (
+                "a database defined only if it is absent",
+                "CREATE DATABASE IF NOT EXISTS Shop_DDL",
+                "create database shop_ddl if absent",
+            ),
+            (
+                "the Presto spelling of the same object",
+                "CREATE SCHEMA shop_ddl",
+                "create database shop_ddl",
+            ),
+            (
+                "a database dropped",
+                "DROP DATABASE shop_ddl",
+                "drop database shop_ddl",
+            ),
+            (
+                "a database dropped with everything in it",
+                "DROP DATABASE IF EXISTS shop_ddl CASCADE",
+                "drop database shop_ddl if present cascade",
+            ),
+            (
+                "the Presto spelling of the drop",
+                "DROP SCHEMA shop_ddl",
+                "drop database shop_ddl",
+            ),
+            ("the databases listed", "SHOW DATABASES", "show databases"),
+            (
+                "the databases narrowed by a SQL pattern",
+                "SHOW SCHEMAS LIKE 'shop%'",
+                "show databases like shop%",
+            ),
             (
                 "Hive DDL with back-quoted names and a location",
                 "CREATE EXTERNAL TABLE `shop`.`ddl_tbl` (id bigint) LOCATION 's3://b/ddl/'",
@@ -1208,6 +1496,34 @@ mod tests {
             let actual = match &reading.plan {
                 Plan::Engine => "engine".to_string(),
                 Plan::Catalog(statement) => match statement.as_ref() {
+                    CatalogStatement::CreateDatabase(database) => format!(
+                        "create database {}{}",
+                        database.target.database,
+                        if database.if_not_exists { " if absent" } else { "" }
+                    ),
+                    CatalogStatement::DropDatabase {
+                        target,
+                        if_exists,
+                        cascade,
+                    } => format!(
+                        "drop database {}{}{}",
+                        target.database,
+                        if *if_exists { " if present" } else { "" },
+                        if *cascade { " cascade" } else { "" }
+                    ),
+                    CatalogStatement::ShowDatabases { filter, .. } => format!(
+                        "show databases{}",
+                        match filter {
+                            None => String::new(),
+                            Some(RelationFilter::Pattern(pattern)) => {
+                                format!(" matching {pattern}")
+                            }
+                            Some(RelationFilter::Like { pattern, .. }) => {
+                                format!(" like {pattern}")
+                            }
+                            Some(RelationFilter::Other(form)) => format!(" where {form}"),
+                        }
+                    ),
                     CatalogStatement::CreateExternalTable(table) => {
                         format!(
                             "external table {}.{}",

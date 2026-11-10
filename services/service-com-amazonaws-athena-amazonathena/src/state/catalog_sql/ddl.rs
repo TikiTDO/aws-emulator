@@ -13,7 +13,7 @@ use ::std::collections::HashMap;
 use ::std::time::SystemTime;
 
 use ::service_com_amazonaws_glue_awsglue::ops::types::{
-    Column as GlueColumn, SerDeInfo, StorageDescriptor, TableInput,
+    Column as GlueColumn, DatabaseInput, SerDeInfo, StorageDescriptor, TableInput,
 };
 use ::service_com_amazonaws_glue_awsglue::state as glue_state;
 
@@ -136,6 +136,133 @@ const RELATION_NAME_COLUMN: &str = "tab_name";
 /// The column a `SHOW CREATE VIEW` result set carries.
 const CREATE_VIEW_COLUMN: &str = "Create View";
 
+/// The column a `SHOW DATABASES` or `SHOW SCHEMAS` result set carries, as the Hive DDL
+/// engine that answers those statements names it.
+const DATABASE_NAME_COLUMN: &str = "database_name";
+
+/// Register the database a `CREATE DATABASE` (or `CREATE SCHEMA`) defines in the Data
+/// Catalog.
+///
+/// The entry is the one the catalog holds for a database: the folded name, the statement's
+/// `COMMENT` as its description, its `LOCATION` as the location URI and its properties as
+/// the database parameters — the same entry `AWSGlue.CreateDatabase` writes, because
+/// `AwsDataCatalog` is that one catalog.
+///
+/// `IF NOT EXISTS` over a database that is already there changes NOTHING and succeeds;
+/// without it, an existing database is the metastore's own already-exists refusal and the
+/// stored entry is left exactly as it was.
+pub fn create_database(
+    store: &mut glue_state::ComAmazonawsGlueAwsglueState,
+    catalog_id: &str,
+    statement: &statement::DatabaseStatement,
+    now: SystemTime,
+) -> Result<StoredResultSet, Failure> {
+    let database = &statement.target.database;
+    if store.database(catalog_id, database).is_some() {
+        if statement.if_not_exists {
+            return Ok(StoredResultSet::default());
+        }
+        return Err(Failure::database_already_exists(database));
+    }
+    let catalog_can_hold_another = store
+        .catalogs
+        .get(catalog_id)
+        .is_none_or(glue_state::Catalog::can_store_database);
+    if !store.can_store_database() || !catalog_can_hold_another {
+        return Err(Failure::emulator(format!(
+            "the Data Catalog already holds the maximum of {} databases, so {database} \
+             cannot be registered",
+            glue_state::MAX_DATABASES_PER_CATALOG
+        )));
+    }
+    let input = DatabaseInput {
+        name: database.clone(),
+        description: statement.comment.clone(),
+        location_uri: statement.location.as_deref().map(trimmed_location),
+        parameters: (!statement.properties.is_empty()).then(|| {
+            statement
+                .properties
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect()
+        }),
+        ..DatabaseInput::default()
+    };
+    let entry = glue_state::DatabaseEntry::from_input(&input, catalog_id, None, now);
+    let Some(catalog) = store.catalog_mut_for_create(catalog_id) else {
+        return Err(Failure::emulator(format!(
+            "this emulator holds no Data Catalog {catalog_id} can be created in, so \
+             {database} cannot be registered"
+        )));
+    };
+    catalog
+        .databases
+        .insert(glue_state::fold_name(database), entry);
+    Ok(StoredResultSet::default())
+}
+
+/// Drop the database a `DROP DATABASE` (or `DROP SCHEMA`) names.
+///
+/// A database that still holds tables is dropped only by a statement that asked for its
+/// contents to go with it (`CASCADE`); without that, the metastore refuses the drop and
+/// the database and every table in it are left exactly as they were. `IF EXISTS` tolerates
+/// an absent database; without it, an absent database is the catalog's own not-found
+/// refusal.
+pub fn drop_database(
+    store: &mut glue_state::ComAmazonawsGlueAwsglueState,
+    catalog_id: &str,
+    target: &Schema,
+    if_exists: bool,
+    cascade: bool,
+) -> Result<StoredResultSet, Failure> {
+    let Some(database) = store.database(catalog_id, &target.database) else {
+        if if_exists {
+            return Ok(StoredResultSet::default());
+        }
+        // The drop is performed by the Hive DDL engine, which resolves the name while it
+        // compiles the statement.
+        return Err(Failure::hive_database_not_found(&target.database));
+    };
+    if !database.tables.is_empty() && !cascade {
+        return Err(Failure::database_not_empty(&target.database));
+    }
+    if let Some(catalog) = store.catalogs.get_mut(catalog_id) {
+        catalog.databases.remove(&glue_state::fold_name(&target.database));
+    }
+    Ok(StoredResultSet::default())
+}
+
+/// List the databases of one data catalog, as `SHOW DATABASES` and `SHOW SCHEMAS` answer
+/// it.
+///
+/// Every database the catalog holds, in the catalog's own name order — and a statement that
+/// gives a PATTERN lists only the names that match it as a whole, exactly as a filtered
+/// `SHOW TABLES` does.
+pub fn show_databases(
+    store: &glue_state::ComAmazonawsGlueAwsglueState,
+    catalog_id: &str,
+    filter: Option<&RelationFilter>,
+) -> Result<StoredResultSet, Failure> {
+    let matcher = match filter {
+        None => None,
+        Some(filter) => Some(name_matcher(filter)?),
+    };
+    let names = store
+        .catalogs
+        .get(catalog_id)
+        .map(glue_state::Catalog::databases_ordered)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|database| {
+            matcher
+                .as_ref()
+                .is_none_or(|matcher| matcher.is_match(&database.name))
+        })
+        .map(|database| database.name.clone())
+        .collect();
+    Ok(single_column_result(DATABASE_NAME_COLUMN, names))
+}
+
 /// Register the table a `CREATE EXTERNAL TABLE` defines in the Data Catalog.
 ///
 /// The entry is the one the catalog holds for a DDL-authored table: its type is
@@ -157,13 +284,15 @@ pub fn create_external_table(
 ) -> Result<StoredResultSet, Failure> {
     let store_can_hold_another = store.can_store_table();
     let Some(database) = store.database_mut(catalog_id, &table.target.database) else {
-        return Err(Failure::schema_not_found(&table.target));
+        // The statement is one the Hive DDL engine performs, so a database it cannot
+        // resolve is that engine's own semantic error.
+        return Err(Failure::hive_database_not_found(&table.target.database));
     };
     if database.tables.contains_key(&table.target.table) {
         if table.if_not_exists {
             return Ok(StoredResultSet::default());
         }
-        return Err(Failure::table_already_exists());
+        return Err(Failure::table_already_exists(&table.target));
     }
     if !store_can_hold_another || !database.can_store_table() {
         return Err(Failure::emulator(format!(
@@ -353,7 +482,7 @@ pub fn create_view(
     };
     match database.tables.get(&view.target.table) {
         Some(existing) if !is_view(existing) => {
-            return Err(Failure::table_already_exists());
+            return Err(Failure::table_already_exists(&view.target));
         }
         Some(_) if !view.or_replace => {
             return Err(Failure::view_already_exists(&view.target));
