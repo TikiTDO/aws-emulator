@@ -76,6 +76,17 @@ pub struct ConnectionSecret {
     /// The credentials the `Authorization: Basic` header is built from, for a
     /// `BASIC` connection.
     pub basic: Option<BasicCredential>,
+    /// The client credentials the token request is made with, for an
+    /// `OAUTH_CLIENT_CREDENTIALS` connection ([`super::oauth`]). They are not
+    /// themselves an authorization an invocation can carry — they are exchanged
+    /// for one.
+    pub oauth: Option<super::oauth::OAuthCredential>,
+    /// The access token the connection's last client-credentials exchange
+    /// issued, which is what an invocation through an OAuth connection carries
+    /// ([`ConnectionSecret::authorization_header`]) — `None` for a connection
+    /// that holds none, which is a connection no invocation is authorized
+    /// through.
+    pub oauth_token: Option<String>,
     /// `InvocationHttpParameters` as the request gave them, the values it
     /// flagged secret included: "additional parameters for the connection that
     /// are passed through with every invocation to the HTTP endpoint".
@@ -90,6 +101,14 @@ impl ::std::fmt::Debug for ConnectionSecret {
             .debug_struct("ConnectionSecret")
             .field("api_key", &self.api_key)
             .field("basic", &self.basic)
+            .field("oauth", &self.oauth)
+            .field(
+                "oauth_token",
+                &self
+                    .oauth_token
+                    .as_ref()
+                    .map(|_| "<the token the exchange issued>"),
+            )
             .field(
                 "invocation_http_parameters",
                 &self
@@ -102,20 +121,29 @@ impl ::std::fmt::Debug for ConnectionSecret {
 }
 
 impl ConnectionSecret {
-    /// The authorization header this connection's credentials ARE, or `None`
-    /// for a connection whose credentials have to be exchanged for a token
-    /// first (`OAUTH_CLIENT_CREDENTIALS`) and for one that holds none at all.
+    /// The authorization header an invocation through this connection carries,
+    /// or `None` for a connection that holds no credential to send: one of an
+    /// `OAUTH_CLIENT_CREDENTIALS` type whose exchange issued no token, and one
+    /// `DeauthorizeConnection` stripped.
     ///
     /// "API_KEY ... BASIC": an api-key connection sends its key under the
     /// header NAME the connection names, and a basic connection sends the
     /// standard `Authorization: Basic <base64(user:password)>` the HTTP basic
     /// scheme defines (RFC 7617), encoded by the `base64` crate rather than by
-    /// hand.
+    /// hand. An OAuth connection sends the token its client-credentials grant
+    /// was exchanged for, under the bearer scheme (RFC 6750 §2.1) — the
+    /// credentials themselves are never sent to the destination.
     pub fn authorization_header(&self) -> Option<(String, String)> {
         use ::base64::Engine as _;
 
         if let Some(key) = self.api_key.as_ref() {
             return Some((key.name.clone(), key.value.clone()));
+        }
+        if let Some(token) = self.oauth_token.as_ref() {
+            return Some((
+                ::http::header::AUTHORIZATION.to_string(),
+                format!("{} {token}", super::oauth::BEARER_SCHEME),
+            ));
         }
         let basic = self.basic.as_ref()?;
         let credentials = ::base64::engine::general_purpose::STANDARD
@@ -221,7 +249,7 @@ pub fn api_destination_invocation(
         .and_then(|parameters| parameters.path_parameter_values.clone())
         .unwrap_or_default();
     Invocation {
-        uri: with_query(&filled_path(endpoint, &path_values), &query),
+        uri: with_query_parameters(&filled_path(endpoint, &path_values), &query),
         headers: headers.into_iter().collect(),
         body: with_body_parameters(
             body,
@@ -275,7 +303,12 @@ fn filled_path(endpoint: &str, values: &[String]) -> String {
 /// own query set, so a parameter carrying a space, an `&` or a non-ASCII
 /// character travels as one value rather than breaking the query it is written
 /// into.
-fn with_query(uri: &str, parameters: &BTreeMap<String, String>) -> String {
+///
+/// Both requests this service makes on the account's behalf build their query
+/// string here — an api-destination invocation and a connection's token exchange
+/// ([`super::oauth`]) — so one parameter is encoded one way whichever request
+/// carries it.
+pub fn with_query_parameters(uri: &str, parameters: &BTreeMap<String, String>) -> String {
     /// The characters a query-string value is encoded away from: the delimiters
     /// of the query itself, plus the ones RFC 3986 does not admit in a URI at
     /// all.

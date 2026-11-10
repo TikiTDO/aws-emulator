@@ -20,8 +20,11 @@
 //! EventBridge withholding the invocation because no document admits it — a function
 //! carrying no resource-based policy, and a function that is not there at all, which is the
 //! same absence ("for Lambda functions … EventBridge relies on resource-based policies",
-//! `PutTargets`) — and the function's own service REFUSING the invocation, which is reported
-//! under the code that service answered rather than under a permission condition.
+//! `PutTargets`) — and the function's own service REFUSING the invocation. The `ERROR_CODE`
+//! is EventBridge's own classification of the failure in both classes, never the target
+//! service's error code: the permission condition where no document admits the invocation,
+//! and `UNKNOWN` where the function's service answered a refusal that classification does
+//! not place — whose own code and sentence the `ERROR_MESSAGE` beside it carries in full.
 //!
 //! What is NOT dead-lettered here is as much of the rule: EventBridge invokes a function
 //! target asynchronously ("Event – Invoke the function asynchronously",
@@ -74,8 +77,15 @@ const ZIP_FILE: &str = "UEsDBAoAAAAAAAAAAAA=";
 /// wrong value in the service would fail this suite.
 const NO_PERMISSIONS: &str = "NO_PERMISSIONS";
 
+/// The condition it names for a refusal its classification does not place: the target's
+/// service answered something that is neither a refusal of the identity nor a resource that
+/// is not there, so the condition says only that, and the answer itself is what the
+/// `ERROR_MESSAGE` beside it carries. Spelled here for the same reason.
+const UNKNOWN: &str = "UNKNOWN";
+
 /// The error AWS Lambda answers an invocation of a function that is not invocable yet, which
-/// is what a delivery made inside the function's creation transition is reported under.
+/// is the sentence such a delivery's `ERROR_MESSAGE` carries — its wire code is in that
+/// message too, where the whole of the service's answer is reported.
 const RESOURCE_CONFLICT: &str = "ResourceConflictException";
 
 /// A well-formed execution role ARN for the created functions.
@@ -282,19 +292,22 @@ enum Failure {
 }
 
 impl Failure {
-    /// The `ERROR_CODE` the dead letter reports: the permission condition for a withheld
-    /// invocation, and otherwise the error code the target service itself answered.
+    /// The `ERROR_CODE` the dead letter reports, which is EventBridge's OWN classification
+    /// of why the delivery failed and never the target service's error code: the permission
+    /// condition for an invocation no document admits, and the unplaced one for a refusal
+    /// the function's own service answered.
     fn code(self) -> &'static str {
         match self {
             Self::NoPolicyAdmitsIt => NO_PERMISSIONS,
-            Self::TheFunctionRefusedIt => RESOURCE_CONFLICT,
+            Self::TheFunctionRefusedIt => UNKNOWN,
         }
     }
 
     /// A sentence the `ERROR_MESSAGE` for the function `arn` has to carry: the one AWS
     /// Lambda answers a caller its resource-based policy does not permit, naming the
-    /// principal, the action and the resource; and the one it answers an invocation of a
-    /// function that cannot be invoked yet.
+    /// principal, the action and the resource; and, for a refusal the function's own service
+    /// answered, that service's own code and sentence, which the message reports in full
+    /// beside the condition.
     fn reported_sentence(self, arn: &str) -> String {
         match self {
             Self::NoPolicyAdmitsIt => format!(
@@ -302,10 +315,10 @@ impl Failure {
                  resource: {arn} because no resource-based policy allows the \
                  {INVOKE_ACTION} action"
             ),
-            Self::TheFunctionRefusedIt => "The operation cannot be performed at this time. \
-                                           The function is currently in the following state: \
-                                           Pending"
-                .to_string(),
+            Self::TheFunctionRefusedIt => format!(
+                "{RESOURCE_CONFLICT}: The operation cannot be performed at this time. The \
+                 function is currently in the following state: Pending"
+            ),
         }
     }
 }

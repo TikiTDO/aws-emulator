@@ -47,14 +47,20 @@ mod connection_authorization;
 mod connection_filter_exclusivity_and_update_completeness;
 #[path = "all/connection_lifecycle.rs"]
 mod connection_lifecycle;
+#[path = "all/connection_oauth_grant.rs"]
+mod connection_oauth_grant;
 #[path = "all/connection_refusal_wording.rs"]
 mod connection_refusal_wording;
 #[path = "all/cross_region_bus_target.rs"]
 mod cross_region_bus_target;
+#[path = "all/dead_letter_condition_classification.rs"]
+mod dead_letter_condition_classification;
 #[path = "all/dead_letter_error_code.rs"]
 mod dead_letter_error_code;
 #[path = "all/encrypted_bus_key_state.rs"]
 mod encrypted_bus_key_state;
+#[path = "all/encrypted_queue_target_key_policy.rs"]
+mod encrypted_queue_target_key_policy;
 #[path = "all/encrypted_topic_target_key_policy.rs"]
 mod encrypted_topic_target_key_policy;
 #[path = "all/entry_level_semantics.rs"]
@@ -163,3 +169,5 @@ mod target_role_assumption;
 mod topic_target_policy_authorization;
 #[path = "all/trace_header_propagation.rs"]
 mod trace_header_propagation;
+#[path = "all/transformed_input_is_json.rs"]
+mod transformed_input_is_json;

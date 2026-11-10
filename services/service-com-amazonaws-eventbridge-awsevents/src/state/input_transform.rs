@@ -29,22 +29,48 @@ pub struct Delivery<'a> {
     pub ingestion_time: &'a str,
 }
 
-/// The value the reserved placeholder `key` carries, or `None` when the
+/// What the reserved placeholder `key` is filled with, or `None` when the
 /// reserved namespace holds no such placeholder.
 ///
-/// The five EventBridge fills itself: the whole event (`aws.events.event`),
-/// the whole event as JSON text (`aws.events.event.json`), the matched
-/// rule's ARN and name, and the event's ingestion time.
-fn reserved(key: &str, event: &Value, delivery: &Delivery<'_>) -> Option<Value> {
+/// The five EventBridge fills itself: the whole event (`aws.events.event`), the
+/// whole event as JSON text (`aws.events.event.json`), the matched rule's ARN and
+/// name, and the event's ingestion time.
+///
+/// A placeholder standing for the whole EVENT carries that event's JSON DOCUMENT
+/// wherever it stands — [`Fill::Document`] — because the event is a JSON object
+/// and a reading of one as characters is not a thing any consumer is handed: a
+/// template that is nothing but `<aws.events.event.json>` renders the event, which
+/// is what the placeholder is for. The other three carry text a caller may put
+/// anywhere, so they fill like a selected value does.
+fn reserved(key: &str, event: &Value, delivery: &Delivery<'_>) -> Option<Fill> {
     match key {
-        "aws.events.event" | "aws.events.event.json" => Some(event.clone()),
-        "aws.events.rule-arn" => Some(Value::String(delivery.rule_arn.to_string())),
-        "aws.events.rule-name" => Some(Value::String(delivery.rule.to_string())),
-        "aws.events.event.ingestion-time" => {
-            Some(Value::String(delivery.ingestion_time.to_string()))
+        "aws.events.event" | "aws.events.event.json" => {
+            Some(Fill::Document(event.to_string()))
         }
+        "aws.events.rule-arn" => Some(Fill::Selected(Value::String(
+            delivery.rule_arn.to_string(),
+        ))),
+        "aws.events.rule-name" => Some(Fill::Selected(Value::String(
+            delivery.rule.to_string(),
+        ))),
+        "aws.events.event.ingestion-time" => Some(Fill::Selected(Value::String(
+            delivery.ingestion_time.to_string(),
+        ))),
         _ => None,
     }
+}
+
+/// What ONE placeholder is filled with, told apart by how it is WRITTEN into the
+/// template.
+#[derive(Debug, Clone)]
+enum Fill {
+    /// A value the event carries: its JSON text where the placeholder stands as a
+    /// JSON value, and its characters ([`text`]) where it stands inside a string
+    /// or in a template that is not JSON at all.
+    Selected(Value),
+    /// A JSON document, which is written as it stands wherever the placeholder is
+    /// — the whole event is one.
+    Document(String),
 }
 
 /// What a path selected, told apart the way a RENDERING has to tell it
@@ -120,20 +146,25 @@ pub fn by_input_path(path: &str, event: &Value) -> Result<String, String> {
 /// The template's own FORM decides how a value is written, because the
 /// documented templates are of two kinds:
 ///
-/// * one that opens a JSON value — an object, an array or a string — carries
-///   its placeholders "in quotes or out"
-///   (`InputTransformer$InputTemplate`), so a placeholder standing as a JSON
-///   value carries the selected value's JSON text and one standing inside a
-///   string carries that value's CHARACTERS ([`text`]), escaped for the string
-///   it lands in — `{"n": <n>}` renders a number and `{"n": "<n>"}` renders
-///   that number's digits as a string, and neither can break the template's
-///   own JSON;
-/// * any other template is TEXT (`"<instance> is in state <status>"`): every
-///   placeholder carries the value's characters and every character the
-///   template itself wrote is delivered as written.
-/// * any other template is TEXT (`"<instance> is in state <status>"`): every
-///   placeholder carries the value's characters and every character the
-///   template itself wrote is delivered as written.
+/// * one that opens a JSON OBJECT or ARRAY carries its placeholders "in quotes
+///   or out" (`InputTransformer$InputTemplate`), so a placeholder standing as a
+///   JSON value carries the selected value's JSON text and one standing inside
+///   one of the template's own strings carries that value's CHARACTERS
+///   ([`text`]), escaped for the string it lands in — `{"n": <n>}` renders a
+///   number and `{"n": "<n>"}` renders that number's digits as a string, and
+///   neither can break the template's own JSON;
+/// * any other template is PLAIN TEXT (`"<instance> is in state <status>"`, a
+///   sentence): every placeholder carries the value's characters AS THEY READ,
+///   nothing escapes them, and every character the template itself wrote — the
+///   quotes a quoted template opens and closes with included — is delivered as
+///   written. So such a rendering is a JSON document only where the characters
+///   substituted into it happen not to break one, and an input that is not a
+///   document is never handed to the target
+///   ([`crate::ops::put_events::deliver`] fails that invocation instead).
+///
+/// A placeholder standing for the whole EVENT carries that event's JSON document
+/// ([`Fill::Document`]), escaped where it stands inside a structured template's
+/// own string, for the reason [`reserved`] gives.
 ///
 /// A key the map does not hold and the reserved namespace does not name is
 /// not a placeholder at all: the text is left exactly as the template wrote
@@ -159,9 +190,10 @@ pub fn render(
     event: &Value,
     delivery: &Delivery<'_>,
 ) -> Result<String, String> {
-    let structured = template
-        .trim_start()
-        .starts_with(['{', '[', '"']);
+    // A template that opens a JSON object or array is one whose own JSON the
+    // rendering keeps; anything else — a quoted string, a sentence — is plain
+    // text, which escapes nothing (see above).
+    let structured = template.trim_start().starts_with(['{', '[']);
     let mut rendered = String::with_capacity(template.len());
     // Whether the scan stands inside a string literal of a STRUCTURED
     // template, and whether the character before it escaped this one, which
@@ -174,13 +206,22 @@ pub fn render(
         // A placeholder is read before the character opening it is
         // classified: `<` is never part of a template's own JSON structure.
         if let Some((key, tail)) = placeholder(rest).filter(|_| !escaped) {
-            if let Some(value) = filling(key, paths, event, delivery)? {
-                if structured && !in_string {
-                    rendered.push_str(&value.to_string());
-                } else if structured {
-                    rendered.push_str(&escaped_text(&value));
-                } else {
-                    rendered.push_str(&text(&value));
+            if let Some(fill) = filling(key, paths, event, delivery)? {
+                match fill {
+                    // A JSON document stands as it is where the template takes a
+                    // value, and as its characters — escaped for the string it
+                    // lands in — inside one.
+                    Fill::Document(document) if structured && in_string => {
+                        rendered.push_str(&escaped_for_a_string(&document));
+                    }
+                    Fill::Document(document) => rendered.push_str(&document),
+                    Fill::Selected(value) if structured && !in_string => {
+                        rendered.push_str(&value.to_string());
+                    }
+                    Fill::Selected(value) if structured => {
+                        rendered.push_str(&escaped_for_a_string(&text(&value)));
+                    }
+                    Fill::Selected(value) => rendered.push_str(&text(&value)),
                 }
                 if rendered.len() > MAX_RENDERED_BYTES {
                     return Err(format!(
@@ -230,17 +271,17 @@ fn filling(
     paths: &::std::collections::BTreeMap<String, String>,
     event: &Value,
     delivery: &Delivery<'_>,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<Fill>, String> {
     if let Some(path) = paths.get(key) {
         return selection(path, event).map(|selection| {
-            Some(match selection {
+            Some(Fill::Selected(match selection {
                 Selection::Value(value) => value,
                 // Nothing was selected, so the placeholder stands for no
                 // characters at all: the empty string, which is a JSON string
                 // where the placeholder stands as a value and nothing where it
                 // stands inside one.
                 Selection::Nothing => Value::String(String::new()),
-            })
+            }))
         });
     }
     Ok(key
@@ -277,8 +318,8 @@ fn placeholder(text: &str) -> Option<(&str, &str)> {
 ///
 /// This is the one reading of a selected value as text, so a sentence template
 /// and a placeholder standing inside a JSON template's own string (where it is
-/// escaped for that string, [`escaped_text`]) carry the same characters. A
-/// placeholder standing as a JSON VALUE carries the value's JSON text instead —
+/// escaped for that string, [`escaped_for_a_string`]) carry the same characters.
+/// A placeholder standing as a JSON VALUE carries the value's JSON text instead —
 /// that one is a value, not characters — which is where the quotes come back.
 ///
 /// The walk descends one frame per level of the value, which is bounded by the
@@ -304,11 +345,11 @@ fn text(value: &Value) -> String {
     }
 }
 
-/// [`text`] escaped for the JSON string literal it is written into, so a
-/// selected value carrying a quote, a backslash or a control character
-/// cannot break the template's own JSON.
-fn escaped_text(value: &Value) -> String {
-    let quoted = Value::String(text(value)).to_string();
+/// `characters` escaped for the JSON string literal they are written into, so a
+/// selected value carrying a quote, a backslash or a control character cannot
+/// break the template's own JSON.
+fn escaped_for_a_string(characters: &str) -> String {
+    let quoted = Value::String(characters.to_string()).to_string();
     // `Value::String`'s rendering is the QUOTED form, and what the
     // placeholder stands for is its content: the quotes around it belong to
     // the template's own string, which already carries them.
@@ -462,11 +503,19 @@ mod tests {
             ("a null path in a string", "{\"n\": \"<nul>\"}", "{\"n\": \"null\"}"),
             (
                 // The quotes the selected value carries are escaped for the
-                // string the placeholder stands in, so the template stays
-                // the JSON it was written as.
+                // string the placeholder stands in, so the template stays the
+                // JSON it was written as.
                 "a value carrying quotes",
                 "{\"q\": \"<quoted>\"}",
                 "{\"q\": \"he said \\\"hi\\\"\"}",
+            ),
+            (
+                // A TEXT template escapes nothing: the value's characters are
+                // written as they read, which is what can leave a rendering that
+                // is no JSON document at all.
+                "a value carrying quotes in a sentence",
+                "he told me: <quoted>",
+                "he told me: he said \"hi\"",
             ),
             (
                 "a quoted-string template keeps its own quoting",

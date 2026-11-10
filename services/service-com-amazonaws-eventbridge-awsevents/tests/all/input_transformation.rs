@@ -11,24 +11,29 @@
 //! `Target$InputPath`), and a target carrying an `InputTransformer` receives its
 //! `InputTemplate` with every `<key>` placeholder filled from
 //! `InputPathsMap` — the template being delivered as it renders, so one that is
-//! a JSON object carries its placeholders "in quotes or out" and one that is not
-//! is text whose own quoting survives (`InputTransformer$InputTemplate`). A
-//! placeholder standing as a JSON value carries the selected value's JSON text;
-//! one carrying CHARACTERS — inside the template's own string, or anywhere in a
-//! text template — carries what the value holds with no JSON string quoting at
-//! any level, so an array of strings reads `[a,b]`. A path
+//! a JSON object carries its placeholders "in quotes or out" and one that is a
+//! JSON string carries text whose own quoting survives
+//! (`InputTransformer$InputTemplate`). A placeholder standing as a JSON value
+//! carries the selected value's JSON text; one carrying CHARACTERS — inside the
+//! template's own string — carries what the value holds with no JSON string
+//! quoting at any level, so an array of strings reads `[a,b]`. A path
 //! that names no place in the event selects NOTHING, which an `InputTransformer`
 //! placeholder is filled with the empty string for — distinct from a place that
 //! IS there and holds `null`, which renders as the literal `null` where the
 //! placeholder stands as a value and as the characters `null` inside a string.
 //!
+//! What a target may be HANDED is a JSON document, and a substituted value is
+//! never escaped for the place it lands in, so a rendering that is not one is a
+//! delivery that does not happen — that half of the rule is
+//! `tests/all/transformed_input_is_json.rs`, which also owns the rows whose
+//! rendering comes out invalid.
+//!
 //! The tables span the class rather than one recorded case: the rows differ along
 //! the KIND of place a path names (a member, a nested member, an array element,
 //! a slice of an array, a member the event does not carry, an index past the end
 //! of an array, a slice spanning nothing, a member holding `null`), along WHERE
-//! the placeholder stands (a bare JSON value, inside a JSON string, in text), and
-//! along the FORM of the template (a JSON object, a JSON array, a quoted string,
-//! a sentence).
+//! the placeholder stands (a bare JSON value, inside a JSON string), and
+//! along the FORM of the template (a JSON object, a JSON array, a quoted string).
 
 use serde_json::{json, Value};
 use service_com_amazonaws_eventbridge_awsevents::state::InvocationOutcome;
@@ -294,17 +299,18 @@ async fn an_input_transformer_delivers_its_rendered_template() {
             "{\"i\": [\"first\",\"second\",\"third\"]}",
         ),
         (
-            // The quotes a selected value carries are escaped for the string the
-            // placeholder stands in, so the rendering is still the JSON the
-            // template was written as.
-            "a value carrying quotes",
+            // A bare placeholder stands as a JSON VALUE, so a value carrying
+            // quotes arrives as its JSON text, escaping and all — which is the
+            // value's own rendering and not an escaping of the substitution.
+            "a value carrying quotes as a bare placeholder",
             json!({ "quote": "$.detail.customer.quote" }),
-            "{\"q\": \"<quote>\"}",
+            "{\"q\": <quote>}",
             "{\"q\": \"she said \\\"go\\\"\"}",
         ),
         (
-            // A template that is not a JSON object or array is TEXT: its own
-            // quoting is delivered as written.
+            // A template that is a JSON STRING is text: its own quoting is
+            // delivered as written, and what the placeholder carries is the
+            // selected value's characters.
             "a quoted-string template keeps its quotes",
             json!({ "order": "$.detail.orderId" }),
             "\"<order>\"",
@@ -386,53 +392,57 @@ async fn a_path_this_emulator_does_not_evaluate_refuses_the_delivery() {
 }
 
 /// A TEXT template renders every placeholder as the value's own characters, so a
-/// sentence template reads as a sentence — and a placeholder no map key and no
+/// sentence reads as a sentence — and a placeholder no map key and no
 /// reserved name stands for is left exactly as the template wrote it, because
 /// nothing says what it means.
+///
+/// The template is the JSON STRING such a sentence is written as, which is what
+/// makes the rendering an input a target may be handed (the counterpart rows,
+/// where it is not, are in `tests/all/transformed_input_is_json.rs`).
 #[tokio::test]
 async fn a_text_template_renders_values_as_text_and_leaves_unknown_keys_alone() {
     let rows = [
         (
             "a sentence spanning two placeholders",
             json!({ "order": "$.detail.orderId", "amount": "$.detail.amount" }),
-            "<order> is for <amount>",
-            "A-1 is for 7",
+            "\"<order> is for <amount>\"",
+            "\"A-1 is for 7\"",
         ),
         (
             "the reserved placeholder naming the matched rule",
             json!({ "order": "$.detail.orderId" }),
-            "<aws.events.rule-name>/<order>",
-            "transform/A-1",
+            "\"<aws.events.rule-name>/<order>\"",
+            "\"transform/A-1\"",
         ),
         (
             "an array of strings in a sentence",
             json!({ "all": "$.detail.items[*]" }),
-            "items <all>",
-            "items [first,second,third]",
+            "\"items <all>\"",
+            "\"items [first,second,third]\"",
         ),
         (
             "a list of objects in a sentence",
             json!({ "lines": "$.detail.lines" }),
-            "lines <lines>",
-            "lines [{sku:s1},{sku:s2}]",
+            "\"lines <lines>\"",
+            "\"lines [{sku:s1},{sku:s2}]\"",
         ),
         (
             "a member holding null in a sentence",
             json!({ "nul": "$.detail.nothing" }),
-            "value <nul>",
-            "value null",
+            "\"value <nul>\"",
+            "\"value null\"",
         ),
         (
             "a path naming no place in a sentence",
             json!({ "missing": "$.detail.missing" }),
-            "value <missing>.",
-            "value .",
+            "\"value <missing>.\"",
+            "\"value .\"",
         ),
         (
             "a placeholder nothing names",
             json!({ "order": "$.detail.orderId" }),
-            "<order> then <unknown>",
-            "A-1 then <unknown>",
+            "\"<order> then <unknown>\"",
+            "\"A-1 then <unknown>\"",
         ),
     ];
 

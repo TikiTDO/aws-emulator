@@ -293,9 +293,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // is what this call answers.
             let exchange = crate::state::needs_authorization_exchange(&authorization_type)
                 // The credentials the exchange is made with are the ones the
-                // update left on the record — which a connection
+                // update left on the record's CREDENTIAL half — where the client
+                // secret the grant has to carry lives — which a connection
                 // `DeauthorizeConnection` stripped no longer has at all.
-                .then(|| connection.auth_parameters.o_auth_parameters.clone());
+                .then(|| connection.secret.oauth.clone());
             connection.state = crate::state::CONNECTION_STATE_UPDATING.to_string();
             connection.pending = Some(crate::state::PendingTransition {
                 due: now + crate::state::CONNECTION_TRANSITION,
@@ -332,15 +333,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // emulator transport and nothing else
         // ([`crate::state::authorization_exchange`]).
         if let Some(oauth) = exchange {
-            let authorized = match oauth.as_ref() {
-                Some(oauth) => {
-                    crate::state::authorization_exchange(&ctx.callback().http_connector(), oauth)
-                        .await
-                }
-                // A connection left holding no authorization endpoint has
-                // nothing to obtain a token from.
-                None => Err(crate::state::NO_AUTHORIZATION_ENDPOINT.to_string()),
-            };
+            let authorized = crate::state::authorization_exchange(
+                &ctx.callback().http_connector(),
+                oauth.as_ref(),
+            )
+            .await;
             crate::state::record_authorization(&state, &input.name, authorized);
         }
         Ok(updated)
@@ -489,9 +486,10 @@ fn reported_auth_parameters(
 /// its secret, and the HTTP parameters of the exchange with every value the
 /// request flagged secret withheld.
 ///
-/// Named on its own because the authorization exchange is made against exactly
-/// these parameters ([`crate::state::authorization_exchange`]), so what the
-/// exchange uses and what a read reports are one projection of the request.
+/// Named on its own because the authorization parameters a read reports are the
+/// non-secret half of exactly the block the exchange is made from
+/// ([`connection_secret`] keeps the other half), so the two are one projection of
+/// the request.
 fn reported_oauth_parameters(
     oauth: &UpdateConnectionOAuthRequestParameters,
 ) -> ConnectionOAuthResponseParameters {
@@ -531,6 +529,24 @@ fn connection_secret(
                 password: basic.password.clone()?,
             })
         }),
+        // The grant an OAuth connection's token request is made as needs all
+        // three: an update that left any of them unset leaves the connection
+        // holding no credential to exchange, which is a connection that obtains
+        // no token.
+        oauth: parameters.o_auth_parameters.as_ref().and_then(|oauth| {
+            let client = oauth.client_parameters.as_ref()?;
+            Some(crate::state::oauth::OAuthCredential {
+                client_id: client.client_id.clone()?,
+                client_secret: client.client_secret.clone()?,
+                authorization_endpoint: oauth.authorization_endpoint.clone()?,
+                http_method: oauth.http_method.clone().unwrap_or_default(),
+                http_parameters: oauth.o_auth_http_parameters.clone(),
+            })
+        }),
+        // A connection holds a token only once an exchange has issued one, and
+        // an update replaces the credentials, so whatever token the connection
+        // held before it no longer authorizes anything.
+        oauth_token: None,
         invocation_http_parameters: parameters.invocation_http_parameters.clone(),
     }
 }

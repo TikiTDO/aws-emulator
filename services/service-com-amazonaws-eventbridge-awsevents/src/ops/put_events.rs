@@ -501,7 +501,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let iam = crate::state::iam_state(&*self.engine);
         let cloudwatch = crate::state::cloudwatch_state(&*self.engine);
         let glue = crate::state::glue_state(&*self.engine);
-        let kms = crate::state::topic_encryption::kms_state(&*self.engine);
+        let kms = crate::state::target_encryption::kms_state(&*self.engine);
         let stores = Stores {
             iam: iam.as_ref(),
             cloudwatch: cloudwatch.as_ref(),
@@ -597,6 +597,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                             ctx.callback(),
                             &mut clients,
                             &dispatch.region,
+                            stores.kms,
                             &handover,
                             &dispatch.rendered,
                             &outcome,
@@ -1740,6 +1741,10 @@ pub(crate) async fn deliver(
         .as_deref()
         .or(reshaped.as_deref())
         .unwrap_or(handover.rendered);
+    // Whether the target is handed an input of its OWN rather than the event
+    // envelope, which is what has to be checked for being a JSON document at all
+    // ([`invalid_input_refusal`]): the envelope is one by construction.
+    let own_input = target.input.is_some() || reshaped.is_some();
     if !budget.charge(body.len()) {
         ::tracing::warn!(
             target = %target.arn,
@@ -1775,12 +1780,19 @@ pub(crate) async fn deliver(
         };
         match role_refusal(stores.iam, role_arn, &attempt) {
             Some((code, message)) => crate::state::InvocationOutcome::Failed { code, message },
-            None => {
-                kind.invoke(
-                    callback, clients, stores, region, handover, body, &mut retries, budget,
-                )
-                .await
-            }
+            // "Input: valid JSON text passed to the target": what a target is
+            // handed is a JSON document, so an input this delivery rendered that
+            // is not one is an invocation that FAILS — nothing is handed over
+            // ([`invalid_input_refusal`]).
+            None => match own_input.then(|| invalid_input_refusal(body)).flatten() {
+                Some(refusal) => refusal,
+                None => {
+                    kind.invoke(
+                        callback, clients, stores, region, handover, body, &mut retries, budget,
+                    )
+                    .await
+                }
+            },
         }
     } else {
         crate::state::InvocationOutcome::NotAttempted(no_invocation_reason(&target.arn))
@@ -1790,8 +1802,17 @@ pub(crate) async fn deliver(
     // the dead-letter queue configured for that target" and counts it on
     // `FailedInvocations`. Both follow from the SAME outcome, so they happen in
     // one place.
-    dead_letter_refusal(callback, clients, region, handover, body, &outcome, retries.as_ref())
-        .await;
+    dead_letter_refusal(
+        callback,
+        clients,
+        region,
+        stores.kms,
+        handover,
+        body,
+        &outcome,
+        retries.as_ref(),
+    )
+    .await;
     // Every handover that reached the target's API is counted on the rule's own
     // invocation metrics, whichever way it went — a rule that is delivering is
     // as observable as one that is failing.
@@ -1816,8 +1837,8 @@ pub(crate) struct Stores<'a> {
     /// The KMS store holding the key an encrypted topic target is encrypted
     /// with, whose own policy decides whether this service may have a data key
     /// generated under it
-    /// ([`crate::state::topic_encryption::generate_data_key_denied`]).
-    pub(crate) kms: Option<&'a ::engine::ServiceState<crate::state::topic_encryption::KmsState>>,
+    /// ([`crate::state::target_encryption::generate_data_key_denied`]).
+    pub(crate) kms: Option<&'a ::engine::ServiceState<crate::state::target_encryption::KmsState>>,
 }
 
 /// Hand ONE routed event to the Glue workflow `arn` names, and answer what came
@@ -1868,18 +1889,18 @@ fn notify_workflow(
         | WorkflowEventDelivery::Fired { .. }
         | WorkflowEventDelivery::Deactivated => crate::state::InvocationOutcome::Invoked,
         WorkflowEventDelivery::NoWorkflow => crate::state::InvocationOutcome::Failed {
-            code: GLUE_ENTITY_NOT_FOUND_CODE.to_string(),
+            code: delivery_condition(GLUE_ENTITY_NOT_FOUND_CODE).to_string(),
             message: messages::WORKFLOW_NOT_FOUND.to_string(),
         },
         WorkflowEventDelivery::NoEventTrigger => crate::state::InvocationOutcome::Failed {
-            code: GLUE_ENTITY_NOT_FOUND_CODE.to_string(),
+            code: delivery_condition(GLUE_ENTITY_NOT_FOUND_CODE).to_string(),
             message: format!(
                 "Workflow {name} has no EVENT trigger to receive the event delivered to it."
             ),
         },
         WorkflowEventDelivery::ConcurrentRunsExceeded { .. } => {
             crate::state::InvocationOutcome::Failed {
-                code: GLUE_CONCURRENT_RUNS_EXCEEDED_CODE.to_string(),
+                code: delivery_condition(GLUE_CONCURRENT_RUNS_EXCEEDED_CODE).to_string(),
                 message: messages::concurrent_workflow_runs_exceeded(name),
             }
         }
@@ -1888,7 +1909,9 @@ fn notify_workflow(
 
 /// The error code Glue answers for an entity a request names and this account
 /// does not hold (`EntityNotFoundException`, "A specified entity does not
-/// exist"), which is what a handover to a workflow that is not there fails with.
+/// exist"), which is what a handover to a workflow that is not there fails with —
+/// classified into the condition EventBridge reports for it
+/// ([`delivery_condition`]), as every target service's answer is.
 const GLUE_ENTITY_NOT_FOUND_CODE: &str = "EntityNotFoundException";
 
 /// The error code Glue answers for a run past a workflow's own ceiling
@@ -1906,10 +1929,12 @@ const GLUE_CONCURRENT_RUNS_EXCEEDED_CODE: &str = "ConcurrentRunsExceededExceptio
 /// ([`republish`]) record a refusal the same way. A handover that was NOT
 /// ATTEMPTED is nothing AWS would dead-letter: a gap in this emulator is not an
 /// event the target refused.
+#[allow(clippy::too_many_arguments)]
 async fn dead_letter_refusal(
     callback: &smithy_server_runtime::EmbeddedEmulator,
     clients: &mut Clients,
     region: &str,
+    kms: Option<&::engine::ServiceState<crate::state::target_encryption::KmsState>>,
     handover: &Handover<'_>,
     body: &str,
     outcome: &crate::state::InvocationOutcome,
@@ -1936,8 +1961,8 @@ async fn dead_letter_refusal(
     let dlq_region =
         ::service_common::arn::region_of(dead_letter_arn, SQS_ARN_NAMESPACE).unwrap_or(region);
     dead_letter(
-        callback, clients, dlq_region, &queue, dead_letter_arn, handover, body, code, message,
-        retries,
+        callback, clients, dlq_region, kms, &queue, dead_letter_arn, handover, body, code,
+        message, retries,
     )
     .await;
 }
@@ -1990,6 +2015,34 @@ fn transformed(handover: &Handover<'_>) -> Result<Option<String>, String> {
         None => Ok(None),
         Some(path) => crate::state::input_transform::by_input_path(path, &event).map(Some),
     }
+}
+
+/// Why the input this delivery built is not one a target may be handed, as the
+/// invocation outcome that records it — or `None` when it is a JSON document.
+///
+/// The rule AWS follows: what a target receives is JSON text, whether it is the
+/// event envelope, the target's own constant ("Input: valid JSON text passed to
+/// the target") or what its `InputPath` or `InputTransformer` rendered. A
+/// rendering is NOT guaranteed to be one: a placeholder carries the selected
+/// value as it reads and nothing escapes it for the place it lands in
+/// ([`crate::state::input_transform::render`]), so a template may render text
+/// that is no JSON document — a sentence, or a quoted string a substituted quote
+/// broke in half. Such an input is an invocation that FAILS: nothing is handed to
+/// the target, the event goes to the target's dead-letter queue and the rule
+/// counts it on `FailedInvocations`, like any other refused invocation (see
+/// [`deliver`]).
+///
+/// The condition is [`crate::state::INVALID_JSON`]: what the delivery had to send
+/// is not a JSON document, which is a fact about the input rather than about the
+/// target's identity or existence.
+fn invalid_input_refusal(body: &str) -> Option<crate::state::InvocationOutcome> {
+    if ::serde_json::from_str::<&::serde_json::value::RawValue>(body).is_ok() {
+        return None;
+    }
+    Some(crate::state::InvocationOutcome::Failed {
+        code: crate::state::INVALID_JSON.to_string(),
+        message: crate::state::INPUT_IS_NOT_JSON.to_string(),
+    })
 }
 
 /// How many event-bus targets ONE published event may be re-published through.
@@ -2532,10 +2585,20 @@ impl TargetKind {
                 // the handle is a copy over the shared in-process transport, so
                 // it addresses the same endpoint the cached one does.
                 let client = clients.sqs(callback, region).clone();
-                // The QUEUE's own policy decides this delivery before anything
-                // is enqueued ([`queue_delivery_refusal`]).
-                if let Some(refusal) =
-                    queue_delivery_refusal(&client, &queue, self.action(), arn, handover).await
+                // The QUEUE's own documents decide this delivery before anything
+                // is enqueued: its `Policy`, and — for an encrypted queue — the
+                // policy of the key its messages are encrypted under
+                // ([`queue_delivery_refusal`]).
+                if let Some(refusal) = queue_delivery_refusal(
+                    &client,
+                    stores.kms,
+                    region,
+                    &queue,
+                    self.action(),
+                    arn,
+                    handover,
+                )
+                .await
                 {
                     return refusal;
                 }
@@ -2867,7 +2930,8 @@ const NOT_IMPLEMENTED_CODE: &str = "NotImplemented";
 /// An `Ok` is a delivery the target accepted. An error is read through the
 /// SDK's own error metadata: a `NotImplemented` is this emulator's gap rather
 /// than a refusal of the event (see [`TargetKind::invoke`]), and anything else
-/// is a failed invocation carrying the code and message the target gave.
+/// is a failed invocation under the CONDITION that answer belongs to
+/// ([`delivery_condition`]), carrying the answer the target gave as its message.
 fn outcome<T, E>(answer: Result<T, E>) -> crate::state::InvocationOutcome
 where
     E: ::aws_smithy_types::error::metadata::ProvideErrorMetadata + ::std::error::Error + 'static,
@@ -2880,7 +2944,7 @@ where
     match error.code() {
         Some(NOT_IMPLEMENTED_CODE) => crate::state::InvocationOutcome::NotAttempted(rendered),
         Some(code) => crate::state::InvocationOutcome::Failed {
-            code: code.to_string(),
+            code: delivery_condition(code).to_string(),
             message: rendered,
         },
         // No code at all: the call did not reach the target's service, which is
@@ -2888,6 +2952,75 @@ where
         None => crate::state::InvocationOutcome::NotAttempted(rendered),
     }
 }
+
+/// The CONDITION EventBridge reports for a delivery the target's service refused
+/// with the error code `code`.
+///
+/// The rule the service follows: the condition on the invocation log and on the
+/// dead letter's `ERROR_CODE` is EventBridge's OWN classification of why the
+/// delivery failed, never the target service's error code — that answer is what
+/// the `ERROR_MESSAGE` beside it carries, in full. A target that was not there to
+/// take the event is [`crate::state::NO_RESOURCE`], one that refused the
+/// identity the call was made as is [`crate::state::NO_PERMISSIONS`], and a
+/// failure of any other kind is [`crate::state::UNKNOWN_CONDITION`] — the
+/// condition for a refusal the classification does not place, where the
+/// target's own answer in the message is all there is to go on.
+///
+/// So a consumer of a dead-letter queue keys its alarms off the same few
+/// conditions whichever service the target lives in, which is exactly what it
+/// cannot do if the code varies with the target's vendor.
+fn delivery_condition(code: &str) -> &'static str {
+    if TARGET_RESOURCE_ABSENT_CODES.contains(&code) {
+        return crate::state::NO_RESOURCE;
+    }
+    if TARGET_ACCESS_DENIED_CODES.contains(&code) {
+        return crate::state::NO_PERMISSIONS;
+    }
+    crate::state::UNKNOWN_CONDITION
+}
+
+/// Every error code a target's service answers for a RESOURCE THAT IS NOT THERE,
+/// as each of those services publishes one: the `awsQueryError` code or the error
+/// shape's own name, for the services a target of this service can live in.
+///
+/// Source: each target service's own model —
+/// `smithy_query(query="operation", operation="SendMessage"|"Invoke"|"Publish"|
+/// "StartExecution"|"PutRecord"|"StartPipelineExecution"|"PutLogEvents")` names
+/// the shapes, and `query="shape"` carries the `awsQueryError` code of each.
+const TARGET_RESOURCE_ABSENT_CODES: [&str; 8] = [
+    // Amazon SQS: `QueueDoesNotExist`, whose query code is the prefixed one.
+    "AWS.SimpleQueueService.NonExistentQueue",
+    "QueueDoesNotExist",
+    // AWS Lambda, Amazon Kinesis, CloudWatch Logs and Amazon SNS all name the
+    // absent resource with one of these two.
+    "ResourceNotFoundException",
+    "NotFound",
+    // AWS Step Functions.
+    "StateMachineDoesNotExist",
+    // AWS Glue.
+    "EntityNotFoundException",
+    // AWS CodePipeline.
+    "PipelineNotFoundException",
+    // Amazon SNS's `NotFoundException` under its shape name.
+    "NotFoundException",
+];
+
+/// Every error code a target's service answers when it refuses the IDENTITY the
+/// invocation was made as, from the same models: an authorization failure, or one
+/// the key the target is encrypted under decided — which a service relays under a
+/// code of its own (`KMS.AccessDeniedException` is Amazon SQS's for the second,
+/// `KMSAccessDenied` Amazon SNS's).
+const TARGET_ACCESS_DENIED_CODES: [&str; 9] = [
+    "AccessDenied",
+    "AccessDeniedException",
+    "AuthorizationError",
+    "AuthorizationErrorException",
+    "NotAuthorized",
+    "KmsAccessDenied",
+    "KMSAccessDenied",
+    "KMSAccessDeniedException",
+    "KMS.AccessDeniedException",
+];
 
 /// What a RETRIED invocation spent, as the dead-letter message reports it.
 struct Retries {
@@ -3195,90 +3328,231 @@ async fn attempt_api_destination(
 const STRING_ATTRIBUTE_TYPE: &str = "String";
 
 /// Why the queue at `queue_url` does not accept this delivery, as the invocation
-/// outcome that records it — or `None` when its own policy permits it.
+/// outcome that records it — or `None` when the documents in force over it permit
+/// it.
 ///
 /// The rule AWS follows: "for Lambda functions, Amazon SNS topics and Amazon SQS
 /// queues, EventBridge relies on resource-based policies", and the call it makes
 /// on a queue is `sqs:SendMessage` as the service principal
-/// [`crate::state::SERVICE_PRINCIPAL`]. So the queue's OWN `Policy` attribute is
-/// the only document in force over this delivery, and what it states decides it
-/// ([`crate::state::target_policy_admits`]): nothing is enqueued without a grant
-/// for that principal, an explicit deny refuses whatever else is granted, and a
-/// grant scoped by `aws:SourceArn` authorizes the deliveries of the rule it names
-/// and no other. A refusal is the delivery FAILING rather than one nobody
-/// attempted, so it is dead-lettered and counted on `FailedInvocations` like any
-/// other failed invocation (see [`deliver`]), under the condition and sentence
-/// Amazon SQS's own refusal gives it
-/// ([`crate::state::queue_access_refusal`]).
+/// [`crate::state::SERVICE_PRINCIPAL`]. So the queue's OWN `Policy` attribute
+/// decides this delivery ([`crate::state::target_policy_admits`]): nothing is
+/// enqueued without a grant for that principal, an explicit deny refuses whatever
+/// else is granted, and a grant scoped by `aws:SourceArn` authorizes the
+/// deliveries of the rule it names and no other. For an ENCRYPTED queue there is
+/// a second document — the policy of the key its messages are encrypted under
+/// ([`queue_key_refusal`]) — and the delivery needs both.
 ///
-/// The policy is read through the queue's own `GetQueueAttributes`, so what
-/// decides a delivery is the document a client's last write left on the queue —
-/// a policy just written grants the next delivery and one just cleared stops
-/// granting it. A queue that does not ANSWER that read decides nothing here:
-/// the `SendMessage` that follows reports what such a queue answers, which is
-/// the queue's own refusal rather than a verdict read off a policy this never
-/// saw.
+/// A refusal is the delivery FAILING rather than one nobody attempted, so it is
+/// dead-lettered and counted on `FailedInvocations` like any other failed
+/// invocation (see [`deliver`]), under the condition and sentence the refusing
+/// service's own answer gives it ([`crate::state::queue_access_refusal`] for the
+/// policy, [`queue_key_send_refusal`] for the key).
+///
+/// The attributes are read through the queue's own `GetQueueAttributes`, so what
+/// decides a delivery is what a client's last write left on the queue — a policy
+/// just written grants the next delivery and one just cleared stops granting it.
+/// A queue that does not ANSWER that read decides nothing here: the `SendMessage`
+/// that follows reports what such a queue answers, which is the queue's own
+/// refusal rather than a verdict read off a document this never saw.
 async fn queue_delivery_refusal(
     client: &::aws_sdk_sqs::Client,
+    kms: Option<&::engine::ServiceState<crate::state::target_encryption::KmsState>>,
+    region: &str,
     queue_url: &str,
     action: &str,
     resource: &str,
     handover: &Handover<'_>,
 ) -> Option<crate::state::InvocationOutcome> {
-    let policy = queue_policy(client, queue_url).await?;
+    let attributes = queue_attributes(client, queue_url).await?;
     let attempt = crate::state::DeliveryAttempt {
         rule: handover.rule,
         target_id: &handover.target.id,
         action,
         resource,
     };
-    if crate::state::target_policy_admits(policy.as_deref(), &attempt, handover.rule_arn) {
+    if !crate::state::target_policy_admits(
+        attributes.policy.as_deref(),
+        &attempt,
+        handover.rule_arn,
+    ) {
+        ::tracing::warn!(
+            queue = %queue_url,
+            rule = %handover.rule,
+            %resource,
+            "an EventBridge delivery was withheld: the queue's own policy does not allow this \
+             service to send it a message"
+        );
+        let (code, message) = crate::state::queue_access_refusal(resource);
+        return Some(crate::state::InvocationOutcome::Failed { code, message });
+    }
+    queue_key_refusal(kms, &attributes, region, resource, handover)
+}
+
+/// Why the key the queue `queue_arn` names is encrypted with does not let this
+/// delivery be enqueued, as the invocation outcome that records it — or `None`
+/// for a queue on no customer managed key and for one whose key admits this
+/// service.
+///
+/// The SAME rule the topic branch follows ([`topic_key_refusal`]): a queue
+/// carrying `KmsMasterKeyId` has every message sent to it encrypted under that
+/// key, and Amazon SQS performs that encryption by calling
+/// `kms:GenerateDataKey` for the sender — so the KEY's own policy is a SECOND
+/// document in force over a delivery to such a queue, beside the queue's own
+/// `Policy`, and a key policy that does not admit this service's principal is a
+/// send that does not happen however freely the queue's policy grants
+/// `sqs:SendMessage`. The decision is KMS's own, over the key record that
+/// service's handlers wrote
+/// ([`crate::state::target_encryption::generate_data_key_denied`]), so
+/// `PutKeyPolicy` lets the deliveries resume with nothing else changed.
+///
+/// A refusal is the delivery FAILING rather than one nobody attempted, so it is
+/// dead-lettered and counted on `FailedInvocations` like any other, under the
+/// condition and the sentence the two services nest for it
+/// ([`queue_key_send_refusal`]).
+fn queue_key_refusal(
+    kms: Option<&::engine::ServiceState<crate::state::target_encryption::KmsState>>,
+    attributes: &QueueAttributes,
+    region: &str,
+    queue_arn: &str,
+    handover: &Handover<'_>,
+) -> Option<crate::state::InvocationOutcome> {
+    let identifier = attributes.kms_master_key_id.as_deref()?;
+    if !crate::state::target_encryption::generate_data_key_denied(
+        kms,
+        region,
+        identifier,
+        queue_arn,
+        &crate::state::target_encryption::via_service(SQS_ARN_NAMESPACE, region),
+    ) {
         return None;
     }
     ::tracing::warn!(
-        queue = %queue_url,
+        queue = %queue_arn,
         rule = %handover.rule,
-        %resource,
-        "an EventBridge delivery was withheld: the queue's own policy does not allow this \
-         service to send it a message"
+        "an EventBridge delivery was withheld: the key the target queue is encrypted with does \
+         not allow this service to generate a data key under it"
     );
-    let (code, message) = crate::state::queue_access_refusal();
+    let (code, message) = queue_key_send_refusal();
     Some(crate::state::InvocationOutcome::Failed { code, message })
 }
 
-/// What the queue at `queue_url` answered when its `Policy` attribute was read:
-/// `Some(Some(document))` for a queue carrying one, `Some(None)` for a queue
-/// that carries none, and `None` for a queue that did not answer the read at
-/// all.
+/// The error code Amazon SQS answers a send whose encryption key refused it
+/// (`KmsAccessDenied`'s `awsQueryError` code), and the status that answer
+/// carries:
+/// `smithy_query(query="shape", shape="KmsAccessDenied",
+/// model_path="services/service-com-amazonaws-sqs-amazonsqs/smithy-model/com-amazonaws-sqs-amazonsqs.json")`.
+const SQS_KMS_ACCESS_DENIED_CODE: &str = "KMS.AccessDeniedException";
+const SQS_KMS_ACCESS_DENIED_STATUS: u16 = 400;
+
+/// The condition and the sentence EventBridge reports for an encrypted queue
+/// target it could not send to, because the key its messages are encrypted under
+/// withheld the data key.
 ///
-/// The last case is told apart from the second because they mean different
-/// things for a delivery: a queue that answered and carries no policy has
-/// granted nothing, while a queue that did not answer is one nothing is known
-/// about (see [`queue_delivery_refusal`]).
-async fn queue_policy(
+/// What the delivery SEES is Amazon SQS's refusal of the `sqs:SendMessage`
+/// wrapping KMS's refusal of the `kms:GenerateDataKey`, each with the metadata
+/// block an AWS error carries — the service, the status, the error code and the id
+/// of the one refused call. The innermost sentence is KMS's OWN for a refusal that
+/// can report nothing about the resource
+/// (`service_com_amazonaws_kms_trentservice::state::unauthorized_resource_message`),
+/// so the two services cannot word the same denial differently, and the condition
+/// names the PERMISSION ([`crate::state::NO_PERMISSIONS`]), as every refusal a
+/// target's own documents decide does. It is the same nesting a topic target's
+/// refusal carries ([`topic_key_publish_refusal`]), with that target service's own
+/// block in place of this one's.
+///
+/// Each request id is MINTED here, for the reason
+/// [`crate::state::queue_access_refusal`] gives: it identifies ONE refused call —
+/// there are two nested calls, so there are two ids.
+fn queue_key_send_refusal() -> (String, String) {
+    (
+        crate::state::NO_PERMISSIONS.to_string(),
+        target_key_refusal_message(
+            crate::state::SQS_SERVICE_NAME,
+            SQS_KMS_ACCESS_DENIED_STATUS,
+            SQS_KMS_ACCESS_DENIED_CODE,
+        ),
+    )
+}
+
+/// The sentence a delivery to a target whose KEY withheld the data key is
+/// reported in: KMS's own refusal of the `kms:GenerateDataKey`, with the metadata
+/// block an AWS error carries, inside the block of the target service that
+/// relayed it — which is what the delivery SAW.
+///
+/// One wording for every target kind whose service encrypts what it is handed
+/// ([`crate::state::target_encryption`] decides them all), so the only thing that
+/// varies is that service's own block: its name, the status and the error code it
+/// answers the condition with. The innermost sentence is KMS's OWN for a refusal
+/// that can report nothing about the resource
+/// (`service_com_amazonaws_kms_trentservice::state::unauthorized_resource_message`),
+/// so no two services word the same denial differently.
+///
+/// Each request id is MINTED here, for the reason
+/// [`crate::state::queue_access_refusal`] gives: it identifies ONE refused call —
+/// there are two nested calls, so there are two ids.
+fn target_key_refusal_message(service: &str, status: u16, code: &str) -> String {
+    let kms_request_id = ::service_common::query_error_envelope::new_request_id();
+    let relaying_request_id = ::service_common::query_error_envelope::new_request_id();
+    format!(
+        "{} (Service: {KMS_SERVICE_NAME}; Status Code: {KMS_ACCESS_DENIED_STATUS}; \
+         Error Code: {KMS_ACCESS_DENIED_CODE}; Request ID: {kms_request_id}; Proxy: null) \
+         (Service: {service}; Status Code: {status}; Error Code: {code}; Request ID: \
+         {relaying_request_id}; Proxy: null)",
+        ::service_com_amazonaws_kms_trentservice::state::unauthorized_resource_message(
+            crate::state::SERVICE_PRINCIPAL,
+            KMS_GENERATE_DATA_KEY_OPERATION,
+        )
+    )
+}
+
+/// The attributes of a queue target that decide a delivery to it: its policy, and
+/// the customer managed key its messages are encrypted under. Either is `None`
+/// for a queue that carries it not at all.
+struct QueueAttributes {
+    policy: Option<String>,
+    kms_master_key_id: Option<String>,
+}
+
+/// What the queue at `queue_url` answered when the attributes that decide a
+/// delivery to it were read, or `None` for a queue that did not answer the read
+/// at all.
+///
+/// The last case is told apart from a queue that answered and carries neither
+/// attribute because they mean different things for a delivery: a queue that
+/// answered and carries no policy has granted this service nothing, while a
+/// queue that did not answer is one nothing is known about (see
+/// [`queue_delivery_refusal`]).
+async fn queue_attributes(
     client: &::aws_sdk_sqs::Client,
     queue_url: &str,
-) -> Option<Option<String>> {
+) -> Option<QueueAttributes> {
     let answered = client
         .get_queue_attributes()
         .queue_url(queue_url)
         .attribute_names(::aws_sdk_sqs::types::QueueAttributeName::Policy)
+        .attribute_names(::aws_sdk_sqs::types::QueueAttributeName::KmsMasterKeyId)
         .send()
         .await;
     match answered {
-        Ok(answer) => Some(
-            answer
-                .attributes()
-                .and_then(|attributes| {
-                    attributes.get(&::aws_sdk_sqs::types::QueueAttributeName::Policy)
-                })
-                .cloned(),
-        ),
+        Ok(answer) => {
+            let read = |name: &::aws_sdk_sqs::types::QueueAttributeName| {
+                answer
+                    .attributes()
+                    .and_then(|attributes| attributes.get(name))
+                    .cloned()
+            };
+            Some(QueueAttributes {
+                policy: read(&::aws_sdk_sqs::types::QueueAttributeName::Policy),
+                kms_master_key_id: read(
+                    &::aws_sdk_sqs::types::QueueAttributeName::KmsMasterKeyId,
+                ),
+            })
+        }
         Err(error) => {
             ::tracing::warn!(
                 queue = %queue_url,
                 error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
-                "an EventBridge target queue's policy could not be read"
+                "an EventBridge target queue's attributes could not be read"
             );
             None
         }
@@ -3365,7 +3639,7 @@ async fn topic_attributes(
             Some(TopicAttributes {
                 policy: read(TOPIC_POLICY_ATTRIBUTE),
                 kms_master_key_id: read(
-                    crate::state::topic_encryption::KMS_MASTER_KEY_ATTRIBUTE,
+                    crate::state::target_encryption::KMS_MASTER_KEY_ATTRIBUTE,
                 ),
             })
         }
@@ -3456,7 +3730,7 @@ fn topic_publish_refusal(topic_arn: &str) -> (String, String) {
 /// principal is a publish that does not happen however freely the topic's policy
 /// grants `sns:Publish`. The decision is KMS's own, over the key record that
 /// service's handlers wrote
-/// ([`crate::state::topic_encryption::generate_data_key_denied`]), so
+/// ([`crate::state::target_encryption::generate_data_key_denied`]), so
 /// `PutKeyPolicy` lets the deliveries resume with nothing else changed.
 ///
 /// A refusal is the delivery FAILING rather than one nobody attempted, so it is
@@ -3464,15 +3738,19 @@ fn topic_publish_refusal(topic_arn: &str) -> (String, String) {
 /// condition and the sentence the two services nest for it
 /// ([`topic_key_publish_refusal`]).
 fn topic_key_refusal(
-    kms: Option<&::engine::ServiceState<crate::state::topic_encryption::KmsState>>,
+    kms: Option<&::engine::ServiceState<crate::state::target_encryption::KmsState>>,
     attributes: Option<&TopicAttributes>,
     region: &str,
     topic_arn: &str,
     handover: &Handover<'_>,
 ) -> Option<crate::state::InvocationOutcome> {
     let identifier = attributes?.kms_master_key_id.as_deref()?;
-    if !crate::state::topic_encryption::generate_data_key_denied(
-        kms, region, identifier, topic_arn,
+    if !crate::state::target_encryption::generate_data_key_denied(
+        kms,
+        region,
+        identifier,
+        topic_arn,
+        &crate::state::target_encryption::via_service(SNS_ARN_NAMESPACE, region),
     ) {
         return None;
     }
@@ -3509,34 +3787,18 @@ const SNS_KMS_ACCESS_DENIED_STATUS: u16 = 400;
 /// under withheld the data key.
 ///
 /// What the delivery SEES is Amazon SNS's refusal of the `sns:Publish` wrapping
-/// KMS's refusal of the `kms:GenerateDataKey`, each with the metadata block an AWS
-/// error carries — the service, the status, the error code and the id of the one
-/// refused call. The innermost sentence is KMS's OWN for a refusal that can report
-/// nothing about the resource
-/// (`service_com_amazonaws_kms_trentservice::state::unauthorized_resource_message`),
-/// so the two services cannot word the same denial differently. The condition
-/// names the PERMISSION ([`crate::state::NO_PERMISSIONS`]), as every refusal a
-/// target's own documents decide does.
-///
-/// Each request id is MINTED here, for the reason [`topic_publish_refusal`] gives:
-/// it identifies ONE refused call — there are two nested calls, so there are two
-/// ids — and is drawn fresh from the tree's one mint of an AWS request id rather
-/// than derived from the event or the target.
+/// KMS's refusal of the `kms:GenerateDataKey` — the one nesting every encrypted
+/// target's refusal carries ([`target_key_refusal_message`]), with this service's
+/// own block. The condition names the PERMISSION
+/// ([`crate::state::NO_PERMISSIONS`]), as every refusal a target's own documents
+/// decide does.
 fn topic_key_publish_refusal() -> (String, String) {
-    let kms_request_id = ::service_common::query_error_envelope::new_request_id();
-    let sns_request_id = ::service_common::query_error_envelope::new_request_id();
     (
         crate::state::NO_PERMISSIONS.to_string(),
-        format!(
-            "{} (Service: {KMS_SERVICE_NAME}; Status Code: {KMS_ACCESS_DENIED_STATUS}; \
-             Error Code: {KMS_ACCESS_DENIED_CODE}; Request ID: {kms_request_id}; Proxy: null) \
-             (Service: {SNS_SERVICE_NAME}; Status Code: {SNS_KMS_ACCESS_DENIED_STATUS}; \
-             Error Code: {SNS_KMS_ACCESS_DENIED_CODE}; Request ID: {sns_request_id}; \
-             Proxy: null)",
-            ::service_com_amazonaws_kms_trentservice::state::unauthorized_resource_message(
-                crate::state::SERVICE_PRINCIPAL,
-                KMS_GENERATE_DATA_KEY_OPERATION,
-            )
+        target_key_refusal_message(
+            SNS_SERVICE_NAME,
+            SNS_KMS_ACCESS_DENIED_STATUS,
+            SNS_KMS_ACCESS_DENIED_CODE,
         ),
     )
 }
@@ -4041,6 +4303,7 @@ async fn dead_letter(
     callback: &smithy_server_runtime::EmbeddedEmulator,
     clients: &mut Clients,
     region: &str,
+    kms: Option<&::engine::ServiceState<crate::state::target_encryption::KmsState>>,
     queue: &str,
     dead_letter_arn: &str,
     handover: &Handover<'_>,
@@ -4067,6 +4330,8 @@ async fn dead_letter(
     let client = clients.sqs(callback, region).clone();
     if queue_delivery_refusal(
         &client,
+        kms,
+        region,
         queue,
         TargetKind::Queue.action(),
         dead_letter_arn,

@@ -214,15 +214,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // here so no secret the request carried is ever stored on the record a
         // read serializes.
         let auth_parameters = reported_auth_parameters(&input.auth_parameters);
+        // The credential half, which no read reports and every invocation
+        // through this connection carries.
+        let secret = connection_secret(&input.auth_parameters);
         // "OAUTH tokens are refreshed when a 401 or 407 response is returned"
         // (`AuthorizationType`): an OAuth connection's client credentials are not
         // the authorization, they are exchanged for a token at the connection's
         // own authorization endpoint, so the state such a connection reaches is
         // the one that exchange came to. A type whose credentials ARE the
         // authorization needs no exchange and is authorized as soon as it is
-        // written.
-        let exchange = auth_parameters
-            .o_auth_parameters
+        // written. The exchange is made from the CREDENTIAL half, which is where
+        // the client secret the grant has to carry lives.
+        let exchange = secret
+            .oauth
             .clone()
             .filter(|_| crate::state::needs_authorization_exchange(&input.authorization_type));
 
@@ -267,9 +271,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 description: input.description,
                 authorization_type: input.authorization_type,
                 auth_parameters,
-                // The credential half, which no read reports and every
-                // invocation through this connection carries.
-                secret: connection_secret(&input.auth_parameters),
+                secret,
                 invocation_resource_configuration_arn: input
                     .invocation_connectivity_parameters
                     .as_ref()
@@ -342,9 +344,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // state the connection settles in rests on is what this emulator itself
         // serves at the endpoint.
         if let Some(oauth) = exchange {
-            let authorized =
-                crate::state::authorization_exchange(&ctx.callback().http_connector(), &oauth)
-                    .await;
+            let authorized = crate::state::authorization_exchange(
+                &ctx.callback().http_connector(),
+                Some(&oauth),
+            )
+            .await;
             crate::state::record_authorization(&state, &input.name, authorized);
         }
         Ok(created)
@@ -486,11 +490,14 @@ fn reported_auth_parameters(
 /// through this connection carries
 /// ([`crate::state::invocation::ConnectionSecret`]): the api key under the
 /// header name the request chose, the basic credentials the `Authorization`
-/// header is built from, and the `InvocationHttpParameters` with the values the
-/// request flagged secret still in them, because the endpoint is sent those
-/// values and not their keys alone. An `OAUTH_CLIENT_CREDENTIALS` connection's
-/// client credentials are NOT an authorization the invocation can carry — they
-/// are exchanged for a token first — so none is kept here for one.
+/// header is built from, the client credentials an OAuth connection's token
+/// request is made with ([`crate::state::oauth`]), and the
+/// `InvocationHttpParameters` with the values the request flagged secret still in
+/// them, because the endpoint is sent those values and not their keys alone. An
+/// `OAUTH_CLIENT_CREDENTIALS` connection's client credentials are NOT an
+/// authorization the invocation can carry — they are exchanged for a token first,
+/// and the TOKEN is what the invocation carries
+/// ([`crate::state::record_authorization`] is what records it).
 fn connection_secret(
     parameters: &CreateConnectionAuthRequestParameters,
 ) -> crate::state::invocation::ConnectionSecret {
@@ -507,6 +514,18 @@ fn connection_secret(
                 password: basic.password.clone(),
             }
         }),
+        oauth: parameters
+            .o_auth_parameters
+            .as_ref()
+            .map(|oauth| crate::state::oauth::OAuthCredential {
+                client_id: oauth.client_parameters.client_id.clone(),
+                client_secret: oauth.client_parameters.client_secret.clone(),
+                authorization_endpoint: oauth.authorization_endpoint.clone(),
+                http_method: oauth.http_method.clone(),
+                http_parameters: oauth.o_auth_http_parameters.clone(),
+            }),
+        // A connection holds a token only once an exchange has issued one.
+        oauth_token: None,
         invocation_http_parameters: parameters.invocation_http_parameters.clone(),
     }
 }

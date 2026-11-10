@@ -80,7 +80,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::ops::types::{
     ApiDestination as ApiDestinationSummary, Archive as ArchiveSummary, Connection,
     ConnectionAuthResponseParameters, ConnectionBodyParameter, ConnectionHeaderParameter,
-    ConnectionHttpParameters, ConnectionOAuthResponseParameters, ConnectionQueryStringParameter,
+    ConnectionHttpParameters, ConnectionQueryStringParameter,
     DeadLetterConfig,
     DescribeApiDestinationOutput, DescribeArchiveOutput, DescribeConnectionOutput,
     DescribeEndpointOutput, DescribeReplayOutput, Endpoint as EndpointSummary, EndpointEventBus,
@@ -876,6 +876,27 @@ pub const FAILED_TO_ASSUME_ROLE: &str = "FAILED_TO_ASSUME_ROLE";
 /// in force on it do not allow the API call the target's invocation makes.
 pub const NO_PERMISSIONS: &str = "NO_PERMISSIONS";
 
+/// The condition EventBridge reports for a delivery that failed for a reason its
+/// classification does not place: the target's service answered something that is
+/// neither a refusal of the identity ([`NO_PERMISSIONS`]) nor a resource that is
+/// not there ([`NO_RESOURCE`]), so what there is to go on is that answer itself,
+/// which the dead letter's `ERROR_MESSAGE` carries beside this condition.
+pub const UNKNOWN_CONDITION: &str = "UNKNOWN";
+
+/// The condition EventBridge reports for a delivery whose own input was not one a
+/// target may be handed: what it had to send is not a JSON document, so no call
+/// was made with it.
+pub const INVALID_JSON: &str = "INVALID_JSON";
+
+/// What that delivery reports beside the condition: AWS's own sentence for an
+/// input a target may not be handed, which carries nothing of the request —
+/// "Invalid input for target."
+///
+/// Fixed text, with no variable part: the rendered input itself is not reported,
+/// because it is built from the event and a dead letter carries the event
+/// already.
+pub const INPUT_IS_NOT_JSON: &str = "Invalid input for target.";
+
 /// The CloudWatch namespace EventBridge's own metrics live in.
 pub const METRIC_NAMESPACE: &str = "AWS/Events";
 
@@ -992,9 +1013,11 @@ pub const AUTHORIZATION_EXCHANGE_METHOD: &str = "POST";
 pub const NO_AUTHORIZATION_ENDPOINT: &str =
     "The connection names no authorization endpoint to obtain a token from.";
 
-/// Obtain the token an OAuth connection needs, answering `Ok(())` when the
-/// authorization endpoint issued one and `Err(reason)` \u2014 the `StateReason` the
-/// connection then reports \u2014 when it did not.
+/// Obtain the token an OAuth connection needs: the client-credentials grant at
+/// the connection's own authorization endpoint
+/// ([`oauth::client_credentials_token`]), answering the access token it issued
+/// and `Err(reason)` — the `StateReason` the connection then reports — when it
+/// issued none.
 ///
 /// The rule AWS follows: an `OAUTH_CLIENT_CREDENTIALS` connection's client
 /// credentials are exchanged for a token at its `AuthorizationEndpoint` with its
@@ -1004,63 +1027,20 @@ pub const NO_AUTHORIZATION_ENDPOINT: &str =
 /// destination invoking through it INACTIVE
 /// ([`ComAmazonawsEventbridgeAwseventsState::api_destination_state`]).
 ///
-/// The request goes through the IN-PROCESS emulator transport and nothing else,
-/// like every other request this service makes on the account's behalf: no
-/// socket is opened and no name is resolved, so an authorization endpoint this
-/// emulator serves nothing at answers the transport's own refusal, which is an
-/// exchange that reached no endpoint.
+/// `credential` is the credential half of the connection's parameters, which is
+/// where the client SECRET the grant has to carry lives: the half a read reports
+/// withholds it ([`reported_http_parameters`]), so the exchange is never made
+/// from that half.
 pub async fn authorization_exchange(
     transport: &::aws_smithy_runtime_api::client::http::SharedHttpConnector,
-    parameters: &ConnectionOAuthResponseParameters,
-) -> Result<(), String> {
-    use ::aws_smithy_runtime_api::client::http::HttpConnector;
-
-    let Some(endpoint) = parameters.authorization_endpoint.as_deref() else {
+    credential: Option<&oauth::OAuthCredential>,
+) -> Result<String, String> {
+    // A connection left holding no authorization endpoint — one
+    // `DeauthorizeConnection` stripped — has nothing to obtain a token from.
+    let Some(credential) = credential else {
         return Err(NO_AUTHORIZATION_ENDPOINT.to_string());
     };
-    let named_method = parameters
-        .http_method
-        .as_deref()
-        .unwrap_or(AUTHORIZATION_EXCHANGE_METHOD);
-    let Ok(method) = ::http::Method::from_bytes(named_method.as_bytes()) else {
-        return Err(format!(
-            "The connection's authorization HttpMethod {named_method:?} is not an HTTP method."
-        ));
-    };
-    // Every value here comes from the stored parameters, so an endpoint that is
-    // not a URI fails HERE rather than panicking.
-    let request = ::http::Request::builder()
-        .method(method)
-        .uri(endpoint)
-        .body(::aws_smithy_types::body::SdkBody::empty())
-        .map_err(|error| error.to_string())
-        .and_then(|request| {
-            ::aws_smithy_runtime_api::http::Request::try_from(request)
-                .map_err(|error| error.to_string())
-        });
-    let request = match request {
-        Ok(request) => request,
-        Err(_) => return Err(ENDPOINT_NOT_REACHED.to_string()),
-    };
-    match ::tokio::time::timeout(AUTHORIZATION_EXCHANGE_TIMEOUT, transport.call(request)).await {
-        // Nothing answered inside the timeout, or the endpoint could not be
-        // reached at all, or this emulator serves nothing at it — one condition
-        // as the connection reports it: the endpoint was not reached.
-        Err(_) | Ok(Err(_)) => Err(ENDPOINT_NOT_REACHED.to_string()),
-        Ok(Ok(response))
-            if response
-                .body()
-                .bytes()
-                .is_some_and(is_transport_refusal) =>
-        {
-            Err(ENDPOINT_NOT_REACHED.to_string())
-        }
-        Ok(Ok(response)) if (200..=299).contains(&response.status().as_u16()) => Ok(()),
-        Ok(Ok(response)) => Err(format!(
-            "The authorization endpoint answered HTTP {} instead of issuing a token.",
-            response.status().as_u16()
-        )),
-    }
+    oauth::client_credentials_token(transport, credential).await
 }
 
 /// What a connection reports as its `StateReason` when EventBridge could not
@@ -1152,7 +1132,8 @@ pub fn authorization_endpoint_violation(endpoint: &str) -> Option<String> {
 }
 
 /// Record what a connection's authorization exchange came to: the state the
-/// clock owes the connection `name` is what that exchange answered.
+/// clock owes the connection `name` is what that exchange answered, and the
+/// token it issued is what the connection authorizes its invocations with.
 ///
 /// The second half of the write a connection of an authorization type that needs
 /// a token makes ([`authorization_exchange`]). It is applied after the exchange
@@ -1165,11 +1146,17 @@ pub fn authorization_endpoint_violation(endpoint: &str) -> Option<String> {
 pub fn record_authorization(
     state: &::engine::ServiceState<ComAmazonawsEventbridgeAwseventsState>,
     name: &str,
-    authorized: Result<(), String>,
+    authorized: Result<String, String>,
 ) {
-    let transition = match authorized {
-        Ok(()) => ConnectionTransition::to(CONNECTION_STATE_AUTHORIZED),
-        Err(reason) => ConnectionTransition::to_because(CONNECTION_STATE_DEAUTHORIZED, reason),
+    let (transition, token) = match authorized {
+        Ok(token) => (
+            ConnectionTransition::to(CONNECTION_STATE_AUTHORIZED),
+            Some(token),
+        ),
+        Err(reason) => (
+            ConnectionTransition::to_because(CONNECTION_STATE_DEAUTHORIZED, reason),
+            None,
+        ),
     };
     let mut store = state.lock();
     let Some(connection) = store.connection_mut(name) else {
@@ -1178,6 +1165,11 @@ pub fn record_authorization(
     if connection.is_being_removed() {
         return;
     }
+    // The token the exchange issued lives in the connection's secret, which no
+    // read reports and every invocation through the connection carries; an
+    // exchange that issued none leaves the connection holding none, so no
+    // invocation through it is authorized.
+    connection.secret.oauth_token = token;
     match connection.pending.as_mut() {
         Some(pending) => pending.to = transition,
         None => {
@@ -3279,30 +3271,33 @@ pub fn target_policy_decision(
 ///
 /// Distinct from [`NO_PERMISSIONS`], which is about the identity the call was
 /// made as: this one is about the RESOURCE, and it is what a target service
-/// answering "no such resource" earns — including a target whose own policy
-/// withholds the call from this service, because the service answers a caller it
-/// has granted nothing exactly as it answers one naming a resource that is not
-/// there.
+/// answering "no such resource" earns. The two are the service's OWN
+/// classification of a failed delivery and never the target service's error code,
+/// which the dead letter reports in its `ERROR_MESSAGE` beside the condition.
 pub const NO_RESOURCE: &str = "NO_RESOURCE";
 
 /// The fixed text Amazon SQS answers a caller that may not address the queue it
-/// named — which is also what it answers one naming a queue that is not there,
-/// so neither tells the caller which it was.
+/// named, as that service words an authorization failure: the principal, the
+/// action and the queue, and the document that withheld the grant. Read from the
+/// SHARED sentence (`::service_common::iam_authorization`), so the refusal a
+/// delivery reports and the one Amazon SQS answers a client with cannot drift
+/// apart.
 ///
-/// NOT the same sentence as that service's own `QueueDoesNotExist` payload
-/// (`service-com-amazonaws-sqs-amazonsqs`'s `state::QUEUE_DOES_NOT_EXIST_MESSAGE`,
-/// "The specified queue does not exist."): this is the answer as the caller of
-/// `sqs:SendMessage` reads it, which is what a dead-lettered EventBridge delivery
-/// reports. The two are deliberately distinct and neither follows the other.
-const QUEUE_INACCESSIBLE_MESSAGE: &str =
-    "The specified queue does not exist or you do not have access to it.";
+/// The action is named the way that service names it in a refusal — case-folded
+/// (`service-com-amazonaws-sqs-amazonsqs`'s `state::authorization`) — and the
+/// answer carries the AWS-common `AccessDenied` with HTTP 403, because Amazon
+/// SQS's model declares no shape for an authorization failure.
+const SQS_SEND_MESSAGE_ACTION_NAME: &str = "sqs:sendmessage";
 
-/// The error code that answer carries, as Amazon SQS publishes it for the
-/// condition (its model's `awsQueryError` code for `QueueDoesNotExist`).
-const QUEUE_INACCESSIBLE_ERROR_CODE: &str = "AWS.SimpleQueueService.NonExistentQueue";
+/// The service name Amazon SQS's own error metadata carries. `pub(crate)`
+/// because every refusal this service reports of a call on a queue carries that
+/// block — the policy refusal here and the encrypted-queue one in
+/// `crate::ops::put_events` — so the name is written once.
+pub(crate) const SQS_SERVICE_NAME: &str = "AmazonSQS";
 
-/// The HTTP status that answer carries.
-const QUEUE_INACCESSIBLE_STATUS: u16 = 400;
+/// The error code and status that answer carries.
+const SQS_ACCESS_DENIED_CODE: &str = "AccessDenied";
+const SQS_ACCESS_DENIED_STATUS: u16 = 403;
 
 /// The condition and the sentence EventBridge reports for a queue target it could
 /// not hand an event to, because the queue granted this service nothing.
@@ -3310,10 +3305,12 @@ const QUEUE_INACCESSIBLE_STATUS: u16 = 400;
 /// The queue's own policy is what governs the delivery
 /// ([`target_policy_admits`]), and what the delivery SEES when that document
 /// grants nothing is Amazon SQS's own refusal of the `sqs:SendMessage` — the
-/// sentence that service answers for a queue the caller may not address. So the
-/// condition names the resource rather than the permission ([`NO_RESOURCE`]) and
-/// the message is that answer as the caller read it: the service, the status, the
-/// error code and the id of the refused request.
+/// authorization sentence naming the principal the call was made as, the action
+/// and the queue, followed by the metadata block an AWS error carries. So the
+/// condition names the PERMISSION ([`NO_PERMISSIONS`]), which is what the
+/// delivery failed for: the identity it was made as was not allowed the call,
+/// and the resource was there all along ([`NO_RESOURCE`] is the condition of a
+/// target that is NOT).
 ///
 /// The request id is MINTED here and nowhere else: it identifies the one refused
 /// call, so it is drawn fresh rather than derived from the event or the target,
@@ -3321,14 +3318,18 @@ const QUEUE_INACCESSIBLE_STATUS: u16 = 400;
 /// queue. It comes from the tree's one mint of an AWS request id
 /// (`::service_common::query_error_envelope::new_request_id`), so this service
 /// cannot report one in a form no other service reports.
-pub fn queue_access_refusal() -> (String, String) {
+pub fn queue_access_refusal(queue_arn: &str) -> (String, String) {
     let request_id = ::service_common::query_error_envelope::new_request_id();
     (
-        NO_RESOURCE.to_string(),
+        NO_PERMISSIONS.to_string(),
         format!(
-            "{QUEUE_INACCESSIBLE_MESSAGE} (Service: AmazonSQS; Status Code: \
-             {QUEUE_INACCESSIBLE_STATUS}; Error Code: {QUEUE_INACCESSIBLE_ERROR_CODE}; Request \
-             ID: {request_id}; Proxy: null)"
+            "{} (Service: {SQS_SERVICE_NAME}; Status Code: {SQS_ACCESS_DENIED_STATUS}; Error \
+             Code: {SQS_ACCESS_DENIED_CODE}; Request ID: {request_id}; Proxy: null)",
+            ::service_common::iam_authorization::not_authorized_by_resource_policy(
+                SERVICE_PRINCIPAL,
+                SQS_SEND_MESSAGE_ACTION_NAME,
+                queue_arn,
+            )
         ),
     )
 }
@@ -4972,11 +4973,16 @@ pub mod log_group_target;
 /// does, which is what that module performs.
 pub mod schedule;
 
-/// The customer managed key an Amazon SNS TOPIC target is encrypted with, and
-/// whether this service may have a data key generated under it — the second
-/// document in force over a delivery to such a topic, beside the topic's own
-/// access policy.
-pub mod topic_encryption;
+/// The customer managed key a TARGET is encrypted with, and whether this service
+/// may have a data key generated under it — the second document in force over a
+/// delivery to such a target, beside the target's own access policy.
+pub mod target_encryption;
+
+/// The CLIENT-CREDENTIALS grant an `OAUTH_CLIENT_CREDENTIALS` connection
+/// authorizes with: the token request EventBridge makes at the connection's
+/// authorization endpoint, and the access token every invocation through the
+/// connection then carries.
+pub mod oauth;
 
 /// Whether EventBridge may ASSUME the role a rule's target names — the step
 /// every target invocation begins with, and the one that decides a handover
