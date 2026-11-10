@@ -22,9 +22,16 @@
 //! stays single ([`ComAmazonawsResiliencehubv2NgrhservicecoreState`]), so one lock
 //! covers the whole store and a policy can be counted against the services that
 //! reference it.
+//!
+//! One reading beside them reaches OUTSIDE this store: [`invoker_role`] resolves the IAM
+//! role a `permissionModel` names against the account's IAM records in the same shared
+//! engine, which is what `CreateService` and `UpdateService` have to know before they
+//! write.
 
+mod invoker_role;
 mod policies;
 
+pub use invoker_role::{invoker_role_rejection, unassumable_message, SERVICE_PRINCIPAL};
 pub use policies::{
     mint_policy_arn, PolicyRecord, MAX_POLICIES, POLICY_RESOURCE, POLICY_VALUE_SOURCE_CROSS_ACCOUNT,
     POLICY_VALUE_SOURCE_SELF,

@@ -165,6 +165,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
         let now = ::std::time::SystemTime::now();
+
+        // A service's assessments run UNDER the IAM role its `permissionModel` names, so a
+        // request switching the service onto a role the account's IAM records show this
+        // service cannot assume is refused before anything is merged — the same gate
+        // `CreateService` applies, and for the same reason. Resolved on every call, so
+        // repairing the role's trust policy flips an otherwise identical request.
+        if let Some(refusal) = input.permission_model.as_ref().and_then(|model| {
+            crate::state::invoker_role_rejection(&*self.engine, &model.invoker_role_name)
+        }) {
+            return Err(UpdateServiceErrorModeled::ValidationException(refusal).into());
+        }
+
         let mut store = state.lock();
         let Some(record) = store.services.get_mut(&input.service_arn) else {
             return Err(UpdateServiceErrorModeled::ResourceNotFoundException(

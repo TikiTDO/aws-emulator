@@ -15,6 +15,8 @@
 mod constraint_report_wording;
 #[path = "all/effective_policy_values.rs"]
 mod effective_policy_values;
+#[path = "all/invoker_role_trust.rs"]
+mod invoker_role_trust;
 #[path = "all/policy_lifecycle.rs"]
 mod policy_lifecycle;
 #[path = "all/service_function_lifecycle.rs"]

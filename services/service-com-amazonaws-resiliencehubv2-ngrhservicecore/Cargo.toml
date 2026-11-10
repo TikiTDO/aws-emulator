@@ -11,6 +11,10 @@ engine = { workspace = true }
 # `validation_message`: the bracketed constraint report this service states for a value
 # outside a member's `@pattern`, shared with the V1 endpoint of the same service.
 service-common = { path = "../common" }
+# The account's IAM records, read through the IAM service's own state struct in the SAME
+# shared engine: `permissionModel.invokerRoleName` names a role this service has to be able
+# to assume, so `CreateService` and `UpdateService` resolve it before they write.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }
 aws-smithy-schema-server = { workspace = true }

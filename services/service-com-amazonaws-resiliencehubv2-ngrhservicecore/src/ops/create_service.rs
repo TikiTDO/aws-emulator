@@ -170,6 +170,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let now = ::std::time::SystemTime::now();
         let region = crate::state::request_region(ctx.parts());
+
+        // A service's assessments run UNDER the IAM role `permissionModel` names, so a role
+        // the account's IAM records show this service cannot assume is a service that could
+        // never be assessed: the create is refused before the ARN is minted and before
+        // anything is written. Resolved on EVERY call rather than cached, so repairing the
+        // role's trust policy flips an otherwise identical request from refused to served —
+        // which is also why the gate precedes the `clientToken` replay below: the role is a
+        // value of THIS request, judged as it stands now, so a token whose role has since
+        // stopped being assumable is refused rather than replayed.
+        if let Some(refusal) = crate::state::invoker_role_rejection(
+            &*self.engine,
+            &input.permission_model.invoker_role_name,
+        ) {
+            return Err(CreateServiceErrorModeled::ValidationException(refusal).into());
+        }
+
         let mut store = state.lock();
 
         // `clientToken` is an @idempotencyToken: a repeat of the same call returns the
