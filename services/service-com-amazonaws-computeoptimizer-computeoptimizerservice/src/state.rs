@@ -137,6 +137,14 @@ use crate::ops::types::{
 /// isn't specified, we use the default value `DAYS_14`".
 pub const DEFAULT_LOOK_BACK_PERIOD: &str = "DAYS_14";
 
+/// The enhanced-infrastructure-metrics status in force when no preference sets one, one of
+/// the model's `EnhancedInfrastructureMetrics` values
+/// (`crate::ops::types::ENHANCED_INFRASTRUCTURE_METRICS_VALUES` = `Active` | `Inactive`).
+/// The vocabulary names the NOT-SET state itself — "a status of `Inactive` confirms that
+/// it's not yet applied to recommendations" — so the status is reported as `Inactive`
+/// rather than left off an effective-preferences answer.
+pub const DEFAULT_ENHANCED_INFRASTRUCTURE_METRICS: &str = "Inactive";
+
 /// The most preference records this store holds. A `PutRecommendationPreferences` key is
 /// built from caller-supplied `resourceType` + `scope`, and a `ResourceArn` scope admits
 /// any EC2 instance or Auto Scaling group ARN, so without this bound repeated calls could
@@ -1688,8 +1696,11 @@ pub fn look_back_period_in_days(preference: &str) -> f64 {
 /// was generated under are the preferences a read of that resource reports.
 #[derive(Debug, Clone)]
 pub struct EffectivePreferences {
-    /// `EnhancedInfrastructureMetrics`, reported only where a record sets it.
-    pub enhanced_infrastructure_metrics: Option<String>,
+    /// `EnhancedInfrastructureMetrics`, which defaults to
+    /// [`DEFAULT_ENHANCED_INFRASTRUCTURE_METRICS`]: the preference's own vocabulary names
+    /// the state of a resource no record covers, so there is always a status in force to
+    /// report.
+    pub enhanced_infrastructure_metrics: String,
     /// `InferredWorkloadTypesPreference`, which defaults to
     /// [`INFERRED_WORKLOAD_TYPES_ACTIVE`] because "the inferred workload type feature is
     /// active by default".
@@ -1739,7 +1750,7 @@ impl EffectivePreferences {
     ) -> EffectiveRecommendationPreferences {
         EffectiveRecommendationPreferences {
             cpu_vendor_architectures: Some(cpu_vendor_architectures),
-            enhanced_infrastructure_metrics: self.enhanced_infrastructure_metrics.clone(),
+            enhanced_infrastructure_metrics: Some(self.enhanced_infrastructure_metrics.clone()),
             inferred_workload_types: Some(self.inferred_workload_types.clone()),
             external_metrics_preference: self.external_metrics_preference.clone(),
             look_back_period: Some(self.look_back_period.clone()),
@@ -2845,7 +2856,9 @@ impl ComAmazonawsComputeoptimizerComputeoptimizerserviceState {
                 cpu_vendor_architectures: requested_cpu_vendor_architectures
                     .filter(|architectures| !architectures.is_empty())
                     .map(<[String]>::to_vec),
-                enhanced_infrastructure_metrics: effective.enhanced_infrastructure_metrics.clone(),
+                enhanced_infrastructure_metrics: Some(
+                    effective.enhanced_infrastructure_metrics.clone(),
+                ),
                 look_back_period: Some(effective.look_back_period.clone()),
                 // Where the money figures came from (`RDSSavingsEstimationModeSource`): every
                 // one of them is computed from the prices stored with this service's own
@@ -3923,7 +3936,8 @@ impl ComAmazonawsComputeoptimizerComputeoptimizerserviceState {
             enhanced_infrastructure_metrics: effective(|record| {
                 record.enhanced_infrastructure_metrics.is_some()
             })
-            .and_then(|record| record.enhanced_infrastructure_metrics.clone()),
+            .and_then(|record| record.enhanced_infrastructure_metrics.clone())
+            .unwrap_or_else(|| DEFAULT_ENHANCED_INFRASTRUCTURE_METRICS.to_string()),
             inferred_workload_types: effective(|record| record.inferred_workload_types.is_some())
                 .and_then(|record| record.inferred_workload_types.clone())
                 .unwrap_or_else(|| INFERRED_WORKLOAD_TYPES_ACTIVE.to_string()),

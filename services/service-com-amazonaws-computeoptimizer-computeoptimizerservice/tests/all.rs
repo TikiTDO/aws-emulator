@@ -49,6 +49,8 @@ mod ecs_service_recommendations;
 mod ecs_service_recommendations_export;
 #[path = "all/effective_preferred_resource_candidates.rs"]
 mod effective_preferred_resource_candidates;
+#[path = "all/effective_status_preference_is_always_reported.rs"]
+mod effective_status_preference_is_always_reported;
 #[path = "all/enrollment_and_preferences.rs"]
 mod enrollment_and_preferences;
 #[path = "all/export_preference_gated_columns.rs"]

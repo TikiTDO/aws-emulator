@@ -491,9 +491,9 @@ async fn effective_preferences_resolve_by_scope_precedence() {
         body["lookBackPeriod"], "DAYS_14",
         "no preferences stored: expected the default look-back period, got {body}"
     );
-    assert!(
-        body["enhancedInfrastructureMetrics"].is_null(),
-        "no preferences stored: nothing else is in effect, got {body}"
+    assert_eq!(
+        body["enhancedInfrastructureMetrics"], "Inactive",
+        "no preferences stored: the status in force is the documented default, got {body}"
     );
 
     // Each row adds a more specific record and states what must then be in effect.
@@ -593,9 +593,10 @@ async fn effective_preferences_resolve_by_scope_precedence() {
         effective["preferredResources"][0]["excludeList"][0], "t2",
         "auto scaling group: expected its own resource-level record, got {effective}"
     );
-    assert!(
-        effective["enhancedInfrastructureMetrics"].is_null(),
-        "auto scaling group: an Ec2Instance record must not apply to it, got {effective}"
+    assert_eq!(
+        effective["enhancedInfrastructureMetrics"], "Inactive",
+        "auto scaling group: an Ec2Instance record must not apply to it, so the documented \
+         default is in force, got {effective}"
     );
     assert_eq!(
         effective["lookBackPeriod"], "DAYS_14",
@@ -793,9 +794,9 @@ async fn delete_removes_only_the_named_preferences() {
         effective["lookBackPeriod"], "DAYS_14",
         "with every record gone, the default look-back period applies, got {effective}"
     );
-    assert!(
-        effective["enhancedInfrastructureMetrics"].is_null(),
-        "with every record gone, nothing else is in effect, got {effective}"
+    assert_eq!(
+        effective["enhancedInfrastructureMetrics"], "Inactive",
+        "with every record gone, the documented default status applies, got {effective}"
     );
 }
 

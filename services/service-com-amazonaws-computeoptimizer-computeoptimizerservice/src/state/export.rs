@@ -781,10 +781,7 @@ fn put_preferences(row: &mut ExportRow, preferences: &EffectivePreferences) {
     put(
         row,
         "EffectiveRecommendationPreferencesEnhancedInfrastructureMetrics",
-        preferences
-            .enhanced_infrastructure_metrics
-            .clone()
-            .unwrap_or_default(),
+        preferences.enhanced_infrastructure_metrics.clone(),
     );
     // `savingsEstimationMode` is an `InstanceSavingsEstimationMode`, whose one member is the
     // `source` the money figures came from — which is what the reader reports for it.

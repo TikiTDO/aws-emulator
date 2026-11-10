@@ -5,8 +5,9 @@
 //! IMPLEMENTED: resolves each preference field for one resource from the stored records,
 //! taking it from the most specific scope that sets it — resource, then account, then the
 //! account default, then organization — and falling back to the service's documented
-//! default (`lookBackPeriod`, `utilizationPreferences`, `preferredResources`), which the
-//! list members report as a list rather than as an absent member. A `resourceArn` whose
+//! default (`enhancedInfrastructureMetrics`, `lookBackPeriod`, `utilizationPreferences`,
+//! `preferredResources`), which the list members report as a list rather than as an absent
+//! member. A `resourceArn` whose
 //! account field names another account is refused, not resolved: this emulator answers for
 //! one standalone account and records no organization.
 //!
@@ -276,7 +277,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let effective = guard.effective_preferences(&input.resource_arn, resource);
 
         Ok(GetEffectiveRecommendationPreferencesOutput {
-            enhanced_infrastructure_metrics: effective.enhanced_infrastructure_metrics,
+            // The status in force, always reported: the preference's own vocabulary names
+            // the state of a resource no record covers ("a status of Inactive confirms that
+            // it's not yet applied to recommendations"), so an absent member would say
+            // nothing a caller can read. `externalMetricsPreference` below is the member
+            // whose own documentation DOES make absence the answer — "if the preference
+            // isn't applied to the recommendations already, then this object doesn't appear
+            // in the response".
+            enhanced_infrastructure_metrics: Some(effective.enhanced_infrastructure_metrics),
             external_metrics_preference: effective.external_metrics_preference,
             // "When this preference isn't specified, we use the default value DAYS_14."
             look_back_period: Some(effective.look_back_period),

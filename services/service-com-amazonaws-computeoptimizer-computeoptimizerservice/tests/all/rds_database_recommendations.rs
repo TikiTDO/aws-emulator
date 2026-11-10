@@ -450,6 +450,9 @@ async fn an_analysed_database_is_reported_from_its_catalog_row() {
                 {"name": "DatabaseConnections", "statistic": "Maximum", "value": 12.0},
             ],
             "effectiveRecommendationPreferences": {
+                // The status in force with no preference on record: the preference's
+                // vocabulary names the not-applied state itself.
+                "enhancedInfrastructureMetrics": "Inactive",
                 "lookBackPeriod": DEFAULT_LOOK_BACK_PERIOD,
                 // Every money figure is computed from the prices stored with this
                 // emulator's own analysis.

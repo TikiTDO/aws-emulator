@@ -16,8 +16,8 @@
 
 use serde_json::{json, Value};
 use service_com_amazonaws_computeoptimizer_computeoptimizerservice::state::{
-    DEFAULT_LOOK_BACK_PERIOD, MAX_PREFERENCE_RECORDS, ORGANIZATION_SCOPE_VALUE, SCOPE_ACCOUNT_ID,
-    SCOPE_ORGANIZATION, SCOPE_RESOURCE_ARN,
+    DEFAULT_ENHANCED_INFRASTRUCTURE_METRICS, DEFAULT_LOOK_BACK_PERIOD, MAX_PREFERENCE_RECORDS,
+    ORGANIZATION_SCOPE_VALUE, SCOPE_ACCOUNT_ID, SCOPE_ORGANIZATION, SCOPE_RESOURCE_ARN,
 };
 
 use crate::harness::{
@@ -136,10 +136,11 @@ async fn a_put_that_sets_no_preference_stores_no_record() {
             json!(DEFAULT_LOOK_BACK_PERIOD),
             "case {case:?}: expected the default lookBackPeriod, got {effective}"
         );
-        assert!(
-            effective["enhancedInfrastructureMetrics"].is_null(),
-            "case {case:?}: no record sets enhancedInfrastructureMetrics, so none is in \
-             effect, got {effective}"
+        assert_eq!(
+            effective["enhancedInfrastructureMetrics"],
+            json!(DEFAULT_ENHANCED_INFRASTRUCTURE_METRICS),
+            "case {case:?}: no record sets enhancedInfrastructureMetrics, so the documented \
+             default status is in effect, got {effective}"
         );
     }
 }
