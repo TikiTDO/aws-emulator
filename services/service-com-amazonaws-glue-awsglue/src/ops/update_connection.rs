@@ -218,7 +218,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // `Connection$LastUpdatedBy` is "the user, group, or role that last updated
             // this connection definition": the identity this emulator's credentials speak
             // for, derived as at create and never from the request.
-            Some(crate::state::request_principal()),
+            Some(crate::state::request_principal_id()),
             ::std::time::SystemTime::now(),
         );
         ::tracing::info!(

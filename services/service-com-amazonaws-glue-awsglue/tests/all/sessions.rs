@@ -26,7 +26,8 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
 use service_com_amazonaws_glue_awsglue::state::{
-    messages, ComAmazonawsGlueAwsglueState, DEFAULT_SESSION_TIMEOUT_MINUTES,
+    dpu_per_worker, messages, ComAmazonawsGlueAwsglueState, DEFAULT_SESSION_TIMEOUT_MINUTES,
+    DEFAULT_SESSION_TYPE, DEFAULT_SESSION_WORKERS, DEFAULT_SESSION_WORKER_TYPE,
     MIN_SESSION_GLUE_VERSION, SESSION_SETTLES_AFTER,
 };
 use smithy_server_runtime::MultiServiceRouter;
@@ -66,6 +67,12 @@ const SECONDS_PER_MINUTE: u64 = 60;
 /// The members of a create that the modelled `Session` shape reports back, as a body a
 /// round-trip assertion can be made against. `Timeout`, `Tags` and `RequestOrigin` are not
 /// among them: the shape carries no such members.
+///
+/// Three of them are filled in by the SERVICE when the create named nothing for them, so
+/// what must come back is the create's value where it sent one and the service's otherwise:
+/// the arguments map (the empty map), the session type ([`DEFAULT_SESSION_TYPE`]) and, for a
+/// create that expressed no capacity at all, the worker configuration a session is
+/// provisioned with.
 fn reported_members(request: &Value) -> Value {
     let mut expected = json!({});
     for member in [
@@ -73,17 +80,39 @@ fn reported_members(request: &Value) -> Value {
         "Description",
         "Role",
         "Command",
-        "DefaultArguments",
         "Connections",
         "SecurityConfiguration",
         "GlueVersion",
-        "NumberOfWorkers",
-        "WorkerType",
-        "SessionType",
     ] {
         expected[member] = request.get(member).cloned().unwrap_or(Value::Null);
     }
+    expected["DefaultArguments"] = request
+        .get("DefaultArguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    expected["SessionType"] = request
+        .get("SessionType")
+        .cloned()
+        .unwrap_or_else(|| json!(DEFAULT_SESSION_TYPE));
+    let named_capacity = ["WorkerType", "NumberOfWorkers", "MaxCapacity"]
+        .iter()
+        .any(|member| request.get(member).is_some());
+    if named_capacity {
+        for member in ["WorkerType", "NumberOfWorkers"] {
+            expected[member] = request.get(member).cloned().unwrap_or(Value::Null);
+        }
+    } else {
+        expected["WorkerType"] = json!(DEFAULT_SESSION_WORKER_TYPE);
+        expected["NumberOfWorkers"] = json!(DEFAULT_SESSION_WORKERS);
+    }
     expected
+}
+
+/// The DPU figure the worker configuration a session that named no capacity is provisioned
+/// with amounts to, through the model's own per-worker figures.
+fn default_session_capacity() -> f64 {
+    dpu_per_worker(DEFAULT_SESSION_WORKER_TYPE).expect("the default worker type maps to DPUs")
+        * f64::from(DEFAULT_SESSION_WORKERS)
 }
 
 /// Create a session and return the `Session` its answer reports.
@@ -153,6 +182,7 @@ async fn created_sessions_are_read_back_from_the_store() {
         .collect();
 
     // (case, the create body, the IdleTimeout it must report, the MaxCapacity it must report)
+    let defaulted_capacity = Some(default_session_capacity());
     let cases: Vec<(&str, Value, i64, Option<f64>)> = vec![
         (
             // The shape a notebook client sends: the three required members alone.
@@ -163,7 +193,7 @@ async fn created_sessions_are_read_back_from_the_store() {
                 "Command": { "Name": "glueetl" },
             }),
             i64::from(DEFAULT_SESSION_TIMEOUT_MINUTES),
-            None,
+            defaulted_capacity,
         ),
         (
             "every optional member",
@@ -196,7 +226,7 @@ async fn created_sessions_are_read_back_from_the_store() {
                 "Timeout": 120,
             }),
             120,
-            None,
+            defaulted_capacity,
         ),
         (
             // Both timeouts at the modelled floor ("range 1..").
@@ -209,7 +239,7 @@ async fn created_sessions_are_read_back_from_the_store() {
                 "IdleTimeout": 1,
             }),
             1,
-            None,
+            defaulted_capacity,
         ),
         (
             // "each worker maps to 2 DPU" for `G.2X`, so three of them are six DPUs.
@@ -261,7 +291,7 @@ async fn created_sessions_are_read_back_from_the_store() {
                 "GlueVersion": "5.1",
             }),
             i64::from(DEFAULT_SESSION_TIMEOUT_MINUTES),
-            None,
+            defaulted_capacity,
         ),
         (
             "an id at the modelled length bound",
@@ -271,7 +301,7 @@ async fn created_sessions_are_read_back_from_the_store() {
                 "Command": { "Name": "glueetl" },
             }),
             i64::from(DEFAULT_SESSION_TIMEOUT_MINUTES),
-            None,
+            defaulted_capacity,
         ),
         (
             "a description at the modelled length bound",
@@ -282,7 +312,7 @@ async fn created_sessions_are_read_back_from_the_store() {
                 "Description": long_description,
             }),
             i64::from(DEFAULT_SESSION_TIMEOUT_MINUTES),
-            None,
+            defaulted_capacity,
         ),
         (
             "the maximum number of default arguments",
@@ -293,7 +323,7 @@ async fn created_sessions_are_read_back_from_the_store() {
                 "DefaultArguments": full_arguments,
             }),
             i64::from(DEFAULT_SESSION_TIMEOUT_MINUTES),
-            None,
+            defaulted_capacity,
         ),
         (
             "an empty argument map and an empty connection list",
@@ -305,7 +335,7 @@ async fn created_sessions_are_read_back_from_the_store() {
                 "Connections": { "Connections": [] },
             }),
             i64::from(DEFAULT_SESSION_TIMEOUT_MINUTES),
-            None,
+            defaulted_capacity,
         ),
     ];
 
@@ -362,18 +392,22 @@ async fn created_sessions_are_read_back_from_the_store() {
             Some(0.0),
             "case {case}: expected no progress on a fresh session, got {read}"
         );
-        // A session that is still running has not completed, nothing has consumed DPUs for
-        // it, no error was displayed during it, and no usage profile is associated with it.
-        for member in [
-            "CompletedOn",
-            "ExecutionTime",
-            "DPUSeconds",
-            "ErrorMessage",
-            "ProfileName",
-        ] {
+        // A session that is still running has not completed, no error was displayed during
+        // it, and no usage profile is associated with it.
+        for member in ["CompletedOn", "ErrorMessage", "ProfileName"] {
             assert!(
                 read.get(member).is_none_or(Value::is_null),
                 "case {case}: a running session reports no {member}, got {read}"
+            );
+        }
+        // Nothing has been accounted to a session that has not run: "the total time the
+        // session ran for" and "the DPUs consumed by the session" are both zero, which is a
+        // figure a client can read rather than an absent member.
+        for member in ["ExecutionTime", "DPUSeconds"] {
+            assert_eq!(
+                read[member].as_f64(),
+                Some(0.0),
+                "case {case}: a fresh session has consumed no {member}, got {read}"
             );
         }
         // The modelled `Session` shape carries neither member, so what the create sent
@@ -744,10 +778,17 @@ async fn an_idle_session_times_out_when_its_own_timeout_falls_due() {
                 );
             }
             None => {
-                for member in ["CompletedOn", "ExecutionTime", "DPUSeconds"] {
-                    assert!(
-                        read.get(member).is_none_or(Value::is_null),
-                        "case {case}: a running session reports no {member}, got {read}"
+                // A session still running has not completed, so nothing has been accounted
+                // to it: the accounting members report zero rather than nothing.
+                assert!(
+                    read.get("CompletedOn").is_none_or(Value::is_null),
+                    "case {case}: a running session reports no CompletedOn, got {read}"
+                );
+                for member in ["ExecutionTime", "DPUSeconds"] {
+                    assert_eq!(
+                        read[member].as_f64(),
+                        Some(0.0),
+                        "case {case}: a running session has consumed no {member}, got {read}"
                     );
                 }
             }

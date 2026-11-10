@@ -96,7 +96,9 @@ fn reset_values() -> Value {
         // "When the JobMode field is missing or null, SCRIPT is assigned as the default
         // value."
         "JobMode": DEFAULT_JOB_MODE,
-        "JobRunQueuingEnabled": Value::Null,
+        // "If false or not populated, the job runs will not be considered for queueing":
+        // the flag a definition naming none applies is false, and that is what it reports.
+        "JobRunQueuingEnabled": false,
         "Description": Value::Null,
         "LogUri": Value::Null,
         // "The maximum number of concurrent runs allowed for the job. The default is 1."

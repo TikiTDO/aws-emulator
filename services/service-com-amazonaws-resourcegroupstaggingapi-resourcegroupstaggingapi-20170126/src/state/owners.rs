@@ -343,8 +343,12 @@ pub fn tagged_resources<Eng: Send + Sync + 'static>(
         // Glue holds the tag set of every resource whose create carries a `Tags` map, so
         // the tags a create recorded are already this projection's rows: that service's
         // own records, with the ARN minted for the serving Region (a Glue record carries
-        // no Region of its own, like an EventBridge event bus).
-        for (arn, tags) in state.lock().tagged_resources(region) {
+        // no Region of its own, like an EventBridge event bus). The rows are the ones of
+        // the account this emulator serves, which is the account this API answers for.
+        for (arn, tags) in state
+            .lock()
+            .tagged_resources(::engine::emulator_account_id(), region)
+        {
             record(arn, tags.into_iter().collect());
         }
     }

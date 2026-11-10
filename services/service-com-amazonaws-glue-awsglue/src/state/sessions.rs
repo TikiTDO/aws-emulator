@@ -55,6 +55,32 @@ pub const DEFAULT_SESSION_TIMEOUT_MINUTES: i32 = 2_880;
 /// that is not is refused rather than stored.
 pub const MIN_SESSION_GLUE_VERSION: f64 = 2.0;
 
+/// The `SessionType` a create that named none is provisioned as.
+///
+/// The model documents no default for the member, and the recorded reads of a session created
+/// without one report `LIVY`: of the modelled values (`LIVY`, `SPARK_CONNECT`, from
+/// `smithy_query shape=SessionType`) that is the kind this service's own statement operations
+/// drive — `RunStatement`, `GetStatement` and `CancelStatement` are that interface — so a
+/// create that asks for no particular kind is provisioned as that one, and every read reports
+/// the kind the session IS rather than leaving a client to guess it.
+pub const DEFAULT_SESSION_TYPE: &str = "LIVY";
+
+/// The worker type a session create that named no capacity is provisioned with: the default
+/// worker type, which "maps to 1 DPU" (`CreateSessionRequest$WorkerType`) — the same type a
+/// job definition naming no capacity is given ([`DEFAULT_SPARK_WORKER_TYPE`]), and the type
+/// the recorded reads of such a session report.
+pub const DEFAULT_SESSION_WORKER_TYPE: &str = DEFAULT_SPARK_WORKER_TYPE;
+
+/// How many [`DEFAULT_SESSION_WORKER_TYPE`] workers such a session is provisioned with.
+///
+/// The model documents no default here either, and the recorded reads of a session created
+/// without a capacity report two of them (and the DPU figure they amount to): a remote Spark
+/// runtime — "the period in which a remote Spark runtime environment is running" (`Session`)
+/// — runs a driver and an executor, so two workers is the smallest session the service brings
+/// up, and the figure follows from them through the one per-worker table every capacity goes
+/// through ([`dpu_per_worker`]).
+pub const DEFAULT_SESSION_WORKERS: i32 = 2;
+
 /// How many seconds one minute of a session's documented timeouts is: both `Timeout` and
 /// `IdleTimeout` are stated in minutes.
 pub(super) const SECONDS_PER_MINUTE: u64 = 60;
@@ -109,9 +135,10 @@ pub struct SessionEntry {
     pub role: String,
     /// `Session$Command`: "The command object", as the create described it.
     pub command: SessionCommand,
-    /// `Session$DefaultArguments`: "A map array of key-value pairs", and `None` when the
-    /// create carried no map at all — which a read reports differently from an empty one.
-    pub default_arguments: Option<HashMap<String, String>>,
+    /// `Session$DefaultArguments`: "A map array of key-value pairs", which is the EMPTY map
+    /// for a create that carried none — the service reports the arguments a statement of
+    /// this session runs with, and a session with no arguments runs with none.
+    pub default_arguments: HashMap<String, String>,
     /// `Session$Connections`: "The number of connections used for the session."
     pub connections: Option<ConnectionsList>,
     /// The session's capacity in DPUs: what the create named, else what its worker
@@ -119,10 +146,11 @@ pub struct SessionEntry {
     /// capacity-carrying request goes through.
     pub max_capacity: Option<f64>,
     /// `Session$NumberOfWorkers`: "The number of workers of a defined `WorkerType` to use
-    /// for the session", as the create named it.
+    /// for the session", as the create named it, else the configuration the service
+    /// provisions a session that named no capacity with ([`DEFAULT_SESSION_WORKERS`]).
     pub number_of_workers: Option<i32>,
     /// `Session$WorkerType`: "The type of predefined worker that is allocated when a
-    /// session runs", as the create named it.
+    /// session runs", as the create named it, else [`DEFAULT_SESSION_WORKER_TYPE`].
     pub worker_type: Option<String>,
     /// `Session$SecurityConfiguration`: "The name of the SecurityConfiguration structure to
     /// be used with the session."
@@ -132,8 +160,8 @@ pub struct SessionEntry {
     /// model documents no default for a session's Glue version, so none is invented here.
     pub glue_version: Option<String>,
     /// `Session$SessionType`: "The type of the session", one of the modelled `SessionType`
-    /// values, as the create named it.
-    pub session_type: Option<String>,
+    /// values, as the create named it, else [`DEFAULT_SESSION_TYPE`].
+    pub session_type: String,
     /// "The number of minutes before session times out"
     /// (`CreateSessionRequest$Timeout`), defaulted by
     /// [`DEFAULT_SESSION_TIMEOUT_MINUTES`] when the create named none.
@@ -174,6 +202,20 @@ impl SessionEntry {
     /// member taken from the request or from the default the model documents for it.
     pub fn from_create_input(input: &CreateSessionInput, now: SystemTime) -> Self {
         let timeout = input.timeout.unwrap_or(DEFAULT_SESSION_TIMEOUT_MINUTES);
+        // The worker configuration the create named, else the one the service provisions a
+        // session that named no capacity at all with; a create that named a DPU figure
+        // asked for that capacity and gets no worker configuration invented for it.
+        let (worker_type, number_of_workers) = match (
+            input.worker_type.clone(),
+            input.number_of_workers,
+            input.max_capacity,
+        ) {
+            (None, None, None) => (
+                Some(DEFAULT_SESSION_WORKER_TYPE.to_string()),
+                Some(DEFAULT_SESSION_WORKERS),
+            ),
+            (worker_type, number_of_workers, _) => (worker_type, number_of_workers),
+        };
         Self {
             id: input.id.clone(),
             created_on: now,
@@ -184,21 +226,24 @@ impl SessionEntry {
             description: input.description.clone(),
             role: input.role.clone(),
             command: input.command.clone(),
-            default_arguments: input.default_arguments.clone(),
+            default_arguments: input.default_arguments.clone().unwrap_or_default(),
             connections: input.connections.clone(),
             // The same three members a job's capacity is read from, with the same
             // documentation, so they resolve through the same helper.
             max_capacity: capacity_from(
                 input.max_capacity,
                 0,
-                input.worker_type.as_deref(),
-                input.number_of_workers,
+                worker_type.as_deref(),
+                number_of_workers,
             ),
-            number_of_workers: input.number_of_workers,
-            worker_type: input.worker_type.clone(),
+            number_of_workers,
+            worker_type,
             security_configuration: input.security_configuration.clone(),
             glue_version: input.glue_version.clone(),
-            session_type: input.session_type.clone(),
+            session_type: input
+                .session_type
+                .clone()
+                .unwrap_or_else(|| DEFAULT_SESSION_TYPE.to_string()),
             timeout,
             // "Default for Spark ETL jobs is value of Timeout."
             idle_timeout: input.idle_timeout.unwrap_or(timeout),
@@ -254,13 +299,13 @@ impl SessionEntry {
     }
 
     /// `Session$ExecutionTime`: "The total time the session ran for", in seconds — the span
-    /// from the instant it was created to the instant it completed, and `None` while it is
-    /// still running.
-    pub(super) fn execution_time(&self) -> Option<f64> {
-        self.completed_on?
-            .duration_since(self.created_on)
-            .ok()
+    /// from the instant it was created to the instant it completed, and 0 for a session that
+    /// has not completed, since no time has been accounted to it yet.
+    pub(super) fn execution_time(&self) -> f64 {
+        self.completed_on
+            .and_then(|completed_on| completed_on.duration_since(self.created_on).ok())
             .map(|ran| ran.as_secs_f64())
+            .unwrap_or_default()
     }
 
     /// Rebuild the modelled `Session` shape from what is stored, so every reader of a
@@ -277,7 +322,7 @@ impl SessionEntry {
             description: self.description.clone(),
             role: Some(self.role.clone()),
             command: Some(self.command.clone()),
-            default_arguments: self.default_arguments.clone(),
+            default_arguments: Some(self.default_arguments.clone()),
             connections: self.connections.clone(),
             // "The code execution progress of the session", which is the model's own
             // default until a statement of this session has run code.
@@ -288,17 +333,16 @@ impl SessionEntry {
             number_of_workers: self.number_of_workers,
             worker_type: self.worker_type.clone(),
             completed_on: self.completed_on.map(to_date_time),
-            execution_time,
-            // "The DPUs consumed by the session (formula: ExecutionTime * MaxCapacity)",
-            // which is reportable once both of those are.
-            dpu_seconds: execution_time
-                .zip(self.max_capacity)
-                .map(|(ran, capacity)| ran * capacity),
+            execution_time: Some(execution_time),
+            // "The DPUs consumed by the session (formula: ExecutionTime * MaxCapacity)": the
+            // time accounted to the session at the capacity it holds, which is none for a
+            // session that has not run and none for one holding no DPU figure.
+            dpu_seconds: Some(execution_time * self.max_capacity.unwrap_or_default()),
             idle_timeout: Some(self.idle_timeout),
             // "The name of an Glue usage profile associated with the session": a session
             // create carries no profile member, so no session this store holds has one.
             profile_name: None,
-            session_type: self.session_type.clone(),
+            session_type: Some(self.session_type.clone()),
         }
     }
 

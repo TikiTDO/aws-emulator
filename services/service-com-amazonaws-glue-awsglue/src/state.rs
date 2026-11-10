@@ -350,7 +350,8 @@ use crate::ops::types::{
     CreateUsageProfileInput,
     JobCommand, JobNodeDetails, JobRun, JobUpdate, LakeFormationConfiguration,
     LineageConfiguration,
-    Node, NotificationProperty, Partition, PartitionInput, Predicate, PrincipalPermissions,
+    Node, NotificationProperty, Partition, PartitionInput, Predecessor, Predicate,
+    PrincipalPermissions,
     ProfileConfiguration,
     RLSProperties,
     RecrawlPolicy, RegistryId, Schedule,
@@ -2601,6 +2602,9 @@ impl ComAmazonawsGlueAwsglueState {
         now: SystemTime,
     ) -> Vec<ActionJobRun> {
         let mut begun = Vec::new();
+        // The runs this firing was PRECEDED by, resolved before any job is borrowed to write
+        // to, so every run the firing begins reports the same predecessors.
+        let predecessors = self.satisfied_predicate_runs(region, trigger_name, now);
         for action in actions {
             let Some(job_name) = action.job_name.as_deref() else {
                 continue;
@@ -2617,7 +2621,7 @@ impl ComAmazonawsGlueAwsglueState {
                 continue;
             }
             let run_id = new_job_run_id();
-            let run = JobRunEntry::start(
+            let mut run = JobRunEntry::start(
                 job,
                 &request,
                 run_id.clone(),
@@ -2625,6 +2629,10 @@ impl ComAmazonawsGlueAwsglueState {
                 None,
                 Some(trigger_name),
             );
+            // "A job run that was used in the predicate of a conditional trigger that
+            // triggered this job run" (`Predecessor`): the runs that satisfied the firing
+            // trigger's predicate precede every run the firing begins.
+            run.predecessors = predecessors.clone();
             job.record_run(run);
             begun.push(ActionJobRun {
                 job_name: job_name.to_string(),
@@ -2632,6 +2640,63 @@ impl ComAmazonawsGlueAwsglueState {
             });
         }
         begun
+    }
+
+    /// The runs that SATISFIED the predicate of the trigger `trigger_name`, in condition
+    /// order, as the `Predecessor` list a run that firing begins reports.
+    ///
+    /// "The predicate of this trigger, which defines when it will fire"
+    /// (`Trigger$Predicate`) belongs to one trigger kind: only a CONDITIONAL trigger carries
+    /// one, and each of its conditions names a job and the `JobRunState` that job has to
+    /// have reached. The run that satisfied a condition is the LATEST run of that job in
+    /// that state, which is the run the firing follows; a condition naming a crawler names
+    /// no job run, and a condition no run of the job satisfies contributes none.
+    fn satisfied_predicate_runs(
+        &mut self,
+        region: &str,
+        trigger_name: &str,
+        now: SystemTime,
+    ) -> Vec<Predecessor> {
+        let conditions: Vec<(String, Option<String>)> = self
+            .trigger(region, trigger_name)
+            .filter(|trigger| trigger.trigger_type == TRIGGER_TYPE_CONDITIONAL)
+            .and_then(|trigger| trigger.predicate.as_ref())
+            .and_then(|predicate| predicate.conditions.as_ref())
+            .map(|conditions| {
+                conditions
+                    .iter()
+                    .filter_map(|condition| {
+                        condition
+                            .job_name
+                            .clone()
+                            .map(|job_name| (job_name, condition.state.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut predecessors = Vec::new();
+        for (job_name, state) in conditions {
+            let Some(job) = self.job_mut(region, &job_name) else {
+                continue;
+            };
+            // The state a run is in is the one the clock already owed it, so a run that has
+            // reached the condition's state counts whether or not anybody read it.
+            job.settle_due_runs(now);
+            let satisfying = job
+                .runs
+                .iter()
+                .rev()
+                .find(|run| state.as_deref().is_none_or(|wanted| run.state == wanted))
+                .map(|run| run.id.clone());
+            if let Some(run_id) = satisfying {
+                predecessors.push(Predecessor {
+                    job_name: Some(job_name),
+                    run_id: Some(run_id),
+                });
+            }
+        }
+        predecessors
     }
 
     /// The EVENT trigger of the Region `region` that the events delivered to the workflow
@@ -3355,17 +3420,29 @@ impl ComAmazonawsGlueAwsglueState {
         }
     }
 
-    /// Every resource this store holds a tag set for, as `(ARN, tags)`.
+    /// Every resource of the account `account_id` this store holds a tag set for, as
+    /// `(ARN, tags)`.
     ///
-    /// This is the account's tag-store rows for this service: the tags a create recorded
+    /// This is ONE account's tag-store rows for this service: the tags a create recorded
     /// are the resource's own, so the account-wide tagging API projects THESE records
     /// rather than keeping a second copy that a create would have to be taught to write.
     /// Resources carrying NO tag are included — the caller decides what to do with an
     /// untagged resource — and `region` is the Region the ARNs are minted for, for the
     /// reason [`request_region`] gives.
-    pub fn tagged_resources(&self, region: &str) -> Vec<(String, HashMap<String, String>)> {
+    ///
+    /// The account is the boundary the single-resource accessors enforce, so it bounds this
+    /// projection too: a database and a connection are reached through the catalog of
+    /// `account_id` alone, exactly as [`Self::resource_tags`] reaches them, and the crawlers
+    /// and job definitions that live beside the catalog tree in one per-account namespace are
+    /// projected only for an account this emulator serves ([`is_served_account`]), exactly as
+    /// that accessor decides it. So no account's rows are ever reported to another's.
+    pub fn tagged_resources(
+        &self,
+        account_id: &str,
+        region: &str,
+    ) -> Vec<(String, HashMap<String, String>)> {
         let mut found: Vec<(String, HashMap<String, String>)> = Vec::new();
-        for catalog in self.catalogs.values() {
+        if let Some(catalog) = self.catalogs.get(account_id) {
             for database in catalog.databases.values() {
                 found.push((
                     TaggedResourceKind::Database.arn(region, &database.name),
@@ -3378,6 +3455,9 @@ impl ComAmazonawsGlueAwsglueState {
                     connection.tags.clone(),
                 ));
             }
+        }
+        if !is_served_account(account_id) {
+            return found;
         }
         for crawler in self.crawlers.values() {
             found.push((

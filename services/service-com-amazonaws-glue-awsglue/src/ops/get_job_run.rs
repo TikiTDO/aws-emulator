@@ -207,14 +207,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         };
 
-        // `PredecessorsIncluded` asks for "a list of predecessor runs", which are the
-        // runs "used in the predicate of a conditional trigger that triggered this job
-        // run". A run started through `StartJobRun` was triggered by nothing, so the list
-        // is empty either way and the projection carries no predecessors.
-        let _ = input.predecessors_included;
+        // "True if a list of predecessor runs should be returned"
+        // (`GetJobRunRequest$PredecessorsIncluded`, whose modelled default is false): the
+        // predecessors are the runs "used in the predicate of a conditional trigger that
+        // triggered this job run" (`Predecessor`), and a read that does not ask for them
+        // reports the member as the empty list rather than the runs themselves.
+        let mut job_run = run.to_job_run();
+        if !input.predecessors_included {
+            job_run.predecessor_runs = Some(Vec::new());
+        }
 
         Ok(GetJobRunOutput {
-            job_run: Some(run.to_job_run()),
+            job_run: Some(job_run),
         })
     }
 }

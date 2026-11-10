@@ -141,18 +141,30 @@ pub fn compile_name_pattern(pattern: &str) -> Result<::regex::Regex, ::regex::Er
 /// `services/service-com-amazonaws-sts-awssecuritytokenservicev20110615/src/state.rs`).
 pub(super) const AMBIENT_USER_NAME: &str = "emulator";
 
+/// The principal that made this request, as the RELATIVE id IAM gives that identity: the
+/// resource part of its ARN, `user/<userName>`.
+///
+/// This is the form Glue records in `Connection$LastUpdatedBy` — "the user, group, or role
+/// that last updated this connection definition", a `NameString` rather than an ARN — so a
+/// client matching the updater against the identity's own short form matches.
+/// [`request_principal`] renders the same identity as the full ARN for the members that
+/// carry one.
+pub fn request_principal_id() -> String {
+    format!("user/{AMBIENT_USER_NAME}")
+}
+
 /// The principal that made this request, as the ARN the catalog records in
 /// `Table$CreatedBy` ("The person or entity who created the table").
 ///
-/// Server-derived from the emulator's own identity contract, never from the request: it
-/// is the ARN of the identity a request signed with this emulator's credentials speaks
+/// Server-derived from the emulator's own identity contract, never from the request: it is
+/// the ARN of the identity a request signed with this emulator's credentials speaks
 /// for, which is the one [`AMBIENT_USER_NAME`] names — so Glue and STS agree on who the
 /// caller is. An access key id is a credential id, not a user name, so it is never
 /// rendered into an IAM ARN: that is a principal no AWS rule produces. The value is
 /// therefore the same on every call and across restarts, exactly as the IAM identity
 /// behind one set of credentials is.
 pub fn request_principal() -> String {
-    ::engine::emulator_arn("iam", "", &format!("user/{AMBIENT_USER_NAME}"))
+    ::engine::emulator_arn("iam", "", &request_principal_id())
 }
 
 /// The `CatalogId` a request addresses: the one it names, else this emulator's

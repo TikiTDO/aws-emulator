@@ -248,8 +248,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &input.connection_input,
             // `Connection$LastUpdatedBy` is "the user, group, or role that last updated
             // this connection definition" — the identity this emulator's credentials speak
-            // for, derived the same way `Table$CreatedBy` is and never from the request.
-            Some(crate::state::request_principal()),
+            // for, in the relative form that member carries, and never from the request.
+            Some(crate::state::request_principal_id()),
             input.tags.as_ref(),
             ::std::time::SystemTime::now(),
         );

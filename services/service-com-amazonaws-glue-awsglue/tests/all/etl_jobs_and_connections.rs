@@ -13,8 +13,9 @@
 //! * `CreateJob` creates a job DEFINITION and answers its name; `GetJob` reports that
 //!   stored definition back, with the members the request supplied plus the defaults the
 //!   model documents for the ones it omitted — `JobMode` ("When the JobMode field is
-//!   missing or null, SCRIPT is assigned as the default value"), `GlueVersion` ("Jobs that
-//!   are created without specifying a Glue version default to Glue 5.1"), `Timeout` ("the
+//!   missing or null, SCRIPT is assigned as the default value"), `GlueVersion` (the version
+//!   the service fills in for a create that named none, which every read reports),
+//!   `Timeout` ("the
 //!   timeout is defaulted to 2,880 minutes for Glue version 4.0 and earlier, or 480
 //!   minutes for Glue version 5.0 and later") and
 //!   `ExecutionProperty$MaxConcurrentRuns` ("The default is 1").
@@ -37,6 +38,7 @@
 //! and the recorded `glueetl`/`s3://…` case from the issue is one row among them.
 
 use serde_json::{json, Value};
+use service_com_amazonaws_glue_awsglue::state::DEFAULT_GLUE_VERSION;
 
 use crate::wire::{call, emulator, error_code, ok};
 /// This emulator's account id, which is also the default `CatalogId`.
@@ -77,7 +79,7 @@ fn job_rows() -> Vec<JobRow> {
                 "Command": command("glueetl", "s3://scripts-bucket/etl.py"),
             }),
             job_mode: "SCRIPT",
-            glue_version: "5.1",
+            glue_version: DEFAULT_GLUE_VERSION,
             timeout: 480,
             max_concurrent_runs: 1,
         },
@@ -95,7 +97,7 @@ fn job_rows() -> Vec<JobRow> {
                 "MaxCapacity": 0.0625,
             }),
             job_mode: "SCRIPT",
-            glue_version: "5.1",
+            glue_version: DEFAULT_GLUE_VERSION,
             timeout: 480,
             max_concurrent_runs: 1,
         },

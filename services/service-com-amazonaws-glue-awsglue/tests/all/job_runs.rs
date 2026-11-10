@@ -29,9 +29,10 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
 use service_com_amazonaws_glue_awsglue::state::{
-    ComAmazonawsGlueAwsglueState, JobRunEntry, FIRST_JOB_RUN_ATTEMPT, JOB_RUN_ID_PREFIX,
-    JOB_RUN_SCRIPT_UNREADABLE_LEAD, JOB_RUN_SETTLES_AFTER, JOB_RUN_STATE_FAILED,
-    JOB_RUN_STATE_STARTING, MAX_RUNS_PER_JOB, MAX_TIMEOUT_MINUTES, TERMINAL_JOB_RUN_STATES,
+    ComAmazonawsGlueAwsglueState, JobRunEntry, DEFAULT_GLUE_VERSION, FIRST_JOB_RUN_ATTEMPT,
+    JOB_RUN_ID_PREFIX, JOB_RUN_SCRIPT_UNREADABLE_LEAD, JOB_RUN_SETTLES_AFTER,
+    JOB_RUN_STATE_FAILED, JOB_RUN_STATE_STARTING, MAX_RUNS_PER_JOB, MAX_TIMEOUT_MINUTES,
+    PYTHON_SHELL_JOB_LOG_GROUP, TERMINAL_JOB_RUN_STATES,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -199,21 +200,27 @@ async fn a_started_run_is_read_back_through_get_job_run() {
             json!({
                 "JobName": "sim2real-bookmark-job",
                 "JobMode": "SCRIPT",
-                "GlueVersion": "5.1",
+                "GlueVersion": DEFAULT_GLUE_VERSION,
                 "Timeout": 5,
                 "MaxCapacity": 0.0625,
                 // A fraction of a DPU is no whole DPU.
                 "AllocatedCapacity": 0,
                 "Attempt": FIRST_JOB_RUN_ATTEMPT,
                 "Arguments": {},
-                // Nothing triggered this run and it retries nothing.
+                // Nothing triggered this run and it retries nothing, so no predicate run
+                // precedes it — reported as the empty list.
                 "TriggerName": Value::Null,
                 "PreviousRunId": Value::Null,
-                "PredecessorRuns": Value::Null,
+                "PredecessorRuns": [],
                 "ProfileName": Value::Null,
                 "DPUSeconds": Value::Null,
                 "StateDetail": Value::Null,
-                "LogGroupName": Value::Null,
+                // A Python shell job's runs log under their own group, and this job carries
+                // no security configuration for the group to be encrypted with.
+                "LogGroupName": PYTHON_SHELL_JOB_LOG_GROUP,
+                // "If false or not populated, the job runs will not be considered for
+                // queueing": neither the job nor the start named the flag.
+                "JobRunQueuingEnabled": false,
             }),
         ),
         (

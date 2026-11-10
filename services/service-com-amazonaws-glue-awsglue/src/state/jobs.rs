@@ -15,9 +15,64 @@ pub const JOB_COMMAND_NAMES: [&str; 4] = ["glueetl", "pythonshell", "gluestreami
 /// missing or null, SCRIPT is assigned as the default value" (`CreateJob$JobMode`).
 pub const DEFAULT_JOB_MODE: &str = "SCRIPT";
 
-/// The `GlueVersion` stored for a create that named none: "Jobs that are created
-/// without specifying a Glue version default to Glue 5.1" (`CreateJob$GlueVersion`).
-pub const DEFAULT_GLUE_VERSION: &str = "5.1";
+/// The `GlueVersion` stored for a create that named none, which is the version the service
+/// runs such a job on and reports from every read of it.
+///
+/// `CreateJob$GlueVersion` states the rule — a job created without a Glue version is given
+/// one — and names the version that was current when the model was published ("Jobs that are
+/// created without specifying a Glue version default to Glue 5.1"). The version filled in is
+/// whatever the service's current default is, and that is what it answers with; a create
+/// that names a version keeps the one it named, whichever it is.
+pub const DEFAULT_GLUE_VERSION: &str = "6.0";
+
+/// The `JobRunQueuingEnabled` a definition — or a run — that named none carries: "A value
+/// of true means job run queuing is enabled for the job runs. If false or not populated, the
+/// job runs will not be considered for queueing" (`Job$JobRunQueuingEnabled`). "Not
+/// populated" and `false` are the same behaviour, so the flag the service applies is always
+/// known and every read reports it rather than leaving a client to guess.
+pub const DEFAULT_JOB_RUN_QUEUING_ENABLED: bool = false;
+
+/// The log group a run of a Python shell job writes into, and the one every other job's run
+/// writes into: `JobRun$LogGroupName` is "the name of the log group for secure logging …
+/// This name can be `/aws-glue/jobs/`", which is the group Spark job runs log under, while a
+/// Python shell job (`JobCommand$Name` [`PYTHON_SHELL_COMMAND`]) logs under its own group.
+///
+/// Those two are the groups the member's own documentation and the recorded reads of a run
+/// state; no recorded read and no documented sentence names a separate group for a Ray job's
+/// runs, so a run of one reports the group the member documents rather than a third name this
+/// emulator would have to invent.
+pub const SPARK_JOB_LOG_GROUP: &str = "/aws-glue/jobs";
+/// See [`SPARK_JOB_LOG_GROUP`].
+pub const PYTHON_SHELL_JOB_LOG_GROUP: &str = "/aws-glue/python-jobs";
+
+/// The log group a run of this job writes into: the group its COMMAND logs under
+/// ([`SPARK_JOB_LOG_GROUP`], [`PYTHON_SHELL_JOB_LOG_GROUP`]), and — for a run that carries a
+/// security configuration — that group with the role and configuration names appended, which
+/// is the form the member documents for an encrypted group: "If you add a role name and
+/// `SecurityConfiguration` name (in other words,
+/// `/aws-glue/jobs-yourRoleName-yourSecurityConfigurationName/`), then that security
+/// configuration is used to encrypt the log group."
+///
+/// `role` is the job's `Role`, read through this crate's ONE reading of that member
+/// ([`glue_role_reference`]), so the name appended is the one IAM holds the role under
+/// whichever form the request named it in.
+pub fn job_run_log_group(
+    command: &JobCommand,
+    role: &str,
+    security_configuration: Option<&str>,
+) -> String {
+    let base = match command.name.as_deref() {
+        Some(PYTHON_SHELL_COMMAND) => PYTHON_SHELL_JOB_LOG_GROUP,
+        _ => SPARK_JOB_LOG_GROUP,
+    };
+    match security_configuration {
+        Some(configuration) => format!(
+            "{base}-{}-{configuration}",
+            glue_role_reference(role).name
+        ),
+        None => base.to_string(),
+    }
+}
 
 /// `ExecutionProperty$MaxConcurrentRuns` for a job whose create named no execution
 /// property: "The maximum number of concurrent runs allowed for the job. The default
@@ -120,22 +175,61 @@ pub fn default_capacity(
     command: &JobCommand,
     glue_version: &str,
 ) -> (Option<String>, Option<i32>, Option<f64>) {
-    let expresses_workers = glue_version
-        .parse::<f64>()
-        .is_ok_and(|version| version >= MIN_WORKER_TYPE_GLUE_VERSION);
-    match command.name.as_deref() {
-        Some(SPARK_ETL_COMMAND) | Some(SPARK_STREAMING_COMMAND) if expresses_workers => (
+    if expresses_capacity_as_workers(command, glue_version) {
+        return (
             Some(DEFAULT_SPARK_WORKER_TYPE.to_string()),
             Some(DEFAULT_SPARK_WORKERS),
             dpu_per_worker(DEFAULT_SPARK_WORKER_TYPE)
                 .map(|per_worker| per_worker * f64::from(DEFAULT_SPARK_WORKERS)),
-        ),
+        );
+    }
+    match command.name.as_deref() {
         Some(SPARK_ETL_COMMAND) | Some(SPARK_STREAMING_COMMAND) => {
             (None, None, Some(DEFAULT_SPARK_DPUS))
         }
         Some(PYTHON_SHELL_COMMAND) => (None, None, Some(DEFAULT_PYTHON_SHELL_DPUS)),
         _ => (None, None, None),
     }
+}
+
+/// Whether the capacity of a job of this command and Glue version IS a worker
+/// configuration rather than a DPU figure: a Spark batch or streaming job from
+/// [`MIN_WORKER_TYPE_GLUE_VERSION`] on, by the sentence quoted on
+/// [`DEFAULT_SPARK_WORKER_TYPE`] ("For Glue version 2.0 or later jobs, you cannot specify a
+/// `Maximum capacity`. Instead, you should specify a `Worker type` and the `Number of
+/// workers`").
+fn expresses_capacity_as_workers(command: &JobCommand, glue_version: &str) -> bool {
+    let spark = matches!(
+        command.name.as_deref(),
+        Some(SPARK_ETL_COMMAND) | Some(SPARK_STREAMING_COMMAND)
+    );
+    spark
+        && glue_version
+            .parse::<f64>()
+            .is_ok_and(|version| version >= MIN_WORKER_TYPE_GLUE_VERSION)
+}
+
+/// The worker configuration `dpus` amounts to on a job whose capacity is expressed as
+/// workers: that many [`DEFAULT_SPARK_WORKER_TYPE`] workers, since one of them "maps to 1
+/// DPU" (`CreateJob$WorkerType`) — the same reading [`default_capacity`] gives the
+/// documented default of [`DEFAULT_SPARK_DPUS`] DPUs.
+///
+/// `None` when the capacity of such a job is a DPU figure rather than a worker
+/// configuration ([`expresses_capacity_as_workers`]), and when the figure is not a whole
+/// number of those workers — a Python shell job's 0.0625 DPU is no worker count.
+fn workers_for_dpus(
+    command: &JobCommand,
+    glue_version: &str,
+    dpus: f64,
+) -> Option<(&'static str, i32)> {
+    if !expresses_capacity_as_workers(command, glue_version) {
+        return None;
+    }
+    let workers = dpus / dpu_per_worker(DEFAULT_SPARK_WORKER_TYPE)?;
+    if workers.fract() != 0.0 || !(1.0..=f64::from(i32::MAX)).contains(&workers) {
+        return None;
+    }
+    Some((DEFAULT_SPARK_WORKER_TYPE, workers as i32))
 }
 
 /// The DPUs one worker of `worker_type` maps to, as `CreateJob$WorkerType` documents
@@ -202,7 +296,9 @@ pub struct JobEntry {
     /// One of the modelled `JobMode` values; [`DEFAULT_JOB_MODE`] when the create
     /// named none.
     pub job_mode: String,
-    pub job_run_queuing_enabled: Option<bool>,
+    /// Whether this job's runs are considered for queueing;
+    /// [`DEFAULT_JOB_RUN_QUEUING_ENABLED`] when the definition named nothing.
+    pub job_run_queuing_enabled: bool,
     pub description: Option<String>,
     pub log_uri: Option<String>,
     pub role: String,
@@ -357,7 +453,9 @@ impl JobEntry {
                 .job_mode
                 .clone()
                 .unwrap_or_else(|| DEFAULT_JOB_MODE.to_string()),
-            job_run_queuing_enabled: input.job_run_queuing_enabled,
+            job_run_queuing_enabled: input
+                .job_run_queuing_enabled
+                .unwrap_or(DEFAULT_JOB_RUN_QUEUING_ENABLED),
             description: input.description.clone(),
             log_uri: input.log_uri.clone(),
             role: input.role.clone(),
@@ -437,7 +535,9 @@ impl JobEntry {
                 .job_mode
                 .clone()
                 .unwrap_or_else(|| DEFAULT_JOB_MODE.to_string()),
-            job_run_queuing_enabled: update.job_run_queuing_enabled,
+            job_run_queuing_enabled: update
+                .job_run_queuing_enabled
+                .unwrap_or(DEFAULT_JOB_RUN_QUEUING_ENABLED),
             description: update.description.clone(),
             log_uri: update.log_uri.clone(),
             role: update.role.clone().unwrap_or_default(),
@@ -644,7 +744,7 @@ impl JobEntry {
         Job {
             name: Some(self.name.clone()),
             job_mode: Some(self.job_mode.clone()),
-            job_run_queuing_enabled: self.job_run_queuing_enabled,
+            job_run_queuing_enabled: Some(self.job_run_queuing_enabled),
             description: self.description.clone(),
             log_uri: self.log_uri.clone(),
             role: Some(self.role.clone()),
@@ -736,8 +836,11 @@ pub(super) fn max_concurrent_runs_of(property: Option<&ExecutionProperty>) -> i3
 /// What the definition named, read by [`capacity_from`] — else, when it named no capacity
 /// at all, the documented default for its command and Glue version
 /// ([`default_capacity`]), because the service fills those in rather than storing a job
-/// with no capacity for a runner to size. `CreateJob` and `UpdateJob` submit the same four
-/// capacity members with the same documentation, so both resolve them here.
+/// with no capacity for a runner to size. A definition that named only a DPU figure, on a
+/// job whose capacity IS a worker configuration, is stored with the configuration that
+/// figure amounts to ([`workers_for_dpus`]), so the three members always describe ONE
+/// capacity. `CreateJob` and `UpdateJob` submit the same four capacity members with the
+/// same documentation, so both resolve them here.
 pub(super) fn capacity_members(
     max_capacity: Option<f64>,
     allocated_capacity: i32,
@@ -752,8 +855,23 @@ pub(super) fn capacity_members(
         worker_type,
         number_of_workers,
     );
-    if named.is_none() && worker_type.is_none() && number_of_workers.is_none() {
-        return default_capacity(command, glue_version);
+    if worker_type.is_none() && number_of_workers.is_none() {
+        // Nothing named a capacity at all: the service fills in the documented default.
+        let Some(dpus) = named else {
+            return default_capacity(command, glue_version);
+        };
+        // A definition that expressed its capacity as a DPU figure, on a command and Glue
+        // version whose capacity IS a worker configuration, is stored with the
+        // configuration that figure amounts to, so a read reports the capacity the job
+        // holds in the form that job's capacity takes.
+        if let Some((derived_worker_type, workers)) = workers_for_dpus(command, glue_version, dpus)
+        {
+            return (
+                Some(derived_worker_type.to_string()),
+                Some(workers),
+                Some(dpus),
+            );
+        }
     }
     (
         worker_type.map(str::to_string),
@@ -927,7 +1045,9 @@ pub struct JobRunEntry {
     /// i.e. the run this one retries, when the request named one.
     pub previous_run_id: Option<String>,
     pub job_mode: String,
-    pub job_run_queuing_enabled: Option<bool>,
+    /// Whether this run was considered for queueing: what the start named, else the job's
+    /// own flag ([`JobEntry::job_run_queuing_enabled`]).
+    pub job_run_queuing_enabled: bool,
     /// Server-set: the instant `StartJobRun` recorded this run.
     pub started_on: SystemTime,
     /// Server-set: moves with every state change of this run.
@@ -971,6 +1091,15 @@ pub struct JobRunEntry {
     pub security_configuration: Option<String>,
     pub notification_property: Option<NotificationProperty>,
     pub glue_version: String,
+    /// `JobRun$LogGroupName`: the group this run's logs are written under, as
+    /// [`job_run_log_group`] resolves it from the job's command and this run's security
+    /// configuration. Written once at start, so every read of the run reports one group.
+    pub log_group_name: String,
+    /// `JobRun$PredecessorRuns`: "a list of predecessors to this job run" — the runs "used in
+    /// the predicate of a conditional trigger that triggered this job run" (`Predecessor`),
+    /// which is empty for a run a caller started directly and for one a trigger with no
+    /// satisfied predicate began.
+    pub predecessors: Vec<Predecessor>,
     pub execution_class: Option<String>,
     pub maintenance_window: Option<String>,
     pub execution_role_session_policy: Option<String>,
@@ -1037,7 +1166,9 @@ impl JobRunEntry {
             job_mode: job.job_mode.clone(),
             // "If this field does not match the value set in the job run, then the value
             // from the job run field will be used."
-            job_run_queuing_enabled: input.job_run_queuing_enabled.or(job.job_run_queuing_enabled),
+            job_run_queuing_enabled: input
+                .job_run_queuing_enabled
+                .unwrap_or(job.job_run_queuing_enabled),
             started_on: now,
             last_modified_on: now,
             completed_on: None,
@@ -1067,6 +1198,19 @@ impl JobRunEntry {
                 .or_else(|| job.notification_property.clone()),
             // `GlueVersion` is not a `StartJobRun` member: a run uses its job's.
             glue_version: job.glue_version.clone(),
+            // Which log group the run writes under follows from the job's command and the
+            // security configuration the run ends up with, so it is resolved here, once.
+            log_group_name: job_run_log_group(
+                &job.command,
+                &job.role,
+                input
+                    .security_configuration
+                    .as_deref()
+                    .or(job.security_configuration.as_deref()),
+            ),
+            // A run a caller started is preceded by nothing; a firing whose predicate named
+            // runs records them on the run it begins.
+            predecessors: Vec::new(),
             execution_class: input
                 .execution_class
                 .clone()
@@ -1237,7 +1381,7 @@ impl JobRunEntry {
             trigger_name: self.trigger_name.clone(),
             job_name: Some(self.job_name.clone()),
             job_mode: Some(self.job_mode.clone()),
-            job_run_queuing_enabled: self.job_run_queuing_enabled,
+            job_run_queuing_enabled: Some(self.job_run_queuing_enabled),
             started_on: Some(to_date_time(self.started_on)),
             last_modified_on: Some(to_date_time(self.last_modified_on)),
             completed_on: self.completed_on.map(to_date_time),
@@ -1245,10 +1389,10 @@ impl JobRunEntry {
             arguments: Some(self.arguments.clone()),
             error_message: self.error_message.clone(),
             // "A job run that was used in the predicate of a conditional trigger that
-            // triggered this job run" (`Predecessor`): a run started through
-            // `StartJobRun` has none, and a run this one retries is not one of them —
-            // that is `PreviousRunId`.
-            predecessor_runs: None,
+            // triggered this job run" (`Predecessor`): the runs that preceded this one, which
+            // is the EMPTY list for a run nothing preceded rather than no list at all. A run
+            // this one retries is not one of them — that is `PreviousRunId`.
+            predecessor_runs: Some(self.predecessors.clone()),
             // `AllocatedCapacity` is the same quantity as `MaxCapacity` — "This field is
             // deprecated. Use MaxCapacity instead" — so it reports the same number of
             // whole DPUs, and the model's own default of 0 for a run with no capacity.
@@ -1259,10 +1403,9 @@ impl JobRunEntry {
             worker_type: self.worker_type.clone(),
             number_of_workers: self.number_of_workers,
             security_configuration: self.security_configuration.clone(),
-            // "The name of the log group for secure logging": a run's script writes its
-            // output into the run's own log here rather than into a log group of this
-            // account, so there is no group holding it to name.
-            log_group_name: None,
+            // "The name of the log group for secure logging": the group this run's logs are
+            // written under, resolved when the run started.
+            log_group_name: Some(self.log_group_name.clone()),
             notification_property: self.notification_property.clone(),
             glue_version: Some(self.glue_version.clone()),
             // "The total time each executor ran during the lifecycle of a job run in

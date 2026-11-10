@@ -289,6 +289,8 @@ mod schema_version_registration;
 mod search_tables;
 #[path = "all/security_configurations.rs"]
 mod security_configurations;
+#[path = "all/service_filled_read_members.rs"]
+mod service_filled_read_members;
 #[path = "all/session_deletion.rs"]
 mod session_deletion;
 #[path = "all/session_tags.rs"]
@@ -305,6 +307,8 @@ mod statements;
 mod store_capacity;
 #[path = "all/table_optimizers.rs"]
 mod table_optimizers;
+#[path = "all/tag_projection_account_scope.rs"]
+mod tag_projection_account_scope;
 #[path = "all/table_update_concurrency.rs"]
 mod table_update_concurrency;
 #[path = "all/table_version_deletion.rs"]
