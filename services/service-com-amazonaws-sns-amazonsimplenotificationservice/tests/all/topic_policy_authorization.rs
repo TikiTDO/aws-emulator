@@ -48,10 +48,12 @@ const ACCOUNT_KEY: &str = "AKIDSNSAUTHORIZATION";
 /// `AuthorizationError`.
 const AUTHORIZATION_ERROR: (u16, &str) = (403, "AuthorizationError");
 
-/// The reason clause IAM states when nothing the resource's own policy carries allows the
-/// action — the default deny a call with no grant anywhere falls to.
-fn no_resource_policy_allows(action: &str) -> String {
-    format!("because no resource-based policy allows the {action} action")
+/// The reason clause IAM states for the default deny a call with no grant anywhere falls to:
+/// within one account the permission the principal is missing is its own, so the sentence
+/// names the identity-based policies that did not grant it — the clause the recorded refusal
+/// of this service carries.
+fn no_identity_policy_allows(action: &str) -> String {
+    format!("because no identity-based policy allows the {action} action")
 }
 
 /// The reason clause IAM states when the resource's own policy explicitly denies the call.
@@ -421,7 +423,7 @@ async fn every_topic_action_needs_a_grant_and_is_served_by_one() {
                 &principal.arn,
                 call.action,
                 &topic,
-                &no_resource_policy_allows(call.action)
+                &no_identity_policy_allows(call.action)
             ),
             "case {case:?}: unexpected sentence, got {body}"
         );
@@ -491,7 +493,7 @@ async fn the_topic_policy_grants_by_principal_and_denies_over_any_allow() {
             "the generated default policy, with no identity policy",
             no_document(),
             no_document(),
-            Some(no_resource_policy_allows("SNS:Publish")),
+            Some(no_identity_policy_allows("SNS:Publish")),
         ),
         (
             "a topic policy naming the principal",
@@ -513,7 +515,7 @@ async fn the_topic_policy_grants_by_principal_and_denies_over_any_allow() {
                 })
             },
             no_document(),
-            Some(no_resource_policy_allows("SNS:Publish")),
+            Some(no_identity_policy_allows("SNS:Publish")),
         ),
         (
             "a topic policy naming the account, with an identity policy",
@@ -668,7 +670,7 @@ async fn a_refused_call_changes_nothing_and_reports_nothing() {
                 &principal.arn,
                 "SNS:Publish",
                 arn,
-                &no_resource_policy_allows("SNS:Publish")
+                &no_identity_policy_allows("SNS:Publish")
             ),
             "case {case:?}: unexpected sentence, got {body}"
         );

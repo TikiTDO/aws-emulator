@@ -83,6 +83,9 @@ service-com-amazonaws-lambda-awsgirapiservice = { workspace = true }
 # feedback role is resolved in, and the principals an authorization test creates, is a
 # dependency of this crate itself.)
 service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
+# STS mints the role-session credential the publish-authorization suite signs with, so the
+# session a refusal names is the one `sts:AssumeRole` reported.
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
 # A deployment package the delivery tests upload is a .zip archive they write in memory, as
 # `FunctionCode$ZipFile` carries it: base64 of a .zip.
 zip = { version = "9", default-features = false, features = ["deflate"] }

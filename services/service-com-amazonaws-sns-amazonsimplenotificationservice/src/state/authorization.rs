@@ -222,12 +222,15 @@ fn refusal(
         return None;
     }
     if !(identity == Decision::Allowed || caller.identity_is_unbounded()) {
-        // Neither document allows the call. SNS states that of the resource's policy, which
-        // is the document a caller of this service can write a grant into.
-        return Some(iam::not_authorized_by_resource_policy(
+        // Neither document allows the call, which within one account is IAM's default deny:
+        // what the principal is missing is a permission of its OWN, so the sentence names the
+        // identity-based policies that did not grant it, the clause AWS states for a
+        // same-account caller no policy allows.
+        return Some(iam::not_authorized_by_identity_policy(
             &caller.arn,
             action,
             resource,
+            &iam::no_identity_policy_allows(action),
         ));
     }
     // "A permissions boundary sets the maximum permissions that an identity-based policy can
