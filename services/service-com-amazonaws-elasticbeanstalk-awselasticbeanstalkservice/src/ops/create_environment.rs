@@ -331,13 +331,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .get(&(input.application_name.clone(), template_name.clone()))
                 else {
                     return Err(CreateEnvironmentError::invalid_parameter_value(
-                        crate::state::missing_configuration_template_message(template_name),
+                        crate::state::missing_configuration_template_message(
+                            &input.application_name,
+                            template_name,
+                        ),
                     ));
                 };
                 Some(template.clone())
             }
             None => None,
         };
+
+        // "SolutionStackName: the name of an Elastic Beanstalk solution stack
+        // (platform version) to use with the environment." A solution stack
+        // name names a platform version out of this service's own published
+        // catalog, so a name the catalog does not offer names nothing that can
+        // be launched — the same refusal the ARN form gets below.
+        if let Some(message) =
+            crate::state::unpublished_solution_stack_refusal(input.solution_stack_name.as_deref())
+        {
+            return Err(CreateEnvironmentError::invalid_parameter_value(message));
+        }
 
         // "PlatformArn: The Amazon Resource Name (ARN) of the custom platform to
         // use with the environment." A platform version is either CUSTOM — created

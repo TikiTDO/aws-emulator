@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteConfigurationTemplate
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteConfigurationTemplate`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Implemented: removes the saved configuration the request names from the application
+//! that holds it, so the configuration set it held stops being described and the name is
+//! free again. This is the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteConfigurationTemplate::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The write is SYNCHRONOUS: a saved configuration IS the record this store holds, so
+//! there is nothing for the clock to carry out afterwards. The environments launched from
+//! the template are untouched, as the operation documents: "when you launch an
+//! environment using a configuration template, the environment gets a copy of the
+//! template. You can delete or modify the environment's copy of the template without
+//! affecting the running environment."
 //!
 //! ## Shape of an operation
 //!
@@ -156,18 +157,67 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteConfigurationTemplate` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteConfigurationTemplateErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteConfigurationTemplate"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            DeleteConfigurationTemplateError::internal_failure(
+                "the Elastic Beanstalk store is unavailable",
+            )
+        })?;
+        let mut store = state.lock();
+        // Every event this call records belongs to this one request's activity.
+        let request_id = crate::state::new_request_id();
+        // An application whose deletion the clock has already carried out holds
+        // nothing, so those are settled before this application is read.
+        store.materialize_due_transitions();
+
+        // "Deletes the specified application along with all associated versions
+        // and configurations": an application already on its way out is taking
+        // this template with it, and that deletion is an operation in progress on
+        // the very element this one would act on — which is what this operation's
+        // one modelled error reports.
+        if store
+            .applications
+            .get(&input.application_name)
+            .is_some_and(crate::state::Application::is_deleting)
+        {
+            return Err(
+                DeleteConfigurationTemplateErrorModeled::OperationInProgressException(
+                    OperationInProgressException {
+                        message: Some(format!(
+                            "Cannot delete configuration template {} because application {} is \
+                             being deleted.",
+                            input.template_name, input.application_name
+                        )),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // The model declares NO not-found error for this operation (its only
+        // modelled error is `OperationInProgressException`), and deleting a name
+        // no saved configuration exists under succeeds: there is nothing left to
+        // delete, which is the post-condition the caller asked for. So this is a
+        // no-op success — it writes nothing and records no activity, and answers
+        // the same way however many times it is repeated, which is what makes a
+        // re-run teardown converge instead of aborting. The same answer
+        // `DeleteApplication` gives an application this account does not hold.
+        let key = (input.application_name.clone(), input.template_name.clone());
+        let Some(template) = store.configuration_templates.remove(&key) else {
+            return Ok(DeleteConfigurationTemplateOutput);
+        };
+
+        // The activity this call performed, recorded for `DescribeEvents` under
+        // this request's id: the operation starting and the operation completing.
+        // The delete is done when the call returns, so it records a COMPLETED
+        // activity rather than a start the clock finishes later.
+        store.record_completed_activity(
+            &request_id,
+            "deleteConfigurationTemplate",
+            None,
+            template.event_subject(),
+        );
+
+        Ok(DeleteConfigurationTemplateOutput)
     }
 }

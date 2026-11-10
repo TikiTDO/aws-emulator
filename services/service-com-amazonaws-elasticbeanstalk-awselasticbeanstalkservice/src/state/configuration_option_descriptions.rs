@@ -78,6 +78,11 @@ pub(super) const OPTION_DESCRIPTIONS: &[OptionDescription] = &[
     ),
     (
         NAMESPACE_LAUNCH_CONFIGURATION,
+        OPTION_INSTANCE_TYPE,
+        "Amazon EC2 instance type the environment's instances run on.",
+    ),
+    (
+        NAMESPACE_LAUNCH_CONFIGURATION,
         "MonitoringInterval",
         "Interval at which Amazon CloudWatch metrics are collected from the environment's \
          instances.",

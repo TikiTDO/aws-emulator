@@ -442,6 +442,34 @@ pub fn solution_stack_named(name: &str) -> Option<&'static SolutionStack> {
     SOLUTION_STACKS.iter().find(|stack| stack.name() == name)
 }
 
+/// The message this service refuses a `SolutionStackName` that names no
+/// published solution stack with, built from the request:
+/// `No Solution Stack named '<name>' found.`
+///
+/// The same shape as the not-found sentences every other create answers an
+/// absent resource with, read from the one place every caller reads it.
+pub fn missing_solution_stack_message(solution_stack_name: &str) -> String {
+    format!("No Solution Stack named '{solution_stack_name}' found.")
+}
+
+/// The refusal a request that names the platform version to run by
+/// `SolutionStackName` is owed when that name is not one this service publishes
+/// — and `None` when it is, or when the request names no solution stack at all.
+///
+/// A solution stack name names a platform version out of the SERVICE's own
+/// catalog ([`SOLUTION_STACKS`], what `ListAvailableSolutionStacks` reports):
+/// a name the catalog does not offer names no platform version, so there is
+/// nothing to launch, configure or describe against it and the request is
+/// refused rather than accepted against a platform that cannot exist. The ONE
+/// place that check is written, so every operation taking the member refuses the
+/// same names with the same sentence.
+pub fn unpublished_solution_stack_refusal(solution_stack_name: Option<&str>) -> Option<String> {
+    let name = solution_stack_name?;
+    solution_stack_named(name)
+        .is_none()
+        .then(|| missing_solution_stack_message(name))
+}
+
 /// The current release of each platform family this catalog publishes, as the
 /// `v<major>.<minor>.<patch>` component every branch of that family is
 /// published at.

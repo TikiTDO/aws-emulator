@@ -37,6 +37,8 @@ mod create_platform_version_authorization;
 mod custom_platform_version_registration;
 #[path = "all/custom_platform_version_tags.rs"]
 mod custom_platform_version_tags;
+#[path = "all/delete_configuration_template.rs"]
+mod delete_configuration_template;
 #[path = "all/delete_platform_version.rs"]
 mod delete_platform_version;
 #[path = "all/describe_application_versions.rs"]
@@ -59,6 +61,8 @@ mod environment_operations;
 mod environment_resources;
 #[path = "all/environment_template_configuration.rs"]
 mod environment_template_configuration;
+#[path = "all/environment_tier_changes.rs"]
+mod environment_tier_changes;
 #[path = "all/events.rs"]
 mod events;
 // Not a suite of its own: the name the suites below import the shared harness
@@ -67,6 +71,8 @@ mod events;
 mod harness;
 #[path = "all/lifecycle.rs"]
 mod lifecycle;
+#[path = "all/launch_configuration_options.rs"]
+mod launch_configuration_options;
 #[path = "all/managed_action_history.rs"]
 mod managed_action_history;
 #[path = "all/managed_actions.rs"]
@@ -81,12 +87,16 @@ mod operations_role;
 mod platform_branch_catalog;
 #[path = "all/platform_branches.rs"]
 mod platform_branches;
+#[path = "all/platform_definition_bundle_build.rs"]
+mod platform_definition_bundle_build;
 #[path = "all/platform_update_availability.rs"]
 mod platform_update_availability;
 #[path = "all/platform_version_catalog_projection.rs"]
 mod platform_version_catalog_projection;
 #[path = "all/platform_versions.rs"]
 mod platform_versions;
+#[path = "all/published_solution_stack_validation.rs"]
+mod published_solution_stack_validation;
 #[path = "all/record_projections.rs"]
 mod record_projections;
 #[path = "all/recorded_wire_members.rs"]

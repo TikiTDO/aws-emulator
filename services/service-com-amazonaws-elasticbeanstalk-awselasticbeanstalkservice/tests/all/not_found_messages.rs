@@ -21,6 +21,9 @@
 //!   the request gave that environment (`source` / `destination`) instead of
 //!   `Environment`;
 //! * `DescribePlatformVersion`: `Platform '<PlatformArn>' does not exist.`
+//! * every configuration-template lookup: `No Configuration Template named
+//!   '<ApplicationName>/<TemplateName>' found.`, naming the template by the PAIR
+//!   that identifies one (a template name "must be unique per application").
 //!
 //! The templates are written out HERE rather than imported from the service, so
 //! a change to the service's builders that changes the wire wording fails these
@@ -34,7 +37,7 @@
 
 use service_com_amazonaws_elasticbeanstalk_awselasticbeanstalkservice as eb;
 
-use crate::harness::{Emulator, SOLUTION_STACK};
+use crate::harness::{Emulator, PAST_DUE, SOLUTION_STACK};
 use crate::lifecycle::{account, TEST_REGION};
 
 /// The template most of this service's environment lookups word a missing
@@ -60,6 +63,13 @@ fn missing_environment_in_account(role: Option<&str>, kind: &str, value: &str) -
 /// The template `DescribePlatformVersion` words a missing platform version with.
 fn missing_platform(platform_arn: &str) -> String {
     format!("Platform '{platform_arn}' does not exist.")
+}
+
+/// The template every configuration-template lookup words a missing saved
+/// configuration with: the `(ApplicationName, TemplateName)` pair that names
+/// one, joined by `/`.
+fn missing_configuration_template(application_name: &str, template_name: &str) -> String {
+    format!("No Configuration Template named '{application_name}/{template_name}' found.")
 }
 
 /// The modelled minimum length of `EnvironmentName` (`len 4..40`), from the
@@ -490,6 +500,175 @@ async fn describe_platform_version_reports_the_arn_that_does_not_exist() {
             expected,
             "case {case:?}: expected {expected:?}, got {:?}",
             described.error_message()
+        );
+    }
+}
+
+/// One row of the configuration-template table: the operation that resolves the
+/// template, the request it is driven with, and the pair the message has to
+/// name.
+struct TemplateCase {
+    case: &'static str,
+    action: &'static str,
+    params: Vec<(&'static str, String)>,
+    application_name: String,
+    template_name: String,
+}
+
+#[tokio::test]
+async fn every_configuration_template_lookup_names_the_application_and_the_template() {
+    let emulator = Emulator::new();
+    let application = "template-messages";
+    let other_application = "template-messages-other";
+    for name in [application, other_application] {
+        assert_eq!(
+            emulator
+                .call("CreateApplication", &[("ApplicationName", name)])
+                .await
+                .status,
+            200,
+            "fixture {name:?}: expected 200 from CreateApplication"
+        );
+    }
+    // A template the OTHER application holds, so a row can name a real template
+    // name under an application that does not hold it.
+    assert_eq!(
+        emulator
+            .call(
+                "CreateConfigurationTemplate",
+                &[
+                    ("ApplicationName", other_application),
+                    ("TemplateName", "elsewhere"),
+                    ("SolutionStackName", SOLUTION_STACK.as_str()),
+                ],
+            )
+            .await
+            .status,
+        200,
+        "fixture \"elsewhere\": expected 200 from CreateConfigurationTemplate"
+    );
+    assert_eq!(
+        emulator
+            .call(
+                "CreateEnvironment",
+                &[
+                    ("ApplicationName", application),
+                    ("EnvironmentName", "template-msg-env"),
+                    ("SolutionStackName", SOLUTION_STACK.as_str()),
+                ],
+            )
+            .await
+            .status,
+        200,
+        "fixture \"template-msg-env\": expected 200 from CreateEnvironment"
+    );
+    // The launch the clock owes, so the update below is refused by the template
+    // it names rather than by a status the launch left behind.
+    std::thread::sleep(PAST_DUE);
+
+    // Rows differ along the operation that resolved the template and how the
+    // pair misses: a template name no application holds, a template name its
+    // owner's SIBLING application does not hold, and a source template named by
+    // a create.
+    let cases = vec![
+        TemplateCase {
+            case: "a launch from a template that does not exist",
+            action: "CreateEnvironment",
+            params: vec![
+                ("ApplicationName", application.to_string()),
+                ("EnvironmentName", "ghost-template-env".to_string()),
+                ("TemplateName", "never-created".to_string()),
+            ],
+            application_name: application.to_string(),
+            template_name: "never-created".to_string(),
+        },
+        TemplateCase {
+            case: "an update deploying a template another application holds",
+            action: "UpdateEnvironment",
+            params: vec![
+                ("EnvironmentName", "template-msg-env".to_string()),
+                ("TemplateName", "elsewhere".to_string()),
+            ],
+            application_name: application.to_string(),
+            template_name: "elsewhere".to_string(),
+        },
+        TemplateCase {
+            case: "a read of a template that does not exist",
+            action: "DescribeConfigurationSettings",
+            params: vec![
+                ("ApplicationName", application.to_string()),
+                ("TemplateName", "never-created".to_string()),
+            ],
+            application_name: application.to_string(),
+            template_name: "never-created".to_string(),
+        },
+        TemplateCase {
+            case: "the option catalogue of a template that does not exist",
+            action: "DescribeConfigurationOptions",
+            params: vec![
+                ("ApplicationName", application.to_string()),
+                ("TemplateName", "never-created".to_string()),
+            ],
+            application_name: application.to_string(),
+            template_name: "never-created".to_string(),
+        },
+        TemplateCase {
+            case: "a write to a template that does not exist",
+            action: "UpdateConfigurationTemplate",
+            params: vec![
+                ("ApplicationName", application.to_string()),
+                ("TemplateName", "never-created".to_string()),
+                ("Description", "no such configuration".to_string()),
+            ],
+            application_name: application.to_string(),
+            template_name: "never-created".to_string(),
+        },
+        TemplateCase {
+            case: "a create copying a source template another application holds",
+            action: "CreateConfigurationTemplate",
+            params: vec![
+                ("ApplicationName", application.to_string()),
+                ("TemplateName", "copied".to_string()),
+                (
+                    "SourceConfiguration.TemplateName",
+                    "elsewhere".to_string(),
+                ),
+            ],
+            application_name: application.to_string(),
+            template_name: "elsewhere".to_string(),
+        },
+    ];
+
+    for TemplateCase {
+        case,
+        action,
+        params,
+        application_name,
+        template_name,
+    } in &cases
+    {
+        let params: Vec<(&str, &str)> = params
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
+        let refused = emulator.call(action, &params).await;
+        assert_eq!(
+            refused.status, 400,
+            "case {case:?}: expected HTTP 400, got {} and body {}",
+            refused.status, refused.body
+        );
+        assert_eq!(
+            refused.error_code(),
+            "InvalidParameterValue",
+            "case {case:?}: expected InvalidParameterValue, got body {}",
+            refused.body
+        );
+        let expected = missing_configuration_template(application_name, template_name);
+        assert_eq!(
+            refused.error_message(),
+            expected,
+            "case {case:?}: expected {expected:?}, got {:?}",
+            refused.error_message()
         );
     }
 }

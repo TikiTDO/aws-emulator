@@ -220,7 +220,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let key = (input.application_name.clone(), input.template_name.clone());
         let Some(template) = store.configuration_templates.get(&key) else {
             return Err(UpdateConfigurationTemplateError::invalid_parameter_value(
-                crate::state::missing_configuration_template_message(&input.template_name),
+                crate::state::missing_configuration_template_message(
+                    &input.application_name,
+                    &input.template_name,
+                ),
             ));
         };
 

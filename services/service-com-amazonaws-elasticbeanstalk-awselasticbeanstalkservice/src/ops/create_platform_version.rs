@@ -2,8 +2,8 @@
 
 //! @op CreatePlatformVersion
 //! Implemented: records a custom platform version for this account and reports it as
-//! `Creating` until the clock makes the build completion due. This is the ONLY file to
-//! touch for this operation.
+//! `Creating` until the clock makes the build completion due, then in the status that
+//! build reached. This is the ONLY file to touch for this operation.
 //!
 //! Whether the caller may create it at all is IAM's decision, taken before anything is
 //! read or written (`crate::service::authorization`): a caller whose identity-based
@@ -17,9 +17,12 @@
 //!
 //! The platform definition archive named by `PlatformDefinitionBundle` is DOWNLOADED —
 //! for the CALLER, so a create whose archive the caller may not read, or whose archive
-//! object storage cannot hand back, is refused — but its contents
-//! are not interpreted and no builder environment is launched, so every value a built
-//! platform would report from the archive (its category, maintainer, operating system,
+//! object storage cannot hand back, is refused — and the version is BUILT from it: the
+//! platform definition file the archive has to carry is what the build reads
+//! (`crate::state::platform_build`), so an archive that defines no platform settles the
+//! version in the terminal failure status instead of `Ready`. Nothing else in the
+//! archive is interpreted and no builder environment is launched, so every other value
+//! a built platform would report from it (its category, maintainer, operating system,
 //! languages, frameworks) and the `Builder` of the response are absent rather than
 //! invented.
 //!
@@ -199,6 +202,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         {
             return Err(CreatePlatformVersionError::invalid_parameter_value(message));
         }
+        // The version is BUILT from that archive: the platform builder reads the
+        // platform definition file the archive has to carry, and an archive that
+        // defines no platform produces none — so the verdict that reading reaches
+        // is what decides the terminal `PlatformStatus` the version settles in
+        // below. Read before the store is locked, so no other caller waits on it.
+        let build = crate::state::build_platform_definition(
+            ctx,
+            &region,
+            &input.platform_definition_bundle,
+        )
+        .await;
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             CreatePlatformVersionError::internal_failure(
                 "the Elastic Beanstalk store is unavailable",
@@ -232,7 +246,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             platform_version: input.platform_version.clone(),
             platform_owner: ::engine::emulator_account_id().to_string(),
             // The version is built before it can be used, so it starts `Creating`
-            // and the move to `Ready` is what the clock owes.
+            // and the terminal status its build reached is what the clock owes.
             status: crate::state::PLATFORM_STATUS_CREATING.to_string(),
             definition_bundle: Some(input.platform_definition_bundle.clone()),
             option_settings: input.option_settings.clone().unwrap_or_default(),
@@ -240,7 +254,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             date_created: created,
             date_updated: created,
             tags: input.tags.clone().unwrap_or_default(),
-            pending_status: Some(crate::state::PendingPlatformStatus::build_completion()),
+            pending_status: Some(crate::state::PendingPlatformStatus::build_completion(build)),
         };
         let summary = platform_version.to_summary();
         store.platform_versions.insert(arn, platform_version);

@@ -305,7 +305,10 @@ async fn a_launch_from_an_unknown_template_is_refused() {
             "case {case:?}: unexpected error code in {}",
             refused.body
         );
-        let expected = format!("No Configuration Template named '{template_name}' found.");
+        // A template is named by the `(ApplicationName, TemplateName)` pair, and
+        // the refusal names it the way the lookup did.
+        let expected =
+            format!("No Configuration Template named '{APPLICATION}/{template_name}' found.");
         assert_eq!(
             refused.error_message(),
             expected,

@@ -22,13 +22,15 @@
 //! a verdict from the shape of the bucket, the key or the version label.
 //!
 //! The archive is CALLER content, so both the bytes downloaded
-//! ([`MAX_SOURCE_BUNDLE_BYTES`]) and the manifest and configuration text parsed
-//! out of them ([`MAX_VALIDATED_TEXT_BYTES`], applied to what is DECOMPRESSED)
-//! are bounded; how many entries the archive declares is bounded by the first of
+//! ([`MAX_ARCHIVE_BYTES`]) and the manifest and configuration text parsed out
+//! of them ([`MAX_VALIDATED_TEXT_BYTES`], applied to what is DECOMPRESSED) are
+//! bounded; how many entries the archive declares is bounded by the first of
 //! those, since nothing but an entry's name is read for an entry that is neither
 //! of the two files validated, and nothing is retained once the verdict is
-//! reached. The reading happens before this service's store is locked, so no
-//! other caller waits on it.
+//! reached. Both bounds and the download itself are
+//! [`super::caller_archive`]'s, shared with the platform build that reads the
+//! other caller-named archive. The reading happens before this service's store
+//! is locked, so no other caller waits on it.
 //!
 //! Split out of [`super`], which holds the store the versions live in.
 
@@ -60,20 +62,6 @@ const EBEXTENSIONS_FOLDER: &str = ".ebextensions/";
 /// `CreateApplicationVersion$Process` names it: `*.config`.
 const CONFIG_FILE_EXTENSION: &str = ".config";
 
-/// How many bytes of a source bundle this emulator reads to validate it.
-///
-/// A bound on CALLER content: the archive is downloaded into this process, so
-/// its size is capped rather than trusted. An archive past the cap is not read
-/// at all, which is why it is not reported as validated either (see
-/// [`BundleProcessing::NotProcessed`]) — a verdict is only ever reached by
-/// reading the files it is about.
-const MAX_SOURCE_BUNDLE_BYTES: usize = 32 * 1024 * 1024;
-
-/// How many bytes of manifest and configuration text this emulator parses out of
-/// one source bundle, in total — the second bound on caller content, applied to
-/// what is DECOMPRESSED so a small archive cannot expand into this process.
-const MAX_VALIDATED_TEXT_BYTES: usize = 4 * 1024 * 1024;
-
 /// What pre-processing a source bundle concluded about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BundleProcessing {
@@ -85,7 +73,7 @@ pub enum BundleProcessing {
     Failed,
     /// NOTHING validated the bundle, so there is no verdict to report and the
     /// version stays `Unprocessed` ("Application version wasn't pre-processed or
-    /// validated"): the archive is past [`MAX_SOURCE_BUNDLE_BYTES`], or object
+    /// validated"): the archive is past [`MAX_ARCHIVE_BYTES`], or object
     /// storage answered something that says nothing about the object at all (an
     /// emulator assembled without object storage answers the router's own
     /// `UnknownService`, and a transport failure answers nothing) — the same
@@ -193,14 +181,18 @@ impl ComAmazonawsElasticbeanstalkAwselasticbeanstalkserviceState {
     }
 }
 
+/// What a source bundle IS, for the log line a read that learned nothing leaves
+/// behind. See [`download_caller_archive`].
+const SOURCE_BUNDLE_SUBJECT: &str = "an application version's source bundle";
+
 /// The verdict pre-processing reaches for the source bundle at `location`:
 /// download it from object storage, in process, and validate the files
 /// `CreateApplicationVersion$Process` names.
 ///
-/// The read is a read: it changes nothing a later caller sees, in this service's
-/// store or in object storage. Exactly one `GetObject` per request, no loop,
-/// nothing retained — the bytes are dropped once the files have been parsed, and
-/// both bounds above apply to them.
+/// The read is the shared one ([`download_caller_archive`]), so this
+/// pre-processing and the platform build read a caller-named archive exactly
+/// alike; what belongs to pre-processing is only what it CONCLUDES from the
+/// bytes.
 ///
 /// The body IS needed here, unlike the existence check the create performs
 /// first ([`archive_download_refusal`], a `HeadObject`): the verdict is about
@@ -211,96 +203,14 @@ pub async fn process_source_bundle(
     region: &str,
     location: &S3Location,
 ) -> BundleProcessing {
-    use ::aws_smithy_types::error::metadata::ProvideErrorMetadata;
-
-    let bucket = location.s3_bucket.as_deref().unwrap_or_default();
-    let key = location.s3_key.as_deref().unwrap_or_default();
-    // A location that names no bucket, or no key, names no Amazon S3 object at
-    // all: such a create is refused before a version is recorded, so there is
-    // nothing here to read and nothing to conclude.
-    if bucket.is_empty() || key.is_empty() {
-        return BundleProcessing::NotProcessed;
+    match download_caller_archive(ctx, region, location, SOURCE_BUNDLE_SUBJECT).await {
+        DownloadedArchive::Bytes(bytes) => validate_source_bundle(&bytes),
+        // Object storage said the archive is not there, or not readable: the
+        // bundle pre-processing was asked to validate cannot be read at all,
+        // which is a processing failure rather than silence.
+        DownloadedArchive::NotReadable => BundleProcessing::Failed,
+        DownloadedArchive::NotRead => BundleProcessing::NotProcessed,
     }
-    let read = match s3_client(ctx, region)
-        .get_object()
-        .bucket(bucket)
-        .key(key)
-        .send()
-        .await
-    {
-        Ok(read) => read,
-        Err(failure) => {
-            let status = failure
-                .raw_response()
-                .map(|response| response.status().as_u16());
-            let code = failure.code().unwrap_or_default().to_string();
-            // Object storage said the archive is not there, or not readable:
-            // the bundle pre-processing was asked to validate cannot be read at
-            // all, which is a processing failure rather than silence.
-            if answer_is_about_the_object(status, &code) {
-                return BundleProcessing::Failed;
-            }
-            ::tracing::warn!(
-                bucket,
-                key,
-                code = %code,
-                status = ?status,
-                detail = %::aws_smithy_types::error::display::DisplayErrorContext(&failure),
-                "the Amazon S3 read of an application version's source bundle answered nothing \
-                 about the object, so nothing pre-processed the version",
-            );
-            return BundleProcessing::NotProcessed;
-        }
-    };
-    // The length the object REPORTS, before a single byte of it is held.
-    if read
-        .content_length()
-        .is_some_and(|length| length > MAX_SOURCE_BUNDLE_BYTES as i64)
-    {
-        ::tracing::warn!(
-            bucket,
-            key,
-            "an application version's source bundle is past the bytes this emulator reads, so \
-             nothing pre-processed the version",
-        );
-        return BundleProcessing::NotProcessed;
-    }
-    // The body is read CHUNK BY CHUNK and the bound applied before each chunk is
-    // kept, so an object that reported no length — or a smaller one than it
-    // sends — cannot grow this process past the cap: the read is abandoned the
-    // moment the next chunk would carry it past, with nothing retained. Never
-    // `collect()`, which would buffer the whole object before any bound could
-    // look at it.
-    let mut body = read.body;
-    let mut bytes: Vec<u8> = Vec::new();
-    loop {
-        let chunk = match body.next().await {
-            // The object has been handed over in full, within the bound.
-            None => break,
-            Some(Ok(chunk)) => chunk,
-            Some(Err(failure)) => {
-                ::tracing::warn!(
-                    bucket,
-                    key,
-                    detail = %::aws_smithy_types::error::display::DisplayErrorContext(&failure),
-                    "an application version's source bundle was handed over and then stopped, so \
-                     nothing pre-processed the version",
-                );
-                return BundleProcessing::NotProcessed;
-            }
-        };
-        if bytes.len().saturating_add(chunk.len()) > MAX_SOURCE_BUNDLE_BYTES {
-            ::tracing::warn!(
-                bucket,
-                key,
-                "an application version's source bundle is past the bytes this emulator reads, so \
-                 nothing pre-processed the version",
-            );
-            return BundleProcessing::NotProcessed;
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    validate_source_bundle(&bytes)
 }
 
 /// The verdict pre-processing reaches for the source bundle `bytes`.
@@ -351,38 +261,27 @@ fn validate_source_bundle(bytes: &[u8]) -> BundleProcessing {
         if !is_validated_file(&name) {
             continue;
         }
-        // The bound is applied to what is DECOMPRESSED, one byte past the budget
-        // at most: `take` is what stops a stream that claims to be small and is
-        // not.
-        let mut text: Vec<u8> = Vec::new();
-        if let Err(failure) = ::std::io::Read::read_to_end(
-            &mut ::std::io::Read::take(&mut entry, budget as u64 + 1),
-            &mut text,
-        ) {
-            ::tracing::debug!(
-                entry = %name,
-                detail = %failure,
-                "a file an application version's source bundle is pre-processed on could not be \
-                 read, so its pre-processing failed",
-            );
-            return BundleProcessing::Failed;
-        }
-        if text.len() > budget {
-            ::tracing::warn!(
-                entry = %name,
-                "an application version's source bundle carries more manifest and configuration \
-                 text than this emulator parses, so nothing pre-processed the version",
-            );
-            return BundleProcessing::NotProcessed;
-        }
-        budget -= text.len();
-        let Ok(text) = String::from_utf8(text) else {
-            ::tracing::debug!(
-                entry = %name,
-                "a file an application version's source bundle is pre-processed on is not text, \
-                 so its pre-processing failed",
-            );
-            return BundleProcessing::Failed;
+        // The bound is applied to what is DECOMPRESSED, by the one reader both
+        // archive validations take an entry's text through.
+        let text = match archive_entry_text(&mut entry, &mut budget) {
+            ArchiveEntryText::Text(text) => text,
+            ArchiveEntryText::PastBudget => {
+                ::tracing::warn!(
+                    entry = %name,
+                    "an application version's source bundle carries more manifest and \
+                     configuration text than this emulator parses, so nothing pre-processed the \
+                     version",
+                );
+                return BundleProcessing::NotProcessed;
+            }
+            ArchiveEntryText::NotText => {
+                ::tracing::debug!(
+                    entry = %name,
+                    "a file an application version's source bundle is pre-processed on is not \
+                     text, so its pre-processing failed",
+                );
+                return BundleProcessing::Failed;
+            }
         };
         if let Err(failure) = ::yaml_rust2::YamlLoader::load_from_str(&text) {
             ::tracing::debug!(

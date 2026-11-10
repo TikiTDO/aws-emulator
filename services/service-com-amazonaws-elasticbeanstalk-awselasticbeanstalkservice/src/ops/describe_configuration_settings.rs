@@ -215,7 +215,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 else {
                     return Err(
                         DescribeConfigurationSettingsError::invalid_parameter_value(
-                            crate::state::missing_configuration_template_message(template_name),
+                            crate::state::missing_configuration_template_message(
+                                &input.application_name,
+                                template_name,
+                            ),
                         ),
                     );
                 };

@@ -47,19 +47,23 @@ use crate::ops::types::{
     PlatformBranchSummary, PlatformDescription, PlatformFramework, PlatformProgrammingLanguage,
     PlatformSummary, S3Location, SingleInstanceHealth, StatusCodes, Tag,
 };
+pub mod caller_archive;
 pub mod configuration_option_catalog;
 pub mod configuration_option_descriptions;
 pub mod environment_health;
 pub mod event_notifications;
 pub mod managed_action_schedule;
+pub mod platform_build;
 pub mod platform_catalog;
 pub mod version_processing;
 
+pub use caller_archive::*;
 pub use configuration_option_catalog::*;
 pub use configuration_option_descriptions::*;
 pub use environment_health::*;
 pub use event_notifications::*;
 pub use managed_action_schedule::*;
+pub use platform_build::*;
 pub use platform_catalog::*;
 pub use version_processing::*;
 
@@ -191,6 +195,11 @@ pub const HEALTH_STATUS_OK: &str = "Ok";
 pub const PLATFORM_STATUS_CREATING: &str = "Creating";
 /// See [`PLATFORM_STATUS_CREATING`].
 pub const PLATFORM_STATUS_READY: &str = "Ready";
+/// The terminal status of a custom platform version whose BUILD did not produce
+/// a platform: the archive the request named defines none, so there is no
+/// version to launch on. See [`PLATFORM_STATUS_CREATING`] and
+/// [`platform_build`].
+pub const PLATFORM_STATUS_FAILED: &str = "Failed";
 /// The status a custom platform version is in while the delete
 /// `DeletePlatformVersion` started is running. See [`PLATFORM_STATUS_CREATING`].
 pub const PLATFORM_STATUS_DELETING: &str = "Deleting";
@@ -443,6 +452,29 @@ pub const TIER_TYPE_STANDARD: &str = "Standard";
 /// latest compatible worker tier version" resolves to here and what the recorded
 /// `CreateEnvironment` responses report.
 pub const DEFAULT_TIER_VERSION: &str = "1.0";
+
+/// The message this service refuses an `UpdateEnvironment` that asks for a tier
+/// the environment's platform version does not support with, built from the
+/// request and the environment:
+/// `Unsupported environment tier <name> version <version> for solution stack '<stack>'`.
+///
+/// The tier an environment runs is fixed at its launch — "at this time, if you
+/// change the tier version, name, or type, Elastic Beanstalk returns
+/// `InvalidParameterValue` error" — so the only tier the platform version it
+/// runs supports FOR IT is the one it already has, and the refusal names the
+/// tier the request asked for and the platform version it was asked for on. The
+/// name and the version are the request's own where it stated them and the
+/// environment's where it did not; the solution stack is the environment's.
+pub fn unsupported_environment_tier_message(
+    tier_name: &str,
+    tier_version: &str,
+    solution_stack_name: &str,
+) -> String {
+    format!(
+        "Unsupported environment tier {tier_name} version {tier_version} for solution stack \
+         '{solution_stack_name}'"
+    )
+}
 
 /// `EventSeverity` from least to most severe, in the order the model declares the
 /// enum's members (`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`) — the
@@ -2072,9 +2104,10 @@ pub struct PlatformVersion {
     /// version" — this account, for a platform version created here.
     pub platform_owner: String,
     pub status: String,
-    /// Where the platform definition archive was said to be. Nothing reads the
-    /// archive, so none of the values a built platform would report from it (its
-    /// category, maintainer, operating system, languages, frameworks) is
+    /// Where the platform definition archive was said to be. The build reads
+    /// the platform definition file in it (see [`platform_build`]) and nothing
+    /// else, so none of the other values a built platform would report from it
+    /// (its category, maintainer, operating system, languages, frameworks) is
     /// invented.
     pub definition_bundle: Option<S3Location>,
     pub option_settings: Vec<ConfigurationOptionSetting>,
@@ -2084,13 +2117,15 @@ pub struct PlatformVersion {
     pub date_created: ::aws_smithy_types::DateTime,
     pub date_updated: ::aws_smithy_types::DateTime,
     pub tags: Vec<Tag>,
-    /// The move to `Ready` the clock owes this version. See [`PendingPlatformStatus`].
+    /// The move the clock owes this version: the terminal status its build
+    /// reached, or the completion of its deletion. See
+    /// [`PendingPlatformStatus`].
     pub pending_status: Option<PendingPlatformStatus>,
 }
 
-/// The status change the clock owes a platform version: `Creating` -> `Ready`
-/// or `Deleting` -> `Deleted`, due one [`STATUS_TRANSITION_SPAN`] after the call
-/// that started it.
+/// The status change the clock owes a platform version: `Creating` -> the
+/// status its BUILD reached, or `Deleting` -> `Deleted`, due one
+/// [`STATUS_TRANSITION_SPAN`] after the call that started it.
 #[derive(Debug, Clone)]
 pub struct PendingPlatformStatus {
     pub due_at: Instant,
@@ -2098,9 +2133,10 @@ pub struct PendingPlatformStatus {
 }
 
 impl PendingPlatformStatus {
-    /// The move `CreatePlatformVersion` owes: `Creating` -> `Ready`.
-    pub fn build_completion() -> Self {
-        Self::due(PLATFORM_STATUS_READY)
+    /// The move `CreatePlatformVersion` owes: `Creating` -> the terminal status
+    /// the BUILD of the definition archive reached ([`PlatformBuild`]).
+    pub fn build_completion(build: PlatformBuild) -> Self {
+        Self::due(build.terminal_status())
     }
 
     /// The move `DeletePlatformVersion` owes: `Deleting` -> `Deleted`.
@@ -4575,14 +4611,21 @@ pub const RESOURCE_CONFIGURATION_TEMPLATE: &str = "Configuration Template";
 /// The message this service refuses a request with `InvalidParameterValue` for
 /// when the `(ApplicationName, TemplateName)` pair it supplied names no stored
 /// configuration template, built from the request: `No Configuration Template
-/// named '<name>' found.`
+/// named '<application>/<template>' found.`
 ///
-/// The same shape as the not-found sentences the create operations answer a bad
+/// A template name "must be unique per application", so the PAIR is what names
+/// one: the sentence names the template the way the lookup did, the application
+/// and the template joined by `/`, which is what tells a caller that passed the
+/// right template name under the wrong application which half was wrong. The
+/// same shape as the not-found sentences the create operations answer a bad
 /// `ApplicationName` or `VersionLabel` with (`No Application named '<name>'
 /// found.`), read from the one place every caller reads it, so two operations
 /// cannot word one refusal two ways.
-pub fn missing_configuration_template_message(template_name: &str) -> String {
-    format!("No Configuration Template named '{template_name}' found.")
+pub fn missing_configuration_template_message(
+    application_name: &str,
+    template_name: &str,
+) -> String {
+    format!("No Configuration Template named '{application_name}/{template_name}' found.")
 }
 
 /// The message this service refuses a `ResourceArn` that is not one of its own

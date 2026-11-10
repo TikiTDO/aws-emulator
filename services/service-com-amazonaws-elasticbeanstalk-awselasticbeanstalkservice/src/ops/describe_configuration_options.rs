@@ -284,7 +284,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 else {
                     return Err(
                         DescribeConfigurationOptionsError::invalid_parameter_value(
-                            crate::state::missing_configuration_template_message(template_name),
+                            crate::state::missing_configuration_template_message(
+                                application_name,
+                                template_name,
+                            ),
                         ),
                     );
                 };
@@ -364,9 +367,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 }
             } else if let Some(name) = solution_stack_name.as_deref() {
                 return Err(
-                    DescribeConfigurationOptionsError::invalid_parameter_value(format!(
-                        "No Solution Stack named '{name}' found."
-                    )),
+                    DescribeConfigurationOptionsError::invalid_parameter_value(
+                        crate::state::missing_solution_stack_message(name),
+                    ),
                 );
             }
         }

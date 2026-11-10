@@ -283,7 +283,6 @@ async fn created_configuration_templates_are_derived_from_the_request_and_persis
     // option is sent twice, and whether a description was supplied.
     let base_stack = published_stack(0);
     let arn_stack = published_stack(2);
-    let unpublished_stack = "64bit Fictional Linux v0.0.1 running Nothing";
     let cases = vec![
         TemplateCase {
             case: "a solution stack and nothing else",
@@ -396,22 +395,6 @@ async fn created_configuration_templates_are_derived_from_the_request_and_persis
             expected_solution_stack: Some(base_stack.name()),
             expected_platform_arn: Some(base_stack.platform_arn(TEST_REGION)),
             expected_description: Some(""),
-        },
-        TemplateCase {
-            // A solution stack the catalogue does not publish resolves to no
-            // platform version, so no ARN is invented for it — the same way
-            // `CreateEnvironment` reports one.
-            case: "a solution stack the catalogue does not publish",
-            template_name: "unpublished-stack",
-            params: vec![(
-                "SolutionStackName".to_string(),
-                unpublished_stack.to_string(),
-            )],
-            settings: Vec::new(),
-            expected_settings: Vec::new(),
-            expected_solution_stack: Some(unpublished_stack.to_string()),
-            expected_platform_arn: None,
-            expected_description: None,
         },
     ];
 
@@ -880,6 +863,19 @@ async fn bad_configuration_requests_are_refused_with_the_services_own_codes() {
                 (
                     "PlatformArn".to_string(),
                     format!("arn:aws:elasticbeanstalk:{TEST_REGION}::platform/Fictional/1.0.0"),
+                ),
+            ],
+            code: "InvalidParameterValue",
+        },
+        RefusalCase {
+            case: "a solution stack the catalogue does not publish",
+            action: "CreateConfigurationTemplate",
+            params: vec![
+                ("ApplicationName".to_string(), APPLICATION.to_string()),
+                ("TemplateName".to_string(), "unpublished-stack".to_string()),
+                (
+                    "SolutionStackName".to_string(),
+                    "64bit Fictional Linux v0.0.1 running Nothing".to_string(),
                 ),
             ],
             code: "InvalidParameterValue",

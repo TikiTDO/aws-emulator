@@ -671,7 +671,7 @@ async fn the_application_and_environment_lifecycle_runs_end_to_end() {
                 ("VersionLabel", "v1"),
                 (
                     "SolutionStackName",
-                    "64bit Amazon Linux 2 v5.8.0 running Node.js 18",
+                    SOLUTION_STACK.as_str(),
                 ),
             ],
         )

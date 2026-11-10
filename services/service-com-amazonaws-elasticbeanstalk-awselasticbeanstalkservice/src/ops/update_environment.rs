@@ -253,6 +253,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
 
+        // "SolutionStackName: this specifies the platform version that the
+        // environment will run after the environment is updated." A solution
+        // stack name names a platform version out of this service's own
+        // published catalog, so a name the catalog does not offer names nothing
+        // to move the environment onto — the same refusal the ARN form gets
+        // below. A statement about the REQUEST, so it precedes every lookup.
+        if let Some(message) =
+            crate::state::unpublished_solution_stack_refusal(input.solution_stack_name.as_deref())
+        {
+            return Err(UpdateEnvironmentError::invalid_parameter_value(message));
+        }
+
         // How many option settings one configuration may carry is a bound on the
         // REQUEST; the merged result is checked against it again below, so
         // neither the stored record nor the merge's own work is unbounded.
@@ -312,6 +324,66 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // "Tier: This specifies the tier to use to update the environment.
+        // Condition: At this time, if you change the tier version, name, or
+        // type, Elastic Beanstalk returns InvalidParameterValue error." The tier
+        // an environment runs is fixed at its launch, so the only tier the
+        // platform version it runs supports FOR IT is the one it already has: a
+        // request stating a different `Name`, `Type` or `Version` asks for a
+        // tier that platform version does not support, and is refused naming the
+        // tier asked for and the platform version it was asked for on. A member
+        // the request repeats unchanged changes nothing and is accepted; one it
+        // leaves out says nothing about that member. The environment's tier is
+        // read through the same defaulting `CreateEnvironment` stored it with, so
+        // a member defaulted at creation compares against the reported value.
+        //
+        // This is a statement about the REQUEST against the platform version the
+        // environment runs — neither of which an operation in flight changes —
+        // so it is answered BEFORE the environment's readiness below: a caller
+        // that asked for a tier the platform cannot run is told so whatever the
+        // environment happens to be doing, rather than having the tier
+        // diagnosis masked by a transient status.
+        let current_tier = crate::state::environment_tier_with_defaults(environment.tier.as_ref());
+        if let Some(requested_tier) = input.tier.as_ref() {
+            let changed = [
+                (&requested_tier.name, &current_tier.name),
+                (&requested_tier.r#type, &current_tier.r#type),
+                (&requested_tier.version, &current_tier.version),
+            ]
+            .into_iter()
+            .any(|(requested_value, current_value)| {
+                requested_value
+                    .as_deref()
+                    .is_some_and(|requested| Some(requested) != current_value.as_deref())
+            });
+            if changed {
+                return Err(UpdateEnvironmentError::invalid_parameter_value(
+                    crate::state::unsupported_environment_tier_message(
+                        requested_tier
+                            .name
+                            .as_deref()
+                            .or(current_tier.name.as_deref())
+                            .unwrap_or_default(),
+                        requested_tier
+                            .version
+                            .as_deref()
+                            .or(current_tier.version.as_deref())
+                            .unwrap_or_default(),
+                        // The platform version the environment runs, named the
+                        // way this refusal names one. A CUSTOM platform version
+                        // has no solution stack name this service can derive, so
+                        // the environment reports its ARN instead and that is
+                        // what the refusal names.
+                        environment
+                            .solution_stack_name
+                            .as_deref()
+                            .or(environment.platform_arn.as_deref())
+                            .unwrap_or_default(),
+                    ),
+                ));
+            }
+        }
+
         // "Ready: Environment is available to have an action performed on it,
         // such as update or terminate." An environment that is launching,
         // updating, aborting or on its way out is in no state to take an update —
@@ -322,33 +394,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                  Current status: {}.",
                 environment.environment_name, environment.status
             )));
-        }
-
-        // "Tier: This specifies the tier to use to update the environment.
-        // Condition: At this time, if you change the tier version, name, or
-        // type, Elastic Beanstalk returns InvalidParameterValue error." A member
-        // the request repeats unchanged changes nothing and is accepted; one it
-        // leaves out says nothing about that member. The environment's tier is
-        // read through the same defaulting `CreateEnvironment` stored it with, so
-        // a member defaulted at creation compares against the reported value.
-        let current_tier = crate::state::environment_tier_with_defaults(environment.tier.as_ref());
-        if let Some(requested_tier) = input.tier.as_ref() {
-            for (member, requested_value, current_value) in [
-                ("Name", &requested_tier.name, &current_tier.name),
-                ("Type", &requested_tier.r#type, &current_tier.r#type),
-                ("Version", &requested_tier.version, &current_tier.version),
-            ] {
-                let Some(requested_value) = requested_value.as_deref() else {
-                    continue;
-                };
-                if Some(requested_value) != current_value.as_deref() {
-                    return Err(UpdateEnvironmentError::invalid_parameter_value(format!(
-                        "Environment tier {member} cannot be changed from '{}' to \
-                         '{requested_value}'.",
-                        current_value.as_deref().unwrap_or_default()
-                    )));
-                }
-            }
         }
 
         let application_name = environment.application_name.clone();
@@ -379,7 +424,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .get(&(application_name.clone(), template_name.clone()))
                 else {
                     return Err(UpdateEnvironmentError::invalid_parameter_value(
-                        crate::state::missing_configuration_template_message(template_name),
+                        crate::state::missing_configuration_template_message(
+                            &application_name,
+                            template_name,
+                        ),
                     ));
                 };
                 Some(template.clone())

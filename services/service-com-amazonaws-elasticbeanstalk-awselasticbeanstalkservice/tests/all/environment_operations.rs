@@ -33,9 +33,12 @@ fn reports(body: &str, element: &str) -> bool {
     })
 }
 
-/// A solution stack name, so a created environment is a complete one. Any
-/// non-empty value does: nothing here depends on the platform.
-const SOLUTION_STACK: &str = "64bit Amazon Linux 2 v5.8.0 running Node.js 18";
+/// A platform for the environments below to run on: a `SolutionStackName` the
+/// service's own catalogue publishes, since `CreateEnvironment` refuses one it
+/// does not. Nothing here depends on WHICH platform it is.
+fn solution_stack() -> String {
+    crate::lifecycle::SOLUTION_STACK.clone()
+}
 
 /// Create `application` with one version `v1` and, when `environment` is given,
 /// one environment that has reached `Ready` — the state the operations below act
@@ -73,7 +76,7 @@ async fn fixture(emulator: &Emulator, application: &str, environment: Option<&st
                     ("ApplicationName", application),
                     ("EnvironmentName", environment),
                     ("VersionLabel", "v1"),
-                    ("SolutionStackName", SOLUTION_STACK),
+                    ("SolutionStackName", solution_stack().as_str()),
                 ],
             )
             .await;
@@ -651,7 +654,7 @@ async fn describe_environment_health_reports_the_attributes_the_request_named() 
             &[
                 ("ApplicationName", "grey-app"),
                 ("EnvironmentName", "grey-env-1"),
-                ("SolutionStackName", SOLUTION_STACK),
+                ("SolutionStackName", solution_stack().as_str()),
             ],
         )
         .await;

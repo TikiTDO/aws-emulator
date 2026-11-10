@@ -35,8 +35,12 @@ const BUNDLE_KEY: &str = "bundles/2026/app.zip";
 
 /// What a source bundle IS: an archive carrying these entries, or bytes that are
 /// no archive at all.
+///
+/// `pub(crate)`: the platform-build suite uploads the OTHER caller-named archive
+/// (`CreatePlatformVersion$PlatformDefinitionBundle`) and writes it the same way
+/// a client does, so neither suite keeps a second archive writer.
 #[derive(Debug, Clone, Copy)]
-enum Bundle {
+pub(crate) enum Bundle {
     /// A `.zip` whose entries are `(path, content)`.
     Zip(&'static [(&'static str, &'static [u8])]),
     /// Bytes that no archive reader will read.
@@ -45,7 +49,7 @@ enum Bundle {
 
 impl Bundle {
     /// The bytes a client uploads for this bundle.
-    fn bytes(self) -> Vec<u8> {
+    pub(crate) fn bytes(self) -> Vec<u8> {
         match self {
             Bundle::Raw(bytes) => bytes.to_vec(),
             Bundle::Zip(entries) => {

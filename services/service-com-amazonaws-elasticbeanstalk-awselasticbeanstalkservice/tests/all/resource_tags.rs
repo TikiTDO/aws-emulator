@@ -20,7 +20,7 @@
 //! metacharacters, over the raw document rather than through the harness's reader,
 //! so a value reflected unescaped fails it.
 
-use crate::lifecycle::{account, Answer, Emulator, PAST_DUE, TEST_REGION};
+use crate::lifecycle::{account, Answer, Emulator, PAST_DUE, SOLUTION_STACK, TEST_REGION};
 
 /// The key/value pairs `ListTagsForResource` reported, sorted so the assertion is
 /// about the SET of tags on the resource and not about a list order the model does
@@ -433,7 +433,7 @@ async fn an_environment_reports_the_tags_it_was_created_with() {
             ("EnvironmentName".to_string(), (*environment).to_string()),
             (
                 "SolutionStackName".to_string(),
-                "64bit Amazon Linux 2 v5.8.0 running Node.js 18".to_string(),
+                SOLUTION_STACK.to_string(),
             ),
         ];
         params.extend(tag_params(tags));
@@ -502,7 +502,7 @@ async fn an_arn_that_names_no_taggable_resource_is_refused() {
                     ("EnvironmentName", "live-env"),
                     (
                         "SolutionStackName",
-                        "64bit Amazon Linux 2 v5.8.0 running Node.js 18",
+                        SOLUTION_STACK.as_str(),
                     ),
                 ],
             )
@@ -673,7 +673,7 @@ async fn a_terminated_environment_is_no_longer_a_taggable_resource() {
                 ("EnvironmentName", "doomed-env"),
                 (
                     "SolutionStackName",
-                    "64bit Amazon Linux 2 v5.8.0 running Node.js 18",
+                    SOLUTION_STACK.as_str(),
                 ),
                 ("Tags.member.1.Key", "tier"),
                 ("Tags.member.1.Value", "web"),

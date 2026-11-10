@@ -236,6 +236,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
+        // "SolutionStackName: the name of an Elastic Beanstalk solution stack
+        // (platform version) that this configuration uses." A solution stack
+        // name names a platform version out of this service's own published
+        // catalog, so a name the catalog does not offer names no platform
+        // version to configure — the same refusal the ARN form gets below.
+        if let Some(message) =
+            crate::state::unpublished_solution_stack_refusal(input.solution_stack_name.as_deref())
+        {
+            return Err(CreateConfigurationTemplateError::invalid_parameter_value(
+                message,
+            ));
+        }
+
         // How many option settings one configuration may carry is a bound on the
         // REQUEST, so it is answered here: the list the caller sent is refused
         // before anything is resolved, and the merged result is checked again
@@ -347,10 +360,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some((source_application, source_template)) = source_configuration {
             let Some(source) = store
                 .configuration_templates
-                .get(&(source_application, source_template.clone()))
+                .get(&(source_application.clone(), source_template.clone()))
             else {
                 return Err(CreateConfigurationTemplateError::invalid_parameter_value(
-                    crate::state::missing_configuration_template_message(&source_template),
+                    crate::state::missing_configuration_template_message(
+                        &source_application,
+                        &source_template,
+                    ),
                 ));
             };
             // "Constraint: If both solution stack name and source configuration

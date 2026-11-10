@@ -960,24 +960,50 @@ async fn a_created_environment_reports_the_platform_version_it_runs_on() {
         );
     }
 
-    // A solution stack the catalog does not publish resolves to no platform
-    // version, and no ARN is invented for it.
-    let unknown = ok(
+    // A solution stack the catalogue does not publish names no platform version
+    // at all, so the launch is refused and nothing is recorded for it.
+    let case = "an unpublished solution stack";
+    let unpublished = "64bit Fictional Linux v0.0.1 running Nothing";
+    let refused = emulator
+        .call(
+            "CreateEnvironment",
+            &[
+                ("ApplicationName", application),
+                ("EnvironmentName", "unknown-stack"),
+                ("SolutionStackName", unpublished),
+            ],
+        )
+        .await;
+    assert_eq!(
+        refused.status, 400,
+        "case {case:?}: expected HTTP 400, got {} and body {}",
+        refused.status, refused.body
+    );
+    assert_eq!(
+        refused.error_code(),
+        "InvalidParameterValue",
+        "case {case:?}: unexpected error code, got body {}",
+        refused.body
+    );
+    assert_eq!(
+        refused.error_message(),
+        eb::state::missing_solution_stack_message(unpublished),
+        "case {case:?}: the refusal names the stack the request asked for, got body {}",
+        refused.body
+    );
+    let described = ok(
         &emulator,
-        "an unpublished solution stack",
-        "CreateEnvironment",
-        &[
-            ("ApplicationName", application),
-            ("EnvironmentName", "unknown-stack"),
-            ("SolutionStackName", "64bit Fictional Linux v0.0.1 running Nothing"),
-        ],
+        case,
+        "DescribeEnvironments",
+        &[("EnvironmentNames.member.1", "unknown-stack")],
     )
     .await;
-    assert_eq!(
-        unknown.value("PlatformArn"),
-        None,
-        "case \"an unpublished solution stack\": no platform ARN may be invented, got {}",
-        unknown.body
+    assert!(
+        described
+            .values_at("Environments/member/EnvironmentName")
+            .is_empty(),
+        "case {case:?}: no environment may have been recorded, got body {}",
+        described.body
     );
 }
 

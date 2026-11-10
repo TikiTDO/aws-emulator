@@ -219,15 +219,17 @@ async fn every_error_envelope_names_the_request_it_answers() {
             code: "MissingRequiredParameter",
         },
         EnvelopeCase {
-            // `DeleteConfigurationTemplate` still carries the scaffold header, so
-            // it answers the 501 — which is an error response and carries the
+            // `ValidateConfigurationSettings` still carries the scaffold header,
+            // so it answers the 501 — which is an error response and carries the
             // element too. Both of its input's required members are supplied, so
             // the request reaches the handler rather than the boundary validator.
             case: "the scaffold's 501",
-            action: "DeleteConfigurationTemplate",
+            action: "ValidateConfigurationSettings",
             params: owned(&[
                 ("ApplicationName", "envelope-app"),
-                ("TemplateName", "envelope-template"),
+                ("OptionSettings.member.1.Namespace", "aws:autoscaling:asg"),
+                ("OptionSettings.member.1.OptionName", "MinSize"),
+                ("OptionSettings.member.1.Value", "1"),
             ]),
             status: 501,
             code: "NotImplemented",

@@ -299,12 +299,25 @@ pub const GENERAL_CONFIGURATION_OPTIONS: &[ConfigurationOption] = &[
     )
     .with_max_length(255),
     ConfigurationOption::new(
-        "aws:autoscaling:launchconfiguration",
+        NAMESPACE_LAUNCH_CONFIGURATION,
         "IamInstanceProfile",
         CHANGE_SEVERITY_RESTART_ENVIRONMENT,
         "aws-elasticbeanstalk-ec2-role",
     )
     .with_max_length(500),
+    // The single-valued form of the instance type an environment runs, which
+    // the environment derivations read beside the Auto Scaling group's list
+    // (`aws:ec2:instances` / `InstanceTypes`) — see
+    // [`environment_instance_type`]. The default is the type an environment
+    // that names none runs ([`DEFAULT_INSTANCE_TYPE`]), read from that one
+    // constant so the published default cannot differ from what this service
+    // launches.
+    ConfigurationOption::new(
+        NAMESPACE_LAUNCH_CONFIGURATION,
+        OPTION_INSTANCE_TYPE,
+        CHANGE_SEVERITY_RESTART_ENVIRONMENT,
+        DEFAULT_INSTANCE_TYPE,
+    ),
     ConfigurationOption::new(
         "aws:autoscaling:launchconfiguration",
         "MonitoringInterval",

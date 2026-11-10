@@ -209,9 +209,10 @@ async fn every_reported_stack_is_a_stack_an_environment_can_be_created_on() {
     );
 
     for (index, name) in names.iter().enumerate() {
-        // `CreateEnvironment` stores whatever `SolutionStackName` it is given —
-        // it gates nothing on this catalog — so what this row proves is that a
-        // reported name survives the create/describe round trip unchanged.
+        // Every name this catalogue reports is one `CreateEnvironment` accepts
+        // — it refuses a solution stack the catalogue does not publish — and
+        // what this row proves is that a reported name survives the
+        // create/describe round trip unchanged.
         let environment_name = format!("stack-env-{index}");
         let created = emulator
             .call(
