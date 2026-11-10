@@ -186,6 +186,40 @@ pub(crate) async fn call_rest_json(
     uri: &str,
     body: Option<&Value>,
 ) -> Result<Value, Refusal> {
+    rest_json(ctx, signing_name, region, None, method, uri, body).await
+}
+
+/// [`call_rest_json`] for a caller that also states WHICH operation of that service the
+/// method and URI name.
+///
+/// The binding alone does not say it — a REST URI is a resource, not an operation — and the
+/// diagnostic the SDK of some services appends to a refused call's message NAMES the
+/// operation ([`super::SdkDiagnostic::Operation`]). An arm that calls such a service passes
+/// the operation its own model names, so the refusal a failed resource reports is the one
+/// that service's SDK would raise.
+pub(crate) async fn call_rest_json_named(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    signing_name: &str,
+    region: &str,
+    operation: &str,
+    method: &'static str,
+    uri: &str,
+    body: Option<&Value>,
+) -> Result<Value, Refusal> {
+    rest_json(ctx, signing_name, region, Some(operation), method, uri, body).await
+}
+
+/// The one REST-JSON call both of the two above are: `operation` is the called operation's
+/// own name where the caller stated it.
+async fn rest_json(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    signing_name: &str,
+    region: &str,
+    operation: Option<&str>,
+    method: &'static str,
+    uri: &str,
+    body: Option<&Value>,
+) -> Result<Value, Refusal> {
     let payload = match body {
         Some(document) => serde_json::to_vec(document).map_err(|error| Refusal {
             code: "SerializationException".to_string(),
@@ -204,7 +238,7 @@ pub(crate) async fn call_rest_json(
     if (200..300).contains(&status) {
         return Ok(document);
     }
-    Err(refusal_of(signing_name, status, &document))
+    Err(refusal_of_call(signing_name, operation, status, &document))
 }
 
 /// [`call_rest_json`] for an operation whose input is an `@httpPayload`: the bytes the
@@ -576,6 +610,17 @@ pub(crate) fn xml_scalar_children(
 /// The message is the one an SDK of that service would raise ([`sdk_message`]), because what
 /// a resource provider reports is what its own SDK call raised.
 pub(super) fn refusal_of(signing_name: &str, status: u16, document: &Value) -> Refusal {
+    refusal_of_call(signing_name, None, status, document)
+}
+
+/// [`refusal_of`] for a caller that states WHICH operation of that service was refused,
+/// which is part of the diagnostic some SDKs word ([`call_rest_json_named`]).
+pub(super) fn refusal_of_call(
+    signing_name: &str,
+    operation: Option<&str>,
+    status: u16,
+    document: &Value,
+) -> Refusal {
     let code = document
         .get("__type")
         .or_else(|| document.get("code"))
@@ -589,7 +634,7 @@ pub(super) fn refusal_of(signing_name: &str, status: u16, document: &Value) -> R
         .and_then(Value::as_str)
         .unwrap_or_default();
     Refusal {
-        message: sdk_message(signing_name, status, &code, message),
+        message: sdk_message_of(signing_name, operation, status, &code, message),
         code,
     }
 }

@@ -66,6 +66,10 @@ fn identifying_return_value(resource_type: &str) -> Option<&'static str> {
         // The Amazon S3 Vectors types, each identified by its own ARN.
         S3VECTORS_VECTOR_BUCKET => "VectorBucketArn",
         S3VECTORS_INDEX => "IndexArn",
+        // An Amazon Braket spending limit, identified by the ARN that service minted for it
+        // ("Ref returns the spending limit ARN"), which is the handle every spending-limit
+        // API takes — the type declares no name a client could name one by.
+        BRAKET_SPENDING_LIMIT => "SpendingLimitArn",
         // The CloudFront types, each identified by the id that service assigns.
         CLOUDFRONT_DISTRIBUTION
         | CLOUDFRONT_ORIGIN_ACCESS_CONTROL

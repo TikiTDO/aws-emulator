@@ -2224,6 +2224,44 @@ pub(super) fn epoch_seconds(declared: &str) -> Option<Value> {
     ::serde_json::Number::from_f64(instant.as_secs_f64()).map(Value::Number)
 }
 
+/// One timestamp a `restJson1` answer carries, as the ISO-8601 instant a template value
+/// spells one with — the reverse of [`epoch_seconds`] above, and the ONE reading of that
+/// direction, so two arms handed the same answer report the same text.
+///
+/// A timestamp is a VALUE on the wire rather than text: a JSON protocol carries one as the
+/// seconds since the epoch unless the member's own `@timestampFormat` makes it a date-time
+/// string. A number is therefore rendered as the instant here, and a value the answering
+/// service already wrote as text is reported as it came; anything else is no instant at all,
+/// which is what `None` reports.
+///
+/// The rendering is at MICROSECOND precision. A number holds the fraction of a second in a
+/// binary form that carries no exact nanosecond count, so printing every digit of it would
+/// publish noise below the precision the number has — and a client comparing this text
+/// against the timestamp member it came from would read two instants a fraction of a
+/// microsecond apart. Microseconds is the precision a reader of such a number keeps, so the
+/// fraction is rounded to it, carrying a whole extra second where that rounds up.
+pub(super) fn instant_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return (!text.is_empty()).then(|| text.to_string());
+    }
+    let seconds = value.as_f64().filter(|seconds| seconds.is_finite())?;
+    let whole = seconds.floor();
+    let micros = ((seconds - whole) * MICROS_PER_SECOND).round() as u32;
+    let (whole, micros) = if f64::from(micros) >= MICROS_PER_SECOND {
+        (whole + 1.0, 0)
+    } else {
+        (whole, micros)
+    };
+    ::aws_smithy_types::DateTime::from_secs_and_nanos(whole as i64, micros * NANOS_PER_MICRO)
+        .fmt(::aws_smithy_types::date_time::Format::DateTime)
+        .ok()
+}
+
+/// How many microseconds one second holds, and how many nanoseconds one microsecond does:
+/// the precision [`instant_text`] renders an instant carried as a number at.
+const MICROS_PER_SECOND: f64 = 1_000_000.0;
+const NANOS_PER_MICRO: u32 = 1_000;
+
 // ---------------------------------------------------------------------------
 // AWS Certificate Manager: AWS::CertificateManager::AcmeEndpoint
 // ---------------------------------------------------------------------------

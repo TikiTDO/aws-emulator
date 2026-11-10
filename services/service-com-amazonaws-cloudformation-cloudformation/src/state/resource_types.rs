@@ -80,7 +80,7 @@
 
 use super::template::{
     DeclaredResource, Template, ACMPCA_CERTIFICATE, ACMPCA_CERTIFICATE_AUTHORITY,
-    ACMPCA_CERTIFICATE_AUTHORITY_ACTIVATION, APIGATEWAY_DOMAIN_NAME,
+    ACMPCA_CERTIFICATE_AUTHORITY_ACTIVATION, APIGATEWAY_DOMAIN_NAME, BRAKET_SPENDING_LIMIT,
 };
 
 /// The namespace Amazon Web Services' own resource types live under: a type spelled with
@@ -278,6 +278,10 @@ pub const AWS_RESOURCE_TYPES: &[&str] = &[
     "AWS::BedrockAgentCore::Memory",
     "AWS::BedrockAgentCore::Runtime",
     "AWS::BedrockAgentCore::WorkloadIdentity",
+    // Amazon Braket. A spending limit is the cost control that service's own
+    // `CreateSpendingLimit` makes for a quantum device, which `super::provisioner` creates
+    // there.
+    BRAKET_SPENDING_LIMIT,
     // AWS Budgets
     "AWS::Budgets::Budget",
     // Amazon Keyspaces (for Apache Cassandra)

@@ -1330,3 +1330,7 @@ mod cloudformation_deployed_pipe_delivery;
 // which spans CloudFormation, Step Functions and IAM at once.
 #[path = "all/cloudformation_sfn_absent_role_and_stop.rs"]
 mod cloudformation_sfn_absent_role_and_stop;
+// deploy -> read-back -> delete round trip of a stack-declared `AWS::Braket::SpendingLimit`,
+// and the refusals Amazon Braket's own control plane answers for one it will not create.
+#[path = "all/cloudformation_provisions_braket_spending_limits.rs"]
+mod cloudformation_provisions_braket_spending_limits;

@@ -2661,6 +2661,10 @@ pub fn name_property(resource_type: &str, properties: &Value) -> Option<String> 
 pub fn replacement_properties(resource_type: &str) -> &'static [&'static str] {
     match resource_type {
         IAM_ACCESS_KEY => &["Serial", "UserName"],
+        // A spending limit is a cost control ABOUT one device: `UpdateSpendingLimit` takes
+        // the limit's amount and its period and no device at all, so a declaration naming
+        // another device asks for a different limit.
+        BRAKET_SPENDING_LIMIT => &["DeviceArn"],
         // An AppConfig environment and configuration profile belong to the application their
         // `ApplicationId` names, and a profile reads its configuration from the source its
         // `LocationUri` and `Type` fix: each is a member of that type's create and of no

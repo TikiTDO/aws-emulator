@@ -464,7 +464,8 @@ pub(super) use super::{
 };
 
 use super::provisioning::{
-    call_json_rpc, call_query, call_rest_json, call_rest_xml, percent_encoded, xml_element,
+    call_json_rpc, call_query, call_rest_json, call_rest_json_named, call_rest_xml,
+    percent_encoded, xml_element,
     xml_entry_map, xml_leaf, xml_scalar_children, Created, Readiness, Refusal, Removal,
     AWS_JSON_1_0, AWS_JSON_1_1,
 };
@@ -476,6 +477,7 @@ use super::template::{
     APIGATEWAYV2_DOMAIN_NAME, APIGATEWAYV2_INTEGRATION, APIGATEWAYV2_ROUTE,
     APIGATEWAYV2_STAGE, BACKUP_PLAN, BACKUP_SELECTION, BACKUP_VAULT, BATCH_COMPUTE_ENVIRONMENT,
     BATCH_JOB_QUEUE, BATCH_SERVICE_ENVIRONMENT, BEDROCK_GUARDRAIL, BEDROCK_KNOWLEDGE_BASE,
+    BRAKET_SPENDING_LIMIT,
     CLOUDWATCH_DASHBOARD,
     CLOUDWATCH_METRIC_STREAM, CODEARTIFACT_DOMAIN, CODEARTIFACT_REPOSITORY,
     CODEBUILD_PROJECT,
@@ -870,6 +872,12 @@ pub(super) enum Provisioner {
     /// removes. The name IS the identity's handle — every call on one takes it — so it is
     /// the physical id the naming rules already compute for the type.
     BedrockAgentCoreWorkloadIdentity,
+    /// `AWS::Braket::SpendingLimit`: a spending limit of Amazon Braket's own control plane,
+    /// which `CreateSpendingLimit` makes for the quantum device the template names,
+    /// `UpdateSpendingLimit` changes and `DeleteSpendingLimit` removes. That service MINTS
+    /// the `spendingLimitArn` the type publishes — the handle every spending-limit API takes
+    /// — so it is read off that create's own answer and is the identity a `Ref` resolves to.
+    BraketSpendingLimit,
     /// `AWS::XRay::SamplingRule`: a sampling rule of AWS X-Ray, which
     /// `CreateSamplingRule` creates under the rule name its declaration states and
     /// `DeleteSamplingRule` deletes. X-Ray mints the `RuleARN` that type's `Ref`
@@ -1021,6 +1029,7 @@ pub(super) fn provisioner_for(resource_type: &str) -> Option<Provisioner> {
         BEDROCK_AGENTCORE_WORKLOAD_IDENTITY => {
             Some(Provisioner::BedrockAgentCoreWorkloadIdentity)
         }
+        BRAKET_SPENDING_LIMIT => Some(Provisioner::BraketSpendingLimit),
         XRAY_SAMPLING_RULE => Some(Provisioner::XraySamplingRule),
         CONFIG_CONFIGURATION_RECORDER => Some(Provisioner::ConfigConfigurationRecorder),
         CONFIG_DELIVERY_CHANNEL => Some(Provisioner::ConfigDeliveryChannel),
@@ -1473,6 +1482,13 @@ impl Provisioner {
             // declaration asks for.
             Self::BedrockAgentCoreWorkloadIdentity => {
                 create_workload_identity(ctx, region, resource, propagated).await
+            }
+            // `AWS::Braket::SpendingLimit` publishes `Tags` as a MAP, which is the shape
+            // `CreateSpendingLimit`'s own `tags` member takes, so a spending limit a stack
+            // creates carries the tags CloudFormation gives it beside the ones the
+            // declaration asks for.
+            Self::BraketSpendingLimit => {
+                create_braket_spending_limit(ctx, region, resource, propagated).await
             }
             Self::XraySamplingRule => {
                 create_sampling_rule(ctx, region, resource, propagated).await
@@ -2069,6 +2085,13 @@ impl Provisioner {
             Self::AutoScalingGroup => {
                 update_auto_scaling_group(ctx, region, resource, declared).await
             }
+            // `UpdateSpendingLimit` "updates an existing spending limit" by the ARN Amazon
+            // Braket minted, taking the limit's amount and its period — every property of
+            // the type except the device it caps, which replaces the resource instead — so a
+            // changed declaration of either reaches the limit the stack created.
+            Self::BraketSpendingLimit => update_braket_spending_limit(ctx, region, resource, declared)
+                .await
+                .map(Some),
             // Every other type's in-place update is its own entry here, exactly as its
             // create and delete are: until one is written, nothing is asked of the owning
             // service and the deployment says so.
@@ -2552,6 +2575,11 @@ impl Provisioner {
             Self::BedrockAgentCoreWorkloadIdentity => {
                 delete_workload_identity(ctx, region, physical_resource_id).await
             }
+            // The delete addresses the spending limit by the ARN Amazon Braket minted for
+            // it, which is this resource's physical id.
+            Self::BraketSpendingLimit => {
+                delete_braket_spending_limit(ctx, region, physical_resource_id).await
+            }
             // A rule is addressed by its name or by the ARN X-Ray minted — "either name
             // or ARN, but not both" — and the ARN is this resource's physical id.
             Self::XraySamplingRule => delete_sampling_rule(ctx, region, resource).await,
@@ -2954,6 +2982,11 @@ impl Provisioner {
             Self::BedrockAgentCoreWorkloadIdentity => {
                 describe_workload_identity(ctx, region, physical_resource_id).await
             }
+            // Amazon Braket publishes no read of ONE spending limit, so the limit is read
+            // out of the account's own listing, by the ARN that service minted for it.
+            Self::BraketSpendingLimit => {
+                describe_braket_spending_limit(ctx, region, physical_resource_id).await
+            }
             // X-Ray publishes no read of ONE sampling rule, so the rule is read out of the
             // account's own listing, by the identity that service minted for it.
             Self::XraySamplingRule => describe_sampling_rule(ctx, region, resource).await,
@@ -2986,6 +3019,7 @@ mod config_recording;
 mod event_pipes;
 mod bedrock_guardrails;
 mod bedrock_knowledge_bases;
+mod braket_spending_limits;
 mod data_and_storage;
 mod iam_identities;
 mod application_services;
@@ -2999,6 +3033,7 @@ pub(crate) use application_services::*;
 use config_recording::*;
 use bedrock_guardrails::*;
 use bedrock_knowledge_bases::*;
+use braket_spending_limits::*;
 use iam_identities::*;
 use data_and_storage::*;
 

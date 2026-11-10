@@ -305,15 +305,3 @@ fn pipe_attributes(pipe: &Value) -> BTreeMap<String, String> {
     }
     attributes
 }
-
-/// One timestamp a `restJson1` answer carries — the seconds since the epoch that protocol's
-/// default timestamp format uses — as the ISO-8601 instant a template value spells one with;
-/// `None` for anything that is not such a number.
-///
-/// The reverse of the `epoch_seconds` reading that puts a declared instant onto that wire.
-fn instant_text(value: &Value) -> Option<String> {
-    let seconds = value.as_f64()?;
-    ::aws_smithy_types::DateTime::from_secs_f64(seconds)
-        .fmt(::aws_smithy_types::date_time::Format::DateTime)
-        .ok()
-}

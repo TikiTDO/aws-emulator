@@ -1286,6 +1286,30 @@ pub(super) fn return_values(
             attributes.insert("KnowledgeBaseId".to_string(), id.clone());
             (id, attributes)
         }
+        // Amazon Braket's own control plane: the spending limit an
+        // `AWS::Braket::SpendingLimit` declares. "Ref returns the spending limit ARN" (the
+        // type's primary identifier); Fn::GetAtt reads `SpendingLimitArn` and `CreatedAt`.
+        // Amazon Braket MINTS that ARN — `CreateSpendingLimit` takes no identifier for the
+        // limit and answers the `spendingLimitArn` it assigned, whose resource path carries a
+        // uuid of that service's own (`SpendingLimitArn`:
+        // `^arn:aws[a-z\-]*:braket:[a-z0-9\-]+:[0-9]{12}:spending-limit/.*$`) — so the value
+        // here is a STAND-IN of that form, which `super::provisioning` re-points at the ARN
+        // the create really answered
+        // ([`super::provisioner::Provisioner::BraketSpendingLimit`]). `CreatedAt` is that
+        // service's clock and is not computed here: it reaches the resource off that
+        // service's own report of the limit it created.
+        BRAKET_SPENDING_LIMIT => {
+            let arn = ::emulator_server::emulator_arn(
+                BRAKET_ARN_NAMESPACE,
+                region,
+                &format!(
+                    "{BRAKET_SPENDING_LIMIT_PATH}/{}",
+                    generated_uuid(resource_type, name)
+                ),
+            );
+            attributes.insert("SpendingLimitArn".to_string(), arn.clone());
+            (arn, attributes)
+        }
         // "Ref returns the name"; Fn::GetAtt: Name, WorkloadIdentityArn. A workload
         // identity is named, not id'd: `CreateWorkloadIdentity` takes a `name`
         // (`^[A-Za-z0-9_.-]+$`) and answers that name plus the ARN, whose shape the model
@@ -1702,6 +1726,11 @@ pub fn published_attribute_names(resource_type: &str) -> &'static [&'static str]
         ELB_LISTENER_RULE => &["IsDefault", "RuleArn"],
         BEDROCK_GUARDRAIL => &["GuardrailArn", "GuardrailId", "Version"],
         BEDROCK_KNOWLEDGE_BASE => &["KnowledgeBaseArn", "KnowledgeBaseId"],
+        // A spending limit's ARN is the one return value these naming rules can compute; its
+        // `CreatedAt` is Amazon Braket's clock, which reaches the resource off that
+        // service's own report of the limit rather than from here, exactly as a knowledge
+        // base's instants do.
+        BRAKET_SPENDING_LIMIT => &["SpendingLimitArn"],
         "AWS::BedrockAgentCore::Memory" => &["MemoryArn", "MemoryId"],
         "AWS::BedrockAgentCore::Runtime" => {
             &["AgentRuntimeArn", "AgentRuntimeId", "AgentRuntimeVersion"]
@@ -1970,6 +1999,13 @@ pub fn identity_is_service_assigned(resource_type: &str) -> bool {
         // takes — a pattern no name CloudFormation decides can satisfy — so the identifier in
         // force is the one that service answered.
         || resource_type == BEDROCK_KNOWLEDGE_BASE
+        // An Amazon Braket SPENDING LIMIT is one more: `CreateSpendingLimit` takes no
+        // identifier for the limit — the declaration states the device, the amount and the
+        // period — and answers the `spendingLimitArn` that service minted, whose resource
+        // path carries a uuid of its own, so the identifier in force is the one it answered.
+        // That ARN is also what every call on a limit takes (`UpdateSpendingLimit` and
+        // `DeleteSpendingLimit` each address one by it).
+        || resource_type == BRAKET_SPENDING_LIMIT
         // An Amazon EC2 VPC, a subnet of one and a security group of one are three more:
         // `CreateVpc`, `CreateSubnet` and `CreateSecurityGroup` take no identifier at all —
         // EC2 assigns each resource an id of its own published form — and "Ref returns the
@@ -2110,6 +2146,24 @@ const BEDROCK_GUARDRAIL_DRAFT_VERSION: &str = "DRAFT";
 /// alphanumeric characters and carries no separator.
 const BEDROCK_KNOWLEDGE_BASE_ID_SALT: &str = "bedrock/knowledge-base";
 const BEDROCK_KNOWLEDGE_BASE_ID_DIGITS: usize = 10;
+
+/// The `AWS::<cloudFormationName>::<Resource>` type of an Amazon Braket SPENDING LIMIT: the
+/// cost control that service's own `CreateSpendingLimit` makes for a quantum device. The
+/// middle segment is that model's own `awsService.sdkId` (`Braket`).
+///
+/// "Ref returns the spending limit ARN", and `Fn::GetAtt` reads `SpendingLimitArn` and
+/// `CreatedAt`. Amazon Braket mints that ARN and keeps that instant, which is why
+/// [`identity_is_service_assigned`] names this type and why neither value can be recomputed
+/// from the template.
+pub const BRAKET_SPENDING_LIMIT: &str = "AWS::Braket::SpendingLimit";
+
+/// Amazon Braket's ARN namespace, which is the namespace a spending-limit ARN carries
+/// (`SpendingLimitArn`: `^arn:aws[a-z\-]*:braket:[a-z0-9\-]+:[0-9]{12}:spending-limit/.*$`).
+pub const BRAKET_ARN_NAMESPACE: &str = "braket";
+
+/// The resource path a spending-limit ARN carries before the identifier Amazon Braket minted
+/// for it, from that same pattern.
+const BRAKET_SPENDING_LIMIT_PATH: &str = "spending-limit";
 
 /// The `AWS::<cloudFormationName>::<Resource>` types of the two OpenSearch Serverless
 /// resources a stack creates. The middle segment is that service's own

@@ -23,6 +23,8 @@ mod apigateway_vpc_link_resources;
 mod application_auto_scaling_resources;
 #[path = "all/bedrock_knowledge_base_identity.rs"]
 mod bedrock_knowledge_base_identity;
+#[path = "all/braket_spending_limit_resource_type.rs"]
+mod braket_spending_limit_resource_type;
 #[path = "all/bucket_analytics_configurations.rs"]
 mod bucket_analytics_configurations;
 #[path = "all/bucket_intelligent_tiering_configurations.rs"]

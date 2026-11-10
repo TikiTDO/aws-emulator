@@ -390,6 +390,13 @@ fn a_stream_is_written_only_for_roles_iam_holds_and_firehose_may_assume() {
             let mut router = build_router(engine);
             router.set_request_authentication(false);
             let runtime = tokio::runtime::Builder::new_current_thread()
+                // The time driver, because the emulator's services run CLOCKS: a service
+                // whose state owes a transition spawns a background task that waits on a
+                // timer, and a timer on a runtime built without this panics the task — and,
+                // on a current-thread runtime, that panic unwinds out of whichever
+                // `block_on` happened to poll it. Enabling it is what lets those clocks run
+                // here, and it changes nothing this suite asserts.
+                .enable_time()
                 .build()
                 .expect("a current-thread runtime");
 

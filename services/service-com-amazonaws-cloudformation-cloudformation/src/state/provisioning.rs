@@ -3257,16 +3257,52 @@ const UNNAMED_CODE_PREFIX: &str = "HTTP ";
 ///
 /// One entry per service whose reported wording this emulator pins; a service with no entry
 /// has its message reported exactly as it worded it, with no diagnostic invented for it.
-const SDK_SERVICE_NAMES: &[(&str, &str)] = &[
+/// Each entry also carries the SHAPE that service's SDK words the diagnostic in
+/// ([`SdkDiagnostic`]), which is the SDK's and cannot be derived from the service.
+const SDK_SERVICE_NAMES: &[(&str, &str, SdkDiagnostic)] = &[
     // Application Auto Scaling's SDK names it by its `sdkId` without the spaces, which is
     // also the `cloudFormationName` the type names of its resources carry
     // (`smithy_query(query="service_info")`).
-    ("application-autoscaling", "ApplicationAutoScaling"),
-    ("es", "OpenSearch"),
-    ("iam", "Iam"),
-    ("lambda", "Lambda"),
-    ("s3", "S3"),
+    (
+        "application-autoscaling",
+        "ApplicationAutoScaling",
+        SdkDiagnostic::Attempts,
+    ),
+    // Amazon Braket's SDK names it by that model's own `sdkId` (`Braket`), and words its
+    // diagnostic with the refused OPERATION and that service's error code in it, as the
+    // recorded `ResourceStatusReason` of a failed `AWS::Braket::SpendingLimit` carries it (in
+    // the behavioral corpus `simparity-behavioral-aws-v1`, check
+    // `braket__cloudformation.deploy-braket-spendinglimit-simulator-device-rejected`, whose
+    // reason reads `Resource handler returned message: "<the service's sentence> (Service:
+    // Braket; Operation: CreateSpendingLimit; Status Code: 400; Error Code:
+    // ValidationException; Request ID: …)" (RequestToken: …, HandlerErrorCode:
+    // InvalidRequest)`).
+    ("braket", "Braket", SdkDiagnostic::Operation),
+    ("es", "OpenSearch", SdkDiagnostic::Attempts),
+    ("iam", "Iam", SdkDiagnostic::Attempts),
+    ("lambda", "Lambda", SdkDiagnostic::Attempts),
+    ("s3", "S3", SdkDiagnostic::Attempts),
 ];
+
+/// The SHAPE of the parenthesis an SDK appends to the message of the exception it raises for
+/// a refused call.
+///
+/// Both name the service and the HTTP status; what differs is what else they carry and how
+/// the parts are separated. Which of them a called service's SDK words is that SDK's, and it
+/// is not derivable from the service, so it is RECORDED per service in
+/// [`SDK_SERVICE_NAMES`] — each entry citing where that shape was read from — and a service
+/// with no entry has no diagnostic invented for it at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SdkDiagnostic {
+    /// `(Service: <service>, Status Code: <status>, Request ID: <id>) (SDK Attempt Count:
+    /// <n>)` — comma-separated, with the call's id (or ids) and how many attempts the SDK
+    /// made at it.
+    Attempts,
+    /// `(Service: <service>; Operation: <operation>; Status Code: <status>; Error Code:
+    /// <code>; Request ID: <id>)` — semicolon-separated, naming the operation that was
+    /// refused and the error code it was refused with in place of the attempt count.
+    Operation,
+}
 
 /// The services whose answers carry an EXTENDED request id beside the request id, which
 /// their SDK states in the diagnostic too.
@@ -3313,17 +3349,35 @@ fn sdk_request_ids(signing_name: &str) -> String {
 /// call and how many attempts the SDK made at it.
 ///
 /// `None` for a service [`SDK_SERVICE_NAMES`] does not name, which leaves the message as
-/// that service worded it.
-fn sdk_diagnostic(signing_name: &str, status: u16, code: &str) -> Option<String> {
-    let service = SDK_SERVICE_NAMES
+/// that service worded it — and for a diagnostic that NAMES the operation when the caller
+/// named none, since an operation is not something to invent.
+///
+/// `operation` is the called operation as its own model names it, which only a caller that
+/// knows which operation it is making can state ([`call_rest_json_named`]).
+fn sdk_diagnostic(
+    signing_name: &str,
+    operation: Option<&str>,
+    status: u16,
+    code: &str,
+) -> Option<String> {
+    let (service, shape) = SDK_SERVICE_NAMES
         .iter()
-        .find(|(name, _)| *name == signing_name)
-        .map(|(_, service)| *service)?;
-    Some(format!(
-        "(Service: {service}, Status Code: {status}, {}) (SDK Attempt Count: {})",
-        sdk_request_ids(signing_name),
-        sdk_attempt_count(code),
-    ))
+        .find(|(name, _, _)| *name == signing_name)
+        .map(|(_, service, shape)| (*service, *shape))?;
+    match shape {
+        SdkDiagnostic::Attempts => Some(format!(
+            "(Service: {service}, Status Code: {status}, {}) (SDK Attempt Count: {})",
+            sdk_request_ids(signing_name),
+            sdk_attempt_count(code),
+        )),
+        SdkDiagnostic::Operation => operation.map(|operation| {
+            format!(
+                "(Service: {service}; Operation: {operation}; Status Code: {status}; \
+                 Error Code: {code}; {})",
+                sdk_request_ids(signing_name),
+            )
+        }),
+    }
 }
 
 /// How many attempts an AWS SDK makes at a call whose refusal it classifies as worth
@@ -3355,7 +3409,19 @@ fn sdk_attempt_count(code: &str) -> u32 {
 /// service worded, then that SDK's diagnostic of the call where this crate words one
 /// ([`sdk_diagnostic`]).
 pub(super) fn sdk_message(signing_name: &str, status: u16, code: &str, message: &str) -> String {
-    match sdk_diagnostic(signing_name, status, code) {
+    sdk_message_of(signing_name, None, status, code, message)
+}
+
+/// [`sdk_message`] for a caller that knows WHICH operation of that service it called, which
+/// is part of the diagnostic some SDKs word ([`SdkDiagnostic::Operation`]).
+pub(super) fn sdk_message_of(
+    signing_name: &str,
+    operation: Option<&str>,
+    status: u16,
+    code: &str,
+    message: &str,
+) -> String {
+    match sdk_diagnostic(signing_name, operation, status, code) {
         Some(diagnostic) if message.is_empty() => diagnostic,
         Some(diagnostic) => format!("{message} {diagnostic}"),
         None => message.to_string(),
