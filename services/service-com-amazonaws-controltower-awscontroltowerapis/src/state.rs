@@ -3122,6 +3122,10 @@ pub struct CatalogBaseline {
     /// The ARN's resource segment, which is the baseline's identity: 16 characters of
     /// `[A-Z0-9]`, from `BaselineArn`'s pattern
     /// `^arn:[a-z-]+:controltower:[a-z0-9-]*:[0-9]{0,12}:baseline/[A-Z0-9]{16}$`.
+    ///
+    /// AWS-owned and fixed per baseline — the identifier clients and templates embed and
+    /// hand back to `GetBaseline`/`EnableBaseline` — so it is carried verbatim in
+    /// [`BASELINE_CATALOG`] rather than generated.
     pub id: &'static str,
     /// `GetBaselineOutput$name` / `BaselineSummary$name` — "The human-readable name of a
     /// Baseline."
@@ -3138,11 +3142,11 @@ pub struct CatalogBaseline {
     /// configuration and is refused rather than persisted — the same rule
     /// [`CATALOG_LANDING_ZONE_VERSIONS`] carries one level up.
     ///
-    /// Like the ids, these sets are this emulator's own publication: nothing published
-    /// derives a baseline id, and a baseline's version list moves with AWS's releases.
-    /// The `4.0` of AWS's own `EnableBaseline` example is kept for the baseline that
-    /// example enables, every baseline starts at `1.0`, and each entry satisfies
-    /// `BaselineVersion`.
+    /// Unlike the ids, names and descriptions beside them — which are AWS's own published
+    /// catalog values — these sets are this emulator's own publication: a baseline's
+    /// version list moves with AWS's releases. The `4.0` of AWS's own `EnableBaseline`
+    /// example is kept for the baseline that example enables, every baseline starts at
+    /// `1.0`, and each entry satisfies `BaselineVersion`.
     pub versions: &'static [&'static str],
     /// The `EnabledBaselineParameter` keys this baseline DECLARES, in a stable order.
     ///
@@ -3198,25 +3202,44 @@ impl CatalogBaseline {
     }
 }
 
-/// The baselines this emulator publishes, in a stable order.
+/// The baselines AWS Control Tower publishes, in the order `ListBaselines` reports them.
 ///
-/// The NAMES are the baseline types the AWS Control Tower User Guide documents
-/// (`AWSControlTowerBaseline` and its prerequisite `IdentityCenterBaseline`, the
-/// `AuditBaseline`/`LogArchiveBaseline` of the shared accounts, and the three AWS Backup
-/// baselines), and each description summarises that documented purpose; the model
-/// declares `description` free-form text, so it is a summary rather than AWS's wording
-/// character for character.
+/// Every member of an entry — the `name`, the `description` and the ARN's 16-character id
+/// segment — is AWS-OWNED catalog data, not an emulator choice: the catalog is the same in
+/// every partition, region and account, a client discovers a baseline by name or ARN and
+/// then enables it by that ARN, and `GetBaseline` is expected to answer the name and
+/// description AWS publishes for the ARN it is handed. So the entries below carry AWS's own
+/// values: the id segments clients and templates embed, and each baseline's fixed
+/// description text, reproduced rather than summarised. The id segment is fixed per
+/// baseline, which is why nothing here is minted per request — only the partition and
+/// region segments of a baseline ARN come from the request ([`baseline_arn`]).
 ///
-/// The IDs are opaque in AWS — nothing published derives one — so the two that appear in
-/// AWS's own API examples (`AWSControlTowerBaseline`, `IdentityCenterBaseline`) are kept
-/// and the rest are this emulator's own, chosen once and never minted per request: a
-/// baseline ARN a caller stores keeps resolving for the life of this emulator.
+/// The remaining members are this service's own model of what a baseline OFFERS (the
+/// versions it may be enabled at, the parameter keys it declares, whether AWS Control Tower
+/// assesses inheritance drift on it and whether enabling it brings a target under
+/// governance); see [`CatalogBaseline`] for the rule behind each.
+///
+/// One caveat on the text: the descriptions of `BackupAdminBaseline`, `BackupBaseline`,
+/// `CentralConfigBaseline` and `ConfigBaseline` follow AWS's documented wording for those
+/// baselines as closely as it could be established rather than being known verbatim, so
+/// they are the entries to correct first if AWS's exact sentence for one of them comes to
+/// hand; every other description here is AWS's own text.
 pub const BASELINE_CATALOG: &[CatalogBaseline] = &[
+    CatalogBaseline {
+        id: "4T4HA1KMO10S6311",
+        name: "AuditBaseline",
+        description: "Sets up resources to monitor security and compliance of accounts \
+                      in your organization.",
+        versions: &["1.0"],
+        parameters: &[],
+        detects_inheritance_drift: false,
+        establishes_governance: false,
+    },
     CatalogBaseline {
         id: "17BSJV3IGJ2QSGA2",
         name: "AWSControlTowerBaseline",
-        description: "Sets up the resources and permissions AWS Control Tower requires \
-                      to govern the accounts of a target organizational unit.",
+        description: "Sets up resources and mandatory controls for member accounts \
+                      within the target OU, required for AWS Control Tower governance.",
         versions: &["1.0", "2.0", "3.0", "4.0"],
         parameters: &["IdentityCenterEnabledForBaseline"],
         detects_inheritance_drift: true,
@@ -3225,40 +3248,58 @@ pub const BASELINE_CATALOG: &[CatalogBaseline] = &[
         establishes_governance: true,
     },
     CatalogBaseline {
-        id: "4T4HA1KMO10S6311",
-        name: "AuditBaseline",
-        description: "Sets up the cross-account audit resources AWS Control Tower \
-                      requires in the audit account.",
-        versions: &["1.0"],
-        parameters: &[],
-        detects_inheritance_drift: false,
-        establishes_governance: false,
-    },
-    CatalogBaseline {
-        id: "TR7NC4VPG9DH2KLM",
+        id: "H6C5JFCJJ3CPU3J5",
         name: "BackupAdminBaseline",
-        description: "Sets up the backup administration resources AWS Control Tower \
-                      requires in the backup administration account.",
+        description: "Sets up a delegated administrator account for AWS Backup in your \
+                      organization.",
         versions: &["1.0"],
         parameters: &[],
         detects_inheritance_drift: false,
         establishes_governance: false,
     },
     CatalogBaseline {
-        id: "QXK3R9ZB7PN5TD2H",
+        id: "APO9ATVPBKFRRGLK",
         name: "BackupBaseline",
-        description: "Sets up the backup plans and roles AWS Control Tower applies to \
-                      the accounts of a target organizational unit.",
+        description: "Sets up backup resources for member accounts within the target \
+                      OU.",
         versions: &["1.0"],
         parameters: &[],
         detects_inheritance_drift: true,
         establishes_governance: false,
     },
     CatalogBaseline {
-        id: "WM8FJ6YHL3QS5XKB",
+        id: "3WPD0NA6TJ9AOMU2",
         name: "BackupCentralVaultBaseline",
-        description: "Sets up the central backup vault AWS Control Tower requires in \
-                      the backup central vault account.",
+        description: "Sets up a central AWS Backup vault in your organization.",
+        versions: &["1.0"],
+        parameters: &[],
+        detects_inheritance_drift: false,
+        establishes_governance: false,
+    },
+    CatalogBaseline {
+        id: "YX7VMZML5IG8EJUD",
+        name: "CentralConfigBaseline",
+        description: "Sets up central resources for AWS Config in your organization.",
+        versions: &["1.0"],
+        parameters: &[],
+        detects_inheritance_drift: false,
+        establishes_governance: false,
+    },
+    CatalogBaseline {
+        id: "A6EEAE10F08193F2",
+        name: "CentralSecurityRolesBaseline",
+        description: "Sets up central resources for security monitoring within your \
+                      organization.",
+        versions: &["1.0"],
+        parameters: &[],
+        detects_inheritance_drift: false,
+        establishes_governance: false,
+    },
+    CatalogBaseline {
+        id: "1QBGH2G48YVGDQ3Y",
+        name: "ConfigBaseline",
+        description: "Sets up resources for AWS Config in accounts in your \
+                      organization.",
         versions: &["1.0"],
         parameters: &[],
         detects_inheritance_drift: false,
@@ -3267,18 +3308,19 @@ pub const BASELINE_CATALOG: &[CatalogBaseline] = &[
     CatalogBaseline {
         id: "LN25R72TTG6IGPTQ",
         name: "IdentityCenterBaseline",
-        description: "Sets up the AWS IAM Identity Center resources that are a \
-                      prerequisite for the AWSControlTowerBaseline.",
+        description: "Sets up shared resources for AWS Identity Center, which prepares \
+                      the AWSControlTowerBaseline to set up Identity Center access for \
+                      accounts.",
         versions: &["1.0", "4.0"],
         parameters: &[],
         detects_inheritance_drift: false,
         establishes_governance: false,
     },
     CatalogBaseline {
-        id: "2V6DZ8QKR4JT7MWN",
+        id: "J8HX46AHS5MIKQPD",
         name: "LogArchiveBaseline",
-        description: "Sets up the centralized log storage AWS Control Tower requires in \
-                      the log archive account.",
+        description: "Sets up a central repository for logs of API activities and \
+                      resource configurations from accounts in your organization.",
         versions: &["1.0"],
         parameters: &[],
         detects_inheritance_drift: false,
@@ -3405,10 +3447,9 @@ pub struct CatalogControl {
     /// a caller may name a control by.
     ///
     /// These ids are opaque in AWS — nothing published derives one from a control's name —
-    /// so, like the baseline ids, they are this emulator's own publication: chosen once
-    /// and never minted per request, so an identifier a caller stores keeps resolving for
-    /// the life of this emulator. Each is 26 lowercase alphanumeric characters, the form
-    /// AWS Control Catalog control ARNs carry.
+    /// and this emulator publishes its own: chosen once and never minted per request, so an
+    /// identifier a caller stores keeps resolving for the life of this emulator. Each is 26
+    /// lowercase alphanumeric characters, the form AWS Control Catalog control ARNs carry.
     pub catalog_id: &'static str,
     /// Whether `EnableControl` may enable this control.
     ///

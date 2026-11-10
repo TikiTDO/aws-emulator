@@ -625,7 +625,7 @@ async fn an_update_overlapping_an_operation_in_flight_is_a_conflict() {
 /// the clock has made due.
 #[tokio::test]
 async fn an_identifier_no_enablement_matches_is_not_found() {
-    let baseline = "arn:aws:controltower:ap-south-1::baseline/QXK3R9ZB7PN5TD2H";
+    let baseline = "arn:aws:controltower:ap-south-1::baseline/YX7VMZML5IG8EJUD";
     let target = "arn:aws:organizations::123456789012:ou/o-exampleorg/ou-nf11-1a";
 
     let router = set_up_emulator().await;

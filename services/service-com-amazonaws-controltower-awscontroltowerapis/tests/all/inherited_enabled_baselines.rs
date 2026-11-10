@@ -117,7 +117,7 @@ fn governances() -> Vec<Governance> {
             enablements: vec![
                 Enablement {
                     baseline_identifier:
-                        "arn:aws:controltower:ap-south-1::baseline/WM8FJ6YHL3QS5XKB",
+                        "arn:aws:controltower:ap-south-1::baseline/3WPD0NA6TJ9AOMU2",
                     baseline_version: "1.0",
                     target_identifier:
                         "arn:aws:organizations::123456789012:ou/o-anotherorg/ou-dd44-4d",

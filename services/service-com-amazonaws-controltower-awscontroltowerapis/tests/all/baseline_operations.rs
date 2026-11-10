@@ -95,7 +95,7 @@ pub(crate) fn enablements() -> Vec<Enablement> {
         },
         Enablement {
             case: "a baseline of one of the shared accounts, in another region",
-            baseline_identifier: "arn:aws:controltower:ap-south-1::baseline/WM8FJ6YHL3QS5XKB",
+            baseline_identifier: "arn:aws:controltower:ap-south-1::baseline/3WPD0NA6TJ9AOMU2",
             baseline_version: "1.0",
             target_identifier: "arn:aws:organizations::123456789012:ou/o-exampleorg/ou-ee55-5e",
             parameters: Some(serde_json::json!([])),
