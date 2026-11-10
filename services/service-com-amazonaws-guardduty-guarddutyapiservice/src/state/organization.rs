@@ -461,6 +461,18 @@ pub fn validate_org_feature_configurations(
 /// member (`smithy_query(shape="OrganizationFeatureConfiguration")`): an entry that
 /// states no auto-enablement states nothing to change about it, and may still carry
 /// the additional configurations below.
+///
+/// A feature's additional configurations are stored ONE PER
+/// `OrgFeatureAdditionalConfiguration` member, keyed by that name, the way the
+/// feature switches themselves are stored one per `OrgFeature` member
+/// ([`OrganizationConfiguration::set_feature`]) and the way the member side keys the
+/// same switches ([`additional_configuration_records`]): a name a request repeats is
+/// ONE configuration and the last entry naming it is the one that lands, as for the
+/// feature switches above. That is also what keeps the stored configuration no
+/// longer than the two model catalogs however long a request's lists are, so every
+/// later walk of it — a read, and the write that carries an auto-enablement onto the
+/// administrator's member accounts — is bounded by the model rather than by the
+/// request.
 pub fn apply_org_feature_configurations(
     configuration: &mut OrganizationConfiguration,
     features: Option<&Vec<crate::ops::types::OrganizationFeatureConfiguration>>,
@@ -481,22 +493,24 @@ pub fn apply_org_feature_configurations(
             continue;
         };
         if let Some(additional) = feature.additional_configuration.as_ref() {
-            record.additional_configuration = additional
-                .iter()
-                .filter_map(|configuration| {
-                    configuration
-                        .name
-                        .as_deref()
-                        .map(|name| OrgAdditionalConfigRecord {
-                            name: name.to_string(),
-                            auto_enable: configuration
-                                .auto_enable
-                                .as_deref()
-                                .unwrap_or(AUTO_ENABLE_NONE)
-                                .to_string(),
-                        })
-                })
-                .collect();
+            let mut by_name: BTreeMap<&str, OrgAdditionalConfigRecord> = BTreeMap::new();
+            for configuration in additional {
+                let Some(name) = configuration.name.as_deref() else {
+                    continue;
+                };
+                by_name.insert(
+                    name,
+                    OrgAdditionalConfigRecord {
+                        name: name.to_string(),
+                        auto_enable: configuration
+                            .auto_enable
+                            .as_deref()
+                            .unwrap_or(AUTO_ENABLE_NONE)
+                            .to_string(),
+                    },
+                );
+            }
+            record.additional_configuration = by_name.into_values().collect();
         }
     }
 }

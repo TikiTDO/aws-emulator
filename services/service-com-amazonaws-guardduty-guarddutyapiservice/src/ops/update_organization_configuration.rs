@@ -10,6 +10,11 @@
 //! Each switch is stored ONCE, as the feature that governs it, so the deprecated
 //! `DataSources` input and the `Features` one write the same record.
 //!
+//! A switch auto-enabled for ALL of the organization's accounts covers the accounts
+//! it already holds, so the write reaches this administrator's stored member
+//! accounts too; one auto-enabled for the accounts that NEW-ly join reaches only the
+//! accounts recorded from here on.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -246,6 +251,36 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `Features` entry for the same switch wins.
         crate::state::apply_org_data_sources(configuration, input.data_sources.as_ref());
         crate::state::apply_org_feature_configurations(configuration, input.features.as_ref());
+
+        // A switch auto-enabled `ALL` covers "all accounts in the organization ...
+        // includes NEW accounts that join the organization and accounts that may
+        // have been suspended or removed from the organization in GuardDuty"
+        // (`smithy_query(query="doc",shape="OrganizationFeatureConfiguration",member="AutoEnable")`),
+        // so writing the configuration writes the member accounts this
+        // administrator ALREADY holds too — through the same member-side writer
+        // `CreateMembers` applies to the accounts it records, so the two paths
+        // cannot disagree about one account's switches. A switch auto-enabled `NEW`
+        // is about the accounts that join from here on, so it reaches none of them,
+        // and nothing switches a feature OFF, which is what "when you update the
+        // auto-enable setting from ALL or NEW to NONE, this action doesn't disable
+        // the corresponding option for your existing accounts" says. The same
+        // sentences note that AWS "may take up to 24 hours to update the
+        // configuration for all the member accounts"; that propagation delay is
+        // compressed here, so a caller reading a member straight after this call
+        // already sees the settings it wrote.
+        //
+        // The configuration is read ONCE, as a borrow of the sibling field the
+        // members are written through, so every account of one call is given the
+        // same settings and nothing is copied to get at them.
+        let organization = &detector.organization;
+        for member in detector.members.values_mut() {
+            crate::state::apply_organization_auto_enable_for(
+                member,
+                organization,
+                now,
+                crate::state::AutoEnableScope::AccountsAlreadyHeld,
+            );
+        }
         // `UpdatedAt` is "the last-updated timestamp for the detector"
         // (`smithy_query(operation="GetDetector")`) and the organization
         // configuration is part of the detector's own record, like the scan settings

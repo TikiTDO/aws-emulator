@@ -505,18 +505,78 @@ pub(super) fn apply_member_feature_configurations(
     }
 }
 
-/// Write the organization's auto-enable settings onto one member account's stored
-/// configuration.
+/// Which of the organization's accounts one application of its auto-enable
+/// settings covers — the ONE thing [`AUTO_ENABLE_NEW`] and [`AUTO_ENABLE_ALL`]
+/// differ in.
 ///
-/// A feature the organization auto-enables — any `OrgFeatureStatus` other than
-/// [`AUTO_ENABLE_NONE`], which is the same "is this an auto-enablement" reading
-/// [`org_status_flag`] gives the deprecated boolean view — is ENABLED for the
-/// account, together with every additional configuration that feature auto-enables.
-/// A feature the organization auto-enables for no account keeps whatever the
-/// member's configuration already said, because then "the administrator must manage
-/// the feature for each account individually"
-/// (`smithy_query(query="doc",shape="OrganizationFeatureConfiguration",member="AutoEnable")`)
-/// — so nothing here switches a feature OFF.
+/// `NEW` auto-enables a switch "when a new account joins the organization", while
+/// `ALL` auto-enables it for "all accounts in the organization ... includes NEW
+/// accounts that join the organization and accounts that may have been suspended or
+/// removed from the organization in GuardDuty"
+/// (`smithy_query(query="doc",shape="OrganizationFeatureConfiguration",member="AutoEnable")`,
+/// and the same sentences for the auto-enablement of GuardDuty itself). So which
+/// statuses an application honours depends on whether the account it writes is one
+/// the settings are being applied TO by a request that names it, or one the
+/// administrator was already holding when the settings themselves changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoEnableScope {
+    /// The accounts a request names, which GuardDuty applies the settings to
+    /// "irrespective of the accounts being new or existing members"
+    /// (`smithy_query(query="doc",shape="CreateMembers")`): every auto-enablement
+    /// covers them, `NEW` included.
+    RequestedAccounts,
+    /// The member accounts the administrator ALREADY holds, when the organization's
+    /// own configuration is what is being written: only `ALL` covers them, because
+    /// `NEW` is about the accounts that join from then on.
+    AccountsAlreadyHeld,
+}
+
+impl AutoEnableScope {
+    /// Does an `OrgFeatureStatus` auto-enable its switch for an account in this
+    /// scope? `AutoEnableMembers` carries the same three members
+    /// ([`AUTO_ENABLE_NONE`]), so the reading serves both enums.
+    fn covers(self, auto_enable: &str) -> bool {
+        match self {
+            Self::RequestedAccounts => org_status_flag(auto_enable),
+            Self::AccountsAlreadyHeld => auto_enable == AUTO_ENABLE_ALL,
+        }
+    }
+}
+
+/// Write the organization's auto-enable settings onto one member account's stored
+/// configuration, for an account the settings are being applied to by a request
+/// that names it ([`AutoEnableScope::RequestedAccounts`]) — see
+/// [`apply_organization_auto_enable_for`] for the rule and for the other scope.
+pub fn apply_organization_auto_enable(
+    member: &mut MemberRecord,
+    organization: &OrganizationConfiguration,
+    now: i64,
+) -> bool {
+    apply_organization_auto_enable_for(
+        member,
+        organization,
+        now,
+        AutoEnableScope::RequestedAccounts,
+    )
+}
+
+/// Write the organization's auto-enable settings onto one member account's stored
+/// configuration, for the accounts `scope` covers.
+///
+/// A feature the organization auto-enables for an account in `scope` — any
+/// `OrgFeatureStatus` [`AutoEnableScope::covers`] — is ENABLED for the account,
+/// together with every additional configuration that feature auto-enables for the
+/// same accounts. A feature the organization auto-enables for no account in `scope`
+/// keeps whatever the member's configuration already said: auto-enabled for no
+/// account at all, "the administrator must manage the feature for each account
+/// individually"
+/// (`smithy_query(query="doc",shape="OrganizationFeatureConfiguration",member="AutoEnable")`),
+/// and auto-enabled only for the accounts that JOIN, an account already held is not
+/// one of them. So nothing here switches a feature OFF — which is also what "when
+/// you update the auto-enable setting from `ALL` or `NEW` to `NONE`, this action
+/// doesn't disable the corresponding option for your existing accounts"
+/// (`smithy_query(query="doc",shape="UpdateOrganizationConfigurationRequest",member="AutoEnableOrganizationMembers")`)
+/// says.
 ///
 /// Only the features a member request can configure ([`MEMBER_FEATURES`]) can be
 /// auto-enabled, which is exactly the set an organization configuration holds
@@ -526,16 +586,17 @@ pub(super) fn apply_member_feature_configurations(
 /// Answers whether this call wrote any switch at all — re-applying the status a
 /// switch already carries writes nothing ([`set_feature_in`]) — so a caller can
 /// tell a write that landed from one that left the record exactly as it was.
-pub fn apply_organization_auto_enable(
+pub fn apply_organization_auto_enable_for(
     member: &mut MemberRecord,
     organization: &OrganizationConfiguration,
     now: i64,
+    scope: AutoEnableScope,
 ) -> bool {
     // The configuration as it stood before, so "did anything move" is answered on
     // the stored switches themselves rather than on what the settings named.
     let stored = member.features.clone();
     for name in MEMBER_FEATURES {
-        if !org_status_flag(organization.feature_auto_enable(name)) {
+        if !scope.covers(organization.feature_auto_enable(name)) {
             continue;
         }
         member.set_feature(name, ENABLED, now);
@@ -544,7 +605,7 @@ pub fn apply_organization_auto_enable(
             .iter()
             .filter(|feature| feature.name == *name)
             .flat_map(|feature| feature.additional_configuration.iter())
-            .filter(|additional| org_status_flag(&additional.auto_enable))
+            .filter(|additional| scope.covers(&additional.auto_enable))
             .map(|additional| additional.name.as_str())
             .collect();
         for additional in auto_enabled {

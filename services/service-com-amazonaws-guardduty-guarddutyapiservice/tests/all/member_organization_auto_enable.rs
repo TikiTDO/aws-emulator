@@ -238,7 +238,7 @@ pub(crate) fn feature_instant(configuration: &Value, name: &str, case: &str) -> 
 
 /// The status a member's feature reports for one of its additional configurations,
 /// or `None` when the feature carries no such configuration at all.
-fn additional_status(
+pub(crate) fn additional_status(
     configuration: &Value,
     feature: &str,
     additional: &str,
@@ -254,7 +254,7 @@ fn additional_status(
 
 /// Every feature's status in a member configuration, as `(name, status)` pairs in the
 /// order reported.
-fn every_feature_status(configuration: &Value, case: &str) -> Vec<(String, String)> {
+pub(crate) fn every_feature_status(configuration: &Value, case: &str) -> Vec<(String, String)> {
     ORG_FEATURES
         .iter()
         .map(|name| {

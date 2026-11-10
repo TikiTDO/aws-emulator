@@ -223,6 +223,8 @@ mod organization_admin_redesignation;
 mod organization_admin_removal;
 #[path = "all/organization_configuration.rs"]
 mod organization_configuration;
+#[path = "all/organization_configuration_member_propagation.rs"]
+mod organization_configuration_member_propagation;
 #[path = "all/organization_managed_administrator_disassociation.rs"]
 mod organization_managed_administrator_disassociation;
 #[path = "all/organization_managed_members.rs"]
