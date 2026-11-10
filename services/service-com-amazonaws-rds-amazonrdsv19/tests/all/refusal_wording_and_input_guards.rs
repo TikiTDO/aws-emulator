@@ -32,7 +32,7 @@ use service_com_amazonaws_rds_amazonrdsv19::state::{
     check_not_empty, db_proxy_not_found_message, db_security_group_not_found_colon_message,
     db_security_group_not_found_message, invalid_event_source_type_message,
     reboot_db_instance_state_message, DB_INSTANCE_ENGINES, EVENT_CATEGORIES,
-    REBOOTABLE_DB_INSTANCE_STATUSES, SIBLING_CONTROL_PLANE_ENGINES,
+    INVALID_DB_ENGINE_MESSAGE, REBOOTABLE_DB_INSTANCE_STATUSES, SIBLING_CONTROL_PLANE_ENGINES,
 };
 
 use crate::db_instances::{
@@ -302,7 +302,9 @@ async fn describe_export_tasks_filters_by_identifier_and_bounds_its_page_size() 
 
 /// The reports whose `Engine` RESOLVES the engine whose catalogue is reported refuse a value
 /// that names no engine this front door publishes, and serve every one that does —
-/// whichever case it is written in.
+/// whichever case it is written in. Each one words that refusal the way the real service
+/// words it for that operation: the engine-version report names the value it did not
+/// recognise, the orderable-options report answers its one fixed sentence.
 #[tokio::test]
 async fn an_engine_that_names_no_published_engine_is_refused() {
     let router = emulator();
@@ -320,7 +322,11 @@ async fn an_engine_that_names_no_published_engine_is_refused() {
                 400,
                 INVALID_PARAMETER_VALUE,
             );
-            let expected = format!("Unrecognized engine name: {value}");
+            let expected = if action == "DescribeOrderableDBInstanceOptions" {
+                INVALID_DB_ENGINE_MESSAGE.to_string()
+            } else {
+                format!("Unrecognized engine name: {value}")
+            };
             let message = text(&body, "Message");
             assert_eq!(
                 message, expected,

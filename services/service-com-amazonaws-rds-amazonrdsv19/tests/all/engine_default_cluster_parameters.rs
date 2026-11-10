@@ -346,13 +346,13 @@ const PUBLISHED: [Published; 9] = [
         true,
     ),
     (
-        "Amazon Neptune, a default that is on",
+        "Amazon Neptune, a parameter whose domain is an enumeration",
         "neptune1.3",
-        "neptune_enforce_ssl",
-        APPLY_TYPE_STATIC,
-        "boolean",
-        "0,1",
-        "1",
+        "neptune_enable_slow_query_log",
+        APPLY_TYPE_DYNAMIC,
+        "string",
+        "disabled,info,debug",
+        "disabled",
         true,
     ),
 ];
@@ -480,11 +480,11 @@ async fn the_cluster_catalog_differs_from_the_per_instance_catalog() {
 // Rule 4: what is a cluster family at all
 // ---------------------------------------------------------------------------
 
-/// A `DBParameterGroupFamily` this operation serves names an engine that HAS a cluster form
-/// followed by that engine's version; anything else — a family of an instance-only engine, an
-/// engine name with no version, a version with no engine, a name no served engine carries — is
-/// refused with a 400 `InvalidParameterValue` rather than answered with an empty parameter
-/// list.
+/// A `DBParameterGroupFamily` this operation serves is one this front door PUBLISHES whose
+/// engine HAS a cluster form; anything else — a published family of an instance-only engine,
+/// a family naming a release its engine never had, an engine name with no version, a version
+/// with no engine, a name no served engine carries — is refused with a 400
+/// `InvalidParameterValue` rather than answered with an empty parameter list.
 #[tokio::test]
 async fn a_value_that_is_not_a_cluster_family_is_refused() {
     let router = emulator();
@@ -496,9 +496,9 @@ async fn a_value_that_is_not_a_cluster_family_is_refused() {
         ("a sibling control plane's engine", "docdb4.0", true),
         ("the other sibling control plane's engine", "neptune1.3", true),
         (
-            "a version this emulator publishes no engine version for",
+            "a release this emulator publishes no engine version of",
             "aurora-mysql5.6",
-            true,
+            false,
         ),
         ("an engine that runs only as a DB instance", "oracle-ee-19", false),
         ("another instance-only engine", "sqlserver-ee-15.0", false),

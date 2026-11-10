@@ -177,7 +177,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let family = input.db_parameter_group_family;
-        let published = cluster_engine_default_parameters(&family)
+        let published = published_cluster_family_parameters(&family)
             .map_err(DescribeEngineDefaultClusterParametersError::invalid_parameter_value)?;
 
         // The catalog is kept in parameter-name order, so its own order is the report's and
@@ -206,6 +206,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     }
 }
 
+/// The cluster parameters the DB CLUSTER parameter group family `family` publishes as this
+/// REPORT answers for it, or the refusal message for a value that is not such a family.
+///
+/// A family is published reference data: the service serves the families it publishes
+/// (`crate::ops::describe_engine_default_parameters::publishes_parameter_group_family`) and
+/// refuses every other value, whatever its shape — a value naming an engine this door serves
+/// followed by a release that engine has never had names no family at all, so answering it
+/// with defaults would tell a caller probing a family name that the name exists. A published
+/// family whose engine has no cluster form publishes no CLUSTER family either, which is the
+/// narrowing [`cluster_engine_default_parameters`] carries.
+fn published_cluster_family_parameters(
+    family: &str,
+) -> Result<&'static [crate::state::ClusterParameterSpec], String> {
+    if !super::describe_engine_default_parameters::publishes_parameter_group_family(family) {
+        return Err(
+            super::describe_engine_default_parameters::not_a_valid_parameter_group_family(family),
+        );
+    }
+    cluster_engine_default_parameters(family)
+}
+
 /// The cluster parameters the engine named by `family` publishes, or the refusal message for
 /// a value that is not a DB CLUSTER parameter group family.
 ///
@@ -226,21 +247,17 @@ fn cluster_engine_default_parameters(
     family: &str,
 ) -> Result<&'static [crate::state::ClusterParameterSpec], String> {
     let Some(engine) = super::describe_engine_default_parameters::family_engine(family) else {
-        return Err(format!(
-            "Invalid value '{family}' for DBParameterGroupFamily: a DB cluster parameter group \
-             family names an engine this service serves followed by that engine's version \
-             (aurora-mysql8.0, aurora-postgresql16, docdb5.0)"
-        ));
+        return Err(
+            super::describe_engine_default_parameters::not_a_valid_parameter_group_family(family),
+        );
     };
     if !crate::state::DB_CLUSTER_ENGINES
         .iter()
         .any(|known| known.eq_ignore_ascii_case(engine))
     {
-        return Err(format!(
-            "Invalid value '{family}' for DBParameterGroupFamily: only an engine that has a \
-             cluster form publishes DB cluster parameters, and those engines are {}",
-            crate::state::DB_CLUSTER_ENGINES.join(", ")
-        ));
+        return Err(
+            super::describe_engine_default_parameters::not_a_valid_parameter_group_family(family),
+        );
     }
     // The MySQL-compatible cluster engines share one cluster vocabulary (Aurora MySQL's is
     // MySQL's), and so do the PostgreSQL-compatible ones.
@@ -360,10 +377,17 @@ pub(crate) const POSTGRES_CLUSTER_PARAMETERS: &[crate::state::ClusterParameterSp
 /// The cluster parameters Amazon Neptune publishes.
 ///
 /// Source: the "DB cluster parameter group parameters" section of the Amazon Neptune User
-/// Guide — Neptune's cluster parameters, as distinct from the single parameter its DB
-/// parameter group carries (`crate::ops::describe_engine_default_parameters`'s Neptune
-/// catalog); see [`MYSQL_CLUSTER_PARAMETERS`] for what the columns are and what the catalog
-/// does and does not claim.
+/// Guide — Neptune's cluster parameters, as distinct from the parameter its DB parameter
+/// group carries (`crate::ops::describe_engine_default_parameters`'s Neptune catalog); see
+/// [`MYSQL_CLUSTER_PARAMETERS`] for what the columns are and what the catalog does and does
+/// not claim. The two LEVELS of this engine publish disjoint parameters: its query timeout
+/// belongs to a DB parameter group and is reported there, not here, so neither level
+/// reports the other's.
+///
+/// Each `description` is the graph engine's OWN catalog text for the parameter — fixed text
+/// belonging to the parameter in this engine's catalog, which is what the API reports byte
+/// for byte, rather than the wording a relational engine publishes for a parameter of the
+/// same kind.
 pub(crate) const NEPTUNE_CLUSTER_PARAMETERS: &[crate::state::ClusterParameterSpec] = &[
     parameter(
         "neptune_enable_audit_log",
@@ -373,30 +397,20 @@ pub(crate) const NEPTUNE_CLUSTER_PARAMETERS: &[crate::state::ClusterParameterSpe
         "0",
         true,
         "",
-        "Enables the auditing of cluster activity.",
+        "Toggle audit logging for Neptune",
     ),
     parameter(
-        "neptune_enforce_ssl",
-        crate::state::APPLY_TYPE_STATIC,
-        "boolean",
-        "0,1",
-        "1",
+        "neptune_enable_slow_query_log",
+        // The engine starts writing the slow-query log as soon as the parameter changes, so
+        // the change needs no reboot; the guide publishes the three levels below, with
+        // logging off by default.
+        crate::state::APPLY_TYPE_DYNAMIC,
+        "string",
+        "disabled,info,debug",
+        "disabled",
         true,
         "",
-        "Requires client connections to the cluster to use TLS.",
-    ),
-    parameter(
-        "neptune_query_timeout",
-        // The same parameter the engine's DB parameter groups carry, with the one apply
-        // type and description that control plane publishes for it; see
-        // [`super::describe_engine_default_parameters::NEPTUNE_QUERY_TIMEOUT_DESCRIPTION`].
-        crate::state::APPLY_TYPE_STATIC,
-        "integer",
-        "10-2147483647",
-        "120000",
-        true,
-        "",
-        super::describe_engine_default_parameters::NEPTUNE_QUERY_TIMEOUT_DESCRIPTION,
+        "Enable Slow query logs for Neptune",
     ),
     parameter(
         "neptune_streams",
@@ -406,7 +420,7 @@ pub(crate) const NEPTUNE_CLUSTER_PARAMETERS: &[crate::state::ClusterParameterSpe
         "0",
         true,
         "",
-        "Enables the change-log stream of the cluster's graph.",
+        "Enable or disable Neptune Streams feature",
     ),
     parameter(
         "neptune_streams_expiry_days",

@@ -544,16 +544,12 @@ async fn default_only_with_no_resolvable_default_engine_version_is_refused() {
             ],
         ),
         // An engine this front door reports on behalf of ANOTHER control plane publishes
-        // its versions here but no DEFAULT among them: the default-version registry this
-        // report reads is the RDS DB instance engines' own, and the DocumentDB and Neptune
-        // APIs own the version a cluster is created with.
+        // its versions here, and the DEFAULT among them wherever that control plane
+        // publishes one: the graph engine does, and the document engine's own recorded
+        // behaviour is the refusal below.
         (
             "DefaultOnly for the Amazon DocumentDB engine",
             vec![("DefaultOnly", "true"), ("Engine", "docdb")],
-        ),
-        (
-            "DefaultOnly for the Amazon Neptune engine",
-            vec![("DefaultOnly", "true"), ("Engine", "neptune")],
         ),
         (
             "DefaultOnly narrowed to one DocumentDB major version",
@@ -594,6 +590,12 @@ async fn default_only_with_no_resolvable_default_engine_version_is_refused() {
                 ("Filters.Filter.1.Name", "engine"),
                 ("Filters.Filter.1.Values.Value.1", "mysql"),
             ],
+        ),
+        // The graph engine of the Amazon Neptune control plane this door serves publishes a
+        // default release of its own, so `DefaultOnly` reports it rather than refusing.
+        (
+            "DefaultOnly for the Amazon Neptune engine",
+            vec![("DefaultOnly", "true"), ("Engine", "neptune")],
         ),
     ] {
         let body = expect_ok(case, call(&router, "DescribeDBEngineVersions", &params).await);

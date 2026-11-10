@@ -171,15 +171,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .map_err(DescribeEngineDefaultParametersError::validation)?;
 
         let family = input.db_parameter_group_family;
-        let Some(published) = engine_default_parameters(&family) else {
+        // A `DBParameterGroupFamily` is one the service PUBLISHES, so a value naming none is
+        // refused rather than answered with defaults ([`publishes_parameter_group_family`]).
+        if !publishes_parameter_group_family(&family) {
             return Err(
-                DescribeEngineDefaultParametersError::invalid_parameter_value(format!(
-                    "Invalid value '{family}' for DBParameterGroupFamily: a DB parameter group \
-                     family names an engine this service serves followed by that engine's \
-                     version (mysql8.0, aurora-postgresql16, sqlserver-ee-15.0)"
-                )),
+                DescribeEngineDefaultParametersError::invalid_parameter_value(
+                    not_a_valid_parameter_group_family(&family),
+                ),
             );
-        };
+        }
+        // A family the service publishes but this emulator holds no parameter catalog for is
+        // a 200 carrying an empty list — the long-standing rule [`engine_default_parameters`]
+        // states for its `_` arm (the Db2 engines today): the family IS served, and the
+        // honest report of a catalog this emulator does not hold is no parameters rather than
+        // a name, default or allowed-value set this front door made up, which a caller would
+        // configure against. Every published family names an engine this door serves, so the
+        // resolution below succeeds; a value that somehow did not would publish nothing by
+        // the same rule rather than borrow another engine's catalog.
+        let published = engine_default_parameters(&family).unwrap_or_default();
 
         // `Filters`: "The only supported filter is parameter-name. The results list only
         // includes information about the parameters with these names." Every admitted
@@ -334,6 +343,105 @@ pub(crate) fn family_engine(family: &str) -> Option<&'static str> {
         .copied()
 }
 
+/// How this front door refuses a `DBParameterGroupFamily` it does not publish: the one
+/// sentence the real service answers for such a value, carrying the family the request
+/// named and nothing else.
+///
+/// Stated once here because every operation that RESOLVES a family against the published
+/// list answers the same text — the instance-level engine-default report and the
+/// cluster-level one — so a caller reads one refusal whichever level it asked about.
+pub(crate) fn not_a_valid_parameter_group_family(family: &str) -> String {
+    format!("ParameterGroupFamily {family} is not a valid parameter group family")
+}
+
+/// Whether `family` is a DB parameter group family this front door PUBLISHES.
+///
+/// A family is published reference data, not a string SHAPE: the service serves the
+/// families it publishes and refuses every other value, however family-like it looks — an
+/// engine this door serves followed by a number is not a family when that engine has no
+/// such release. What is published is the union of the two lists this service already
+/// holds, so nothing here is a third catalogue that could disagree with them:
+///
+/// * every `DBParameterGroupFamily` the engine-version catalogue reports
+///   ([`super::describe_db_engine_versions::published_parameter_group_families`]) — which
+///   is where the families of the engines this door serves on behalf of another control
+///   plane come from, since this model's own value list names none of them; and
+/// * the value list `DescribeEngineDefaultParametersMessage$DBParameterGroupFamily`
+///   publishes ([`PUBLISHED_FAMILY_VALUE_LIST`]), which carries families this emulator's
+///   engine-version catalogue samples no release of.
+///
+/// Compared case-insensitively, the way every other published name this service resolves
+/// is; the response echoes the caller's own spelling back.
+pub(crate) fn publishes_parameter_group_family(family: &str) -> bool {
+    PUBLISHED_FAMILY_VALUE_LIST
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(family))
+        || super::describe_db_engine_versions::published_parameter_group_families()
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(family))
+}
+
+/// The DB parameter group families this model's own member publishes as its "Valid Values"
+/// (`smithy_query(query="doc",shape="DescribeEngineDefaultParametersMessage",member="DBParameterGroupFamily")`),
+/// in the order that list writes them.
+///
+/// A list on one member is only as new as the release that wrote it — it names no family of
+/// the engines this door serves for another control plane, and none of the newer RDS
+/// releases — which is why [`publishes_parameter_group_family`] reads it BESIDE the
+/// engine-version catalogue rather than instead of it.
+const PUBLISHED_FAMILY_VALUE_LIST: &[&str] = &[
+    "aurora-mysql5.7",
+    "aurora-mysql8.0",
+    "aurora-postgresql10",
+    "aurora-postgresql11",
+    "aurora-postgresql12",
+    "aurora-postgresql13",
+    "aurora-postgresql14",
+    "custom-oracle-ee-19",
+    "custom-oracle-ee-cdb-19",
+    "db2-ae",
+    "db2-ce",
+    "db2-se",
+    "mariadb10.2",
+    "mariadb10.3",
+    "mariadb10.4",
+    "mariadb10.5",
+    "mariadb10.6",
+    "mysql5.7",
+    "mysql8.0",
+    "oracle-ee-19",
+    "oracle-ee-cdb-19",
+    "oracle-ee-cdb-21",
+    "oracle-se2-19",
+    "oracle-se2-cdb-19",
+    "oracle-se2-cdb-21",
+    "postgres10",
+    "postgres11",
+    "postgres12",
+    "postgres13",
+    "postgres14",
+    "sqlserver-ee-11.0",
+    "sqlserver-ee-12.0",
+    "sqlserver-ee-13.0",
+    "sqlserver-ee-14.0",
+    "sqlserver-ee-15.0",
+    "sqlserver-ex-11.0",
+    "sqlserver-ex-12.0",
+    "sqlserver-ex-13.0",
+    "sqlserver-ex-14.0",
+    "sqlserver-ex-15.0",
+    "sqlserver-se-11.0",
+    "sqlserver-se-12.0",
+    "sqlserver-se-13.0",
+    "sqlserver-se-14.0",
+    "sqlserver-se-15.0",
+    "sqlserver-web-11.0",
+    "sqlserver-web-12.0",
+    "sqlserver-web-13.0",
+    "sqlserver-web-14.0",
+    "sqlserver-web-15.0",
+];
+
 /// Whether `engine` RUNS the PostgreSQL engine: Amazon RDS for PostgreSQL itself, and the
 /// engines that run the same PostgreSQL releases under another name
 /// (`aurora-postgresql`).
@@ -403,6 +511,21 @@ pub(crate) const fn parameter(
         description,
     }
 }
+
+/// The character sets a MySQL-compatible engine admits as its server character set, as the
+/// `AllowedValues` of the character-set parameters below publish them: the engine's own
+/// character-set table, written in the order that table carries (ascending character-set
+/// id), comma-separated.
+///
+/// Source: the character-set table these engines publish (`SHOW CHARACTER SET` in the MySQL
+/// and MariaDB manuals), which is what the managed engine publishes as the values its
+/// character-set parameters accept. It is the table these engines carry in COMMON: a set
+/// only one of them added in a later release is not claimed for the others, which share
+/// this catalog.
+const MYSQL_CHARACTER_SETS: &str = "big5,dec8,cp850,hp8,koi8r,latin1,latin2,swe7,ascii,ujis,\
+     sjis,hebrew,tis620,euckr,koi8u,gb2312,greek,cp1250,gbk,latin5,armscii8,utf8,ucs2,cp866,\
+     keybcs2,macce,macroman,cp852,latin7,utf8mb4,cp1251,utf16,cp1256,cp1257,utf32,binary,\
+     geostd8,cp932,eucjpms";
 
 /// The parameters the MySQL-compatible engines publish.
 ///
@@ -666,6 +789,16 @@ pub(crate) const MYSQL_PARAMETERS: &[crate::state::ClusterParameterSpec] = &[
         "",
         "The size in bytes of the cache holding changes to statements that use \
          nontransactional tables during a transaction.",
+    ),
+    parameter(
+        "character_set_server",
+        crate::state::APPLY_TYPE_DYNAMIC,
+        "string",
+        MYSQL_CHARACTER_SETS,
+        "latin1",
+        true,
+        "",
+        "The server's default character set.",
     ),
     parameter(
         "connect_timeout",
@@ -1394,5 +1527,8 @@ pub(crate) const NEPTUNE_PARAMETERS: &[crate::state::ClusterParameterSpec] = &[p
 /// (`DescribeDBParameters`) and a DB cluster parameter group's
 /// (`DescribeDBClusterParameters`), which is why it lives in one place and is read by both
 /// catalogs.
-pub(crate) const NEPTUNE_QUERY_TIMEOUT_DESCRIPTION: &str = "Graph query timeout (ms)";
+///
+/// A catalog description is FIXED text belonging to the parameter in that engine's catalog,
+/// reported byte for byte — including the terminating period the graph engine writes.
+pub(crate) const NEPTUNE_QUERY_TIMEOUT_DESCRIPTION: &str = "Graph query timeout (ms).";
 

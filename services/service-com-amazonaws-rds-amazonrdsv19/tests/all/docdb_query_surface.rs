@@ -45,10 +45,13 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use crate::db_instances::{call, emulator, expect_error, expect_ok, subtrees, text, texts};
 
-/// The engines this front door reports on behalf of ANOTHER control plane: their own API
-/// owns the engine version a cluster is created with, so this door publishes their
-/// versions but no DEFAULT among them.
+/// The engines this front door reports on behalf of ANOTHER control plane.
 const ENGINES_OF_ANOTHER_CONTROL_PLANE: [&str; 2] = ["docdb", "neptune"];
+
+/// The one engine this door resolves no DEFAULT engine version for: recorded behaviour on
+/// the document engine is the `InvalidParameterCombination` refusal, while the graph engine
+/// publishes a default of its own like every other engine here.
+const ENGINE_WITH_NO_DEFAULT_VERSION: &str = "docdb";
 
 /// The engines whose instances are CLUSTER members — the Aurora engines plus the two
 /// above — as `src/ops/describe_db_engine_versions.rs` names them.
@@ -485,7 +488,7 @@ async fn default_only_names_one_default_version_or_is_refused() {
             &params!["Engine" => engine, "DefaultOnly" => "true"],
         )
         .await;
-        if ENGINES_OF_ANOTHER_CONTROL_PLANE.contains(&engine.as_str()) {
+        if engine == ENGINE_WITH_NO_DEFAULT_VERSION {
             let body = expect_error(&case, answer, 400, "InvalidParameterCombination");
             assert!(
                 text(&body, "Message").contains("default engine version"),

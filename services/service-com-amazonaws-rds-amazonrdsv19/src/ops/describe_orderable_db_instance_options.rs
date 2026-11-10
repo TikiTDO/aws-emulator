@@ -182,8 +182,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `Engine` is required here and names "the database engine to describe DB instance
         // options for": it RESOLVES the engine whose catalogue is reported, so a value that
         // names no engine this front door publishes is refused rather than answered with an
-        // empty catalogue of options.
-        crate::state::check_published_engine(&input.engine)
+        // empty catalogue of options. This report words that refusal the way the real
+        // service words it HERE — the fixed `Invalid DB engine` sentence
+        // ([`crate::state::check_engine`]), which carries nothing from the request — rather
+        // than the engine-naming sentence the engine-VERSION report answers with: each
+        // operation answers its own published wording.
+        crate::state::check_engine(&input.engine)
             .map_err(DescribeOrderableDBInstanceOptionsError::invalid_parameter_value)?;
         // `Filters`: "This parameter isn't currently supported." Honouring it is not an
         // option (there is no documented filter name to honour) and ignoring it would

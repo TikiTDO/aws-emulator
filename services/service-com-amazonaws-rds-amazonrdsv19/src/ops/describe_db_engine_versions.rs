@@ -278,11 +278,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `DefaultOnly` reports "only the default version of the specified engine or the
         // engine and major version combination" — so there has to BE a specified engine
         // whose default to report, and this door has to resolve a default for it (see
-        // [`resolves_a_default_version`]: it resolves none for an engine it reports on
-        // behalf of another control plane). A request that names no engine at all, or one
-        // whose default does not resolve here, resolves to no default: it is refused as
-        // the parameter combination it is, rather than answered with an arbitrary version
-        // or with an empty list that would read as "this engine has no versions".
+        // [`resolves_a_default_version`], which is asked of the engine's own control
+        // plane). A request that names no engine at all, or one whose default does not
+        // resolve here, resolves to no default: it is refused as the parameter combination
+        // it is, rather than answered with an arbitrary version or with an empty list that
+        // would read as "this engine has no versions".
         if input.default_only == Some(true) {
             let engine_named = input.engine.is_some()
                 || input.db_parameter_group_family.is_some()
@@ -767,11 +767,18 @@ const DOCDB: VersionProfile = VersionProfile::provisioned()
 /// range (`ServerlessV2FeaturesSupport`), so a client reads the range it may configure from
 /// the version it is about to create a cluster with — exactly as an Aurora version
 /// publishes its ACU range. The range this front door reports for a Neptune Serverless
-/// cluster is the one its control plane answers with: a floor that scales to zero
-/// ([`SERVERLESS_V2_PAUSE_MIN_CAPACITY`]) up to [`SERVERLESS_V2_EARLIER_MAX_CAPACITY`]
-/// capacity units.
-const NEPTUNE: VersionProfile = NEPTUNE_BEFORE_SERVERLESS
-    .serverless_v2(SERVERLESS_V2_PAUSE_MIN_CAPACITY, SERVERLESS_V2_EARLIER_MAX_CAPACITY);
+/// cluster is the one its control plane is RECORDED answering with — half a capacity unit
+/// ([`SERVERLESS_V2_MIN_CAPACITY`], the same figure the Aurora versions publish) up to
+/// [`SERVERLESS_V2_EARLIER_MAX_CAPACITY`] — rather than the whole-unit floor the Neptune
+/// User Guide's "Using Amazon Neptune Serverless" page documents for a cluster's own
+/// configuration; where the recording and the prose differ about what this MEMBER carries,
+/// the recording is what the API reports. The floor is NOT zero either way: a zero
+/// `ServerlessV2FeaturesSupport$MinCapacity` is the member's own way of reporting the
+/// automatic pause/resume feature, which this engine's serverless clusters do not have.
+const NEPTUNE: VersionProfile = NEPTUNE_BEFORE_SERVERLESS.serverless_v2(
+    SERVERLESS_V2_MIN_CAPACITY,
+    SERVERLESS_V2_EARLIER_MAX_CAPACITY,
+);
 
 /// An Amazon Neptune version from before Neptune Serverless: the cluster engine's
 /// capabilities without a serverless capacity range.
@@ -966,6 +973,14 @@ const AURORA_POSTGRESQL_LOG_TYPES: &[&str] = &["iam-db-auth-error", "instance", 
 /// The log types an Amazon DocumentDB engine can export to CloudWatch Logs
 /// (`EnableCloudwatchLogsExports` in the DocumentDB model: the audit and profiler logs).
 const DOCDB_LOG_TYPES: &[&str] = &["audit", "profiler"];
+
+/// The log types an Amazon Neptune engine can export to CloudWatch Logs: the audit log and
+/// the slow-query log, which are the two logs that engine writes — each turned on by one of
+/// the cluster parameters its control plane publishes
+/// (`crate::ops::describe_engine_default_cluster_parameters`'s `neptune_enable_audit_log`
+/// and `neptune_enable_slow_query_log`), so what a version reports as exportable and what a
+/// parameter group can switch on cannot disagree.
+const NEPTUNE_LOG_TYPES: &[&str] = &["audit", "slowquery"];
 
 /// Every DB engine this service reports versions for.
 ///
@@ -1169,7 +1184,7 @@ pub(crate) const ENGINES: &[EngineFacts] = &[
         // answer different questions, which is why they are separate columns here.
         product: "Neptune",
         description: "Amazon Neptune",
-        exportable_log_types: &["audit"],
+        exportable_log_types: NEPTUNE_LOG_TYPES,
         character_sets: &[],
         nchar_character_sets: &[],
         timezones: &[],
@@ -2750,17 +2765,34 @@ pub(crate) fn is_rds_custom_engine(engine: &str) -> bool {
 /// `DefaultOnly` selects, and so what decides between a report and an
 /// `InvalidParameterCombination` refusal.
 ///
-/// An engine this door reports on behalf of ANOTHER control plane
-/// ([`serves_another_control_plane`]), whose own API owns the engine version a cluster is
-/// created with (`CreateDBClusterMessage$EngineVersion` in those models: "The
-/// --engine-version will default to the latest major engine version"), publishes NO
-/// default version here: the default-version registry this report reads is the RDS DB
-/// instance engines' own. Recorded behaviour on the DocumentDB engine is this refusal, not
-/// an answer naming a version. The versions themselves are still reported; only the
-/// DEFAULT of them is not a thing this door resolves.
+/// Whether an engine has a default version is the ENGINE's own published fact, asked of the
+/// control plane that owns it rather than assumed for a whole class of engines: the graph
+/// engine of the Amazon Neptune control plane publishes one (its releases carry the version
+/// a cluster created without an `EngineVersion` gets, and recorded behaviour on that engine
+/// is a report naming it), so a `DefaultOnly` request for it is answered from the
+/// catalogue's own engine-default row like any other engine's.
+///
+/// [`ENGINES_THAT_RESOLVE_NO_DEFAULT_VERSION`] is the exception list, and it cannot be read
+/// off the catalogue: an engine on it still publishes a default RELEASE — the version a
+/// create without an `EngineVersion` provisions, which [`resolve_version`] reads from the
+/// same `DefaultLevel::Engine` row — and still answers this report's `DefaultOnly` with the
+/// refusal. The two questions have different answers for it, so the fact is carried as the
+/// published datum it is.
 fn resolves_a_default_version(engine: &str) -> bool {
-    !serves_another_control_plane(engine)
+    !ENGINES_THAT_RESOLVE_NO_DEFAULT_VERSION
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(engine))
 }
+
+/// The engines whose `DefaultOnly` report this front door resolves no default version for.
+///
+/// The document engine of the Amazon DocumentDB control plane is the one entry: recorded
+/// behaviour on it is the `InvalidParameterCombination` refusal rather than an answer naming
+/// a version, while every other engine here — including the graph engine of the other
+/// control plane this door serves — answers with the release it publishes as its default.
+/// Its versions are still reported; only the DEFAULT of them is not a thing this door
+/// resolves.
+const ENGINES_THAT_RESOLVE_NO_DEFAULT_VERSION: [&str; 1] = [crate::state::DOCDB_ENGINE];
 
 /// The engine facts of `engine`, or `None` for an engine this service reports no
 /// versions for (the `custom-oracle-*` engines, whose versions only

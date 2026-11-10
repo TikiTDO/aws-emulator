@@ -235,6 +235,8 @@ mod neptune_create_gates;
 mod neptune_engine_catalog;
 #[path = "all/neptune_probe.rs"]
 mod neptune_probe;
+#[path = "all/neptune_reference_catalogs.rs"]
+mod neptune_reference_catalogs;
 #[path = "all/not_found_paths.rs"]
 mod not_found_paths;
 #[path = "all/not_found_refusal_sentences.rs"]

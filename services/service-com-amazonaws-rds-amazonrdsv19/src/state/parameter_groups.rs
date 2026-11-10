@@ -189,11 +189,8 @@ impl DbClusterParameterGroupRecord {
     /// caller set, plus the metadata the family publishes for it when it publishes any.
     pub fn parameter_to_wire(&self, name: &str) -> Parameter {
         let setting = self.parameters.get(name);
-        let spec = crate::ops::describe_engine_default_cluster_parameters::cluster_parameter_spec(
-            &self.family,
-            name,
-        )
-        .map(|spec| published_spec_for_family(&self.family, spec));
+        let spec = published_cluster_parameter_at_any_level(&self.family, name)
+            .map(|spec| published_spec_for_family(&self.family, spec));
         let spec = spec.as_ref();
         Parameter {
             parameter_name: Some(name.to_string()),
@@ -401,6 +398,32 @@ pub fn published_cluster_parameters(family: &str) -> Option<&'static [ClusterPar
     crate::ops::describe_engine_default_cluster_parameters::cluster_parameter_catalog(family)
 }
 
+/// The record the DB CLUSTER parameter group family `family` publishes for the parameter
+/// named `name`, read from whichever LEVEL of that family publishes it.
+///
+/// The family selects WHICH catalog a parameter's published metadata comes from, never
+/// whether there is any: a group carries the parameters a caller set on it, and each of them
+/// is described by the record its family publishes — the family's cluster-level catalog
+/// first ([`published_cluster_parameters`]) and then the record that same family publishes
+/// at the DB-parameter level ([`published_db_parameter`]), which is the one catalog a family
+/// whose engine publishes no cluster-level list has at all. A parameter group's family is
+/// not scoped to the engine of the control plane the group was created through, so a
+/// cluster group of an instance-only engine's family is an ordinary group whose parameters
+/// that family describes — rather than one whose parameters report a bare name and value
+/// with no apply type, data type, allowed values, description or modifiability.
+///
+/// A parameter the family publishes at NEITHER level is described by nothing, which is what
+/// a group reports for it: this emulator's catalogs are samples of AWS's published lists, so
+/// a name outside them is carried (`validate_cluster_parameter_setting` admits it) without
+/// invented metadata.
+pub fn published_cluster_parameter_at_any_level(
+    family: &str,
+    name: &str,
+) -> Option<&'static ClusterParameterSpec> {
+    crate::ops::describe_engine_default_cluster_parameters::cluster_parameter_spec(family, name)
+        .or_else(|| published_db_parameter(family, name))
+}
+
 /// Refuse a setting a DB CLUSTER parameter group of `family` cannot carry: a parameter the
 /// family publishes that the engine does not let a caller modify, or a value outside the ones
 /// that parameter admits — the `AllowedValues` its own published catalog entry carries,
@@ -421,7 +444,15 @@ pub fn validate_cluster_parameter_setting(
     value: &str,
 ) -> Result<(), String> {
     validate_parameter_setting(family, name, value)?;
-    validate_known_setting(published_cluster_parameters(family), name, value)
+    // ONE resolution answers both halves: the record a group REPORTS for a parameter
+    // ([`published_cluster_parameter_at_any_level`]) is the record the value it carries is
+    // held to, so a group can never store a value the `AllowedValues` it publishes for that
+    // parameter forbids, nor a value for a parameter it reports as not modifiable.
+    validate_known_setting(
+        published_cluster_parameter_at_any_level(family, name).map(std::slice::from_ref),
+        name,
+        value,
+    )
 }
 
 /// The apply method a change to a DB (instance) parameter gets when the caller asks for

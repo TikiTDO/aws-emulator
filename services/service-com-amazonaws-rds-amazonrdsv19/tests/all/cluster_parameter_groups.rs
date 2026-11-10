@@ -556,9 +556,9 @@ async fn a_parameter_value_outside_the_published_set_is_refused() {
     );
 }
 
-/// A parameter the family's published catalog does not carry is still accepted and read
-/// back from state, because refusing a value there would invent a constraint — it simply
-/// carries none of the metadata only a published parameter has.
+/// A parameter the family's published catalog does not carry at EITHER level is still
+/// accepted and read back from state, because refusing a value there would invent a
+/// constraint — it simply carries none of the metadata only a published parameter has.
 #[tokio::test]
 async fn a_family_with_no_published_catalog_carries_any_parameter() {
     let router = emulator();
@@ -566,10 +566,10 @@ async fn a_family_with_no_published_catalog_carries_any_parameter() {
     let rows: [(&str, &str, bool, &str, &str); 3] = [
         ("a docdb family", "docdb4.0", true, "tls", "enabled"),
         (
-            "a parameter an aurora family's catalog does not carry",
+            "a parameter no catalog of an aurora family carries",
             "aurora-postgresql15",
             false,
-            "max_connections",
+            "not_a_published_parameter",
             "4096",
         ),
         (
