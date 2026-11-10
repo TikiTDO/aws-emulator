@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetSchema
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetSchema`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetSchema::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the relation a collaboration holds under a name, computed from the configured
+//! table association that contributed it and the configured table that association refers
+//! to — see `crate::state::schemas` for why a schema is derived rather than stored.
+//!
+//! A schema belongs to ONE collaboration (the URI is
+//! `/collaborations/{collaborationIdentifier}/schemas/{name}`), so a relation another
+//! collaboration holds under the same name is not found through this one, and a
+//! collaboration the caller is not part of is an authorization failure rather than a
+//! miss.
 //!
 //! ## Shape of an operation
 //!
@@ -149,18 +150,54 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetSchema` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetSchemaErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetSchema"))
+        use crate::state as st;
+
+        let Some(state) = st::service_state(&*self.engine) else {
+            return Err(GetSchemaErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("cleanrooms state is unavailable".to_string()),
+                },
+            )
+            .into());
+        };
+
+        let region = st::request_region(ctx.parts());
+        let store = state.lock();
+        let caller = st::caller_account_id();
+
+        // The collaboration is resolved first, the same way every other
+        // collaboration-scoped read resolves it: a caller that is not part of the
+        // collaboration learns nothing about the relations it holds.
+        let Some(record) = store.visible_collaboration(&input.collaboration_identifier, caller)
+        else {
+            return Err(GetSchemaErrorModeled::AccessDeniedException(
+                AccessDeniedException {
+                    message: Some(st::authorization_denied_message(
+                        Self::NAME,
+                        &st::collaboration_arn(&region, &input.collaboration_identifier),
+                    )),
+                    reason: Some(st::ACCESS_DENIED_REASON_INSUFFICIENT_PERMISSIONS.to_string()),
+                },
+            )
+            .into());
+        };
+
+        let Some(association) = store.schema_source(&record.id, &input.name) else {
+            return Err(GetSchemaErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: st::schema_not_found_message(
+                        &input.name,
+                        &input.collaboration_identifier,
+                    ),
+                    resource_id: input.name.clone(),
+                    resource_type: st::RESOURCE_TYPE_SCHEMA.to_string(),
+                },
+            )
+            .into());
+        };
+
+        Ok(GetSchemaOutput {
+            schema: store.schema_view(record, association, &region),
+        })
     }
 }

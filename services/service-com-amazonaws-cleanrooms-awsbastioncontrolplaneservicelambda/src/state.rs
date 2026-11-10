@@ -75,12 +75,12 @@ use ::aws_smithy_types::DateTime;
 use crate::ops::types::{
     AccessBudgetsPrivacyTemplateParametersOutput, AnalysisParameter, AnalysisSchema, AnalysisSource,
     AnalysisTemplate, AnalysisTemplateSummary, ApprovalStatusDetails, Change, ChangeSpecification,
-    Collaboration, CollaborationChangeRequest, CollaborationSummary, ComputeConfiguration,
+    Collaboration, CollaborationChangeRequest, CollaborationSummary, Column, ComputeConfiguration,
     ConfiguredTable, ConfiguredTableAnalysisRule, ConfiguredTableAnalysisRulePolicy,
     ConfiguredTableAnalysisRulePolicyV1, ConfiguredTableAssociation,
     ConfiguredTableAssociationAnalysisRule, ConfiguredTableAssociationAnalysisRulePolicy,
-    ConfiguredTableAssociationAnalysisRulePolicyV1, ConfiguredTableAssociationSummary,
-    DataEncryptionMetadata,
+    ConfiguredTableAssociationAnalysisRulePolicyV1, ConfiguredTableAssociationSchemaTypeProperties,
+    ConfiguredTableAssociationSummary, DataEncryptionMetadata,
     DifferentialPrivacyTemplateParametersOutput, ErrorMessageConfiguration, MLMemberAbilities,
     MemberChangeSpecification, MemberSpecification, MemberSummary, Membership,
     MembershipJobComputePaymentConfig, MembershipMLPaymentConfig,
@@ -91,9 +91,16 @@ use crate::ops::types::{
     MembershipSyntheticDataGenerationPaymentConfig, PaymentConfiguration, PrivacyBudgetTemplate,
     PrivacyBudgetTemplateParametersInput, PrivacyBudgetTemplateParametersOutput, ProtectedQuery,
     ProtectedQueryError, ProtectedQueryOutputConfiguration, ProtectedQueryResultConfiguration,
-    QueryComputePaymentConfig, ResourceNotFoundException, SyntheticDataParameters, TableReference,
-    WorkerComputeConfiguration,
+    QueryComputePaymentConfig, ResourceNotFoundException, Schema, SchemaStatusDetail,
+    SchemaStatusReason, SchemaTypeProperties, SnowflakeTableSchema, SyntheticDataParameters,
+    TableReference, WorkerComputeConfiguration,
 };
+
+/// The schemas a collaboration holds: the relations its members contributed to it,
+/// derived from the configured table associations and configured tables already stored
+/// here rather than persisted a second time.
+mod schemas;
+pub use schemas::*;
 
 /// The ARN service segment and the SigV4 signing name for Clean Rooms, from
 /// `OPERATIONS.md` (`sigv4 name cleanrooms`) and the `CollaborationArn` /

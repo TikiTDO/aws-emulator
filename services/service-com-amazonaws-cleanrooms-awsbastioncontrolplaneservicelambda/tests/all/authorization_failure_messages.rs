@@ -122,6 +122,13 @@ fn collaboration_calls() -> Vec<CollaborationCall> {
             body: |_| Some(json!({ "action": "APPROVE" })),
             resource_scoped: true,
         },
+        CollaborationCall {
+            operation: "GetSchema",
+            method: "GET",
+            path: |id| format!("/collaborations/{id}/schemas/relation_0"),
+            body: |_| None,
+            resource_scoped: true,
+        },
     ]
 }
 
