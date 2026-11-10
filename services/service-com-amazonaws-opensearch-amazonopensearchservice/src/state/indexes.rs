@@ -593,6 +593,129 @@ pub(super) fn write_member(
     }
 }
 
+/// Remove the member at `path` from `document`, as [`with_index_settings`]'s one
+/// erasing step — the sibling of [`write_member`].
+///
+/// A setting written with no value at all is one the index no longer carries, so it is
+/// taken OUT of the schema rather than held as a value that is nothing: what the index
+/// then reports for it is what the cluster's own default gives it. A path no member of
+/// the document stands at removes nothing.
+pub(super) fn remove_member(document: &mut ::aws_smithy_types::Document, path: &[&str]) {
+    use ::aws_smithy_types::Document;
+
+    // The root itself is not a member, so a document that names nothing removes nothing.
+    let Some((name, ancestors)) = path.split_last() else {
+        return;
+    };
+    let mut node = document;
+    for ancestor in ancestors {
+        let Document::Object(members) = node else {
+            return;
+        };
+        let Some(child) = members.get_mut(*ancestor) else {
+            return;
+        };
+        node = child;
+    }
+    if let Document::Object(members) = node {
+        members.remove(*name);
+    }
+}
+
+/// The member an index's schema carries its settings in: "mappings, settings, and
+/// semantic enrichment configuration" are the sections of an `IndexSchema`, and this is
+/// the second of them.
+pub const SCHEMA_SETTINGS: &str = "settings";
+
+/// The section INSIDE those settings every index setting has its canonical name under:
+/// an index setting is named `index.<setting>`, so `index` is the section the whole of
+/// an index's settings live in once they are stored.
+pub const SETTINGS_INDEX_SECTION: &str = "index";
+
+/// The settings `schema` carries, as ONE section: every setting under the name it has
+/// below [`SETTINGS_INDEX_SECTION`], whichever of the two spellings a caller wrote it in.
+///
+/// A client writes an index's settings either directly under [`SCHEMA_SETTINGS`]
+/// (`{"settings": {"number_of_shards": 2}}`) or under the `index` section inside them
+/// (`{"settings": {"index": {"number_of_shards": 2}}}`), and both name the same setting:
+/// `index.number_of_shards`. So the two spellings are read as one section here — the one
+/// every reader of an index's settings sees — with the explicit spelling standing where
+/// both carry a name, and the merge is [`merged_index_schema`]'s so a nested section
+/// (`analysis`) written in both spellings keeps the members of each.
+pub fn index_settings(
+    schema: &::aws_smithy_types::Document,
+) -> ::serde_json::Map<String, ::serde_json::Value> {
+    use ::serde_json::{Map, Value};
+
+    let Some(Value::Object(mut written)) = json_from_document(schema).get(SCHEMA_SETTINGS).cloned()
+    else {
+        return Map::new();
+    };
+    let Some(nested) = written.remove(SETTINGS_INDEX_SECTION) else {
+        return written;
+    };
+    let merged = merged_index_schema(
+        &document_from_json(&Value::Object(written)),
+        &document_from_json(&nested),
+    );
+    match json_from_document(&merged) {
+        Value::Object(members) => members,
+        _ => Map::new(),
+    }
+}
+
+/// `schema` with the settings `updates` names written into it: the schema an accepted
+/// index-settings update leaves the index carrying.
+///
+/// Each update names ONE setting by the dotted name it has below
+/// [`SETTINGS_INDEX_SECTION`] and carries the value it is written with, or no value at
+/// all for a setting the update takes out ([`remove_member`]). The settings the schema
+/// already held come along as the one section [`index_settings`] reads them as, so an
+/// update cannot leave the same setting stored under two spellings; every other section
+/// of the schema — the mappings above all — is left exactly as it was.
+pub fn with_index_settings(
+    schema: &::aws_smithy_types::Document,
+    updates: &[(String, Option<::serde_json::Value>)],
+) -> ::aws_smithy_types::Document {
+    use ::serde_json::Value;
+
+    let mut settings = document_from_json(&Value::Object(index_settings(schema)));
+    for (name, value) in updates {
+        let path: Vec<&str> = name.split('.').filter(|part| !part.is_empty()).collect();
+        match value {
+            Some(value) => write_member(&mut settings, &path, document_from_json(value)),
+            None => remove_member(&mut settings, &path),
+        }
+    }
+    let mut updated = schema.clone();
+    write_member(
+        &mut updated,
+        &[SCHEMA_SETTINGS, SETTINGS_INDEX_SECTION],
+        settings,
+    );
+    // The canonical section now carries every setting the index has, including the ones
+    // the schema held in the direct spelling, so those are dropped rather than left
+    // beside it as a second copy of the same setting.
+    if let ::aws_smithy_types::Document::Object(members) = &mut updated {
+        if let Some(::aws_smithy_types::Document::Object(section)) =
+            members.get_mut(SCHEMA_SETTINGS)
+        {
+            section.retain(|name, _| name == SETTINGS_INDEX_SECTION);
+        }
+    }
+    updated
+}
+
+/// The name the setting `written` names has below [`SETTINGS_INDEX_SECTION`]: an index
+/// setting may be written with its `index.` prefix or without it, and both name the same
+/// setting, so the prefix is dropped where a request carried it.
+pub fn index_setting_name(written: &str) -> &str {
+    written
+        .strip_prefix(SETTINGS_INDEX_SECTION)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .unwrap_or(written)
+}
+
 /// The `IndexSchema` section an index's analysis settings live in: the tokenizers,
 /// filters and analyzers the domain's cluster builds the index's text pipeline from.
 ///

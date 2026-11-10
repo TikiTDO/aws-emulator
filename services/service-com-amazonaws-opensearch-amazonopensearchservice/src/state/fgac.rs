@@ -95,6 +95,13 @@ pub const ACTION_DELETE_INDEX: &str = "indices:admin/delete";
 /// The action reading an index's own settings and mappings asks for.
 pub const ACTION_GET_INDEX: &str = "indices:admin/get";
 
+/// The action reading an index's own settings asks for — the monitoring action the
+/// engine's get-settings API is registered under.
+pub const ACTION_GET_INDEX_SETTINGS: &str = "indices:monitor/settings/get";
+
+/// The action updating those settings asks for.
+pub const ACTION_UPDATE_INDEX_SETTINGS: &str = "indices:admin/settings/update";
+
 /// The action writing an index template asks for.
 pub const ACTION_PUT_TEMPLATE: &str = "indices:admin/index_template/put";
 

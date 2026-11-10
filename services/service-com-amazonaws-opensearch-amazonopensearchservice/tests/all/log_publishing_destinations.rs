@@ -15,7 +15,10 @@
 //! CloudWatch Logs log group that exists in the caller's own account and Region;
 //! anything else is refused with `ValidationException` (HTTP 400) and neither creates a
 //! domain nor changes what one publishes. A DISABLED option delivers nothing, so no
-//! destination is required of it.
+//! destination is required of it. Each refusal states the condition that HELD: a
+//! destination naming a group this account and Region does not hold is the service's
+//! fixed existence sentence, and a value that names no log group at all is the
+//! misconfigured-option sentence naming the log type that carried it.
 //!
 //! The rows differ along what the rule generalises over: which log type carries the
 //! option, whether the named group exists (one of several created groups, one never
@@ -54,15 +57,37 @@ const UNCREATED_GROUP: &str = "/aws/opensearch/domains/never-created";
 /// A group created and then deleted, which names nothing once the delete has run.
 const DELETED_GROUP: &str = "/aws/opensearch/domains/withdrawn";
 
+/// The sentence the service refuses a destination that does not exist with: fixed text,
+/// carrying no part of the request — not the group's name and not the log type.
+const NO_SUCH_GROUP: &str = "The specified CloudWatch Logs log group doesn't exist.";
+
+/// What the rule answers a row with, where it refuses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Refused {
+    /// The destination names a log group this account and Region does not hold: the
+    /// fixed existence sentence, whichever field of the ARN it is that misses them.
+    Nonexistent,
+    /// The value names no log group AT ALL, so the option publishes to nowhere: the
+    /// misconfigured-option sentence, which names the log type that carried it.
+    NoDestination(&'static str),
+}
+
+impl Refused {
+    /// Whether `message` is the sentence this refusal is stated in.
+    fn stated_in(&self, message: &str) -> bool {
+        match self {
+            Self::Nonexistent => message == NO_SUCH_GROUP,
+            Self::NoDestination(log_type) => message.contains(log_type),
+        }
+    }
+}
+
 /// One row of the table: the `LogPublishingOptions` map to send, the case it stands for,
-/// and what the refusal has to name — `None` where the rule accepts the map.
+/// and how the rule refuses it — `None` where the rule accepts the map.
 struct Row {
     case: &'static str,
     options: Value,
-    /// The text the refusal sentence has to carry: the log group for a destination that
-    /// names no group of this account, the log type for a value that names no log group
-    /// at all.
-    names: Option<String>,
+    refused: Option<Refused>,
 }
 
 /// An enabled option publishing `log_type` to `arn`.
@@ -76,12 +101,12 @@ fn rows() -> Vec<Row> {
         Row {
             case: "a created group",
             options: enabled("INDEX_SLOW_LOGS", &log_group_arn(PUBLISHED_GROUP)),
-            names: None,
+            refused: None,
         },
         Row {
             case: "another created group, under another log type",
             options: enabled("SEARCH_SLOW_LOGS", &log_group_arn(SECOND_GROUP)),
-            names: None,
+            refused: None,
         },
         Row {
             // `LogGroup$arn` is the same group written with the trailing `:*` that names
@@ -91,17 +116,17 @@ fn rows() -> Vec<Row> {
                 "ES_APPLICATION_LOGS",
                 &format!("{}:*", log_group_arn(PUBLISHED_GROUP)),
             ),
-            names: None,
+            refused: None,
         },
         Row {
             case: "a group nobody created",
             options: enabled("INDEX_SLOW_LOGS", &log_group_arn(UNCREATED_GROUP)),
-            names: Some(UNCREATED_GROUP.to_string()),
+            refused: Some(Refused::Nonexistent),
         },
         Row {
             case: "a group created and then deleted",
             options: enabled("INDEX_SLOW_LOGS", &log_group_arn(DELETED_GROUP)),
-            names: Some(DELETED_GROUP.to_string()),
+            refused: Some(Refused::Nonexistent),
         },
         Row {
             case: "a created group's name in another Region",
@@ -109,7 +134,7 @@ fn rows() -> Vec<Row> {
                 "INDEX_SLOW_LOGS",
                 &log_group_arn(PUBLISHED_GROUP).replace(REGION, "eu-west-1"),
             ),
-            names: Some(PUBLISHED_GROUP.to_string()),
+            refused: Some(Refused::Nonexistent),
         },
         Row {
             case: "a created group's name in another account",
@@ -118,7 +143,7 @@ fn rows() -> Vec<Row> {
                 &log_group_arn(PUBLISHED_GROUP)
                     .replace(::engine::emulator_account_id(), "210987654321"),
             ),
-            names: Some(PUBLISHED_GROUP.to_string()),
+            refused: Some(Refused::Nonexistent),
         },
         Row {
             case: "a created group's name in another partition",
@@ -126,7 +151,7 @@ fn rows() -> Vec<Row> {
                 "INDEX_SLOW_LOGS",
                 &log_group_arn(PUBLISHED_GROUP).replace("arn:aws:", "arn:aws-cn:"),
             ),
-            names: Some(PUBLISHED_GROUP.to_string()),
+            refused: Some(Refused::Nonexistent),
         },
         Row {
             // A value that is not a log group's ARN names no destination at all, which
@@ -136,17 +161,17 @@ fn rows() -> Vec<Row> {
                 "INDEX_SLOW_LOGS",
                 &format!("{}:log-stream:one", log_group_arn(PUBLISHED_GROUP)),
             ),
-            names: Some("INDEX_SLOW_LOGS".to_string()),
+            refused: Some(Refused::NoDestination("INDEX_SLOW_LOGS")),
         },
         Row {
             case: "an ARN of another service",
             options: enabled("INDEX_SLOW_LOGS", "arn:aws:s3:::a-bucket"),
-            names: Some("INDEX_SLOW_LOGS".to_string()),
+            refused: Some(Refused::NoDestination("INDEX_SLOW_LOGS")),
         },
         Row {
             case: "the log group's name rather than its ARN",
             options: enabled("INDEX_SLOW_LOGS", PUBLISHED_GROUP),
-            names: Some("INDEX_SLOW_LOGS".to_string()),
+            refused: Some(Refused::NoDestination("INDEX_SLOW_LOGS")),
         },
         Row {
             case: "two log types, both resolving",
@@ -160,7 +185,7 @@ fn rows() -> Vec<Row> {
                     "CloudWatchLogsLogGroupArn": log_group_arn(SECOND_GROUP),
                 },
             }),
-            names: None,
+            refused: None,
         },
         Row {
             case: "two log types, the second publishing to a group nobody created",
@@ -174,7 +199,7 @@ fn rows() -> Vec<Row> {
                     "CloudWatchLogsLogGroupArn": log_group_arn(UNCREATED_GROUP),
                 },
             }),
-            names: Some(UNCREATED_GROUP.to_string()),
+            refused: Some(Refused::Nonexistent),
         },
         Row {
             // A disabled option delivers nothing, so the group it names is never
@@ -186,12 +211,12 @@ fn rows() -> Vec<Row> {
                     "CloudWatchLogsLogGroupArn": log_group_arn(UNCREATED_GROUP),
                 },
             }),
-            names: None,
+            refused: None,
         },
         Row {
             case: "an empty map",
             options: json!({}),
-            names: None,
+            refused: None,
         },
     ]
 }
@@ -235,7 +260,7 @@ async fn an_enabled_log_publishing_option_must_name_a_log_group_that_exists() {
         let Row {
             case,
             options,
-            names,
+            refused,
         } = row;
 
         // The map on the call that CREATES a domain with it.
@@ -243,12 +268,12 @@ async fn an_enabled_log_publishing_option_must_name_a_log_group_that_exists() {
         let mut body = baseline_create(&created);
         body["LogPublishingOptions"] = options.clone();
         let answer = emulator.create(body).await;
-        match &names {
-            Some(named) => {
+        match &refused {
+            Some(refused) => {
                 assert_refusal(&answer, REFUSAL, case);
                 assert!(
-                    message(&answer, case).contains(named.as_str()),
-                    "case CreateDomain({case}): expected the refusal to name {named:?}, got {:?}",
+                    refused.stated_in(&message(&answer, case)),
+                    "case CreateDomain({case}): expected the refusal {refused:?}, got {:?}",
                     message(&answer, case)
                 );
                 assert_no_domain(&emulator, &created).await;
@@ -276,12 +301,12 @@ async fn an_enabled_log_publishing_option_must_name_a_log_group_that_exists() {
         let answer = emulator
             .update_config(changed, json!({ "LogPublishingOptions": options.clone() }))
             .await;
-        match &names {
-            Some(named) => {
+        match &refused {
+            Some(refused) => {
                 assert_refusal(&answer, REFUSAL, case);
                 assert!(
-                    message(&answer, case).contains(named.as_str()),
-                    "case UpdateDomainConfig({case}): expected the refusal to name {named:?}, \
+                    refused.stated_in(&message(&answer, case)),
+                    "case UpdateDomainConfig({case}): expected the refusal {refused:?}, \
                      got {:?}",
                     message(&answer, case)
                 );
@@ -349,10 +374,10 @@ async fn every_log_type_resolves_its_destination_the_same_way() {
                 );
             } else {
                 assert_refusal(&answer, REFUSAL, &case);
-                assert!(
-                    message(&answer, &case).contains(UNCREATED_GROUP),
-                    "case CreateDomain({case}): expected the refusal to name the log group, \
-                     got {:?}",
+                assert_eq!(
+                    message(&answer, &case),
+                    NO_SUCH_GROUP,
+                    "case CreateDomain({case}): expected the existence refusal, got {:?}",
                     message(&answer, &case)
                 );
                 assert_no_domain(&emulator, &name).await;

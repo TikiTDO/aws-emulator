@@ -145,6 +145,8 @@ mod index_modelled_answers;
 mod index_registry;
 #[path = "all/index_schema_updates.rs"]
 mod index_schema_updates;
+#[path = "all/index_settings_api.rs"]
+mod index_settings_api;
 #[path = "all/insight_detail_answerability.rs"]
 mod insight_detail_answerability;
 #[path = "all/insight_details.rs"]
@@ -159,6 +161,8 @@ mod instance_type_catalog;
 mod instance_type_engine_refusal;
 #[path = "all/instance_type_limits.rs"]
 mod instance_type_limits;
+#[path = "all/log_publishing_delivery.rs"]
+mod log_publishing_delivery;
 #[path = "all/log_publishing_destinations.rs"]
 mod log_publishing_destinations;
 #[path = "all/log_type_key_constraint.rs"]

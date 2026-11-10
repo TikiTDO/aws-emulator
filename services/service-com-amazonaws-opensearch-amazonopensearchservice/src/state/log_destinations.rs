@@ -20,11 +20,11 @@
 //! ENGINE rather than to a mounted service, so which services the emulator happens to
 //! mount does not change what this check resolves.
 //!
-//! What a caller SEES for such a destination is the service's one sentence for a log
-//! group it cannot write to: publishing is authorized by a CloudWatch Logs resource
-//! policy over the destination group, and a group nobody created carries no policy that
-//! admits anybody, so the refusal is the missing-permission one naming that group
-//! ([`unwritable_destination`]).
+//! What a caller SEES for such a destination is the service's own sentence for a log group
+//! it cannot resolve: the group is not there ([`nonexistent_destination`]). That sentence
+//! carries no part of the request, because WHICH group is missing is not what it states —
+//! it states that the destination the request named does not exist, which is the one thing
+//! a caller has to act on.
 
 use ::service_com_amazonaws_cloudwatchlogs_logs_20140328::state as cloudwatch_logs;
 
@@ -46,7 +46,11 @@ const LOG_GROUP_STREAMS_SUFFIX: &str = ":*";
 /// `None` for a value that is not the ARN of a CloudWatch Logs log group — an option
 /// carrying one of those names no destination at all, which is
 /// [`super::log_publishing_refusal`]'s refusal rather than this module's.
-fn named_log_group(arn: &str) -> Option<(&str, &str)> {
+///
+/// `pub(crate)` because the DELIVERY into that group reads the destination the same way
+/// ([`super::log_publishing`]): one reading of what an option's ARN names, so what the
+/// create resolved is what a record is published to.
+pub(crate) fn named_log_group(arn: &str) -> Option<(&str, &str)> {
     if !cloudwatch_logs::is_log_group_arn(arn) {
         return None;
     }
@@ -65,25 +69,22 @@ pub fn names_a_log_group(arn: &str) -> bool {
     named_log_group(arn).is_some()
 }
 
-/// What the service answers an enabled option whose destination it cannot write to.
+/// What the service answers an enabled option whose destination does not exist.
 ///
-/// Publishing into a log group is authorized by a CloudWatch Logs resource policy over
-/// that group, so this is the sentence a destination the service may not write to is
-/// refused with — including a group nobody created, which no policy covers. It names the
-/// log group the request asked for and nothing else of the request.
-pub fn unwritable_destination(log_group: &str) -> ValidationException {
+/// A log group nobody created is no destination at all, and the service says so in a fixed
+/// sentence: the refusal states the CONDITION that held and carries no value of the request
+/// — not the group's name, not the log type — so it reads the same for every destination
+/// that resolves to nothing. It is the refusal for a group this account and Region does not
+/// hold, whichever field of the ARN it is that misses them.
+pub fn nonexistent_destination() -> ValidationException {
     ValidationException {
-        message: Some(format!(
-            "The Resource Access Policy specified for the CloudWatch Logs log group \
-             {log_group} does not grant sufficient permissions for Amazon OpenSearch Service to \
-             create a log stream. Please add the resource access policy using the \
-             PutResourcePolicy API in the CloudWatch Logs service."
-        )),
+        message: Some("The specified CloudWatch Logs log group doesn't exist.".to_string()),
     }
 }
 
 /// Whether every enabled option in `options` publishes to a log group that EXISTS, and
-/// the refusal naming the first destination that does not otherwise.
+/// the refusal for the first destination that does not otherwise
+/// ([`nonexistent_destination`]).
 ///
 /// The log types are visited in order, so one request with two unresolvable destinations
 /// is refused with the same sentence however the map was iterated. A DISABLED option
@@ -128,7 +129,7 @@ pub fn log_publishing_destination_refusal<'a, Eng: Send + Sync + 'static>(
             .get(name)
             .is_none_or(|group| group.log_group_arn != arn)
         {
-            return Some(unwritable_destination(name));
+            return Some(nonexistent_destination());
         }
     }
     None

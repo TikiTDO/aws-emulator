@@ -71,8 +71,9 @@
 //!
 //! The REST surface served is the one this emulator can answer out of persisted state:
 //! the cluster banner and health, the cluster's nodes and its own settings, an index's
-//! create/read/delete, a document write, read and delete, a count and a search over a
-//! bounded query vocabulary ([`selector`]) whose `match` is evaluated over the terms the
+//! create/read/delete, its own settings read and updated, a document write, read and
+//! delete, a count and a search over a bounded query vocabulary ([`selector`]) whose
+//! `match` is evaluated over the terms the
 //! field's own analysis chain produces, the tokens a text produces through that chain
 //! ([`analyze`]), index templates, ingest pipelines (declared, simulated and applied to a
 //! write that names one), the index-management plugin's policy API, and the security
@@ -106,6 +107,10 @@ mod pipeline;
 
 /// The analyze API: the tokens a text produces through the chain a request resolves.
 mod analyze;
+
+/// The index-settings API: the settings one index holds, and the update that changes the
+/// dynamic ones.
+mod index_settings;
 
 /// The most bytes one data-plane request body is read as JSON.
 ///
@@ -142,20 +147,23 @@ const MAX_BOOL_NESTING: usize = 20;
 /// body it sent.
 const MAX_QUERY_CLAUSES: usize = 1_024;
 
-/// How much of a DOCUMENT's text one search may analyze, over the whole scan: its bytes,
-/// plus [`ANALYSIS_OVERHEAD`] for each analysis.
+/// How much text one search may analyze, over the whole scan: its bytes, plus
+/// [`ANALYSIS_OVERHEAD`] for each analysis.
 ///
 /// The emulator's OWN bound on the TIME one request can occupy, and on the PRODUCT the
 /// per-factor caps leave open: a search analyzes each document's own text once per analyzed
 /// clause, so its work is the documents it visits times the clauses it carries times the
-/// text each holds at those fields. Counting the text rather than the analyses is what ties
-/// the budget to the work itself — tokenizing, stemming and expanding all cost the length of
-/// what they run over — and the per-analysis floor is what keeps a scan of very many tiny
-/// values bounded too. The budget is charged AND checked at each analysis
-/// ([`Terms::document`]), so no analysis past it is performed, whatever one document's pass
-/// carries; the scan that reached it is then refused rather than reporting part of a scan as
-/// the whole. The data plane serves a request on the calling task while it holds this
-/// service's store, so the span this bounds is one no other caller can be made to wait past.
+/// text each holds at those fields — and it analyzes each CLAUSE's own text once per index
+/// the request resolved, so a request naming every index multiplies that work too. Counting
+/// the text rather than the analyses is what ties the budget to the work itself —
+/// tokenizing, stemming and expanding all cost the length of what they run over — and the
+/// per-analysis floor is what keeps a scan of very many tiny values bounded too. The budget
+/// is charged AND checked at each analysis, query text and document text alike
+/// ([`charged`]), so no analysis past it is performed, whatever one document's pass or one
+/// index's resolution carries; the request that reached it is then refused rather than
+/// reporting part of a scan as the whole. The data plane serves a request on the calling
+/// task while it holds this service's store, so the span this bounds is one no other caller
+/// can be made to wait past.
 const MAX_ANALYZED_BYTES: usize = 8 * 1024 * 1024;
 
 /// What one analysis costs against [`MAX_ANALYZED_BYTES`] beside the text's own length, so
@@ -482,6 +490,7 @@ pub fn serve<Eng: Send + Sync + 'static>(
     // emulator holds no policy evidence for — the account's own credential, or a grant it
     // cannot read — which is the posture `crate::state::authorization` documents.
     let identity = ctx.and_then(|ctx| state::authorization::request_identity_documents(engine, ctx));
+    let now = SystemTime::now();
     let request = Request {
         method: &method,
         path: &resolved.request_path,
@@ -489,11 +498,13 @@ pub fn serve<Eng: Send + Sync + 'static>(
         body,
         principal: &principal,
         identity: identity.as_ref(),
+        started: ::std::time::Instant::now(),
+        at: now,
+        published: ::std::cell::RefCell::new(Vec::new()),
     };
     let Some(state) = service_state(engine) else {
         return error(503, "cluster_block_exception", "blocked by: [SERVICE_UNAVAILABLE]");
     };
-    let now = SystemTime::now();
     let mut store = state.lock();
     // The dictionary files this domain's packages mount, resolved out of the store before
     // the domain this request addresses is borrowed: the content belongs to the PACKAGES
@@ -515,7 +526,13 @@ pub fn serve<Eng: Send + Sync + 'static>(
             "blocked by: [SERVICE_UNAVAILABLE/1/state not recovered / initialized]",
         );
     }
-    serve_resolved(domain, &request, now, &across, &files)
+    let answer = serve_resolved(domain, &request, now, &across, &files);
+    // The records the work this request did produced go to the log groups the domain
+    // publishes them to — after THIS service's store is released, so the two stores are
+    // never held at once (`crate::state::log_publishing`'s lock order).
+    drop(store);
+    state::log_publishing::deliver(engine, &request.published.into_inner());
+    answer
 }
 
 /// The dictionary files the packages IN PLACE on the domain mount, for a request whose
@@ -662,6 +679,75 @@ fn remote_patterns<'r>(request: &'r Request<'r>) -> Vec<&'r str> {
         .collect()
 }
 
+/// The comma-separated index patterns `named` carries, refused past
+/// [`MAX_NAMED_INDEX_PATTERNS`] so one request's index resolution cannot be sized by the
+/// path it sent. An empty element names nothing and is dropped.
+fn named_patterns(named: &str) -> Result<Vec<&str>, Box<RtResponse>> {
+    let patterns: Vec<&str> = named.split(',').filter(|name| !name.is_empty()).collect();
+    if patterns.len() > MAX_NAMED_INDEX_PATTERNS {
+        return Err(Box::new(error(
+            400,
+            ingest::ILLEGAL_ARGUMENT_EXCEPTION,
+            &format!(
+                "a request may name at most {MAX_NAMED_INDEX_PATTERNS} indexes, and this one \
+                 names {}",
+                patterns.len()
+            ),
+        )));
+    }
+    Ok(patterns)
+}
+
+/// The indexes of `domain` ONE pattern names: every index a wildcard pattern or `_all`
+/// matches ([`matched_index`]), or the one index a plain name carries — and the engine's own
+/// not-found for a name no index of the domain carries.
+///
+/// The ONE reading of what a pattern names, so every route that takes one — a search, a
+/// count, the index-settings API — resolves it alike.
+fn matched_indexes<'a>(
+    domain: &'a Domain,
+    pattern: &str,
+) -> Result<Vec<&'a str>, Box<RtResponse>> {
+    if pattern == "_all" || pattern.contains('*') || pattern.contains('?') {
+        return Ok(domain
+            .indexes
+            .keys()
+            .filter(|name| matched_index(pattern, name))
+            .map(String::as_str)
+            .collect());
+    }
+    match domain.indexes.get_key_value(pattern) {
+        Some((name, _)) => Ok(vec![name.as_str()]),
+        None => Err(Box::new(index_not_found(pattern))),
+    }
+}
+
+/// The indexes `named` names, in the store's own order and de-duplicated: one index by its
+/// name, several by a comma-separated list, a set of them by a wildcard pattern or `_all`,
+/// and every index the domain holds for a path that names none.
+///
+/// Composed of the two readings a search's own resolution is composed of
+/// ([`named_patterns`], [`matched_indexes`]), so which of a domain's indexes a path is about
+/// is decided in one place. A `<cluster>:<index>` pattern names ANOTHER cluster's index
+/// ([`CrossCluster`]), of which this domain holds nothing, so it resolves to no local index
+/// here.
+fn resolved_indexes<'a>(
+    domain: &'a Domain,
+    named: Option<&str>,
+) -> Result<Vec<&'a str>, Box<RtResponse>> {
+    let Some(named) = named else {
+        return Ok(domain.indexes.keys().map(String::as_str).collect());
+    };
+    let mut resolved: BTreeSet<&str> = BTreeSet::new();
+    for pattern in named_patterns(named)? {
+        if pattern.contains(REMOTE_CLUSTER_SEPARATOR) {
+            continue;
+        }
+        resolved.extend(matched_indexes(domain, pattern)?);
+    }
+    Ok(resolved.into_iter().collect())
+}
+
 /// One data-plane request, as the surface below reads it.
 struct Request<'a> {
     method: &'a str,
@@ -673,9 +759,37 @@ struct Request<'a> {
     /// The identity-based policy documents in force on that principal, or `None` when this
     /// emulator holds none for it.
     identity: Option<&'a Vec<String>>,
+    /// When this plane began serving the request, so the work it does can state how long it
+    /// really took ([`Request::took`]) — which is what a slow-log threshold is compared
+    /// against.
+    started: ::std::time::Instant,
+    /// The instant the request is served at, which every record it produces is stamped with.
+    at: SystemTime,
+    /// The records the domain's log publishing has of the work this request did — filled in
+    /// by the step that did it ([`Request::record_served`]) and delivered once this
+    /// service's store is released, so no two stores are held at once.
+    published: ::std::cell::RefCell<Vec<state::log_publishing::PublishedRecord>>,
 }
 
 impl Request<'_> {
+    /// How long serving this request has taken so far — the duration the work it did really
+    /// occupied, never a figure chosen for a record.
+    fn took(&self) -> ::std::time::Duration {
+        self.started.elapsed()
+    }
+
+    /// Note what the work this request did produced, as the records `domain`'s enabled
+    /// log-publishing options have of it ([`state::log_publishing::records`]).
+    ///
+    /// Called by the step that DID the work, because that step is what knows which index was
+    /// read or written and under which id; nothing is recorded for a domain that publishes
+    /// nothing, or for work no threshold of its index makes slow.
+    fn record_served(&self, domain: &Domain, served: &[state::log_publishing::Served<'_>]) {
+        let records = state::log_publishing::records(domain, served, self.at);
+        if !records.is_empty() {
+            self.published.borrow_mut().extend(records);
+        }
+    }
     /// The path's segments, with empty ones dropped so a trailing or doubled `/` names no
     /// segment of its own.
     fn segments(&self) -> Vec<&str> {
@@ -827,6 +941,13 @@ fn serve_resolved(
         // so neither reserved name is read as an index.
         ["_analyze"] => analyze::analyze_request(domain, request, None, files),
         [index, "_analyze"] => analyze::analyze_request(domain, request, Some(index), files),
+        // The settings of the indexes a request names, and of every index the cluster
+        // holds where it names none. Both arms come before the index arms below, so the
+        // reserved name is never read as an index.
+        ["_settings"] => index_settings::index_settings_request(domain, request, None),
+        [index, "_settings"] => {
+            index_settings::index_settings_request(domain, request, Some(index))
+        }
         // A refresh with no index named is the whole cluster's, and this arm comes before
         // the single-segment one below so the reserved name is never read as an index.
         ["_refresh"] => match request.method {
@@ -1149,9 +1270,9 @@ fn cluster_settings_request(domain: &mut Domain, request: &Request<'_>) -> RtRes
             |domain| {
                 ok(&json!({
                     state::SETTINGS_PERSISTENT:
-                        reported_settings(&domain.cluster_settings.persistent, request),
+                        reported_text_settings(&domain.cluster_settings.persistent, request),
                     state::SETTINGS_TRANSIENT:
-                        reported_settings(&domain.cluster_settings.transient, request),
+                        reported_text_settings(&domain.cluster_settings.transient, request),
                 }))
             },
         ),
@@ -1210,7 +1331,18 @@ fn update_cluster_settings(domain: &mut Domain, request: &Request<'_>) -> RtResp
         if let Err(refusal) = flatten_settings(written, &mut String::new(), &mut flattened) {
             return *refusal;
         }
-        updates.push((scope.as_str() == state::SETTINGS_TRANSIENT, flattened));
+        // The cluster holds its settings as TEXT, so each value an update wrote is read
+        // as the text it is held under.
+        let mut settings: Vec<SettingUpdate> = Vec::new();
+        for (name, value) in flattened {
+            let held = match value.as_ref().map(|value| setting_text(&name, value)) {
+                Some(Ok(text)) => Some(text),
+                Some(Err(refusal)) => return *refusal,
+                None => None,
+            };
+            settings.push((name, held));
+        }
+        updates.push((scope.as_str() == state::SETTINGS_TRANSIENT, settings));
     }
     // Past the quota the WHOLE update is refused, before anything is stored: a setting a
     // caller wrote and this cluster dropped would be indistinguishable from one it holds,
@@ -1267,15 +1399,36 @@ fn update_cluster_settings(domain: &mut Domain, request: &Request<'_>) -> RtResp
     ok(&json!({
         "acknowledged": true,
         state::SETTINGS_PERSISTENT:
-            reported_settings(&domain.cluster_settings.persistent, request),
+            reported_text_settings(&domain.cluster_settings.persistent, request),
         state::SETTINGS_TRANSIENT:
-            reported_settings(&domain.cluster_settings.transient, request),
+            reported_text_settings(&domain.cluster_settings.transient, request),
     }))
 }
 
 /// One setting an update writes: its flat dotted NAME, and the value it is written with —
 /// `None` for a setting the update RESETS.
 type SettingUpdate = (String, Option<String>);
+
+/// One setting a settings body names, as [`flatten_settings`] reads it out: its flat
+/// dotted NAME, and the value written for it — `None` for a setting the body RESETS.
+type WrittenSetting = (String, Option<Value>);
+
+/// The TEXT a cluster setting is held as, for the value an update wrote it with.
+///
+/// The cluster's settings are strings, so a number or a boolean is held as the text it was
+/// written as and one spelling is stored. A LIST is no value one cluster setting takes,
+/// which the engine states as a value it could not parse for that setting.
+fn setting_text(name: &str, value: &Value) -> Result<String, Box<RtResponse>> {
+    match value {
+        Value::String(text) => Ok(text.clone()),
+        Value::Array(_) => Err(Box::new(error(
+            400,
+            ingest::ILLEGAL_ARGUMENT_EXCEPTION,
+            &format!("Failed to parse value for setting [{name}]"),
+        ))),
+        other => Ok(other.to_string()),
+    }
+}
 
 /// The settings one scope of an update writes: whether that scope is the transient one, and
 /// the settings it names.
@@ -1294,7 +1447,7 @@ const X_CONTENT_PARSE_EXCEPTION: &str = "x_content_parse_exception";
 fn flatten_settings(
     written: &Map<String, Value>,
     prefix: &mut String,
-    into: &mut Vec<SettingUpdate>,
+    into: &mut Vec<WrittenSetting>,
 ) -> Result<(), Box<RtResponse>> {
     if prefix.matches('.').count() > state::INDEX_SCHEMA_MAX_DEPTH {
         return Err(Box::new(error(
@@ -1315,15 +1468,7 @@ fn flatten_settings(
                 flatten_settings(nested, &mut nested_prefix, into)?;
             }
             Value::Null => into.push((name, None)),
-            Value::String(text) => into.push((name, Some(text.clone()))),
-            Value::Bool(_) | Value::Number(_) => into.push((name, Some(value.to_string()))),
-            Value::Array(_) => {
-                return Err(Box::new(error(
-                    400,
-                    ingest::ILLEGAL_ARGUMENT_EXCEPTION,
-                    &format!("Failed to parse value for setting [{name}]"),
-                )))
-            }
+            value => into.push((name, Some(value.clone()))),
         }
     }
     Ok(())
@@ -1337,13 +1482,16 @@ fn flatten_settings(
 /// own (`a` beside `a.b`) has no object to nest under, so it is reported under the name it
 /// has rather than displacing the other: both settings the cluster holds are reported, which
 /// is what a client reading its own configuration back needs.
-fn reported_settings(held: &BTreeMap<String, String>, request: &Request<'_>) -> Value {
+fn reported_settings<'a>(
+    held: impl IntoIterator<Item = (&'a str, Value)>,
+    request: &Request<'_>,
+) -> Value {
     let flat = request.parameter("flat_settings").as_deref() == Some("true");
     let mut reported = Map::new();
     for (name, value) in held {
         let segments: Vec<&str> = name.split('.').collect();
         if flat || segments.len() == 1 {
-            reported.insert(name.clone(), json!(value));
+            reported.insert(name.to_string(), value);
             continue;
         }
         let mut at = Some(&mut reported);
@@ -1356,14 +1504,23 @@ fn reported_settings(held: &BTreeMap<String, String>, request: &Request<'_>) -> 
         }
         match at {
             Some(at) => {
-                at.insert(segments[segments.len() - 1].to_string(), json!(value));
+                at.insert(segments[segments.len() - 1].to_string(), value);
             }
             None => {
-                reported.insert(name.clone(), json!(value));
+                reported.insert(name.to_string(), value);
             }
         }
     }
     Value::Object(reported)
+}
+
+/// One settings scope as a report carries it, for a scope the cluster holds as TEXT
+/// ([`reported_settings`]).
+fn reported_text_settings(held: &BTreeMap<String, String>, request: &Request<'_>) -> Value {
+    reported_settings(
+        held.iter().map(|(name, value)| (name.as_str(), json!(value))),
+        request,
+    )
 }
 
 /// The pipelines a `GET /_ingest/pipeline` reports: every one the cluster holds, or the ONE
@@ -1800,7 +1957,18 @@ fn index_request(domain: &mut Domain, request: &Request<'_>, index_name: &str) -
         }),
         "DELETE" => guarded(domain, request, fgac::ACTION_DELETE_INDEX, |domain| {
             match domain.indexes.remove(index_name) {
-                Some(_) => ok(&json!({ "acknowledged": true })),
+                Some(_) => {
+                    // Which indexes the cluster holds is what its own application log
+                    // states, so the delete that changed it is recorded.
+                    request.record_served(
+                        domain,
+                        &[state::log_publishing::Served::Applied {
+                            index: index_name,
+                            change: state::log_publishing::IndexChange::Deleted,
+                        }],
+                    );
+                    ok(&json!({ "acknowledged": true }))
+                }
                 None => index_not_found(index_name),
             }
         }),
@@ -1887,6 +2055,22 @@ fn create_index(domain: &mut Domain, request: &Request<'_>, index_name: &str) ->
             documents: BTreeMap::new(),
         },
     );
+    // An index the cluster did not hold before is a change to the cluster's own state,
+    // which its application log states — with the shard layout the created index carries,
+    // as the engine's own line carries it.
+    let (shards, replicas) = domain.indexes.get(index_name).map_or((1, 1), |index| {
+        (
+            setting_number(&index.schema, "number_of_shards").unwrap_or(1),
+            setting_number(&index.schema, "number_of_replicas").unwrap_or(1),
+        )
+    });
+    request.record_served(
+        domain,
+        &[state::log_publishing::Served::Applied {
+            index: index_name,
+            change: state::log_publishing::IndexChange::Created { shards, replicas },
+        }],
+    );
     ok(&json!({
         "acknowledged": true,
         "shards_acknowledged": true,
@@ -1907,26 +2091,14 @@ fn read_index(domain: &Domain, request: &Request<'_>, index_name: &str) -> RtRes
     }
     let schema = state::json_from_document(&index.schema);
     let mappings = schema.get("mappings").cloned().unwrap_or_else(|| json!({}));
-    // A client writes the settings either directly or nested under `index`; one level of
-    // that nesting is unwrapped so the report carries exactly one.
-    let written = schema.get("settings").cloned().unwrap_or_else(|| json!({}));
-    let mut settings = written
-        .get("index")
-        .cloned()
-        .unwrap_or(written)
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    settings.insert("provided_name".to_string(), json!(index_name));
-    settings.insert(
-        "uuid".to_string(),
-        json!(stable_uuid(&format!("{}/{index_name}", domain.arn))),
-    );
     ok(&json!({
         index_name: {
             "aliases": {},
             "mappings": mappings,
-            "settings": { "index": Value::Object(settings) },
+            "settings": {
+                state::SETTINGS_INDEX_SECTION:
+                    index_settings::settings_view(domain, index, request),
+            },
         }
     }))
 }
@@ -2052,6 +2224,17 @@ fn document_write(
                 .and_then(|index| index.documents.get(&indexed.document_id))
                 .map_or(1, |document| document.version);
             let created = version == 1;
+            // The write really happened, and how long it took is what the index's own
+            // indexing slow-log threshold is compared against.
+            request.record_served(
+                domain,
+                &[state::log_publishing::Served::Indexed {
+                    index: &indexed.index_name,
+                    id: &indexed.document_id,
+                    took: request.took(),
+                    source: ::std::str::from_utf8(request.body).unwrap_or_default(),
+                }],
+            );
             rendered(
                 if created { 201 } else { 200 },
                 &json!({
@@ -2185,6 +2368,7 @@ fn count(
         Ok(selected) => selected,
         Err(refusal) => return *refusal,
     };
+    record_searched(domain, request, index_name);
     ok(&json!({
         "count": total,
         "_shards": { "total": 1, "successful": 1, "skipped": 0, "failed": 0 },
@@ -2231,6 +2415,7 @@ fn search(
             Ok(selected) => selected,
             Err(refusal) => return *refusal,
         };
+    record_searched(domain, request, index_name);
     let hits: Vec<Value> = hits
         .into_iter()
         .map(|(index, id, source)| {
@@ -2251,6 +2436,24 @@ fn search(
             "hits": hits,
         },
     }))
+}
+
+/// Note the read a search or a count performed, for the domain's search slow-log
+/// publishing: ONE record per index the path named, because the threshold that decides
+/// whether the read was slow is each index's own.
+fn record_searched(domain: &Domain, request: &Request<'_>, named: &str) {
+    let took = request.took();
+    let source = ::std::str::from_utf8(request.body).unwrap_or_default();
+    let served: Vec<state::log_publishing::Served<'_>> = resolved_indexes(domain, Some(named))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|index| state::log_publishing::Served::Searched {
+            index,
+            took,
+            source,
+        })
+        .collect();
+    request.record_served(domain, &served);
 }
 
 /// The number a search names for `name`, in the body or in the query string, falling back
@@ -2285,18 +2488,7 @@ fn selected_documents(
 ) -> Result<Selected, Box<RtResponse>> {
     let body = request.json()?.unwrap_or_else(|| json!({}));
     let select = selector(body.get("query"), 0)?;
-    let patterns: Vec<&str> = index_name.split(',').filter(|name| !name.is_empty()).collect();
-    if patterns.len() > MAX_NAMED_INDEX_PATTERNS {
-        return Err(Box::new(error(
-            400,
-            ingest::ILLEGAL_ARGUMENT_EXCEPTION,
-            &format!(
-                "a request may name at most {MAX_NAMED_INDEX_PATTERNS} indexes, and this one \
-                 names {}",
-                patterns.len()
-            ),
-        )));
-    }
+    let patterns = named_patterns(index_name)?;
     // A `BTreeSet` of names, so an index named twice is scanned once and the order is the
     // store's own: two reads of one domain report the same documents in the same order.
     let mut named = ::std::collections::BTreeSet::new();
@@ -2314,26 +2506,7 @@ fn selected_documents(
             remote.insert(pattern);
             continue;
         }
-        if pattern == "_all" || pattern.contains('*') || pattern.contains('?') {
-            named.extend(
-                domain
-                    .indexes
-                    .keys()
-                    .filter(|name| {
-                        ::service_common::iam_authorization::wildcard_match(
-                            if pattern == "_all" { "*" } else { pattern },
-                            name,
-                            true,
-                        )
-                    })
-                    .map(String::as_str),
-            );
-            continue;
-        }
-        if !domain.indexes.contains_key(pattern) {
-            return Err(Box::new(index_not_found(pattern)));
-        }
-        named.insert(pattern);
+        named.extend(matched_indexes(domain, pattern)?);
     }
     // A query's BREADTH is bounded as its depth is: past the engine's own clause ceiling
     // the query is refused rather than evaluated clause by clause against every document,
@@ -2431,17 +2604,14 @@ impl Scan {
         }
         let selected = select.matches(id, source, terms);
         // The budget the scan's analyses share is CHARGED and CHECKED where each analysis
-        // happens ([`Terms::document`]), so nothing past it is ever analyzed; this is where
-        // a scan that reached it is refused, rather than answering from a document pass
-        // that stopped halfway through its clauses.
+        // happens ([`charged`]), so nothing past it is ever analyzed; this is where a scan
+        // that reached it is refused, rather than answering from a document pass that
+        // stopped halfway through its clauses.
         if terms.analyzed() > MAX_ANALYZED_BYTES {
             return Err(Box::new(error(
                 400,
                 ingest::ILLEGAL_ARGUMENT_EXCEPTION,
-                &format!(
-                    "a request may analyze at most {MAX_ANALYZED_BYTES} bytes of document \
-                     text"
-                ),
+                &format!("a request may analyze at most {MAX_ANALYZED_BYTES} bytes of text"),
             )));
         }
         if !selected {
@@ -2466,10 +2636,11 @@ impl Scan {
 /// dictionaries those chains read — a chain carries its whole stop-word or synonym set.
 ///
 /// The QUERY's own text is analyzed here too, once per clause, since a clause asks the same
-/// question of every document; only a DOCUMENT's text is analyzed as the scan reaches it,
-/// and each such analysis is charged against the budget the WHOLE scan shares
-/// ([`MAX_ANALYZED_BYTES`]), which is why that budget is borrowed from the scan rather than
-/// held per index.
+/// question of every document; a DOCUMENT's text is analyzed as the scan reaches it. BOTH
+/// are charged against the budget the WHOLE scan shares ([`MAX_ANALYZED_BYTES`]) — which is
+/// why that budget is borrowed from the scan rather than held per index: the chains are
+/// resolved once per index the request names, so without one shared allowance a request
+/// naming every index would analyze its own clause texts over again per index.
 ///
 /// The two chains a mapping may name are kept apart: the one a query's text goes through and
 /// the one the field's own text went through. A field the index holds its values WHOLE for (a
@@ -2485,8 +2656,9 @@ struct Terms<'a> {
     /// The field -> the text each clause asks about -> the terms that text produces
     /// through the chain a QUERY's text goes through for that field.
     queries: BTreeMap<String, BTreeMap<String, Vec<String>>>,
-    /// How much of the scan's analysis budget has been spent on document text
-    /// ([`MAX_ANALYZED_BYTES`]) — the scan's own counter, shared by every index it reaches.
+    /// How much of the scan's analysis budget has been spent, on query text and on document
+    /// text alike ([`MAX_ANALYZED_BYTES`]) — the scan's own counter, shared by every index
+    /// it reaches.
     spent: &'a ::std::cell::Cell<usize>,
 }
 
@@ -2496,8 +2668,12 @@ impl<'a> Terms<'a> {
     ///
     /// Refused past [`MAX_CHAINS_PER_INDEX`] distinct chains: each carries its own
     /// dictionary, so that bound is what keeps the memory one query's resolution costs a
-    /// product of constants rather than a number the query chooses. Refused too for a chain
-    /// this engine cannot build — a tokenizer or filter nothing registers, or a
+    /// product of constants rather than a number the query chooses. Refused too past the
+    /// scan's own analysis budget ([`charged`]), which the clause texts analyzed here draw
+    /// down along with the document text the scan goes on to analyze: the chains are
+    /// resolved once per index the request names, so the clause texts of a request naming
+    /// many indexes are analyzed once per index and that work is bounded here. Refused too
+    /// for a chain this engine cannot build — a tokenizer or filter nothing registers, or a
     /// configuration it cannot run — since answering from another chain's terms would be
     /// answering a question the caller did not ask.
     fn of(
@@ -2547,6 +2723,9 @@ impl<'a> Terms<'a> {
                 into.insert(field.clone(), named);
             }
             if let Some(chain) = searching.get(field).and_then(|named| chains.get(named)) {
+                // The clause's own text costs what analyzing it costs, charged against the
+                // one allowance the whole scan shares BEFORE the analysis is performed.
+                charged(spent, text)?;
                 queries
                     .entry(field.clone())
                     .or_default()
@@ -2577,20 +2756,38 @@ impl<'a> Terms<'a> {
     /// budget is analyzed, however many clauses one document's pass carries.
     fn document(&self, field: &str, text: &str) -> Option<Vec<String>> {
         let chain = self.chains.get(self.indexing.get(field)?)?;
-        let cost = ANALYSIS_OVERHEAD.saturating_add(text.len());
-        let spent = self.spent.get().saturating_add(cost);
-        if spent > MAX_ANALYZED_BYTES {
-            self.spent.set(spent);
+        if charged(self.spent, text).is_err() {
             return Some(Vec::new());
         }
-        self.spent.set(spent);
         Some(chain.terms(text))
     }
 
-    /// How much of this scan's budget the document text analyzed so far has cost.
+    /// How much of this scan's budget the text analyzed so far has cost.
     fn analyzed(&self) -> usize {
         self.spent.get()
     }
+}
+
+/// Charge analyzing `text` against the budget the whole scan shares, and refuse the request
+/// where that takes it past [`MAX_ANALYZED_BYTES`] — the ONE statement of what one analysis
+/// costs, so the query's text and a document's are charged alike.
+///
+/// The charge is taken BEFORE the analysis it pays for, so nothing past the budget is ever
+/// analyzed. A document's analysis cannot refuse from where it stands ([`Terms::document`]
+/// answers no terms and leaves the scan marked exhausted, which [`Scan::consider`] refuses);
+/// the query's can, since no document has been judged yet.
+fn charged(spent: &::std::cell::Cell<usize>, text: &str) -> Result<(), Box<RtResponse>> {
+    let cost = ANALYSIS_OVERHEAD.saturating_add(text.len());
+    let total = spent.get().saturating_add(cost);
+    spent.set(total);
+    if total > MAX_ANALYZED_BYTES {
+        return Err(Box::new(error(
+            400,
+            ingest::ILLEGAL_ARGUMENT_EXCEPTION,
+            &format!("a request may analyze at most {MAX_ANALYZED_BYTES} bytes of text"),
+        )));
+    }
+    Ok(())
 }
 
 /// The refusal a chain this engine cannot build earns: the engine's illegal-argument

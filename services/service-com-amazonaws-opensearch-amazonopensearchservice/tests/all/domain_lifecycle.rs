@@ -238,7 +238,7 @@ impl Emulator {
     /// ([`Emulator::with_log_groups`]), the way an SDK drives it: `POST /` with
     /// `X-Amz-Target: Logs_20140328.<Op>`, signed for that service so the router can
     /// name it.
-    async fn logs_call(&self, operation: &str, body: Value) -> Answer {
+    pub(crate) async fn logs_call(&self, operation: &str, body: Value) -> Answer {
         let request = http::Request::builder()
             .method("POST")
             .uri("/")

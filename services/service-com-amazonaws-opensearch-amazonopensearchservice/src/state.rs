@@ -63,6 +63,10 @@ pub mod cognito_authentication;
 /// log group that exists — the check the create path and the update path share.
 pub mod log_destinations;
 
+/// What a domain's enabled log-publishing options DELIVER into the log groups they name:
+/// the slow-log records its own data plane produces, and the cluster's application log.
+pub mod log_publishing;
+
 /// Whether a value satisfies its member's modelled `@pattern` over its WHOLE length —
 /// the reading AWS applies, which the request boundary's find does not enforce for an
 /// unanchored expression.
