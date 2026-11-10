@@ -82,7 +82,7 @@ async fn resolve_key_arn(
 /// in an endpoint URL's authority, so it is read as a Region LABEL
 /// (`service_common::arn::region_label`, the one place this tree states that
 /// grammar) instead of being interpolated as given — the same guard
-/// [`super::ec2_subnets`] applies to the other service this crate asks. `None`
+/// [`super::ec2_client`] applies to the other service this crate asks. `None`
 /// for a value that would name an authority the caller chose rather than the peer
 /// service this emulator asks, in which case nothing is asked at all and the
 /// identifier the request named is stored as sent.

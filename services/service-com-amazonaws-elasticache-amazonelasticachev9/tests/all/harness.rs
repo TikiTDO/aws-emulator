@@ -303,6 +303,81 @@ impl Emulator {
         self.account_subnets_in(REGION).await
     }
 
+    /// Mint `count` VPC security groups in `region` through `ec2:CreateSecurityGroup` and
+    /// answer the ids EC2 reported for them, in the order they were created.
+    ///
+    /// A security group is an Amazon EC2 resource and its identifier is EC2's to mint, so a
+    /// suite that needs one ASKS the owner for it — exactly where the service under test
+    /// will look for it. `label` keeps the group names of one suite apart from another's,
+    /// because "you can't have two security groups for the same VPC with the same name".
+    pub async fn security_groups_in(&self, region: &str, label: &str, count: usize) -> Vec<String> {
+        let mut minted = Vec::with_capacity(count);
+        for index in 0..count {
+            minted.push(
+                self.security_group_named_in(region, &format!("{label}-{index}"))
+                    .await,
+            );
+        }
+        minted
+    }
+
+    /// [`Self::security_groups_in`] for [`REGION`].
+    pub async fn security_groups(&self, label: &str, count: usize) -> Vec<String> {
+        self.security_groups_in(REGION, label, count).await
+    }
+
+    /// The id of the account's security group called `name` in `region`, created through
+    /// `ec2:CreateSecurityGroup` when the account has no group of that name yet.
+    ///
+    /// A static table can name the GROUP it means but not its id, because the id is EC2's
+    /// to mint: this is what turns the one into the other, and asking twice for one name
+    /// answers the same real id both times.
+    pub async fn security_group_named_in(&self, region: &str, name: &str) -> String {
+        let ec2 = self.ec2(region);
+        let filter = ::aws_sdk_ec2::types::Filter::builder()
+            .name("group-name")
+            .values(name)
+            .build();
+        let described = ec2
+            .describe_security_groups()
+            .filters(filter)
+            .send()
+            .await
+            .expect("EC2 must report the account's security groups");
+        if let Some(id) = described
+            .security_groups()
+            .iter()
+            .find_map(::aws_sdk_ec2::types::SecurityGroup::group_id)
+        {
+            return id.to_string();
+        }
+        ec2.create_security_group()
+            .group_name(name)
+            .description(format!("the {name} group of this suite"))
+            .send()
+            .await
+            .expect("EC2 must create the security group")
+            .group_id()
+            .expect("CreateSecurityGroup must report the group id it minted")
+            .to_string()
+    }
+
+    /// [`Self::security_group_named_in`] for [`REGION`].
+    pub async fn security_group_named(&self, name: &str) -> String {
+        self.security_group_named_in(REGION, name).await
+    }
+
+    /// Delete the security group `group_id` through `ec2:DeleteSecurityGroup`, so the id
+    /// becomes one the account HELD and holds no longer.
+    pub async fn delete_security_group(&self, group_id: &str) {
+        self.ec2(REGION)
+            .delete_security_group()
+            .group_id(group_id)
+            .send()
+            .await
+            .expect("EC2 must delete the security group");
+    }
+
     /// Send one KMS call through the same router and answer its HTTP status and
     /// parsed body.
     ///

@@ -487,14 +487,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // "AuthToken can be specified only on replication groups where
         // TransitEncryptionEnabled is true." The token itself is a secret and is
         // never stored; only the fact that one was set, which is all the model
-        // reports.
+        // reports. ElastiCache words that rule as a BAD VALUE for the token: the
+        // password is the thing that cannot be carried without encryption in
+        // transit, and the sentence carries no trailing stop.
         let transit_encryption_enabled = input.transit_encryption_enabled.unwrap_or(false);
         if let Some(token) = input.auth_token.as_deref() {
             if !transit_encryption_enabled {
-                return Err(invalid_combination(
-                    "AuthToken can be specified only on a replication group where \
-                     TransitEncryptionEnabled is true."
-                        .to_string(),
+                return Err(invalid_value(
+                    crate::state::AUTH_TOKEN_NEEDS_TRANSIT_ENCRYPTION_MESSAGE.to_string(),
                 ));
             }
             if let Some(message) = crate::state::auth_token_refusal(token) {
@@ -769,6 +769,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let region = crate::state::request_region(ctx.parts());
+        // Every VPC security group the request names has to be one the account HAS: the
+        // group is what guards network access to the cache the request is asking for, so an
+        // identifier that names none could never guard anything. Which security groups the
+        // account has, and which VPC each one is in, is Amazon EC2's answer and nobody
+        // else's (`crate::state::ec2_security_groups`), asked over the emulator's own
+        // in-process callback — and asked BEFORE any state is written, so a refused request
+        // creates nothing. The VPC each one guards is compared against the group's
+        // placement below, once the subnet group is resolved.
+        let requested_security_groups = match crate::state::ec2_security_groups::resolved_or_refusal(
+            ctx,
+            &region,
+            input.security_group_ids.as_deref(),
+        )
+        .await
+        {
+            Ok(resolved) => resolved,
+            Err(message) => return Err(invalid_value(message)),
+        };
         // `KmsKeyId` is "the ID of the KMS key used to encrypt the disk in the
         // cluster" and the group REPORTS it for the rest of its life, so the
         // identifier the request named is resolved to the key's own ARN before it
@@ -834,11 +852,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `CreateCacheParameterGroup` added. The STORED name is what the group
         // carries, so it reports the group's own identity rather than the casing
         // the request used.
-        let requested_parameter_group = match input.cache_parameter_group_name.as_deref() {
-            Some(name) => match store.parameter_group(name) {
-                Some(group) => Some(group.name.clone()),
-                None => {
-                    return Err(
+        let requested_parameter_group: Option<(String, String)> =
+            match input.cache_parameter_group_name.as_deref() {
+                Some(name) => match store.parameter_group(name) {
+                    Some(group) => Some((group.name.clone(), group.family.clone())),
+                    None => {
+                        return Err(
                         CreateReplicationGroupErrorModeled::CacheParameterGroupNotFoundFault(
                             CacheParameterGroupNotFoundFault {
                                 message: Some(
@@ -850,10 +869,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         )
                         .into(),
                     )
-                }
-            },
-            None => None,
-        };
+                    }
+                },
+                None => None,
+            };
 
         // Seeding the group from a stored snapshot ("The name of a snapshot from
         // which to restore data into the new replication group"): a name this
@@ -926,6 +945,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 }
             }
         };
+        let requested_engine_version = input.engine_version.clone();
         let engine_version = input
             .engine_version
             .or_else(|| {
@@ -934,6 +954,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .map(|cluster| cluster.engine_version.clone())
             })
             .unwrap_or_else(|| crate::state::default_engine_version(&engine).to_string());
+        // A group's parameters are its FAMILY's engine's, so a group of another
+        // engine than the one these clusters run carries settings that engine does
+        // not have.
+        if let Some((_, family)) = requested_parameter_group.as_ref() {
+            let group_engine = crate::state::family_engine(family);
+            if group_engine != engine {
+                return Err(invalid_combination(
+                    crate::state::parameter_group_engine_mismatch_message(group_engine, &engine),
+                ));
+            }
+        }
+        // A version the REQUEST names has to be one the engine OFFERS: the
+        // catalogue `DescribeCacheEngineVersions` publishes is what a client picks
+        // a version from, so a value absent from it names no engine version this
+        // service could run the group's clusters on. A version the request does
+        // not name is the engine's own newest published version, or the one the
+        // primary cluster is already running — each already offered.
+        if let Some(named) = requested_engine_version.as_deref() {
+            if !crate::state::version_is_offered(&engine, named) {
+                return Err(invalid_combination(
+                    crate::state::version_not_offered_message(&engine, named),
+                ));
+            }
+        }
         let cache_node_type = input.cache_node_type.or_else(|| {
             primary
                 .as_ref()
@@ -994,6 +1038,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .as_ref()
                 .and_then(|cluster| cluster.cache_subnet_group_name.clone()),
         };
+
+        // A security group only ever guards network interfaces of its OWN VPC, so one in
+        // another VPC than the subnets the clusters are placed in could not guard them. The
+        // placement's VPC is the one the owner of subnets reported when the subnet group was
+        // created; the groups' VPCs came from EC2 above.
+        if let Some(name) = cache_subnet_group_name.as_deref() {
+            if let Some(placement) = store.cache_subnet_groups.get(&name.to_ascii_lowercase()) {
+                if let Some(group_vpc) = crate::state::ec2_security_groups::vpc_mismatch(
+                    &requested_security_groups,
+                    &placement.vpc_id,
+                ) {
+                    return Err(invalid_combination(
+                        crate::state::ec2_security_groups::vpc_mismatch_message(
+                            &placement.name,
+                            &placement.vpc_id,
+                            group_vpc,
+                        ),
+                    ));
+                }
+            }
+        }
 
         // The shards and their members as they will be stored: the cluster ids
         // ElastiCache derives from the group id, and the zone each member sits
@@ -1131,7 +1196,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // group, so the group this replication group reports is always one this
         // account holds. A version no published family covers has no default
         // group to join, so the version itself is refused.
-        let cache_parameter_group_name = match requested_parameter_group {
+        let cache_parameter_group_name = match requested_parameter_group.map(|(name, _)| name) {
             Some(name) => name,
             None => {
                 let derived = crate::state::default_parameter_group_name(&engine, &engine_version)

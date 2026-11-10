@@ -54,6 +54,9 @@ struct CacheCase {
     /// names, or `None` when it names none and ElastiCache selects the Region's
     /// defaults (every row of this table is created in us-east-1).
     subnet_ids: Option<usize>,
+    /// How many VPC security groups (the ids EC2 mints for the account) the
+    /// request attaches the cache to; `0` when it names none.
+    security_groups: usize,
     /// Every `(element suffix, text)` pair the response must additionally
     /// carry — the members this row sets and nothing else reports.
     reported: &'static [(&'static str, &'static str)],
@@ -96,6 +99,7 @@ fn assert_reports_case(
     reply: &Reply,
     status: &str,
     account_subnets: &[String],
+    security_groups: &[String],
 ) {
     let name = case.name;
     assert_eq!(
@@ -188,6 +192,16 @@ fn assert_reports_case(
              {reported_subnets:?}"
         );
     }
+    // The security groups a cache reports are the ones the request named, which
+    // are groups the account HAS — their ids come from EC2, the service that owns
+    // security groups.
+    let expected_groups: Vec<&str> = security_groups.iter().map(String::as_str).collect();
+    assert_eq!(
+        reply.all("SecurityGroupIds/SecurityGroupId"),
+        expected_groups,
+        "case {name} ({where_from}): expected SecurityGroupIds {expected_groups:?}, got {:?}",
+        reply.all("SecurityGroupIds/SecurityGroupId")
+    );
 }
 
 #[tokio::test]
@@ -208,6 +222,7 @@ async fn a_created_serverless_cache_is_read_back_from_persisted_state() {
             description: None,
             storage_encryption_type: "sse-elasticache",
             subnet_ids: None,
+            security_groups: 0,
             reported: &[("NetworkType", "ipv4"), ("ConnectionType", "vpc")],
         },
         CacheCase {
@@ -228,6 +243,7 @@ async fn a_created_serverless_cache_is_read_back_from_persisted_state() {
             description: Some("the production cache"),
             storage_encryption_type: "sse-elasticache",
             subnet_ids: None,
+            security_groups: 0,
             reported: &[
                 ("SnapshotRetentionLimit", "7"),
                 ("DailySnapshotTime", "04:30"),
@@ -245,13 +261,13 @@ async fn a_created_serverless_cache_is_read_back_from_persisted_state() {
             description: None,
             storage_encryption_type: "sse-elasticache",
             subnet_ids: None,
+            security_groups: 0,
             reported: &[],
         },
         CacheCase {
             name: "placed-cache",
             extra: &[
                 ("Engine", "redis"),
-                ("SecurityGroupIds.SecurityGroupId.1", "sg-0123456789abcdef0"),
                 (
                     "KmsKeyId",
                     "arn:aws:kms:us-east-1:111122223333:key/abcd-1234",
@@ -267,13 +283,11 @@ async fn a_created_serverless_cache_is_read_back_from_persisted_state() {
             description: None,
             storage_encryption_type: "sse-kms",
             subnet_ids: Some(2),
-            reported: &[
-                ("SecurityGroupId", "sg-0123456789abcdef0"),
-                (
-                    "KmsKeyId",
-                    "arn:aws:kms:us-east-1:111122223333:key/abcd-1234",
-                ),
-            ],
+            security_groups: 1,
+            reported: &[(
+                "KmsKeyId",
+                "arn:aws:kms:us-east-1:111122223333:key/abcd-1234",
+            )],
         },
         CacheCase {
             // The usage limits are persisted exactly as sent, including the
@@ -295,6 +309,7 @@ async fn a_created_serverless_cache_is_read_back_from_persisted_state() {
             description: None,
             storage_encryption_type: "sse-elasticache",
             subnet_ids: None,
+            security_groups: 0,
             reported: &[
                 ("Unit", "GB"),
                 ("DataStorage/Minimum", "1"),
@@ -327,6 +342,18 @@ async fn a_created_serverless_cache_is_read_back_from_persisted_state() {
                     }),
             );
         }
+        // A row that attaches security groups names groups the account HAS: EC2
+        // mints them, so their ids are asked of the owner rather than written
+        // down here.
+        let security_groups = emulator
+            .security_groups(case.stored_name, case.security_groups)
+            .await;
+        extra.extend(security_groups.iter().enumerate().map(|(index, id)| {
+            (
+                format!("SecurityGroupIds.SecurityGroupId.{}", index + 1),
+                id.clone(),
+            )
+        }));
         let created = create_cache_with(&emulator, case.name, &extra).await;
         assert_eq!(
             created.status,
@@ -342,6 +369,7 @@ async fn a_created_serverless_cache_is_read_back_from_persisted_state() {
             &created,
             state::SERVERLESS_STATUS_CREATING,
             &account_subnets,
+            &security_groups,
         );
         assert_eq!(
             created.text("ServerlessCache/ARN"),
@@ -376,6 +404,7 @@ async fn a_created_serverless_cache_is_read_back_from_persisted_state() {
             &described,
             state::SERVERLESS_STATUS_AVAILABLE,
             &account_subnets,
+            &security_groups,
         );
         assert!(
             described.text("CreateTime").is_some(),

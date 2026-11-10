@@ -249,3 +249,24 @@ mod shard_configuration;
 mod migration_completion;
 #[path = "all/serverless_lifecycle_spelling.rs"]
 mod serverless_lifecycle_spelling;
+
+// Appended for the same reason: the suite about the ONE source every ElastiCache operation
+// that attaches a resource to VPC security groups resolves those identifiers against
+// (Amazon EC2, the service that owns security groups).
+#[path = "all/security_groups_resolve_against_ec2.rs"]
+mod security_groups_resolve_against_ec2;
+
+// Appended for the same reason: the suite about the engine versions a create or an upgrade
+// may name — the ones `DescribeCacheEngineVersions` offers.
+#[path = "all/engine_version_must_be_offered.rs"]
+mod engine_version_must_be_offered;
+
+// Appended for the same reason: the suite about the ENGINE a cache parameter group a request
+// names has to belong to.
+#[path = "all/parameter_group_engine_must_match.rs"]
+mod parameter_group_engine_must_match;
+
+// Appended for the same reason: the suite about the two sentences an `AuthToken` is refused
+// with.
+#[path = "all/auth_token_refusal_wording.rs"]
+mod auth_token_refusal_wording;

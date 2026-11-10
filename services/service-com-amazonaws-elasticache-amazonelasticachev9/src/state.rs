@@ -176,6 +176,8 @@ use crate::ops::types::{
     UserGroupPendingChanges, UserGroupsUpdateStatus,
 };
 
+pub mod ec2_client;
+pub mod ec2_security_groups;
 pub mod ec2_subnets;
 pub mod kms_key;
 mod store;

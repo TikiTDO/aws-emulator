@@ -155,6 +155,28 @@ pub(super) fn latest_published_version(engine: &str) -> Option<&'static str> {
         .map(|row| row.engine_version)
 }
 
+/// True when the published catalog OFFERS `engine_version` for `engine`.
+///
+/// A request may name a published version itself, or the version LINE one belongs to (`6.2`
+/// names `6.2.5` and `6.2.6`) — the same reading [`version_matches`] gives the describe's
+/// own filter, so what a client may create on is exactly what
+/// `DescribeCacheEngineVersions` offers it. A version of ANOTHER engine, or one past what
+/// this engine publishes, is offered by nothing.
+pub fn version_is_offered(engine: &str, engine_version: &str) -> bool {
+    CACHE_ENGINE_VERSIONS
+        .iter()
+        .any(|row| row.engine == engine && version_matches(engine_version, row.engine_version))
+}
+
+/// How ElastiCache words a request naming an engine version the engine does not offer:
+/// `Cannot find version <engine-version> for <engine>`.
+///
+/// The variable parts are the version and the engine the request named; the rest is fixed
+/// text, and it carries no trailing stop.
+pub fn version_not_offered_message(engine: &str, engine_version: &str) -> String {
+    format!("Cannot find version {engine_version} for {engine}")
+}
+
 /// One published cache engine version, as this emulator holds it.
 #[derive(Debug, Clone)]
 pub struct CacheEngineVersionRecord {

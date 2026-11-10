@@ -855,7 +855,7 @@ async fn a_create_this_service_cannot_satisfy_is_refused_with_its_modelled_error
             "an auth token without in-transit encryption",
             &[("AuthToken", "aVeryLongPassword123")],
             400,
-            "InvalidParameterCombination",
+            "InvalidParameterValue",
         ),
         (
             "an auth token shorter than 16 characters",

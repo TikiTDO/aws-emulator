@@ -110,6 +110,31 @@ pub fn family_line(family: &str) -> Option<(&'static str, (i32, i32))> {
         .map(|(_, engine, version)| (*engine, *version))
 }
 
+/// The ENGINE a published parameter group family belongs to.
+///
+/// "A family's name is the engine followed by its version line" (see
+/// [`PARAMETER_GROUP_FAMILIES`]), so the engine is the family name up to its
+/// first digit: `redis7` is Redis OSS, `valkey8` is Valkey, `memcached1.6` is
+/// Memcached. This is the engine a group's parameters are MEANT for, which is a
+/// different question from the catalog they are drawn from ([`family_line`]:
+/// Valkey draws on the Redis OSS catalog).
+pub fn family_engine(family: &str) -> &str {
+    let end = family
+        .find(|character: char| character.is_ascii_digit())
+        .unwrap_or(family.len());
+    &family[..end]
+}
+
+/// How ElastiCache words a request whose cache parameter group belongs to another
+/// engine than the one the resource runs: `<group-engine> parameter group is not
+/// applicable to engine <engine>`.
+///
+/// The variable parts are the engine the group's family belongs to and the engine
+/// the request named; the rest is fixed text, and it carries no trailing stop.
+pub fn parameter_group_engine_mismatch_message(group_engine: &str, engine: &str) -> String {
+    format!("{group_engine} parameter group is not applicable to engine {engine}")
+}
+
 /// `version` as the `(major, minor)` pair a family line is compared against, so
 /// a parameter's `MinimumEngineVersion` ("2.6.13", "6.2.6") and a family's line
 /// are ordered by the same rule. A part that is not a number counts as 0, which

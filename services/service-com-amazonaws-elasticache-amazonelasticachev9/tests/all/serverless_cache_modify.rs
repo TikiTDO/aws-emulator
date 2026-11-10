@@ -37,8 +37,36 @@ const BASELINE: &[(&str, &str)] = &[
     ("CacheUsageLimits.ECPUPerSecond.Maximum", "5000"),
     ("SnapshotRetentionLimit", "7"),
     ("DailySnapshotTime", "03:00"),
-    ("SecurityGroupIds.SecurityGroupId.1", "sg-0123456789abcdef0"),
+    ("SecurityGroupIds.SecurityGroupId.1", "sg:baseline"),
 ];
+
+/// What a row writes where a VPC security group id belongs: the marker, followed by the
+/// NAME of the group it means.
+///
+/// A security group is an Amazon EC2 resource and its id is EC2's to mint, so no static row
+/// can carry one. A row names the group; [`resolve_groups`] asks the owner for its id.
+const GROUP_MARKER: &str = "sg:";
+
+/// `pairs` with every security-group marker resolved to the id EC2 minted for that group.
+async fn resolve_groups(emulator: &Emulator, pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    let mut resolved = Vec::with_capacity(pairs.len());
+    for (key, value) in pairs {
+        let value = match value.strip_prefix(GROUP_MARKER) {
+            Some(name) => emulator.security_group_named(name).await,
+            None => (*value).to_string(),
+        };
+        resolved.push(((*key).to_string(), value));
+    }
+    resolved
+}
+
+/// One expected value with its security-group marker resolved the same way.
+async fn resolve_group(emulator: &Emulator, value: &str) -> String {
+    match value.strip_prefix(GROUP_MARKER) {
+        Some(name) => emulator.security_group_named(name).await,
+        None => value.to_string(),
+    }
+}
 
 /// One row of the apply table.
 #[derive(Debug, Clone, Copy)]
@@ -189,13 +217,13 @@ const CASES: &[ModifyCase] = &[
         request_name: "grouped-sg-cache",
         create: &[],
         modify: &[
-            ("SecurityGroupIds.SecurityGroupId.1", "sg-1111111111aaaaaaa"),
-            ("SecurityGroupIds.SecurityGroupId.2", "sg-2222222222bbbbbbb"),
+            ("SecurityGroupIds.SecurityGroupId.1", "sg:replacement-one"),
+            ("SecurityGroupIds.SecurityGroupId.2", "sg:replacement-two"),
         ],
         reported: &[("Description", "the baseline cache")],
         reported_lists: &[(
             "SecurityGroupIds/SecurityGroupId",
-            &["sg-1111111111aaaaaaa", "sg-2222222222bbbbbbb"],
+            &["sg:replacement-one", "sg:replacement-two"],
         )],
         transient: false,
     },
@@ -223,7 +251,7 @@ const CASES: &[ModifyCase] = &[
 /// Create one serverless cache and insist the create itself succeeded.
 async fn create_cache(emulator: &Emulator, case: &str, name: &str, extra: &[(&str, &str)]) -> Reply {
     let mut pairs = params(&[("ServerlessCacheName", name)]);
-    pairs.extend(params(extra));
+    pairs.extend(resolve_groups(emulator, extra).await);
     let created = emulator.call("CreateServerlessCache", &pairs).await;
     assert_eq!(
         created.status, 200,
@@ -236,7 +264,7 @@ async fn create_cache(emulator: &Emulator, case: &str, name: &str, extra: &[(&st
 /// `ModifyServerlessCache` with the pairs a row sends.
 async fn modify_cache(emulator: &Emulator, name: &str, extra: &[(&str, &str)]) -> Reply {
     let mut pairs = params(&[("ServerlessCacheName", name)]);
-    pairs.extend(params(extra));
+    pairs.extend(resolve_groups(emulator, extra).await);
     emulator.call("ModifyServerlessCache", &pairs).await
 }
 
@@ -253,21 +281,26 @@ async fn describe_cache(emulator: &Emulator, name: &str) -> Reply {
 /// Assert `reply` reports every member `case` expects, naming the case, the
 /// member and the actual value on every failure. `where_from` says which
 /// response is under test.
-fn assert_reports(case: &ModifyCase, where_from: &str, reply: &Reply) {
+async fn assert_reports(emulator: &Emulator, case: &ModifyCase, where_from: &str, reply: &Reply) {
     for (member, expected) in case.reported {
+        let expected = resolve_group(emulator, expected).await;
         assert_eq!(
             reply.text(member),
-            Some(*expected),
+            Some(expected.as_str()),
             "case {} ({where_from}): expected {member} {expected:?}, got {:?}",
             case.case,
             reply.text(member)
         );
     }
     for (member, expected) in case.reported_lists {
+        let mut resolved = Vec::with_capacity(expected.len());
+        for value in *expected {
+            resolved.push(resolve_group(emulator, value).await);
+        }
         assert_eq!(
             reply.all(member),
-            expected.to_vec(),
-            "case {} ({where_from}): expected {member} {expected:?}, got {:?}",
+            resolved.iter().map(String::as_str).collect::<Vec<&str>>(),
+            "case {} ({where_from}): expected {member} {resolved:?}, got {:?}",
             case.case,
             reply.all(member)
         );
@@ -324,7 +357,7 @@ async fn a_modify_applies_every_member_it_names_and_leaves_the_rest() {
             case.name,
             modified.text("ServerlessCacheName")
         );
-        assert_reports(case, "the modify's answer", &modified);
+        assert_reports(&emulator, case, "the modify's answer", &modified).await;
 
         // Capacity and engine changes are work the service carries out after the
         // call, so the cache is transient until the clock owes it `AVAILABLE`
@@ -363,7 +396,7 @@ async fn a_modify_applies_every_member_it_names_and_leaves_the_rest() {
             state::SERVERLESS_STATUS_AVAILABLE,
             settled.text("Status")
         );
-        assert_reports(case, "a read past the modify span", &settled);
+        assert_reports(&emulator, case, "a read past the modify span", &settled).await;
     }
 }
 
@@ -647,6 +680,9 @@ async fn a_refused_modify_leaves_the_live_cache_untouched() {
     // Nothing the table asked for happened: the live cache still runs every
     // value it was created with, in the status it was in.
     let untouched = describe_cache(&emulator, "available-cache").await;
+    // The baseline's security group is the one EC2 minted for it, so the id is asked of
+    // the owner here the same way the create asked for it.
+    let baseline_group = resolve_group(&emulator, "sg:baseline").await;
     for (member, expected) in [
         ("Description", "the baseline cache"),
         ("DataStorage/Unit", "GB"),
@@ -658,7 +694,7 @@ async fn a_refused_modify_leaves_the_live_cache_untouched() {
         ("DailySnapshotTime", "03:00"),
         ("Engine", "redis"),
         ("MajorEngineVersion", "7"),
-        ("SecurityGroupId", "sg-0123456789abcdef0"),
+        ("SecurityGroupId", baseline_group.as_str()),
         ("Status", state::SERVERLESS_STATUS_AVAILABLE),
     ] {
         assert_eq!(

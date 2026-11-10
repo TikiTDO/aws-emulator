@@ -560,6 +560,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let region = crate::state::request_region(ctx.parts());
+        // Every VPC security group the request names has to be one the account HAS: the
+        // group is what guards network access to the cluster the request is asking for, so
+        // an identifier that names none could never guard anything. Which security groups
+        // the account has, and which VPC each one is in, is Amazon EC2's answer and nobody
+        // else's (`crate::state::ec2_security_groups`), asked over the emulator's own
+        // in-process callback — and asked BEFORE any state is written, so a refused request
+        // creates nothing. The VPC each one guards is compared against the cluster's
+        // placement below, once the subnet group is resolved.
+        let requested_security_groups = match crate::state::ec2_security_groups::resolved_or_refusal(
+            ctx,
+            &region,
+            input.security_group_ids.as_deref(),
+        )
+        .await
+        {
+            Ok(resolved) => resolved,
+            Err(message) => {
+                return Err(CreateCacheClusterErrorModeled::InvalidParameterValueException(
+                    InvalidParameterValueException {
+                        message: Some(message),
+                    },
+                )
+                .into())
+            }
+        };
         let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
 
@@ -590,6 +615,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                             },
                         )
                         .into());
+                    }
+                    // A group's parameters are its FAMILY's engine's, so a group
+                    // of another engine than the one this cluster runs carries
+                    // settings that engine does not have.
+                    let group_engine = crate::state::family_engine(&group.family);
+                    if group_engine != engine {
+                        let message = crate::state::parameter_group_engine_mismatch_message(
+                            group_engine,
+                            &engine,
+                        );
+                        return Err(
+                            CreateCacheClusterErrorModeled::InvalidParameterCombinationException(
+                                InvalidParameterCombinationException {
+                                    message: Some(message),
+                                },
+                            )
+                            .into(),
+                        );
                     }
                     Some(group.name.clone())
                 }
@@ -691,9 +734,57 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             None => None,
         };
 
+        // A security group only ever guards network interfaces of its OWN VPC, so one in
+        // another VPC than the subnets the cluster is placed in could not guard it. The
+        // placement's VPC is the one the owner of subnets reported when the subnet group was
+        // created; the groups' VPCs came from EC2 above.
+        if let Some(name) = cache_subnet_group_name.as_deref() {
+            if let Some(placement) = store.cache_subnet_groups.get(&name.to_ascii_lowercase()) {
+                if let Some(group_vpc) = crate::state::ec2_security_groups::vpc_mismatch(
+                    &requested_security_groups,
+                    &placement.vpc_id,
+                ) {
+                    return Err(
+                        CreateCacheClusterErrorModeled::InvalidParameterCombinationException(
+                            InvalidParameterCombinationException {
+                                message: Some(
+                                    crate::state::ec2_security_groups::vpc_mismatch_message(
+                                        &placement.name,
+                                        &placement.vpc_id,
+                                        group_vpc,
+                                    ),
+                                ),
+                            },
+                        )
+                        .into(),
+                    );
+                }
+            }
+        }
+
+        let requested_engine_version = input.engine_version.clone();
         let engine_version = input
             .engine_version
             .unwrap_or_else(|| crate::state::default_engine_version(&engine).to_string());
+        // A version the REQUEST names has to be one the engine OFFERS: the
+        // catalogue `DescribeCacheEngineVersions` publishes is what a client picks
+        // a version from, so a value absent from it names no engine version this
+        // service could run the cluster on. A version the request does not name is
+        // the engine's own newest published version, already offered.
+        if let Some(named) = requested_engine_version.as_deref() {
+            if !crate::state::version_is_offered(&engine, named) {
+                return Err(
+                    CreateCacheClusterErrorModeled::InvalidParameterCombinationException(
+                        InvalidParameterCombinationException {
+                            message: Some(crate::state::version_not_offered_message(
+                                &engine, named,
+                            )),
+                        },
+                    )
+                    .into(),
+                );
+            }
+        }
         // "Default: ... the default parameter group for the specified engine":
         // the derived default is resolved through the SAME stored map as a named
         // group, so the group a cluster reports is always one this account

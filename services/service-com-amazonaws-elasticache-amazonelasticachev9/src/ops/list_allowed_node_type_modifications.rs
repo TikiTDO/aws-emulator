@@ -420,16 +420,38 @@ pub fn is_published_node_type(node_type: &str) -> bool {
         })
 }
 
+/// The sentence a value that is not a node-type NAME at all is refused with: it names no
+/// value, because the value is not one the service can report back as a node type.
+///
+/// Recorded behaviour, and the second of the two sentences this rule has: a value of the
+/// documented `cache.<family>.<size>` form that the catalogue does not list is refused with
+/// [`validate_node_type`]'s per-value sentence instead, which names what was sent.
+pub const NODE_TYPE_NOT_A_NODE_TYPE_MESSAGE: &str =
+    "Cache Node Type specified is not a valid node type.";
+
+/// The prefix every published cache node type carries: "all current generation instance
+/// types are created in Amazon VPC by default" and each is named `cache.<family>.<size>`
+/// (`CacheNodeType`), so a value without it names no node type of this service at all.
+pub const NODE_TYPE_PREFIX: &str = "cache.";
+
 /// `Err(message)` when `node_type` is not a node type this service publishes.
 ///
-/// The message names the value the request supplied, which is what makes the
-/// refusal diagnosable: the member carries no modelled enum or `@pattern`, so
-/// the catalogue is the only statement of which values it may take, and a
-/// request outside it is refused with `InvalidParameterValue` (HTTP 400) by
-/// every operation that would otherwise persist the name.
+/// Two sentences, because ElastiCache answers two: a value that is not of the node-type form
+/// — no `cache.` prefix — is not a node type at all and is refused with
+/// [`NODE_TYPE_NOT_A_NODE_TYPE_MESSAGE`]; a value OF that form which the catalogue does not
+/// list is refused with the sentence that names it, which is what makes that refusal
+/// diagnosable. The member carries no modelled enum or `@pattern`, so the catalogue is the
+/// only statement of which values it may take, and a request outside it is refused with
+/// `InvalidParameterValue` (HTTP 400) by every operation that would otherwise persist the
+/// name.
 pub fn validate_node_type(node_type: &str) -> Result<(), String> {
     if is_published_node_type(node_type) {
         Ok(())
+    } else if !node_type
+        .to_ascii_lowercase()
+        .starts_with(NODE_TYPE_PREFIX)
+    {
+        Err(NODE_TYPE_NOT_A_NODE_TYPE_MESSAGE.to_string())
     } else {
         Err(format!("Invalid Cache Node Type: {node_type}."))
     }

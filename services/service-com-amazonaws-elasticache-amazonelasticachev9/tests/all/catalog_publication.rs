@@ -367,9 +367,12 @@ async fn every_cluster_capable_family_publishes_its_cluster_mode_on_default_grou
 async fn a_cluster_mode_on_default_group_can_be_named_when_creating_a_replication_group() {
     let emulator = Emulator::new();
 
-    // The axis: the family whose cluster-mode-on default the create names.
+    // The axis: the family whose cluster-mode-on default the create names. A group's
+    // parameters are its family's ENGINE's, so each row runs the engine of the family it
+    // names.
     for (index, family) in ["redis7", "redis6.x", "valkey8"].into_iter().enumerate() {
         let group = format!("default.{family}.cluster.on");
+        let engine = state::family_engine(family).to_string();
         let id = format!("cluster-mode-{index}");
         let created = emulator
             .call(
@@ -377,6 +380,7 @@ async fn a_cluster_mode_on_default_group_can_be_named_when_creating_a_replicatio
                 &params(&[
                     ("ReplicationGroupId", &id),
                     ("ReplicationGroupDescription", "cluster mode enabled"),
+                    ("Engine", &engine),
                     ("CacheParameterGroupName", &group),
                     ("CacheNodeType", "cache.m5.large"),
                     ("NumNodeGroups", "2"),
@@ -426,24 +430,35 @@ async fn a_cluster_mode_on_default_group_cannot_be_used_to_create_a_cluster() {
     // documents "you cannot use any parameter group which has
     // cluster-enabled='yes' when creating a cluster", so a family's plain
     // default is accepted and its cluster-mode-on default is refused — a
-    // cluster-mode group belongs to a replication group.
-    let cases: [(&str, &str, u16); 6] = [
-        ("plain redis7", "default.redis7", 200),
-        ("cluster-mode redis7", "default.redis7.cluster.on", 400),
-        ("plain valkey8", "default.valkey8", 200),
-        ("cluster-mode valkey8", "default.valkey8.cluster.on", 400),
-        ("plain redis3.2", "default.redis3.2", 200),
-        ("cluster-mode redis3.2", "default.redis3.2.cluster.on", 400),
+    // cluster-mode group belongs to a replication group. Each row runs the ENGINE of the
+    // family it names, because a group's parameters are that engine's.
+    let cases: [(&str, &str, &str, u16); 6] = [
+        ("plain redis7", "redis", "default.redis7", 200),
+        ("cluster-mode redis7", "redis", "default.redis7.cluster.on", 400),
+        ("plain valkey8", "valkey", "default.valkey8", 200),
+        (
+            "cluster-mode valkey8",
+            "valkey",
+            "default.valkey8.cluster.on",
+            400,
+        ),
+        ("plain redis3.2", "redis", "default.redis3.2", 200),
+        (
+            "cluster-mode redis3.2",
+            "redis",
+            "default.redis3.2.cluster.on",
+            400,
+        ),
     ];
 
-    for (index, (case, group, status)) in cases.into_iter().enumerate() {
+    for (index, (case, engine, group, status)) in cases.into_iter().enumerate() {
         let id = format!("param-group-{index}");
         let reply = emulator
             .call(
                 "CreateCacheCluster",
                 &params(&[
                     ("CacheClusterId", &id),
-                    ("Engine", "redis"),
+                    ("Engine", engine),
                     ("CacheNodeType", "cache.m5.large"),
                     ("NumCacheNodes", "1"),
                     ("CacheParameterGroupName", group),

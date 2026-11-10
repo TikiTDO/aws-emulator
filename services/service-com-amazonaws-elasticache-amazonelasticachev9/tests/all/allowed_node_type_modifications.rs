@@ -170,11 +170,11 @@ async fn the_lists_are_the_catalogue_split_around_the_stored_node_type() {
             down_is_empty: false,
         },
         Case {
-            // One patch below it.
+            // The newest version the catalogue publishes BELOW the gate.
             id: "memcached-before-the-gate",
             extra: &[
                 ("Engine", "memcached"),
-                ("EngineVersion", "1.5.15"),
+                ("EngineVersion", "1.5.10"),
                 ("CacheNodeType", "cache.t3.small"),
             ],
             up: &["cache.t3.medium", "cache.m7g.large"],
@@ -414,7 +414,7 @@ async fn the_split_is_complete_and_sound_over_the_whole_catalogue() {
         ("redis", "7.1"),
         ("redis", "5.0.5"),
         ("memcached", "1.6.22"),
-        ("memcached", "1.5.15"),
+        ("memcached", "1.5.10"),
         ("valkey", "8.0"),
     ];
 

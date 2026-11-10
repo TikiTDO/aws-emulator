@@ -1045,6 +1045,12 @@ async fn every_stored_cluster_setting_is_reported_back() {
     // the element that must report it, so a member accepted and dropped fails
     // here.
     let emulator = Emulator::new();
+    // The VPC security group this cluster is attached to is an Amazon EC2
+    // resource, so its id is minted by the owner rather than written down here.
+    let security_group = emulator
+        .security_groups("cluster-settings", 1)
+        .await
+        .remove(0);
     let created = create_cluster(
         &emulator,
         "configured",
@@ -1057,7 +1063,7 @@ async fn every_stored_cluster_setting_is_reported_back() {
             ("SnapshotRetentionLimit", "5"),
             ("SnapshotWindow", "05:00-09:00"),
             ("AutoMinorVersionUpgrade", "false"),
-            ("SecurityGroupIds.SecurityGroupId.1", "sg-0123456789abcdef0"),
+            ("SecurityGroupIds.SecurityGroupId.1", security_group.as_str()),
             ("LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.LogType", "slow-log"),
             (
                 "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.DestinationType",
@@ -1114,7 +1120,7 @@ async fn every_stored_cluster_setting_is_reported_back() {
             // `SecurityGroupMembershipList`'s member carries no `@xmlName`, so
             // the element is the Smithy default `member`.
             "SecurityGroups/member/SecurityGroupId",
-            "sg-0123456789abcdef0",
+            security_group.as_str(),
         ),
         ("SecurityGroupIds", "SecurityGroups/member/Status", "active"),
         (

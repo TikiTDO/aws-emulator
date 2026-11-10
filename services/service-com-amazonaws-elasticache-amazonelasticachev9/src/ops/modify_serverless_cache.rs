@@ -183,7 +183,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // record or the request is refused with a modelled error, so a 200 never
         // reports a configuration the store does not hold, and a refused modify
         // leaves the live cache exactly as it was.
-        let _ = ctx;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(crate::scaffolded::Scaffolded::validation(
                 crate::state::STORE_UNAVAILABLE,
@@ -194,6 +193,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // "is stored as a lowercase string", so the cache this request resolves
         // is the one stored under the lowercased name.
         let name = input.serverless_cache_name.to_ascii_lowercase();
+        // Every VPC security group the request names has to be one the account
+        // HAS: the group is what guards network access to this cache's VPC
+        // endpoint, so an identifier that names none could never guard it. Which
+        // security groups the account has is Amazon EC2's answer and nobody
+        // else's (`crate::state::ec2_security_groups`), asked over the emulator's
+        // own in-process callback — and asked before the store is locked, because
+        // asking another service is a call out of this handler. The VPC each group
+        // guards is not compared here, for the reason `CreateServerlessCache`
+        // gives: this cache is placed in subnets rather than in a cache subnet
+        // group.
+        let region = crate::state::request_region(ctx.parts());
+        if let Err(message) = crate::state::ec2_security_groups::resolved_or_refusal(
+            ctx,
+            &region,
+            input.security_group_ids.as_deref(),
+        )
+        .await
+        {
+            return Err(invalid_value(message));
+        }
         let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
         // A user group whose change has fallen due is `active` now, so the

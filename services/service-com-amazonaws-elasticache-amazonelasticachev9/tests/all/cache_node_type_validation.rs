@@ -148,13 +148,24 @@ async fn a_create_naming_a_node_type_outside_the_catalogue_is_refused_and_stores
             "case {case} ({node_type}): expected the modelled InvalidParameterValue, got {}",
             reply.body
         );
-        // The refusal names the value that was refused, so a client can tell
-        // WHICH member it has to change.
+        // WHICH of the two sentences: a value of the `cache.<family>.<size>` form that the
+        // catalogue does not hold is named in the refusal, so a client can tell which member
+        // to change; a value that is not of that form at all is not a node type to name, and
+        // the refusal says so instead.
         let message = reply.text("Error/Message").unwrap_or_default();
-        assert!(
-            !message.is_empty() && message.contains(node_type),
-            "case {case} ({node_type}): the message must name the refused value, got {message:?}"
-        );
+        if node_type.to_ascii_lowercase().starts_with("cache.") {
+            assert!(
+                message.contains(node_type),
+                "case {case} ({node_type}): the message must name the refused value, got \
+                 {message:?}"
+            );
+        } else {
+            assert_eq!(
+                message, catalogue::NODE_TYPE_NOT_A_NODE_TYPE_MESSAGE,
+                "case {case} ({node_type}): a value that is not a node type at all must be \
+                 refused with the sentence that says so, got {message:?}"
+            );
+        }
         // Nothing was written: every cache-cluster lookup for the id answers the
         // modelled not-found rather than resolving a cluster the service refused
         // to create.

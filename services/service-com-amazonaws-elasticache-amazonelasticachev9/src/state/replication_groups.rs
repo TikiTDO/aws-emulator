@@ -192,31 +192,38 @@ pub fn normalize_replication_group_engine(engine: &str) -> Result<String, String
 }
 
 /// `None` when `token` satisfies every documented `AuthToken` constraint, else
-/// the reason it does not: "Must be only printable ASCII characters. Must be at
-/// least 16 characters and no more than 128 characters in length. The only
-/// permitted printable special characters are !, &, #, $, ^, <, >, and -."
+/// the sentence the request is refused with: "Must be only printable ASCII
+/// characters. Must be at least 16 characters and no more than 128 characters in
+/// length. The only permitted printable special characters are !, &, #, $, ^, <,
+/// >, and -."
+///
+/// The constraints are several, and ElastiCache answers ONE sentence for all of
+/// them — `Invalid AuthToken provided.` — so a token that is too short, too long
+/// or carries a character the engine's password alphabet excludes is refused the
+/// same way.
 pub fn auth_token_refusal(token: &str) -> Option<String> {
-    if !(AUTH_TOKEN_MIN_LEN..=AUTH_TOKEN_MAX_LEN).contains(&token.chars().count()) {
-        return Some(format!(
-            "Invalid value for AuthToken: the password must be at least {AUTH_TOKEN_MIN_LEN} and \
-             no more than {AUTH_TOKEN_MAX_LEN} characters in length."
-        ));
-    }
-    if !token.chars().all(|character| {
+    let permitted = |character: char| {
         character.is_ascii_alphanumeric() || AUTH_TOKEN_SPECIAL_CHARACTERS.contains(&character)
-    }) {
-        return Some(format!(
-            "Invalid value for AuthToken: the password must be printable ASCII characters, and \
-             the only permitted printable special characters are {}.",
-            AUTH_TOKEN_SPECIAL_CHARACTERS
-                .iter()
-                .map(char::to_string)
-                .collect::<Vec<String>>()
-                .join(", ")
-        ));
+    };
+    if !(AUTH_TOKEN_MIN_LEN..=AUTH_TOKEN_MAX_LEN).contains(&token.chars().count())
+        || !token.chars().all(permitted)
+    {
+        return Some(INVALID_AUTH_TOKEN_MESSAGE.to_string());
     }
     None
 }
+
+/// The one sentence a token that is not a valid `AuthToken` is refused with.
+pub const INVALID_AUTH_TOKEN_MESSAGE: &str = "Invalid AuthToken provided.";
+
+/// The sentence a request carrying an `AuthToken` without encryption in transit
+/// is refused with.
+///
+/// "AuthToken can be specified only on replication groups where
+/// TransitEncryptionEnabled is true", worded as what it is — a password the
+/// connection cannot carry — and with no trailing stop.
+pub const AUTH_TOKEN_NEEDS_TRANSIT_ENCRYPTION_MESSAGE: &str =
+    "The AUTH token is only supported when encryption-in-transit is enabled";
 
 /// The inclusive slot range a `Slots` string names, or the reason it names none.
 ///

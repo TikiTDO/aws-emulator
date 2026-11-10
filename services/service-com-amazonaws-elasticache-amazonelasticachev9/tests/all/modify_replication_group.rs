@@ -659,6 +659,9 @@ async fn a_group_wide_setting_is_carried_into_the_member_clusters() {
     // the snapshot settings — read back through `DescribeCacheClusters`, which
     // reports the same stored clusters.
     let emulator = Emulator::new();
+    // The VPC security group the clusters move onto is an Amazon EC2 resource, so
+    // its id is minted by the owner rather than written down here.
+    let security_group = emulator.security_groups("group-wide", 1).await.remove(0);
     create_group(&emulator, "members", "member-wide", &[("NumCacheClusters", "2")]).await;
     std::thread::sleep(PAST_TRANSITION);
 
@@ -669,7 +672,7 @@ async fn a_group_wide_setting_is_carried_into_the_member_clusters() {
         &[
             ("CacheParameterGroupName", "default.redis6.x"),
             ("PreferredMaintenanceWindow", "tue:05:00-tue:06:30"),
-            ("SecurityGroupIds.SecurityGroupId.1", "sg-0123456789abcdef0"),
+            ("SecurityGroupIds.SecurityGroupId.1", security_group.as_str()),
             ("NotificationTopicArn", "arn:aws:sns:us-east-1:000000000000:cache"),
             ("SnapshotRetentionLimit", "4"),
             ("SnapshotWindow", "03:00-04:00"),
@@ -697,7 +700,7 @@ async fn a_group_wide_setting_is_carried_into_the_member_clusters() {
                 ),
                 (
                     "SecurityGroups/member/SecurityGroupId",
-                    "sg-0123456789abcdef0",
+                    security_group.as_str(),
                 ),
                 (
                     "NotificationConfiguration/TopicArn",
@@ -965,7 +968,7 @@ async fn a_request_this_service_cannot_satisfy_is_refused_with_its_modelled_erro
             "plain-rg",
             &[("AuthToken", GOOD_AUTH_TOKEN)],
             400,
-            "InvalidParameterCombination",
+            "InvalidParameterValue",
         ),
         (
             "an auth token shorter than the documented minimum",

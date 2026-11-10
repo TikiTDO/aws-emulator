@@ -289,7 +289,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(crate::scaffolded::Scaffolded::validation(
                 crate::state::STORE_UNAVAILABLE,
@@ -477,6 +476,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             _ => {}
         }
 
+        // Every VPC security group the request names has to be one the account
+        // HAS: the group is what guards network access to this group's clusters,
+        // so an identifier that names none could never guard them. Which security
+        // groups the account has, and which VPC each one is in, is Amazon EC2's
+        // answer and nobody else's (`crate::state::ec2_security_groups`), asked
+        // over the emulator's own in-process callback — and asked before the store
+        // is locked, because asking another service is a call out of this handler.
+        let region = crate::state::request_region(ctx.parts());
+        let requested_security_groups =
+            match crate::state::ec2_security_groups::resolved_or_refusal(
+                ctx,
+                &region,
+                input.security_group_ids.as_deref(),
+            )
+            .await
+            {
+                Ok(resolved) => resolved,
+                Err(message) => return Err(invalid_value(message)),
+            };
+
         let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
         // Whether the group and the clusters below are `available` depends on the
@@ -490,12 +509,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // The parameter group the group's clusters move to has to be one this
         // account holds, resolved through the one stored map, and the STORED name
-        // is what the group carries afterwards.
-        let requested_parameter_group = match input.cache_parameter_group_name.as_deref() {
-            Some(name) => match store.parameter_group(name) {
-                Some(group) => Some(group.name.clone()),
-                None => {
-                    return Err(
+        // is what the group carries afterwards. Its family comes with it, because
+        // which ENGINE the group's parameters are for is checked below, once the
+        // engine these clusters will run is known.
+        let requested_parameter_group: Option<(String, String)> =
+            match input.cache_parameter_group_name.as_deref() {
+                Some(name) => match store.parameter_group(name) {
+                    Some(group) => Some((group.name.clone(), group.family.clone())),
+                    None => {
+                        return Err(
                         ModifyReplicationGroupErrorModeled::CacheParameterGroupNotFoundFault(
                             CacheParameterGroupNotFoundFault {
                                 message: Some(
@@ -507,10 +529,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         )
                         .into(),
                     )
-                }
-            },
-            None => None,
-        };
+                    }
+                },
+                None => None,
+            };
 
         // This operation words that fault `Replication group '<id>' not found`,
         // the id single-quoted and no trailing stop, while the describe that
@@ -537,6 +559,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The group as it stands, settled, read once so the checks below all see
         // the same configuration; the change is written back through the store.
         let group = group.clone();
+
+        // A security group only ever guards network interfaces of its OWN VPC, so one in
+        // another VPC than the subnets this group's clusters are placed in could not guard
+        // them. The placement is the subnet group the replication group was created in, and
+        // its VPC is the one the owner of subnets reported then.
+        let placement = group
+            .cache_subnet_group_name
+            .as_deref()
+            .and_then(|name| store.cache_subnet_groups.get(&name.to_ascii_lowercase()));
+        if let Some(placement) = placement {
+            if let Some(group_vpc) = crate::state::ec2_security_groups::vpc_mismatch(
+                &requested_security_groups,
+                &placement.vpc_id,
+            ) {
+                return Err(invalid_combination(
+                    crate::state::ec2_security_groups::vpc_mismatch_message(
+                        &placement.name,
+                        &placement.vpc_id,
+                        group_vpc,
+                    ),
+                ));
+            }
+        }
 
         // A group has to be provisioned before it can be reconfigured, so one
         // still `creating`, going away, or busy with work of its own (a snapshot)
@@ -733,6 +778,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .engine_version
             .clone()
             .unwrap_or_else(|| group.engine_version.clone());
+        // A group's parameters are its FAMILY's engine's, so a group of another engine than
+        // the one these clusters will run carries settings that engine does not have.
+        if let Some((_, family)) = requested_parameter_group.as_ref() {
+            let group_engine = crate::state::family_engine(family);
+            if group_engine != engine_after {
+                return Err(invalid_combination(
+                    crate::state::parameter_group_engine_mismatch_message(
+                        group_engine,
+                        &engine_after,
+                    ),
+                ));
+            }
+        }
+        // A version the REQUEST names has to be one the engine OFFERS: the
+        // catalogue `DescribeCacheEngineVersions` publishes is what a client picks
+        // an upgrade from, so a value absent from it names no engine version this
+        // group's clusters could move onto.
+        if let Some(named) = input.engine_version.as_deref() {
+            if !crate::state::version_is_offered(&engine_after, named) {
+                return Err(invalid_combination(
+                    crate::state::version_not_offered_message(&engine_after, named),
+                ));
+            }
+        }
         if crate::state::parameter_group_family(&engine_after, &engine_version_after).is_none() {
             return Err(invalid_combination(format!(
                 "No cache parameter group family supports {engine_after} {engine_version_after}."
@@ -804,10 +873,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .transit_encryption_enabled
             .unwrap_or(group.transit_encryption_enabled);
         if input.auth_token.is_some() && !transit_encryption_after {
-            return Err(invalid_combination(
-                "AuthToken can be specified only on a replication group where \
-                 TransitEncryptionEnabled is true."
-                    .to_string(),
+            return Err(invalid_value(
+                crate::state::AUTH_TOKEN_NEEDS_TRANSIT_ENCRYPTION_MESSAGE.to_string(),
             ));
         }
         // "SET - allowed only after ROTATE", and "DELETE - allowed only when
@@ -902,7 +969,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some(discovery) = input.ip_discovery.clone() {
             group.ip_discovery = Some(discovery);
         }
-        if let Some(name) = requested_parameter_group.clone() {
+        if let Some((name, _)) = requested_parameter_group.clone() {
             group.cache_parameter_group_name = name;
         }
         if let Some(enabled) = input.multi_az_enabled {
@@ -1076,7 +1143,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let member_version = input.engine_version.clone();
         let member_node_type = input.cache_node_type.clone();
         let member_window = input.preferred_maintenance_window.clone();
-        let member_parameter_group = requested_parameter_group.clone();
+        let member_parameter_group = requested_parameter_group.clone().map(|(name, _)| name);
         let member_security_groups = input.security_group_ids.clone();
         let member_topic = input.notification_topic_arn.clone();
         let member_topic_status = input.notification_topic_status.clone();

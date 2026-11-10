@@ -974,11 +974,21 @@ async fn a_cluster_joins_a_group_the_account_holds_and_nothing_else() {
                     "case EngineVersion={version}: create must be refused 400, got {} {}",
                     created.status, created.body
                 );
+                // A version the engine's published catalogue does not OFFER is refused for
+                // being absent from it, which is the combination refusal AWS answers —
+                // before the derived default group it has no family for is looked for.
                 assert_eq!(
                     created.error_code(),
-                    "InvalidParameterValue",
-                    "case EngineVersion={version}: expected InvalidParameterValue, got {}",
+                    "InvalidParameterCombination",
+                    "case EngineVersion={version}: expected InvalidParameterCombination, got {}",
                     created.body
+                );
+                assert_eq!(
+                    created.error_message(),
+                    format!("Cannot find version {version} for redis"),
+                    "case EngineVersion={version}: expected the version-not-offered sentence, \
+                     got {:?}",
+                    created.error_message()
                 );
             }
         }

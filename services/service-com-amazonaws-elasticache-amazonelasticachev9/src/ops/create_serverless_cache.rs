@@ -404,6 +404,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let region = crate::state::request_region(ctx.parts());
 
+        // Every VPC security group the request names has to be one the account
+        // HAS: the group is what guards network access to the cache's VPC
+        // endpoint, so an identifier that names none could never guard it. Which
+        // security groups the account has is Amazon EC2's answer and nobody
+        // else's (`crate::state::ec2_security_groups`), the same owner the subnet
+        // resolution below asks — and asked BEFORE any state is written, so a
+        // refused request creates nothing. The VPC each group guards is not
+        // compared here: a serverless cache is placed in subnets this request
+        // names rather than in a cache subnet group, and the refusal for a
+        // placement in another VPC names that group.
+        if let Err(message) = crate::state::ec2_security_groups::resolved_or_refusal(
+            ctx,
+            &region,
+            input.security_group_ids.as_deref(),
+        )
+        .await
+        {
+            return Err(invalid_value(message));
+        }
+
         // Every named subnet has to be one the account HAS: the cache's VPC
         // endpoint is deployed into it, so an id that names no subnet could
         // never carry one. Which subnets the account has is Amazon EC2's answer

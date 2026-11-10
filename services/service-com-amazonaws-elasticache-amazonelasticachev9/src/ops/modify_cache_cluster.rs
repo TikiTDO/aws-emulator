@@ -262,7 +262,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(crate::scaffolded::Scaffolded::validation(
                 crate::state::STORE_UNAVAILABLE,
@@ -297,32 +296,93 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         }
+        // Every VPC security group the request names has to be one the account
+        // HAS: the group is what guards network access to this cluster, so an
+        // identifier that names none could never guard it. Which security groups
+        // the account has, and which VPC each one is in, is Amazon EC2's answer
+        // and nobody else's (`crate::state::ec2_security_groups`), asked over the
+        // emulator's own in-process callback — and asked before the store is
+        // locked, because asking another service is a call out of this handler.
+        let region = crate::state::request_region(ctx.parts());
+        let requested_security_groups = match crate::state::ec2_security_groups::resolved_or_refusal(
+            ctx,
+            &region,
+            input.security_group_ids.as_deref(),
+        )
+        .await
+        {
+            Ok(resolved) => resolved,
+            Err(message) => {
+                return Err(ModifyCacheClusterErrorModeled::InvalidParameterValueException(
+                    InvalidParameterValueException {
+                        message: Some(message),
+                    },
+                )
+                .into())
+            }
+        };
+
         let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
 
+        // A security group only ever guards network interfaces of its OWN VPC, so one in
+        // another VPC than the subnets this cluster is placed in could not guard it. The
+        // placement is the subnet group the cluster was created in, and its VPC is the one
+        // the owner of subnets reported then.
+        let placement = store
+            .cache_clusters
+            .get(&cache_cluster_id)
+            .and_then(|cluster| cluster.cache_subnet_group_name.clone())
+            .and_then(|name| store.cache_subnet_groups.get(&name.to_ascii_lowercase()))
+            .map(|group| (group.name.clone(), group.vpc_id.clone()));
+        if let Some((placement_name, placement_vpc)) = placement {
+            if let Some(group_vpc) = crate::state::ec2_security_groups::vpc_mismatch(
+                &requested_security_groups,
+                &placement_vpc,
+            ) {
+                return Err(
+                    ModifyCacheClusterErrorModeled::InvalidParameterCombinationException(
+                        InvalidParameterCombinationException {
+                            message: Some(
+                                crate::state::ec2_security_groups::vpc_mismatch_message(
+                                    &placement_name,
+                                    &placement_vpc,
+                                    group_vpc,
+                                ),
+                            ),
+                        },
+                    )
+                    .into(),
+                );
+            }
+        }
+
         // The parameter group the cluster moves to has to be one this account
         // holds, resolved through the one stored map of groups, and the STORED
-        // name is what the cluster carries afterwards.
-        let requested_parameter_group = match input.cache_parameter_group_name.as_deref() {
-            Some(name) => match store.parameter_group(name) {
-                Some(group) => Some(group.name.clone()),
-                None => {
-                    return Err(
-                        ModifyCacheClusterErrorModeled::CacheParameterGroupNotFoundFault(
-                            CacheParameterGroupNotFoundFault {
-                                message: Some(
+        // name is what the cluster carries afterwards. Its family comes with it,
+        // because which ENGINE the group's parameters are for is checked below,
+        // once the engine this cluster will run is known.
+        let requested_parameter_group: Option<(String, String)> =
+            match input.cache_parameter_group_name.as_deref() {
+                Some(name) => match store.parameter_group(name) {
+                    Some(group) => Some((group.name.clone(), group.family.clone())),
+                    None => {
+                        return Err(
+                            ModifyCacheClusterErrorModeled::CacheParameterGroupNotFoundFault(
+                                CacheParameterGroupNotFoundFault {
+                                    message: Some(
                                     crate::service::cache_parameter_group_not_found::spaced_message(
                                         name,
                                     ),
                                 ),
-                            },
+                                },
+                            )
+                            .into(),
                         )
-                        .into(),
-                    )
-                }
-            },
-            None => None,
-        };
+                    }
+                },
+                None => None,
+            };
 
         let Some(cluster) = store.settled_cluster_mut(&cache_cluster_id, now) else {
             return Err(ModifyCacheClusterErrorModeled::CacheClusterNotFoundFault(
@@ -377,6 +437,47 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             },
             None => cluster.engine.clone(),
         };
+
+        // A group's parameters are its FAMILY's engine's, so a group of another
+        // engine than the one this cluster will run carries settings that engine
+        // does not have.
+        if let Some((_, family)) = requested_parameter_group.as_ref() {
+            let group_engine = crate::state::family_engine(family);
+            if group_engine != engine {
+                return Err(
+                    ModifyCacheClusterErrorModeled::InvalidParameterCombinationException(
+                        InvalidParameterCombinationException {
+                            message: Some(
+                                crate::state::parameter_group_engine_mismatch_message(
+                                    group_engine,
+                                    &engine,
+                                ),
+                            ),
+                        },
+                    )
+                    .into(),
+                );
+            }
+        }
+
+        // A version the REQUEST names has to be one the engine OFFERS: the
+        // catalogue `DescribeCacheEngineVersions` publishes is what a client picks
+        // an upgrade from, so a value absent from it names no engine version this
+        // cluster could move onto.
+        if let Some(named) = input.engine_version.as_deref() {
+            if !crate::state::version_is_offered(&engine, named) {
+                return Err(
+                    ModifyCacheClusterErrorModeled::InvalidParameterCombinationException(
+                        InvalidParameterCombinationException {
+                            message: Some(crate::state::version_not_offered_message(
+                                &engine, named,
+                            )),
+                        },
+                    )
+                    .into(),
+                );
+            }
+        }
 
         // A cluster has to be provisioned before it can be reconfigured, so one
         // still `creating`, going away, or busy with work of its own (a reboot,
@@ -611,7 +712,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some(upgrade) = input.auto_minor_version_upgrade {
             cluster.auto_minor_version_upgrade = Some(upgrade);
         }
-        if let Some(name) = requested_parameter_group {
+        if let Some((name, _)) = requested_parameter_group {
             cluster.cache_parameter_group_name = name;
         }
         if let Some(ids) = input.security_group_ids {
