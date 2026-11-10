@@ -8,6 +8,10 @@
 //! `UNCONFIRMED` with a freshly minted `sub` — which is the `UserSub` the response
 //! carries and what `AdminGetUser` reads back.
 //!
+//! The registration attempt this terminates is also an OBSERVATION of the app client it
+//! was made through, published into the pool's `AWS/Cognito` sign-up series
+//! ([`crate::state::auth_metrics`]).
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -257,6 +261,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // A registration is an attempt this one call terminates — it registers the user or
+        // it is refused, with no challenge in between — so it is served first and OBSERVED
+        // after, in the sign-up series of the app client it was made through
+        // ([`crate::state::auth_metrics`]).
+        let client_id = input.client_id.clone();
+        let answered = self.sign_up(input, ctx).await;
+        crate::state::auth_metrics::record(
+            &*self.engine,
+            crate::state::auth_metrics::Counter::Registration,
+            // This operation models no `UserPoolId`: the app client names the pool.
+            None,
+            &client_id,
+            crate::state::auth_metrics::attempt_of(&answered, |_| true),
+            ::std::time::SystemTime::now(),
+        );
+        answered
+    }
+}
+
+impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SignUp<Eng> {
+    /// Register the user `input` asks for and deliver what that owes: the whole operation but
+    /// for the observation its outcome publishes, which its caller makes once this has
+    /// answered.
+    async fn sign_up(
+        &self,
+        input: SignUpInput,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
+    ) -> Result<SignUpOutput, SignUpError> {
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(internal_error());
         };

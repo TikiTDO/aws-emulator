@@ -7,6 +7,9 @@
 //! operation computes its response from this state — a create stores a resource
 //! and a later read renders the STORED resource, never the request that made it.
 
+/// The CloudWatch series a pool's own authentication and registration traffic publishes:
+/// what one terminated attempt observes, and where that observation is stored.
+pub mod auth_metrics;
 /// The user-pool Lambda-trigger dispatch: a pool's [`LambdaConfigType`] member becomes an
 /// invocation of the function it names, with the event for the stage the invoking
 /// operation reached.

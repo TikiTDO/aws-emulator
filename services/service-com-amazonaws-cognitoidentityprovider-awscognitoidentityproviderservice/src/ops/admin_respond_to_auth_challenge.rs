@@ -14,6 +14,10 @@
 //! A pool whose `LambdaConfig` names a pre-token-generation function has that function
 //! gate the tokens the answered challenge mints ([`crate::state::lambda_triggers`]).
 //!
+//! Answering the challenge is what TERMINATES the sign-in attempt it belongs to, so this
+//! call is also the OBSERVATION of that attempt's outcome, published into the pool's
+//! `AWS/Cognito` sign-in series ([`crate::state::auth_metrics`]).
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -308,6 +312,33 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // Answering the outstanding challenge is what TERMINATES the sign-in attempt it
+        // belongs to, so the outcome this call publishes is the attempt's: the tokens it
+        // completes with, or the refusal that ends it ([`crate::state::auth_metrics`]).
+        let (user_pool_id, client_id) = (input.user_pool_id.clone(), input.client_id.clone());
+        let answered = self.respond(input, ctx).await;
+        crate::state::auth_metrics::record(
+            &*self.engine,
+            crate::state::auth_metrics::Counter::SignIn,
+            Some(&user_pool_id),
+            &client_id,
+            crate::state::auth_metrics::attempt_of(&answered, |output| {
+                output.authentication_result.is_some()
+            }),
+            ::std::time::SystemTime::now(),
+        );
+        answered
+    }
+}
+
+impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> AdminRespondToAuthChallenge<Eng> {
+    /// Answer the outstanding challenge `input` responds to: the whole operation but for the
+    /// observation its outcome publishes, which its caller makes once this has answered.
+    async fn respond(
+        &self,
+        input: AdminRespondToAuthChallengeInput,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
+    ) -> Result<AdminRespondToAuthChallengeOutput, AdminRespondToAuthChallengeError> {
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(internal_error());
         };

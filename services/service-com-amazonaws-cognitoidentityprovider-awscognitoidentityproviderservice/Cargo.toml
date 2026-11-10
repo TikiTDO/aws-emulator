@@ -13,6 +13,11 @@ service-common = { path = "../common" }
 # (`src/service/web_acl.rs`): the association and the rule evaluation are WAFv2's own
 # records and its own data plane, read through that crate rather than copied here.
 service-com-amazonaws-wafv2-awswaf-20190729 = { workspace = true }
+# A user pool's authentication and registration traffic publishes the AWS/Cognito metric
+# series a client watches it through (`src/state/auth_metrics.rs`): the datapoints go into
+# CloudWatch's OWN metric store, the one `GetMetricStatistics` and `ListMetrics` read, so
+# one metric has one home.
+service-com-amazonaws-cloudwatch-graniteserviceversion20100801 = { workspace = true }
 # The IAM store holds the access keys of the account's users and the identity-based
 # policies in force on them: the authorization gate in front of this service's signed
 # operations (`src/service/iam_authorization.rs`) reads IAM's OWN state accessors rather

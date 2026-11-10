@@ -255,6 +255,8 @@ mod update_user_pool_domain_not_found;
 mod user_attribute_verification_code;
 #[path = "all/user_import_job_lifecycle.rs"]
 mod user_import_job_lifecycle;
+#[path = "all/user_pool_auth_metrics.rs"]
+mod user_pool_auth_metrics;
 #[path = "all/user_pool_domain.rs"]
 mod user_pool_domain;
 #[path = "all/user_pool_mfa_config.rs"]

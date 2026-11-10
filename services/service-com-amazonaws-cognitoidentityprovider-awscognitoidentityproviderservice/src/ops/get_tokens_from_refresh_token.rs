@@ -17,6 +17,10 @@
 //! issued and has since revoked is refused AS revoked, which is a different sentence
 //! from the one a value it cannot resolve at all gets.
 //!
+//! The exchange this call terminates — the fresh tokens it answers with, or the refusal
+//! that ends it — is also an OBSERVATION of the app client it ran against, published into
+//! the pool's `AWS/Cognito` token-refresh series ([`crate::state::auth_metrics`]).
+//!
 //! A pool whose `LambdaConfig` names a pre-token-generation function has that function
 //! gate the tokens this refresh mints ([`crate::state::lambda_triggers`]).
 //!
@@ -208,6 +212,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // A refresh is an attempt this one call terminates, so it is served first and
+        // OBSERVED after, in the refresh-token series of the app client it ran against
+        // ([`crate::state::auth_metrics`]).
+        let client_id = input.client_id.clone();
+        let answered = self.refresh(input, ctx).await;
+        crate::state::auth_metrics::record(
+            &*self.engine,
+            crate::state::auth_metrics::Counter::TokenRefresh,
+            // This operation models no `UserPoolId`: the app client names the pool.
+            None,
+            &client_id,
+            crate::state::auth_metrics::attempt_of(&answered, |output| {
+                output.authentication_result.is_some()
+            }),
+            ::std::time::SystemTime::now(),
+        );
+        answered
+    }
+}
+
+impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> GetTokensFromRefreshToken<Eng> {
+    /// Serve the refresh `input` asks for: the whole operation but for the observation its
+    /// outcome publishes, which its caller makes once this has answered.
+    async fn refresh(
+        &self,
+        input: GetTokensFromRefreshTokenInput,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
+    ) -> Result<GetTokensFromRefreshTokenOutput, GetTokensFromRefreshTokenError> {
         // The app client in the body names the pool, and `ClientMetadata` is the "input
         // for any custom workflows that this action triggers" that reaches the pool's
         // configured trigger function; the credential store is what mints the refresh

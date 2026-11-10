@@ -12,6 +12,10 @@
 //! records the device it came from and answers with that device's
 //! `NewDeviceMetadata` when the pool did not recognise it.
 //!
+//! Every attempt this call terminates — a completed sign-in, and every refusal of one — is
+//! also an OBSERVATION of the app client it ran against, published into the pool's
+//! `AWS/Cognito` sign-in series ([`crate::state::auth_metrics`]).
+//!
 //! A pool whose `LambdaConfig` names a `PreAuthentication` function has that function
 //! gate the sign-in, and one that names a pre-token-generation function has it gate the
 //! tokens a completed sign-in mints
@@ -302,6 +306,35 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // The attempt is served first and OBSERVED after, because what it publishes follows
+        // what it was answered: an answer carrying no `AuthenticationResult` is a challenge
+        // the caller still has to answer rather than a sign-in that happened
+        // ([`crate::state::auth_metrics`]).
+        let counter = crate::state::auth_metrics::Counter::attempted(&input.auth_flow);
+        let (user_pool_id, client_id) = (input.user_pool_id.clone(), input.client_id.clone());
+        let answered = self.initiate(input, ctx).await;
+        crate::state::auth_metrics::record(
+            &*self.engine,
+            counter,
+            Some(&user_pool_id),
+            &client_id,
+            crate::state::auth_metrics::attempt_of(&answered, |output| {
+                output.authentication_result.is_some()
+            }),
+            ::std::time::SystemTime::now(),
+        );
+        answered
+    }
+}
+
+impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> AdminInitiateAuth<Eng> {
+    /// Serve the sign-in `input` asks for: the whole operation but for the observation its
+    /// outcome publishes, which its caller makes once this has answered.
+    async fn initiate(
+        &self,
+        input: AdminInitiateAuthInput,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
+    ) -> Result<AdminInitiateAuthOutput, AdminInitiateAuthError> {
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(internal_error());
         };
