@@ -263,6 +263,8 @@ mod vpc_link_subnet_resolution;
 mod vpc_link_update;
 #[path = "all/websocket_connect_authorization.rs"]
 mod websocket_connect_authorization;
+#[path = "all/websocket_connect_backend.rs"]
+mod websocket_connect_backend;
 #[path = "all/websocket_handshake_data_plane.rs"]
 mod websocket_handshake_data_plane;
 #[path = "all/websocket_lambda_routes.rs"]

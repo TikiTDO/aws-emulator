@@ -28,6 +28,7 @@ pub mod ec2_subnets;
 pub mod integration_response_key;
 mod network;
 pub mod paging;
+pub mod route_request_parameters;
 pub mod route_throttle;
 pub mod selection_expression;
 pub mod websocket_transport;

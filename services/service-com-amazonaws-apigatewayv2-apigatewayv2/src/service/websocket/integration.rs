@@ -183,7 +183,12 @@ async fn lambda_proxy(
             "this route's AWS_PROXY integration names no Lambda function to invoke".to_string(),
         )
     })?;
-    let event = event::event(connection, &selected.route_key, call);
+    // The integration's own `RequestParameters` are applied BEFORE the event is stated: they
+    // are "request parameters that are passed from the method request to the backend"
+    // (`Integration$RequestParameters`), so what the function is told is the call as that
+    // mapping leaves it ([`super::parameters`]).
+    let mapped = super::parameters::mapped(connection, &integration.request_parameters);
+    let event = event::event(&mapped, &selected.route_key, call);
     let payload = ::serde_json::to_vec(&event).map_err(|error| {
         Unserved::Unperformable(format!("the event for this call could not be stated: {error}"))
     })?;

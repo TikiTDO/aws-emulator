@@ -44,6 +44,12 @@
 //! What never travels is the CALLER'S own credential: the invocation is signed with the
 //! credentials the in-process callback hands this handler, and neither they nor any
 //! `Authorization` header the client presented are reported or logged.
+//!
+//! The hop is made over the CALLBACK HANDLE rather than over the whole request context
+//! (`OperationContext::callback`), because the two data planes reach a function from
+//! different places: an HTTP invoke is an operation of this service and holds a context,
+//! while a WEBSOCKET api's socket is a core-owned listener whose handler holds none. The
+//! handle is the one piece either needs, so it is what this module takes.
 
 use std::time::Duration;
 

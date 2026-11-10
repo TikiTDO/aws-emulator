@@ -135,8 +135,12 @@ fn rows() -> Vec<Row> {
         Row {
             case: "CreateRoute$RequestParameters, a non-empty map of structures",
             collection: "routes",
+            // `$connect` is the one route key a WEBSOCKET api accepts request parameters
+            // on (`crate::state::route_request_parameters`), and a key of that spelling is
+            // a route of an HTTP api like any other, so the row still weighs both
+            // directions of the PROTOCOL restriction this suite is about.
             request: json!({
-                "routeKey": "GET /params",
+                "routeKey": "$connect",
                 "requestParameters": {
                     "route.request.header.x-trace": { "required": true }
                 }

@@ -311,6 +311,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             updated.request_parameters = request_parameters.into_iter().collect();
         }
 
+        // The merged route is weighed against the same narrowing the create applies: a
+        // WEBSOCKET api accepts request parameters only on the route that serves the
+        // connection request (`crate::state::route_request_parameters`). It is read off the
+        // MERGED route, so moving a route that carries parameters onto another key, and
+        // adding parameters to a route that is not the connection request's, are both
+        // refused — and a patch that only renames a `$connect` route carrying them is not.
+        if let Err(message) = crate::state::route_request_parameters::validate_route_request_parameters(
+            &api.protocol_type,
+            &updated.route_key,
+            !updated.request_parameters.is_empty(),
+        ) {
+            return Err(bad_request(message));
+        }
+
         // A route key identifies the route within its api, so an update cannot move a
         // route onto a key another route of the same api already holds. The route being
         // updated is excluded, so re-sending its own key is not a conflict with itself.

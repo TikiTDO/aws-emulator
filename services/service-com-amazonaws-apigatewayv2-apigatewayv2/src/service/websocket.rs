@@ -96,6 +96,11 @@ pub mod connect_authorizer;
 pub mod dispatch;
 pub mod event;
 pub mod integration;
+// The DATA MAPPING `Integration$RequestParameters` applies to a WebSocket call, which the
+// event above states after it: the member is a mapping from a request parameter of the call
+// (or a quoted static value) onto an integration request parameter, and this module is the
+// one reader of it.
+pub mod parameters;
 pub mod transport;
 
 use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse};

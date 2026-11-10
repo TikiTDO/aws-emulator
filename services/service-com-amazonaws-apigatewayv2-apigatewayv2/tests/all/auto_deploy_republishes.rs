@@ -373,9 +373,10 @@ fn integration_request(protocol: Protocol, upstream: &str) -> Value {
 }
 
 /// The route of an api of `protocol`: an HTTP api's key names a method and a path, a
-/// WebSocket api's names an action, and the members a route may carry
+/// WebSocket api's names one of its reserved keys, and the members a route may carry
 /// (`RequestParameters`, `RouteResponseSelectionExpression`) are supported only for
-/// WebSocket APIs.
+/// WebSocket APIs — with `RequestParameters` accepted only on `$connect`, the route that
+/// serves the connection request.
 fn route_request(protocol: Protocol, integration_id: &str) -> (String, Value) {
     let target = format!("integrations/{integration_id}");
     match protocol {
@@ -384,9 +385,9 @@ fn route_request(protocol: Protocol, integration_id: &str) -> (String, Value) {
             json!({ "routeKey": "GET /items", "target": target }),
         ),
         Protocol::WebSocket => (
-            "$default".to_string(),
+            "$connect".to_string(),
             json!({
-                "routeKey": "$default",
+                "routeKey": "$connect",
                 "target": target,
                 "routeResponseSelectionExpression": "$default",
                 "requestParameters": {

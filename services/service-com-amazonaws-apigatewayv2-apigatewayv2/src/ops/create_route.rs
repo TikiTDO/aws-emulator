@@ -251,6 +251,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(bad_request(&message));
         }
 
+        // And a WEBSOCKET api narrows that member further: a route's request parameters are
+        // the parameters of the CONNECTION REQUEST, so only the route that serves it may
+        // declare any (`crate::state::route_request_parameters`). Checked BEFORE anything is
+        // written, so a refused create leaves the api's routes exactly as they were.
+        if let Err(message) = crate::state::route_request_parameters::validate_route_request_parameters(
+            &api.protocol_type,
+            &input.route_key,
+            input
+                .request_parameters
+                .as_ref()
+                .is_some_and(|parameters| !parameters.is_empty()),
+        ) {
+            return Err(bad_request(message));
+        }
+
         // A route key identifies the route within its api, so one api cannot carry two
         // routes with the same key. The sentence is the one every writer of a route key
         // shares (`crate::state::duplicate_identity`).

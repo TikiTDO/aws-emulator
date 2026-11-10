@@ -599,7 +599,7 @@ async fn admission(
             }
         }
         Err(unserved) => {
-            tracing::info!(
+            tracing::warn!(
                 %api_id,
                 stage = %stage_name,
                 ?unserved,
@@ -860,6 +860,7 @@ async fn disconnected(
         );
     }
 }
+
 
 /// The address a connection on a core-owned loopback listener comes from. The core does not
 /// hand the handler the peer address, and every connection to a loopback listener comes from

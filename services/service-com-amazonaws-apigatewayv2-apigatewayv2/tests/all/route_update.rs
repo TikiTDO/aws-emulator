@@ -176,9 +176,13 @@ fn patched_record(created: &Value, patch: &Value) -> Value {
 
 /// The route every patch row starts from: a WebSocket route carrying every member the
 /// service stores, so a row can replace any one of them.
+///
+/// Its key is `$connect`, because `RequestParameters` is accepted only on the route that
+/// serves the connection request (`crate::state::route_request_parameters`) and this route
+/// carries every member.
 fn base_route(integration_id: &str, authorizer_id: &str) -> Value {
     json!({
-        "routeKey": "sendmessage",
+        "routeKey": "$connect",
         "target": format!("integrations/{integration_id}"),
         "authorizationType": "CUSTOM",
         "authorizerId": authorizer_id,
@@ -231,11 +235,14 @@ fn patch_rows() -> Vec<PatchRow> {
         },
         PatchRow {
             case: "the route key moves to a key no other route holds",
-            patch: json!({ "routeKey": "broadcast" }),
+            // A route that moves OFF `$connect` gives up its request parameters in the same
+            // patch: only that route may declare any, so the merged record could not carry
+            // both.
+            patch: json!({ "routeKey": "broadcast", "requestParameters": {} }),
         },
         PatchRow {
             case: "the route key is re-sent unchanged",
-            patch: json!({ "routeKey": "sendmessage" }),
+            patch: json!({ "routeKey": "$connect" }),
         },
         PatchRow {
             case: "the target",
@@ -261,7 +268,8 @@ fn patch_rows() -> Vec<PatchRow> {
                 "apiKeyRequired": false,
                 "operationName": "disconnect",
                 "authorizationScopes": ["scope/three"],
-                "requestModels": { "default": "Other", "extra": "Empty" }
+                "requestModels": { "default": "Other", "extra": "Empty" },
+                "requestParameters": {}
             }),
         },
         PatchRow {
@@ -695,6 +703,10 @@ struct WebSocketOnlyMember {
     /// The same member set to the value it would carry anyway, or `None` where the
     /// member has no such value.
     inert: Option<Value>,
+    /// The key the route on the SUPPORTING api is created with, where the member needs a
+    /// particular one: `RequestParameters` is accepted only on `$connect`
+    /// (`crate::state::route_request_parameters`). `None` takes the generic key below.
+    route_key: Option<&'static str>,
 }
 
 fn websocket_only_members() -> Vec<WebSocketOnlyMember> {
@@ -703,26 +715,31 @@ fn websocket_only_members() -> Vec<WebSocketOnlyMember> {
             member: "apiKeyRequired",
             configuring: json!(true),
             inert: Some(json!(false)),
+            route_key: None,
         },
         WebSocketOnlyMember {
             member: "modelSelectionExpression",
             configuring: json!("$request.body.action"),
             inert: None,
+            route_key: None,
         },
         WebSocketOnlyMember {
             member: "requestModels",
             configuring: json!({ "default": "Empty" }),
             inert: Some(json!({})),
+            route_key: None,
         },
         WebSocketOnlyMember {
             member: "requestParameters",
             configuring: json!({ "route.request.header.x-trace": { "required": true } }),
             inert: Some(json!({})),
+            route_key: Some("$connect"),
         },
         WebSocketOnlyMember {
             member: "routeResponseSelectionExpression",
             configuring: json!("$default"),
             inert: None,
+            route_key: None,
         },
     ]
 }
@@ -751,7 +768,11 @@ async fn a_patch_configuring_a_websocket_only_member_is_refused_on_an_http_api()
             &emulator,
             case,
             &socket_id,
-            &json!({ "routeKey": format!("socket-{case}") }),
+            &json!({
+                "routeKey": restricted
+                    .route_key
+                    .map_or_else(|| format!("socket-{case}"), str::to_string)
+            }),
         )
         .await;
 

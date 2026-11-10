@@ -14,7 +14,9 @@
 //! the form of the key deleted (header, querystring, body), its position in the key order
 //! (only, first, middle, last), and the constraint the entry carries (`required` true,
 //! false, absent). The recorded case that filed the issue — one key dropped from a
-//! two-key WebSocket route — is one row.
+//! two-key WebSocket route — is one row. Every route here is the `$connect` route, because
+//! that is the only route of a WEBSOCKET api that may declare request parameters at all
+//! (`crate::state::route_request_parameters`), and each row creates an api of its own.
 
 use serde_json::{json, Value};
 
@@ -55,7 +57,7 @@ fn rows() -> Vec<Row> {
         Row {
             case: "the first of two keys in key order",
             route: json!({
-                "routeKey": "sendmessage",
+                "routeKey": "$connect",
                 "requestParameters": {
                     "route.request.header.Authorization": { "required": true },
                     "route.request.querystring.token": { "required": false }
@@ -67,7 +69,7 @@ fn rows() -> Vec<Row> {
         Row {
             case: "the last of two keys in key order",
             route: json!({
-                "routeKey": "$disconnect",
+                "routeKey": "$connect",
                 "requestParameters": {
                     "route.request.header.Authorization": { "required": true },
                     "route.request.querystring.token": { "required": true }
@@ -79,7 +81,7 @@ fn rows() -> Vec<Row> {
         Row {
             case: "the middle key of three, a querystring key",
             route: json!({
-                "routeKey": "broadcast",
+                "routeKey": "$connect",
                 "requestParameters": {
                     "route.request.body.action": { "required": true },
                     "route.request.header.X-Trace": { "required": false },
@@ -98,7 +100,7 @@ fn rows() -> Vec<Row> {
         Row {
             case: "a body key whose entry carries no constraint member",
             route: json!({
-                "routeKey": "ping",
+                "routeKey": "$connect",
                 "requestParameters": {
                     "route.request.body.action": {},
                     "route.request.body.payload": { "required": true }
@@ -308,7 +310,7 @@ async fn deleting_the_same_parameter_twice_is_not_found_the_second_time() {
         "a route with two parameters",
         &api_id,
         &json!({
-            "routeKey": "sendmessage",
+            "routeKey": "$connect",
             "requestParameters": {
                 "route.request.header.Authorization": { "required": true },
                 "route.request.querystring.token": { "required": false }
