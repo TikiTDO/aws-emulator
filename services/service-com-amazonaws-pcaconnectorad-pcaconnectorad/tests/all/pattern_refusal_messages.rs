@@ -26,17 +26,19 @@ use serde_json::{json, Value};
 
 use super::harness::{call, encode_label, router, ACCOUNT, REGION};
 
-/// The clause opener a `@pattern` requirement is stated with.
-const PATTERN_REQUIREMENT: &str = "Member must satisfy regular expression pattern: ";
+/// The clause opener a `@pattern` requirement is stated with. Shared with the sibling
+/// suite that asserts the same rule over the ARN members of the service-principal-name
+/// and connector operations, so the sentence is written here once.
+pub(crate) const PATTERN_REQUIREMENT: &str = "Member must satisfy regular expression pattern: ";
 
 /// `TemplateArn`'s modelled expression, as the model declares it.
 const TEMPLATE_ARN_PATTERN: &str = r"^arn:[\w-]+:pca-connector-ad:[\w-]+:[0-9]+:connector\/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\/template\/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$";
 
 /// `ConnectorArn`'s modelled expression.
-const CONNECTOR_ARN_PATTERN: &str = r"^arn:[\w-]+:pca-connector-ad:[\w-]+:[0-9]+:connector\/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$";
+pub(crate) const CONNECTOR_ARN_PATTERN: &str = r"^arn:[\w-]+:pca-connector-ad:[\w-]+:[0-9]+:connector\/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$";
 
 /// `DirectoryRegistrationArn`'s modelled expression.
-const DIRECTORY_REGISTRATION_ARN_PATTERN: &str =
+pub(crate) const DIRECTORY_REGISTRATION_ARN_PATTERN: &str =
     r"^arn:[\w-]+:pca-connector-ad:[\w-]+:[0-9]+:directory-registration\/d-[0-9a-f]{10}$";
 
 /// `GroupSecurityIdentifier`'s modelled expression.
@@ -63,14 +65,14 @@ fn well_formed_template_arn() -> String {
 }
 
 /// A connector ARN `ConnectorArn`'s expression admits.
-fn well_formed_connector_arn() -> String {
+pub(crate) fn well_formed_connector_arn() -> String {
     format!(
         "arn:aws:pca-connector-ad:{REGION}:{ACCOUNT}:connector/11111111-2222-3333-4444-555555555555"
     )
 }
 
 /// A directory-registration ARN `DirectoryRegistrationArn`'s expression admits.
-fn well_formed_directory_registration_arn() -> String {
+pub(crate) fn well_formed_directory_registration_arn() -> String {
     format!("arn:aws:pca-connector-ad:{REGION}:{ACCOUNT}:directory-registration/d-0123456789")
 }
 
@@ -294,7 +296,7 @@ fn pattern_cases() -> Vec<PatternCase> {
 /// The expression a refusal quotes for `pattern`: the modelled text without the
 /// whole-value anchor pair the model wraps it in. Written here as the inverse of that
 /// wrapping, so no row carries a hand-copied expression of its own.
-fn advertised(pattern: &str) -> &str {
+pub(crate) fn advertised(pattern: &str) -> &str {
     pattern
         .strip_prefix('^')
         .and_then(|body| body.strip_suffix('$'))
