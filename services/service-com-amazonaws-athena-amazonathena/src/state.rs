@@ -11,7 +11,11 @@
 //!
 //! A workgroup has no lifecycle the clock owes: Athena answers `CreateWorkGroup` with
 //! the workgroup already usable, so the record is stored in its terminal state and a
-//! read never has to materialise a pending transition. A data catalog has one only when
+//! read never has to materialise a pending transition. The one workgroup the registry
+//! holds no record for is the account's default workgroup ([`DEFAULT_WORK_GROUP`]):
+//! nothing created it, so [`default_work_group_record`] builds it from the instant the
+//! registries were opened and `ListWorkGroups` reports it beside the created ones. A data
+//! catalog has one only when
 //! its creation is asynchronous (see [`DataCatalogRecord::status_at`]), and even then the
 //! due instant is stored once and every read derives the status from it rather than
 //! writing.
@@ -60,7 +64,7 @@ use crate::ops::types::{
     Column, DataCatalog, EngineVersion, ManagedQueryResultsConfiguration, QueryExecution,
     QueryExecutionContext, QueryExecutionStatistics, QueryExecutionStatus, ResultConfiguration,
     ResultReuseConfiguration, ResultReuseInformation, TableMetadata, Tag, WorkGroup,
-    WorkGroupConfiguration, CONNECTION_TYPE_VALUES,
+    WorkGroupConfiguration, WorkGroupSummary, CONNECTION_TYPE_VALUES,
 };
 
 /// The `WorkGroupState` a freshly created workgroup is in. One of
@@ -139,6 +143,25 @@ pub struct WorkGroupRecord {
 }
 
 impl WorkGroupRecord {
+    /// The record as the modelled `WorkGroupSummary` a listing reports it by.
+    ///
+    /// `WorkGroupSummary` is documented "The summary information for the workgroup, which
+    /// includes its name, state, description, and the date and time it was created", so
+    /// every member it carries is projected from this same record — the listing reports no
+    /// value the detailed read ([`Self::to_work_group`]) would not.
+    pub fn to_summary(&self) -> WorkGroupSummary {
+        WorkGroupSummary {
+            name: Some(self.name.clone()),
+            state: Some(self.state.clone()),
+            description: self.description.clone(),
+            creation_time: Some(::aws_smithy_types::DateTime::from(self.created_at)),
+            engine_version: self.configuration.engine_version.clone(),
+            // Filled only for an IAM Identity Center enabled workgroup, whose Identity
+            // Center application this emulator does not create.
+            identity_center_application_arn: None,
+        }
+    }
+
     /// The record as the modelled `WorkGroup` shape a read answers with.
     pub fn to_work_group(&self) -> WorkGroup {
         WorkGroup {
@@ -151,6 +174,31 @@ impl WorkGroupRecord {
             // whose Identity Center application this emulator does not create.
             identity_center_application_arn: None,
         }
+    }
+}
+
+/// The account's default workgroup, as a record a listing can report.
+///
+/// Athena gives every account one workgroup nobody created: the one
+/// [`DEFAULT_WORK_GROUP`] names, which a query that names no workgroup runs in and which
+/// `DeleteWorkGroup` documents "cannot be deleted". It is therefore not in
+/// [`ComAmazonawsAthenaAmazonathenaState::work_groups`] \u2014 no `CreateWorkGroup` call ever
+/// wrote it \u2014 and it is built here instead, from `created_at`: the instant this account's
+/// registries were opened, held once on the store so every read reports the same one.
+///
+/// Enabled (it is the workgroup queries run in by default), with no description of its
+/// own and the engine version Athena resolves for a workgroup that selected none.
+pub fn default_work_group_record(created_at: SystemTime) -> WorkGroupRecord {
+    WorkGroupRecord {
+        name: DEFAULT_WORK_GROUP.to_string(),
+        state: WORK_GROUP_STATE_ENABLED.to_string(),
+        description: None,
+        configuration: WorkGroupConfiguration {
+            engine_version: Some(resolved_engine_version(None)),
+            ..WorkGroupConfiguration::default()
+        },
+        created_at,
+        tags: Vec::new(),
     }
 }
 
@@ -1565,6 +1613,17 @@ fn executions_cursor(work_group: &str, position: usize) -> String {
     format!("executions{CURSOR_SEPARATOR}{work_group}{CURSOR_SEPARATOR}{position}")
 }
 
+/// The cursor a `ListWorkGroups` page hands back: the scope it walked \u2014 the whole
+/// account, since the operation models no member that narrows it \u2014 and the position to
+/// resume at.
+fn work_groups_cursor(position: usize) -> String {
+    format!("workgroups{CURSOR_SEPARATOR}{ACCOUNT_SCOPE}{CURSOR_SEPARATOR}{position}")
+}
+
+/// The scope of a listing that walks everything this account holds, carried in that
+/// listing's cursors where a filtered listing carries what it filtered on.
+const ACCOUNT_SCOPE: &str = "account";
+
 /// The position `cursor` names for `kind` within `scope`, or `None` for any cursor that
 /// is not one of those — including one minted for another execution, another workgroup
 /// or another operation, which names no position in THIS read.
@@ -1580,10 +1639,17 @@ fn cursor_position(cursor: &str, kind: &str, scope: &str) -> Option<usize> {
 }
 
 /// Per-service state for com-amazonaws-athena-amazonathena. A handler reaches it through [`service_state`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ComAmazonawsAthenaAmazonathenaState {
-    /// Every workgroup this account holds, keyed by its name. A `BTreeMap` so a
-    /// listing walks the registry in one stable order.
+    /// When this account's Athena registries were opened, which is the `CreationTime` of
+    /// the account's default workgroup: that workgroup is there before any
+    /// `CreateWorkGroup` call, so its creation instant belongs to the account rather than
+    /// to a request. Held once, so every read reports the same instant for it.
+    opened_at: SystemTime,
+    /// Every workgroup a `CreateWorkGroup` call registered, keyed by its name. A
+    /// `BTreeMap` so a listing walks the registry in one stable order. The account's
+    /// default workgroup is NOT here \u2014 nothing created it; see
+    /// [`default_work_group_record`] and [`Self::work_group_summaries`].
     pub work_groups: BTreeMap<String, WorkGroupRecord>,
     /// Every data catalog this account holds, keyed by its name — the key the
     /// `CreateDataCatalogInput$Name` documentation calls unique per account. A
@@ -1615,12 +1681,51 @@ pub struct ComAmazonawsAthenaAmazonathenaState {
     page_token_key: PageTokenKey,
 }
 
+impl Default for ComAmazonawsAthenaAmazonathenaState {
+    /// A store holding nothing a request wrote, opened NOW: the account's default
+    /// workgroup dates from this instant (see [`Self::opened_at`]), which is why this
+    /// store is constructed rather than derived.
+    fn default() -> Self {
+        Self {
+            opened_at: SystemTime::now(),
+            work_groups: BTreeMap::new(),
+            data_catalogs: BTreeMap::new(),
+            query_executions: HashMap::new(),
+            query_execution_order: Vec::new(),
+            idempotency_tokens: HashMap::new(),
+            query_databases: BTreeMap::new(),
+            notebooks: NotebookRegistry::default(),
+            page_token_key: PageTokenKey::new(),
+        }
+    }
+}
+
 impl ComAmazonawsAthenaAmazonathenaState {
     /// Whether this account has the workgroup `name`: one `CreateWorkGroup` registered,
-    /// or [`DEFAULT_WORK_GROUP`] — Athena's own default workgroup, which every account
+    /// or [`DEFAULT_WORK_GROUP`] \u2014 Athena's own default workgroup, which every account
     /// has and which therefore needs no record here.
     pub fn holds_work_group(&self, name: &str) -> bool {
         name == DEFAULT_WORK_GROUP || self.work_groups.contains_key(name)
+    }
+
+    /// Every workgroup this account holds, as the summaries a listing reports, in name
+    /// order.
+    ///
+    /// That is each one a `CreateWorkGroup` call registered and has not been deleted,
+    /// plus the account's default workgroup ([`default_work_group_record`]), which exists
+    /// without a record of its own \u2014 the same set [`Self::holds_work_group`] answers for.
+    /// A record registered under the default workgroup's own name is reported from that
+    /// record, so no workgroup is reported twice.
+    pub fn work_group_summaries(&self) -> Vec<WorkGroupSummary> {
+        let mut by_name: BTreeMap<&str, WorkGroupSummary> = self
+            .work_groups
+            .iter()
+            .map(|(name, record)| (name.as_str(), record.to_summary()))
+            .collect();
+        by_name
+            .entry(DEFAULT_WORK_GROUP)
+            .or_insert_with(|| default_work_group_record(self.opened_at).to_summary());
+        by_name.into_values().collect()
     }
 
     /// The execution `id` names, or `None` when this account holds none.
@@ -1756,6 +1861,18 @@ impl ComAmazonawsAthenaAmazonathenaState {
     pub fn executions_page_position(&self, work_group: &str, token: &str) -> Option<usize> {
         let cursor = self.page_cursor(token)?;
         cursor_position(&cursor, "executions", work_group)
+    }
+
+    /// The `NextToken` a `ListWorkGroups` page resumed at `position` hands back.
+    pub fn work_groups_page_token(&self, position: usize) -> String {
+        ::hex::encode(self.page_token_key.mint(&work_groups_cursor(position)))
+    }
+
+    /// The position `token` resumes a workgroup listing at, or `None` for a token this
+    /// store did not mint for THAT listing.
+    pub fn work_groups_page_position(&self, token: &str) -> Option<usize> {
+        let cursor = self.page_cursor(token)?;
+        cursor_position(&cursor, "workgroups", ACCOUNT_SCOPE)
     }
 
     /// The cursor `token` carries, or `None` for any value this store did not mint.
