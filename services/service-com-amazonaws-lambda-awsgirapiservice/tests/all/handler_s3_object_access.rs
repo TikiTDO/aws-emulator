@@ -72,18 +72,18 @@ const INLINE_POLICY: &str = "inline";
 
 /// The code S3 answers an authorization refusal with, and the status it carries (Amazon S3
 /// "Error responses": `AccessDenied`, HTTP 403).
-const ACCESS_DENIED: &str = "AccessDenied";
-const ACCESS_DENIED_STATUS: i64 = 403;
+pub(crate) const ACCESS_DENIED: &str = "AccessDenied";
+pub(crate) const ACCESS_DENIED_STATUS: i64 = 403;
 
 /// Lambda, Amazon S3, IAM and the token service over ONE shared engine, as
 /// `core/router/src/lib.rs` mounts them: the handler's SDK call is dispatched back into this
 /// same router, so the bucket it reads is the bucket this suite wrote.
-struct Emulator {
+pub(crate) struct Emulator {
     router: MultiServiceRouter,
 }
 
 impl Emulator {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
         let mut router = MultiServiceRouter::new();
         // The suite signs nothing: the `Authorization` header carries only the credential
@@ -139,7 +139,7 @@ impl Emulator {
     }
 
     /// One Amazon S3 request that must be served.
-    async fn s3_ok(&self, case: &str, method: &str, uri: &str, body: &[u8]) -> String {
+    pub(crate) async fn s3_ok(&self, case: &str, method: &str, uri: &str, body: &[u8]) -> String {
         let (status, answered) = self.s3(method, uri, body).await;
         assert!(
             (200..300).contains(&status),
@@ -256,7 +256,12 @@ impl Emulator {
     /// Create the execution role `role_name`, trusted by Lambda, carrying `policy` as its
     /// inline identity policy when one is given — written with IAM's own operations, so the
     /// role a session is minted of is the record `iam:CreateRole` wrote.
-    async fn execution_role(&self, case: &str, role_name: &str, policy: Option<&str>) -> String {
+    pub(crate) async fn execution_role(
+        &self,
+        case: &str,
+        role_name: &str,
+        policy: Option<&str>,
+    ) -> String {
         let trust = json!({
             "Version": "2012-10-17",
             "Statement": [{
@@ -296,7 +301,7 @@ impl Emulator {
 
     /// Create a function whose code is `source`, running as `role_arn`, and wait out the
     /// provisioning window.
-    async fn function(&self, case: &str, name: &str, role_arn: &str, source: &str) {
+    pub(crate) async fn function(&self, case: &str, name: &str, role_arn: &str, source: &str) {
         let (status, _headers, created) = self
             .lambda(
                 "POST",
@@ -324,7 +329,12 @@ impl Emulator {
 
     /// `Invoke` the function synchronously with `event`, answering the payload the run
     /// produced and the `FunctionError` signal it carried, if any.
-    async fn invoke(&self, case: &str, name: &str, event: &Value) -> (Option<String>, Value) {
+    pub(crate) async fn invoke(
+        &self,
+        case: &str,
+        name: &str,
+        event: &Value,
+    ) -> (Option<String>, Value) {
         let (status, headers, payload) = self
             .lambda(
                 "POST",
@@ -357,7 +367,7 @@ impl Emulator {
 }
 
 /// The ARN of the role IAM holds under `role_name`.
-fn role_arn(role_name: &str) -> String {
+pub(crate) fn role_arn(role_name: &str) -> String {
     format!(
         "arn:aws:iam::{}:role/{role_name}",
         engine::emulator_account_id()
@@ -367,7 +377,7 @@ fn role_arn(role_name: &str) -> String {
 /// The assumed-role session ARN a call made by an invocation of `function_name` running as
 /// `role_name` speaks for: the session a function's calls are made under is named for the
 /// FUNCTION.
-fn session_arn(role_name: &str, function_name: &str) -> String {
+pub(crate) fn session_arn(role_name: &str, function_name: &str) -> String {
     format!(
         "arn:aws:sts::{}:assumed-role/{role_name}/{function_name}",
         engine::emulator_account_id()
@@ -376,7 +386,12 @@ fn session_arn(role_name: &str, function_name: &str) -> String {
 
 /// One policy document, in the flavour its `Principal` element decides: a bucket policy
 /// names one, an identity policy names none.
-fn document(effect: &str, action: &str, resource: &str, principal: Option<&str>) -> String {
+pub(crate) fn document(
+    effect: &str,
+    action: &str,
+    resource: &str,
+    principal: Option<&str>,
+) -> String {
     let mut statement = json!({
         "Effect": effect,
         "Action": action,
@@ -423,7 +438,7 @@ fn package(source: &str) -> Vec<u8> {
 /// The handler the read table runs: it makes ONE `GetObject` call per address the event
 /// names and reports what each answered, so the invocation's payload IS what the SDK gave
 /// the guest — the object's bytes, or the refusal S3 worded.
-const READER_SOURCE: &str = r#"
+pub(crate) const READER_SOURCE: &str = r#"
 import boto3
 import botocore.exceptions
 
