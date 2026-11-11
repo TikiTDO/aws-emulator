@@ -67,7 +67,8 @@ const MAX_TAG_KEY_CHARACTERS: usize = 128;
 const MAX_CERTIFICATE_NAME_CHARACTERS: usize = 128;
 
 /// The envelope the boundary walk states for ONE broken requirement whose value this
-/// service does not echo — a value outside a bound its member declares.
+/// service does not echo — a value outside a bound its member declares, and a value outside
+/// its member's `@pattern`.
 fn one_unechoed_violation(member: &str, requirement: &str) -> String {
     format!(
         "1 validation error detected: Value at '{member}' failed to satisfy constraint: \

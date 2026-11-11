@@ -51,11 +51,14 @@
 //!   ([`crate::state::RESERVED_TAG_KEY_PREFIX`]) is Amazon Web Services' own, so such a
 //!   request is refused with the modelled 400 `ValidationException` naming `tags` and no
 //!   inquiry is created.
-//! * The inquiry's RESPONSES are model-generated compliance answers, and no such engine
-//!   runs in this emulator. Nothing is synthesised to look generated: no query ever
-//!   carries a `response`, and that absence is the signal — a query is reported under the
-//!   handle its submission gave it, never under question text nothing read — and no query
-//!   is failed for work nothing ran.
+//! * The inquiry's RESPONSES are RETRIEVED from the published report catalog this service
+//!   serves: the documents whose text carries the submitted query's terms are the sources,
+//!   and the response a query reports is the passages of those documents, each under the
+//!   source it was read out of, with a citation naming where that document is published
+//!   ([`crate::state::answer_from_catalog`]). Nothing is synthesised to look generated — a
+//!   query the catalog holds nothing bearing on carries no `response` and no citation, a
+//!   query is reported under the handle its submission gave it, never under question text
+//!   nothing read, and no query is failed for work nothing ran.
 //! * Only a submission carrying NOTHING to process ends in the modelled failure state
 //!   ([`crate::state::InquiryContentRecord::nothing_to_process`], read by `materialise`).
 //!   A unit of work whose handle this API's own `query` member cannot carry is reported as
@@ -294,7 +297,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
         let fingerprint = request_fingerprint(&input.name, &support_mode, &content, &tags);
-        let queries = enumerate_queries(&input.name, &support_mode, &content, now);
+        // The catalog each query is answered out of, copied out under the lock so the
+        // retrieval below runs WITHOUT holding it: the catalog is service-owned and never
+        // written, so what was copied cannot go stale.
+        let corpus = crate::state::AnswerCorpus::from_catalog(&state.lock().reports);
+        let queries = enumerate_queries(&input.name, &support_mode, &content, now, &corpus);
 
         let mut store = state.lock();
 
@@ -456,12 +463,16 @@ fn content_record(content: InquiryContent) -> crate::state::InquiryContentRecord
 /// can REPORT, so it decides neither whether the submission was processed nor what became
 /// of it (see [`crate::state::ComplianceInquiry::materialise`]).
 ///
-/// No query carries a `response`: see [`crate::state::InquiryQuery::response`].
+/// Each query carries the ANSWER the retrieval over the published report catalog produced
+/// for its text ([`crate::state::answer_from_catalog`]), which the query reports once the
+/// clock has made its processing due; a query the catalog holds nothing bearing on carries
+/// none.
 fn enumerate_queries(
     title: &str,
     support_mode: &str,
     content: &crate::state::InquiryContentRecord,
     now: ::std::time::SystemTime,
+    catalog: &crate::state::AnswerCorpus,
 ) -> Vec<crate::state::InquiryQuery> {
     let review_type = crate::state::review_type_for(support_mode);
     let texts: Vec<String> = content
@@ -473,8 +484,8 @@ fn enumerate_queries(
         .zip(texts)
         .map(|(identifier, query)| crate::state::InquiryQuery {
             identifier,
+            answer: crate::state::answer_from_catalog(&query, catalog),
             query,
-            response: None,
             review_type: Some(review_type.to_string()),
             status: crate::state::QUERY_STATUS_PROCESSING.to_string(),
             status_message: crate::state::QUERY_MESSAGE_IN_PROGRESS.to_string(),

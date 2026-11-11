@@ -11,7 +11,11 @@
 //! * It is a REPORTING operation (`@readonly`): the one write it makes is
 //!   [`crate::state::ComplianceInquiry::materialise`], which applies the transition the
 //!   CLOCK already owed the inquiry — the same transition every other reader of it
-//!   materialises, owed at the same instant whether or not anybody called.
+//!   materialises, owed at the same instant whether or not anybody called. That transition
+//!   is also what RELEASES each query's answer: from the due instant a query reports the
+//!   response the retrieval over the published catalog produced for it and the citations
+//!   naming where those sources are published
+//!   ([`crate::state::InquiryQuery::reported_answer`]).
 //! * The queries are reported in `queryIdentifier` order ("[s]equential identifier of the
 //!   query within the inquiry"), which is the stable total order the pagination token
 //!   indexes into: a page of at most `maxResults` records, and a `nextToken` naming the
@@ -168,7 +172,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
@@ -196,6 +200,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let page_size = crate::state::page_size(input.max_results);
         let now = ::std::time::SystemTime::now();
+        // The endpoint this caller reached the emulator on, which the links of the cited
+        // sources name ([`crate::state::QueryCitation::source_link`]): the URL has to
+        // resolve for whoever was handed it.
+        let host = crate::state::document_url_host(ctx.parts());
 
         let mut store = state.lock();
         // The one rule every inquiry-targeting operation of this service resolves its
@@ -220,7 +228,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             |position| {
                 crate::state::inquiry_queries_token(&input.compliance_inquiry_id, position)
             },
-            |query| query.to_summary(),
+            |query| query.to_summary(&host),
         );
 
         Ok(ListComplianceInquiryQueriesOutput {

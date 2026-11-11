@@ -23,9 +23,10 @@
 //!   non-failure terminal status even when no unit of work of it could be reported inside
 //!   the modelled bounds of `QuerySummary$query`.
 //!
-//! No query ever carries a `response`: a compliance answer is model-generated text and no
-//! such engine runs in this emulator, so the member stays absent rather than carrying
-//! prose nothing produced.
+//! A query reports an answer only once its processing is over, and only when the published
+//! report catalog holds a document bearing on the handle that unit of work was submitted
+//! under: the `response` and the `citations` supporting it are always reported together, and
+//! a unit of work the catalog has nothing on reports neither.
 //!
 //! The rows differ along what the rule generalises over: the form of the content, how many
 //! sections an upload names (none, one, several, and `FileSectionList`'s published
@@ -501,11 +502,13 @@ async fn an_inquiry_owns_one_query_per_unit_of_work_its_content_submitted() {
                 "case {label:?}: expected the pair {query_terminal:?} past the processing \
                  span, got {query:?}",
             );
-            assert!(
+            // The answer travels as one, and a section label the catalog holds nothing
+            // bearing on is answered with neither member.
+            assert_eq!(
                 query["response"].is_null(),
-                "case {label:?}: no engine generates a compliance response here, so none \
-                 may be reported, got {:?}",
-                query["response"]
+                query["citations"].is_null(),
+                "case {label:?}: a response and the citations supporting it are reported \
+                 together, got {query:?}"
             );
         }
 

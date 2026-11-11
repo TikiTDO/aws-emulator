@@ -33,7 +33,10 @@
 //! than in its [`Default`]. An inquiry carries its own clock-owed transition — AWS
 //! answers the create with HTTP 202 and a non-terminal `PROCESSING` status — which
 //! [`ComplianceInquiry::materialise`] applies from the stored due instant, so a reader
-//! only ever materialises a change the clock had already made due.
+//! only ever materialises a change the clock had already made due. That same transition
+//! RELEASES each query's answer — the `response` the retrieval over the published report
+//! catalog produced for it and the `citations` naming where those sources are published,
+//! which live in [`inquiry_answers`].
 //!
 //! An inquiry also carries the one TAG SET this service persists: `TagResource`,
 //! `UntagResource` and `ListTagsForResource` act on the tags of the resource their
@@ -95,6 +98,11 @@ use crate::ops::types::{
     QuerySummary, ReportDetail, ReportSummary, ResourceNotFoundException, ValidationException,
     ValidationExceptionField, NOTIFICATION_SUBSCRIPTION_STATUS_VALUES,
 };
+
+/// The ANSWER a compliance-inquiry query carries — the response this service retrieved for
+/// it out of the published catalog, and the citations that support it.
+mod inquiry_answers;
+pub use inquiry_answers::*;
 
 /// The ARN syntax the tagging surface reads a caller-supplied `resourceArn` against.
 /// Re-exported by name, so a handler reaches it through `crate::state` like every other
@@ -379,25 +387,21 @@ pub const REVIEW_TYPE_AI: &str = "AI";
 /// `ReviewType`'s value for a response a human expert reviews.
 pub const REVIEW_TYPE_HUMAN: &str = "HUMAN";
 
-/// The longest `query` text a `QuerySummary` can report: `QuerySummary$query` targets
-/// `LongStringAttribute`, which is `@length(min: 1, max: 2048)`.
+/// The longest text a `LongStringAttribute` member of this service can report:
+/// `QuerySummary$query`, `QuerySummary$response` and `Citation$sourceContent` all target
+/// it, and it is `@length(min: 1, max: 2048)`.
 pub const QUERY_TEXT_LIMIT: usize = 2048;
 
 /// `label` as `QuerySummary$query` can report it, or `None` when nothing reportable
 /// remains of it.
 ///
 /// The member targets `LongStringAttribute` — `@length(min: 1, max: 2048)`, `@pattern
-/// ^[^<>]*$` — so the characters that pattern excludes are dropped and the text is
-/// clipped to the modelled maximum. Submitted query text already satisfies the shape
+/// ^[^<>]*$` — which is the one shape rule [`reportable_long_text`] applies for every
+/// member of this service targeting it. Submitted query text already satisfies the shape
 /// (the request carried it through the same one), so this only ever bites on a handle
 /// read off a member with looser constraints, such as the inquiry's title.
 pub fn reportable_query_text(label: &str) -> Option<String> {
-    let text: String = label
-        .chars()
-        .filter(|character| *character != '<' && *character != '>')
-        .take(QUERY_TEXT_LIMIT)
-        .collect();
-    (!text.is_empty()).then_some(text)
+    reportable_long_text(label)
 }
 
 /// The `ReviewType` the queries of one submission carry, from the support mode the
@@ -866,8 +870,9 @@ impl InquiryContentRecord {
     ///
     /// A unit is reported under its own handle and nothing more: the questions a section
     /// holds are written INSIDE the document, no document understanding runs in this
-    /// emulator, and no question text is invented for them (nor any response — see
-    /// [`InquiryQuery::response`]).
+    /// emulator, and no question text is invented for them. What each unit is ANSWERED
+    /// with is the retrieval over the published catalog for the handle it carries (see
+    /// [`InquiryQuery::answer`]).
     ///
     /// Content with [`nothing_to_process`](Self::nothing_to_process) submits NO unit: there
     /// is nothing for a unit of work to be about, which is the one thing that makes an
@@ -928,14 +933,16 @@ pub struct InquiryQuery {
     /// work (see [`InquiryContentRecord::work_units`]), rendered inside the modelled
     /// bounds of the member that reports it ([`reportable_query_text`]).
     pub query: String,
-    /// "Generated response to the query."
+    /// "Generated response to the query", and "[s]upporting citations for the response",
+    /// as the retrieval over the published report catalog produced them for this query's
+    /// text ([`answer_from_catalog`]).
     ///
-    /// `None` until something generates one, and NOTHING in this emulator does: a
-    /// compliance answer is model-generated text and no such engine runs in-process, so
-    /// this member stays absent rather than carrying prose nothing produced. Its absence
-    /// is the honest signal; the query's own status still reports that its processing is
-    /// over, because the query itself was received and recorded.
-    pub response: Option<String>,
+    /// `None` when the catalog holds nothing bearing on the query: there is no passage to
+    /// quote, so the members stay absent rather than carrying text no source supports.
+    /// Produced when the query was SUBMITTED and reported once the clock has made its
+    /// processing due ([`Self::reported_answer`]) — the catalog is service-owned and never
+    /// written, so the answer does not depend on when the retrieval ran.
+    pub answer: Option<QueryAnswer>,
     /// One of `ReviewType`'s values — the review the inquiry was submitted for
     /// ([`review_type_for`]). A query awaiting [`REVIEW_TYPE_HUMAN`] stays non-terminal:
     /// a human expert's review is not the clock's to finish (see
@@ -949,19 +956,37 @@ pub struct InquiryQuery {
 }
 
 impl InquiryQuery {
+    /// The answer this query REPORTS, which is the one it holds once its processing is no
+    /// longer in progress.
+    ///
+    /// A query still being processed — including one resting on the human expert review its
+    /// inquiry's support mode asked for, which nothing here performs — reports no response
+    /// and no citation: the answer is released when the processing that produced it is
+    /// over, so a client polling for it sees it appear exactly when the status says it may.
+    pub fn reported_answer(&self) -> Option<&QueryAnswer> {
+        self.answer
+            .as_ref()
+            .filter(|_| self.status != QUERY_STATUS_PROCESSING)
+    }
+
     /// The `QuerySummary` projection `ListComplianceInquiryQueries` reports.
     ///
-    /// `citations` and `updatedResponseVersions` are absent rather than empty: a citation
-    /// supports a GENERATED response and a response version records an EDIT to one, and
-    /// this query has no response at all (see [`InquiryQuery::response`]), so there is
-    /// nothing to cite and no version history to report.
-    pub fn to_summary(&self) -> QuerySummary {
+    /// `response` and `citations` are the answer this query reports, both read off the one
+    /// stored [`QueryAnswer`] so the response and the sources supporting it cannot
+    /// disagree; the citation links name this emulator on the endpoint `host` — the one the
+    /// reading request reached it on.
+    ///
+    /// `updatedResponseVersions` is absent rather than empty: a response version records an
+    /// EDIT to a response, and nothing in this emulator edits one, so there is no version
+    /// history to report.
+    pub fn to_summary(&self, host: &str) -> QuerySummary {
+        let answer = self.reported_answer();
         QuerySummary {
             query_identifier: self.identifier,
             query: self.query.clone(),
-            response: self.response.clone(),
+            response: answer.map(|answer| answer.response.clone()),
             review_type: self.review_type.clone(),
-            citations: None,
+            citations: answer.map(|answer| answer.reported_citations(host)),
             status: self.status.clone(),
             status_message: self.status_message.clone(),
             created_at: ::aws_smithy_types::DateTime::from(self.created_at),
@@ -1010,9 +1035,9 @@ pub struct InquiryFeedback {
     /// records and a second submission naming the same one is refused.
     ///
     /// It is not compared against a GENERATED revision, though: nothing in this emulator
-    /// generates a response or an edit to one (see [`InquiryQuery::response`]), so no
-    /// stored revision exists for a request's value to be stale against, and no staleness
-    /// refusal is synthesised for a comparison nothing could make.
+    /// edits a response (see [`QueryAnswer`]), so no stored revision exists for a
+    /// request's value to be stale against, and no staleness refusal is synthesised for a
+    /// comparison nothing could make.
     pub response_revision_id: Option<i32>,
     /// "The timestamp when the feedback was submitted" — what the call answered with.
     pub submitted_at: SystemTime,
@@ -1079,14 +1104,16 @@ impl ComplianceInquiry {
     ///
     /// * a query the service's own model reviews ([`REVIEW_TYPE_AI`]) is processed by the
     ///   due instant, so it reaches `COMPLETED`, and an inquiry whose queries all did
-    ///   reaches the modelled clean-completion message. NO RESPONSE is reported for one:
-    ///   a compliance answer is model-generated text and no such engine runs in-process,
-    ///   so the `response` member stays absent (see [`InquiryQuery::response`]) rather
-    ///   than carrying prose nothing produced. The absent member is the honest signal,
-    ///   not a query-level error that never happened;
+    ///   reaches the modelled clean-completion message. From that instant the query
+    ///   REPORTS the answer it holds ([`InquiryQuery::reported_answer`]) — the passages the
+    ///   retrieval over the published catalog found for it and the citations naming where
+    ///   they are published — and a query the catalog holds nothing bearing on reports
+    ///   none, which is the honest signal rather than a query-level error that never
+    ///   happened;
     /// * a query submitted for HUMAN expert review ([`REVIEW_TYPE_HUMAN`]) is not the
     ///   CLOCK's to finish — a human has to look at it, and nothing in this emulator
-    ///   stands in for one — so it stays non-terminal and reports that it is waiting,
+    ///   stands in for one — so it stays non-terminal, reports that it is waiting and
+    ///   reports no answer while the review that would release it is pending,
     ///   and the inquiry RESTS in `HUMAN_REVIEW` while the review its support mode asked
     ///   for is pending ([`review_type_for`], the one thing that decides the review every
     ///   query of this inquiry carries), rather than being moved on as though a review had
@@ -1281,10 +1308,13 @@ impl ComplianceInquiry {
     /// published.
     ///
     /// Every value in it is read off this stored record — the inquiry's metadata and its
-    /// queries with their statuses — so the document reports what the emulator holds and
-    /// nothing else. In particular a query carries the `response` it has, which is null
-    /// while nothing has generated one, rather than text no model wrote.
-    pub fn export_document(&self, covered: &[i32], include_citations: bool) -> Vec<u8> {
+    /// queries with their statuses and answers — so the document reports what the emulator
+    /// holds and nothing else. In particular a query carries the `response` it reports
+    /// ([`InquiryQuery::reported_answer`]), which is null while its processing is not over.
+    ///
+    /// `host` is the endpoint the exporting caller reached this emulator on, which is what
+    /// the cited sources' links name ([`QueryCitation::source_link`]).
+    pub fn export_document(&self, covered: &[i32], include_citations: bool, host: &str) -> Vec<u8> {
         // Which queries the export covers is asked once per query and once per feedback
         // record, so the set is INDEXED once here rather than scanned for each question.
         let covers: BTreeSet<i32> = covered.iter().copied().collect();
@@ -1293,10 +1323,11 @@ impl ComplianceInquiry {
             .iter()
             .filter(|query| covers.contains(&query.identifier))
             .map(|query| {
+                let answer = query.reported_answer();
                 let mut entry = ::serde_json::json!({
                     "queryIdentifier": query.identifier,
                     "query": query.query,
-                    "response": query.response,
+                    "response": answer.map(|answer| answer.response.clone()),
                     "reviewType": query.review_type,
                     "status": query.status,
                     "statusMessage": query.status_message,
@@ -1304,10 +1335,21 @@ impl ComplianceInquiry {
                 });
                 if include_citations {
                     // "When true, include citations in the exported document." A citation
-                    // cites the source a generated response drew on, so a query with no
-                    // response has none: the member is present and EMPTY rather than
-                    // filled with references nothing read.
-                    entry["citations"] = ::serde_json::json!([]);
+                    // cites the source the query's response was drawn from, so the sources
+                    // reported here are the ones the stored answer holds — and a query
+                    // reporting no answer yet contributes an EMPTY list rather than
+                    // references nothing read.
+                    entry["citations"] = ::serde_json::json!(answer
+                        .map(|answer| answer
+                            .citations
+                            .iter()
+                            .map(|citation| ::serde_json::json!({
+                                "sourceLabel": citation.source_label,
+                                "sourceContent": citation.source_content,
+                                "sourceLink": citation.source_link(host),
+                            }))
+                            .collect::<Vec<::serde_json::Value>>())
+                        .unwrap_or_default());
                 }
                 entry
             })

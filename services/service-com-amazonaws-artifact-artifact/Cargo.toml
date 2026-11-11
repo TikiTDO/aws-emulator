@@ -8,6 +8,12 @@ build = "build.rs"
 
 [dependencies]
 engine = { workspace = true }
+# `service-common` carries the workspace's ONE free-text search over a stored document's
+# text, which is what retrieves the sources a compliance-inquiry query is answered from,
+# and the ARN form a caller-supplied `resourceArn` is read against, shared with every other
+# service that binds one, so the tagging surface's syntax refusal cannot disagree with
+# theirs.
+service-common = { path = "../common" }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }
 aws-smithy-schema-server = { workspace = true }
@@ -17,10 +23,6 @@ emulator-telemetry = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 aws-smithy-types = { workspace = true }
 tokio = { workspace = true }
-# The ARN form a caller-supplied `resourceArn` is read against, shared with every other
-# service that binds one, so the tagging surface's syntax refusal cannot disagree with
-# theirs.
-service-common = { path = "../common" }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }

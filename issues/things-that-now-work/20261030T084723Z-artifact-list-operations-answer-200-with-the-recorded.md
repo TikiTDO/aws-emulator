@@ -12,6 +12,33 @@ Issue-Commit: 8d9be40717a60d4ab4e72e06403011e9fbdef268
 
 # artifact list operations answer 200 with the recorded resources absent
 
+## Resolution (partial: Cause 2 fixed, Cause 1 declined)
+
+Cause 2 (ListComplianceInquiryQueries) is FIXED. A compliance-inquiry query is now answered
+out of the published report catalog this service serves: the documents whose text carries
+the query's terms are the sources, the matched passage of each one is what it contributes,
+and the query reports that response together with the citations naming, quoting and linking
+to those sources, once the clock-owed transition has made its processing due. The answer
+plane lives in `services/service-com-amazonaws-artifact-artifact/src/state/inquiry_answers.rs`
+(retrieval by the shared `services/common/src/document_text_search.rs`), is projected by
+`ListComplianceInquiryQueries` and by the exported document, and is covered by
+`tests/all/inquiry_query_answers.rs`. The remaining replay divergence on this key is the
+answer's WORDING — an AWS answer is model-generated text and no such engine runs in-process —
+and the three `citations[].sourceLink` values, which must name this emulator's own endpoint
+and can never equal AWS's URLs.
+
+Cause 1 (ListReports serving a short report catalog) is DECLINED: it can only be satisfied by
+fitting the recorded instance. The replay reports 413 distinct `$.reports[arn="…"]`
+divergences for it — the recording's catalog holds several hundred reports under
+AWS-assigned ids whose names, descriptions, series and period bounds the replay withholds and
+no AWS rule produces (the issue itself states the membership is recorded behaviour only). The
+rule it states — every published report appears in exactly one page of the enumeration, each
+entry carrying the full `ReportSummary` keyed by its `<reportId>:<version>` arn — is already
+implemented (`src/ops/list_reports.rs`, `Report::to_summary`) and pinned by
+`tests/all/pagination_page_walk.rs` and `tests/all/report_projection.rs`. The divergence key
+`artifact|ListReports|2xx->2xx|$.reports[arn="arn` therefore remains open as recorded-catalog
+membership, not as a code defect.
+
 > _Note: this issue was identified against the code base at commit `8d9be40717a60d4ab4e72e06403011e9fbdef268`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
 
 ## Operation

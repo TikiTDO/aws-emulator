@@ -20,10 +20,10 @@
 //!    completes with `InquiryStatusMessage`'s "Compliance inquiry processing is complete.",
 //!    the "One or more queries encountered errors during processing." value is reported
 //!    only when a query failed, and an inquiry whose submitted content carried nothing to
-//!    process — so it owns no query at all — ends `FAILED`. No `response` is ever reported
-//!    for a query — a compliance answer is
-//!    model-generated text and no such engine runs in this emulator — and that absence,
-//!    not a query-level error that never happened, is what says so.
+//!    process — so it owns no query at all — ends `FAILED`. A query reports the answer it
+//!    holds — its `response` and the `citations` supporting it, always together — once its
+//!    processing is over, and reports neither while no source of the published catalog
+//!    bears on it, which is not a query-level error.
 //!
 //! Rule 1 is checked end to end over HTTP across the operations below that report a
 //! timestamp (so the rows differ along operation, shape, member, whether the member is
@@ -528,11 +528,11 @@ async fn an_inquiry_completes_cleanly_when_no_query_of_it_failed() {
                 "case {case:?}: query {position} is reviewed by the service's own model, so \
                  its processing is over without error, got {query:?}"
             );
-            assert!(
+            assert_eq!(
                 query["response"].is_null(),
-                "case {case:?}: query {position} carries no model-generated response, and \
-                 nothing in this emulator generates one, got {:?}",
-                query["response"]
+                query["citations"].is_null(),
+                "case {case:?}: query {position} reports a response and the citations \
+                 supporting it together, got {query:?}"
             );
         }
     }

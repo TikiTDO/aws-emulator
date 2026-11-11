@@ -562,12 +562,6 @@ async fn an_export_answers_a_url_naming_the_inquiry_it_was_taken_from() {
             case.covered.len()
         );
         for query in queries {
-            assert!(
-                query["response"].is_null(),
-                "case {label:?}: nothing generated a response, so the document must \
-                 report none; got {:?}",
-                query["response"]
-            );
             // "When true, include citations in the exported document": the member is
             // there when the request asked for it, and absent when it did not.
             assert_eq!(
@@ -576,6 +570,31 @@ async fn an_export_answers_a_url_naming_the_inquiry_it_was_taken_from() {
                 "case {label:?}: citations were asked for: {:?}; got {query:?}",
                 case.include_citations
             );
+            // The document reports the answer the query reports: the response and the
+            // sources it was drawn from together, or neither.
+            if case.include_citations.unwrap_or(false) {
+                let citations = query["citations"].as_array().cloned().unwrap_or_default();
+                assert_eq!(
+                    query["response"].is_null(),
+                    citations.is_empty(),
+                    "case {label:?}: the exported response and the sources it was drawn \
+                     from are reported together, got {query:?}"
+                );
+                for citation in &citations {
+                    assert!(
+                        citation["sourceLabel"].as_str().is_some_and(|label| !label
+                            .is_empty())
+                            && citation["sourceContent"]
+                                .as_str()
+                                .is_some_and(|content| !content.is_empty())
+                            && citation["sourceLink"]
+                                .as_str()
+                                .is_some_and(|link| link.starts_with("https://")),
+                        "case {label:?}: an exported citation names its source, quotes it \
+                         and links to it, got {citation:?}"
+                    );
+                }
+            }
         }
         assert_eq!(
             document["includeCitations"],

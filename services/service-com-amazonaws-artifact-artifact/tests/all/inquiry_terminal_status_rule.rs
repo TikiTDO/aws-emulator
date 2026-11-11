@@ -402,11 +402,11 @@ async fn an_inquiry_reports_what_became_of_the_content_it_was_submitted_with() {
                 "case {label:?}: nothing here processes a query's content, so no query \
                  may report a failure, got {query:?}"
             );
-            assert!(
+            assert_eq!(
                 query["response"].is_null(),
-                "case {label:?}: no engine generates a compliance response here, so none \
-                 may be reported, got {:?}",
-                query["response"]
+                query["citations"].is_null(),
+                "case {label:?}: a response and the citations supporting it are reported \
+                 together, got {query:?}"
             );
         }
 

@@ -53,6 +53,8 @@ mod harness;
 mod implemented_inquiry_operations;
 #[path = "all/inquiry_last_modified.rs"]
 mod inquiry_last_modified;
+#[path = "all/inquiry_query_answers.rs"]
+mod inquiry_query_answers;
 #[path = "all/inquiry_query_identifier_rules.rs"]
 mod inquiry_query_identifier_rules;
 #[path = "all/inquiry_tags_reporting.rs"]

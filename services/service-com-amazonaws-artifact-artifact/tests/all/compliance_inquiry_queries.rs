@@ -13,7 +13,9 @@
 //! * a query's `status`/`statusMessage` move with the CLOCK, not with any call: a listing
 //!   inside the inquiry's processing span reports the non-terminal pair, a listing after it
 //!   reports the terminal pair, and every later listing reports that same record — so a
-//!   read never changes what a later caller sees;
+//!   read never changes what a later caller sees. The answer a query holds is released by
+//!   that same transition: while its processing is in progress it reports neither a
+//!   `response` nor a `citation`, and the two are always reported together;
 //! * the page is bounded by `maxResults` (`@range(min: 1, max: 300)`) and resumed by a
 //!   `nextToken` this service issued for THIS inquiry — an OPAQUE cursor, not the
 //!   `<inquiryId>:<identifier>` pair it resumes at; a token it did not issue is refused
@@ -60,9 +62,7 @@ const QUERY_IN_PROGRESS: &str = "Query processing is in-progress.";
 
 /// `QueryStatus`'s value a query ends in, and the message that goes with it: the query
 /// text came from the request itself, so its processing is over at the inquiry's due
-/// instant. No `response` is ever reported with it — a compliance answer is
-/// model-generated text and no such engine runs in this emulator — and its absence, not a
-/// query-level error that never happened, is what says so.
+/// instant — which is also when the query starts reporting the answer it holds.
 const QUERY_TERMINAL: (&str, &str) = ("COMPLETED", "Query processing is complete.");
 
 /// The pair a query submitted for HUMAN review rests in: a human expert's review is not
@@ -352,24 +352,58 @@ fn assert_summary(
          got {message:?}"
     );
     // Read inside the inquiry's processing span or after it, the pair is one of exactly
-    // two — and no `response` is ever reported, because nothing generated one.
+    // two.
     let legal = [("PROCESSING", QUERY_IN_PROGRESS), terminal_pair];
     assert!(
         legal.contains(&(status, message)),
         "case {case:?}: expected one of {legal:?}, got {:?}",
         (status, message)
     );
-    assert!(
-        summary["response"].is_null(),
-        "case {case:?}: no engine generates a compliance response here, so none may be \
-         reported, got {:?}",
-        summary["response"]
-    );
-    assert!(
-        summary["citations"].is_null(),
-        "case {case:?}: a citation supports a generated response, and there is none, got {:?}",
+    // The answer travels as one: the citations ARE what the response is made of, so
+    // neither member is ever reported without the other, and a query still being
+    // processed reports neither.
+    let response = summary["response"].as_str();
+    let citations = summary["citations"].as_array();
+    assert_eq!(
+        response.is_some(),
+        citations.is_some(),
+        "case {case:?}: a response and the citations supporting it are reported together, \
+         got response {:?} and citations {:?}",
+        summary["response"],
         summary["citations"]
     );
+    assert!(
+        status != "PROCESSING" || response.is_none(),
+        "case {case:?}: a query whose processing is still in progress reports no answer, \
+         got {:?}",
+        summary["response"]
+    );
+    if let (Some(response), Some(citations)) = (response, citations) {
+        assert!(
+            !citations.is_empty(),
+            "case {case:?}: a reported answer cites the sources it was drawn from, got {:?}",
+            summary["citations"]
+        );
+        for citation in citations {
+            let source_label = citation["sourceLabel"].as_str().unwrap_or_default();
+            let source_content = citation["sourceContent"].as_str().unwrap_or_default();
+            let source_link = citation["sourceLink"].as_str().unwrap_or_default();
+            assert!(
+                response.contains(source_label) && response.contains(source_content),
+                "case {case:?}: the response is the cited passages, so it must carry \
+                 {source_label:?} and its passage, got {response:?}"
+            );
+            assert!(
+                source_link.starts_with("https://"),
+                "case {case:?}: a citation links to where the source is published, got \
+                 {source_link:?}"
+            );
+        }
+        assert!(
+            response.chars().count() <= 2048 && !response.contains(['<', '>']),
+            "case {case:?}: the response must satisfy LongStringAttribute, got {response:?}"
+        );
+    }
     assert!(
         summary["updatedResponseVersions"].is_null(),
         "case {case:?}: a response version records an edit to a response, and there is none, \
