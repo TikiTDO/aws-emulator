@@ -169,6 +169,8 @@ mod missing_entity_message_wording;
 mod nested_member_clause_wording;
 #[path = "all/net_new_refusal_wording.rs"]
 mod net_new_refusal_wording;
+#[path = "all/nested_pattern_clause_wording.rs"]
+mod nested_pattern_clause_wording;
 #[path = "all/network_condition_authorization.rs"]
 mod network_condition_authorization;
 #[path = "all/open_id_connect_client_id_registration.rs"]
