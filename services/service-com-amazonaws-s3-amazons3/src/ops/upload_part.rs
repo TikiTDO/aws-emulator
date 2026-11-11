@@ -550,7 +550,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // nothing applied.
             server_side_encryption: encryption.sse_algorithm.clone(),
             ssekms_key_id: encryption.kms_key_id.clone(),
-            bucket_key_enabled: encryption.bucket_key_enabled,
+            bucket_key_enabled: encryption.reported_bucket_key_enabled(),
             // And, for an upload initiated under a CUSTOMER-provided key: the algorithm and
             // the digest of that key, "to confirm the encryption algorithm that's used" and
             // "to provide the round-trip message integrity verification of the

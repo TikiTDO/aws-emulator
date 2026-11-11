@@ -244,11 +244,15 @@ pub struct ObjectEncryption {
     /// A `ServerSideEncryption` value (`AES256`, `aws:kms`, …), or `None` for an object
     /// stored before any encryption state was recorded for it.
     pub sse_algorithm: Option<String>,
-    /// `SSEKMSKeyId`, verbatim as the request carried it — "You can specify the key ID,
-    /// key alias, or the Amazon Resource Name (ARN) of the KMS key" — or, for a write that
-    /// named no encryption member at all, the `KMSMasterKeyID` of the bucket's default
-    /// encryption configuration ([`Bucket::default_object_encryption`]), and `None` when
-    /// neither names one.
+    /// `SSEKMSKeyId`: for an object stored under SSE-KMS, the ARN of the key it is
+    /// encrypted under — the key the write's reference resolved to through KMS
+    /// ([`sse_kms::write_key`]), whether that reference was the request's own
+    /// `SSEKMSKeyId`, the `KMSMasterKeyID` of the bucket's default encryption configuration
+    /// ([`Bucket::default_object_encryption`]) or nothing at all, which is this account's
+    /// Amazon Web Services managed key for the service. "You can specify the key ID, key
+    /// alias, or the Amazon Resource Name (ARN) of the KMS key" are three spellings of one
+    /// key, and what an object records is the key. `None` for an object whose encryption is
+    /// not SSE-KMS, and for a reference KMS resolved nothing for.
     pub kms_key_id: Option<String>,
     /// `SSEKMSEncryptionContext`: "a Base64-encoded string holding a UTF-8 encoded JSON
     /// of additional encryption context key-value pairs", verbatim.
@@ -301,6 +305,25 @@ impl ObjectEncryption {
             return Some("x-amz-server-side-encryption-bucket-key-enabled");
         }
         None
+    }
+
+    /// Whether an object's own `BucketKeyEnabled` is REPORTED, and as what: `Some(true)` for
+    /// an object written with an S3 Bucket Key in force, and `None` for every other object.
+    ///
+    /// The member is bound to `x-amz-server-side-encryption-bucket-key-enabled` with no
+    /// `@default` (`smithy_query(query="operation",operation="HeadObject")`), and "setting
+    /// this header to `true` causes Amazon S3 to use an S3 Bucket Key"
+    /// (`PutObjectRequest$BucketKeyEnabled`) — so the header states that S3 used one, and an
+    /// object written without one carries no such header at all rather than one stating
+    /// `false`. "Member absent" and "member false" are different facts about an object, and a
+    /// client reads the presence of the header as the decision S3 made for it.
+    ///
+    /// This is the OBJECT-level projection, and it is the opposite of the BUCKET-level rule:
+    /// `ServerSideEncryptionRule$BucketKeyEnabled` is a configuration SETTING with a
+    /// documented off state ("General purpose buckets - By default, S3 Bucket Key is not
+    /// enabled"), which `GetBucketEncryption` reports as `false` explicitly.
+    pub fn reported_bucket_key_enabled(&self) -> Option<bool> {
+        self.bucket_key_enabled.filter(|enabled| *enabled)
     }
 
     /// How many bytes this record retains — the caller-supplied strings it holds, which

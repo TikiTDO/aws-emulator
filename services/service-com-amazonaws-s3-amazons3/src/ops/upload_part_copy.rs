@@ -688,7 +688,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // `UploadPart` reports it for a part of the same upload.
             server_side_encryption: encryption.sse_algorithm.clone(),
             ssekms_key_id: encryption.kms_key_id.clone(),
-            bucket_key_enabled: encryption.bucket_key_enabled,
+            bucket_key_enabled: encryption.reported_bucket_key_enabled(),
             // Everything else this output can carry describes something no recorded part
             // has: the SSE-C members are refused above, and `RequestCharged` reports a
             // Requester Pays charge nothing here makes.

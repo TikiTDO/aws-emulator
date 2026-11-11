@@ -676,7 +676,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // `x-amz-server-side-encryption` headers the write answered with.
             server_side_encryption: object.encryption.sse_algorithm.clone(),
             ssekms_key_id: object.encryption.kms_key_id.clone(),
-            bucket_key_enabled: object.encryption.bucket_key_enabled,
+            bucket_key_enabled: object.encryption.reported_bucket_key_enabled(),
             // And, for an object stored under a CUSTOMER-provided key: the algorithm and the
             // digest of that key (`HeadObjectOutput$SSECustomerAlgorithm` and
             // `$SSECustomerKeyMD5`), the same pair a GET of the same object reports.

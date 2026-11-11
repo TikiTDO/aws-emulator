@@ -643,7 +643,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CopyObject<Eng> {
         let Some(destination) = store.bucket(&input.bucket) else {
             return Err(CopyObjectErrorModeled::NoSuchBucket(NoSuchBucket {}).into());
         };
-        let encryption = if requested.names_no_member() {
+        let mut encryption = if requested.names_no_member() {
             destination.default_object_encryption()
         } else {
             requested.clone()
@@ -884,28 +884,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CopyObject<Eng> {
         // and taken again for the write.
         drop(store);
 
-        // The KEY the destination object's SSE-KMS encryption names has to be one KMS can mint
-        // a data key under, judged exactly as a `PutObject` of the same object judges it and
-        // through the same seam ([`crate::state::sse_kms::missing_key_refusal`]): the copy
-        // writes a new object, so the data key it is encrypted under is minted for whichever
-        // reference it ends up stored under — the request's own, or the destination bucket
-        // default's `KMSMasterKeyID` when the request names no encryption member (read above,
-        // while the guard was held). A reference KMS holds no key for yields no data key, so
-        // S3 relays KMS's own failure and nothing is written. Asked HERE, with the guard given
-        // up, for the same reason the decision below is: it reads another service's store
-        // through the shared engine.
-        if let Some(key_id) = encryption.kms_key_id.as_deref() {
-            if let Some(relay) = crate::state::sse_kms::missing_key_refusal(
-                &*self.engine,
-                &crate::state::request_region(ctx.parts()),
-                key_id,
-            ) {
+        // The KEY the destination object's SSE-KMS encryption is performed under is resolved
+        // against KMS here, exactly as a `PutObject` of the same object resolves its own and
+        // through the same seam ([`crate::state::sse_kms::write_key`]): the copy writes a new
+        // object, so its data key is minted for whichever encryption it ends up stored under
+        // — the request's own, or the destination bucket's default configuration when the
+        // request names no encryption member (read above, while the guard was held). A
+        // reference KMS holds no key for, and a key whose state mints no data key, refuse the
+        // copy and nothing is written; a reference KMS does resolve settles the key ARN the
+        // destination object records. Asked HERE, with the guard given up, for the same reason
+        // the decision below is: it reads another service's store through the shared engine.
+        match crate::state::sse_kms::write_key(
+            &*self.engine,
+            &crate::state::request_region(ctx.parts()),
+            &encryption,
+        ) {
+            crate::state::sse_kms::WriteKey::Refused(relay) => {
                 return Err(crate::scaffolded::Scaffolded::unmodeled(
-                    crate::state::sse_kms::KMS_NOT_FOUND_CODE,
-                    crate::state::sse_kms::KMS_NOT_FOUND_STATUS,
-                    relay,
-                ));
+                    relay.code,
+                    relay.status,
+                    relay.message,
+                ))
             }
+            crate::state::sse_kms::WriteKey::Resolved(key_arn) => {
+                encryption.kms_key_id = Some(key_arn);
+            }
+            crate::state::sse_kms::WriteKey::Unasked => {}
         }
 
         if let Some(denial) = crate::state::sse_kms::decrypt_refusal(
@@ -1266,7 +1270,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CopyObject<Eng> {
             server_side_encryption: encryption.sse_algorithm.clone(),
             ssekms_key_id: encryption.kms_key_id.clone(),
             ssekms_encryption_context: encryption.kms_encryption_context.clone(),
-            bucket_key_enabled: encryption.bucket_key_enabled,
+            bucket_key_enabled: encryption.reported_bucket_key_enabled(),
             // "If the object expiration is configured, the response includes this header"
             // (`CopyObjectOutput$Expiration`): the DESTINATION bucket's lifecycle
             // configuration applied to the copy just stored, computed from it the way

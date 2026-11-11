@@ -13,7 +13,8 @@
 //!   reference KMS holds no key for yields no data key, so S3 relays KMS's own failure
 //!   (HTTP 400, the KMS exception's name qualified by the service that raised it, and the
 //!   sentence KMS words for the form the request supplied) and the object is not created. A
-//!   reference KMS DOES resolve is stored and reported back as the write sent it.
+//!   reference KMS DOES resolve names ONE key whatever spelling it took, so the object is
+//!   stored under — and reports — that key's own ARN.
 //! * A listing's `AnnotationPrefix` selects annotation NAMES — "filter results to
 //!   annotations whose name begins with the specified prefix"
 //!   (`ListObjectAnnotationsRequest$AnnotationPrefix`) — so a selector no name of the
@@ -76,8 +77,9 @@ pub(crate) fn router_with_kms() -> MultiServiceRouter {
 /// One KMS call over the shared engine. KMS is an awsJson1_1 service reached by
 /// `X-Amz-Target: TrentService.<Operation>`.
 ///
-/// `pub(crate)`: the SSE-KMS data-key suite beside this one drives its keys and key policies
-/// through this one dispatcher rather than building a second one.
+/// `pub(crate)`: the SSE-KMS data-key and write-key suites beside this one drive their keys,
+/// key policies and key STATES through this one dispatcher, and ask KMS what it holds through
+/// it, rather than building a second one.
 pub(crate) async fn kms(
     router: &MultiServiceRouter,
     operation: &str,
@@ -266,8 +268,38 @@ async fn a_write_naming_a_kms_key_reference_that_resolves_to_no_key_is_refused_a
 /// whether a Bucket Key is asked for beside it.
 type ResolvableRow = (&'static str, String, bool);
 
+/// What KMS itself reports for the key a reference names: the member of its `KeyMetadata`
+/// named — the `Arn` an object written under that reference carries, whichever spelling the
+/// reference took, or the `KeyManager` that says who manages it.
+///
+/// `pub(crate)`: the encryption suites in this crate assert the same facts against their own
+/// objects, so each comes from KMS's own `DescribeKey` rather than from a string one of them
+/// builds.
+pub(crate) async fn described_key_member(
+    router: &MultiServiceRouter,
+    reference: &str,
+    member: &str,
+) -> String {
+    let (status, payload) = kms(router, "DescribeKey", &json!({"KeyId": reference})).await;
+    assert_eq!(
+        status, 200,
+        "describing {reference:?} must succeed, got {status} with {payload}"
+    );
+    payload["KeyMetadata"][member]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!("DescribeKey must answer {member} for {reference:?}, got {payload}")
+        })
+        .to_string()
+}
+
+/// [`described_key_member`] for the one member every caller of it needs: the key's ARN.
+pub(crate) async fn described_key_arn(router: &MultiServiceRouter, reference: &str) -> String {
+    described_key_member(router, reference, "Arn").await
+}
+
 #[tokio::test]
-async fn a_write_naming_a_key_kms_holds_is_stored_under_that_reference() {
+async fn a_write_naming_a_key_kms_holds_is_stored_under_that_key_s_arn() {
     let router = router_with_kms();
     bucket(&router, "kms-resolvable-bucket").await;
     let (key_id, key_arn) = created_key(&router, "the key these writes name").await;
@@ -277,7 +309,7 @@ async fn a_write_naming_a_key_kms_holds_is_stored_under_that_reference() {
     // the dangling table walks, plus the PREDEFINED Amazon Web Services alias of this
     // service's managed key, which exists in every Region and carries no key until something
     // asks for it (so nothing creates it here) — and along whether an S3 Bucket Key
-    // accompanies it.
+    // accompanies it. Every form names ONE key, so every object carries that key's ARN.
     let rows: [ResolvableRow; 6] = [
         ("the key ARN", key_arn.clone(), false),
         ("the bare key id", key_id.clone(), false),
@@ -314,17 +346,24 @@ async fn a_write_naming_a_key_kms_holds_is_stored_under_that_reference() {
             written.status,
             text(&written)
         );
+        // The key the reference names, as KMS reports it: the object carries the KEY, not the
+        // spelling the request used, so the expected value is KMS's own `Arn` for it.
+        let expected = described_key_arn(&router, reference).await;
+        assert!(
+            expected.starts_with("arn:aws:kms:") && expected.contains(":key/"),
+            "case {case:?}: KMS must name the key by a key ARN, got {expected:?}"
+        );
         assert_eq!(
             written
                 .header("x-amz-server-side-encryption-aws-kms-key-id")
                 .as_deref(),
-            Some(reference.as_str()),
-            "case {case:?}: expected the reference {reference:?} reported back, got {:?}",
+            Some(expected.as_str()),
+            "case {case:?}: expected the key ARN {expected:?} reported back, got {:?}",
             written.header("x-amz-server-side-encryption-aws-kms-key-id")
         );
 
-        // Read back through an implemented reader: the object is really there, under the
-        // reference the write named.
+        // Read back through an implemented reader: the object is really there, under the key
+        // the write's reference resolved to.
         let read = get_object(&router, "kms-resolvable-bucket", &key, "", &[]).await;
         assert_eq!(
             read.status, 200,
@@ -340,8 +379,8 @@ async fn a_write_naming_a_key_kms_holds_is_stored_under_that_reference() {
         assert_eq!(
             read.header("x-amz-server-side-encryption-aws-kms-key-id")
                 .as_deref(),
-            Some(reference.as_str()),
-            "case {case:?}: a read must report the same reference, got {:?}",
+            Some(expected.as_str()),
+            "case {case:?}: a read must report the same key ARN, got {:?}",
             read.header("x-amz-server-side-encryption-aws-kms-key-id")
         );
     }
@@ -557,7 +596,10 @@ async fn copy_object(
 
 /// `POST /<bucket>/<key>?uploads` — `CreateMultipartUpload`, which settles the encryption
 /// every write of the upload is stored under.
-async fn create_multipart_upload(
+///
+/// `pub(crate)`: the write-key suite beside this one initiates its uploads through this one
+/// rather than keeping a second copy of the same request.
+pub(crate) async fn create_multipart_upload(
     router: &MultiServiceRouter,
     bucket_name: &str,
     key: &str,

@@ -27,6 +27,8 @@ mod bedrock_knowledge_base_identity;
 mod braket_spending_limit_resource_type;
 #[path = "all/bucket_analytics_configurations.rs"]
 mod bucket_analytics_configurations;
+#[path = "all/bucket_default_encryption.rs"]
+mod bucket_default_encryption;
 #[path = "all/bucket_intelligent_tiering_configurations.rs"]
 mod bucket_intelligent_tiering_configurations;
 #[path = "all/bucket_inventory_configurations.rs"]

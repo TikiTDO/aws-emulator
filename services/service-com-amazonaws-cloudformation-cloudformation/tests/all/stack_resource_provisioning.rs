@@ -30,10 +30,22 @@ use crate::stack_lifecycle::{
 use service_com_amazonaws_cloudformation_cloudformation::state::status;
 use smithy_server_runtime::MultiServiceRouter;
 
-/// What an S3 request answered: the status, and the body for the cases that read one.
+/// What an S3 request answered: the status, the bound response headers, and the body for the
+/// cases that read one.
 pub(crate) struct S3Answer {
     pub(crate) status: u16,
+    pub(crate) headers: http::HeaderMap,
     pub(crate) body: String,
+}
+
+impl S3Answer {
+    /// One bound response header's value — what an object's encryption is reported in.
+    pub(crate) fn header(&self, name: &str) -> Option<String> {
+        self.headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    }
 }
 
 /// Drive one S3 request through the same router, signed for `s3` the way a client's SDK
@@ -61,8 +73,13 @@ pub(crate) async fn s3(
         .expect("a well-formed S3 request");
     let response = router.dispatch(request).await;
     let status = response.status().as_u16();
+    let headers = response.headers().clone();
     let body = String::from_utf8_lossy(&response.into_body()).to_string();
-    S3Answer { status, body }
+    S3Answer {
+        status,
+        headers,
+        body,
+    }
 }
 
 /// `HEAD /<bucket>` — does S3 hold this bucket?

@@ -779,7 +779,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CompleteMultipart
             // stored under and what every later read of it reports.
             server_side_encryption: encryption.sse_algorithm.clone(),
             ssekms_key_id: encryption.kms_key_id.clone(),
-            bucket_key_enabled: encryption.bucket_key_enabled,
+            bucket_key_enabled: encryption.reported_bucket_key_enabled(),
             // The checksum of the object that was assembled, under the member its algorithm
             // names, with the `ChecksumType` that says how it was computed — read off the
             // one record every later read of the object reports it from

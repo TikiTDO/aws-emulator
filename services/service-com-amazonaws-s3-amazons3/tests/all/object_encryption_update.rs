@@ -207,7 +207,9 @@ async fn an_update_re_records_the_encryption_and_leaves_the_object_alone() {
                 answer
                     .header("x-amz-server-side-encryption-bucket-key-enabled")
                     .as_deref(),
-                bucket_key.map(|enabled| if enabled { "true" } else { "false" }),
+                // The header states that S3 USED an S3 Bucket Key on the object, so an update
+                // that switched it off, or named it at all, leaves no header behind.
+                bucket_key.filter(|enabled| *enabled).map(|_| "true"),
                 "case {case:?}/{reader}: the Bucket Key setting must be the one the update \
                  named, got {:?}",
                 answer.header("x-amz-server-side-encryption-bucket-key-enabled")

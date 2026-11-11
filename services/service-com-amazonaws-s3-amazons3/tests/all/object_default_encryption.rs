@@ -24,11 +24,15 @@
 //!   publishes as [`DEFAULT_SSE_ALGORITHM`].
 //! * "You can specify the key ID, key alias, or the Amazon Resource Name (ARN) of the KMS
 //!   key" (`ApplyServerSideEncryptionByDefault$KMSMasterKeyID`): the three forms a
-//!   configured key may take, each a row below.
+//!   configured key may take, each a row below. All three name ONE key, and an OBJECT names
+//!   the key — so whichever form the rule carries, the object reports that key's own ARN; a
+//!   rule naming no key at all leaves the write under this account's Amazon Web Services
+//!   managed key for Amazon S3, whose ARN the object then reports.
 //! * "Specifies whether Amazon S3 should use an S3 Bucket Key for object encryption with
 //!   server-side encryption using Key Management Service (KMS) keys (SSE-KMS)"
 //!   (`PutObjectRequest$BucketKeyEnabled`): the Bucket Key belongs to SSE-KMS alone, so a
-//!   non-KMS default reports no Bucket Key header at all.
+//!   non-KMS default reports no Bucket Key header at all — and neither does an object written
+//!   with the Bucket Key OFF, since the header states that S3 used one.
 //!
 //! The configuration is applied through `PutBucketEncryption` and the objects are written
 //! and read through real HTTP requests to the router, so what is pinned is the wire
@@ -60,6 +64,9 @@ struct KeyForms {
     id: &'static str,
     arn: &'static str,
     alias: &'static str,
+    /// The ARN of this account's Amazon Web Services managed key for Amazon S3, as KMS
+    /// reports it: what an object written under a rule naming NO key is encrypted under.
+    managed: &'static str,
 }
 
 /// [`KeyForms`] over a router that holds KMS beside S3.
@@ -71,8 +78,18 @@ async fn key_forms(router: &MultiServiceRouter) -> KeyForms {
         id: Box::leak(id.into_boxed_str()),
         arn: Box::leak(arn.into_boxed_str()),
         alias: KEY_ALIAS,
+        managed: Box::leak(
+            super::kms_key_references::described_key_arn(router, AWS_MANAGED_KEY_ALIAS)
+                .await
+                .into_boxed_str(),
+        ),
     }
 }
+
+/// The predefined Amazon Web Services alias of this account's Amazon Web Services managed key
+/// for Amazon S3: such an alias has "the format aws/<service-name>"
+/// (`smithy_query(query="doc",shape="ListAliases")`), with this service's own name.
+const AWS_MANAGED_KEY_ALIAS: &str = "alias/aws/s3";
 
 /// What an answer about an inherited-encryption object must report: the algorithm, the KMS
 /// key id and the Bucket Key setting, each `None` where the header must be ABSENT.
@@ -134,7 +151,7 @@ fn rows(key: &KeyForms) -> Vec<Row> {
             expected: Reported {
                 algorithm: Some("aws:kms"),
                 key_id: Some(key.arn),
-                bucket_key: Some("false"),
+                bucket_key: None,
             },
         },
         Row {
@@ -144,7 +161,7 @@ fn rows(key: &KeyForms) -> Vec<Row> {
                 .with_bucket_key(true)]),
             expected: Reported {
                 algorithm: Some("aws:kms"),
-                key_id: Some(key.alias),
+                key_id: Some(key.arn),
                 bucket_key: Some("true"),
             },
         },
@@ -153,16 +170,25 @@ fn rows(key: &KeyForms) -> Vec<Row> {
             configuration: Some(vec![Rule::by_default("aws:kms").with_key(key.id)]),
             expected: Reported {
                 algorithm: Some("aws:kms"),
-                key_id: Some(key.id),
+                key_id: Some(key.arn),
                 bucket_key: None,
             },
         },
         Row {
-            case: "a default of SSE-KMS naming no key, so the object inherits the algorithm alone",
+            case: "a default of SSE-KMS naming no key, so the write uses the managed key",
             configuration: Some(vec![Rule::by_default("aws:kms")]),
             expected: Reported {
                 algorithm: Some("aws:kms"),
-                key_id: None,
+                key_id: Some(key.managed),
+                bucket_key: None,
+            },
+        },
+        Row {
+            case: "a default of dual-layer SSE-KMS naming no key, which uses the same key",
+            configuration: Some(vec![Rule::by_default("aws:kms:dsse")]),
+            expected: Reported {
+                algorithm: Some("aws:kms:dsse"),
+                key_id: Some(key.managed),
                 bucket_key: None,
             },
         },
@@ -210,7 +236,7 @@ fn rows(key: &KeyForms) -> Vec<Row> {
             ]),
             expected: Reported {
                 algorithm: Some("aws:kms:dsse"),
-                key_id: Some(key.id),
+                key_id: Some(key.arn),
                 bucket_key: None,
             },
         },
@@ -390,7 +416,9 @@ async fn a_write_naming_its_own_encryption_is_stored_under_that_and_not_the_buck
             Reported {
                 algorithm: Some("aws:kms:dsse"),
                 key_id: Some(other_key),
-                bucket_key: Some("false"),
+                // The write switches the Bucket Key OFF, so the object was written without
+                // one and carries no `BucketKeyEnabled` at all.
+                bucket_key: None,
             },
         ),
     ];

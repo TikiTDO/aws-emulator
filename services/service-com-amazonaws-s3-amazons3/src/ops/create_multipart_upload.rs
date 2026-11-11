@@ -562,7 +562,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // is stored under exactly the encryption a write of the same bytes would be. Reading
         // it writes nothing: a never-configured bucket's default is computed, not
         // materialised.
-        let encryption = if requested.names_no_member() {
+        let mut encryption = if requested.names_no_member() {
             let store = state.lock();
             match store.bucket(&input.bucket) {
                 Some(bucket) => bucket.default_object_encryption(),
@@ -642,27 +642,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
 
-        // The KEY the upload's SSE-KMS encryption names has to be one KMS can mint a data key
-        // under, judged exactly as a one-shot write judges its own and through the same seam
-        // ([`crate::state::sse_kms::missing_key_refusal`]): the initiation settles the
-        // encryption every part write and the finished object are stored under, so the
-        // reference it settled on is resolved against KMS before the upload is recorded. A
-        // reference KMS holds no key for yields no data key, so S3 relays KMS's own failure
-        // and no upload is initiated. Asked with no guard of this service's held — the two
-        // reads above each take and release their own — because it reads another service's
-        // store through the shared engine.
-        if let Some(key_id) = encryption.kms_key_id.as_deref() {
-            if let Some(relay) = crate::state::sse_kms::missing_key_refusal(
-                &*self.engine,
-                &crate::state::request_region(ctx.parts()),
-                key_id,
-            ) {
+        // The KEY the upload's SSE-KMS encryption is performed under is resolved against KMS
+        // here, exactly as a one-shot write resolves its own and through the same seam
+        // ([`crate::state::sse_kms::write_key`]): the initiation settles the encryption every
+        // part write and the finished object are stored under, so it is settled against KMS
+        // BEFORE the upload is recorded, since the parts are encrypted under a data key KMS
+        // mints. A reference KMS holds no key for, and a key whose state mints no data key,
+        // refuse the initiation — S3 relays KMS's own failure and no upload is registered, so
+        // a client cannot upload parts against a key that could never encrypt them — and a
+        // reference KMS does resolve settles the key ARN the upload and its object record.
+        // Asked with no guard of this service's held — the two reads above each take and
+        // release their own — because it reads another service's store through the shared
+        // engine.
+        match crate::state::sse_kms::write_key(
+            &*self.engine,
+            &crate::state::request_region(ctx.parts()),
+            &encryption,
+        ) {
+            crate::state::sse_kms::WriteKey::Refused(relay) => {
                 return Err(crate::scaffolded::Scaffolded::unmodeled(
-                    crate::state::sse_kms::KMS_NOT_FOUND_CODE,
-                    crate::state::sse_kms::KMS_NOT_FOUND_STATUS,
-                    relay,
-                ));
+                    relay.code,
+                    relay.status,
+                    relay.message,
+                ))
             }
+            crate::state::sse_kms::WriteKey::Resolved(key_arn) => {
+                encryption.kms_key_id = Some(key_arn);
+            }
+            crate::state::sse_kms::WriteKey::Unasked => {}
         }
 
         // And that key has to let THIS caller have a data key for the object: "the requester
@@ -846,7 +853,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             server_side_encryption: encryption.sse_algorithm.clone(),
             ssekms_key_id: encryption.kms_key_id.clone(),
             ssekms_encryption_context: encryption.kms_encryption_context.clone(),
-            bucket_key_enabled: encryption.bucket_key_enabled,
+            bucket_key_enabled: encryption.reported_bucket_key_enabled(),
             // And, for an initiation that supplied its OWN key: the algorithm it named and
             // the digest of that key, which is what every later part of this upload has to
             // present. The key itself is never answered back; it is not kept.

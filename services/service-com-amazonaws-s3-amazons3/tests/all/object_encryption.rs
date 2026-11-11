@@ -98,6 +98,10 @@ async fn a_write_is_stored_under_the_encryption_it_names_and_every_read_reports_
     let (_, key_arn) =
         super::kms_key_references::created_key(&router, "the key these writes name").await;
     let key_arn = key_arn.as_str();
+    // The key the predefined `alias/aws/s3` names, as KMS reports it: an object carries the
+    // KEY its reference resolved to rather than the spelling the request used.
+    let managed_key_arn = super::kms_key_references::described_key_arn(&router, KEY_ALIAS).await;
+    let managed_key_arn = managed_key_arn.as_str();
     bucket(&router, "encryption-bucket").await;
 
     // The rows differ along what the rule generalises over: WHICH algorithm (every value
@@ -152,8 +156,10 @@ async fn a_write_is_stored_under_the_encryption_it_names_and_every_read_reports_
             &[
                 ("x-amz-server-side-encryption", Some("aws:kms")),
                 (
+                    // Three spellings, one key: the object names the key the predefined
+                    // Amazon Web Services alias resolved to.
                     "x-amz-server-side-encryption-aws-kms-key-id",
-                    Some(KEY_ALIAS),
+                    Some(managed_key_arn),
                 ),
                 (
                     "x-amz-server-side-encryption-bucket-key-enabled",
@@ -174,8 +180,10 @@ async fn a_write_is_stored_under_the_encryption_it_names_and_every_read_reports_
             &[
                 ("x-amz-server-side-encryption", Some("aws:kms:dsse")),
                 (
+                    // The header states that S3 USED an S3 Bucket Key, so an object written
+                    // with the setting off carries none at all.
                     "x-amz-server-side-encryption-bucket-key-enabled",
-                    Some("false"),
+                    None,
                 ),
             ],
         ),

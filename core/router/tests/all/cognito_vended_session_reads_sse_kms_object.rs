@@ -630,7 +630,9 @@ fn rows(key_id: &str, key_arn: &str) -> Vec<Row> {
             ],
             expected_algorithm: Some("aws:kms".to_string()),
             kms: true,
-            expected_bucket_key: Some("false"),
+            // The header states that S3 USED an S3 Bucket Key on the object, so a write that
+            // switched it off leaves no such header on the object at all.
+            expected_bucket_key: None,
         },
         Row {
             case: "SSE-KMS under another prefix, the key named by its bare id",

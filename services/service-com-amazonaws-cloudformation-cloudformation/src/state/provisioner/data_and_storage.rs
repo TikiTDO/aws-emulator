@@ -2257,6 +2257,20 @@ pub(super) async fn create_bucket(
             .await
             .map_err(|error| s3_refusal_of(&error))?;
     }
+    // "BucketEncryption — specifies default encryption for a bucket using server-side
+    // encryption with different key options" (this type's own property): the whole
+    // configuration is ONE `PutBucketEncryption`, the call Amazon S3 publishes for it, so a
+    // bucket a template declares an SSE-KMS or SSE-S3 default for behaves exactly like one
+    // configured through that call — including for the writes that inherit it.
+    if let Some(configuration) = declared_bucket_encryption(resource)? {
+        client
+            .put_bucket_encryption()
+            .bucket(bucket)
+            .server_side_encryption_configuration(configuration)
+            .send()
+            .await
+            .map_err(|error| s3_refusal_of(&error))?;
+    }
     // The bucket's whole tag set, in the one call Amazon S3 takes it through.
     let tags = tags_of(&resource.properties, propagated);
     if !tags.is_empty() {
@@ -3469,6 +3483,90 @@ pub(super) fn declared_text(declared: &Value, property: &str) -> Option<String> 
         .get(property)
         .and_then(scalar_text)
         .filter(|text| !text.is_empty())
+}
+
+/// The property an `AWS::S3::Bucket` declares its DEFAULT encryption under.
+pub(super) const BUCKET_ENCRYPTION: &str = "BucketEncryption";
+
+/// The whole `BucketEncryption` a bucket's declaration states, as the
+/// `PutBucketEncryption` request Amazon S3 takes — `None` for a declaration that states no
+/// default encryption of its own, which leaves the bucket on the default every bucket has.
+///
+/// The template nests the rules one level differently from the API and renames nothing else:
+/// `BucketEncryption.ServerSideEncryptionConfiguration` is the LIST of rules the API carries
+/// as `ServerSideEncryptionConfiguration.Rules`, and each entry states the same two things a
+/// `ServerSideEncryptionRule` does — a `ServerSideEncryptionByDefault` naming the
+/// `SSEAlgorithm` and, for the SSE-KMS algorithms, the `KMSMasterKeyID`, beside the rule's own
+/// `BucketKeyEnabled`. `SSEAlgorithm` is REQUIRED inside that container, so an entry stating
+/// the container without it is refused rather than sent incomplete: the stack must not
+/// complete reporting a default encryption Amazon S3 was never asked for.
+pub(super) fn declared_bucket_encryption(
+    resource: &StoredResource,
+) -> Result<Option<::aws_sdk_s3::types::ServerSideEncryptionConfiguration>, Refusal> {
+    use ::aws_sdk_s3::types::{
+        ServerSideEncryption, ServerSideEncryptionByDefault, ServerSideEncryptionConfiguration,
+        ServerSideEncryptionRule,
+    };
+
+    let Some(declared) = resource.properties.get(BUCKET_ENCRYPTION) else {
+        return Ok(None);
+    };
+    let listed = declared
+        .get("ServerSideEncryptionConfiguration")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut rules = Vec::with_capacity(listed.len());
+    for rule in listed {
+        let by_default = match rule.get("ServerSideEncryptionByDefault") {
+            Some(container) => {
+                let algorithm = declared_text(container, "SSEAlgorithm").ok_or_else(|| Refusal {
+                    code: MISSING_PROPERTY_CODE.to_string(),
+                    message: format!(
+                        "a {BUCKET_ENCRYPTION}.ServerSideEncryptionConfiguration entry of \
+                         {S3_BUCKET} declares no SSEAlgorithm"
+                    ),
+                })?;
+                Some(
+                    ServerSideEncryptionByDefault::builder()
+                        .sse_algorithm(ServerSideEncryption::from(algorithm.as_str()))
+                        .set_kms_master_key_id(declared_text(container, "KMSMasterKeyID"))
+                        .build()
+                        .map_err(|error| bucket_encryption_not_sendable(&error))?,
+                )
+            }
+            None => None,
+        };
+        rules.push(
+            ServerSideEncryptionRule::builder()
+                .set_apply_server_side_encryption_by_default(by_default)
+                .set_bucket_key_enabled(
+                    rule.as_object()
+                        .and_then(|stated| declared_flag(stated, "BucketKeyEnabled")),
+                )
+                .build(),
+        );
+    }
+    if rules.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        ServerSideEncryptionConfiguration::builder()
+            .set_rules(Some(rules))
+            .build()
+            .map_err(|error| bucket_encryption_not_sendable(&error))?,
+    ))
+}
+
+/// The refusal for a declared default encryption the SDK will not build into the request
+/// shape, worded the way every other sub-resource of this type words one.
+fn bucket_encryption_not_sendable(error: &dyn ::std::fmt::Display) -> Refusal {
+    Refusal {
+        code: UNIDENTIFIED_FAILURE.to_string(),
+        message: format!(
+            "the {BUCKET_ENCRYPTION} of {S3_BUCKET} cannot be sent to Amazon S3: {error}"
+        ),
+    }
 }
 
 /// Delete the bucket a stack created. A bucket S3 no longer has is already in the state

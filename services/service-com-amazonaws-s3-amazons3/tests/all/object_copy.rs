@@ -399,7 +399,9 @@ async fn a_copy_is_encrypted_under_the_destination_rule_not_the_source_one() {
             request_headers: Vec::new(),
             expected: Reported {
                 algorithm: Some("aws:kms"),
-                key_id: Some(DESTINATION_KEY_ALIAS),
+                // The rule names the key by ALIAS and the object names the key: a copy is a
+                // write, so the reference resolves through KMS to the one key's ARN.
+                key_id: Some(destination_key_arn),
                 bucket_key: Some("true"),
                 context: None,
             },
@@ -414,7 +416,9 @@ async fn a_copy_is_encrypted_under_the_destination_rule_not_the_source_one() {
             expected: Reported {
                 algorithm: Some("aws:kms:dsse"),
                 key_id: Some(destination_key_arn),
-                bucket_key: Some("false"),
+                // The destination's rule switches the Bucket Key OFF, and an object written
+                // without one carries no such header at all.
+                bucket_key: None,
                 context: None,
             },
         },

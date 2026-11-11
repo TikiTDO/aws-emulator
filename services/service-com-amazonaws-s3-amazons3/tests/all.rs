@@ -351,6 +351,8 @@ mod signature_refusal_wording;
 mod sse_kms_data_key_authorization;
 #[path = "all/sse_kms_decrypt_authorization.rs"]
 mod sse_kms_decrypt_authorization;
+#[path = "all/sse_kms_write_key_resolution.rs"]
+mod sse_kms_write_key_resolution;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/stored_payload_checksums.rs"]

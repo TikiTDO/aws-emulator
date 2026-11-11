@@ -633,23 +633,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutObject<Eng> {
         let replication_role =
             crate::state::replication::role_access(&*self.engine, ctx, &input.bucket).await;
 
-        // And so is the KEY this write's SSE-KMS encryption names, for the same reason: it is
-        // resolved against KMS's own store, and no request may hold this service's guard while
-        // it reaches another service's store through the shared engine. The reference is the
-        // one the object would be stored UNDER — the write's own when it named a key, and the
-        // bucket default's `KMSMasterKeyID` when it named none — so the bucket's default is
-        // read here, under a guard taken and released before KMS is asked.
+        // And so is the KEY this write's SSE-KMS encryption is performed under, for the same
+        // reason: it is resolved against KMS's own store, and no request may hold this
+        // service's guard while it reaches another service's store through the shared engine.
+        // The encryption the resolution is made for is the one the object would be STORED
+        // under — the write's own when it named any encryption member, and the bucket's
+        // default configuration when it named none — so the bucket's default is read here,
+        // under a guard taken and released before KMS is asked.
         //
         // What makes the resolution part of the write: the object is encrypted under a data
-        // key KMS mints for that key, so a reference KMS holds no key for yields no data key
-        // and there is nothing to encrypt the object with. S3 relays KMS's own failure rather
-        // than recording an object under a key that does not exist — the decision and the
-        // sentence are KMS's ([`crate::state::sse_kms::missing_key_refusal`]). That is also
-        // why the CONFIGURATION itself is not resolved: S3 "doesn't validate the KMS key ID
-        // provided in PutBucketEncryption requests" (`PutBucketEncryption`'s own
+        // key KMS mints, so what KMS answers decides whether there is anything to encrypt it
+        // with and WHICH key protects it ([`crate::state::sse_kms::write_key`]). A reference
+        // KMS holds no key for, and a key whose state mints no data key, refuse the write —
+        // S3 relays KMS's own failure rather than recording an object under a key that
+        // cannot have encrypted it, and the sentences are KMS's. A reference KMS does resolve
+        // settles the key ARN the object records, whichever spelling the reference took. That
+        // is also why the CONFIGURATION itself is not resolved: S3 "doesn't validate the KMS
+        // key ID provided in PutBucketEncryption requests" (`PutBucketEncryption`'s own
         // documentation), so a default naming a key that is gone is stored and fails at the
         // write that would have used it.
-        let stored_under = {
+        let mut stored_under = {
             let store = state.lock();
             match store.bucket(&input.bucket) {
                 Some(bucket) if requested.names_no_member() => bucket.default_object_encryption(),
@@ -658,19 +661,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutObject<Eng> {
                 _ => requested.clone(),
             }
         };
-        if let Some(key_id) = stored_under.kms_key_id.as_deref() {
-            if let Some(relay) = crate::state::sse_kms::missing_key_refusal(
-                &*self.engine,
-                &crate::state::request_region(ctx.parts()),
-                key_id,
-            ) {
+        let resolved_key = match crate::state::sse_kms::write_key(
+            &*self.engine,
+            &crate::state::request_region(ctx.parts()),
+            &stored_under,
+        ) {
+            crate::state::sse_kms::WriteKey::Refused(relay) => {
                 return Err(crate::scaffolded::Scaffolded::unmodeled(
-                    crate::state::sse_kms::KMS_NOT_FOUND_CODE,
-                    crate::state::sse_kms::KMS_NOT_FOUND_STATUS,
-                    relay,
-                ));
+                    relay.code,
+                    relay.status,
+                    relay.message,
+                ))
             }
-        }
+            // The decision below, and the object itself, name the KEY the reference resolved
+            // to rather than the spelling it arrived as.
+            crate::state::sse_kms::WriteKey::Resolved(key_arn) => {
+                stored_under.kms_key_id = Some(key_arn.clone());
+                Some(key_arn)
+            }
+            crate::state::sse_kms::WriteKey::Unasked => None,
+        };
 
         // And whether the KEY lets THIS caller have a data key for the object at all. The
         // bytes of an SSE-KMS object are encrypted under a data key KMS mints for its key, so
@@ -736,10 +746,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutObject<Eng> {
                 );
             }
         }
-        let encryption = if requested.names_no_member() {
-            bucket_record.default_object_encryption()
-        } else {
-            requested
+        let encryption = {
+            let mut encryption = if requested.names_no_member() {
+                bucket_record.default_object_encryption()
+            } else {
+                requested
+            };
+            // The key the resolution above settled on: what the object records and every read
+            // and write response reports, so the three spellings a reference takes all name
+            // the one key. A write KMS was asked nothing about keeps the reference as it came.
+            if let Some(key_arn) = resolved_key {
+                encryption.kms_key_id = Some(key_arn);
+            }
+            encryption
         };
 
         // WHO is asking, before the write commits. A signed request is authorized per action
@@ -1134,7 +1153,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutObject<Eng> {
             server_side_encryption: encryption.sse_algorithm.clone(),
             ssekms_key_id: encryption.kms_key_id.clone(),
             ssekms_encryption_context: encryption.kms_encryption_context.clone(),
-            bucket_key_enabled: encryption.bucket_key_enabled,
+            bucket_key_enabled: encryption.reported_bucket_key_enabled(),
             // And for a write that supplied its OWN key: the algorithm it named and the
             // digest of that key — "the response headers … include the encryption algorithm
             // and the MD5 digest of the encryption key" (`PutObject`'s own documentation of
