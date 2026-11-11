@@ -4,12 +4,14 @@
 //! policy, end to end over the wire.
 //!
 //! RULE: `GetResourcePolicy` resolves its `ResourceARN` against the EXISTENCE of the resource
-//! only. A resource this account and region hold is served — HTTP 200 whose required `Policy`
-//! member is the policy governing it, which for a resource no statement governs is the empty
-//! JSON object document `{}` — and the modelled `ResourceNotFoundException` is reserved for an
-//! ARN that resolves to no resource at all. So a never-configured resource and a resource whose
-//! policy was detached both read as `{}`, and a read reports that without storing anything: the
-//! resource still carries no policy afterwards.
+//! only. A resource this account and region hold, in a state the read is available in, is
+//! served — HTTP 200 whose required `Policy` member is the policy governing it, which for a
+//! resource no statement governs is the empty JSON object document `{}` — and the modelled
+//! `ResourceNotFoundException` is reserved for an ARN that resolves to no resource at all. So a
+//! never-configured resource and a resource whose policy was detached both read as `{}`, and a
+//! read reports that without storing anything: the resource still carries no policy afterwards.
+//! (A stream the read is NOT available for is refused before the policy slot is reached at all,
+//! which is [`crate::resource_policy_stream_state`]'s.)
 //!
 //! The recorded flows these were derived from read the policy of ONE freshly created stream
 //! that carries none, and re-read it after a detach — each one row of the table below. The rows
@@ -56,8 +58,11 @@ async fn assert_reads_as_empty(emulator: &Emulator, case: &str, region: &str, ar
 }
 
 /// Every kind of resource a `ResourceARN` may name reads as the empty document while it carries
-/// no policy, in every lifecycle status it passes through: a data stream, a consumer registered
-/// with it, and a channel, each read while it is still provisioning and again once it is ready.
+/// no policy: a data stream, a consumer registered with it, and a channel, each read while the
+/// resource itself is still provisioning on a stream the read is available for, and again once
+/// every transition has fallen due. A stream of its own that is still provisioning is not read
+/// at all — the read is not available for it yet, which is its own suite's — and reads as the
+/// empty document as soon as it is `ACTIVE`.
 #[tokio::test]
 async fn a_resource_carrying_no_policy_reads_as_the_empty_document() {
     let emulator = Emulator::new();
@@ -94,8 +99,8 @@ async fn a_resource_carrying_no_policy_reads_as_the_empty_document() {
         .await;
     let channel = channel_arn(REGION, channel_name);
 
-    // A stream whose activation has not fallen due yet: still provisioning, and its policy
-    // slot is just as empty.
+    // A stream whose activation has not fallen due yet: still provisioning, so the read is
+    // not available for it until it is, and its policy slot is just as empty when it is.
     let provisioning = "policy-absence-provisioning";
     emulator
         .ok(
@@ -108,7 +113,6 @@ async fn a_resource_carrying_no_policy_reads_as_the_empty_document() {
 
     let rows: Vec<(&str, &String)> = vec![
         ("an active stream", &stream),
-        ("a stream still provisioning", &creating_stream),
         ("a consumer still provisioning", &consumer),
         ("a channel still provisioning", &channel),
     ];
@@ -117,12 +121,20 @@ async fn a_resource_carrying_no_policy_reads_as_the_empty_document() {
     }
 
     // Once every transition the creates armed has fallen due, the same reads answer the same
-    // empty document: being ready attaches no policy.
+    // empty document: being ready attaches no policy — and the stream that was still
+    // provisioning reads as the empty document too, now that the read is available for it.
     tokio::time::sleep(past_channel_activation()).await;
     tokio::time::sleep(past_activation()).await;
     for (case, arn) in &rows {
         assert_reads_as_empty(&emulator, &format!("{case}, once ready"), REGION, arn).await;
     }
+    assert_reads_as_empty(
+        &emulator,
+        "the stream that was still provisioning, once ready",
+        REGION,
+        &creating_stream,
+    )
+    .await;
 }
 
 /// The read is a pure report: answering the empty document for a resource carrying no policy

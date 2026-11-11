@@ -13,7 +13,11 @@
 //!
 //! There is nothing to delete for an ARN this account and region hold no resource under, and
 //! nothing to delete for a resource that carries no policy: both are the modelled
-//! `ResourceNotFoundException`, each in its own wording.
+//! `ResourceNotFoundException`, each in its own wording. A resource held in a state this
+//! operation is not available in is the modelled `ResourceInUseException`, raised BEFORE the
+//! policy store is written
+//! ([`crate::state::ComAmazonawsKinesisKinesis20131202State::resource_policy_readiness`]), so
+//! nothing is removed from a resource AWS would have refused the removal on.
 //!
 //! ## Shape of an operation
 //!
@@ -171,6 +175,16 @@ fn not_found(message: String) -> DeleteResourcePolicyError {
     .into()
 }
 
+/// The modelled refusal for a resource that is not available for this operation: "The
+/// resource is not available for this operation. For successful operation, the resource must
+/// be in the ACTIVE state" (`ResourceInUseException`).
+fn resource_in_use(message: String) -> DeleteResourcePolicyError {
+    DeleteResourcePolicyErrorModeled::ResourceInUseException(ResourceInUseException {
+        message: Some(message),
+    })
+    .into()
+}
+
 /// Take the policy off the resource the request's ARN names, or answer the modelled refusal
 /// that stands in the way. The whole write lives here so the caller holds the store's lock
 /// for exactly this long.
@@ -180,6 +194,19 @@ fn apply_detachment(
     now: ::std::time::SystemTime,
     input: &DeleteResourcePolicyInput,
 ) -> Result<(), DeleteResourcePolicyError> {
+    // The resource has to be AVAILABLE for the removal before anything is written: a
+    // resource held in a state this operation is not available in keeps the policy it
+    // carries, so the store a refused call leaves behind is the store it found.
+    match store.resource_policy_readiness(now, region, input.resource_arn.as_str()) {
+        Some(Ok(())) => {}
+        Some(Err(message)) => return Err(resource_in_use(message)),
+        None => {
+            return Err(not_found(crate::state::resource_not_found_message(
+                &input.resource_arn,
+            )))
+        }
+    }
+
     // `StreamId` is documented "Not Implemented. Reserved for future use", so no resource
     // carries one and it names nothing: the `ResourceARN` is what this operation addresses a
     // resource by, whichever kind that ARN names.

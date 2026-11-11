@@ -18,6 +18,12 @@
 //! account and region hold no resource under has nothing to report, and that absence of the
 //! RESOURCE is the modelled `ResourceNotFoundException`.
 //!
+//! The resource has to be AVAILABLE for the read, which is checked BEFORE the policy store is
+//! reached
+//! ([`crate::state::ComAmazonawsKinesisKinesis20131202State::resource_policy_readiness`]): a
+//! resource held in a state this operation is not available in is the modelled
+//! `ResourceInUseException`, never the absence of a policy.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -145,6 +151,16 @@ fn not_found(message: String) -> GetResourcePolicyError {
     .into()
 }
 
+/// The modelled refusal for a resource that is not available for this operation: "The
+/// resource is not available for this operation. For successful operation, the resource must
+/// be in the ACTIVE state" (`ResourceInUseException`).
+fn resource_in_use(message: String) -> GetResourcePolicyError {
+    GetResourcePolicyErrorModeled::ResourceInUseException(ResourceInUseException {
+        message: Some(message),
+    })
+    .into()
+}
+
 /// The `GetResourcePolicy` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -193,15 +209,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })?;
 
         let store = state.lock();
+        let now = ::std::time::SystemTime::now();
+        // The resource's own state gates the read, ahead of any policy lookup: a resource
+        // this operation is not available for is refused for THAT reason, rather than
+        // reported as a resource carrying no policy.
+        match store.resource_policy_readiness(now, &region, input.resource_arn.as_str()) {
+            Some(Ok(())) => {}
+            Some(Err(message)) => return Err(resource_in_use(message)),
+            None => {
+                return Err(not_found(crate::state::resource_not_found_message(
+                    &input.resource_arn,
+                )))
+            }
+        }
+
         // `StreamId` is documented "Not Implemented. Reserved for future use", so no resource
         // carries one and it names nothing: the `ResourceARN` is what this operation
         // addresses a resource by, whichever kind that ARN names.
         let policy = store
-            .resource_policy_by_arn(
-                ::std::time::SystemTime::now(),
-                &region,
-                input.resource_arn.as_str(),
-            )
+            .resource_policy_by_arn(now, &region, input.resource_arn.as_str())
             .ok_or_else(|| {
                 not_found(crate::state::resource_not_found_message(&input.resource_arn))
             })?

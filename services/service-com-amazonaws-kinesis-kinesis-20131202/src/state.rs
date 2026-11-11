@@ -2372,6 +2372,24 @@ impl ComAmazonawsKinesisKinesis20131202State {
     /// kind of resource this service holds, exactly as [`Self::resource_tags_by_arn`] does:
     /// whichever kind the ARN names, the policy answered is the one stored on that very
     /// resource.
+    /// The stream this account and region hold at `now` that the resource `arn` names
+    /// belongs to: the stream its own `StreamARN` names, or the stream a `ConsumerARN`
+    /// extends (`…stream/<name>/consumer/<name>:<timestamp>`).
+    ///
+    /// The ONE walk every resource-policy lookup of a stream-borne resource resolves through,
+    /// so a read, a write and the state gate in front of them all address the same record.
+    fn stream_holding_resource(
+        &self,
+        now: SystemTime,
+        region: &str,
+        arn: &str,
+    ) -> Option<&Stream> {
+        self.streams
+            .values()
+            .filter(|stream| stream.region == region && stream.is_held(now))
+            .find(|stream| stream.arn == arn || stream.consumer_by_arn(arn).is_some())
+    }
+
     pub fn resource_policy_by_arn(
         &self,
         now: SystemTime,
@@ -2381,16 +2399,51 @@ impl ComAmazonawsKinesisKinesis20131202State {
         if let Some(channel) = self.channel_by_arn(region, arn) {
             return Some(&channel.policy);
         }
-        self.streams
-            .values()
-            .filter(|stream| stream.region == region && stream.is_held(now))
-            .find_map(|stream| {
-                if stream.arn == arn {
-                    Some(&stream.policy)
-                } else {
-                    stream.consumer_by_arn(arn).map(|consumer| &consumer.policy)
-                }
-            })
+        let stream = self.stream_holding_resource(now, region, arn)?;
+        if stream.arn == arn {
+            Some(&stream.policy)
+        } else {
+            stream.consumer_by_arn(arn).map(|consumer| &consumer.policy)
+        }
+    }
+
+    /// Whether the Kinesis resource `arn` names at `now` is in a state that SERVES a
+    /// resource-policy operation, or the refusal that stands in the way: `None` when this
+    /// account and region hold no resource under that ARN, `Some(Err(sentence))` when the
+    /// resource is held in a state that does not serve the call, and `Some(Ok(()))` when it
+    /// does.
+    ///
+    /// The precondition the three resource-policy operations share: "The resource is not
+    /// available for this operation. For successful operation, the resource must be in the
+    /// ACTIVE state" (`ResourceInUseException`), read for a data stream the same way every
+    /// other operation of this service reads it — a stream whose change is still in flight
+    /// keeps serving ("You can continue to read and write data to your stream while its
+    /// status is UPDATING", `UpdateShardCount`), and a stream whose create or whose removal
+    /// is still due serves nothing. A consumer's policy is addressed through the stream that
+    /// holds it, so the SAME gate stands in front of it.
+    ///
+    /// Resolved by exactly the rule [`Self::resource_policy_by_arn`] resolves an ARN by, so
+    /// the resource a gate reads the state of is the resource whose policy slot the call
+    /// would then reach.
+    pub fn resource_policy_readiness(
+        &self,
+        now: SystemTime,
+        region: &str,
+        arn: &str,
+    ) -> Option<Result<(), String>> {
+        // A channel carries its own lifecycle states, which this precondition is not
+        // published for: its policy slot is reached in every state it is held in.
+        if self.channel_by_arn(region, arn).is_some() {
+            return Some(Ok(()));
+        }
+        self.stream_holding_resource(now, region, arn).map(|stream| {
+            let status = stream.status(now);
+            if matches!(status, STREAM_ACTIVE | STREAM_UPDATING) {
+                Ok(())
+            } else {
+                Err(stream_not_active_or_updating_message(&stream.name, status))
+            }
+        })
     }
 
     /// [`Self::resource_policy_by_arn`] for a caller that WRITES the slot it finds: one rule,
@@ -2557,6 +2610,24 @@ fn stream_name_in(identifier: &str) -> &str {
 pub fn stream_not_active_message(stream_name: &str, status: &str) -> String {
     format!(
         "Stream {stream_name} under account {} not {STREAM_ACTIVE}, instead in state {status}",
+        ::engine::emulator_account_id()
+    )
+}
+
+/// How an operation that serves a stream while a change of it is in flight refuses one that
+/// is not ready at all: the SAME rule [`stream_not_active_message`] states
+/// (`ResourceInUseException`, "For successful operation, the resource must be in the ACTIVE
+/// state"), for an operation whose serving states are `ACTIVE` and `UPDATING` both ("You can
+/// continue to read and write data to your stream while its status is UPDATING",
+/// `UpdateShardCount`) — so the sentence names BOTH states the stream is not in.
+///
+/// Built from the STORED record the same way [`stream_not_active_message`] is: the stream
+/// named by the `StreamName` it is stored under, the account that holds it, and the state it
+/// is in instead.
+pub fn stream_not_active_or_updating_message(stream_name: &str, status: &str) -> String {
+    format!(
+        "Stream {stream_name} under account {} not {STREAM_ACTIVE} or {STREAM_UPDATING}, \
+         instead in state {status}",
         ::engine::emulator_account_id()
     )
 }
@@ -3077,11 +3148,13 @@ pub fn policy_too_large_message(sent: usize) -> String {
 /// policy "is formatted as a JSON string" (`PutResourcePolicyInput$Policy`) and names "the
 /// identity of the principal and the actions allowed on this resource", which is a JSON
 /// object — anything else is the modelled "a specified parameter ... is not supported, or
-/// can't be used" refusal. Built FROM the request: `detail` says what the value sent was
-/// instead.
-pub fn policy_not_json_message(detail: &str) -> String {
-    format!("Policy must be a JSON policy document: {detail}.")
-}
+/// can't be used" refusal, stated as the service's policy-document validation states it.
+///
+/// FIXED text: the refusal quotes neither the document, nor an offset, nor a member name, so
+/// a document that does not parse and one that parses as something other than a policy
+/// object are refused with the one sentence.
+pub const POLICY_INVALID_JSON_MESSAGE: &str =
+    "Policy validation error: This policy contains invalid Json";
 
 /// What a read reports for a resource that carries no resource-based policy: a policy "is
 /// formatted as a JSON string" (`GetResourcePolicyOutput$Policy`) holding "the identity of

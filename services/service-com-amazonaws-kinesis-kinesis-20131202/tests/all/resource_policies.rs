@@ -15,7 +15,9 @@
 //! for all three; a resource that exists and carries no policy has none for the delete to
 //! remove (the same refusal) while the READ is served for it, reporting the empty document —
 //! that half of the rule is [`crate::resource_policy_absence`]'s. A `Policy` that is no policy
-//! document at all is the modelled `InvalidArgumentException`.
+//! document at all is the modelled `InvalidArgumentException`, and a resource held in a state
+//! the operation is not available in is the modelled `ResourceInUseException` — that
+//! precondition is [`crate::resource_policy_stream_state`]'s.
 //!
 //! The recorded flows these were derived from attach ONE document to ONE stream and read it
 //! back, and read a stream that carries none — each one row of the tables below. The rows
@@ -505,6 +507,10 @@ async fn an_absent_policy_is_refused_by_the_delete() {
 /// `InvalidArgumentException`, and the resource keeps whatever it carried: a value that is not
 /// JSON at all, a JSON value that is not an object, and a document one byte past the size
 /// ceiling this emulator retains.
+///
+/// The document check states ONE fixed sentence, which quotes neither the document, nor an
+/// offset, nor a member name — so every form of document that is not a policy is refused with
+/// the very same text.
 #[tokio::test]
 async fn a_policy_that_is_no_policy_document_is_refused() {
     let emulator = Emulator::new();
@@ -514,38 +520,24 @@ async fn a_policy_that_is_no_policy_document_is_refused() {
     assert_eq!(status, 200, "the attach of the kept document must be served");
 
     let oversized = policy_of_bytes(MAX_RESOURCE_POLICY_BYTES + 1);
+    // The sentence the service states for a document that is no policy document, written out
+    // here rather than borrowed from the crate so the wording itself is what the cases pin.
+    let invalid_json = "Policy validation error: This policy contains invalid Json".to_string();
     // (case, the value sent, what the refusal must say)
     let rows: Vec<(&str, String, String)> = vec![
-        (
-            "not json at all",
-            "Allow everyone to read".to_string(),
-            "Policy must be a JSON policy document: the value sent is not valid JSON."
-                .to_string(),
-        ),
+        ("not json at all", "Allow everyone to read".to_string(), invalid_json.clone()),
         (
             "truncated json",
             r#"{"Version":"2012-10-17","Statement":["#.to_string(),
-            "Policy must be a JSON policy document: the value sent is not valid JSON."
-                .to_string(),
+            invalid_json.clone(),
         ),
         (
             "a json array",
             r#"[{"Effect":"Allow"}]"#.to_string(),
-            "Policy must be a JSON policy document: the value sent is not a JSON object."
-                .to_string(),
+            invalid_json.clone(),
         ),
-        (
-            "a json string",
-            r#""Allow""#.to_string(),
-            "Policy must be a JSON policy document: the value sent is not a JSON object."
-                .to_string(),
-        ),
-        (
-            "a json number",
-            "2012".to_string(),
-            "Policy must be a JSON policy document: the value sent is not a JSON object."
-                .to_string(),
-        ),
+        ("a json string", r#""Allow""#.to_string(), invalid_json.clone()),
+        ("a json number", "2012".to_string(), invalid_json.clone()),
         (
             "one byte past the size ceiling",
             oversized.clone(),

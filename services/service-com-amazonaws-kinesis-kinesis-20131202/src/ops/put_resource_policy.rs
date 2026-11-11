@@ -15,7 +15,11 @@
 //! `ResourceNotFoundException` ("If you receive a ResourceNotFoundException, check to see if
 //! you passed a valid stream or consumer resource"), and a `Policy` that is no policy
 //! document — not a JSON object, or larger than this emulator retains — is the modelled
-//! `InvalidArgumentException`.
+//! `InvalidArgumentException`. A resource that is held in a state the operation is not
+//! available in is the modelled `ResourceInUseException`, raised BEFORE the policy store is
+//! written
+//! ([`crate::state::ComAmazonawsKinesisKinesis20131202State::resource_policy_readiness`]), so
+//! nothing is attached to a resource AWS would have left unpoliced.
 //!
 //! ## Shape of an operation
 //!
@@ -184,6 +188,16 @@ fn invalid_argument(message: String) -> PutResourcePolicyError {
     .into()
 }
 
+/// The modelled refusal for a resource that is not available for this operation: "The
+/// resource is not available for this operation. For successful operation, the resource must
+/// be in the ACTIVE state" (`ResourceInUseException`).
+fn resource_in_use(message: String) -> PutResourcePolicyError {
+    PutResourcePolicyErrorModeled::ResourceInUseException(ResourceInUseException {
+        message: Some(message),
+    })
+    .into()
+}
+
 /// Check the request's `Policy` is a policy document this service can store and report
 /// back: bounded in size, and a JSON object, since a resource-based policy "is formatted as
 /// a JSON string" naming "the identity of the principal and the actions allowed on this
@@ -197,16 +211,15 @@ fn check_policy_document(policy: &str) -> Result<(), PutResourcePolicyError> {
             policy.len(),
         )));
     }
+    // What is wrong with the text is stated as the SERVICE states it, in the one fixed
+    // sentence its policy-document validation states: the parser's own diagnostic, the
+    // offending bytes and the offset are details of the crate that read the document, not of
+    // this API, and the refusal carries none of them.
     match ::serde_json::from_str::<::serde_json::Value>(policy) {
         Ok(::serde_json::Value::Object(_)) => Ok(()),
-        Ok(_) => Err(invalid_argument(crate::state::policy_not_json_message(
-            "the value sent is not a JSON object",
-        ))),
-        // What is wrong with the text is stated as the SERVICE states it: the parser's own
-        // diagnostic is a detail of the crate that read the document, not of this API.
-        Err(_) => Err(invalid_argument(crate::state::policy_not_json_message(
-            "the value sent is not valid JSON",
-        ))),
+        _ => Err(invalid_argument(
+            crate::state::POLICY_INVALID_JSON_MESSAGE.to_string(),
+        )),
     }
 }
 
@@ -219,6 +232,22 @@ fn apply_attachment(
     now: ::std::time::SystemTime,
     input: &PutResourcePolicyInput,
 ) -> Result<(), PutResourcePolicyError> {
+    // The resource has to be AVAILABLE for the attach before anything is written: a resource
+    // held in a state this operation is not available in is refused rather than policed, so
+    // the store a refused call leaves behind is the store it found.
+    match store.resource_policy_readiness(now, region, input.resource_arn.as_str()) {
+        Some(Ok(())) => {}
+        Some(Err(message)) => return Err(resource_in_use(message)),
+        None => {
+            return Err(PutResourcePolicyErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: Some(crate::state::resource_not_found_message(&input.resource_arn)),
+                },
+            )
+            .into())
+        }
+    }
+
     // `StreamId` is documented "Not Implemented. Reserved for future use", so no resource
     // carries one and it names nothing: the `ResourceARN` is what this operation addresses a
     // resource by, whichever kind that ARN names.

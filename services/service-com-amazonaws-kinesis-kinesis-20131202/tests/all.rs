@@ -53,6 +53,8 @@ mod record_flow;
 mod resource_policies;
 #[path = "all/resource_policy_absence.rs"]
 mod resource_policy_absence;
+#[path = "all/resource_policy_stream_state.rs"]
+mod resource_policy_stream_state;
 #[path = "all/resource_tag_listing.rs"]
 mod resource_tag_listing;
 #[path = "all/resource_tag_removal.rs"]
