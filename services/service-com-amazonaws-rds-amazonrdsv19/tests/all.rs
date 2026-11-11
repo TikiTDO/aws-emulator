@@ -43,6 +43,8 @@ mod create_resolved_defaults;
 mod custom_db_engine_versions;
 #[path = "all/custom_engine_version_engine_availability.rs"]
 mod custom_engine_version_engine_availability;
+#[path = "all/data_api_http_endpoint.rs"]
+mod data_api_http_endpoint;
 #[path = "all/db_cluster_create_record.rs"]
 mod db_cluster_create_record;
 #[path = "all/db_cluster_deletion.rs"]

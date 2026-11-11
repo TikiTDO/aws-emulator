@@ -295,13 +295,13 @@ impl ComAmazonawsRdsAmazonrdsv19State {
         // A resource type this service keeps no records of reads the same way, because
         // there is no resource of it to find.
         let Some(parsed) = super::parse_rds_resource_arn(resource_name) else {
-            return Err(TagTargetMiss::Unusable(format!(
-                "Invalid resource name: {resource_name}"
+            return Err(TagTargetMiss::Unusable(invalid_resource_name_message(
+                resource_name,
             )));
         };
         let Some(kind) = TaggedKind::from_arn_resource_type(parsed.resource_type) else {
-            return Err(TagTargetMiss::Unusable(format!(
-                "Invalid resource name: {resource_name}"
+            return Err(TagTargetMiss::Unusable(invalid_resource_name_message(
+                resource_name,
             )));
         };
         let found = match kind {
@@ -500,6 +500,17 @@ impl ComAmazonawsRdsAmazonrdsv19State {
                 .map(|r| &mut r.tags),
         }
     }
+}
+
+/// What this front door answers a value that is no usable Amazon RDS resource ARN at all —
+/// one that is no ARN, or an ARN naming a resource type this service keeps no records of.
+///
+/// The value itself is the problem, so the sentence names the value the request carried and
+/// nothing about this emulator's own reach. One wording for every operation that addresses
+/// its resource by ARN, so a tag write and a Data API endpoint toggle cannot drift in how
+/// they word the same unusable value.
+pub fn invalid_resource_name_message(resource_name: &str) -> String {
+    format!("Invalid resource name: {resource_name}")
 }
 
 /// What a tag operation's not-found fault reports for a `ResourceName` that named no

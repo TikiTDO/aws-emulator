@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DisableHttpEndpoint
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DisableHttpEndpoint`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: this operation turns the RDS Data API HTTP endpoint OFF for the stored DB
+//! cluster its `ResourceArn` names — the `DBCluster$HttpEndpointEnabled` flag the cluster's
+//! own describe reports and the Data API reads — and is the ONLY file to touch for this
+//! operation.
+//!
+//! The write itself is
+//! [`crate::state::ComAmazonawsRdsAmazonrdsv19State::set_cluster_http_endpoint`], shared
+//! with `EnableHttpEndpoint`: the two operations differ only in the value they ask for, so
+//! the resolution, the preconditions and the refusal wording are written once.
 //!
 //! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DisableHttpEndpoint::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! broken".
 //!
 //! ## Shape of an operation
 //!
@@ -107,6 +110,29 @@ impl From<DisableHttpEndpointErrorModeled> for DisableHttpEndpointError {
     }
 }
 
+/// This operation's answer to a refused toggle, in its own error channel: the two faults
+/// the model declares for it, plus the member refusal a `ResourceArn` that names no DB
+/// cluster ARN at all is answered on.
+fn refusal_of(refusal: crate::state::DataApiEndpointRefusal) -> DisableHttpEndpointError {
+    match refusal {
+        crate::state::DataApiEndpointRefusal::UnusableArn(message) => {
+            crate::scaffolded::Scaffolded::invalid_parameter_value(message)
+        }
+        crate::state::DataApiEndpointRefusal::NotFound(message) => {
+            DisableHttpEndpointErrorModeled::ResourceNotFoundFault(ResourceNotFoundFault {
+                message: Some(message),
+            })
+            .into()
+        }
+        crate::state::DataApiEndpointRefusal::InvalidState(message) => {
+            DisableHttpEndpointErrorModeled::InvalidResourceStateFault(InvalidResourceStateFault {
+                message: Some(message),
+            })
+            .into()
+        }
+    }
+}
+
 /// The `DisableHttpEndpoint` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -143,18 +169,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DisableHttpEndpoint` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DisableHttpEndpointErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DisableHttpEndpoint"))
+        let region =
+            crate::state::request_region(ctx).map_err(DisableHttpEndpointError::validation)?;
+
+        // No store means this service was mounted on an engine it has no state in, so it
+        // cannot resolve the cluster at all; 501 is the honest answer, never an endpoint
+        // nothing disabled.
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(crate::scaffolded::Scaffolded::not_implemented(Self::NAME));
+        };
+        let mut store = state.lock();
+        // The transitions the clock already made due, so the toggle is judged against the
+        // state the cluster is really in.
+        store.settle_due_transitions(&region);
+
+        // "Disables the HTTP endpoint for the specified DB cluster": the OFF half of the one
+        // write both toggles share.
+        let (resource_arn, enabled) =
+            match store.set_cluster_http_endpoint(&region, &input.resource_arn, false) {
+                Ok(settled) => settled,
+                Err(refusal) => return Err(refusal_of(refusal)),
+            };
+        Ok(DisableHttpEndpointOutput {
+            resource_arn: Some(resource_arn),
+            http_endpoint_enabled: Some(enabled),
+        })
     }
 }

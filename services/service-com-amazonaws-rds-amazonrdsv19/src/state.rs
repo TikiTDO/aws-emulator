@@ -258,6 +258,9 @@ pub mod default_subnet_group;
 mod ec2_security_groups;
 mod instances;
 mod clusters;
+// The Data API HTTP endpoint of a DB cluster: the one write `EnableHttpEndpoint` and
+// `DisableHttpEndpoint` share, and the preconditions both hold a request to.
+mod data_api_endpoint;
 // The Secrets Manager secret RDS manages for a resource's master user password: the
 // record a resource stores for it, and the minting a request that turns
 // `ManageMasterUserPassword` on depends on.
@@ -285,6 +288,7 @@ pub use engine_defaults::*;
 pub use minted_values::*;
 pub use published_values::*;
 pub use clusters::*;
+pub use data_api_endpoint::*;
 pub use instances::*;
 pub use managed_master_secret::*;
 pub use storage_encryption_key::*;
