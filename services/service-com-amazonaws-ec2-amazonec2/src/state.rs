@@ -2081,6 +2081,19 @@ mod launched_root_volumes;
 /// root volume the same launch creates.
 mod launched_primary_interfaces;
 
+/// The network interfaces a launch was TOLD to give its instance
+/// (`RunInstancesRequest$NetworkInterfaces`) — what one of them resolves to and the one
+/// writer that creates or attaches each — in a module of its own beside the single primary
+/// interface a launch that names none gets. Everything it declares is re-exported below.
+mod launched_interfaces;
+pub use launched_interfaces::*;
+
+/// The private IPv4 addresses ONE network interface specification asks for, read the same way
+/// for `CreateNetworkInterface`'s own request and for each entry of a launch's
+/// `NetworkInterfaces`. Everything it declares is re-exported below.
+mod interface_private_ips;
+pub use interface_private_ips::*;
+
 /// The FIXED detail every instance reports — the machine facts of its AMI, the CPU layout of
 /// its instance type, the volumes it holds, where it runs and the option sets its launch
 /// chose — in a module of its own, re-exported so a handler reaches its words as

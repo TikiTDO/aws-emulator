@@ -23,10 +23,11 @@ use std::time::SystemTime;
 use crate::ops::types::{GroupIdentifier, NetworkInterfaceAttachment};
 
 use super::{
-    ATTACHMENT_STATUS_ATTACHED, ComAmazonawsEc2Amazonec2State, DEFAULT_SECURITY_GROUP_NAME,
-    InstanceStateName, NETWORK_INTERFACE_ATTACHMENT_ID_PREFIX, NETWORK_INTERFACE_TYPE_INTERFACE,
-    NetworkInterfaceSpec, PRIMARY_NETWORK_INTERFACE_DEVICE_INDEX, Subnet, region_of_zone_name,
-    system_time_to_date_time, zone_id_for_zone_name,
+    ATTACHMENT_STATUS_ATTACHED, AMAZON_ASSIGNED_IP_OWNER_ID, ComAmazonawsEc2Amazonec2State,
+    InstanceStateName, NETWORK_INTERFACE_ATTACHMENT_ID_PREFIX,
+    NETWORK_INTERFACE_TYPE_INTERFACE, NetworkInterfaceSpec,
+    PRIMARY_NETWORK_INTERFACE_DEVICE_INDEX, Subnet, region_of_zone_name, system_time_to_date_time,
+    zone_id_for_zone_name,
 };
 
 impl ComAmazonawsEc2Amazonec2State {
@@ -96,22 +97,12 @@ impl ComAmazonawsEc2Amazonec2State {
         }
         // Each group the launch named, completed to the id AND the name a report carries
         // ([`Self::group_identifier_of`]) — or, for a launch that named none, the VPC's own
-        // default group, which is what "Default: Amazon Web Services uses the default
-        // security group" gives it.
+        // default group, through the one reading of that default
+        // ([`Self::default_security_group_of_vpc`]).
         let groups: Vec<GroupIdentifier> = if named_groups.is_empty() {
-            self.security_groups
-                .values()
-                .find(|group| {
-                    group.vpc_id.as_deref() == Some(vpc_id.as_str())
-                        && group.group_name.as_deref() == Some(DEFAULT_SECURITY_GROUP_NAME)
-                })
-                .map(|group| {
-                    vec![GroupIdentifier {
-                        group_id: group.group_id.clone(),
-                        group_name: group.group_name.clone(),
-                    }]
-                })
-                .unwrap_or_default()
+            self.default_security_group_of_vpc(&vpc_id)
+                .into_iter()
+                .collect()
         } else {
             named_groups
                 .iter()
@@ -208,7 +199,33 @@ impl ComAmazonawsEc2Amazonec2State {
             .map(|(network_interface_id, _)| network_interface_id.clone())
             .collect();
         for network_interface_id in doomed {
+            // A public IPv4 address AWS assigned the interface itself goes with the
+            // interface — "Amazon Web Services charges for all public IPv4 addresses"
+            // (`AssociatePublicIpAddress`), and nothing holds it once the interface it was
+            // assigned to is gone — so the instance that reported it as its own public
+            // address reports none. An Elastic IP the account allocated is NOT released
+            // here: it outlives the instance, which is what an allocation is.
+            let amazon_assigned = self
+                .network_interfaces
+                .get(&network_interface_id)
+                .and_then(|interface| interface.association.as_ref())
+                .filter(|association| {
+                    association.ip_owner_id.as_deref() == Some(AMAZON_ASSIGNED_IP_OWNER_ID)
+                })
+                .and_then(|association| association.public_ip.clone());
+            let held_by = self
+                .network_interfaces
+                .get(&network_interface_id)
+                .and_then(|interface| interface.attachment.as_ref())
+                .and_then(|attachment| attachment.instance_id.clone());
             self.remove_network_interface(&network_interface_id);
+            if let (Some(public_ip), Some(instance_id)) = (amazon_assigned, held_by) {
+                if let Some(instance) = self.instances.get_mut(&instance_id) {
+                    if instance.public_ip.as_deref() == Some(public_ip.as_str()) {
+                        instance.public_ip = None;
+                    }
+                }
+            }
         }
     }
 }

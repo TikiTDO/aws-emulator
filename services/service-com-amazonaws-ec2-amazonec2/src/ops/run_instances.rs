@@ -13,6 +13,17 @@
 //! so the instance reports it as `Instance$IamInstanceProfile` and
 //! `DescribeIamInstanceProfileAssociations` reports the same record.
 //!
+//! A launch that names its `NetworkInterfaces` gives every instance it mints exactly those
+//! interfaces: each entry is created in the subnet it names, with the security groups,
+//! private IPv4 addresses, description, type and options it names, and attached at its own
+//! device index — or, for an entry naming an interface by id, that existing interface is
+//! attached where it is. The entry at device index 0 is the instance's PRIMARY interface, so
+//! its subnet, groups and primary private address are read into the launch's own members and
+//! the rest of the launch takes exactly the path a launch that spelled them out takes. The
+//! interfaces themselves are written through the store's one writer for them
+//! ([`crate::state::ComAmazonawsEc2Amazonec2State::insert_launched_instance`]), so
+//! `DescribeInstances` and `DescribeNetworkInterfaces` report one record per interface.
+//!
 //! An `ImageId` may name a Systems Manager parameter instead of an AMI — "alternatively, you
 //! can specify a Systems Manager parameter […] The Systems Manager parameter will resolve to
 //! an AMI ID on launch", written `resolve:ssm:<parameter>` — so such a value is resolved
@@ -274,6 +285,10 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+// The interfaces a launch gives its instance, as the store writes them — the one shape this
+// handler resolves a launch's `NetworkInterfaces` into.
+use crate::state::LaunchedInterface;
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -358,11 +373,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             DEFAULT_SOURCE_DEST_CHECK, MAX_IAM_INSTANCE_PROFILE_ASSOCIATIONS,
             MAX_INSTANCES_PER_RUN,
             MAX_SECURITY_GROUPS_PER_INSTANCE, MAX_STORED_BYTES, MAX_STORED_INSTANCES,
-            MAX_USER_DATA_BYTES, RUN_INSTANCES_TAGGABLE_RESOURCES,
+            MAX_NETWORK_INTERFACES, MAX_USER_DATA_BYTES, RUN_INSTANCES_TAGGABLE_RESOURCES,
+            PRIMARY_NETWORK_INTERFACE_DEVICE_INDEX,
             STORED_RECORD_OVERHEAD_BYTES,
             TRANSITION_DELAY,
         };
 
+        // "If you specify a network interface, you must specify any subnets / security groups
+        // as part of the network interface instead of using this parameter"
+        // (`RunInstancesRequest$SubnetId`, `$SecurityGroupIds`, `$SecurityGroups`), and "you
+        // can't specify this option if you've specified the option to designate a private IP
+        // address as the primary IP address in a network interface specification"
+        // (`$PrivateIpAddress`): a request that names its interfaces names those three facts
+        // ON them, so one that names the same fact twice is refused rather than served from
+        // whichever of the two places this handler happened to read. Asked of the REQUEST's
+        // own members, before the launch template is overlaid: a template expresses the same
+        // facts through its own interface, which the overlay below reads into one launch.
+        if input
+            .network_interfaces
+            .as_ref()
+            .is_some_and(|interfaces| !interfaces.is_empty())
+        {
+            refuse_interface_and_instance_level_members(&input)?;
+        }
         // A launch template carries the launch parameters this handler resolves, so a launch
         // that names one is answered from the template VERSION it names, overlaid with the
         // members the request itself carries — "any additional parameters that you specify
@@ -371,7 +404,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // anything else is read, so every check, ceiling, refusal and write below sees ONE
         // launch: a template-driven launch and the equivalent spelled-out one cannot be
         // served differently.
-        let input = match input.launch_template.clone() {
+        let mut input = match input.launch_template.clone() {
             None => input,
             Some(specification) => {
                 let state = require_service_state(&*self.engine)?;
@@ -439,31 +472,45 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 launch_overlaid_with_template(input, &data)?
             }
         };
-        // Network interfaces are a resource this slice does not model, and these
-        // members CONTRADICT ones it does: a launch that names its subnet, groups or
-        // private address only through an interface specification must not be
-        // answered with an instance that sits somewhere else. Refused rather than
-        // accepted and discarded.
+        // "The network interfaces to associate with the instance"
+        // (`RunInstancesRequest$NetworkInterfaces`): a launch that names them launches each
+        // of its instances with exactly those interfaces — created in the subnet, with the
+        // security groups, private addresses and options each entry names, and attached at
+        // its device index — instead of with the single primary interface a launch that names
+        // none gets. Read HERE, before anything else, so the rest of this handler sees ONE
+        // launch: the entry at device index 0 is the instance's primary interface, and its
+        // subnet, groups and primary private address ARE the instance's own.
+        let interface_requests = read_interface_specifications(
+            input.network_interfaces.as_deref().unwrap_or_default(),
+            input.max_count,
+            input
+                .instance_type
+                .as_deref()
+                .unwrap_or(DEFAULT_INSTANCE_TYPE),
+        )?;
+        // A secondary interface is a resource of its own
+        // (`Instance$SecondaryInterfaces`, which `DescribeSecondaryInterfaces` reports),
+        // created in a SECONDARY subnet of a secondary network — resources this launch path
+        // holds none of, so an instance it minted could report none of what was asked for.
+        // Refused rather than accepted and discarded.
         if input
-            .network_interfaces
+            .secondary_interfaces
             .as_ref()
             .is_some_and(|interfaces| !interfaces.is_empty())
-            || input
-                .secondary_interfaces
-                .as_ref()
-                .is_some_and(|interfaces| !interfaces.is_empty())
         {
             return Err(Scaffolded::not_implemented(
-                "RunInstances with a network interface specification",
+                "RunInstances with a secondary interface specification",
             ));
         }
-        // Same: an IPv6 address comes from the subnet's IPv6 range, which is not
-        // modelled, so an instance could not report the address this asks for.
+        // An IPv6 address comes from the subnet's IPv6 range, which is not modelled, so an
+        // instance could not report the address this asks for — whether the launch asks for
+        // it on its own members or on one of its interfaces.
         if input
             .ipv6_addresses
             .as_ref()
             .is_some_and(|addresses| !addresses.is_empty())
             || input.ipv6_address_count.is_some_and(|count| count > 0)
+            || interface_requests.iter().any(|interface| interface.ipv6)
         {
             return Err(Scaffolded::not_implemented(
                 "RunInstances with IPv6 addresses",
@@ -624,6 +671,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // ([`crate::state::ComAmazonawsEc2Amazonec2State::ensure_default_network`]).
         store.ensure_default_network(&region);
 
+        // The interfaces the launch named, resolved against the account: the subnet each one
+        // sits in and, for an entry that names an interface by id, the interface of the
+        // account it attaches. Resolved HERE, before the launch reads its own subnet,
+        // because the PRIMARY interface is where a launch that names its interfaces names
+        // the subnet the instance runs in, the groups applied to it and its primary private
+        // address — so those are read into the launch's own members and everything below
+        // takes exactly the path a launch that spelled them out takes.
+        let planned_interfaces = plan_launch_interfaces(
+            &store,
+            &interface_requests,
+            input.subnet_id.as_deref(),
+            &availability_zone,
+        )?;
+        if let Some(primary) = planned_interfaces
+            .iter()
+            .find(|interface| interface.request.device_index == PRIMARY_NETWORK_INTERFACE_DEVICE_INDEX)
+        {
+            input.subnet_id = Some(primary.subnet_id.clone());
+            if input.security_group_ids.as_ref().is_none_or(Vec::is_empty) {
+                input.security_group_ids = Some(primary.request.group_ids.clone());
+            }
+        }
+
         // The parameter an `ImageId` of the `resolve:ssm:` form names, resolved: "the Systems
         // Manager parameter will resolve to an AMI ID on launch". The mapping is the image
         // catalogue's own ([`crate::state::ComAmazonawsEc2Amazonec2State::public_ssm_parameter_image_ids`]),
@@ -671,6 +741,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .unwrap_or(availability_zone)
         };
 
+        // Every interface an instance holds sits in the instance's own Availability Zone:
+        // "you can attach a network interface to an instance in the same Availability Zone"
+        // (the EC2 User Guide's "Elastic network interfaces"), and an interface lives in one
+        // subnet's zone. Asked once the launch's zone is settled, so a launch whose
+        // interfaces are spread across zones is refused rather than answered with an
+        // instance holding an interface it could not reach.
+        refuse_interfaces_outside_zone(&planned_interfaces, &availability_zone)?;
+
         // Idempotency: one ClientToken names the one reservation it minted. Looked up
         // here, answered below the DryRun check, because a replay stores nothing and
         // so passes the ceilings a fresh launch has to clear.
@@ -695,6 +773,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 &availability_zone,
             ));
         }
+        // How many interfaces an instance may hold is a fact of its instance type, so a
+        // launch that names more than its type can hold is refused before anything is
+        // stored.
+        refuse_too_many_interfaces(&planned_interfaces, &instance_type)?;
         let monitoring_state = if input
             .monitoring
             .as_ref()
@@ -780,10 +862,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // "The tags to apply to the resources that are created during instance launch"
         // (`TagSpecifications`): each specification tags the resources of ITS OWN type, so
         // the instance carries the `instance` entries and nothing else. A specification for
-        // one of the other documented types names a resource this launch does not mint
-        // (this slice stores no volume, network interface or Spot Instance request for a
-        // launch), so its tags are carried by no resource here — they must not land on the
-        // instance, which would report a tag the caller set on something else.
+        // one of the other documented types names a resource this launch does not tag (the
+        // volume and the network interfaces a launch creates are tagged by nothing here, and
+        // this slice stores no Spot Instance request for a launch), so its tags are carried
+        // by no resource here — they must not land on the instance, which would report a tag
+        // the caller set on something else.
         let mut tags = ::std::collections::BTreeMap::new();
         for specification in input.tag_specifications.iter().flatten() {
             if specification.resource_type.as_deref() != Some("instance") {
@@ -830,6 +913,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .map(|(group_id, group_name)| {
                     group_id.as_ref().map_or(0, String::len)
                         + group_name.as_ref().map_or(0, String::len)
+                })
+                .sum::<usize>()
+            // Each interface the launch creates for the instance is a stored record of its own,
+            // charged what the interface store will charge for it ([`crate::state::network_interface_spec_bytes`]'s
+            // three members, of which a launch names the description and the addresses)
+            // beside the per-record overhead — so the batch ceiling below covers every record
+            // this launch stores rather than only the instances.
+            + planned_interfaces
+                .iter()
+                .filter(|interface| interface.request.network_interface_id.is_none())
+                .map(|interface| {
+                    interface
+                        .request
+                        .description
+                        .len()
+                        .saturating_add(
+                            interface
+                                .request
+                                .addresses
+                                .named
+                                .iter()
+                                .map(String::len)
+                                .sum::<usize>(),
+                        )
+                        .saturating_add(STORED_RECORD_OVERHEAD_BYTES)
                 })
                 .sum::<usize>();
         let batch_bytes = per_instance_bytes.saturating_mul(requested);
@@ -879,6 +987,38 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     return Err(Scaffolded::invalid_ip_address_in_use(address));
                 }
             }
+            // The same of every address an interface of the launch names for itself: it is
+            // the same pool, so an address another resource of the account holds cannot be
+            // given to an interface either. Asked here, read-only, so a launch that could
+            // not be given its addresses is refused before the first write — and asked only
+            // of the interfaces the launch CREATES, since an existing one it attaches holds
+            // its own addresses already.
+            for interface in &planned_interfaces {
+                if interface.request.network_interface_id.is_some() {
+                    continue;
+                }
+                for address in &interface.request.addresses.named {
+                    if store.private_ip_in_use(address) {
+                        return Err(Scaffolded::invalid_ip_address_in_use(address));
+                    }
+                }
+            }
+            // Every interface of every instance the launch mints is a record of the
+            // interface store, so that store's own ceiling bounds an interface-named launch
+            // the way the instance store's bounds every launch.
+            let interfaces_to_create = planned_interfaces
+                .iter()
+                .filter(|interface| interface.request.network_interface_id.is_none())
+                .count()
+                .saturating_mul(requested);
+            if store
+                .network_interfaces
+                .len()
+                .saturating_add(interfaces_to_create)
+                > MAX_NETWORK_INTERFACES
+            {
+                return Err(crate::state::network_interface_limit_exceeded());
+            }
         }
 
         // DryRun sits AFTER every parameter has been validated and every read-only
@@ -905,6 +1045,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 }),
             &security_groups,
         )?;
+        // The same two rules for every OTHER interface of the launch, each read against its
+        // own subnet: one reading of "may these groups be applied in this subnet" for every
+        // interface of the instance, rather than one rule for the primary interface and
+        // another for the rest.
+        for interface in &planned_interfaces {
+            if interface.request.device_index == PRIMARY_NETWORK_INTERFACE_DEVICE_INDEX
+                || interface.request.network_interface_id.is_some()
+            {
+                continue;
+            }
+            let named: Vec<(Option<String>, Option<String>)> = interface
+                .request
+                .group_ids
+                .iter()
+                .map(|group_id| (Some(group_id.clone()), None))
+                .collect();
+            refuse_incompatible_security_groups(
+                &store,
+                Some((interface.subnet_id.clone(), interface.vpc_id.clone())),
+                &named,
+            )?;
+        }
 
         if let Some(reservation_id) = replayed {
             return store.whole_reservation_view(&reservation_id).ok_or_else(|| {
@@ -929,31 +1091,61 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let subnet_cidr_block = store
             .launch_subnet(input.subnet_id.as_deref(), &availability_zone)
             .and_then(|subnet| subnet.cidr_block.clone());
+        // The interfaces of each instance the launch mints, with their addresses taken — for
+        // a launch that named its interfaces. The primary interface of each set carries that
+        // instance's own primary private address, so the two lists below are one resolution
+        // rather than two: `addresses[i]` is the primary address of `launched_interfaces[i]`.
         let mut addresses: Vec<String> = Vec::new();
-        let mut exhausted = false;
-        for _ in 0..input.max_count {
-            match input.private_ip_address.clone() {
-                Some(address) => addresses.push(address),
-                None => {
-                    let chosen = match subnet_cidr_block.as_deref() {
-                        Some(cidr_block) => store.mint_private_ip_in_cidr(cidr_block),
-                        None => store.allocate_private_ip(),
-                    };
-                    match chosen {
-                        Some(address) => addresses.push(address),
-                        None => {
-                            exhausted = true;
-                            break;
+        let mut launched_interfaces: Vec<Vec<LaunchedInterface>> = Vec::new();
+        if !planned_interfaces.is_empty() {
+            for _ in 0..input.max_count {
+                let interfaces = match take_launch_interfaces(&mut store, &planned_interfaces) {
+                    Ok(interfaces) => interfaces,
+                    Err(refusal) => {
+                        release_taken_interfaces(&mut store, &launched_interfaces);
+                        return Err(refusal);
+                    }
+                };
+                let primary = interfaces
+                    .iter()
+                    .find(|interface| {
+                        interface.device_index == PRIMARY_NETWORK_INTERFACE_DEVICE_INDEX
+                    })
+                    .and_then(|interface| interface.private_ip_addresses.first().cloned());
+                match primary {
+                    Some(private_ip) => addresses.push(private_ip),
+                    None => {
+                        release_taken_interfaces(&mut store, &launched_interfaces);
+                        release_taken_interfaces(&mut store, &[interfaces]);
+                        return Err(Scaffolded::insufficient_free_addresses());
+                    }
+                }
+                launched_interfaces.push(interfaces);
+            }
+        } else {
+            let mut exhausted = false;
+            for _ in 0..input.max_count {
+                match input.private_ip_address.clone() {
+                    Some(address) => addresses.push(address),
+                    None => {
+                        let chosen = match subnet_cidr_block.as_deref() {
+                            Some(cidr_block) => store.mint_private_ip_in_cidr(cidr_block),
+                            None => store.allocate_private_ip(),
+                        };
+                        match chosen {
+                            Some(address) => addresses.push(address),
+                            None => {
+                                exhausted = true;
+                                break;
+                            }
                         }
                     }
                 }
             }
-        }
-        if exhausted {
-            for address in &addresses {
-                store.release_private_ip(address);
+            if exhausted {
+                store.release_private_ips(&addresses);
+                return Err(Scaffolded::insufficient_free_addresses());
             }
-            return Err(Scaffolded::insufficient_free_addresses());
         }
 
         let reservation_id = store.mint_reservation_id();
@@ -970,7 +1162,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let (image_kernel_id, image_ramdisk_id) = store.image_kernel_and_ramdisk(Some(&image_id));
         for (launch_index, private_ip) in addresses.into_iter().enumerate() {
             let instance_id = store.mint_instance_id();
-            store.insert_instance(InstanceRecord {
+            // The interfaces THIS instance is given: the ones its launch named, with the
+            // addresses already taken for it, or none for a launch that named none — which
+            // gets the single primary interface the store creates for such a launch.
+            let interfaces = launched_interfaces.get(launch_index).cloned().unwrap_or_default();
+            let stored_all_interfaces = store.insert_launched_instance(
+                InstanceRecord {
                 instance_id: instance_id.clone(),
                 reservation_id: reservation_id.clone(),
                 image_id: Some(image_id.clone()),
@@ -980,8 +1177,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 security_groups: security_groups.clone(),
                 private_dns_name: private_dns_name(&private_ip, &region),
                 private_ip,
-                // A public address comes from a default-VPC subnet or an Elastic
-                // IP, neither of which is modelled yet.
+                // A public address comes from an Elastic IP, or from the Amazon pool when the
+                // launch asked its primary interface for one — assigned with that interface,
+                // below, so the instance and the interface report one address.
                 public_ip: None,
                 state: InstanceStateName::Pending,
                 pending_transition: Some(PendingTransition::starting_now(
@@ -1033,7 +1231,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // An on-demand launch fulfills no Spot Instance request, so the instance
                 // carries neither a request id nor the `spot` lifecycle.
                 spot_instance_request_id: None,
-            });
+                },
+                &interfaces,
+            );
+            // The interface store had room for every interface of this launch when the
+            // ceilings above were asked, under the one lock this handler holds; a store that
+            // answers otherwise has not stored what this launch would report, and says so
+            // rather than reporting an instance holding interfaces nothing holds.
+            if !stored_all_interfaces {
+                return Err(crate::state::network_interface_limit_exceeded());
+            }
             // The profile the launch named is recorded over the instance as an association
             // of its own, in the non-terminal `associating` state the clock then moves to
             // `associated` — so a caller that reads straight after the launch still sees
@@ -1117,6 +1324,13 @@ fn launch_overlaid_with_template(
     }
 
     let mut merged = request;
+    // The three facts a request names BOTH on its own members and (for a template-driven
+    // launch) on the template's primary interface, captured before the overlay rewrites
+    // either: the request's own win, which is what the overlay applies to that interface
+    // below.
+    let request_subnet_id = merged.subnet_id.clone();
+    let request_private_ip_address = merged.private_ip_address.clone();
+    let request_security_group_ids = merged.security_group_ids.clone();
     merged.image_id = merged.image_id.or_else(|| data.image_id.clone());
     merged.instance_type = merged.instance_type.or_else(|| data.instance_type.clone());
     merged.key_name = merged.key_name.or_else(|| data.key_name.clone());
@@ -1276,20 +1490,89 @@ fn launch_overlaid_with_template(
     }
 
     // "The network interfaces for the instance" (`RequestLaunchTemplateData$NetworkInterfaces`)
-    // is how a template names the subnet, the groups and the primary address of the instance
-    // it launches, so it is read into the launch's own members rather than refused outright.
+    // is how a template names the interfaces of the instance it launches — the same facts a
+    // request names on its own `NetworkInterfaces` — so they are read into THAT member and a
+    // template-driven launch takes exactly the path a spelled-out one takes. The request's own
+    // interfaces win, as everywhere else in the overlay.
     if merged
         .network_interfaces
         .as_ref()
         .is_none_or(Vec::is_empty)
-        && merged
-            .secondary_interfaces
-            .as_ref()
-            .is_none_or(Vec::is_empty)
     {
-        template_primary_interface(data, &mut merged)?;
+        merged.network_interfaces = data.network_interfaces.as_ref().map(|interfaces| {
+            let mut converted: Vec<InstanceNetworkInterfaceSpecification> =
+                interfaces.iter().map(template_interface).collect();
+            // "Any additional parameters that you specify for the new instance overwrite the
+            // corresponding parameters included in the launch template": the subnet, the
+            // security groups and the primary private address a REQUEST names are the same
+            // three facts the template names ON its primary interface, so the request's own
+            // overwrite them there — which is where this launch expresses them.
+            if let Some(primary) = converted
+                .iter_mut()
+                .find(|interface| interface.device_index.unwrap_or(0) == 0)
+            {
+                if request_subnet_id.is_some() {
+                    primary.subnet_id = request_subnet_id.clone();
+                }
+                if request_private_ip_address.is_some() {
+                    primary.private_ip_address = request_private_ip_address.clone();
+                }
+                if request_security_group_ids
+                    .as_ref()
+                    .is_some_and(|groups| !groups.is_empty())
+                {
+                    primary.groups = request_security_group_ids.clone();
+                }
+            }
+            converted
+        });
     }
     Ok(merged)
+}
+
+/// One `NetworkInterfaces` entry of a launch template version, as the same entry of a launch.
+///
+/// Member by member rather than a conversion written once, for the reason
+/// [`template_placement`] is: the two shapes differ only in the name of the shape and in how
+/// each spells an IPv6 address, so nothing a template says about an interface is dropped on
+/// the way into the launch, and a member added to either shape later shows up here as a
+/// compile error rather than as a silently dropped setting.
+fn template_interface(
+    interface: &LaunchTemplateInstanceNetworkInterfaceSpecificationRequest,
+) -> InstanceNetworkInterfaceSpecification {
+    InstanceNetworkInterfaceSpecification {
+        associate_public_ip_address: interface.associate_public_ip_address,
+        delete_on_termination: interface.delete_on_termination,
+        description: interface.description.clone(),
+        device_index: interface.device_index,
+        groups: interface.groups.clone(),
+        ipv6_address_count: interface.ipv6_address_count,
+        ipv6_addresses: interface.ipv6_addresses.as_ref().map(|addresses| {
+            addresses
+                .iter()
+                .map(|address| InstanceIpv6Address {
+                    ipv6_address: address.ipv6_address.clone(),
+                    is_primary_ipv6: None,
+                })
+                .collect()
+        }),
+        network_interface_id: interface.network_interface_id.clone(),
+        private_ip_address: interface.private_ip_address.clone(),
+        private_ip_addresses: interface.private_ip_addresses.clone(),
+        secondary_private_ip_address_count: interface.secondary_private_ip_address_count,
+        subnet_id: interface.subnet_id.clone(),
+        associate_carrier_ip_address: interface.associate_carrier_ip_address,
+        interface_type: interface.interface_type.clone(),
+        network_card_index: interface.network_card_index,
+        ipv4_prefixes: interface.ipv4_prefixes.clone(),
+        ipv4_prefix_count: interface.ipv4_prefix_count,
+        ipv6_prefixes: interface.ipv6_prefixes.clone(),
+        ipv6_prefix_count: interface.ipv6_prefix_count,
+        primary_ipv6: interface.primary_ipv6,
+        ena_srd_specification: interface.ena_srd_specification.clone(),
+        connection_tracking_specification: interface.connection_tracking_specification.clone(),
+        ena_queue_count: interface.ena_queue_count,
+    }
 }
 
 /// The `Placement` a launch template version's placement describes.
@@ -1312,90 +1595,6 @@ fn template_placement(placement: &LaunchTemplatePlacementRequest) -> Placement {
         spread_domain: placement.spread_domain.clone(),
         host_resource_group_arn: placement.host_resource_group_arn.clone(),
     }
-}
-
-/// Read the launch template version's PRIMARY network interface into the launch's own members:
-/// the subnet it sits in, the groups applied to it and its primary private address.
-///
-/// "All instances have a network interface with a primary private IPv4 address"
-/// (`RunInstances`), and that interface is what a template's `NetworkInterfaces` with device
-/// index 0 describes — the same facts the launch carries as `SubnetId`, `SecurityGroupIds` and
-/// `PrivateIpAddress`, which is why they are read into those members and then take exactly the
-/// path a spelled-out launch takes. A member the request itself carried wins, as everywhere
-/// else in the overlay.
-///
-/// Everything BEYOND that primary interface is refused rather than accepted and dropped, for
-/// the reason the request's own interface specification is: a second interface, an existing
-/// interface attached by id, extra private addresses or prefixes, and an IPv6 address or
-/// count, are all resources or facts this slice does not model, so an instance it minted could
-/// not report them. A template naming one is answered the same way a request naming one is.
-fn template_primary_interface(
-    data: &RequestLaunchTemplateData,
-    merged: &mut RunInstancesInput,
-) -> Result<(), RunInstancesError> {
-    use crate::scaffolded::Scaffolded;
-
-    let interfaces = data.network_interfaces.as_deref().unwrap_or_default();
-    let unmodelled = || {
-        Scaffolded::not_implemented("RunInstances with a network interface specification")
-    };
-    if interfaces.len() > 1
-        || data
-            .secondary_interfaces
-            .as_ref()
-            .is_some_and(|secondary| !secondary.is_empty())
-    {
-        return Err(unmodelled());
-    }
-    let Some(interface) = interfaces.first() else {
-        return Ok(());
-    };
-    if interface.device_index.unwrap_or(0) != 0
-        || interface.network_interface_id.is_some()
-        || interface
-            .private_ip_addresses
-            .as_ref()
-            .is_some_and(|addresses| !addresses.is_empty())
-        || interface
-            .secondary_private_ip_address_count
-            .is_some_and(|count| count > 0)
-        || interface
-            .ipv4_prefixes
-            .as_ref()
-            .is_some_and(|prefixes| !prefixes.is_empty())
-        || interface.ipv4_prefix_count.is_some_and(|count| count > 0)
-        || interface
-            .ipv6_prefixes
-            .as_ref()
-            .is_some_and(|prefixes| !prefixes.is_empty())
-        || interface.ipv6_prefix_count.is_some_and(|count| count > 0)
-    {
-        return Err(unmodelled());
-    }
-    // An IPv6 address comes from the subnet's IPv6 range, which this slice does not model, so
-    // a template that asks for one is answered exactly as a request that asks for one is.
-    merged.ipv6_address_count = merged.ipv6_address_count.or(interface.ipv6_address_count);
-    if merged.ipv6_addresses.as_ref().is_none_or(Vec::is_empty) {
-        merged.ipv6_addresses = interface.ipv6_addresses.as_ref().map(|addresses| {
-            addresses
-                .iter()
-                .map(|address| InstanceIpv6Address {
-                    ipv6_address: address.ipv6_address.clone(),
-                    is_primary_ipv6: None,
-                })
-                .collect()
-        });
-    }
-    if merged.subnet_id.is_none() {
-        merged.subnet_id = interface.subnet_id.clone();
-    }
-    if merged.private_ip_address.is_none() {
-        merged.private_ip_address = interface.private_ip_address.clone();
-    }
-    if merged.security_group_ids.as_ref().is_none_or(Vec::is_empty) {
-        merged.security_group_ids = interface.groups.clone();
-    }
-    Ok(())
 }
 
 /// Refuse a launch whose security groups cannot be applied in the subnet it is placed in.
@@ -1475,4 +1674,641 @@ fn refuse_incompatible_security_groups(
         }
     }
     Ok(())
+}
+
+/// The types a launch may ask one of its network interfaces for.
+///
+/// "Valid values: `interface` | `efa` | `efa-only`"
+/// (`InstanceNetworkInterfaceSpecification$InterfaceType`) — a member the model targets at a
+/// plain string rather than at an enum, so the boundary validator refuses nothing for it and
+/// this is where a launch is held to the catalog that member's documentation publishes.
+const LAUNCH_INTERFACE_TYPES: &[&str] = &[
+    crate::state::NETWORK_INTERFACE_TYPE_INTERFACE,
+    LAUNCH_INTERFACE_TYPE_EFA,
+    crate::state::NETWORK_INTERFACE_TYPE_EFA_ONLY,
+];
+
+/// The Elastic Fabric Adapter member of [`LAUNCH_INTERFACE_TYPES`], which no other path of
+/// this crate names.
+const LAUNCH_INTERFACE_TYPE_EFA: &str = "efa";
+
+/// The most interfaces a launch may name when this service derives no interface limit for its
+/// instance type: the largest number any type holds — "15 of 50 from the `16xlarge` up", the
+/// top row of the published "IP addresses per network interface per instance type" table
+/// ([`crate::state::network_interface_limit`] is the per-type reading of it).
+///
+/// `InstanceNetworkInterfaceSpecificationList` carries no modelled `@length`, so the list a
+/// caller may send is unbounded and this is the ceiling that bounds it.
+const MAX_LAUNCH_INTERFACES: usize = 15;
+
+/// What ONE entry of a launch's `NetworkInterfaces` asks for, read off the request alone.
+///
+/// Everything here is decided without the store, so a launch is refused for what it ASKED
+/// before any record of the account is read: the device index and network card it attaches
+/// at, whether it names an existing interface, the subnet and groups it names, its type and
+/// description, the addresses it asks for ([`crate::state::requested_private_ips`], the one
+/// reading of those members this crate has) and the options the attachment carries.
+#[derive(Debug, Clone, Default)]
+struct InterfaceRequest {
+    device_index: i32,
+    network_card_index: i32,
+    network_interface_id: Option<String>,
+    subnet_id: Option<String>,
+    group_ids: Vec<String>,
+    description: String,
+    interface_type: String,
+    delete_on_termination: bool,
+    associate_public_ip_address: bool,
+    addresses: crate::state::RequestedPrivateIps,
+    /// Whether the entry asked for an IPv6 address at all — a range this slice does not
+    /// model, answered where the launch's own IPv6 members are.
+    ipv6: bool,
+    ena_srd_specification: Option<AttachmentEnaSrdSpecification>,
+    ena_queue_count: Option<i32>,
+}
+
+/// One [`InterfaceRequest`] once the account's own records have been read: the subnet the
+/// interface sits in and that subnet's VPC, zone and address range.
+#[derive(Debug, Clone)]
+struct PlannedInterface {
+    request: InterfaceRequest,
+    subnet_id: String,
+    vpc_id: String,
+    availability_zone: String,
+    availability_zone_id: String,
+    cidr_block: String,
+}
+
+/// Read a launch's `NetworkInterfaces` into what each entry asks for, refusing what the
+/// entries themselves rule out. Empty in, empty out: a launch that names no interface gets
+/// the single primary one the store creates for it.
+///
+/// `max_count` is the launch's own, because two members of an entry can serve exactly ONE
+/// instance: a private address it names, and an existing interface it attaches. `instance_type`
+/// is the launch's, because how many interfaces an instance may hold is a fact of its type.
+fn read_interface_specifications(
+    interfaces: &[InstanceNetworkInterfaceSpecification],
+    max_count: i32,
+    instance_type: &str,
+) -> Result<Vec<InterfaceRequest>, RunInstancesError> {
+    use crate::scaffolded::Scaffolded;
+
+    if interfaces.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The list a caller may send carries no modelled length, so it is bounded HERE, before any
+    // work proportional to its length — reading each entry, and the scan for a device index
+    // another entry already took — is done. The ceiling is the number of interfaces the
+    // instance type can hold, read off the one derivation of a type's facts.
+    let held_at_most = crate::state::network_interface_limit(instance_type)
+        .and_then(|limit| usize::try_from(limit).ok())
+        .unwrap_or(MAX_LAUNCH_INTERFACES);
+    if interfaces.len() > held_at_most {
+        return Err(crate::state::attachment_limit_exceeded(format!(
+            "Interface count {} exceeds the limit for {instance_type}",
+            interfaces.len()
+        )));
+    }
+    let mut requests: Vec<InterfaceRequest> = Vec::with_capacity(interfaces.len());
+    for interface in interfaces {
+        // Members naming state this slice holds nothing of. Each CONTRADICTS what the
+        // interface would otherwise report — a delegated prefix comes out of the subnet's
+        // prefixes, an IPv6 GUA address out of its IPv6 range, a carrier IP address out of a
+        // Wavelength zone's carrier network, and a connection tracking configuration is a
+        // setting of its own — so a launch that asks for one is refused as unwritten rather
+        // than answered with an interface that silently lacks it.
+        if interface
+            .ipv4_prefixes
+            .as_ref()
+            .is_some_and(|prefixes| !prefixes.is_empty())
+            || interface.ipv4_prefix_count.is_some_and(|count| count > 0)
+            || interface
+                .ipv6_prefixes
+                .as_ref()
+                .is_some_and(|prefixes| !prefixes.is_empty())
+            || interface.ipv6_prefix_count.is_some_and(|count| count > 0)
+        {
+            return Err(Scaffolded::not_implemented(
+                "RunInstances with a delegated prefix on a network interface",
+            ));
+        }
+        if interface.primary_ipv6 == Some(true) {
+            return Err(Scaffolded::not_implemented(
+                "RunInstances with a primary IPv6 address",
+            ));
+        }
+        if interface.associate_carrier_ip_address == Some(true) {
+            return Err(Scaffolded::not_implemented(
+                "RunInstances with a carrier IP address",
+            ));
+        }
+        if interface.connection_tracking_specification.is_some() {
+            return Err(Scaffolded::not_implemented(
+                "RunInstances with a connection tracking specification on a network interface",
+            ));
+        }
+
+        // "The position of the network interface in the attachment order. A primary network
+        // interface has a device index of 0" (`DeviceIndex`), which is the position an entry
+        // that names none takes. A position cannot be below zero, and two interfaces cannot
+        // share one: an index is how a client finds one interface of an instance among the
+        // rest.
+        let device_index = interface
+            .device_index
+            .unwrap_or(crate::state::PRIMARY_NETWORK_INTERFACE_DEVICE_INDEX);
+        if device_index < 0 {
+            return Err(crate::state::invalid_parameter_value(format!(
+                "Value ({device_index}) for parameter deviceIndex is invalid. A device index \
+                 is zero or above"
+            )));
+        }
+        if requests
+            .iter()
+            .any(|earlier| earlier.device_index == device_index)
+        {
+            return Err(crate::state::invalid_parameter_value(format!(
+                "Value ({device_index}) for parameter deviceIndex is invalid. Each network \
+                 interface must be attached at a device index of its own"
+            )));
+        }
+        // "The default is network card index 0" (`NetworkCardIndex`).
+        let network_card_index = interface.network_card_index.unwrap_or(0);
+        if network_card_index < 0 {
+            return Err(crate::state::invalid_parameter_value(format!(
+                "Value ({network_card_index}) for parameter networkCardIndex is invalid. A \
+                 network card index is zero or above"
+            )));
+        }
+        // "The type of network interface" (`InterfaceType`), which defaults to the plain
+        // interface every other path of this crate creates.
+        let interface_type = interface
+            .interface_type
+            .clone()
+            .filter(|interface_type| !interface_type.is_empty())
+            .unwrap_or_else(|| crate::state::NETWORK_INTERFACE_TYPE_INTERFACE.to_string());
+        if !LAUNCH_INTERFACE_TYPES.contains(&interface_type.as_str()) {
+            return Err(crate::state::invalid_parameter_value(format!(
+                "Value ({interface_type}) for parameter interfaceType is invalid. Valid \
+                 values are {}",
+                LAUNCH_INTERFACE_TYPES.join(" | ")
+            )));
+        }
+        // "The IDs of the security groups for the network interface" (`Groups`), held to the
+        // number AWS documents per interface — the same ceiling a create of one is held to.
+        let group_ids = crate::state::deduplicate_ids(interface.groups.as_deref().unwrap_or_default());
+        if group_ids.len() > crate::state::MAX_SECURITY_GROUPS_PER_INSTANCE {
+            return Err(crate::state::invalid_parameter_value(format!(
+                "The request names {} security groups, above the maximum of {max} per \
+                 network interface",
+                group_ids.len(),
+                max = crate::state::MAX_SECURITY_GROUPS_PER_INSTANCE,
+            )));
+        }
+        let existing = interface
+            .network_interface_id
+            .clone()
+            .filter(|network_interface_id| !network_interface_id.is_empty());
+        let addresses = crate::state::requested_private_ips(
+            interface.private_ip_address.as_deref(),
+            interface.private_ip_addresses.as_deref().unwrap_or_default(),
+            interface.secondary_private_ip_address_count.unwrap_or(0),
+            interface_type == crate::state::NETWORK_INTERFACE_TYPE_EFA_ONLY,
+        )?;
+        // An address is a value from the subnet's IPv4 range, so a value that is not an IPv4
+        // address at all names nothing to assign — the same reading the launch's own
+        // `PrivateIpAddress` gets.
+        for address in &addresses.named {
+            if address.parse::<::std::net::Ipv4Addr>().is_err() {
+                return Err(Scaffolded::invalid_parameter_value(format!(
+                    "Invalid value '{address}' for privateIpAddress. \
+                     It must be an IPv4 address"
+                )));
+            }
+        }
+        // One address and one interface can be held by ONE instance, so a launch of several
+        // that names either is refused the way a launch naming its own private address is.
+        if max_count > 1 && !addresses.named.is_empty() {
+            return Err(Scaffolded::invalid_parameter_combination(
+                "PrivateIpAddress cannot be specified when launching more than one instance",
+            ));
+        }
+        if max_count > 1 && existing.is_some() {
+            return Err(Scaffolded::invalid_parameter_combination(
+                "A network interface ID cannot be specified when launching more than one \
+                 instance",
+            ));
+        }
+        // "If set to true, the interface is deleted when the instance is terminated. You can
+        // specify true only if creating a new network interface when launching an instance"
+        // (`DeleteOnTermination`) — and an interface a launch creates goes with its instance
+        // unless the launch says otherwise, where one the launch merely attaches outlives it
+        // ("if you attach a network interface to an existing instance, the
+        // DeleteOnTermination attribute is set to false by default").
+        let delete_on_termination = if existing.is_some() {
+            if interface.delete_on_termination == Some(true) {
+                return Err(Scaffolded::invalid_parameter_combination(
+                    "DeleteOnTermination can be specified as true only for a network \
+                     interface the launch creates",
+                ));
+            }
+            false
+        } else {
+            interface.delete_on_termination.unwrap_or(true)
+        };
+        // "The public IP address can only be assigned to a network interface for eth0, and
+        // can only be assigned to a new network interface, not an existing one. You cannot
+        // specify more than one network interface in the request"
+        // (`AssociatePublicIpAddress`).
+        let associate_public_ip_address = interface.associate_public_ip_address.unwrap_or(false);
+        if associate_public_ip_address {
+            if existing.is_some() {
+                return Err(Scaffolded::invalid_parameter_combination(
+                    "A public IPv4 address can be assigned only to a network interface the \
+                     launch creates",
+                ));
+            }
+            if device_index != crate::state::PRIMARY_NETWORK_INTERFACE_DEVICE_INDEX {
+                return Err(Scaffolded::invalid_parameter_combination(
+                    "A public IPv4 address can be assigned only to the network interface for \
+                     eth0",
+                ));
+            }
+            if interfaces.len() > 1 {
+                return Err(Scaffolded::invalid_parameter_combination(
+                    "A public IPv4 address cannot be assigned when the request specifies \
+                     more than one network interface",
+                ));
+            }
+        }
+        requests.push(InterfaceRequest {
+            device_index,
+            network_card_index,
+            network_interface_id: existing,
+            subnet_id: interface.subnet_id.clone(),
+            group_ids,
+            // AWS reports an empty description for an interface nothing described.
+            description: interface.description.clone().unwrap_or_default(),
+            interface_type,
+            delete_on_termination,
+            associate_public_ip_address,
+            addresses,
+            ipv6: interface
+                .ipv6_addresses
+                .as_ref()
+                .is_some_and(|addresses| !addresses.is_empty())
+                || interface.ipv6_address_count.is_some_and(|count| count > 0),
+            // "Specifies the ENA Express settings for the network interface that's attached
+            // to the instance" (`EnaSrdSpecification`): the request's shape and the one the
+            // attachment reports carry the same settings, so what the launch asked for
+            // round-trips through `DescribeNetworkInterfaces` rather than being dropped.
+            ena_srd_specification: interface.ena_srd_specification.as_ref().map(|asked| {
+                AttachmentEnaSrdSpecification {
+                    ena_srd_enabled: asked.ena_srd_enabled,
+                    ena_srd_udp_specification: asked.ena_srd_udp_specification.as_ref().map(
+                        |udp| AttachmentEnaSrdUdpSpecification {
+                            ena_srd_udp_enabled: udp.ena_srd_udp_enabled,
+                        },
+                    ),
+                }
+            }),
+            ena_queue_count: interface.ena_queue_count,
+        });
+    }
+    // "All instances have a network interface with a primary private IPv4 address"
+    // (`RunInstances`), attached at device index 0 — so a launch that names its interfaces
+    // names that one: without it there is no interface to take the instance's own subnet,
+    // groups and primary address from.
+    if !requests
+        .iter()
+        .any(|request| request.device_index == crate::state::PRIMARY_NETWORK_INTERFACE_DEVICE_INDEX)
+    {
+        return Err(Scaffolded::invalid_parameter_combination(
+            "A launch that specifies network interfaces must specify the primary network \
+             interface at device index 0",
+        ));
+    }
+    // In attachment order, which is what a device index is: the instance's interfaces are
+    // then created in that order whatever order the request listed them in.
+    requests.sort_by_key(|request| request.device_index);
+    Ok(requests)
+}
+
+/// Refuse a request that names the same fact on its own members and on its interfaces.
+///
+/// "If you specify a network interface, you must specify any subnets / security groups as
+/// part of the network interface instead of using this parameter"
+/// (`RunInstancesRequest$SubnetId`, `$SecurityGroupIds`, `$SecurityGroups`), and "you can't
+/// specify this option if you've specified the option to designate a private IP address as
+/// the primary IP address in a network interface specification" (`$PrivateIpAddress`).
+fn refuse_interface_and_instance_level_members(
+    input: &RunInstancesInput,
+) -> Result<(), RunInstancesError> {
+    use crate::scaffolded::Scaffolded;
+
+    if input.subnet_id.is_some() {
+        return Err(Scaffolded::invalid_parameter_combination(
+            "Network interfaces and an instance-level subnet ID may not be specified on the \
+             same request",
+        ));
+    }
+    if input
+        .security_group_ids
+        .as_ref()
+        .is_some_and(|groups| !groups.is_empty())
+    {
+        return Err(Scaffolded::invalid_parameter_combination(
+            "Network interfaces and an instance-level security group ID may not be specified \
+             on the same request",
+        ));
+    }
+    if input
+        .security_groups
+        .as_ref()
+        .is_some_and(|groups| !groups.is_empty())
+    {
+        return Err(Scaffolded::invalid_parameter_combination(
+            "Network interfaces and an instance-level security group may not be specified on \
+             the same request",
+        ));
+    }
+    if input.private_ip_address.is_some() {
+        return Err(Scaffolded::invalid_parameter_combination(
+            "Network interfaces and an instance-level private IP address may not be \
+             specified on the same request",
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve each interface the launch named against the account: the subnet it sits in, and
+/// for an entry that names an interface by id, that interface.
+///
+/// `launch_subnet_id` is the launch's own `SubnetId` and `availability_zone` the zone it is
+/// placed in, which together are where an entry that names NO subnet is placed — "if you
+/// don't specify a subnet ID, we choose a default subnet from your default VPC for you"
+/// (`RunInstances`), read through the one resolution of that
+/// ([`crate::state::ComAmazonawsEc2Amazonec2State::launch_subnet`]).
+fn plan_launch_interfaces(
+    store: &crate::state::ComAmazonawsEc2Amazonec2State,
+    requests: &[InterfaceRequest],
+    launch_subnet_id: Option<&str>,
+    availability_zone: &str,
+) -> Result<Vec<PlannedInterface>, RunInstancesError> {
+    use crate::scaffolded::Scaffolded;
+
+    let mut planned: Vec<PlannedInterface> = Vec::with_capacity(requests.len());
+    for request in requests {
+        let subnet_id = match request.network_interface_id.as_deref() {
+            // An interface the account already holds brings its own subnet: it is attached
+            // where it is rather than moved. One something else already holds cannot be
+            // attached to this instance — "the specified interface is currently in use and
+            // cannot be deleted or attached to another instance".
+            Some(existing) => {
+                let Some(interface) = store.network_interfaces.get(existing) else {
+                    return Err(crate::state::invalid_network_interface_id_not_found(
+                        existing,
+                    ));
+                };
+                if store.network_interface_attachment(existing).is_some() {
+                    return Err(crate::state::network_interface_in_use(existing));
+                }
+                interface.subnet_id.clone().unwrap_or_default()
+            }
+            None => match request
+                .subnet_id
+                .as_deref()
+                .filter(|subnet_id| !subnet_id.is_empty())
+            {
+                Some(named) => {
+                    if !store.subnets.contains_key(named) {
+                        return Err(crate::state::invalid_subnet_id_not_found(named));
+                    }
+                    named.to_string()
+                }
+                None => {
+                    let Some(subnet) = store.launch_subnet(launch_subnet_id, availability_zone)
+                    else {
+                        return Err(Scaffolded::missing_parameter(
+                            "The request must contain the parameter subnetId",
+                        ));
+                    };
+                    subnet.subnet_id.clone().unwrap_or_default()
+                }
+            },
+        };
+        let Some(subnet) = store.subnets.get(&subnet_id) else {
+            return Err(crate::state::invalid_subnet_id_not_found(&subnet_id));
+        };
+        planned.push(PlannedInterface {
+            request: request.clone(),
+            subnet_id,
+            vpc_id: subnet.vpc_id.clone().unwrap_or_default(),
+            availability_zone: subnet.availability_zone.clone().unwrap_or_default(),
+            availability_zone_id: subnet.availability_zone_id.clone().unwrap_or_default(),
+            cidr_block: subnet.cidr_block.clone().unwrap_or_default(),
+        });
+    }
+    Ok(planned)
+}
+
+/// Refuse a launch one of whose interfaces sits in another Availability Zone than the
+/// instance.
+///
+/// "You can attach a network interface to an instance in the same Availability Zone" (the EC2
+/// User Guide's "Elastic network interfaces"): an interface lives in one subnet's zone and an
+/// instance runs in one zone, so the two must be the same zone — the refusal names the
+/// parameter the zone came from and both zones, the way the attach of one does.
+fn refuse_interfaces_outside_zone(
+    planned: &[PlannedInterface],
+    availability_zone: &str,
+) -> Result<(), RunInstancesError> {
+    for interface in planned {
+        if interface.availability_zone == availability_zone {
+            continue;
+        }
+        return Err(match interface.request.network_interface_id.as_deref() {
+            Some(existing) => crate::state::invalid_parameter_value(format!(
+                "Value ({existing}) for parameter networkInterfaceId is invalid. The network \
+                 interface is in the Availability Zone {} and the instance is in \
+                 {availability_zone}",
+                interface.availability_zone
+            )),
+            None => crate::state::invalid_parameter_value(format!(
+                "Value ({}) for parameter subnetId is invalid. The subnet is in the \
+                 Availability Zone {} and the instance is in {availability_zone}",
+                interface.subnet_id, interface.availability_zone
+            )),
+        });
+    }
+    Ok(())
+}
+
+/// Refuse a launch that asks for more interfaces than its instance type can hold.
+///
+/// Read off the one derivation of an instance type's facts
+/// ([`crate::state::network_interface_limit`]), so the limit a launch is refused by is the one
+/// `DescribeInstanceTypes` publishes — and a device index is a POSITION, so an interface at
+/// index N gives the instance N+1 interfaces: the count and the highest index are two
+/// readings of the same number and the larger decides, exactly as an attach reads them.
+fn refuse_too_many_interfaces(
+    planned: &[PlannedInterface],
+    instance_type: &str,
+) -> Result<(), RunInstancesError> {
+    let Some(limit) = crate::state::network_interface_limit(instance_type) else {
+        return Ok(());
+    };
+    let highest_index = planned
+        .iter()
+        .map(|interface| interface.request.device_index)
+        .max()
+        .unwrap_or(-1);
+    let count = i32::try_from(planned.len())
+        .unwrap_or(i32::MAX)
+        .max(highest_index.saturating_add(1));
+    if count > limit {
+        return Err(crate::state::attachment_limit_exceeded(format!(
+            "Interface count {count} exceeds the limit for {instance_type}"
+        )));
+    }
+    Ok(())
+}
+
+/// Take the addresses ONE instance's interfaces need and answer the interfaces to store.
+///
+/// Called once per instance the launch mints, so each instance gets interfaces and addresses
+/// of its own. Every address is taken here, BEFORE anything is stored
+/// ([`crate::state::ComAmazonawsEc2Amazonec2State::reserve_private_ip`] for an address the
+/// launch named, [`crate::state::ComAmazonawsEc2Amazonec2State::mint_private_ip_in_cidr`] for
+/// one the service chooses — the one pool every subnet address of this crate comes out of), so
+/// a launch that cannot be given them leaves no half-built instance behind: this call hands
+/// back everything it took before refusing, and the caller hands back what the instances
+/// before it took.
+///
+/// An existing interface keeps the addresses and groups it already holds: it is attached, not
+/// created.
+fn take_launch_interfaces(
+    store: &mut crate::state::ComAmazonawsEc2Amazonec2State,
+    planned: &[PlannedInterface],
+) -> Result<Vec<LaunchedInterface>, RunInstancesError> {
+    use crate::scaffolded::Scaffolded;
+
+    let mut launched: Vec<LaunchedInterface> = Vec::with_capacity(planned.len());
+    let mut taken: Vec<String> = Vec::new();
+    for interface in planned {
+        let mut addresses: Vec<String> = Vec::new();
+        let groups: Vec<GroupIdentifier>;
+        match interface.request.network_interface_id.as_deref() {
+            Some(existing) => {
+                let Some(held) = store.network_interfaces.get(existing) else {
+                    store.release_private_ips(&taken);
+                    return Err(crate::state::invalid_network_interface_id_not_found(
+                        existing,
+                    ));
+                };
+                addresses = held
+                    .private_ip_addresses
+                    .iter()
+                    .flatten()
+                    .filter_map(|address| address.private_ip_address.clone())
+                    .collect();
+                groups = held.groups.clone().unwrap_or_default();
+            }
+            None => {
+                // Each group the launch named for this interface, completed to the id AND the
+                // name a report carries; an interface the launch named none for gets its VPC's
+                // own default group, which is what "Default: Amazon EC2 uses the default
+                // security group" gives it.
+                let mut named_groups: Vec<GroupIdentifier> = interface
+                    .request
+                    .group_ids
+                    .iter()
+                    .map(|group_id| {
+                        store.group_identifier_of(
+                            Some(interface.vpc_id.as_str()),
+                            Some(group_id.as_str()),
+                            None,
+                        )
+                    })
+                    .collect();
+                if named_groups.is_empty() {
+                    named_groups.extend(store.default_security_group_of_vpc(&interface.vpc_id));
+                }
+                groups = named_groups;
+                for address in &interface.request.addresses.named {
+                    // An address the launch named has to be one of the subnet's assignable
+                    // addresses: outside its CIDR block, or one of the five AWS reserves in
+                    // it, there is nothing to assign.
+                    if !crate::state::is_assignable_subnet_address(
+                        &interface.cidr_block,
+                        address,
+                    ) {
+                        store.release_private_ips(&taken);
+                        return Err(crate::state::invalid_parameter_value(format!(
+                            "Value ({address}) for parameter privateIpAddress is invalid. \
+                             Address does not fall within the subnet's assignable address \
+                             range {}",
+                            interface.cidr_block
+                        )));
+                    }
+                    if !store.reserve_private_ip(address) {
+                        store.release_private_ips(&taken);
+                        return Err(Scaffolded::invalid_ip_address_in_use(address));
+                    }
+                    taken.push(address.clone());
+                    addresses.push(address.clone());
+                }
+                while addresses.len() < interface.request.addresses.wanted {
+                    let Some(free) = store.mint_private_ip_in_cidr(&interface.cidr_block) else {
+                        store.release_private_ips(&taken);
+                        return Err(Scaffolded::insufficient_free_addresses());
+                    };
+                    taken.push(free.clone());
+                    addresses.push(free);
+                }
+            }
+        }
+        launched.push(LaunchedInterface {
+            device_index: interface.request.device_index,
+            network_card_index: interface.request.network_card_index,
+            network_interface_id: interface.request.network_interface_id.clone(),
+            subnet_id: interface.subnet_id.clone(),
+            vpc_id: interface.vpc_id.clone(),
+            availability_zone: interface.availability_zone.clone(),
+            availability_zone_id: interface.availability_zone_id.clone(),
+            // The Region the interface's private DNS names are built for is the one its zone
+            // belongs to, read through the ONE reading of that, as the primary interface of a
+            // launch that names none reads it.
+            region: crate::state::region_of_zone_name(&interface.availability_zone).to_string(),
+            description: interface.request.description.clone(),
+            interface_type: interface.request.interface_type.clone(),
+            groups,
+            private_ip_addresses: addresses,
+            delete_on_termination: interface.request.delete_on_termination,
+            associate_public_ip_address: interface.request.associate_public_ip_address,
+            ena_srd_specification: interface.request.ena_srd_specification.clone(),
+            ena_queue_count: interface.request.ena_queue_count,
+        });
+    }
+    Ok(launched)
+}
+
+/// Hand back every private IPv4 address the interfaces of `launched` had taken.
+///
+/// The reverse of [`take_launch_interfaces`]'s taking, for a launch refused after some of its
+/// instances' interfaces were resolved: the addresses go back to the one pool they came out
+/// of, so a refused launch leaves the subnets' addresses exactly as it found them. An
+/// existing interface the launch would have attached is skipped — it holds its addresses
+/// whether or not this launch happened.
+fn release_taken_interfaces(
+    store: &mut crate::state::ComAmazonawsEc2Amazonec2State,
+    launched: &[Vec<LaunchedInterface>],
+) {
+    for interfaces in launched {
+        for interface in interfaces {
+            if interface.network_interface_id.is_some() {
+                continue;
+            }
+            store.release_private_ips(&interface.private_ip_addresses);
+        }
+    }
 }

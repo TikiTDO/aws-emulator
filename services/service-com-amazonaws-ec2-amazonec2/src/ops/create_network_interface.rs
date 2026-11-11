@@ -275,84 +275,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             "CreateNetworkInterface",
         )?;
 
-        // The address members' own documented combination rules, each refused before any
-        // address is resolved so the answer never depends on which one was looked at first.
+        // The address members' own documented combination rules and the addresses they ask
+        // for, read through the ONE reading of those members this crate has
+        // (`crate::state::requested_private_ips`) — the same one each entry of a launch's
+        // `NetworkInterfaces` is read through, so an interface a create stores and one a
+        // launch stores are given their addresses on the same terms. Asked before any
+        // address is resolved, so the answer never depends on which member was looked at
+        // first.
         let specified: &[PrivateIpAddressSpecification] =
             input.private_ip_addresses.as_deref().unwrap_or_default();
         let secondary_count = input.secondary_private_ip_address_count.unwrap_or(0);
-        // `PrivateIpAddresses` carries no `@length`, so the list a caller may send is
-        // unbounded; the per-interface ceiling is enforced HERE, before any work
-        // proportional to the list's size — parsing an address, probing the in-use set — is
-        // done, the way the describe path caps its filter factors up front.
-        if specified.len() > state::MAX_PRIVATE_IPS_PER_NETWORK_INTERFACE {
-            return Err(state::invalid_parameter_value(format!(
-                "The request names {} private IPv4 addresses, above the maximum of {max} \
-                 per network interface",
-                specified.len(),
-                max = state::MAX_PRIVATE_IPS_PER_NETWORK_INTERFACE,
-            )));
-        }
-        if secondary_count < 0 {
-            return Err(state::invalid_parameter_value(format!(
-                "Invalid value '{secondary_count}' for secondaryPrivateIpAddressCount. \
-                 It cannot be negative"
-            )));
-        }
-        if efa_only
-            && (input.private_ip_address.is_some() || !specified.is_empty() || secondary_count > 0)
-        {
-            // "If you specify efa-only, do not assign any IP addresses to the network
-            // interface. EFA-only network interfaces do not support IP addresses"
-            // (`InterfaceType`).
-            return Err(state::invalid_parameter_combination(
-                "An efa-only network interface does not support IP addresses",
-            ));
-        }
-        if secondary_count > 0 && specified.len() > 1 {
-            // "You can't specify this option and specify more than one private IP address
-            // using privateIpAddresses" (`SecondaryPrivateIpAddressCount`).
-            return Err(state::invalid_parameter_combination(
-                "You cannot specify SecondaryPrivateIpAddressCount and more than one \
-                 address in PrivateIpAddresses",
-            ));
-        }
-        if specified
-            .iter()
-            .filter(|address| address.primary.unwrap_or(false))
-            .count()
-            > 1
-        {
-            // "Only one IPv4 address can be designated as primary"
-            // (`PrivateIpAddressSpecification$Primary`).
-            return Err(state::invalid_parameter_value(
-                "Only one IPv4 address can be designated as primary",
-            ));
-        }
-        if input.private_ip_address.is_some()
-            && specified
-                .iter()
-                .any(|address| address.primary.unwrap_or(false))
-        {
-            // "If you specify an IP address, you cannot indicate any IP addresses specified
-            // in privateIpAddresses as primary" (`PrivateIpAddress`).
-            return Err(state::invalid_parameter_combination(
-                "You cannot designate an address in PrivateIpAddresses as primary when \
-                 PrivateIpAddress is specified",
-            ));
-        }
-        // Each entry has to carry the address it specifies: an entry with none names
-        // nothing to assign.
-        for address in specified {
-            if address
-                .private_ip_address
-                .as_deref()
-                .is_none_or(str::is_empty)
-            {
-                return Err(state::missing_parameter(
-                    "Each entry of PrivateIpAddresses must carry a privateIpAddress",
-                ));
-            }
-        }
+        let requested = state::requested_private_ips(
+            input.private_ip_address.as_deref(),
+            specified,
+            secondary_count,
+            efa_only,
+        )?;
 
         let interfaces = state::require_service_state(&*self.engine)?;
         let region = state::request_region(ctx.parts());
@@ -433,39 +371,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // out of, which sees the addresses recorded on a route server endpoint as well as
         // the pool, so no two resources of a subnet can be handed the same address.
         let mut addresses: Vec<String> = Vec::new();
-        let explicit_primary = input.private_ip_address.clone().or_else(|| {
-            specified
-                .iter()
-                .find(|address| address.primary.unwrap_or(false))
-                .and_then(|address| address.private_ip_address.clone())
-        });
-        let mut explicit: Vec<String> = explicit_primary.clone().into_iter().collect();
-        explicit.extend(
-            specified
-                .iter()
-                .filter_map(|address| address.private_ip_address.clone())
-                .filter(|address| explicit_primary.as_deref() != Some(address.as_str())),
-        );
-        // "When you specify a number of secondary IPv4 addresses, Amazon EC2 selects these
-        // IP addresses within the subnet's IPv4 CIDR range"
-        // (`SecondaryPrivateIpAddressCount`): they are additional to the primary address,
-        // which every interface that carries addresses at all has — so an interface asks
-        // for the addresses the request named (at least the primary one) plus that count.
-        let wanted = if efa_only {
-            0
-        } else {
-            explicit
-                .len()
-                .max(1)
-                .saturating_add(usize::try_from(secondary_count).unwrap_or_default())
-        };
-        if wanted > state::MAX_PRIVATE_IPS_PER_NETWORK_INTERFACE {
-            return Err(state::invalid_parameter_value(format!(
-                "The request asks for {wanted} private IPv4 addresses, above the maximum \
-                 of {max} per network interface",
-                max = state::MAX_PRIVATE_IPS_PER_NETWORK_INTERFACE,
-            )));
-        }
+        let explicit = requested.named.clone();
+        let wanted = requested.wanted;
 
         // A token is only idempotent for the REQUEST it was first given with: replayed with
         // different parameters it names an interface the caller did not ask for, which EC2
@@ -525,7 +432,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // addresses: outside its CIDR block, or one of the five AWS reserves in it,
             // there is nothing to assign.
             if !state::is_assignable_subnet_address(&cidr_block, &address) {
-                release_taken(&mut store, &addresses);
+                store.release_private_ips(&addresses);
                 return Err(state::invalid_parameter_value(format!(
                     "Value ({address}) for parameter privateIpAddress is invalid. \
                      Address does not fall within the subnet's assignable address range \
@@ -537,7 +444,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // rather than in the pool — so ONE question decides it for every resource, and
             // a request naming one address twice is refused the second time.
             if !store.reserve_private_ip(&address) {
-                release_taken(&mut store, &addresses);
+                store.release_private_ips(&addresses);
                 return Err(Scaffolded::invalid_ip_address_in_use(&address));
             }
             addresses.push(address);
@@ -550,7 +457,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             let Some(free) = store.mint_private_ip_in_cidr(&cidr_block) else {
                 // "The subnet does not have enough free private IPv4 addresses to satisfy
                 // the request" — EC2's `InsufficientFreeAddressesInSubnet`.
-                release_taken(&mut store, &addresses);
+                store.release_private_ips(&addresses);
                 return Err(Scaffolded::insufficient_free_addresses());
             };
             addresses.push(free);
@@ -592,11 +499,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // refusals hand the addresses back, so a refused create leaves the subnet's
         // addresses exactly as it found them.
         if !store.has_network_interface_capacity() {
-            release_taken(&mut store, &addresses_taken);
+            store.release_private_ips(&addresses_taken);
             return Err(state::network_interface_limit_exceeded());
         }
         if store.would_exceed_stored_bytes(payload_bytes) {
-            release_taken(&mut store, &addresses_taken);
+            store.release_private_ips(&addresses_taken);
             return Err(Scaffolded::tag_limit_exceeded(format!(
                 "This emulator holds {held} of at most {max} bytes of caller-supplied \
                  data, so it cannot store {payload_bytes} more",
@@ -609,7 +516,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // have the required permissions, the error response is DryRunOperation" (`DryRun`).
         // Nothing is stored, and the addresses the selection took go back.
         if input.dry_run.unwrap_or(false) {
-            release_taken(&mut store, &addresses_taken);
+            store.release_private_ips(&addresses_taken);
             return Err(state::dry_run_operation());
         }
 
@@ -618,7 +525,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the same refusal that question earns rather than unwrapped, handing the addresses
         // back the way every refusal above does.
         let Some(network_interface_id) = store.insert_network_interface(spec) else {
-            release_taken(&mut store, &addresses_taken);
+            store.release_private_ips(&addresses_taken);
             return Err(state::network_interface_limit_exceeded());
         };
         if let Some(token) = input.client_token.clone() {
@@ -639,22 +546,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             network_interface: Some(interface),
             client_token: input.client_token.clone(),
         })
-    }
-}
-
-/// Hand back every private IPv4 address this call had already taken.
-///
-/// The selection above TAKES each address as it chooses it (`reserve_private_ip` /
-/// `mint_private_ip_in_cidr`), which is what stops one request handing the same address out
-/// twice; so every refusal after the first take releases them again
-/// ([`crate::state::ComAmazonawsEc2Amazonec2State::release_private_ip`], the reverse of
-/// that take), and a refused create leaves the subnet's addresses exactly as it found them.
-fn release_taken(
-    store: &mut crate::state::ComAmazonawsEc2Amazonec2State,
-    addresses: &[String],
-) {
-    for address in addresses {
-        store.release_private_ip(address);
     }
 }
 

@@ -1775,7 +1775,7 @@ async fn run_instances_refuses_an_unservable_request() {
             code: "InvalidParameterValue",
         },
         Case {
-            label: "a network interface specification, which this slice does not model",
+            label: "a network interface specification naming a subnet of no account",
             params: vec![
                 p("ImageId", AMI),
                 p("MinCount", "1"),
@@ -1783,8 +1783,8 @@ async fn run_instances_refuses_an_unservable_request() {
                 p("NetworkInterface.1.DeviceIndex", "0"),
                 p("NetworkInterface.1.SubnetId", "subnet-0123456789abcdef0"),
             ],
-            status: 501,
-            code: "NotImplemented",
+            status: 400,
+            code: "InvalidSubnetID.NotFound",
         },
         Case {
             label: "IPv6 addresses, which come from a subnet range this slice does not model",

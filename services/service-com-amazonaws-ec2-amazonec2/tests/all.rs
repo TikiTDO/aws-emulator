@@ -52,6 +52,13 @@ mod local_gateways;
 // neighbourhood and the tail of this file are where every new ec2 suite inserts its lines.
 #[path = "all/run_instances_from_launch_template.rs"]
 mod run_instances_from_launch_template;
+// `RunInstances` with a NETWORK INTERFACE SPECIFICATION: the interfaces a launch names are
+// created in the subnets, with the groups, addresses and options they name, or an existing one
+// is attached — and what a launch asks for that an interface cannot be given. Declared beside
+// `prefix_lists` for the reason the note above gives: the sorted neighbourhood and the tail of
+// this file are where every new ec2 suite inserts its lines.
+#[path = "all/run_instances_network_interfaces.rs"]
+mod run_instances_network_interfaces;
 // The SQL Server High Availability REGISTRATIONS the account holds: what an enable writes and
 // a describe reads back, what a disable takes out and reports, and the order both refuse in.
 // Declared beside `prefix_lists` for the reason the note above gives.

@@ -155,7 +155,28 @@ impl ComAmazonawsEc2Amazonec2State {
     /// resources the launch gives it: the EBS root volume
     /// ([`Self::mint_launched_root_volume`]) and the primary network interface
     /// ([`Self::mint_launched_primary_interface`]).
+    ///
+    /// For a launch that NAMED the interfaces of its instance, [`Self::insert_launched_instance`]
+    /// is the same write with those interfaces instead of the single default one; this is that
+    /// call with none, so every launch path stores its instance through one body.
     pub fn insert_instance(&mut self, record: InstanceRecord) {
+        self.insert_launched_instance(record, &[]);
+    }
+
+    /// Store a launched instance together with the interfaces its launch named
+    /// ([`LaunchedInterface`]), and answer whether every one of them was stored.
+    ///
+    /// `interfaces` empty is a launch that named none, which gets the single primary
+    /// interface [`Self::mint_launched_primary_interface`] creates for it; a launch that
+    /// named them gets exactly those, each created or attached at its own device index
+    /// ([`Self::mint_launched_interfaces`]). Either way the instance, its root volume and its
+    /// interfaces are stored by this one body, so no launch path can store an instance
+    /// without the resources that come with it.
+    pub fn insert_launched_instance(
+        &mut self,
+        record: InstanceRecord,
+        interfaces: &[LaunchedInterface],
+    ) -> bool {
         if let Some(reservation) = self.reservations.get_mut(&record.reservation_id) {
             reservation.instance_ids.push(record.instance_id.clone());
         }
@@ -166,7 +187,11 @@ impl ComAmazonawsEc2Amazonec2State {
         let instance_id = record.instance_id.clone();
         self.instances.insert(record.instance_id.clone(), record);
         self.mint_launched_root_volume(&instance_id);
-        self.mint_launched_primary_interface(&instance_id);
+        if interfaces.is_empty() {
+            self.mint_launched_primary_interface(&instance_id);
+            return true;
+        }
+        self.mint_launched_interfaces(&instance_id, interfaces)
     }
 
     /// Start the termination of the instance `instance_id` names, as of `at`, and answer the
