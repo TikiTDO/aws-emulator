@@ -86,11 +86,6 @@
 #[allow(unused_imports)]
 use super::types::*;
 
-/// Why a policy document was refused — the requirement the rejected member failed,
-/// which `crate::state::validation_failed` states in the service's own envelope.
-const INVALID_POLICY_REQUIREMENT: &str = "The policy you provided isn't a valid policy \
-    document. Provide a JSON policy document with a Statement and then try again";
-
 /// Why a policy was refused on a multiview channel — the requirement the rejected member
 /// failed. A multiview channel composites the channels it lists as sources and is reached
 /// through their access, so it takes no resource policy of its own: the case the model's
@@ -190,11 +185,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // wording is decided in ONE place rather than per operation.
         if !crate::state::is_policy_document(&input.policy) {
             return Err(PutChannelPolicyErrorModeled::ValidationException(
-                crate::state::validation_failed(
-                    "policy",
-                    INVALID_POLICY_REQUIREMENT,
-                    "INVALID_POLICY",
-                ),
+                crate::state::invalid_policy(),
             )
             .into());
         }

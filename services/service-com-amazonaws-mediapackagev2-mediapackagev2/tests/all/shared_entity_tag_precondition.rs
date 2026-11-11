@@ -234,6 +234,34 @@ pub(crate) async fn settle_job(emulator: &Emulator, path: &str) {
     panic!("case \"setup\": the harvest job at {path} never left QUEUED");
 }
 
+/// How often, and for how long, [`ended_job`] waits: comfortably past the two transition
+/// spans the emulator owes a job whose window had already closed, so one budget is
+/// re-scaled in one place when that span changes.
+///
+/// `pub(crate)` because the suites whose own client type this waiter cannot take
+/// (`harvest_job_refusal_text`, which drives the data-plane-capable client) still wait on
+/// THIS budget rather than inventing a second one.
+pub(crate) const END_POLL_INTERVAL: Duration = Duration::from_millis(50);
+pub(crate) const END_POLL_LIMIT: u32 = 600;
+
+/// Poll a harvest job created for a window that had already CLOSED until the clock has
+/// ENDED it, which is the status `CancelHarvestJob` refuses as ineligible.
+///
+/// The counterpart of [`settle_job`] for the other transition the clock owes a job, and
+/// `pub(crate)` for the same reason: the suites that need a job in that status wait for it
+/// here rather than each carrying its own poll and its own budget. Nobody touches the job,
+/// so the status it reaches is the clock's.
+pub(crate) async fn ended_job(emulator: &Emulator, case: &str, path: &str) {
+    for _ in 0..END_POLL_LIMIT {
+        let body = read(emulator, case, path).await;
+        if body["Status"] == json!("FAILED") {
+            return;
+        }
+        tokio::time::sleep(END_POLL_INTERVAL).await;
+    }
+    panic!("case {case:?}: the clock never ended the harvest job at {path}");
+}
+
 /// The `Message` member of an error envelope (`""` when absent).
 pub(crate) fn message(body: &Value) -> &str {
     body.get("Message")

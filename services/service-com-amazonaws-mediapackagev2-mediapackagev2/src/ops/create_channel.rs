@@ -509,6 +509,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // gets none, so none is published and none is reachable.
         let ingest_endpoints = crate::state::ingest_endpoints(
             &group.egress_domain,
+            &region,
             &group.name,
             &name,
             &input_type,

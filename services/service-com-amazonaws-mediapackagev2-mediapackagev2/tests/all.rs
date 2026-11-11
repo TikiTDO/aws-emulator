@@ -60,6 +60,10 @@ mod update_roundtrip;
 mod resource_tags;
 #[path = "all/published_data_plane_urls.rs"]
 mod published_data_plane_urls;
+#[path = "all/aws_refusal_sentences.rs"]
+mod aws_refusal_sentences;
+#[path = "all/published_data_plane_addressing.rs"]
+mod published_data_plane_addressing;
 #[path = "all/reserved_tag_keys.rs"]
 mod reserved_tag_keys;
 #[path = "all/attached_multiview_channels.rs"]

@@ -2,9 +2,13 @@
 
 //! @op CancelHarvestJob
 //! IMPLEMENTED. Moves one in-progress harvest job to `CANCELLED`, which a later
-//! `GetHarvestJob` reports. A job that has already reached a terminal status cannot be
-//! cancelled and is refused `ValidationException` (400) with `ValidationExceptionType`
-//! `HARVEST_JOB_INELIGIBLE_FOR_CANCELLATION`. `x-amzn-update-if-match` is honoured as a
+//! `GetHarvestJob` reports. The operation is `@idempotent`, so a repeat against a job this
+//! operation has ALREADY cancelled is the same request as the one that cancelled it: the
+//! job is in the status the call asks for, so it is answered the same success and nothing
+//! is committed. A job the CLOCK ended instead — `COMPLETED` or `FAILED`, a status
+//! cancelling cannot reach — is refused `ValidationException` (400) with
+//! `ValidationExceptionType` `HARVEST_JOB_INELIGIBLE_FOR_CANCELLATION`.
+//! `x-amzn-update-if-match` is honoured as a
 //! precondition here too, with the same single-serialization-point rule `UpdateChannel`
 //! documents.
 //!
@@ -88,13 +92,12 @@
 #[allow(unused_imports)]
 use super::types::*;
 
-/// Why a job that has finished was refused for cancellation — the requirement the
+/// Why a job whose work has ENDED was refused for cancellation — the requirement the
 /// rejected member failed, which `crate::state::validation_failed` states in the
 /// service's own envelope. It states the RULE, so it names neither the job the caller
 /// addressed nor the status it had reached.
 const INELIGIBLE_FOR_CANCELLATION_REQUIREMENT: &str = "A harvest job can be cancelled \
-    only before it reaches a terminal status. Verify the status of the harvest job and \
-    then try again";
+    only before its work ends. Verify the status of the harvest job and then try again";
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -221,6 +224,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::stale_entity_tag_rejection(input.e_tag.as_deref(), &job.etag)
         {
             return Err(CancelHarvestJobErrorModeled::ConflictException(conflict).into());
+        }
+        // The operation is `@idempotent`: a repeat against a job this operation already
+        // cancelled is the SAME request as the one that cancelled it, so the job is
+        // already in the status the call asks for and the answer is the success the first
+        // call gave — nothing is committed, so neither the entity tag nor `ModifiedAt`
+        // moves. Only a status cancelling cannot REACH is a refusal, which is the next
+        // rule.
+        if job.status == crate::state::HARVEST_JOB_CANCELLED {
+            return Ok(CancelHarvestJobOutput {});
         }
         if job.is_terminal() {
             return Err(CancelHarvestJobErrorModeled::ValidationException(

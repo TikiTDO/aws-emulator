@@ -400,7 +400,7 @@ fn materialization_fills_only_what_the_caller_left_out() {
 #[test]
 fn the_ingest_host_shares_the_groups_dns() {
     let egress = egress_domain("us-west-2", "group");
-    let endpoints = ingest_endpoints(&egress, "group", "channel", DEFAULT_INPUT_TYPE);
+    let endpoints = ingest_endpoints(&egress, "us-west-2", "group", "channel", DEFAULT_INPUT_TYPE);
     let suffix = egress.split_once(".egress.").expect("an egress label").1;
     assert!(
         !endpoints.is_empty(),
@@ -414,7 +414,7 @@ fn the_ingest_host_shares_the_groups_dns() {
         );
     }
     assert!(
-        ingest_endpoints(&egress, "group", "channel", INPUT_TYPE_MULTIVIEW).is_empty(),
+        ingest_endpoints(&egress, "us-west-2", "group", "channel", INPUT_TYPE_MULTIVIEW).is_empty(),
         "a channel that receives no ingest of its own must publish no ingest endpoint"
     );
 }
@@ -694,6 +694,7 @@ fn a_change_to_any_member_of_an_origin_endpoint_moves_its_entity_tag() {
                 },
                 ManifestLocation {
                     egress_domain: "host.example",
+                    region: "us-west-2",
                     group: "group",
                     channel: "channel",
                     endpoint: "endpoint",

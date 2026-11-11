@@ -159,8 +159,8 @@ use super::types::*;
 /// rejected member failed, which `crate::state::validation_failed` states in the
 /// service's own envelope. It states the RULE, so it carries neither of the instants the
 /// caller sent.
-const END_TIME_NOT_AFTER_START_REQUIREMENT: &str = "The end time of a harvest job's \
-    schedule must be later than its start time. Correct the schedule and then try again";
+const END_TIME_NOT_AFTER_START_REQUIREMENT: &str = "Harvest job end time must be later \
+    than the start time. Check your configured start and end times and then try again";
 
 /// Why a schedule covering no time at all was refused — the requirement the rejected
 /// member failed. A harvest job exports the content inside its window, so a window of
@@ -175,6 +175,11 @@ const ZERO_LENGTH_WINDOW_REQUIREMENT: &str = "The schedule of a harvest job must
 const UNPUBLISHED_MANIFEST_REQUIREMENT: &str = "A harvest job can harvest only the \
     manifests its origin endpoint publishes. Verify the manifest names against the \
     manifests of the origin endpoint and then try again";
+
+/// The member path a harvest job refused for the window it schedules names: the
+/// `ScheduleConfiguration` member that carries BOTH instants the rule is about, in
+/// lowerCamel as the wire names it.
+const SCHEDULE_CONFIGURATION_MEMBER: &str = "scheduleConfiguration";
 
 /// The member path a harvest job refused for the channel it addresses names: the channel
 /// the request addressed, in lowerCamel as the wire names it.
@@ -294,11 +299,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let end = input.schedule_configuration.end_time.as_secs_f64();
         // Both schedule refusals are worded by the crate's one validation builder, so
         // they report the member the request named them at and the rule it failed, in the
-        // same form as every other refusal this service makes.
+        // same form as every other refusal this service makes. Each is about the
+        // RELATIONSHIP between the two instants `ScheduleConfiguration` carries rather
+        // than about either of them on its own, so the member path is the structure that
+        // holds both — the one rule this service states a cross-member refusal by
+        // (`crate::state::cross_member_validation_failed`).
         if end < start {
             return Err(CreateHarvestJobErrorModeled::ValidationException(
-                crate::state::validation_failed(
-                    "scheduleConfiguration.endTime",
+                crate::state::cross_member_validation_failed(
+                    Some(SCHEDULE_CONFIGURATION_MEMBER),
                     END_TIME_NOT_AFTER_START_REQUIREMENT,
                     crate::state::VALIDATION_END_TIME_EARLIER_THAN_START_TIME,
                 ),
@@ -307,8 +316,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
         if end == start {
             return Err(CreateHarvestJobErrorModeled::ValidationException(
-                crate::state::validation_failed(
-                    "scheduleConfiguration.endTime",
+                crate::state::cross_member_validation_failed(
+                    Some(SCHEDULE_CONFIGURATION_MEMBER),
                     ZERO_LENGTH_WINDOW_REQUIREMENT,
                     crate::state::VALIDATION_INVALID_HARVEST_JOB_DURATION,
                 ),

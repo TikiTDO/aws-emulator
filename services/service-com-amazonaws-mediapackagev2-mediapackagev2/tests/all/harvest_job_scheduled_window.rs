@@ -54,12 +54,14 @@ const FAILED: &str = "FAILED";
 /// before the clock owes it the next status, so a wait of this length materialises every
 /// transition that was due — and a status still reported after it is one the job's own
 /// schedule is holding it in.
-const PAST_ANY_SPAN: Duration = Duration::from_millis(1_000);
+const PAST_ANY_SPAN: Duration = Duration::from_millis(3_500);
 
 /// How long a row waits for a transition its schedule puts in the future, and how often it
-/// looks: short polls, so a status that lasts only one span is still observed.
+/// looks: short polls, so a status that lasts only one span is still observed. The limit is
+/// the number of polls, which spans comfortably more than the two transition spans a job
+/// created for a closed window crosses.
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
-const POLL_LIMIT: u32 = 1_200;
+const POLL_LIMIT: u32 = 3_000;
 
 /// A fresh emulator holding the channel group, channel and origin endpoint a harvest job
 /// needs, and no harvest job yet.
@@ -207,9 +209,9 @@ const OPENING_WINDOWS: &[Window] = &[
         opens_during_the_row: false,
     },
     Window {
-        label: "a window that opens three seconds from now",
-        start_offset: 3.0,
-        end_offset: 603.0,
+        label: "a window that opens six seconds from now",
+        start_offset: 6.0,
+        end_offset: 606.0,
         settled: QUEUED,
         opens_during_the_row: true,
     },

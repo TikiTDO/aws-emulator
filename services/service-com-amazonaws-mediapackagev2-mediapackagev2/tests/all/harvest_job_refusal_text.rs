@@ -9,8 +9,10 @@
 //!
 //! The rule is asserted over a SET of inputs per refusal class: the schedule window is
 //! refused at several distances and at several instants, an unharvestable manifest is
-//! named in each manifest family the model declares and mixed with published ones, a
-//! terminal job is re-cancelled under differently shaped job names, a pagination token the
+//! named in each manifest family the model declares and mixed with published ones, a job
+//! whose work the clock has ENDED is refused for cancellation over several closed windows
+//! (while a job this operation has already cancelled is answered the same success again,
+//! as `@idempotent` requires), a pagination token the
 //! service never issued is sent in several forms, and the tag ceiling is crossed on two
 //! operations whose wire member name differs. The accepted rows are asserted too: a
 //! refusal rule is only a rule if the requests it does NOT cover are still served.
@@ -23,6 +25,10 @@ use crate::channel_lifecycle::error_type;
 use crate::rejection_rule_and_negative_paths::{
     epoch_seconds_from_now, harvest_body, Answer, Emulator,
 };
+// The crate's ONE budget for waiting on the clock to END a harvest job, beside the waiter
+// that owns it: this suite drives the data-plane-capable client, whose type that waiter
+// cannot take, so it shares the budget rather than inventing a second one.
+use crate::shared_entity_tag_precondition::{END_POLL_INTERVAL, END_POLL_LIMIT};
 
 /// The fixed envelope every refused request is reported in
 /// (`state::validation_message`).
@@ -222,7 +228,9 @@ async fn a_refused_harvest_window_is_reported_at_the_member_in_the_crates_form()
         assert_refusal_form(
             label,
             &answer,
-            "scheduleConfiguration.endTime",
+            // A rule about the RELATIONSHIP between the two instants
+            // `ScheduleConfiguration` carries is stated at the member that holds both.
+            "scheduleConfiguration",
             Some(expected_type),
             &[
                 start_seconds.as_str(),
@@ -378,11 +386,11 @@ async fn an_unharvestable_manifest_is_reported_at_the_manifest_member() {
 }
 
 #[tokio::test]
-async fn re_cancelling_a_finished_job_is_reported_at_the_job_member() {
+async fn cancelling_a_cancelled_job_again_is_the_same_request_and_the_same_answer() {
     let emulator = hierarchy().await;
     let start = epoch_seconds_from_now(600.0);
     // The job names differ in shape (dashes, underscores, digits, length), which is what
-    // a message echoing the caller's value would differ on.
+    // an answer keyed on the caller's value would differ on.
     for name in ["cancel-a", "Cancel_B-2", "c3", "a-very-long-harvest-job-name-0001"] {
         let mut body = job_body(
             start,
@@ -406,13 +414,89 @@ async fn re_cancelling_a_finished_job_is_reported_at_the_job_member() {
             "case {name:?}: the first cancellation must succeed, got {} with body {}",
             cancelled.status, cancelled.body
         );
-        let again = emulator.call("PUT", &path, None).await;
+        let read = emulator.call("GET", &path, None).await;
+        assert_eq!(
+            read.string("Status"),
+            "CANCELLED",
+            "case {name:?}: the cancelled job must report CANCELLED, got {}",
+            read.body
+        );
+        // `@idempotent`: the repeat is the same request, so it is answered the same
+        // success and commits nothing — the job's entity tag and modification instant
+        // are the ones the first cancellation left.
+        for repeat in 1..=2 {
+            let again = emulator.call("PUT", &path, None).await;
+            assert_eq!(
+                again.status, 200,
+                "case {name:?}: repeat {repeat} of the cancellation must be accepted, got \
+                 {} with body {}",
+                again.status, again.body
+            );
+            let read_again = emulator.call("GET", &path, None).await;
+            for member in ["Status", "ETag", "ModifiedAt"] {
+                assert_eq!(
+                    read_again.json[member], read.json[member],
+                    "case {name:?}: repeat {repeat} must not move {member}: expected {}, \
+                     got {}",
+                    read.json[member], read_again.json[member]
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_job_whose_work_has_ended_is_reported_at_the_job_member() {
+    let emulator = hierarchy().await;
+    // Windows that had already CLOSED when the job was created, so the clock ends the job
+    // of its own accord. The rows differ in how long ago the window closed and how long
+    // it was — what a rule keyed on one recorded pair of instants would differ on.
+    let cases: &[(&str, f64, f64)] = &[
+        ("a window that closed an hour before the job", -7200.0, -3600.0),
+        ("a one-second window that closed a day before the job", -86_401.0, -86_400.0),
+        ("a window that closed a minute before the job", -3660.0, -60.0),
+    ];
+    for (index, (label, start_offset, end_offset)) in cases.iter().enumerate() {
+        let name = format!("ended-{index}");
+        let base = epoch_seconds_from_now(0.0);
+        let mut body = job_body(
+            base + start_offset,
+            base + end_offset,
+            json!({"HlsManifests": [{"ManifestName": PUBLISHED_HLS}]}),
+        );
+        body["HarvestJobName"] = json!(name);
+        let created = create_job(&emulator, body).await;
+        assert_eq!(
+            created.status, 200,
+            "case {label:?}: the job must be created, got {} with body {}",
+            created.status, created.body
+        );
+        let path = format!(
+            "/channelGroup/{GROUP}/channel/{CHANNEL}/originEndpoint/{ENDPOINT}\
+             /harvestJob/{name}"
+        );
+        // Nobody touches the job: the clock alone ends it, which is what makes the
+        // refusal below a property of the status rather than of this request.
+        let mut ended = String::new();
+        for _ in 0..END_POLL_LIMIT {
+            let read = emulator.call("GET", &path, None).await;
+            ended = read.string("Status").to_string();
+            if ended == "FAILED" {
+                break;
+            }
+            tokio::time::sleep(END_POLL_INTERVAL).await;
+        }
+        assert_eq!(
+            ended, "FAILED",
+            "case {label:?}: the clock must end a job whose window had closed, got {ended:?}"
+        );
+        let refused = emulator.call("PUT", &path, None).await;
         assert_refusal_form(
-            name,
-            &again,
+            label,
+            &refused,
             "harvestJobName",
             Some("HARVEST_JOB_INELIGIBLE_FOR_CANCELLATION"),
-            &[name, GROUP, CHANNEL, ENDPOINT, "CANCELLED"],
+            &[name.as_str(), GROUP, CHANNEL, ENDPOINT, "FAILED"],
         );
     }
 }

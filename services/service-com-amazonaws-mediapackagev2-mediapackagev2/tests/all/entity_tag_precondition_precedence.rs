@@ -42,7 +42,7 @@ use crate::multiview_configuration_validation::multiview;
 use crate::rejection_rule_and_negative_paths::{epoch_seconds_from_now, harvest_body};
 use crate::resource_tags::map_of;
 use crate::shared_entity_tag_precondition::{
-    message, read, settle_job, IF_MATCH, STALE_ETAG_MESSAGE,
+    ended_job, message, read, IF_MATCH, STALE_ETAG_MESSAGE,
 };
 
 /// The channel, origin endpoint and harvest job every row builds inside a channel group of
@@ -223,9 +223,10 @@ async fn fresh(emulator: &Emulator, row: &Row, group: &str) -> String {
         return endpoint_path;
     }
 
-    // A harvest job whose scheduled window is OPEN NOW and ends long after this test does,
-    // so the only transition the clock owes it comes due inside the emulator's own span.
-    let start = epoch_seconds_from_now(0.0);
+    // A harvest job whose scheduled window had already CLOSED when it was created, so the
+    // clock ends it of its own accord — which is the status `CancelHarvestJob` refuses as
+    // ineligible, reached without any write of this suite's own.
+    let start = epoch_seconds_from_now(-7200.0);
     let mut request = harvest_body(start, start + 3600.0, &[MANIFEST]);
     request["HarvestJobName"] = json!(JOB);
     let (status, body) = emulator
@@ -236,14 +237,7 @@ async fn fresh(emulator: &Emulator, row: &Row, group: &str) -> String {
         "case {label:?}: CreateHarvestJob in {group} expected 200, got {status} {body}"
     );
     let job_path = format!("{endpoint_path}/harvestJob/{JOB}");
-    settle_job(emulator, &job_path).await;
-    // `CancelHarvestJob`'s own rule refuses a job that is already terminal, so this row's
-    // job reaches that state through an UNCONDITIONAL cancellation first.
-    let (status, body) = emulator.call_with_headers("PUT", &job_path, None, &[]).await;
-    assert_eq!(
-        status, 200,
-        "case {label:?}: the first CancelHarvestJob expected 200, got {status} {body}"
-    );
+    ended_job(emulator, label, &job_path).await;
     job_path
 }
 

@@ -529,6 +529,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let name = input.origin_endpoint_name.clone();
         let at = crate::state::ManifestLocation {
             egress_domain: &egress_domain,
+            region: &region,
             group: &group_name,
             channel: &channel.name,
             endpoint: &name,

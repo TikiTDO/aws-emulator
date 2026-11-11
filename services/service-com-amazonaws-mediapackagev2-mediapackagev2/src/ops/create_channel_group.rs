@@ -317,7 +317,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let name = input.channel_group_name.clone();
         let created_at = crate::state::now();
         let arn = crate::state::channel_group_arn(&region, &name);
-        let egress_domain = crate::state::egress_domain(&region, &name);
+        let egress_domain = crate::state::announced_data_plane_domain(
+            ctx.parts(),
+            ctx.endpoint().as_str(),
+            &region,
+            &name,
+        );
 
         let mut group = crate::state::ChannelGroup {
             name: name.clone(),

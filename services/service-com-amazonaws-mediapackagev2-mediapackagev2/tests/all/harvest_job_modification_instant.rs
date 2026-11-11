@@ -179,29 +179,31 @@ struct Row {
 
 /// Windows that open AFTER the job is created, so the `QUEUED` -> `IN_PROGRESS` transition
 /// falls due exactly at the scheduled start. The rows differ in where that start sits and
-/// in how long the reader waited before looking.
+/// in how long the reader waited before looking. Every start is past the emulator's own
+/// transition span, so the scheduled instant is the later of the two and therefore the one
+/// the transition falls due at.
 const OPENING_ROWS: &[Row] = &[
     Row {
-        label: "a window that opens two seconds in, read a second after it opened",
-        start_offset: 2.0,
-        end_offset: 600.0,
-        read_offset: 3.0,
-        settled: IN_PROGRESS,
-        due_at_window_end: false,
-    },
-    Row {
-        label: "the same window, read three seconds after it opened instead",
-        start_offset: 2.0,
+        label: "a window that opens four seconds in, read a second after it opened",
+        start_offset: 4.0,
         end_offset: 600.0,
         read_offset: 5.0,
         settled: IN_PROGRESS,
         due_at_window_end: false,
     },
     Row {
-        label: "a window that opens two and a half seconds in, read two seconds later",
-        start_offset: 2.5,
+        label: "the same window, read three seconds after it opened instead",
+        start_offset: 4.0,
+        end_offset: 600.0,
+        read_offset: 7.0,
+        settled: IN_PROGRESS,
+        due_at_window_end: false,
+    },
+    Row {
+        label: "a window that opens four and a half seconds in, read two seconds later",
+        start_offset: 4.5,
         end_offset: 90.0,
-        read_offset: 4.5,
+        read_offset: 6.5,
         settled: IN_PROGRESS,
         due_at_window_end: false,
     },
@@ -209,21 +211,22 @@ const OPENING_ROWS: &[Row] = &[
 
 /// Windows that CLOSE after the job is created, so the `IN_PROGRESS` -> `FAILED` transition
 /// falls due exactly at the scheduled end. The rows differ in the window's length and in
-/// when the reader looked.
+/// when the reader looked. Every window is longer than the emulator's own transition span,
+/// so the scheduled end is the later of the two.
 const CLOSING_ROWS: &[Row] = &[
     Row {
-        label: "a one-second window, read two seconds after it closed",
-        start_offset: 2.0,
-        end_offset: 3.0,
-        read_offset: 5.0,
+        label: "a four-second window, read two seconds after it closed",
+        start_offset: 4.0,
+        end_offset: 8.0,
+        read_offset: 10.0,
         settled: FAILED,
         due_at_window_end: true,
     },
     Row {
-        label: "a three-and-a-half-second window, read just after it closed",
-        start_offset: 2.0,
-        end_offset: 5.5,
-        read_offset: 6.1,
+        label: "a five-and-a-half-second window, read just after it closed",
+        start_offset: 4.0,
+        end_offset: 9.5,
+        read_offset: 10.1,
         settled: FAILED,
         due_at_window_end: true,
     },
@@ -345,9 +348,10 @@ const SETTLED_ROWS: &[SettledRow] = &[
 ];
 
 /// The delays two otherwise identical jobs are first read after. Both are past every span
-/// the emulator owes such a job, so each read observes the same settled status.
+/// the emulator owes such a job — two transition spans for a window that had already
+/// closed — so each read observes the same settled status.
 const UNEQUAL_READ_DELAYS: [Duration; 2] =
-    [Duration::from_millis(1_500), Duration::from_millis(4_000)];
+    [Duration::from_millis(6_500), Duration::from_millis(8_500)];
 
 /// RULE 3 — with no scheduled instant to stamp, the gap between `CreatedAt` and
 /// `ModifiedAt` is still the job's own: identical for a reader that looked early and one

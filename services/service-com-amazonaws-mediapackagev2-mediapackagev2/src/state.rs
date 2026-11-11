@@ -378,9 +378,11 @@ pub const INVALID_ARN_MESSAGE: &str = "Invalid input resource arn: bad syntax";
 /// The wire error code for a well-formed `ResourceArn` naming a resource that is absent.
 pub const RESOURCE_NOT_FOUND_CODE: &str = "NotFoundException";
 
-/// The sentence that accompanies [`RESOURCE_NOT_FOUND_CODE`].
-pub const TAGGED_RESOURCE_NOT_FOUND_MESSAGE: &str =
-    "The resource arn you provided does not name a resource that exists";
+/// The sentence that accompanies [`RESOURCE_NOT_FOUND_CODE`] — the whole fixed text of
+/// this failure, which says that the resource was not found and nothing else: the tagging
+/// front end does not echo the ARN it could not resolve, so two callers naming two
+/// different absent resources read the same sentence.
+pub const TAGGED_RESOURCE_NOT_FOUND_MESSAGE: &str = "Resource was not found";
 
 /// The most tags one resource carries, and so the most entries a resource's tag map can
 /// ever hold.
@@ -1507,12 +1509,14 @@ pub fn harvest_job_harvests_unpublished_manifest(
 
 /// The shortest time a harvest job spends in each status it has yet to leave.
 ///
-/// AWS does not publish this latency, so it is the EMULATOR's own span, inside the
-/// 250–750 ms band the project fixes for a transition a call starts: a caller that polls
-/// straight after `CreateHarvestJob` still observes `QUEUED`, and a job whose scheduled
-/// window has already passed by the time it was created is still observed `IN_PROGRESS`
-/// before it ends, instead of crossing both transitions at one instant.
-const HARVEST_JOB_TRANSITION_MILLIS: i64 = 400;
+/// AWS does not publish this latency, so it is the EMULATOR's own span for a transition the
+/// clock owes. It is chosen so that a caller that acts straight after a call still observes
+/// the status that call left behind and the refusals that status carries: a client that
+/// polls after `CreateHarvestJob` still sees `QUEUED`, and a job created for a window that
+/// had ALREADY closed is still `QUEUED` and then `IN_PROGRESS` — cancellable, which is what
+/// `CancelHarvestJob` serves while a job has not reached a status it can no longer leave —
+/// instead of crossing both transitions before the caller's next request arrives.
+const HARVEST_JOB_TRANSITION_MILLIS: i64 = 3_000;
 
 /// `at`, moved on by one [`HARVEST_JOB_TRANSITION_MILLIS`] span.
 fn after_harvest_job_span(at: ::aws_smithy_types::DateTime) -> ::aws_smithy_types::DateTime {
@@ -2474,20 +2478,24 @@ pub fn parse_ingest_path(path: &str) -> Option<IngestTarget> {
 }
 
 /// The ingest endpoints a channel of this input type is created with, derived from the
-/// parent group's egress domain and the channel's name: the redundant pair for a channel
-/// that receives ingest of its own, and NONE for one that does not (see
+/// parent group's announced data-plane domain and the channel's name: the redundant pair
+/// for a channel that receives ingest of its own, and NONE for one that does not (see
 /// [`is_multiview_input_type`]) — a channel with no ingest stream of its own has no URL
 /// for a contributing encoder to push to, and `IngestEndpoints` carries no `@required` on
 /// any channel shape, so reporting none is what the model represents that with.
 ///
-/// Each endpoint of the pair is a SEPARATE ingest target, so each is published on its own
-/// hostname: the group's ingest DNS ([`ingest_domain`]) with a first label of its own,
-/// built from the channel's identity and that endpoint's ordinal
-/// ([`ingest_endpoint_label`]). Two redundant endpoints that differed only in their URL
-/// PATH would be one host to a client that pins or load-balances per ingest endpoint,
-/// which cannot distinguish the two publishers MediaPackage hands them to.
+/// Each endpoint of the pair is a SEPARATE ingest target, so on the hostnames AWS's own
+/// addressing publishes each is published on its own: the group's ingest DNS
+/// ([`ingest_domain`]) with a first label of its own, built from the channel's identity and
+/// that endpoint's ordinal ([`ingest_endpoint_label`]). Two redundant endpoints that
+/// differed only in their URL PATH would be one host to a client that pins or
+/// load-balances per ingest endpoint, which cannot distinguish the two publishers
+/// MediaPackage hands them to. On the EMULATOR'S own endpoint there is one address to
+/// publish on, so the pair is distinguished the only way it can be there — by the ordinal
+/// their paths already carry (see [`data_plane_url`]).
 pub fn ingest_endpoints(
     egress_domain: &str,
+    region: &str,
     group: &str,
     channel: &str,
     input_type: &str,
@@ -2495,21 +2503,36 @@ pub fn ingest_endpoints(
     if is_multiview_input_type(input_type) {
         return Vec::new();
     }
+    (1..=INGEST_ENDPOINTS_PER_CHANNEL)
+        .map(|index| IngestEndpoint {
+            id: Some(index.to_string()),
+            url: Some(data_plane_url(
+                &ingest_endpoint_domain(egress_domain, channel, index),
+                region,
+                &format!("/in/v1/{group}/{index}/{channel}/index"),
+            )),
+        })
+        .collect()
+}
+
+/// The domain ONE ingest endpoint of a channel is published on: its own hostname under the
+/// group's ingest DNS when the group's data plane is announced on the hostnames AWS's own
+/// addressing publishes, and the emulator's own address otherwise — which is the one
+/// address a client on this machine can reach, for every endpoint of every channel.
+fn ingest_endpoint_domain(egress_domain: &str, channel: &str, ordinal: u8) -> String {
+    if data_plane_of_host(egress_domain).is_none() {
+        return egress_domain.to_string();
+    }
     let domain = ingest_domain(egress_domain);
     // Everything after the group's own first label: the DNS both halves of a group's data
     // plane share, which is what each endpoint's own label is prefixed onto.
     let group_dns = domain
         .split_once('.')
         .map_or(domain.as_str(), |(_label, rest)| rest);
-    (1..=INGEST_ENDPOINTS_PER_CHANNEL)
-        .map(|index| {
-            let host = format!("{}.{group_dns}", ingest_endpoint_label(&domain, channel, index));
-            IngestEndpoint {
-                id: Some(index.to_string()),
-                url: Some(format!("https://{host}/in/v1/{group}/{index}/{channel}/index")),
-            }
-        })
-        .collect()
+    format!(
+        "{}.{group_dns}",
+        ingest_endpoint_label(&domain, channel, ordinal)
+    )
 }
 
 /// The first label of ONE ingest endpoint's hostname: a label derived from the channel's
@@ -2553,30 +2576,37 @@ impl ManifestKind {
     }
 }
 
-/// The egress URL of one manifest: the group's egress domain plus the path that names
-/// the group, the channel, the endpoint and the manifest.
+/// The egress URL of one manifest: the group's announced data-plane domain plus the path
+/// that names the group, the channel, the endpoint and the manifest.
 pub fn manifest_url(
     egress_domain: &str,
+    region: &str,
     group: &str,
     channel: &str,
     endpoint: &str,
     manifest_name: &str,
     kind: ManifestKind,
 ) -> String {
-    format!(
-        "https://{egress_domain}/out/v1/{group}/{channel}/{endpoint}/{manifest_name}{}",
-        kind.suffix()
+    data_plane_url(
+        egress_domain,
+        region,
+        &format!(
+            "/out/v1/{group}/{channel}/{endpoint}/{manifest_name}{}",
+            kind.suffix()
+        ),
     )
 }
 
-/// Where a manifest's URL is rooted: the parent group's egress domain plus the names of
-/// the group, the channel and the origin endpoint the manifest belongs to.
+/// Where a manifest's URL is rooted: the parent group's announced data-plane domain and
+/// the Region it serves, plus the names of the group, the channel and the origin endpoint
+/// the manifest belongs to.
 ///
 /// Passed to the `Create*` -> `Get*` conversions below so every manifest family builds
-/// its URL from the same four values.
+/// its URL from the same values.
 #[derive(Debug, Clone, Copy)]
 pub struct ManifestLocation<'a> {
     pub egress_domain: &'a str,
+    pub region: &'a str,
     pub group: &'a str,
     pub channel: &'a str,
     pub endpoint: &'a str,
@@ -2586,6 +2616,7 @@ impl ManifestLocation<'_> {
     fn url(&self, manifest_name: &str, kind: ManifestKind) -> String {
         manifest_url(
             self.egress_domain,
+            self.region,
             self.group,
             self.channel,
             self.endpoint,
@@ -3762,20 +3793,34 @@ pub fn manifest_set_violation(
         }
         if let Some(exception_type) = container_manifest_conflict(container, family) {
             return Some(ManifestSetViolation {
+                // About the RELATIONSHIP between `ContainerType` and the manifest list,
+                // both of them the request's own members, so the refusal is stated at the
+                // request itself rather than at either member — the rule
+                // [`cross_member_validation_failed`] states for every cross-member
+                // refusal this service makes, which for the request's own members is the
+                // bare request path [`validation_message`] renders for `None`.
                 message: validation_message(
-                    Some(family.member()),
-                    &format!(
-                        "A {container} container type can't be combined with a {} \
-                         manifest. Remove the manifest, or create an origin endpoint \
-                         whose container type serves it",
-                        family.label()
-                    ),
+                    None,
+                    &container_manifest_requirement(container, family),
                 ),
                 validation_exception_type: exception_type,
             });
         }
     }
     None
+}
+
+/// The requirement a manifest family its container type cannot serve failed: that family
+/// is not served by an endpoint of that container type.
+///
+/// It names the family and the container type, which are the two things the caller has to
+/// reconcile, and nothing else from the request. The sentence ends in a space, which is
+/// part of the text this class is reported with.
+fn container_manifest_requirement(container: &str, family: ManifestFamily) -> String {
+    format!(
+        "{} manifest is not supported on endpoint with {container} container type. ",
+        family.label()
+    )
 }
 
 /// The ETag of an origin endpoint: a digest over everything the endpoint is made of, so
@@ -3838,6 +3883,39 @@ pub fn origin_endpoint_etag(endpoint: &OriginEndpoint) -> String {
 // =============================================================================
 // Resource policies: the shared document check and the wording around it
 // =============================================================================
+
+/// The `ValidationExceptionType` a policy document this service cannot accept carries,
+/// from the model's `ValidationExceptionType` enum.
+pub const VALIDATION_INVALID_POLICY: &str = "INVALID_POLICY";
+
+/// Why a policy document this service cannot accept was refused — the requirement the
+/// `Policy` member failed, stated in the service's own envelope by
+/// [`validation_failed`].
+///
+/// The whole sentence is fixed text for the `INVALID_POLICY` class: it states the
+/// requirement (the document has to be a valid IAM policy) and tells the caller to look at
+/// what it sent, and it interpolates nothing from the document that was submitted — a
+/// caller's policy text is never echoed back. Shared by the policy writers
+/// (`PutChannelPolicy` and `PutOriginEndpointPolicy`) so one rejected document cannot be
+/// worded two ways.
+pub const INVALID_POLICY_REQUIREMENT: &str = "The policy you entered isn't valid. The \
+    policy must be a valid IAM policy. Check your policy and then try again";
+
+/// The member path a refused policy document is reported at: the `Policy` member of both
+/// policy writers, in lowerCamel as the wire names it.
+pub const POLICY_MEMBER: &str = "policy";
+
+/// The modelled 400 both policy writers refuse a document they cannot accept with.
+///
+/// One constructor for the `INVALID_POLICY` class, so the two writers answer the same
+/// member path, the same requirement and the same discriminator.
+pub fn invalid_policy() -> ValidationException {
+    validation_failed(
+        POLICY_MEMBER,
+        INVALID_POLICY_REQUIREMENT,
+        VALIDATION_INVALID_POLICY,
+    )
+}
 
 /// Whether `policy` is a policy document this service accepts.
 ///
@@ -4102,5 +4180,7 @@ fn short_digest(parts: &[&str], len: usize) -> String {
 
 #[cfg(test)]
 mod tests;
+mod data_plane_addressing;
+pub use data_plane_addressing::*;
 mod refusals;
 pub use refusals::*;

@@ -19,7 +19,8 @@
 //!    winner, whatever N is; the losers get `ConflictException` (409) with
 //!    `CONFLICTING_OPERATION`, and the winner's write is what a later read reports.
 //! 5. A harvest job runs its lifecycle out of persisted state: `QUEUED` on create,
-//!    `CANCELLED` after `CancelHarvestJob`, refused for cancellation once terminal, and
+//!    `CANCELLED` after `CancelHarvestJob`, answered the same success when that
+//!    `@idempotent` cancellation is repeated, and
 //!    `ListHarvestJobs` reports exactly the jobs matching its filters.
 //! 6. The ingest and egress URLs the control plane publishes are SERVED, and are gated:
 //!    an anonymous egress fetch is 403 until the endpoint's resource policy grants
@@ -1347,8 +1348,9 @@ async fn harvest_jobs_run_their_lifecycle_out_of_persisted_state() {
         &["job-a"],
     );
 
-    // Cancelling moves the status, which `GetHarvestJob` reports; cancelling again is
-    // refused, because the job is terminal.
+    // Cancelling moves the status, which `GetHarvestJob` reports; cancelling again is the
+    // SAME request (`@idempotent`), so it is answered the same success and the job stays
+    // as the first cancellation left it.
     let (label, job) = &created[0];
     let answer = emulator
         .call("PUT", &format!("{endpoint_path}/harvestJob/{job}"), None)
@@ -1371,10 +1373,18 @@ async fn harvest_jobs_run_their_lifecycle_out_of_persisted_state() {
         .call("PUT", &format!("{endpoint_path}/harvestJob/{job}"), None)
         .await;
     assert_eq!(
-        answer.string("ValidationExceptionType"),
-        "HARVEST_JOB_INELIGIBLE_FOR_CANCELLATION",
-        "case {label:?}: a terminal job cannot be cancelled again, got {}",
-        answer.body
+        answer.status, 200,
+        "case {label:?}: cancelling a cancelled job again must be accepted, got {} with \
+         body {}",
+        answer.status, answer.body
+    );
+    let read_again = emulator
+        .call("GET", &format!("{endpoint_path}/harvestJob/{job}"), None)
+        .await;
+    assert_eq!(
+        read_again.json["ETag"], read.json["ETag"],
+        "case {label:?}: a repeated cancellation must commit nothing, got {}",
+        read_again.body
     );
 
     // The status filter reports exactly the jobs the store holds in that status. The

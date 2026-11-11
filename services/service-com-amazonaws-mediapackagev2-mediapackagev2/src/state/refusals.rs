@@ -239,8 +239,31 @@ pub fn validation_failed(
     requirement: &str,
     exception_type: &str,
 ) -> ValidationException {
+    cross_member_validation_failed(Some(member_path), requirement, exception_type)
+}
+
+/// The modeled 400 for a rule about the RELATIONSHIP between several members of the
+/// request rather than about any one of them — and the ONE builder of this service's
+/// `ValidationException` body, which [`validation_failed`] delegates to, so the envelope
+/// is assembled in one place however the refusal was found.
+///
+/// Such a refusal is stated at the member that CONTAINS the members the rule relates —
+/// the structure they are both in (`request.scheduleConfiguration` for a rule relating
+/// `ScheduleConfiguration`'s start and end), or the request itself when they are the
+/// request's own members (`request` for a rule relating `ContainerType` to a manifest
+/// list). Naming one of the related members instead would point a caller that reads the
+/// member path at a value that is acceptable on its own, so the path names the smallest
+/// part of the request the caller has to reconsider as a whole.
+///
+/// `container` is `None` for members the request itself holds, which
+/// [`validation_message`] states as the request.
+pub fn cross_member_validation_failed(
+    container: Option<&str>,
+    requirement: &str,
+    exception_type: &str,
+) -> ValidationException {
     ValidationException {
-        message: Some(validation_message(Some(member_path), requirement)),
+        message: Some(validation_message(container, requirement)),
         validation_exception_type: Some(exception_type.to_string()),
     }
 }

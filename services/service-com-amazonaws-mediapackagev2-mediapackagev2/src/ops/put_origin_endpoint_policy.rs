@@ -130,12 +130,6 @@ impl From<PutOriginEndpointPolicyErrorModeled> for PutOriginEndpointPolicyError 
     }
 }
 
-/// Why a policy document was refused — the requirement the rejected member failed. The
-/// same text `PutChannelPolicy` answers with, so one rule produces one message at both
-/// policy scopes; `crate::state::validation_failed` states it in the service's envelope.
-const INVALID_POLICY_REQUIREMENT: &str = "The policy you provided isn't a valid policy \
-    document. Provide a JSON policy document with a Statement and then try again";
-
 /// The `PutOriginEndpointPolicy` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -191,11 +185,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // crate's one definition of a valid policy, shared with `PutChannelPolicy`.
         if !crate::state::is_policy_document(&input.policy) {
             return Err(PutOriginEndpointPolicyErrorModeled::ValidationException(
-                crate::state::validation_failed(
-                    "policy",
-                    INVALID_POLICY_REQUIREMENT,
-                    "INVALID_POLICY",
-                ),
+                crate::state::invalid_policy(),
             )
             .into());
         }

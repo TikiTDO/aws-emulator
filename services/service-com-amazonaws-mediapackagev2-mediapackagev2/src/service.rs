@@ -43,20 +43,25 @@
 //!
 //! ## The data plane
 //!
-//! MediaPackage publishes two kinds of hostname. The CONTROL plane is
+//! MediaPackage publishes two kinds of address. The CONTROL plane is
 //! `mediapackagev2.<region>.amazonaws.com`, whose first label names the service, and
-//! that is what the framework's route key resolves. The DATA plane is the per-group
-//! hostnames this service mints and hands out — `EgressDomain` on a channel group, and
-//! `IngestEndpoints[].Url` on a channel — whose first label is an opaque digest. Those
-//! URLs are announced to encoders and players as live endpoints, so a request to one has
-//! to reach THIS service rather than the control-plane resolver, which cannot name a
-//! service from an opaque label and answers `404 UnknownService`.
+//! that is what the framework's route key resolves. The DATA plane is what this service
+//! ANNOUNCES for a client to dial later — `EgressDomain` on a channel group, and
+//! `IngestEndpoints[].Url` on a channel, plus the `Url` of every manifest an origin
+//! endpoint publishes. AWS serves those on per-group hostnames whose first label is an
+//! opaque digest; a client on the machine this emulator runs on resolves none of them, so
+//! the address announced is the endpoint the creating request reached, with everything the
+//! hostname carried moved into the path
+//! ([`crate::state::announced_data_plane_domain`]). Either way, a request to the announced
+//! address has to reach THIS service rather than the control-plane resolver, which cannot
+//! name a service from an opaque label or from the emulator's own address and answers
+//! `404 UnknownService`.
 //!
 //! Three seams carry it, and nothing else changes:
 //!
-//! - [`Service::can_handle`] also claims a request whose `Host` is one of those
-//!   published hostnames ([`crate::state::data_plane_of_host`]), which is what routes it
-//!   here at all.
+//! - [`Service::can_handle`] also claims a request addressed to either of those
+//!   addressings ([`crate::state::addressed_data_plane`]), which is what routes it here at
+//!   all.
 //! - [`Service::override_routing_error`] serves the request that presents NO credential.
 //!   A data-plane request names no modelled operation by construction (`/out/v1/…`,
 //!   `/in/v1/…` are not in the model), so the router reaches exactly this seam for it —
@@ -102,10 +107,11 @@
 //!   ([`crate::state::Channel::discard_ingested_content`]), or by deleting it.
 //!
 //! Both halves resolve the group, channel and endpoint their path names in the REGION the
-//! published hostname belongs to ([`crate::state::data_plane_region`]): the data plane is
+//! announced address names ([`crate::state::addressed_data_plane`]): the data plane is
 //! regional exactly as the control plane is, and a data-plane request carries no
 //! credential scope to read a Region from, so the URL this service handed the client is
-//! what says which Region's resources it reaches.
+//! what says which Region's resources it reaches — a label of the published hostname, or a
+//! path segment of the address on this emulator's own endpoint.
 //!
 //! ## Why this file validates input
 //!
@@ -259,10 +265,16 @@ impl<Eng: Send + Sync + 'static> ErasedOperation for CredentialedDataPlane<Eng> 
     ) -> BoxFuture<'r, RtResponse> {
         Box::pin(async move {
             match data_plane_of_request(req) {
-                Some(crate::state::DataPlane::Egress) => serve_egress(&*self.engine, req),
-                Some(crate::state::DataPlane::Ingest) => serve_ingest(&*self.engine, req),
-                // Unreachable: `override_operation` names this only for a request whose
-                // `Host` is one of the data-plane hostnames this service publishes.
+                Some(addressed) => match addressed.plane {
+                    crate::state::DataPlane::Egress => {
+                        serve_egress(&*self.engine, req, &addressed)
+                    }
+                    crate::state::DataPlane::Ingest => {
+                        serve_ingest(&*self.engine, req, &addressed)
+                    }
+                },
+                // Unreachable: `override_operation` names this only for a request
+                // addressed to one of the data-plane addresses this service publishes.
                 None => svc.definition().routing_error_response(req),
             }
         })
@@ -567,13 +579,12 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         {
             return true;
         }
-        // And a request addressed to one of the data-plane hostnames this service
-        // PUBLISHES, whose opaque first label no route key can name. See the module
-        // docs: without this the router answers `404 UnknownService` for a URL this
-        // service handed out.
-        request_host(parts).is_some_and(|host| {
-            crate::state::data_plane_of_host(host).is_some()
-        })
+        // And a request addressed to one of the data-plane ADDRESSES this service
+        // PUBLISHES — one of AWS's own per-group hostnames, whose opaque first label no
+        // route key can name, or a path on this emulator's own endpoint under the
+        // reserved data-plane namespace. See the module docs: without this the router
+        // answers `404 UnknownService` for a URL this service handed out.
+        crate::state::addressed_data_plane(request_host(parts), parts.uri.path()).is_some()
     }
 
     fn override_operation(
@@ -647,9 +658,16 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // only for the credentialed ones), so this is where an anonymous fetch of a
         // published egress URL and an unauthenticated push to a published ingest URL are
         // served. Anything else keeps the framework's protocol-correct default.
-        match data_plane_of_request(req)? {
-            crate::state::DataPlane::Egress => Some(serve_egress(&*self.engine, req)),
-            crate::state::DataPlane::Ingest => Some(serve_ingest(&*self.engine, req)),
+        match data_plane_of_request(req) {
+            Some(addressed) => match addressed.plane {
+                crate::state::DataPlane::Egress => {
+                    Some(serve_egress(&*self.engine, req, &addressed))
+                }
+                crate::state::DataPlane::Ingest => {
+                    Some(serve_ingest(&*self.engine, req, &addressed))
+                }
+            },
+            None => None,
         }
     }
 
@@ -685,7 +703,11 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
 /// `Principal` against (see the module docs) — a credentialed fetch is verified, then
 /// authorized by the same `*` grant an anonymous one is. A statement naming one principal
 /// is therefore not a grant this emulator can honour, for either seam.
-fn serve_egress<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest) -> RtResponse {
+fn serve_egress<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    req: &RtRequest,
+    addressed: &crate::state::AddressedDataPlane,
+) -> RtResponse {
     if !matches!(req.method(), "GET" | "HEAD") {
         return error_response(
             405,
@@ -693,7 +715,7 @@ fn serve_egress<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest) -> Rt
             "The egress data plane serves GET and HEAD",
         );
     }
-    let Some(target) = crate::state::parse_egress_path(request_path(req.uri())) else {
+    let Some(target) = crate::state::parse_egress_path(&addressed.path) else {
         return error_response(
             404,
             "NotFound",
@@ -707,15 +729,9 @@ fn serve_egress<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest) -> Rt
             "the MediaPackageV2 store is unavailable",
         );
     };
-    let Some(region) = data_plane_region_of_request(req) else {
-        return error_response(
-            404,
-            "NotFound",
-            "The requested host is not an egress host this service publishes",
-        );
-    };
+    let region = addressed.region.as_str();
     let store = state.lock();
-    let granted = store.endpoint_at(&region, &target).is_some_and(|endpoint| {
+    let granted = store.endpoint_at(region, &target).is_some_and(|endpoint| {
         endpoint.policy.as_ref().is_some_and(|attached| {
             crate::state::policy_allows_anonymous(
                 &attached.policy,
@@ -751,7 +767,11 @@ fn serve_egress<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest) -> Rt
 /// [`crate::state::MAX_INGESTED_OBJECT_BYTES`]. A path under a channel that publishes no
 /// ingest endpoint is not a path this service published, so it resolves to nothing (`404`)
 /// however the push is credentialed.
-fn serve_ingest<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest) -> RtResponse {
+fn serve_ingest<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    req: &RtRequest,
+    addressed: &crate::state::AddressedDataPlane,
+) -> RtResponse {
     if !matches!(req.method(), "PUT" | "POST") {
         return error_response(
             405,
@@ -762,7 +782,7 @@ fn serve_ingest<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest) -> Rt
     if !carries_sigv4_credential(req) {
         return error_response(403, "AccessDenied", ACCESS_DENIED_MESSAGE);
     }
-    let Some(target) = crate::state::parse_ingest_path(request_path(req.uri())) else {
+    let Some(target) = crate::state::parse_ingest_path(&addressed.path) else {
         return error_response(
             404,
             "NotFound",
@@ -784,17 +804,11 @@ fn serve_ingest<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest) -> Rt
             "The ingested object is larger than this emulator retains",
         );
     }
-    let Some(region) = data_plane_region_of_request(req) else {
-        return error_response(
-            404,
-            "NotFound",
-            "The requested host is not an ingest host this service publishes",
-        );
-    };
+    let region = addressed.region.as_str();
     let mut store = state.lock();
     // Both store bounds are judged under this one hold of the lock, so two concurrent
     // pushes cannot both see room that only one of them has.
-    match store.record_ingested_object(&region, &target, body.to_vec()) {
+    match store.record_ingested_object(region, &target, body.to_vec()) {
         crate::state::IngestOutcome::Recorded => {}
         crate::state::IngestOutcome::NoSuchChannel => {
             return error_response(
@@ -827,25 +841,16 @@ fn serve_ingest<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest) -> Rt
     resp
 }
 
-/// Which of this service's data planes a request's `Host` names, or `None` when the host is
-/// not one of the hostnames this service publishes.
+/// What a request addresses on this service's data plane, or `None` when it addresses
+/// none of it.
 ///
-/// The `Host` header is what a buffered HTTP/1 request carries; an HTTP/2 request carries
-/// the same authority on its URI instead.
-fn data_plane_of_request(req: &RtRequest) -> Option<crate::state::DataPlane> {
-    crate::state::data_plane_of_host(data_plane_host(req)?)
-}
-
-/// The Region a data-plane request's `Host` names — the Region whose resources that
-/// published hostname serves.
-///
-/// A data-plane request carries no credential scope to read a Region from (an anonymous
-/// player presents none at all), but the hostname this service handed out does name it:
-/// `EgressDomain` and every `IngestEndpoints[].Url` are built for the Region their group
-/// was created in, so the URL a client was given is what decides which Region's groups it
-/// reaches.
-fn data_plane_region_of_request(req: &RtRequest) -> Option<String> {
-    crate::state::data_plane_region(data_plane_host(req)?)
+/// Both addressings are read by the ONE reader of them
+/// ([`crate::state::addressed_data_plane`]): the published HOSTNAME, which a client that
+/// resolves AWS's own hosts sends, and a PATH on this emulator's own endpoint, which is
+/// what a client on this machine can reach. The `Host` header is what a buffered HTTP/1
+/// request carries; an HTTP/2 request carries the same authority on its URI instead.
+fn data_plane_of_request(req: &RtRequest) -> Option<crate::state::AddressedDataPlane> {
+    crate::state::addressed_data_plane(data_plane_host(req), request_path(req.uri()))
 }
 
 /// The `Host` header of a runtime request, or the authority of its URI when it carries

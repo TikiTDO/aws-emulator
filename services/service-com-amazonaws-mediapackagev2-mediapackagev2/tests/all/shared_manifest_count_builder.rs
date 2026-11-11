@@ -48,15 +48,10 @@ struct Case {
     expected: Expected,
 }
 
-/// A refusal of one family on a container type.
-const fn family_refused(exception_type: &'static str, member: &'static str) -> Expected {
-    Expected::Refused {
-        exception_type,
-        member: Some(member),
-    }
-}
-
-/// A refusal about the request as a whole (the count range), which names no member.
+/// A refusal about the request as a whole: the manifest-count range, and the
+/// compatibility between the request's `ContainerType` and the manifest list it carries —
+/// a rule about the RELATIONSHIP between two of the request's own members, which this
+/// service states at the request rather than at either of them.
 const fn set_refused(exception_type: &'static str) -> Expected {
     Expected::Refused {
         exception_type,
@@ -87,13 +82,13 @@ fn rows() -> Vec<Case> {
             label: "TS with DASH alone",
             container: "TS",
             families: &[("DashManifests", 1)],
-            expected: family_refused("TS_CONTAINER_TYPE_WITH_DASH_MANIFEST", "dashManifests"),
+            expected: set_refused("TS_CONTAINER_TYPE_WITH_DASH_MANIFEST"),
         },
         Case {
             label: "TS with MSS alone",
             container: "TS",
             families: &[("MssManifests", 3)],
-            expected: family_refused("TS_CONTAINER_TYPE_WITH_MSS_MANIFEST", "mssManifests"),
+            expected: set_refused("TS_CONTAINER_TYPE_WITH_MSS_MANIFEST"),
         },
         // CMAF adds DASH.
         Case {
@@ -106,7 +101,7 @@ fn rows() -> Vec<Case> {
             label: "CMAF with MSS alone",
             container: "CMAF",
             families: &[("MssManifests", 1)],
-            expected: family_refused("CMAF_CONTAINER_TYPE_WITH_MSS_MANIFEST", "mssManifests"),
+            expected: set_refused("CMAF_CONTAINER_TYPE_WITH_MSS_MANIFEST"),
         },
         Case {
             label: "CMAF with every family it serves, unevenly spread",
@@ -129,22 +124,19 @@ fn rows() -> Vec<Case> {
             label: "ISM with HLS alone",
             container: "ISM",
             families: &[("HlsManifests", 1)],
-            expected: family_refused("ISM_CONTAINER_TYPE_WITH_HLS_MANIFEST", "hlsManifests"),
+            expected: set_refused("ISM_CONTAINER_TYPE_WITH_HLS_MANIFEST"),
         },
         Case {
             label: "ISM with low-latency HLS alone",
             container: "ISM",
             families: &[("LowLatencyHlsManifests", 1)],
-            expected: family_refused(
-                "ISM_CONTAINER_TYPE_WITH_LL_HLS_MANIFEST",
-                "lowLatencyHlsManifests",
-            ),
+            expected: set_refused("ISM_CONTAINER_TYPE_WITH_LL_HLS_MANIFEST"),
         },
         Case {
             label: "ISM with DASH alone",
             container: "ISM",
             families: &[("DashManifests", 2)],
-            expected: family_refused("ISM_CONTAINER_TYPE_WITH_DASH_MANIFEST", "dashManifests"),
+            expected: set_refused("ISM_CONTAINER_TYPE_WITH_DASH_MANIFEST"),
         },
         // The count range is about the total across every family, so an empty set and an
         // over-sized one are refused whichever families carry them.
