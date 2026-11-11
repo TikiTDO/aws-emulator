@@ -720,28 +720,30 @@ pub fn iam_state<Eng: Send + Sync + 'static>(
     ::service_com_amazonaws_iam_awsidentitymanagementv20100508::state::service_state(engine)
 }
 
-/// The member a workspace's execution role travels under, on the create and on
-/// the update alike (`CreateWorkspaceRequest$role`,
-/// `UpdateWorkspaceRequest$role`, both `RoleArn`).
-pub const WORKSPACE_ROLE_MEMBER: &str = "role";
-
-/// The member a sync job's role travels under
-/// (`CreateSyncJobRequest$syncRole`, also `RoleArn`).
-pub const SYNC_ROLE_MEMBER: &str = "syncRole";
+/// The sentence this service words the refusal of a role it cannot assume with.
+///
+/// The model declares the `ValidationException` (HTTP 400) but states no message
+/// text for it; the service's own wording is this ONE fixed sentence, the same
+/// for every member that names a role. It is a constant, not a template: the
+/// service interpolates nothing into it — not the member, not the role ARN, not
+/// its own principal, not the action the trust policy withholds — so neither the
+/// request nor this emulator's state can reach the text a caller matches on.
+pub const UNASSUMABLE_ROLE_MESSAGE: &str =
+    "Could not assume the role provided, verify permissions";
 
 /// `None` when this emulator has no reason to think the service could not act as
-/// the role `role_arn` that `member` names; otherwise the message its refusal
-/// carries.
+/// the role `role_arn`; otherwise the message its refusal carries
+/// ([`UNASSUMABLE_ROLE_MESSAGE`]).
 ///
 /// Where a request names a role THIS service has to act as — a workspace's
-/// execution role ([`WORKSPACE_ROLE_MEMBER`]) or a sync job's
-/// ([`SYNC_ROLE_MEMBER`]) — the role is resolved against the account's IAM
-/// records before anything is persisted, and a role whose trust policy withholds
-/// `sts:AssumeRole` from [`SERVICE_PRINCIPAL`] is refused synchronously rather
-/// than stored and left to fail later. ONE function for every such member: the
-/// rule is about the role, not about the operation that named it, so `member` is
-/// the only thing that differs between its callers — and it is what the message
-/// names, so the caller knows which value to fix.
+/// execution role (`CreateWorkspaceRequest$role`, `UpdateWorkspaceRequest$role`)
+/// or a sync job's (`CreateSyncJobRequest$syncRole`) — the role is resolved
+/// against the account's IAM records before anything is persisted, and a role
+/// whose trust policy withholds `sts:AssumeRole` from [`SERVICE_PRINCIPAL`] is
+/// refused synchronously rather than stored and left to fail later. ONE function
+/// for every such member, carrying ONE message: the rule is about the role, not
+/// about the operation that named it, so nothing about the caller or the member
+/// differs between its callers' refusals.
 ///
 /// NOTHING is parsed here. The role is found by COMPARING the stored ARN string
 /// with the one the request carried — no splitting, no indexing, no arithmetic —
@@ -765,18 +767,14 @@ pub const SYNC_ROLE_MEMBER: &str = "syncRole";
 /// two readings answer differently where IAM holds no role, and only the trust
 /// half of the question is shared (the one reader
 /// `service_common::iam_trust_policy::admits_service_principal`).
-pub fn assume_role_refusal(member: &str, role_arn: &str, iam: &IamState) -> Option<String> {
+pub fn assume_role_refusal(role_arn: &str, iam: &IamState) -> Option<&'static str> {
     let role = iam.roles.values().find(|role| role.arn == role_arn)?;
     let document = role.assume_role_policy_document.as_deref()?;
     match ::service_common::iam_trust_policy::admits_service_principal(document, SERVICE_PRINCIPAL) {
         // A document this emulator cannot read as a policy is no evidence either
         // way, and one that grants the principal the action is the grant itself.
         None | Some(true) => None,
-        Some(false) => Some(format!(
-            "{member} {role_arn} cannot be assumed by {SERVICE_PRINCIPAL}: its trust policy must \
-             grant {} to that service principal",
-            ::service_common::iam_trust_policy::ASSUME_ROLE_ACTION
-        )),
+        Some(false) => Some(UNASSUMABLE_ROLE_MESSAGE),
     }
 }
 

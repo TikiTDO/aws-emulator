@@ -48,7 +48,7 @@ use service_com_amazonaws_iottwinmaker_awsiottwinmaker::ops::types::{
     ErrorDetails, SYNC_RESOURCE_STATE_VALUES, SYNC_RESOURCE_TYPE_VALUES,
 };
 use service_com_amazonaws_iottwinmaker_awsiottwinmaker::state::{
-    sync_job_not_found_message, workspace_not_found_message, SyncResource, SYNC_JOB_ERROR_CODE,
+    workspace_not_found_message, SyncResource, SYNC_JOB_ERROR_CODE, SYNC_JOB_NOT_FOUND_MESSAGE,
     SYNC_JOB_SETTLE_SPAN, SYNC_JOB_STATE_CREATING, SYNC_JOB_STATE_ERROR, SYNC_SOURCE_SITEWISE,
     MAX_PAGE_SIZE,
 };
@@ -494,9 +494,8 @@ async fn an_absent_workspace_or_sync_job_is_refused() {
         );
         assert_eq!(
             refused.member("message").as_str(),
-            Some(sync_job_not_found_message(WORKSPACE, sync_source).as_str()),
-            "case {sync_source:?}: the refusal must name the job that was looked for, got \
-             {refused:?}"
+            Some(SYNC_JOB_NOT_FOUND_MESSAGE),
+            "case {sync_source:?}: expected {SYNC_JOB_NOT_FOUND_MESSAGE:?}, got {refused:?}"
         );
     }
 }

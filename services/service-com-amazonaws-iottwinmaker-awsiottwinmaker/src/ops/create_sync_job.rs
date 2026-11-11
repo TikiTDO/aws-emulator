@@ -222,14 +222,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 message: Some("the IAM store is unavailable".to_string()),
             })
         })?;
-        let role_refusal = crate::state::assume_role_refusal(
-            crate::state::SYNC_ROLE_MEMBER,
-            &input.sync_role,
-            &iam.lock(),
-        );
+        let role_refusal = crate::state::assume_role_refusal(&input.sync_role, &iam.lock());
         if let Some(message) = role_refusal {
             return Err(CreateSyncJobErrorModeled::ValidationException(ValidationException {
-                message: Some(message),
+                message: Some(message.to_string()),
             })
             .into());
         }

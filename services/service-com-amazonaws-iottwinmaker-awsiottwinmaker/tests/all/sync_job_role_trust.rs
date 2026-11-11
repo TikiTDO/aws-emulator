@@ -23,7 +23,7 @@
 use serde_json::json;
 use service_com_amazonaws_iottwinmaker_awsiottwinmaker::ops::types::SYNC_JOB_STATE_VALUES;
 use service_com_amazonaws_iottwinmaker_awsiottwinmaker::state::{
-    sync_job_not_found_message, SERVICE_PRINCIPAL, SYNC_ROLE_MEMBER, SYNC_SOURCE_SITEWISE,
+    SYNC_JOB_NOT_FOUND_MESSAGE, SYNC_SOURCE_SITEWISE, UNASSUMABLE_ROLE_MESSAGE,
 };
 
 use crate::harness::{
@@ -91,18 +91,12 @@ async fn a_sync_role_this_service_cannot_assume_is_refused_and_persists_nothing(
                 (400, Some("ValidationException")),
                 "case {case:?}: expected a 400 ValidationException, got {created:?}"
             );
+            // The refusal carries the service's own fixed sentence, whatever
+            // role the request named and whatever form withheld the grant.
             let message = created.member("message").as_str().unwrap_or_default();
-            // The MEMBER the caller has to fix opens the message — asserted as a
-            // prefix rather than by `contains`, since "role" is a substring of
-            // every role ARN the message quotes.
-            assert!(
-                message.starts_with(&format!("{SYNC_ROLE_MEMBER} {role_arn}")),
-                "case {case:?}: the refusal must open by naming the member and the role, got \
-                 {message:?}"
-            );
-            assert!(
-                message.contains(SERVICE_PRINCIPAL),
-                "case {case:?}: the refusal must name {SERVICE_PRINCIPAL:?}, got {message:?}"
+            assert_eq!(
+                message, UNASSUMABLE_ROLE_MESSAGE,
+                "case {case:?}: expected {UNASSUMABLE_ROLE_MESSAGE:?}, got {message:?}"
             );
             // Nothing was persisted: the read behind the refused create is the
             // service's own not-found refusal for a sync job, and the workspace
@@ -114,8 +108,8 @@ async fn a_sync_role_this_service_cannot_assume_is_refused_and_persists_nothing(
             );
             assert_eq!(
                 read.member("message").as_str(),
-                Some(sync_job_not_found_message(&workspace_id, SYNC_SOURCE_SITEWISE).as_str()),
-                "case {case:?}: expected the sync job not-found construction, got {read:?}"
+                Some(SYNC_JOB_NOT_FOUND_MESSAGE),
+                "case {case:?}: expected {SYNC_JOB_NOT_FOUND_MESSAGE:?}, got {read:?}"
             );
             let workspace = emulator.get_workspace(&workspace_id).await;
             assert!(

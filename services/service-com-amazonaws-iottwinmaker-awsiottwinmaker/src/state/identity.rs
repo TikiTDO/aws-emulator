@@ -168,14 +168,16 @@ pub fn metadata_transfer_job_terminal_message(
     )
 }
 
-/// The message for a sync job the workspace the request named does not hold.
-/// Built from the request, naming the SOURCE that was looked for and the
-/// workspace it was looked for in — a sync job has no id of its own, the source
-/// being its identity inside the workspace. Same construction as
-/// [`scene_not_found_message`] one resource across.
-pub fn sync_job_not_found_message(workspace_id: &str, sync_source: &str) -> String {
-    format!("SyncJob for sync source {sync_source} in workspace {workspace_id} not found.")
-}
+/// The message this service reports for a sync job the workspace the request
+/// named does not hold.
+///
+/// ONE fixed sentence for that miss, whichever operation reports it: the service
+/// interpolates nothing into it — neither the sync source that was looked for
+/// nor the workspace it was looked for in — so a client matching on the text
+/// sees the same string from every reader of a sync job. Unlike
+/// [`scene_not_found_message`] and [`entity_not_found_message`], which this
+/// service does build from the request, this miss is reported as a constant.
+pub const SYNC_JOB_NOT_FOUND_MESSAGE: &str = "Provided Sync Job does not exist!";
 
 /// The message for a workspace this service does not hold, on a path that LOOKS
 /// a workspace UP to serve the request: built from the request, naming the

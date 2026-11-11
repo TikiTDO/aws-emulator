@@ -218,10 +218,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(job) = workspace.sync_jobs.get_mut(&input.sync_source) else {
             return Err(GetSyncJobErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
-                    message: Some(crate::state::sync_job_not_found_message(
-                        &workspace_id,
-                        &input.sync_source,
-                    )),
+                    message: Some(crate::state::SYNC_JOB_NOT_FOUND_MESSAGE.to_string()),
                 },
             )
             .into());

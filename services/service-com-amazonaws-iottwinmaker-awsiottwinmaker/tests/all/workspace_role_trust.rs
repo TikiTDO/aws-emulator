@@ -20,8 +20,7 @@
 
 use serde_json::json;
 use service_com_amazonaws_iottwinmaker_awsiottwinmaker::state::{
-    workspace_not_found_message, SERVICE_PRINCIPAL, SYNC_ROLE_MEMBER, SYNC_SOURCE_SITEWISE,
-    WORKSPACE_ROLE_MEMBER,
+    workspace_not_found_message, SYNC_SOURCE_SITEWISE, UNASSUMABLE_ROLE_MESSAGE,
 };
 
 use crate::harness::{
@@ -29,25 +28,17 @@ use crate::harness::{
 };
 
 /// The refusal a role this service cannot assume draws, as every member's
-/// message words it: the member and the role it named open it, and the principal
-/// whose grant is missing is in it.
-///
-/// The member is asserted as a PREFIX rather than by `contains`, since the
-/// member name is a substring of every role ARN the message quotes.
-fn assert_refusal(case: &str, resp: &crate::harness::Resp, member: &str, role: &str) {
+/// message words it: ONE fixed sentence, with nothing of the request in it.
+fn assert_refusal(case: &str, resp: &crate::harness::Resp) {
     assert_eq!(
         (resp.status, resp.error_type.as_deref()),
         (400, Some("ValidationException")),
         "case {case:?}: expected a 400 ValidationException, got {resp:?}"
     );
     let message = resp.member("message").as_str().unwrap_or_default();
-    assert!(
-        message.starts_with(&format!("{member} {role}")),
-        "case {case:?}: the refusal must open by naming the member and the role, got {message:?}"
-    );
-    assert!(
-        message.contains(SERVICE_PRINCIPAL),
-        "case {case:?}: the refusal must name {SERVICE_PRINCIPAL:?}, got {message:?}"
+    assert_eq!(
+        message, UNASSUMABLE_ROLE_MESSAGE,
+        "case {case:?}: expected {UNASSUMABLE_ROLE_MESSAGE:?}, got {message:?}"
     );
 }
 
@@ -92,7 +83,7 @@ async fn a_workspace_role_this_service_cannot_assume_is_refused_and_persists_not
                 "case {case:?}: the workspace must carry the role the create named, got {read:?}"
             );
         } else {
-            assert_refusal(case, &created, WORKSPACE_ROLE_MEMBER, &role);
+            assert_refusal(case, &created);
             // Nothing was persisted: the read behind the refused create is the
             // service's own not-found refusal for a workspace.
             assert_eq!(
@@ -171,7 +162,7 @@ async fn an_update_naming_a_role_this_service_cannot_assume_changes_nothing() {
                 "case {case:?}: restoring the stored role must be served"
             );
         } else {
-            assert_refusal(case, &updated, WORKSPACE_ROLE_MEMBER, &role);
+            assert_refusal(case, &updated);
             assert_eq!(
                 read.member("role").as_str(),
                 Some(stored_role.as_str()),
@@ -216,19 +207,12 @@ async fn every_member_naming_a_role_decides_alike() {
     assert_refusal(
         "UpdateWorkspace role on a workspace that does not exist",
         &refused_before_lookup,
-        WORKSPACE_ROLE_MEMBER,
-        &refused_role,
     );
 
     let refused_create = emulator
         .create_workspace_with("sharedRuleWs", json!({"role": refused_role}))
         .await;
-    assert_refusal(
-        "CreateWorkspace role",
-        &refused_create,
-        WORKSPACE_ROLE_MEMBER,
-        &refused_role,
-    );
+    assert_refusal("CreateWorkspace role", &refused_create);
 
     // The refused create left the id free, so the same id is created with the
     // assumable role: the two calls differ only in the role they name.
@@ -243,12 +227,7 @@ async fn every_member_naming_a_role_decides_alike() {
     let refused_patch = emulator
         .update_workspace("sharedRuleWs", json!({"role": refused_role}))
         .await;
-    assert_refusal(
-        "UpdateWorkspace role",
-        &refused_patch,
-        WORKSPACE_ROLE_MEMBER,
-        &refused_role,
-    );
+    assert_refusal("UpdateWorkspace role", &refused_patch);
 
     let refused_job = emulator
         .create_sync_job(
@@ -257,12 +236,7 @@ async fn every_member_naming_a_role_decides_alike() {
             json!({"syncRole": refused_role}),
         )
         .await;
-    assert_refusal(
-        "CreateSyncJob syncRole",
-        &refused_job,
-        SYNC_ROLE_MEMBER,
-        &refused_role,
-    );
+    assert_refusal("CreateSyncJob syncRole", &refused_job);
     let accepted_job = emulator
         .create_sync_job(
             "sharedRuleWs",

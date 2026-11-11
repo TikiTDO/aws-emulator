@@ -237,11 +237,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // syncs from no such source has no resources synchronised from it, which
         // includes every source this service does not support.
         let Some(job) = workspace.sync_jobs.get(&input.sync_source) else {
-            return Err(invalid(crate::state::sync_job_not_found_message(
-                &input.workspace_id,
-                &input.sync_source,
-            ))
-            .into());
+            return Err(invalid(crate::state::SYNC_JOB_NOT_FOUND_MESSAGE.to_string()).into());
         };
 
         // Every filter the request names NARROWS the page: a resource is

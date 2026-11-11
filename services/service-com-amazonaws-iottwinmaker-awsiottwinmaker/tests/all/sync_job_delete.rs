@@ -31,7 +31,8 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use service_com_amazonaws_iottwinmaker_awsiottwinmaker::ops::types::SYNC_JOB_STATE_VALUES;
 use service_com_amazonaws_iottwinmaker_awsiottwinmaker::state::{
-    SYNC_JOB_SETTLE_SPAN, SYNC_JOB_STATE_DELETING, SYNC_SOURCE_SITEWISE,
+    workspace_not_found_message, SYNC_JOB_NOT_FOUND_MESSAGE, SYNC_JOB_SETTLE_SPAN,
+    SYNC_JOB_STATE_DELETING, SYNC_SOURCE_SITEWISE,
 };
 
 use crate::harness::{seed_sync_job, sync_job_arn, Emulator, Resp, SYNC_ROLE, REGION};
@@ -256,7 +257,8 @@ async fn deleting_a_sync_job_removes_it() {
 /// RULE: both of this operation's labels address an EXISTING resource, so one
 /// naming something the store does not hold is the modelled
 /// `ResourceNotFoundException` (HTTP 404) — the same reading `GetSyncJob` gives
-/// the same pair — the refusal says what was missing, and it removes nothing.
+/// the same pair — the refusal carries the message this service words that miss
+/// with, and it removes nothing.
 ///
 /// The rows differ along WHICH label misses: the workspace, the source inside a
 /// workspace that holds another job, a source held only in ANOTHER workspace, a
@@ -282,43 +284,70 @@ async fn deleting_what_the_store_does_not_hold_is_not_found() {
         "the first delete of the repeated-delete row must succeed"
     );
 
-    let rows: Vec<(&str, &str, &str, &str)> = vec![
+    // `(case, workspaceId, syncSource, the message the refusal carries)`: a
+    // workspace this service does not hold is reported for the id the request
+    // named, while a workspace that holds no such job reports the service's
+    // fixed sentence for a missing sync job.
+    let rows: Vec<(&str, &str, &str, String)> = vec![
         (
             "no-such-workspace",
             "absentSyncWorkspace",
             SYNC_SOURCE_SITEWISE,
-            "absentSyncWorkspace",
+            workspace_not_found_message("absentSyncWorkspace"),
         ),
         (
             "no-such-source",
             WORKSPACE,
             SYNC_SOURCE_SITEWISE,
-            SYNC_SOURCE_SITEWISE,
+            SYNC_JOB_NOT_FOUND_MESSAGE.to_string(),
         ),
-        ("foreign-workspace", WORKSPACE, "ELSEWHERE_SRC", "ELSEWHERE_SRC"),
-        ("already-deleted", WORKSPACE, "ONCE_SRC", "ONCE_SRC"),
+        (
+            "foreign-workspace",
+            WORKSPACE,
+            "ELSEWHERE_SRC",
+            SYNC_JOB_NOT_FOUND_MESSAGE.to_string(),
+        ),
+        (
+            "already-deleted",
+            WORKSPACE,
+            "ONCE_SRC",
+            SYNC_JOB_NOT_FOUND_MESSAGE.to_string(),
+        ),
         // Sources the service does not support: a different case of the
         // supported value, an unrelated service, and a value the supported one
         // is a prefix of.
-        ("unsupported-lowercase", WORKSPACE, "sitewise", "sitewise"),
-        ("unsupported-other-service", WORKSPACE, "KINESIS", "KINESIS"),
-        ("unsupported-prefixed", WORKSPACE, "SITEWISE2", "SITEWISE2"),
+        (
+            "unsupported-lowercase",
+            WORKSPACE,
+            "sitewise",
+            SYNC_JOB_NOT_FOUND_MESSAGE.to_string(),
+        ),
+        (
+            "unsupported-other-service",
+            WORKSPACE,
+            "KINESIS",
+            SYNC_JOB_NOT_FOUND_MESSAGE.to_string(),
+        ),
+        (
+            "unsupported-prefixed",
+            WORKSPACE,
+            "SITEWISE2",
+            SYNC_JOB_NOT_FOUND_MESSAGE.to_string(),
+        ),
     ];
 
     let held_before = stored_job_count(&emulator);
-    for (case, workspace_id, sync_source, named) in rows {
+    for (case, workspace_id, sync_source, expected) in rows {
         let refused = emulator.delete_sync_job(workspace_id, sync_source).await;
         assert_eq!(
             (refused.status, refused.error_type.as_deref()),
             (404, Some("ResourceNotFoundException")),
             "case {case:?}: expected 404 ResourceNotFoundException, got {refused:?}"
         );
-        assert!(
-            refused
-                .member("message")
-                .as_str()
-                .is_some_and(|message| message.contains(named)),
-            "case {case:?}: the refusal must name what was missing, got {refused:?}"
+        assert_eq!(
+            refused.member("message").as_str(),
+            Some(expected.as_str()),
+            "case {case:?}: expected {expected:?}, got {refused:?}"
         );
         assert_eq!(
             stored_job_count(&emulator),
