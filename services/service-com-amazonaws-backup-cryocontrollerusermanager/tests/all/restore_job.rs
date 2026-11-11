@@ -331,7 +331,11 @@ async fn dynamodb(router: &MultiServiceRouter, operation: &str, body: Value) -> 
 /// Create a DynamoDB table to be backed up, and answer the ARN DynamoDB gives
 /// it. `provisioned` picks which billing mode the source table is in, which is
 /// the mode the restored table has to be created in too.
-async fn source_table(router: &MultiServiceRouter, name: &str, provisioned: bool) -> String {
+pub(crate) async fn source_table(
+    router: &MultiServiceRouter,
+    name: &str,
+    provisioned: bool,
+) -> String {
     let mut body = json!({
         "TableName": name,
         "KeySchema": [

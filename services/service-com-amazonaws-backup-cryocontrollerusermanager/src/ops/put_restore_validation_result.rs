@@ -153,7 +153,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let now = ::std::time::SystemTime::now();
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             PutRestoreValidationResultErrorModeled::ServiceUnavailableException(
@@ -163,20 +162,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 },
             )
         })?;
-        let mut store = state.lock();
-        // The write is on the job, so the transition the clock owes it is
-        // materialised first and the job this call writes is the job as it
-        // stands now.
-        store.settle_restore_job(&input.restore_job_id, now);
+        // This store's lock lives for exactly this block: the publication below
+        // awaits, and a guard must not be held across an await.
+        {
+            let mut store = state.lock();
+            // The write is on the job, so the transition the clock owes it is
+            // materialised first and the job this call writes is the job as it
+            // stands now.
+            store.settle_restore_job(&input.restore_job_id, now);
+            // A transition this call materialised owes the bus its event just as one
+            // the clock pump materialised does (`crate::state::events`).
+            store.record_job_state_changes();
 
-        // `ValidationStatus` is `@required` and targets the model's own enum, so
-        // an absent or unknown value is refused before this handler runs: what
-        // is left to resolve is the job it is reported for.
-        let job = store
-            .stored_restore_job_mut(&input.restore_job_id)
-            .map_err(PutRestoreValidationResultErrorModeled::ResourceNotFoundException)?;
-        job.validation_status = Some(input.validation_status);
-        job.validation_status_message = input.validation_status_message;
+            // `ValidationStatus` is `@required` and targets the model's own enum, so
+            // an absent or unknown value is refused before this handler runs: what
+            // is left to resolve is the job it is reported for.
+            let job = store
+                .stored_restore_job_mut(&input.restore_job_id)
+                .map_err(PutRestoreValidationResultErrorModeled::ResourceNotFoundException)?;
+            job.validation_status = Some(input.validation_status);
+            job.validation_status_message = input.validation_status_message;
+        }
+        crate::state::publish_job_state_changes(ctx, &*self.engine).await;
         Ok(PutRestoreValidationResultOutput)
     }
 }

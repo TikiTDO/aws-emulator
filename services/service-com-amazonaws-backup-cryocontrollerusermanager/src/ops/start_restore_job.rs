@@ -37,8 +37,11 @@
 //! `CreatedResourceArn` the ARN that service answered with — so a resource no
 //! service holds is never reported as created, and a restore of a type this
 //! emulator cannot perform ends in the modelled failure status carrying the
-//! reason. The `Restore Job State Change` events a job's transitions publish
-//! are the subject of this operation's own stub issue.
+//! reason. Every status the job MOVES INTO after this call is published onto the
+//! account's default EventBridge bus as a `Restore Job State Change`
+//! ([`crate::state::RESTORE_JOB_STATE_CHANGE`]), the same way a backup job's and
+//! a copy job's moves are, so a client watching the bus needs to make no further
+//! call.
 //!
 //! Shared types live in `super::types`; the error channel in `crate::scaffolded`.
 //!
@@ -219,8 +222,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })?;
 
         // What the restore has to create, read out of the store under the lock
-        // and used to perform it once the lock is released.
-        let started = {
+        // and used to perform it once the lock is released. A refusal is carried
+        // OUT of the block rather than returned from inside it, so the moves the
+        // settles below materialised are published either way.
+        let started: Result<Started, StartRestoreJobError> = {
             let mut store = state.lock();
 
             // The transitions the clock already owes: a recovery point whose
@@ -230,6 +235,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // token answers from the job's current status.
             store.settle_recovery_points(now);
             store.settle_restore_jobs(now);
+            // Whatever those transitions moved owes the bus an event, whichever
+            // call materialised it (`crate::state::events`).
+            store.record_job_state_changes();
 
             // A repeated `IdempotencyToken` takes no second action: it answers
             // with the job that token started, and performs no second restore.
@@ -240,131 +248,182 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .as_deref()
                 .and_then(|token| store.restore_job_by_idempotency_token(token))
             {
-                return Ok(StartRestoreJobOutput {
-                    restore_job_id: Some(existing.restore_job_id.clone()),
-                });
+                Ok(Started::Replayed(existing.restore_job_id.clone()))
+            } else {
+                Self::stored_restore(&mut store, &input, now)
             }
+        };
 
-            // The recovery point is an INPUT to the restore, so one that
-            // resolves to nothing stored is refused as that member's value and
-            // no job is persisted. Resolved before anything is written.
-            let Some(point) = store.restorable_recovery_point(&input.recovery_point_arn) else {
-                return Err(StartRestoreJobErrorModeled::InvalidParameterValueException(
-                    crate::state::recovery_point_not_found_value(),
-                )
-                .into());
-            };
-            // Taken off the resolved point, so the job can report nothing about
-            // a recovery point the store does not hold.
-            let recovery_point_arn = point.arn.clone();
-            let source_resource_arn = point.resource_arn.clone();
-            let backup_vault_arn = point.backup_vault_arn.clone();
-            let recovery_point_creation_date = point.creation_date;
-            // The tags "included in the backup", which the restore copies to
-            // the resource it creates when the request asks it to.
-            let source_tags = point.tags.clone();
-            // "Starts a job to restore a recovery point for one of the
-            // following resources" — the request may name the type, and when it
-            // does not the type of the resource the point was taken of is what
-            // the restore is of.
-            let resource_type = input
-                .resource_type
-                .clone()
-                .or_else(|| point.resource_type.clone());
+        // Nothing was published while the lock was held; this is where the moves
+        // recorded above reach the bus, before this call's own answer is decided.
+        crate::state::publish_job_state_changes(ctx, &*self.engine).await;
 
-            // The store is in memory and every request can add to it, so the
-            // number of restore jobs it keeps is bounded; AWS refuses a restore
-            // it will not start with the same modelled class.
-            if store.restore_jobs.len() >= crate::state::MAX_RESTORE_JOBS {
-                return Err(StartRestoreJobErrorModeled::InvalidRequestException(
-                    InvalidRequestException {
-                        message: Some(format!(
-                            "this emulator keeps at most {} restore jobs",
-                            crate::state::MAX_RESTORE_JOBS
-                        )),
-                        ..Default::default()
-                    },
-                )
-                .into());
-            }
-
-            let restore_job_id = store.next_id(now);
-            let record = crate::state::RestoreJobRecord {
-                restore_job_id: restore_job_id.clone(),
-                recovery_point_arn,
-                source_resource_arn: source_resource_arn.clone(),
-                backup_vault_arn,
-                recovery_point_creation_date,
-                iam_role_arn: input.iam_role_arn,
-                resource_type: resource_type.clone(),
-                // The restore is not done the instant this call answers, so the
-                // job starts in the non-terminal status AWS reports for one and
-                // the clock owes it the terminal one.
-                status: crate::state::RESTORE_JOB_STATUS_PENDING.to_string(),
-                status_message: None,
-                creation_date: now,
-                settles_at: now
-                    .checked_add(crate::state::RESTORE_JOB_SETTLE_AFTER)
-                    .unwrap_or(now),
-                completion_date: None,
-                metadata: input.metadata.into_iter().collect(),
-                // No validation result has been recorded for this restore yet:
-                // `PutRestoreValidationResult` is what records one.
-                validation_status: None,
-                validation_status_message: None,
-                created_resource_arn: None,
-                copy_source_tags_to_restored_resource: input
-                    .copy_source_tags_to_restored_resource,
-                idempotency_token: input.idempotency_token,
-            };
-            let metadata = record.metadata.clone();
-            // The job is stored BEFORE the restore is performed, so the id this
-            // call answers with addresses a job every read can already resolve
-            // and a repeat of the token cannot start a second restore.
-            store.restore_jobs.insert(restore_job_id.clone(), record);
-            (
+        let restore_job_id = match started? {
+            // A replay performs nothing: the restore its token started is the
+            // only one, and the job it stored is what this call answers with.
+            Started::Replayed(restore_job_id) => restore_job_id,
+            Started::Stored {
                 restore_job_id,
                 resource_type,
                 source_resource_arn,
                 metadata,
                 source_tags,
-            )
+            } => {
+                // THE RESTORE ITSELF: the resource is created in the service that
+                // owns it, over the emulator's own in-process transport, with no
+                // state lock held across the hop. What comes back is that service's
+                // own answer — the ARN of the resource it now holds, or why it holds
+                // none — and it is recorded on the stored job, so every read of that
+                // job reports what the restore came to.
+                //
+                // Started as its OWN task, the way this service's clock pump is
+                // started: `StartRestoreJob` "recovers the saved resource" without
+                // waiting for the recovery to finish, so the call answers with the
+                // job's id and the restore runs on. With no async runtime to spawn
+                // onto there is none to run on, and the restore is performed before
+                // this call answers instead.
+                let restoring = Restoring {
+                    state: ::engine::ServiceState::clone(&state),
+                    restore_job_id: restore_job_id.clone(),
+                    callback: ctx.callback().clone(),
+                    region,
+                    resource_type,
+                    source_resource_arn,
+                    metadata,
+                    source_tags,
+                    copy_source_tags: input.copy_source_tags_to_restored_resource,
+                };
+                match ::tokio::runtime::Handle::try_current() {
+                    Ok(runtime) => {
+                        runtime.spawn(restoring.perform());
+                    }
+                    Err(_) => restoring.perform().await,
+                }
+                restore_job_id
+            }
         };
-        let (restore_job_id, resource_type, source_resource_arn, metadata, source_tags) = started;
 
-        // THE RESTORE ITSELF: the resource is created in the service that owns
-        // it, over the emulator's own in-process transport, with no state lock
-        // held across the hop. What comes back is that service's own answer —
-        // the ARN of the resource it now holds, or why it holds none — and it
-        // is recorded on the stored job, so every read of that job reports what
-        // the restore came to.
-        //
-        // Started as its OWN task, the way this service's clock pump is
-        // started: `StartRestoreJob` "recovers the saved resource" without
-        // waiting for the recovery to finish, so the call answers with the
-        // job's id and the restore runs on. With no async runtime to spawn onto
-        // there is none to run on, and the restore is performed before this call
-        // answers instead.
-        let restoring = Restoring {
-            state: ::engine::ServiceState::clone(&state),
+        // The transition this job is owed falls due on the clock, not on the next
+        // call: the pump publishes it when it does, so a client watching the bus
+        // needs to make no further call (`crate::state::events`).
+        crate::state::drive_job_clock(ctx, &self.engine);
+        Ok(StartRestoreJobOutput {
+            restore_job_id: Some(restore_job_id),
+        })
+    }
+}
+
+/// What a start resolved to under the store's lock: the job a repeated
+/// `IdempotencyToken` replays, or the job this call stored and what performing
+/// its restore needs.
+enum Started {
+    Replayed(String),
+    Stored {
+        restore_job_id: String,
+        resource_type: Option<String>,
+        source_resource_arn: String,
+        metadata: ::std::collections::BTreeMap<String, String>,
+        source_tags: ::std::collections::BTreeMap<String, String>,
+    },
+}
+
+impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> StartRestoreJob<Eng> {
+    /// Resolve the recovery point this restore reads and store the job it starts.
+    ///
+    /// Separate from `handle` so this store's lock lives for exactly this step:
+    /// the publication `handle` makes afterwards awaits, and a guard must not be
+    /// held across an await.
+    fn stored_restore(
+        store: &mut crate::state::ComAmazonawsBackupCryocontrollerusermanagerState,
+        input: &StartRestoreJobInput,
+        now: ::std::time::SystemTime,
+    ) -> Result<Started, StartRestoreJobError> {
+        // The recovery point is an INPUT to the restore, so one that
+        // resolves to nothing stored is refused as that member's value and
+        // no job is persisted. Resolved before anything is written.
+        let Some(point) = store.restorable_recovery_point(&input.recovery_point_arn) else {
+            return Err(StartRestoreJobErrorModeled::InvalidParameterValueException(
+                crate::state::recovery_point_not_found_value(),
+            )
+            .into());
+        };
+        // Taken off the resolved point, so the job can report nothing about
+        // a recovery point the store does not hold.
+        let recovery_point_arn = point.arn.clone();
+        let source_resource_arn = point.resource_arn.clone();
+        let backup_vault_arn = point.backup_vault_arn.clone();
+        let recovery_point_creation_date = point.creation_date;
+        // The tags "included in the backup", which the restore copies to
+        // the resource it creates when the request asks it to.
+        let source_tags = point.tags.clone();
+        // "Starts a job to restore a recovery point for one of the
+        // following resources" — the request may name the type, and when it
+        // does not the type of the resource the point was taken of is what
+        // the restore is of.
+        let resource_type = input
+            .resource_type
+            .clone()
+            .or_else(|| point.resource_type.clone());
+
+        // The store is in memory and every request can add to it, so the
+        // number of restore jobs it keeps is bounded; AWS refuses a restore
+        // it will not start with the same modelled class.
+        if store.restore_jobs.len() >= crate::state::MAX_RESTORE_JOBS {
+            return Err(StartRestoreJobErrorModeled::InvalidRequestException(
+                InvalidRequestException {
+                    message: Some(format!(
+                        "this emulator keeps at most {} restore jobs",
+                        crate::state::MAX_RESTORE_JOBS
+                    )),
+                    ..Default::default()
+                },
+            )
+            .into());
+        }
+
+        let restore_job_id = store.next_id(now);
+        let record = crate::state::RestoreJobRecord {
             restore_job_id: restore_job_id.clone(),
-            callback: ctx.callback().clone(),
-            region,
+            recovery_point_arn,
+            source_resource_arn: source_resource_arn.clone(),
+            backup_vault_arn,
+            recovery_point_creation_date,
+            iam_role_arn: input.iam_role_arn.clone(),
+            resource_type: resource_type.clone(),
+            // The restore is not done the instant this call answers, so the
+            // job starts in the non-terminal status AWS reports for one and
+            // the clock owes it the terminal one.
+            status: crate::state::RESTORE_JOB_STATUS_PENDING.to_string(),
+            status_message: None,
+            creation_date: now,
+            settles_at: now
+                .checked_add(crate::state::RESTORE_JOB_SETTLE_AFTER)
+                .unwrap_or(now),
+            completion_date: None,
+            metadata: input.metadata.clone().into_iter().collect(),
+            // No validation result has been recorded for this restore yet:
+            // `PutRestoreValidationResult` is what records one.
+            validation_status: None,
+            validation_status_message: None,
+            created_resource_arn: None,
+            copy_source_tags_to_restored_resource: input.copy_source_tags_to_restored_resource,
+            idempotency_token: input.idempotency_token.clone(),
+        };
+        let metadata = record.metadata.clone();
+        // The job is stored BEFORE the restore is performed, so the id this
+        // call answers with addresses a job every read can already resolve
+        // and a repeat of the token cannot start a second restore.
+        store.restore_jobs.insert(restore_job_id.clone(), record);
+        // The status this call stored is what this call's own response reports, so
+        // recording it announces nothing: it is the status the job's LATER moves
+        // are published against (`crate::state::events`).
+        store.record_job_state_changes();
+        Ok(Started::Stored {
+            restore_job_id,
             resource_type,
             source_resource_arn,
             metadata,
             source_tags,
-            copy_source_tags: input.copy_source_tags_to_restored_resource,
-        };
-        match ::tokio::runtime::Handle::try_current() {
-            Ok(runtime) => {
-                runtime.spawn(restoring.perform());
-            }
-            Err(_) => restoring.perform().await,
-        }
-
-        Ok(StartRestoreJobOutput {
-            restore_job_id: Some(restore_job_id),
         })
     }
 }
@@ -408,19 +467,31 @@ impl Restoring {
         )
         .await;
         let now = ::std::time::SystemTime::now();
-        let mut store = self.state.lock();
-        let Ok(job) = store.stored_restore_job_mut(&self.restore_job_id) else {
-            return;
-        };
-        match outcome {
-            crate::state::RestoreOutcome::Created(created_resource_arn) => {
-                job.created_resource_arn = Some(created_resource_arn);
+        {
+            let mut store = self.state.lock();
+            let Ok(job) = store.stored_restore_job_mut(&self.restore_job_id) else {
+                return;
+            };
+            match outcome {
+                crate::state::RestoreOutcome::Created(created_resource_arn) => {
+                    job.created_resource_arn = Some(created_resource_arn);
+                }
+                crate::state::RestoreOutcome::Failed(reason) => {
+                    job.status = crate::state::RESTORE_JOB_STATUS_FAILED.to_string();
+                    job.status_message = Some(reason);
+                    job.completion_date = Some(now);
+                }
             }
-            crate::state::RestoreOutcome::Failed(reason) => {
-                job.status = crate::state::RESTORE_JOB_STATUS_FAILED.to_string();
-                job.status_message = Some(reason);
-                job.completion_date = Some(now);
-            }
+            // A restore that created nothing moved the job to its terminal status
+            // HERE rather than on the clock, so this is the call that owes the bus
+            // that move; a restore that created the resource moved nothing yet, and
+            // records none (`crate::state::events`).
+            store.record_job_state_changes();
         }
+        // With the lock released, so none is held across the publication's await.
+        crate::state::publish_queued(&self.callback, &self.state).await;
+        // The resource recorded above is what makes this job's terminal status due on
+        // the clock, so this is where the pump that waits for it is started.
+        crate::state::drive_clock(&self.callback, &self.state);
     }
 }

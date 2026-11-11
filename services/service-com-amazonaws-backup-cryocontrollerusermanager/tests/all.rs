@@ -65,6 +65,8 @@ mod restore_access_vault;
 mod resource_tags;
 #[path = "all/restore_job.rs"]
 mod restore_job;
+#[path = "all/restore_job_state_change_events.rs"]
+mod restore_job_state_change_events;
 #[path = "all/scheduled_runs_preview.rs"]
 mod scheduled_runs_preview;
 #[path = "all/state_roundtrip.rs"]

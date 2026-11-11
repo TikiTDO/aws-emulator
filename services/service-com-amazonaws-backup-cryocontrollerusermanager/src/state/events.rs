@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! The EventBridge events this service publishes as a JOB moves: one event per state
-//! change of a backup job and one per state change of a copy job.
+//! change of a backup job, one per state change of a copy job and one per state change of
+//! a restore job.
 //!
 //! # The rule this module implements
 //!
@@ -9,12 +10,14 @@
 //! job MOVES INTO after the call that started it is PUBLISHED onto the account's default
 //! EventBridge bus, under the `source` this service owns ([`EVENT_SOURCE`]) and the
 //! `detail-type` of the KIND of job that moved ([`BACKUP_JOB_STATE_CHANGE`],
-//! [`COPY_JOB_STATE_CHANGE`]), carrying that job's own stored members — the state it moved
-//! into among them — as the event's `detail` and the recovery point the job wrote in
+//! [`COPY_JOB_STATE_CHANGE`], [`RESTORE_JOB_STATE_CHANGE`]), carrying that job's own stored
+//! members — the state it moved
+//! into among them — as the event's `detail` and the recovery point the job is about in
 //! `resources`. A rule on that bus whose `EventPattern` matches then delivers the envelope
-//! unchanged to every one of that rule's targets, so a client that reacts to a backup or a
-//! copy through EventBridge observes the job without calling AWS Backup again — and ONE
-//! rule whose pattern lists both detail-types receives both kinds of envelope.
+//! unchanged to every one of that rule's targets, so a client that reacts to a backup, a
+//! copy or a restore through EventBridge observes the job without calling AWS Backup again
+//! — and ONE rule whose pattern lists several detail-types receives every kind of envelope
+//! it names.
 //!
 //! The state a START call stored is not a move: it is what that call's own response
 //! reports, so the snapshot is seeded with it and the events published are the transitions
@@ -24,7 +27,8 @@
 //!
 //! Nothing here decides WHEN anything moves: the stored job and the clock do
 //! ([`super::ComAmazonawsBackupCryocontrollerusermanagerState::settle_job`],
-//! [`super::ComAmazonawsBackupCryocontrollerusermanagerState::settle_copy_job`]), and a
+//! [`super::ComAmazonawsBackupCryocontrollerusermanagerState::settle_copy_job`],
+//! [`super::ComAmazonawsBackupCryocontrollerusermanagerState::settle_restore_job`]), and a
 //! state they write is the fact an event reports. So this module is a DIFF rather than a
 //! second state machine:
 //! [`super::ComAmazonawsBackupCryocontrollerusermanagerState::record_job_state_changes`]
@@ -51,7 +55,9 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::SystemTime;
 
-use super::{BackupJob, ComAmazonawsBackupCryocontrollerusermanagerState, CopyJobRecord};
+use super::{
+    BackupJob, ComAmazonawsBackupCryocontrollerusermanagerState, CopyJobRecord, RestoreJobRecord,
+};
 
 /// The `source` of every event AWS Backup publishes.
 ///
@@ -64,6 +70,9 @@ pub const BACKUP_JOB_STATE_CHANGE: &str = "Backup Job State Change";
 
 /// The `detail-type` of the event published when a COPY job changes state.
 pub const COPY_JOB_STATE_CHANGE: &str = "Copy Job State Change";
+
+/// The `detail-type` of the event published when a RESTORE job changes state.
+pub const RESTORE_JOB_STATE_CHANGE: &str = "Restore Job State Change";
 
 /// The event bus this service publishes onto.
 ///
@@ -107,7 +116,8 @@ pub struct JobStateChange {
     /// belongs to, read off its own stored vault ARN rather than off the call that
     /// published it, so a job started in one Region is never announced in another.
     pub region: String,
-    /// The ARN of the recovery point the job wrote, which the envelope carries in
+    /// The ARN of the recovery point the job is about — the one a backup or a copy WROTE,
+    /// and the one a restore read FROM — which the envelope carries in
     /// `resources`: the event names the resource it is about, which is what a rule
     /// filtering on `resources` reads.
     pub resource: String,
@@ -128,6 +138,8 @@ pub struct JobEventLog {
     backup_jobs: BTreeMap<String, String>,
     /// The `CopyJobState` last published for each copy job, by `CopyJobId`.
     copy_jobs: BTreeMap<String, String>,
+    /// The `RestoreJobStatus` last published for each restore job, by `RestoreJobId`.
+    restore_jobs: BTreeMap<String, String>,
     /// The changes queued for the next drain, oldest first.
     pending: VecDeque<JobStateChange>,
 }
@@ -165,6 +177,7 @@ impl ComAmazonawsBackupCryocontrollerusermanagerState {
         let Self {
             backup_jobs,
             copy_jobs,
+            restore_jobs,
             job_events,
             ..
         } = self;
@@ -192,6 +205,18 @@ impl ComAmazonawsBackupCryocontrollerusermanagerState {
                 enqueue(&mut job_events.pending, copy_job_change(job));
             }
         }
+        for (restore_job_id, job) in restore_jobs.iter() {
+            let published = job_events.restore_jobs.get(restore_job_id).cloned();
+            if published.as_deref() == Some(job.status.as_str()) {
+                continue;
+            }
+            job_events
+                .restore_jobs
+                .insert(restore_job_id.clone(), job.status.clone());
+            if published.is_some() {
+                enqueue(&mut job_events.pending, restore_job_change(job));
+            }
+        }
         // A snapshot belongs to a job: one the store no longer holds can never differ
         // again, so the snapshots do not grow past the jobs they are about.
         job_events
@@ -200,6 +225,9 @@ impl ComAmazonawsBackupCryocontrollerusermanagerState {
         job_events
             .copy_jobs
             .retain(|job_id, _| copy_jobs.contains_key(job_id));
+        job_events
+            .restore_jobs
+            .retain(|job_id, _| restore_jobs.contains_key(job_id));
     }
 
     /// Take at most `taking` queued changes out of the store, oldest first — one batch of
@@ -224,7 +252,19 @@ impl ComAmazonawsBackupCryocontrollerusermanagerState {
             .values()
             .filter(|job| job.state == super::COPY_JOB_STATE_CREATED)
             .map(|job| job.settles_at);
-        backups.chain(copies).min()
+        // A restore job owes its terminal status once the restore it started has created
+        // the resource it was asked for: until then the completion is owed by the restore
+        // rather than by the clock, so there is nothing for the pump to wait for and the
+        // restore itself wakes it ([`drive_clock`]) when it records that resource.
+        let restores = self
+            .restore_jobs
+            .values()
+            .filter(|job| {
+                job.status == super::RESTORE_JOB_STATUS_PENDING
+                    && job.created_resource_arn.is_some()
+            })
+            .map(|job| job.settles_at);
+        backups.chain(copies).chain(restores).min()
     }
 
     /// Materialise every job transition the clock has already made due, and queue the
@@ -236,6 +276,7 @@ impl ComAmazonawsBackupCryocontrollerusermanagerState {
     fn materialize_due_job_transitions(&mut self, now: SystemTime) {
         self.settle_jobs(now);
         self.settle_copy_jobs(now);
+        self.settle_restore_jobs(now);
         self.record_job_state_changes();
     }
 
@@ -365,15 +406,30 @@ pub fn drive_job_clock<Eng: Send + Sync + 'static>(
     let Some(state) = super::service_state(&**engine) else {
         return;
     };
+    drive_clock(ctx.callback(), &state);
+}
+
+/// [`drive_job_clock`] over the store itself, for a task that already holds this service's
+/// state rather than the engine it lives in.
+///
+/// The restore a start performs as its own task calls this once it has recorded the resource
+/// it created: that write is what makes the job's terminal status due, and the write happens
+/// under the SAME lock a pump takes to decide whether it still has work — so either the
+/// running pump sees the due instant and keeps it, or it has already stood down and this
+/// claim starts a pump of its own.
+pub fn drive_clock(
+    callback: &smithy_server_runtime::EmbeddedEmulator,
+    state: &::engine::ServiceState<ComAmazonawsBackupCryocontrollerusermanagerState>,
+) {
     let Ok(runtime) = ::tokio::runtime::Handle::try_current() else {
         return;
     };
     let Some(generation) = state.lock().start_clock_pump() else {
         return;
     };
-    let callback = ctx.callback().clone();
-    let engine = ::std::sync::Arc::clone(engine);
-    let pumped = ::engine::ServiceState::clone(&state);
+    let callback = callback.clone();
+    let pumped = ::engine::ServiceState::clone(state);
+    let state = ::engine::ServiceState::clone(state);
     let handle = runtime.spawn(async move {
         // `true` only if the wake-up cap below is what ended the loop; a pump that ran out
         // of work has already released its claim inside the one critical section that
@@ -396,7 +452,7 @@ pub fn drive_job_clock<Eng: Send + Sync + 'static>(
             state
                 .lock()
                 .materialize_due_job_transitions(SystemTime::now());
-            publish_pending(&callback, &*engine).await;
+            publish_queued(&callback, &state).await;
         }
         if capped {
             // Only THIS pump's claim, so a pump started since is left holding its own.
@@ -521,6 +577,63 @@ fn copy_job_change(job: &CopyJobRecord) -> JobStateChange {
     }
 }
 
+/// The change a RESTORE job's move owes.
+///
+/// The restore's own two ends are in the detail — the recovery point it reads FROM and the
+/// resource it CREATED — read off the stored job, so every value is the one
+/// `DescribeRestoreJob` reports for the same job: a member the job does not carry (the
+/// created resource of a restore that has created none, a status message) is absent from
+/// the detail exactly as it is absent from that read.
+fn restore_job_change(job: &RestoreJobRecord) -> JobStateChange {
+    let mut detail = ::serde_json::Map::new();
+    detail.insert("restoreJobId".to_string(), job.restore_job_id.clone().into());
+    detail.insert("status".to_string(), job.status.clone().into());
+    detail.insert(
+        "recoveryPointArn".to_string(),
+        job.recovery_point_arn.clone().into(),
+    );
+    detail.insert(
+        "sourceResourceArn".to_string(),
+        job.source_resource_arn.clone().into(),
+    );
+    detail.insert(
+        "backupVaultArn".to_string(),
+        job.backup_vault_arn.clone().into(),
+    );
+    // The one reading of how much of a restore is done, shared with the read of the same
+    // job, so the event and the read never disagree about it.
+    detail.insert("percentDone".to_string(), job.percent_done().into());
+    insert_instant(&mut detail, "creationDate", Some(job.creation_date));
+    insert_instant(&mut detail, "completionDate", job.completion_date);
+    if let Some(created_resource_arn) = job.created_resource_arn.as_ref() {
+        detail.insert(
+            "createdResourceArn".to_string(),
+            created_resource_arn.clone().into(),
+        );
+    }
+    if let Some(iam_role_arn) = job.iam_role_arn.as_ref() {
+        detail.insert("iamRoleArn".to_string(), iam_role_arn.clone().into());
+    }
+    if let Some(resource_type) = job.resource_type.as_ref() {
+        detail.insert("resourceType".to_string(), resource_type.clone().into());
+    }
+    if let Some(status_message) = job.status_message.as_ref() {
+        detail.insert("statusMessage".to_string(), status_message.clone().into());
+    }
+    JobStateChange {
+        detail_type: RESTORE_JOB_STATE_CHANGE,
+        // A restore belongs to the vault holding the point it restores FROM, so that
+        // vault's Region is the one its events are published in.
+        region: vault_region(&job.backup_vault_arn),
+        // The recovery point the restore is OF: the one ARN the job carries for every
+        // state it is in, where the resource it creates exists only once it has been
+        // created.
+        resource: job.recovery_point_arn.clone(),
+        at: epoch_millis(moved_at(job.completion_date, job.creation_date)),
+        detail: ::serde_json::Value::Object(detail),
+    }
+}
+
 /// The Region the vault `vault_arn` names belongs to.
 ///
 /// Read off the STORED ARN, so the bus a job's events reach is a property of the job rather
@@ -600,6 +713,16 @@ async fn publish_pending<Eng: Send + Sync + 'static>(
     let Some(state) = super::service_state(engine) else {
         return;
     };
+    publish_queued(callback, &state).await;
+}
+
+/// [`publish_pending`] over the store itself, for a task that already holds this service's
+/// state rather than the engine it lives in — the restore a start performs as its own task
+/// records what it came to on the job and publishes that move through this same path.
+pub async fn publish_queued(
+    callback: &smithy_server_runtime::EmbeddedEmulator,
+    state: &::engine::ServiceState<ComAmazonawsBackupCryocontrollerusermanagerState>,
+) {
     // The guard is taken and dropped inside this statement.
     let mut changes = state.lock().take_pending_job_events(MAX_PUBLISHED_PER_DRAIN);
     if changes.is_empty() {

@@ -176,7 +176,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let now = ::std::time::SystemTime::now();
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             DescribeRestoreJobErrorModeled::ServiceUnavailableException(
@@ -186,67 +185,73 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 },
             )
         })?;
-        let mut store = state.lock();
-        // The one write a read performs: the transition the clock had already
-        // made due for this job, which was owed at that instant even if nobody
-        // had called.
-        store.settle_restore_job(&input.restore_job_id, now);
+        // The read holds this store's lock for exactly this block: the publication
+        // below awaits, and a guard must not be held across an await. A refusal is
+        // carried OUT of the block rather than returned from inside it, so the move
+        // the settle materialised is published either way.
+        let output: Result<DescribeRestoreJobOutput, DescribeRestoreJobError> = {
+            let mut store = state.lock();
+            // The one write a read performs: the transition the clock had already
+            // made due for this job, which was owed at that instant even if nobody
+            // had called.
+            store.settle_restore_job(&input.restore_job_id, now);
+            // A transition this read materialised owes the bus its event just as one
+            // the clock pump materialised does (`crate::state::events`).
+            store.record_job_state_changes();
 
-        let job = store
-            .stored_restore_job(&input.restore_job_id)
-            .map_err(DescribeRestoreJobErrorModeled::ResourceNotFoundException)?;
-
-        Ok(DescribeRestoreJobOutput {
-            // The one account whose resources this emulator holds, which is the
-            // account the job belongs to.
-            account_id: Some(::engine::emulator_account_id().to_string()),
-            restore_job_id: Some(job.restore_job_id.clone()),
-            recovery_point_arn: Some(job.recovery_point_arn.clone()),
-            source_resource_arn: Some(job.source_resource_arn.clone()),
-            backup_vault_arn: Some(job.backup_vault_arn.clone()),
-            creation_date: Some(::aws_smithy_types::DateTime::from(job.creation_date)),
-            completion_date: job.completion_date.map(::aws_smithy_types::DateTime::from),
-            status: Some(job.status.clone()),
-            status_message: job.status_message.clone(),
-            // How much of the restore is done, keyed on the status the job is
-            // in: all of it once the restore has completed, and none of it
-            // otherwise — a restore that created nothing is not partly done.
-            percent_done: Some(
-                if job.status == crate::state::RESTORE_JOB_STATUS_COMPLETED {
-                    crate::state::RESTORE_JOB_PERCENT_DONE_COMPLETE
-                } else {
-                    crate::state::RESTORE_JOB_PERCENT_DONE_NONE
-                }
-                .to_string(),
-            ),
-            // The restore moved no bytes, because the backup it reads copied
-            // none: the member reports 0 rather than a size no restore
-            // produced.
-            backup_size_in_bytes: Some(0),
-            iam_role_arn: job.iam_role_arn.clone(),
-            resource_type: job.resource_type.clone(),
-            recovery_point_creation_date: Some(::aws_smithy_types::DateTime::from(
-                job.recovery_point_creation_date,
-            )),
-            // The resource the restore created, as the service that owns it
-            // answered for it; absent until the restore has created one, and
-            // for a restore that created none.
-            created_resource_arn: job.created_resource_arn.clone(),
-            // `CreatedBy` names the restore testing plan that initiated the
-            // job, and a restore started directly has none; an expected
-            // completion time is an estimate nothing here produces; and a
-            // restore job here is never a parent of nested jobs, nor nested in
-            // one.
-            expected_completion_time_minutes: None,
-            created_by: None,
-            validation_status: job.validation_status.clone(),
-            validation_status_message: job.validation_status_message.clone(),
-            // The deletion status reports the deletion of a resource a restore
-            // created, which nothing here ever starts.
-            deletion_status: None,
-            deletion_status_message: None,
-            is_parent: false,
-            parent_job_id: None,
-        })
+            match store.stored_restore_job(&input.restore_job_id) {
+                Err(absent) => Err(
+                    DescribeRestoreJobErrorModeled::ResourceNotFoundException(absent).into(),
+                ),
+                Ok(job) => Ok(DescribeRestoreJobOutput {
+                    // The one account whose resources this emulator holds, which is
+                    // the account the job belongs to.
+                    account_id: Some(::engine::emulator_account_id().to_string()),
+                    restore_job_id: Some(job.restore_job_id.clone()),
+                    recovery_point_arn: Some(job.recovery_point_arn.clone()),
+                    source_resource_arn: Some(job.source_resource_arn.clone()),
+                    backup_vault_arn: Some(job.backup_vault_arn.clone()),
+                    creation_date: Some(::aws_smithy_types::DateTime::from(job.creation_date)),
+                    completion_date: job.completion_date.map(::aws_smithy_types::DateTime::from),
+                    status: Some(job.status.clone()),
+                    status_message: job.status_message.clone(),
+                    // How much of the restore is done, keyed on the status the job
+                    // is in: all of it once the restore has completed, and none of
+                    // it otherwise — a restore that created nothing is not partly
+                    // done.
+                    percent_done: Some(job.percent_done().to_string()),
+                    // The restore moved no bytes, because the backup it reads
+                    // copied none: the member reports 0 rather than a size no
+                    // restore produced.
+                    backup_size_in_bytes: Some(0),
+                    iam_role_arn: job.iam_role_arn.clone(),
+                    resource_type: job.resource_type.clone(),
+                    recovery_point_creation_date: Some(::aws_smithy_types::DateTime::from(
+                        job.recovery_point_creation_date,
+                    )),
+                    // The resource the restore created, as the service that owns it
+                    // answered for it; absent until the restore has created one,
+                    // and for a restore that created none.
+                    created_resource_arn: job.created_resource_arn.clone(),
+                    // `CreatedBy` names the restore testing plan that initiated the
+                    // job, and a restore started directly has none; an expected
+                    // completion time is an estimate nothing here produces; and a
+                    // restore job here is never a parent of nested jobs, nor nested
+                    // in one.
+                    expected_completion_time_minutes: None,
+                    created_by: None,
+                    validation_status: job.validation_status.clone(),
+                    validation_status_message: job.validation_status_message.clone(),
+                    // The deletion status reports the deletion of a resource a
+                    // restore created, which nothing here ever starts.
+                    deletion_status: None,
+                    deletion_status_message: None,
+                    is_parent: false,
+                    parent_job_id: None,
+                }),
+            }
+        };
+        crate::state::publish_job_state_changes(ctx, &*self.engine).await;
+        output
     }
 }

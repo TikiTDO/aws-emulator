@@ -142,6 +142,22 @@ pub struct RestoreJobRecord {
     pub idempotency_token: Option<String>,
 }
 
+impl RestoreJobRecord {
+    /// How much of this restore is done, as `PercentDone` reports it: all of it once the
+    /// restore has completed, and none of it otherwise — a restore that created nothing is
+    /// not partly done.
+    ///
+    /// The ONE reading of it, so the read of a job and the event its move publishes never
+    /// disagree about how far the same restore got.
+    pub fn percent_done(&self) -> &'static str {
+        if self.status == RESTORE_JOB_STATUS_COMPLETED {
+            RESTORE_JOB_PERCENT_DONE_COMPLETE
+        } else {
+            RESTORE_JOB_PERCENT_DONE_NONE
+        }
+    }
+}
+
 impl ComAmazonawsBackupCryocontrollerusermanagerState {
     /// Materialise the transition the clock has already made due, for ONE
     /// restore job: a job whose settle instant has passed, and whose restore
