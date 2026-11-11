@@ -95,11 +95,25 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-groundstation-groundsta
 // here — hence the `CreateEphemerisError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.groundstation#CreateEphemeris")]
+//
+// `ResourceLimitExceededException` is widened in with `extra_errors`, DELIBERATELY off
+// this operation's own modelled error set, for the same reason `CreateConfig`,
+// `CreateMissionProfile` and `RegisterAgent` answer with it: the SERVICE models the shape
+// (HTTP 429, "Account limits for this resource have been exceeded") and it is what this
+// service answers when a create runs past a limit on how many of a resource an account
+// holds, which is how the bounded store below refuses one. Reporting that bound through
+// one of this operation's three declared errors would misdescribe it — the request is
+// valid, it names resources that exist and nothing downstream failed (see
+// `state::MAX_RECORDS_PER_STORE`, reachable only after 1,000 creates).
+#[smithy_macros::operation_error(
+    "com.amazonaws.groundstation#CreateEphemeris",
+    extra_errors = ["ResourceLimitExceededException"]
+)]
 #[derive(Debug)]
 pub enum CreateEphemerisErrorModeled {
     DependencyException(DependencyException),
     InvalidParameterException(InvalidParameterException),
+    ResourceLimitExceededException(ResourceLimitExceededException),
     ResourceNotFoundException(ResourceNotFoundException),
 }
 
@@ -211,13 +225,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // The store this emulator keeps is bounded, so a caller cannot grow it without
-        // limit. This operation models no account-limit error (its client errors are
-        // `InvalidParameterException` and `ResourceNotFoundException`, neither of which
-        // describes a full store), so the bound is reported as what it is: a failure of
-        // the store this service depends on, not of the request.
+        // limit; past the bound a create is refused the way this service refuses one that
+        // runs past an account limit, which is what the condition is — the request is
+        // valid, the resources it names exist and nothing this service depends on failed,
+        // so this is no server-side fault. Checked after the gates above, each of which
+        // judges the request itself, so what the caller hears is what is wrong with the
+        // request rather than a limit a caller might think a retry would clear.
         if guard.ephemerides.len() >= crate::state::MAX_RECORDS_PER_STORE {
-            return Err(CreateEphemerisErrorModeled::DependencyException(
-                DependencyException {
+            return Err(CreateEphemerisErrorModeled::ResourceLimitExceededException(
+                ResourceLimitExceededException {
                     message: Some(format!(
                         "this account already holds the maximum of {} ephemerides",
                         crate::state::MAX_RECORDS_PER_STORE

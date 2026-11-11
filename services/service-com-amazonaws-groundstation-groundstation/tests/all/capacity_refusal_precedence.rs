@@ -73,15 +73,19 @@ const ABSENT_STATION: &str = "Nowhere-1";
 
 /// One request a capacity refusal must not speak for: what is wrong with it, the body it is
 /// sent as, and the answer the service owes it.
-struct Row {
-    case: String,
-    body: Value,
-    status: u16,
-    error: &'static str,
+///
+/// `pub(crate)` here and on [`assert_owed`]: the sibling `store_bound_limit_error.rs` suite
+/// holds the creates it spans to the same rows and the same assertions from this one
+/// harness rather than keeping a second copy of it.
+pub(crate) struct Row {
+    pub(crate) case: String,
+    pub(crate) body: Value,
+    pub(crate) status: u16,
+    pub(crate) error: &'static str,
     /// The text the answer must carry, for a refusal this crate states in ONE place (a
     /// constant or a message helper of `state`); `None` where the row pins the status and
     /// the error shape only, those being what this suite is about.
-    message: Option<String>,
+    pub(crate) message: Option<String>,
 }
 
 /// How many contacts the store holds — what a refused reservation may not have grown.
@@ -135,7 +139,7 @@ fn stored_agents(engine: &engine::InMemoryEngine) -> usize {
 }
 
 /// Assert `reply` is the answer `row` is owed, under the label `stage`.
-fn assert_owed(stage: &str, row: &Row, reply: &Reply) {
+pub(crate) fn assert_owed(stage: &str, row: &Row, reply: &Reply) {
     let case = &row.case;
     assert_eq!(
         reply.status, row.status,
