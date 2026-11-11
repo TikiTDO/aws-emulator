@@ -292,6 +292,7 @@ async fn a_response_document_past_the_bound_fails_the_resource() {
             .unwrap_or_else(|| panic!("case {case:?}: the create must be waiting for a request"));
         let (answered, answer_body) = put_response(
             &router,
+            &engine,
             &stack_id,
             "Thing",
             &request.request_id,
@@ -388,6 +389,7 @@ async fn a_consumer_of_a_providers_data_is_created_from_the_answer() {
         );
         let (answered, answer_body) = put_response(
             &router,
+            &engine,
             &stack_id,
             "Provider",
             &request.request_id,
@@ -436,6 +438,7 @@ async fn a_consumer_of_a_providers_data_is_created_from_the_answer() {
         );
         let (answered, answer_body) = put_response(
             &router,
+            &engine,
             &stack_id,
             "Consumer",
             &consumer.request_id,

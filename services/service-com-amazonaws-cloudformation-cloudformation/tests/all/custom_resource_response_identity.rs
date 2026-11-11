@@ -123,6 +123,7 @@ async fn the_id_a_provider_answers_with_is_what_every_read_reports() {
 
         let (answered, answer_body) = put_response(
             &router,
+            &engine,
             &stack_id,
             "Thing",
             &request.request_id,
@@ -303,6 +304,7 @@ async fn a_failed_answer_fails_the_action_its_request_was_for() {
         if row.answered != Answered::Create {
             put_response(
                 &router,
+                &engine,
                 &stack_id,
                 "Thing",
                 &request.request_id,
@@ -359,6 +361,7 @@ async fn a_failed_answer_fails_the_action_its_request_was_for() {
         };
         let (answered, answer_body) = put_response(
             &router,
+            &engine,
             &stack_id,
             "Thing",
             &awaited,
@@ -468,7 +471,8 @@ async fn the_reason_a_failed_answer_states_is_the_resources_failure_reason() {
             answer["Reason"] = json!(stated);
         }
         let (answered, answer_body) =
-            put_response(&router, &stack_id, "Thing", &request.request_id, &answer).await;
+            put_response(&router, &engine, &stack_id, "Thing", &request.request_id, &answer)
+                .await;
         assert_eq!(
             answered, 200,
             "case {case:?}: expected the provider's answer to be accepted, got {answered} with \

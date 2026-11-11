@@ -42,6 +42,25 @@ pub enum ResponseOutcome {
 }
 
 impl ComAmazonawsCloudformationCloudformationState {
+    /// The `ResponseURL` this emulator published for the request `target` names, or `None`
+    /// when it is waiting for no such answer.
+    ///
+    /// What the plane holds an arriving write to: the published URL is the ONE address that
+    /// request's answer was asked for at, so a write presenting another signature — or none —
+    /// is a write to an address this service did not hand out. A target no barrier awaits has
+    /// no published URL, and such a write is accepted and recorded against nothing, exactly
+    /// as a pre-signed `PUT` to a concluded operation's URL is.
+    pub fn awaited_response_url(&self, region: &str, target: &ResponseTarget) -> Option<String> {
+        let stack = self.resolve(region, &target.stack_id)?;
+        stack.stabilisations.iter().find_map(|barrier| {
+            let request = barrier.provider_request.as_ref()?;
+            (!barrier.released()
+                && barrier.logical_id == target.logical_resource_id
+                && request.request_id == target.request_id)
+                .then(|| request.response_url.clone())
+        })
+    }
+
     /// Record one custom resource provider's answer against the request it answers.
     ///
     /// Addressed exactly as the published URL addresses it: the stack, the logical resource

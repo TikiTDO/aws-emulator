@@ -35,7 +35,8 @@
 //! ## What is in this module, and what is not
 //!
 //! Here: the request document, the two transports a `ServiceToken` can name, the
-//! `ResponseURL` this emulator publishes and serves, and how a provider's answer is read.
+//! `ResponseURL` this emulator publishes on its own endpoint and serves, and how a
+//! provider's answer is read.
 //! The WAIT the answer releases is [`crate::state::stabilising`]'s — a custom resource's
 //! barrier carries the request it is waiting for ([`ProviderRequest`]) and the answer that
 //! arrived ([`ProviderResponse`]) — and the plane that receives the answer is
@@ -50,7 +51,6 @@
 //! [`MAX_REASON_CHARS`] — a provider is a client, so nothing it sends sizes this store.
 
 use std::collections::BTreeMap;
-use std::time::SystemTime;
 
 use serde_json::{Map, Value};
 
@@ -134,41 +134,17 @@ const LAMBDA_SIGNING_NAME: &str = "lambda";
 /// `InvocationType` to `Event`", `Invoke`).
 const INVOCATION_TYPE_EVENT: &str = "Event";
 
-/// The first label of the host this emulator publishes a request's `ResponseURL` on.
-///
-/// Its first label names no service of this emulator, so the framework reads no routing key
-/// out of it and only the service that HANDED THE URL OUT claims a request addressed to it
-/// ([`crate::service::EmulatedService::can_handle`]).
-const RESPONSE_HOST_LABEL: &str = "cloudformation-custom-resource-response";
-
-/// The suffix every host this emulator publishes carries.
-const AWS_HOST_SUFFIX: &str = ".amazonaws.com";
-
 /// The separator the published `ResponseURL` joins the request's three identifying parts
 /// with inside its ONE path segment, as CloudFormation's own response URLs do.
 const RESPONSE_PATH_SEPARATOR: char = '|';
 
-/// The signing algorithm a pre-signed URL names in `X-Amz-Algorithm`.
-const SIGV4_ALGORITHM: &str = "AWS4-HMAC-SHA256";
-
-/// The headers the published URL's signature covers, as `X-Amz-SignedHeaders` names them:
-/// the endpoint the write is addressed to, which is the one header a pre-signed URL signs.
-const SIGNED_HEADERS: &str = "host";
-
-/// How long the published `ResponseURL` may be written to, in seconds: "the maximum
-/// expiration time for the signed URL is one week" (AWS General Reference, *Authenticating
-/// requests: using query parameters*), which is the longest window a query-authenticated URL
-/// can state — and longer than any wait this service holds a resource at, so the window
-/// never closes before the resource it answers for has failed.
-const RESPONSE_URL_EXPIRES_SECONDS: u64 = 604_800;
-
-/// How many hexadecimal characters the published URL's `X-Amz-Signature` carries: the width
-/// of the SHA-256 digest a SigV4 signature is.
-const SIGNATURE_HEX_CHARS: usize = 64;
-
-/// What the published URL's signature is derived under, which keeps it apart from every
-/// other value this crate derives from the same request.
-const SIGNATURE_SALT: &str = "custom-resource-response-url";
+/// How long the published `ResponseURL` may be written to: "the maximum expiration time for
+/// the signed URL is one week" (AWS General Reference, *Authenticating requests: using query
+/// parameters*), which is the longest window a query-authenticated URL can state — and
+/// longer than any wait this service holds a resource at, so the window never closes before
+/// the resource it answers for has failed.
+const RESPONSE_URL_EXPIRY: ::std::time::Duration =
+    ::std::time::Duration::from_secs(604_800);
 
 /// How many `Data` entries of a provider's answer a resource keeps.
 ///
@@ -230,6 +206,10 @@ pub struct ProviderRequest {
     /// resource that an answer may REPLACE was last deployed with, which that replacement's
     /// cleanup `Delete` carries.
     pub old_properties: Option<Value>,
+    /// The `ResponseURL` this request was published under ([`response_url`]): the ONE address
+    /// its answer is accepted at, which is what the plane holds an arriving write to
+    /// ([`presented_signature`]).
+    pub response_url: String,
 }
 
 /// What a provider PUT to the `ResponseURL` of a request.
@@ -353,39 +333,6 @@ pub fn new_request_id() -> String {
     )
 }
 
-/// The host this emulator publishes a `ResponseURL` on, for `region`.
-pub fn response_host(region: &str) -> String {
-    format!(
-        "{RESPONSE_HOST_LABEL}.{region}{AWS_HOST_SUFFIX}",
-        region = region_or_default(region)
-    )
-}
-
-/// True when `host` is the one [`response_host`] publishes — with any `user@` and `:port`
-/// removed, as a `Host` header may carry either.
-///
-/// Recognising it is what routes a request to a URL this service HANDED OUT back to this
-/// service.
-pub fn is_response_host(host: &str) -> bool {
-    response_host_region(host).is_some()
-}
-
-/// The Region a published response host names, or `None` when `host` is not one
-/// [`response_host`] publishes.
-///
-/// A write to this plane is UNSIGNED — a pre-signed URL is followed with no credential — so
-/// the host is where the Region of the stack the answer is about comes from: it is the one
-/// this service put there when it published the URL.
-pub fn response_host_region(host: &str) -> Option<&str> {
-    let host = host.rsplit('@').next().unwrap_or(host);
-    let host = host.split(':').next().unwrap_or(host);
-    let rest = host
-        .strip_prefix(RESPONSE_HOST_LABEL)
-        .and_then(|rest| rest.strip_prefix('.'))?;
-    rest.strip_suffix(AWS_HOST_SUFFIX)
-        .and_then(::service_common::arn::region_label)
-}
-
 /// What a write to a published `ResponseURL` names: the stack the resource belongs to, the
 /// resource it is about and the request it answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -398,51 +345,83 @@ pub struct ResponseTarget {
     pub request_id: String,
 }
 
-/// The `ResponseURL` one provider request publishes: a URL on this emulator's own endpoint
-/// whose ONE path segment carries the stack, the resource and the request, joined as
-/// CloudFormation's own response URLs join them, under the QUERY that makes it a pre-signed
-/// URL.
-///
-/// A URL this emulator SERVES ([`crate::service::custom_resource_plane`]) and reads back
-/// ([`parse_response_path`]), so the provider's answer the request asks for can really be
-/// made against it — with no credential of its own, as a pre-signed URL is followed.
-///
-/// The query is the SigV4 query-authentication form a pre-signed URL carries: the algorithm,
-/// the instant it was issued, the window it states ([`RESPONSE_URL_EXPIRES_SECONDS`]), the
-/// headers the signature covers and the signature itself, which is over the target the URL
-/// authorises and is what the plane holds a write to ([`signature_admits`]). The window is
-/// PUBLISHED and not enforced: the plane does not refuse a write for the instant it arrived,
-/// and the window is the longest one a query-authenticated URL may state rather than a
-/// deadline this service keeps. It names NO credential: the write is addressed to the
-/// endpoint that issued the URL and is served unsigned, so a credential in the query would
-/// both route the write to whatever service that credential's scope named and publish a
-/// credential of this emulator's in a response.
-pub fn response_url(region: &str, stack_id: &str, logical_id: &str, request_id: &str) -> String {
-    let target = format!(
-        "{stack_id}{RESPONSE_PATH_SEPARATOR}{logical_id}{RESPONSE_PATH_SEPARATOR}{request_id}"
-    );
-    let signature = target_signature(&target);
+/// The reserved first path segment every data plane this emulator serves at its own endpoint
+/// is addressed under, and the segment naming WHICH plane: this service's own signing name,
+/// so a write to a URL it published routes to it
+/// ([`::service_common::data_plane_addressing`]).
+fn response_path_prefix() -> String {
     format!(
-        "https://{host}/{segment}?X-Amz-Algorithm={SIGV4_ALGORITHM}&X-Amz-Date={date}\
-         &X-Amz-Expires={RESPONSE_URL_EXPIRES_SECONDS}&X-Amz-SignedHeaders={SIGNED_HEADERS}\
-         &{SIGNATURE_PARAMETER}={signature}",
-        host = response_host(region),
-        segment = percent_encoded(&target),
-        date = amz_date(SystemTime::now()),
+        "/{namespace}/{plane}/",
+        namespace = ::service_common::data_plane_addressing::EMULATOR_PATH_NAMESPACE,
+        plane = crate::state::ARN_NAMESPACE,
     )
 }
 
-/// `now` in the basic-format instant a SigV4 query carries in `X-Amz-Date`:
-/// `YYYYMMDDTHHMMSSZ`.
-fn amz_date(now: SystemTime) -> String {
-    let stamp = crate::state::timestamp(now)
-        .fmt(::aws_smithy_types::date_time::Format::DateTime)
-        .unwrap_or_default();
-    // The extended form the formatter writes, with its separators dropped and its fractional
-    // seconds — which the basic form does not carry — cut off.
-    let whole = stamp.split('.').next().unwrap_or(&stamp).to_string();
-    let whole = whole.trim_end_matches('Z');
-    format!("{}Z", whole.replace(['-', ':'], ""))
+/// The PATH a published `ResponseURL` addresses one request by, decoded: the plane's own
+/// prefix and then the stack, the resource and the request joined as CloudFormation's own
+/// response URLs join them.
+///
+/// The one spelling of that address, read back by [`parse_response_path`] — and the address a
+/// suite writing to this plane uses, rather than spelling it again.
+pub fn response_path(stack_id: &str, logical_id: &str, request_id: &str) -> String {
+    format!(
+        "{prefix}{stack_id}{RESPONSE_PATH_SEPARATOR}{logical_id}{RESPONSE_PATH_SEPARATOR}\
+         {request_id}",
+        prefix = response_path_prefix(),
+    )
+}
+
+/// The `ResponseURL` one provider request publishes: a pre-signed URL on THIS EMULATOR'S OWN
+/// endpoint whose last path segment carries the stack, the resource and the request, joined
+/// as CloudFormation's own response URLs join them.
+///
+/// A URL this emulator SERVES ([`crate::service::custom_resource_plane`]) and reads back
+/// ([`parse_response_path`]), so the provider's answer the request asks for can really be
+/// made against it: the address is the endpoint the provider is already talking to, under the
+/// path namespace a plane served at that endpoint is addressed by, which is the one address a
+/// provider on this machine can reach — a host of AWS's own naming resolves to the real
+/// service or to nothing at all.
+///
+/// It is query-signed by the framework's own signer ([`::smithy_server_runtime::UrlSigner`]),
+/// which is how any URL this emulator hands a caller to fetch later is signed, for the
+/// longest window such a URL may state ([`RESPONSE_URL_EXPIRY`]) — longer than any wait a
+/// resource is held at, so the window never closes before the resource it answers for has
+/// failed. The write itself is served UNSIGNED, as a pre-signed URL is followed: the plane
+/// answers it before the request is authenticated, which is why the published URL is also
+/// what the plane holds a write to ([`crate::state::ComAmazonawsCloudformationCloudformationState::awaited_response_url`]).
+pub fn response_url(
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    stack_id: &str,
+    logical_id: &str,
+    request_id: &str,
+) -> String {
+    let path = response_path(stack_id, logical_id, request_id);
+    let request = ::smithy_server_runtime::SignedUrlRequest::new(
+        ::smithy_server_runtime::http::Method::PUT,
+        crate::state::ARN_NAMESPACE,
+        &path,
+    );
+    match ctx.url_signer().sign(request, RESPONSE_URL_EXPIRY) {
+        Ok(signed) => signed.as_str().to_string(),
+        // The path is this service's own and the window a constant, so nothing a caller
+        // sends can reach here. A URL that cannot be signed is still the address this
+        // plane serves — the write is served unsigned — so the target is published
+        // without the signing query rather than as an address that leads nowhere.
+        Err(error) => {
+            ::tracing::warn!(%error, "a custom resource response URL could not be signed");
+            format!(
+                "{endpoint}{prefix}{segment}",
+                // The plane's path begins with its own `/`, so an endpoint that ends in one
+                // would publish a path with an empty first segment, which names no plane.
+                endpoint = ctx.endpoint().as_str().trim_end_matches('/'),
+                prefix = response_path_prefix(),
+                segment = percent_encoded(&format!(
+                    "{stack_id}{RESPONSE_PATH_SEPARATOR}{logical_id}\
+                     {RESPONSE_PATH_SEPARATOR}{request_id}"
+                )),
+            )
+        }
+    }
 }
 
 /// The Region of the stack a response target names: the Region segment of that stack's own
@@ -466,41 +445,23 @@ pub fn target_region(target: &ResponseTarget) -> Option<&str> {
         .then_some(region)
 }
 
-/// The `X-Amz-Signature` the published URL for one request carries.
-///
-/// A signature is over what the URL AUTHORISES, so it is derived from the target and the
-/// window rather than drawn fresh: the same request's URL is the same URL however often the
-/// request document is built, and [`signature_admits`] is what re-computes it for a write
-/// that arrives — so the field is checked rather than decorative.
-fn target_signature(target: &str) -> String {
-    crate::state::stable_identifier_digits(
-        &format!("{SIGNATURE_SALT}|{target}|{RESPONSE_URL_EXPIRES_SECONDS}"),
-        SIGNATURE_HEX_CHARS,
-    )
-}
-
 /// The query parameter a pre-signed URL carries its signature in.
-const SIGNATURE_PARAMETER: &str = "X-Amz-Signature";
+pub const SIGNATURE_PARAMETER: &str = "X-Amz-Signature";
 
-/// Whether `query` carries the signature this service published for `target` — the one write
-/// the URL authorises.
+/// The `X-Amz-Signature` a query carries, or `None` for one carrying none.
 ///
-/// A write whose signature is not the published one is a write to an address this service
-/// did not hand out: the path alone would admit a target assembled by a caller, so the
-/// signature is what the plane holds the write to ([`crate::service::custom_resource_plane`]),
-/// exactly as a pre-signed URL whose signature does not verify is refused rather than served.
-pub fn signature_admits(target: &ResponseTarget, query: &str) -> bool {
-    let presented = query.split('&').find_map(|pair| {
+/// What the plane holds a write to: the signature the published URL for that request carries
+/// is the one the emulator's signer put on it, so a write presenting another — or none — is
+/// a write to an address this service did not hand out
+/// ([`crate::service::custom_resource_plane`]), exactly as a pre-signed URL whose signature
+/// does not verify is refused rather than served. The path alone would admit a target
+/// assembled by a caller, and this plane is served BEFORE a request is authenticated (the
+/// write carries no credential of its own), so the comparison is this service's to make.
+pub fn presented_signature(query: &str) -> Option<&str> {
+    query.split('&').find_map(|pair| {
         pair.strip_prefix(SIGNATURE_PARAMETER)
             .and_then(|rest| rest.strip_prefix('='))
-    });
-    let expected = target_signature(&format!(
-        "{stack}{RESPONSE_PATH_SEPARATOR}{logical}{RESPONSE_PATH_SEPARATOR}{request}",
-        stack = target.stack_id,
-        logical = target.logical_resource_id,
-        request = target.request_id,
-    ));
-    presented == Some(expected.as_str())
+    })
 }
 
 /// What a request to a published `ResponseURL` names, or `None` when the path is not one
@@ -512,10 +473,10 @@ pub fn parse_response_path(path: &str) -> Option<ResponseTarget> {
     // The query is not part of what the URL names: a pre-signed URL carries its signing
     // parameters there, and the target is the path alone.
     let path = path.split('?').next().unwrap_or(path);
-    let segment = path.strip_prefix('/')?;
-    // ONE path segment: the parts are joined inside it, so a raw separator means this is not
-    // a URL this service published.
-    if segment.is_empty() || segment.contains('/') {
+    let segment = path.strip_prefix(&response_path_prefix())?;
+    // The three parts are joined inside the LAST segment of the published path, so whatever
+    // follows the plane's own prefix is that segment and nothing else.
+    if segment.is_empty() {
         return None;
     }
     let decoded = ::percent_encoding::percent_decode_str(segment)
@@ -569,14 +530,16 @@ pub struct ProviderCall<'a> {
 }
 
 impl ProviderCall<'_> {
-    /// The record of this request the wait for its answer keeps ([`ProviderRequest`]).
-    pub fn remembered(&self) -> ProviderRequest {
+    /// The record of this request the wait for its answer keeps ([`ProviderRequest`]),
+    /// with the `ResponseURL` it was published under ([`send`] answers it).
+    pub fn remembered(&self, response_url: &str) -> ProviderRequest {
         ProviderRequest {
             request_type: self.request_type.to_string(),
             request_id: self.request_id.to_string(),
             physical_resource_id: self.physical_resource_id.map(str::to_string),
             properties: self.properties.clone(),
             old_properties: self.old_properties.cloned(),
+            response_url: response_url.to_string(),
         }
     }
 }
@@ -690,8 +653,9 @@ fn provider_of(properties: &Value, resource_type: &str) -> Result<Provider, Refu
 
 /// Send one provider request, and answer once the provider's own service has ACCEPTED it.
 ///
-/// `Ok(())` says the request was delivered to the `ServiceToken` — not that the provider has
-/// answered it: the answer arrives at the `ResponseURL` and releases the resource's wait
+/// `Ok(response_url)` says the request was delivered to the `ServiceToken` — not that the
+/// provider has answered it: the answer arrives at the `ResponseURL` the request published,
+/// which is what comes back here, and releases the resource's wait
 /// ([`crate::state::stabilising`]). `Err` is the refusal of the service the token names, or
 /// of the declaration that names no provider at all, and fails the resource exactly as a
 /// refused create does.
@@ -706,21 +670,18 @@ pub async fn send(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     call: &ProviderCall<'_>,
-) -> Result<(), Refusal> {
+) -> Result<String, Refusal> {
     let provider = provider_of(call.properties, call.resource_type)?;
     let service_token = match &provider {
         Provider::Topic(token) | Provider::Function(token) => token.clone(),
     };
-    let document = request_document(
-        call,
-        &service_token,
-        &response_url(
-            region,
-            call.stack_id,
-            call.logical_resource_id,
-            call.request_id,
-        ),
+    let response_url = response_url(
+        ctx,
+        call.stack_id,
+        call.logical_resource_id,
+        call.request_id,
     );
+    let document = request_document(call, &service_token, &response_url);
     let message = serde_json::to_string(&document).map_err(|error| Refusal {
         code: "SerializationException".to_string(),
         message: error.to_string(),
@@ -742,7 +703,7 @@ pub async fn send(
                 &parameters,
             )
             .await?;
-            Ok(())
+            Ok(response_url)
         }
         // The function is invoked with the request as its EVENT, and asynchronously: the
         // provider answers at the `ResponseURL`, so nothing waits for the invocation's own
@@ -771,7 +732,7 @@ pub async fn send(
                 message,
             })?;
             if (200..300).contains(&status) {
-                return Ok(());
+                return Ok(response_url);
             }
             let answered: Value = serde_json::from_slice(&payload).unwrap_or(Value::Null);
             Err(refusal_of(LAMBDA_SIGNING_NAME, status, &answered))
@@ -779,113 +740,85 @@ pub async fn send(
     }
 }
 
-/// The region a value this module publishes may name: `region` when it is a well-formed
-/// Region LABEL, else [`crate::state::DEFAULT_REGION`].
-///
-/// A credential scope is request-controlled text and this value is interpolated into a
-/// HOST, so only a value the workspace's one reading of a Region label admits may reach it
-/// ([`::service_common::arn::region_label`]: non-empty, bounded, and `[a-z0-9-]` only) —
-/// which is what keeps every URL this module publishes one [`is_response_host`] recognises.
-fn region_or_default(region: &str) -> &str {
-    ::service_common::arn::region_label(region).unwrap_or(crate::state::DEFAULT_REGION)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The published `ResponseURL` is one this service recognises and reads back: its host is
-    /// the one claimed and its path names the three parts the request was sent under,
-    /// whatever those parts carry.
+    /// Every path a published `ResponseURL` carries is read back whole: the plane's own
+    /// prefix, then the three parts the request was sent under, whatever those parts carry
+    /// and however the URL they travelled in encoded them.
     #[test]
-    fn every_published_response_url_is_read_back_whole() {
-        let cases: &[(&str, &str, &str, &str, &str)] = &[
+    fn every_published_response_path_is_read_back_whole() {
+        let cases: &[(&str, &str, &str, &str)] = &[
             (
                 "a stack ARN, a plain logical id and a minted request id",
-                "us-east-1",
                 "arn:aws:cloudformation:us-east-1:000000000000:stack/probe/0123",
                 "Thing",
                 "11111111-2222-3333-4444-555555555555",
             ),
             (
                 "another Region",
-                "eu-west-2",
                 "arn:aws:cloudformation:eu-west-2:000000000000:stack/other/4567",
                 "Provisioner",
                 "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             ),
             (
-                "a credential scope that is no Region at all",
-                "not a region",
-                "arn:aws:cloudformation:us-east-1:000000000000:stack/probe/0123",
-                "Thing",
-                "11111111-2222-3333-4444-555555555555",
-            ),
-            (
                 "a logical id at the length a template may declare",
-                "ap-southeast-2",
                 "arn:aws:cloudformation:ap-southeast-2:000000000000:stack/s/89ab",
                 "AVeryLongLogicalResourceIdDeclaredByATemplate0123456789",
                 "99999999-8888-7777-6666-555555555555",
             ),
         ];
-        for (case, region, stack_id, logical_id, request_id) in cases {
-            let url = response_url(region, stack_id, logical_id, request_id);
-            let (host, path) = url
-                .strip_prefix("https://")
-                .and_then(|rest| rest.split_once('/'))
-                .unwrap_or_else(|| panic!("case {case:?}: expected a published https URL, got {url}"));
-            assert!(
-                is_response_host(host),
-                "case {case:?}: expected the published host to be claimed, got {host:?}"
+        for (case, stack_id, logical_id, request_id) in cases {
+            let target = format!(
+                "{stack_id}{RESPONSE_PATH_SEPARATOR}{logical_id}{RESPONSE_PATH_SEPARATOR}\
+                 {request_id}"
             );
-            // The published URL is a PRE-SIGNED one: its query carries the signing
-            // parameters a client reads off it, and nothing of the target.
-            let (_, query) = path
-                .split_once('?')
-                .unwrap_or_else(|| panic!("case {case:?}: expected a pre-signing query, got {url}"));
-            for parameter in [
-                "X-Amz-Algorithm=",
-                "X-Amz-Date=",
-                "X-Amz-Expires=",
-                "X-Amz-SignedHeaders=",
-                "X-Amz-Signature=",
-            ] {
-                assert!(
-                    query.contains(parameter),
-                    "case {case:?}: expected the query to carry {parameter}, got {query}"
+            let expected = Some(ResponseTarget {
+                stack_id: (*stack_id).to_string(),
+                logical_resource_id: (*logical_id).to_string(),
+                request_id: (*request_id).to_string(),
+            });
+            // The two spellings the one path travels in: the signer encodes a path with the
+            // SigV4 rule, which keeps `/` as a separator, and a client following the URL may
+            // present the same segment fully encoded.
+            let spellings = [
+                format!("{}{target}", response_path_prefix()),
+                format!("{}{}", response_path_prefix(), percent_encoded(&target)),
+                format!("{}{target}?X-Amz-Signature=abc", response_path_prefix()),
+            ];
+            for path in spellings {
+                let read = parse_response_path(&path);
+                assert_eq!(
+                    read, expected,
+                    "case {case:?}: expected {path} to read back whole, got {read:?}"
                 );
             }
-            assert!(
-                !query.contains("X-Amz-Credential") && !query.contains("AWSAccessKeyId"),
-                "case {case:?}: a published URL names no credential, got {query}"
-            );
-            let read = parse_response_path(&format!("/{path}"));
-            assert_eq!(
-                read,
-                Some(ResponseTarget {
-                    stack_id: (*stack_id).to_string(),
-                    logical_resource_id: (*logical_id).to_string(),
-                    request_id: (*request_id).to_string(),
-                }),
-                "case {case:?}: expected the path to read back whole, got {read:?}"
-            );
         }
     }
 
     /// A path that is not one this module publishes names no request.
     #[test]
     fn a_path_this_module_did_not_publish_names_nothing() {
-        let cases: &[(&str, &str)] = &[
-            ("the bare root", "/"),
-            ("no separators at all", "/just-a-request-id"),
-            ("one separator short", "/stack%7CThing"),
-            ("one separator too many", "/stack%7CThing%7Cid%7Cextra"),
-            ("an empty part", "/stack%7C%7Cid"),
-            ("more than one segment", "/stack/Thing/id"),
+        let prefix = response_path_prefix();
+        let cases: Vec<(&str, String)> = vec![
+            ("the bare root", "/".to_string()),
+            ("the plane's prefix alone", prefix.clone()),
+            ("no plane segment at all", "/stack%7CThing%7Cid".to_string()),
+            (
+                "another plane's path space",
+                "/_aws/execute-api/stack%7CThing%7Cid".to_string(),
+            ),
+            ("no separators at all", format!("{prefix}just-a-request-id")),
+            ("one separator short", format!("{prefix}stack%7CThing")),
+            (
+                "one separator too many",
+                format!("{prefix}stack%7CThing%7Cid%7Cextra"),
+            ),
+            ("an empty part", format!("{prefix}stack%7C%7Cid")),
         ];
         for (case, path) in cases {
-            let read = parse_response_path(path);
+            let read = parse_response_path(&path);
             assert!(
                 read.is_none(),
                 "case {case:?}: expected no request to be named, got {read:?}"

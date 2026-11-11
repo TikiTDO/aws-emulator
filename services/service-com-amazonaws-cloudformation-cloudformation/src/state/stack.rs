@@ -1927,12 +1927,22 @@ impl StoredStack {
             .map_or(now, |operation| operation.started_at);
         let asked_at = SystemTime::now();
         for stabilising in pending {
-            self.stabilisations
-                .push(stabilising::StabilisationBarrier::open(
-                    stabilising,
-                    opened_at,
-                    asked_at,
-                ));
+            let barrier = stabilising::StabilisationBarrier::open(stabilising, opened_at, asked_at);
+            // ONE barrier per wait: the same wait recorded twice would hold the operation
+            // until BOTH were released, and the second release can never come — the answer
+            // the wait is for is one answer. Two passes can reach the same conclusion at
+            // once (a client's read of the stack and the task a landed provider answer
+            // starts, see [`super::provider_driver`]), and each records what that conclusion
+            // owes, so the wait a pass opens is skipped where the stack is already holding
+            // it.
+            if self
+                .stabilisations
+                .iter()
+                .any(|held| held.is_the_same_wait(&barrier) && !held.released())
+            {
+                continue;
+            }
+            self.stabilisations.push(barrier);
         }
     }
 

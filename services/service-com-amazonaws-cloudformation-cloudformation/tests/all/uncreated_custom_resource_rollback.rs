@@ -317,6 +317,7 @@ async fn answer_every_awaited_request(
         let id = physical_resource_id.unwrap_or_else(|| minted.to_string());
         put_response(
             router,
+            engine,
             &stack_id,
             &logical_id,
             &request_id,

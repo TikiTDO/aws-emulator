@@ -18,6 +18,35 @@ Issue-Commit: a6bd8162e254cd53a71309df843cd006b7af8737
 
 > _Note: this issue was identified against the code base at commit `a6bd8162e254cd53a71309df843cd006b7af8737`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
 
+> _Resolution note. Cause 3 is served: the two Hook resource types publish the return values
+> they document (`Ref` and `Fn::GetAtt HookArn`), so a stack declaring one reports every
+> declared output with its value — both Guard-hook checks now get past `outs[...]` and fail on
+> hook INVOCATION, which is the still-open half tracked by
+> `20261025T015306Z-cloudformation-cannot-deploy-large-parts-of-the-resource.md` (no hook store,
+> no Guard evaluation: a FAIL-mode hook blocks nothing and a WARN-mode one records no
+> `HOOK_COMPLETE_FAILED` event). Cause 4 was already served before this change. Cause 2 is
+> served for the addressing and the driver: the `ResponseURL` is now a pre-signed URL on this
+> emulator's own endpoint (`/_aws/cloudformation/<stack>|<logical>|<request>`) that a subscriber
+> can really answer, and a landed answer starts the work it owes itself
+> (`state/provider_driver.rs`) instead of waiting for the client's next CloudFormation call.
+> Cause 1 is served for an inline-code provider: the deployment package CloudFormation builds
+> for inline `ZipFile` code now carries the `cfnresponse` module, so a Python-runtime provider
+> answers its request and the stack settles on that answer.
+>
+> What is still open, with the evidence: (1) a provider whose package is a NODE bundle — the CDK
+> provider framework, `cdk-s3-auto-delete-objects…` — cannot answer at all, because the Lambda
+> runtime's Node core modules carry no `http`/`https`
+> (`services/service-com-amazonaws-lambda-awsgirapiservice/src/state/execution/node/core_modules.rs`
+> `CORE_MODULES`), so its `https.request` to the `ResponseURL` cannot be made; that module, wired
+> to the existing `guest_http` seam, is what those providers need. (2) After a rollback whose
+> provider answered the rollback's own request, `DescribeStackResources` reports the custom
+> resource `UPDATE_COMPLETE` where AWS leaves it `UPDATE_FAILED`, which is what
+> `ContinueUpdateRollback`'s `ResourcesToSkip` guard then refuses
+> (`stack-continue-update-rollback-force-rollback-skips-failed-resource` run#7 and
+> `…-client-request-token-marks-its-events`): the resource's planned terminal event is not
+> rewritten to the failure on that path (`state/stack.rs::fail_stabilisation` ->
+> `fail_planned_resource_event`)._
+
 ## Operation
 ContinueUpdateRollback
 

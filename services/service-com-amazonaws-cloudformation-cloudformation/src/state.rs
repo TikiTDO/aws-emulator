@@ -414,6 +414,10 @@ pub mod stabilising;
 /// service publishes for a provider request performs on this store.
 pub mod provider_responses;
 
+/// Carrying out what a landed provider answer owes — the requests the operation behind it
+/// still has to publish — without waiting for the next client call.
+pub mod provider_driver;
+
 /// The permissions a stack operation runs under: the identity policies of the stack's
 /// service role, which decide the calls a deployment makes in the services that own the
 /// stack's resources.
@@ -2146,6 +2150,14 @@ pub struct ComAmazonawsCloudformationCloudformationState {
     /// these and it is not namespaced by Region; it belongs to no stack, so it is neither
     /// settled nor reclaimed with one.
     pub organizations_access: organizations_access::TrustedAccess,
+    /// How this emulator is reached for the work a LANDED provider answer owes, remembered
+    /// from the last stack operation that provisioned anything (see [`provider_driver`]).
+    ///
+    /// Not a record of anything a client created: a cloneable handle to this emulator's own
+    /// in-process transport and this service's identity, which is what lets the plane that
+    /// receives a provider's answer publish the request that answer owes. `None` until a
+    /// stack operation has provisioned something, which is before any answer can arrive.
+    pub provisioning_reach: Option<provider_driver::ProvisioningReach>,
 }
 
 impl ComAmazonawsCloudformationCloudformationState {
@@ -4822,6 +4834,9 @@ pub async fn settle_due_rollbacks<Eng: Send + Sync + 'static>(
     let due: Vec<DueRollback> = {
         let mut store = state.lock();
         store.settle(SystemTime::now());
+        // ...and how this emulator is reached, so a provider answer that lands out of band
+        // can drive this same work itself ([`provider_driver`]).
+        store.remember_provisioning_reach(ctx);
         store.take_due_rollbacks()
     };
     for owed in due {

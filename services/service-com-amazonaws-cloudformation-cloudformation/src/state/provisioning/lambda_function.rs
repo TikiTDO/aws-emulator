@@ -704,6 +704,13 @@ fn function_code(resource: &StoredResource) -> Result<Value, Refusal> {
 /// base64-encoded, because the API's `ZipFile` is a blob and a JSON request carries a blob
 /// encoded.
 ///
+/// Beside the source, the package carries the RESPONSE MODULE CloudFormation supplies to
+/// inline code ([`RESPONSE_MODULE_SOURCE`]): "the cfnresponse module is available only when
+/// you use the `ZipFile` property to write your function's source code", which is what lets
+/// a custom resource's inline provider answer the request it was sent without shipping an
+/// HTTP client of its own. It is added for the runtime family the module is published for
+/// and for no other ([`response_module_file`]).
+///
 /// Written with the maintained `zip` implementation rather than by hand, and held entirely
 /// in memory: nothing is written to disk.
 fn inline_package(source: &str, handler: &str, runtime: &str) -> Result<String, Refusal> {
@@ -713,9 +720,19 @@ fn inline_package(source: &str, handler: &str, runtime: &str) -> Result<String, 
     let mut archive = ::zip::ZipWriter::new(::std::io::Cursor::new(Vec::new()));
     let options: ::zip::write::SimpleFileOptions = ::zip::write::SimpleFileOptions::default()
         .compression_method(::zip::CompressionMethod::Deflated);
-    archive
+    let mut written = archive
         .start_file(file, options)
-        .and_then(|()| archive.write_all(source.as_bytes()).map_err(Into::into))
+        .and_then(|()| archive.write_all(source.as_bytes()).map_err(Into::into));
+    if let Some(module) = response_module_file(runtime) {
+        written = written
+            .and_then(|()| archive.start_file(module, options))
+            .and_then(|()| {
+                archive
+                    .write_all(RESPONSE_MODULE_SOURCE.as_bytes())
+                    .map_err(Into::into)
+            });
+    }
+    written
         .and_then(|()| archive.finish().map(|cursor| cursor.into_inner()))
         .map(|bytes| base64_encoded(&bytes))
         .map_err(|error| Refusal {
@@ -723,6 +740,73 @@ fn inline_package(source: &str, handler: &str, runtime: &str) -> Result<String, 
             message: format!("the inline deployment package could not be archived: {error}"),
         })
 }
+
+/// The file the response module is supplied as, for the runtime family the declaration
+/// names, or `None` for a runtime CloudFormation publishes no such module for.
+///
+/// Source: "the cfnresponse module is available only when you use the `ZipFile` property",
+/// and the module's documented reference is the Python one, imported as `cfnresponse` — so
+/// the file is that module's own name. Every other runtime family gets none: a module this
+/// emulator supplied under a name CloudFormation does not publish would be a module no real
+/// function can import.
+fn response_module_file(runtime: &str) -> Option<&'static str> {
+    runtime.starts_with("python").then_some("cfnresponse.py")
+}
+
+/// The response module an inline function imports to answer its custom resource request:
+/// `cfnresponse.send(event, context, status, data)` PUTs the response document
+/// CloudFormation documents to the request's own `ResponseURL`.
+///
+/// What the module DOES is the published contract — the members it exports, the document it
+/// sends and the defaults it fills (the physical resource id and the reason a caller states
+/// none for) — and how it sends that document is this emulator's: the request is made with
+/// the standard library's own HTTP client, which reaches the `ResponseURL` this service
+/// published ([`crate::state::provisioning::custom_resource::response_url`]) through the
+/// function runtime's own seam, so nothing of a provider's answer is synthesised here.
+const RESPONSE_MODULE_SOURCE: &str = r#"
+"""The module CloudFormation supplies to inline function code, for answering a custom
+resource request at its ResponseURL.
+"""
+
+import json
+import urllib.request
+
+SUCCESS = "SUCCESS"
+FAILED = "FAILED"
+
+
+def send(
+    event,
+    context,
+    responseStatus,
+    responseData,
+    physicalResourceId=None,
+    noEcho=False,
+    reason=None,
+):
+    """Send one response document to the request's ResponseURL."""
+    stream = getattr(context, "log_stream_name", "")
+    body = {
+        "Status": responseStatus,
+        "Reason": reason
+        or "See the details in CloudWatch Log Stream: {}".format(stream),
+        "PhysicalResourceId": physicalResourceId or stream,
+        "StackId": event["StackId"],
+        "RequestId": event["RequestId"],
+        "LogicalResourceId": event["LogicalResourceId"],
+        "NoEcho": noEcho,
+        "Data": responseData,
+    }
+    encoded = json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        event["ResponseURL"],
+        data=encoded,
+        headers={"content-type": "", "content-length": str(len(encoded))},
+        method="PUT",
+    )
+    with urllib.request.urlopen(request) as answered:
+        answered.read()
+"#;
 
 /// The file extension the source of an inline function carries, for the runtime family the
 /// declaration names.
@@ -924,18 +1008,34 @@ mod tests {
         }
     }
 
-    /// The inline package is a .zip archive holding ONE file, named after the handler's own
-    /// file with the extension the declared runtime's handler format names.
+    /// The inline package is a .zip archive holding the declared source, named after the
+    /// handler's own file with the extension the declared runtime's handler format names —
+    /// and, for the runtime family CloudFormation publishes it for, the response module an
+    /// inline provider answers its custom resource request through.
     #[test]
     fn inline_code_is_archived_under_the_handler_file() {
-        let cases: &[(&str, &str, &str, &str)] = &[
-            ("python", "index.handler", "python3.12", "index.py"),
-            ("python under another file", "app.handler", "python3.13", "app.py"),
-            ("node", "index.handler", "nodejs20.x", "index.mjs"),
-            ("ruby", "index.handler", "ruby3.3", "index.rb"),
-            ("a runtime with no inline form", "bootstrap", "provided.al2023", "bootstrap"),
+        // (case, handler, runtime, the source's file, the module file the package also
+        // carries)
+        let cases: &[(&str, &str, &str, &str, Option<&str>)] = &[
+            ("python", "index.handler", "python3.12", "index.py", Some("cfnresponse.py")),
+            (
+                "python under another file",
+                "app.handler",
+                "python3.13",
+                "app.py",
+                Some("cfnresponse.py"),
+            ),
+            ("node", "index.handler", "nodejs20.x", "index.mjs", None),
+            ("ruby", "index.handler", "ruby3.3", "index.rb", None),
+            (
+                "a runtime with no inline form",
+                "bootstrap",
+                "provided.al2023",
+                "bootstrap",
+                None,
+            ),
         ];
-        for (case, handler, runtime, expected) in cases {
+        for (case, handler, runtime, expected, module) in cases {
             let encoded = inline_package("def handler(event, context):\n    return 1\n", handler, runtime)
                 .unwrap_or_else(|error| panic!("case {case:?}: the package could not be built: {error}"));
             let bytes = ::aws_smithy_types::base64::decode(&encoded)
@@ -951,10 +1051,11 @@ mod tests {
                     .to_string()
                 })
                 .collect();
+            let mut held_names = vec![(*expected).to_string()];
+            held_names.extend(module.map(str::to_string));
             assert_eq!(
-                names,
-                vec![(*expected).to_string()],
-                "case {case:?}: expected the archive to hold {expected:?}, got {names:?}"
+                names, held_names,
+                "case {case:?}: expected the archive to hold {held_names:?}, got {names:?}"
             );
             let mut held = String::new();
             ::std::io::Read::read_to_string(
@@ -968,6 +1069,27 @@ mod tests {
                 held, "def handler(event, context):\n    return 1\n",
                 "case {case:?}: expected the declared source, got {held:?}"
             );
+            // The module the package carries is the one a handler imports by that name, and
+            // what it exports is the published protocol: the two statuses and the call that
+            // sends the response document to the request's own `ResponseURL`.
+            if let Some(module) = module {
+                let mut source = String::new();
+                ::std::io::Read::read_to_string(
+                    &mut archive.by_name(module).unwrap_or_else(|error| {
+                        panic!("case {case:?}: {module} is absent: {error}")
+                    }),
+                    &mut source,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("case {case:?}: {module} could not be read: {error}")
+                });
+                for published in ["SUCCESS", "FAILED", "def send(", "ResponseURL"] {
+                    assert!(
+                        source.contains(published),
+                        "case {case:?}: expected {module} to carry {published:?}, got {source}"
+                    );
+                }
+            }
         }
     }
 }

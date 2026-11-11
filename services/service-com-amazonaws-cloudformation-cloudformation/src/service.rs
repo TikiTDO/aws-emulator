@@ -464,17 +464,6 @@ impl<Eng: Send + Sync + 'static> std::fmt::Debug for EmulatedService<Eng> {
     }
 }
 
-/// The host a request is addressed to and the PATH it names, read through the workspace's
-/// one reading of each: a `Host` header where the request carries one, else the authority of
-/// its absolute URI ([`::service_common::data_plane_addressing::addressed_host`]), and the
-/// path with any scheme, authority and query removed
-/// ([`::service_common::request_path`]). Both are reached from a request's PARTS
-/// (`can_handle`) and from a runtime-API request (`override_routing_error`), which share no
-/// type, so each seam passes the two things it has.
-fn addressed_host(uri: &str, host_header: Option<&str>) -> Option<String> {
-    ::service_common::data_plane_addressing::addressed_host(uri, host_header)
-}
-
 impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     fn definition(&self) -> &dyn ErasedServiceDefinition {
         // The model-derived half of this service — identity, protocol, routing
@@ -499,21 +488,11 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         } {
             return true;
         }
-        // And a request addressed to the host this service publishes a custom resource
-        // provider request's `ResponseURL` on, whose first label names no service at all:
-        // without this the router answers `UnknownService` for a URL this service handed
-        // out. See [`custom_resource_plane`].
-        if addressed_host(
-            &parts.uri.to_string(),
-            parts.headers.get("host").and_then(|host| host.to_str().ok()),
-        )
-        .is_some_and(|host| custom_resource::is_response_host(&host))
-        {
-            return true;
-        }
-        // ...and one whose PATH is one of those published URLs, whatever endpoint name it
-        // reached this emulator by: the path names the STACK, by its own ARN, so a provider
-        // following the URL it was handed addresses this service's own target either way.
+        // ...and one whose PATH is one of the custom resource `ResponseURL`s this service
+        // published: the path namespace a plane served at the emulator's own endpoint is
+        // addressed under, carrying the STACK by its own ARN, so a provider following the URL
+        // it was handed addresses this service's own target whatever endpoint name it reached
+        // this emulator by. See [`custom_resource_plane`].
         custom_resource::parse_response_path(parts.uri.path())
             .is_some_and(|target| custom_resource::target_region(&target).is_some())
     }
@@ -568,21 +547,21 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // host looks like, and keeps the framework's default.
         let target =
             custom_resource::parse_response_path(::service_common::request_path(req.uri()))?;
-        // The Region the answer is about: the one the stack's own ARN names, and failing that
-        // the one the published host carries.
-        let region = match custom_resource::target_region(&target) {
-            Some(region) => region.to_string(),
-            None => addressed_host(req.uri(), req.headers().get("host"))
-                .and_then(|host| {
-                    custom_resource::response_host_region(&host).map(str::to_string)
-                })?,
-        };
-        Some(custom_resource_plane::serve(
-            &*self.engine,
-            req,
-            &region,
-            &target,
-        ))
+        // The Region the answer is about: the one the stack's own ARN names, which is the
+        // only thing the URL says about it — the write carries no credential of its own.
+        let region = custom_resource::target_region(&target)?.to_string();
+        let (answered, concluded) =
+            custom_resource_plane::serve(&*self.engine, req, &region, &target);
+        // An answer this plane RECORDED makes work due that only a handler can carry out:
+        // the next provider request the operation behind it owes. Nothing of a client's is
+        // going to drive that — the provider answered out of band — so the answer starts the
+        // task that does ([`crate::state::provider_driver`]). Only an answer that concluded
+        // something starts one, so a write to a URL whose request is already answered — or
+        // to one nothing awaits — starts no work at all.
+        if concluded {
+            crate::state::provider_driver::drive_landed_answer(&self.engine, &region);
+        }
+        Some(answered)
     }
 
     fn override_framework_error(

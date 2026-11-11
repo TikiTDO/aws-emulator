@@ -183,6 +183,8 @@ mod handler_progress_reports;
 mod harness;
 #[path = "all/held_signal_waits.rs"]
 mod held_signal_waits;
+#[path = "all/hook_resource_return_values.rs"]
+mod hook_resource_return_values;
 #[path = "all/hook_result_detail.rs"]
 mod hook_result_detail;
 #[path = "all/hook_result_invocations.rs"]
@@ -207,6 +209,8 @@ mod initiating_resource_events;
 mod in_place_resource_updates;
 #[path = "all/kept_failed_create.rs"]
 mod kept_failed_create;
+#[path = "all/lambda_backed_custom_resources.rs"]
+mod lambda_backed_custom_resources;
 #[path = "all/lambda_function_stack_tags.rs"]
 mod lambda_function_stack_tags;
 #[path = "all/lambda_layer_version_reference.rs"]
@@ -257,6 +261,8 @@ mod organizations_access;
 mod out_of_band_resource_scan;
 #[path = "all/parameter_and_change_set_conflicts.rs"]
 mod parameter_and_change_set_conflicts;
+#[path = "all/provider_answer_follow_up.rs"]
+mod provider_answer_follow_up;
 #[path = "all/provisioned_ecr_repository.rs"]
 mod provisioned_ecr_repository;
 #[path = "all/provisioned_resources.rs"]

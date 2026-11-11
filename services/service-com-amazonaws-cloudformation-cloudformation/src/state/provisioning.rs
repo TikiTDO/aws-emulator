@@ -861,7 +861,26 @@ pub async fn advance_stabilisations(
     state: &::engine::ServiceState<super::ComAmazonawsCloudformationCloudformationState>,
 ) {
     let region = super::request_region(ctx.parts());
-    let region = region.as_str();
+    advance_stabilisations_in(ctx, state, region.as_str()).await;
+}
+
+/// [`advance_stabilisations`] for one named Region, for a caller that has the Region to
+/// advance rather than a request signed for it.
+///
+/// The Region is what every call this makes is scoped to and what selects the stacks to
+/// advance, so a caller that is not serving a client's request — the task a landed provider
+/// answer starts ([`super::provider_driver`]) — passes the Region the answer was about
+/// instead of a context for it to be read off.
+pub async fn advance_stabilisations_in(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    state: &::engine::ServiceState<super::ComAmazonawsCloudformationCloudformationState>,
+    region: &str,
+) {
+    // How this emulator is reached, kept for the work a provider's answer owes once it lands
+    // out of band ([`super::provider_driver`]): the answer arrives at a plane that is not a
+    // handler, so the handle a handler has is what that plane publishes the next request
+    // through.
+    state.lock().remember_provisioning_reach(ctx);
     settle_expired_waits(ctx, state, region).await;
     // ...and the rollback the stack's own ROLLBACK TRIGGERS force: an alarm a monitored
     // operation's configuration names, read in CloudWatch before this handler takes the lock,
@@ -1008,7 +1027,7 @@ pub async fn advance_stabilisations(
                 Some(call) => match custom_resource::send(ctx, region, &call.as_provider_call())
                     .await
                 {
-                    Ok(()) => Some(call.awaited_removal()),
+                    Ok(response_url) => Some(call.awaited_removal(&response_url)),
                     Err(refusal) => {
                         refused_cleanup = Some((call, refusal));
                         None
@@ -1235,15 +1254,16 @@ impl ReplacedResource {
         }
     }
 
-    /// The wait that cleanup opens: the replaced resource is gone when its provider answers.
-    fn awaited_removal(&self) -> Stabilising {
+    /// The wait that cleanup opens: the replaced resource is gone when its provider answers,
+    /// at the `ResponseURL` the `Delete` was published under.
+    fn awaited_removal(&self, response_url: &str) -> Stabilising {
         Stabilising {
             awaited: super::stabilising::Awaited::Gone,
             logical_id: self.logical_id.clone(),
             resource_type: self.resource_type.clone(),
             physical_resource_id: self.physical_resource_id.clone(),
             reported_state: super::resource_status::DELETE_IN_PROGRESS.to_string(),
-            provider_request: Some(self.as_provider_call().remembered()),
+            provider_request: Some(self.as_provider_call().remembered(response_url)),
         }
     }
 }
@@ -1282,8 +1302,47 @@ fn custom_resource_cleanup(
             .old_properties
             .clone()
             .unwrap_or_else(|| request.properties.clone()),
-        request_id: custom_resource::new_request_id(),
+        request_id: cleanup_request_id(stack_id, barrier, replaced),
     })
+}
+
+/// The `RequestId` the cleanup `Delete` of ONE replaced resource is answered under.
+///
+/// Derived from what identifies that cleanup — the stack, the resource, the physical
+/// resource being cleaned up and the request whose answer replaced it — rather than drawn
+/// fresh, so two passes that read the same answered barrier build the SAME request: the
+/// cleanup is owed once, and a provider that receives it twice is receiving one request
+/// twice rather than two cleanups. It is what the wait for that cleanup is identified by
+/// ([`super::stabilising::StabilisationBarrier::is_the_same_wait`]), so the stack holds one
+/// wait for it however many passes read the answer.
+///
+/// The form is the 8-4-4-4-12 one every other `RequestId` this service hands out carries
+/// ([`custom_resource::new_request_id`] mints a fresh one in the same form).
+fn cleanup_request_id(
+    stack_id: &str,
+    barrier: &super::stabilising::StabilisationBarrier,
+    replaced: &str,
+) -> String {
+    let answered = barrier
+        .provider_request
+        .as_ref()
+        .map(|request| request.request_id.as_str())
+        .unwrap_or_default();
+    let digits = super::stable_identifier_digits(
+        &format!(
+            "custom-resource-cleanup|{stack_id}|{logical}|{replaced}|{answered}",
+            logical = barrier.logical_id,
+        ),
+        32,
+    );
+    format!(
+        "{}-{}-{}-{}-{}",
+        &digits[0..8],
+        &digits[8..12],
+        &digits[12..16],
+        &digits[16..20],
+        &digits[20..32]
+    )
 }
 
 /// Materialise the failures the WAIT CONDITIONS of this Region's stacks have run out on, and
@@ -1580,9 +1639,9 @@ pub async fn reconcile(
                         old_properties: Some(&existing.properties),
                     };
                     let sent = custom_resource::send(ctx, region, &call).await;
-                    let request = call.remembered();
                     match sent {
-                        Ok(()) => {
+                        Ok(response_url) => {
+                            let request = call.remembered(&response_url);
                             // The configuration the provider was asked for is the DECLARED
                             // one, which is what the stack records — exactly as it records an
                             // owning service's applied change.
@@ -1959,8 +2018,8 @@ pub async fn reconcile(
                 old_properties: None,
             };
             match custom_resource::send(ctx, region, &call).await {
-                Ok(()) => {
-                    let request = call.remembered();
+                Ok(response_url) => {
+                    let request = call.remembered(&response_url);
                     // The request is with the provider, so the stack is responsible for the
                     // resource from here on: the record carries `materialised`, which is what
                     // makes a later teardown send the provider the `Delete` it owes.
@@ -3036,7 +3095,7 @@ async fn delete_pass(
                 };
                 custom_resource::send(ctx, region, &call)
                     .await
-                    .map(|()| Some(call.remembered()))
+                    .map(|response_url| Some(call.remembered(&response_url)))
             }
             (None, Some(provisioner)) => {
                 super::service_role::on_resource(

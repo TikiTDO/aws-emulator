@@ -127,17 +127,54 @@ pub fn awaited_request(
     ))
 }
 
-/// PUT one document to the `ResponseURL` of the request `request_id` about `logical_id` of
-/// the stack `stack_id` — the plain, unsigned write a provider makes.
+/// PUT one document to the `ResponseURL` the request `request_id` about `logical_id` of the
+/// stack `stack_id` was published under — the plain, unsigned write a provider makes.
+///
+/// The URL is the one this emulator PUBLISHED for that request, read off the request
+/// CloudFormation is waiting for an answer to: it is query-signed by the emulator's own
+/// signer, so no suite can spell it and the published value is the only one a provider ever
+/// has. A target no request awaits has no published URL, and the write goes to that target's
+/// own address ([`unawaited_response_url`]).
 pub async fn put_response(
     router: &MultiServiceRouter,
+    engine: &Arc<engine::InMemoryEngine>,
     stack_id: &str,
     logical_id: &str,
     request_id: &str,
     document: &Value,
 ) -> (u16, String) {
-    let url = custom_resource::response_url(REGION, stack_id, logical_id, request_id);
+    let url = published_response_url(engine, stack_id, logical_id, request_id);
     put(router, "PUT", &url, document.to_string()).await
+}
+
+/// The `ResponseURL` this emulator published for one request, or that target's own address
+/// when nothing awaits it ([`unawaited_response_url`]).
+pub fn published_response_url(
+    engine: &Arc<engine::InMemoryEngine>,
+    stack_id: &str,
+    logical_id: &str,
+    request_id: &str,
+) -> String {
+    let target = custom_resource::ResponseTarget {
+        stack_id: stack_id.to_string(),
+        logical_resource_id: logical_id.to_string(),
+        request_id: request_id.to_string(),
+    };
+    store(engine)
+        .lock()
+        .awaited_response_url(REGION, &target)
+        .unwrap_or_else(|| unawaited_response_url(stack_id, logical_id, request_id))
+}
+
+/// The address of a response target this emulator published no URL for: the plane's own path
+/// for it on the endpoint a test router serves at, with no signing query — which is what a
+/// row writing to a target nothing is waiting for an answer to sends.
+pub fn unawaited_response_url(stack_id: &str, logical_id: &str, request_id: &str) -> String {
+    format!(
+        "{base}{path}",
+        base = smithy_server_runtime::UNSERVED_URL_BASE,
+        path = custom_resource::response_path(stack_id, logical_id, request_id),
+    )
 }
 
 /// One raw write to a published URL: no credential of any kind, as a pre-signed URL is
@@ -227,6 +264,7 @@ pub async fn settled_with_a_responsive_provider(
                 .unwrap_or_else(|| minted.to_string());
             put_response(
                 router,
+                engine,
                 &stack_id,
                 &logical_id,
                 &request.request_id,
@@ -402,6 +440,7 @@ async fn a_custom_resource_is_what_its_provider_answered() {
 
         let (answered, answer_body) = put_response(
             &router,
+            &engine,
             &stack_id,
             "Thing",
             &request.request_id,
@@ -474,7 +513,8 @@ async fn a_provider_that_answers_failed_fails_the_resource() {
             answer["Reason"] = json!(reason);
         }
         let (answered, answer_body) =
-            put_response(&router, &stack_id, "Thing", &request.request_id, &answer).await;
+            put_response(&router, &engine, &stack_id, "Thing", &request.request_id, &answer)
+                .await;
         assert_eq!(
             answered, 200,
             "case {case:?}: expected the provider's answer to be accepted, got {answered} with \
@@ -560,6 +600,7 @@ async fn an_update_answered_with_a_new_physical_id_replaces_the_resource() {
             .unwrap_or_else(|| panic!("case {case:?}: the create must be waiting for a request"));
         put_response(
             &router,
+            &engine,
             &stack_id,
             "Thing",
             &request.request_id,
@@ -619,6 +660,7 @@ async fn an_update_answered_with_a_new_physical_id_replaces_the_resource() {
 
         put_response(
             &router,
+            &engine,
             &stack_id,
             "Thing",
             &update_request.request_id,
@@ -656,6 +698,7 @@ async fn an_update_answered_with_a_new_physical_id_replaces_the_resource() {
             );
             put_response(
                 &router,
+                &engine,
                 &stack_id,
                 "Thing",
                 &cleanup.request_id,
@@ -704,6 +747,7 @@ async fn a_stacks_deletion_sends_its_custom_resource_provider_a_delete() {
         .unwrap_or_else(|| panic!("case {case:?}: the create must be waiting for a request"));
     put_response(
         &router,
+        &engine,
         &stack_id,
         "Thing",
         &request.request_id,
@@ -742,6 +786,7 @@ async fn a_stacks_deletion_sends_its_custom_resource_provider_a_delete() {
 
     put_response(
         &router,
+        &engine,
         &stack_id,
         "Thing",
         &delete_request.request_id,
@@ -787,7 +832,7 @@ async fn a_write_that_answers_no_awaited_request_is_refused() {
     );
     let (stack_id, request, _) = awaited_request(&engine, stack_name, "Thing")
         .unwrap_or_else(|| panic!("case {case:?}: the create must be waiting for a request"));
-    let awaited = custom_resource::response_url(REGION, &stack_id, "Thing", &request.request_id);
+    let awaited = published_response_url(&engine, &stack_id, "Thing", &request.request_id);
     let good = json!({ "Status": "SUCCESS", "PhysicalResourceId": "probe-1" }).to_string();
 
     // (case, method, the URL written to, the body, the status the plane answers)
@@ -795,8 +840,7 @@ async fn a_write_that_answers_no_awaited_request_is_refused() {
         (
             "a request id nothing is waiting for",
             "PUT",
-            custom_resource::response_url(
-                REGION,
+            unawaited_response_url(
                 &stack_id,
                 "Thing",
                 "00000000-0000-0000-0000-000000000000",
@@ -807,15 +851,14 @@ async fn a_write_that_answers_no_awaited_request_is_refused() {
         (
             "another resource of the same stack",
             "PUT",
-            custom_resource::response_url(REGION, &stack_id, "Other", &request.request_id),
+            unawaited_response_url(&stack_id, "Other", &request.request_id),
             good.clone(),
             200,
         ),
         (
             "a stack this emulator does not hold",
             "PUT",
-            custom_resource::response_url(
-                REGION,
+            unawaited_response_url(
                 "arn:aws:cloudformation:us-east-1:000000000000:stack/absent/0000",
                 "Thing",
                 &request.request_id,

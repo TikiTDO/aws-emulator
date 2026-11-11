@@ -1655,6 +1655,33 @@ pub(super) fn return_values(
                 .unwrap_or_else(|| name.to_string());
             (identity, attributes)
         }
+        // The two Hook types a template declares a CloudFormation Hook with. "Ref returns the
+        // Hook ARN" and `Fn::GetAtt: HookArn` returns that same ARN — the registry ARN form an
+        // activated Hook of this account and Region is addressed by (`type/hook/<Type-Name>`,
+        // built by [`crate::state::registry::type_arn`], so the output a stack publishes is
+        // the identifier the extension APIs take for a Hook rather than a name of
+        // CloudFormation's own).
+        //
+        // The Hook's own type name is the `Alias` its declaration states ("the type name
+        // alias for the Hook … must be in the form `Private::Hook::MyCustomHook`"), which is
+        // what makes the ARN name the Hook a client configures rather than the logical id of
+        // the resource that declared it; a declaration stating none leaves the ARN on
+        // CloudFormation's own generated name for the resource, exactly as every other type
+        // whose name is a property does.
+        CLOUDFORMATION_GUARD_HOOK | CLOUDFORMATION_LAMBDA_HOOK => {
+            let alias = properties
+                .get("Alias")
+                .and_then(|declared| text(declared, scope, 0, budget))
+                .filter(|alias| !alias.is_empty())
+                .unwrap_or_else(|| name.to_string());
+            let arn = crate::state::registry::type_arn(
+                region,
+                crate::state::registry::registry_type::HOOK,
+                &alias,
+            );
+            attributes.insert("HookArn".to_string(), arn.clone());
+            (arn, attributes)
+        }
         // "Ref returns the record name"; the type publishes no `Fn::GetAtt` attribute. The
         // record name CloudFormation reports is the DNS name WITHOUT its terminal dot: a
         // zone's own names are fully qualified in Route 53 ("Route 53 treats
@@ -2604,6 +2631,19 @@ pub const CODEARTIFACT_DOMAIN: &str = "AWS::CodeArtifact::Domain";
 /// repository"), and its published attributes are `Arn`, `DomainOwner` and `Name`. The
 /// `DomainName` a declaration states is a create-only PROPERTY rather than one of them.
 pub const CODEARTIFACT_REPOSITORY: &str = "AWS::CodeArtifact::Repository";
+
+/// The resource types a template declares a CloudFormation HOOK with: the Guard Hook, which
+/// evaluates CloudFormation Guard rules against a stack operation's targets, and the Lambda
+/// Hook, which hands those targets to a function. Both are among the types this service
+/// admits ([`crate::state::resource_types`]).
+///
+/// Each carries a [`return_values`] arm because its `Ref` is NOT its name: "Ref returns the
+/// Hook ARN", and `HookArn` — the ARN of the activated Hook — is what `Fn::GetAtt` reads off
+/// it. Those are the two values a declaration publishes about a Hook, and a stack that
+/// outputs either hands its caller the identifier the extension APIs address that Hook by.
+pub const CLOUDFORMATION_GUARD_HOOK: &str = "AWS::CloudFormation::GuardHook";
+/// See [`CLOUDFORMATION_GUARD_HOOK`].
+pub const CLOUDFORMATION_LAMBDA_HOOK: &str = "AWS::CloudFormation::LambdaHook";
 
 /// CodeArtifact's ARN namespace, which its own model carries as `awsService.arnNamespace`
 /// (`codeartifact`) — the service segment of a domain's and a repository's ARN, and the

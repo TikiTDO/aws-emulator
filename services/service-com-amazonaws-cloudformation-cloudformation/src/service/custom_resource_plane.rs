@@ -11,25 +11,27 @@
 //! a pre-signed URL is followed. Nothing in the generated routing table can name it, so it
 //! is reached through the two seams any emulated data plane uses:
 //!
-//! * [`crate::service::EmulatedService::can_handle`] also claims a request addressed to the
-//!   response host this service publishes
-//!   ([`crate::state::provisioning::custom_resource::is_response_host`]), whose first label
-//!   names no service, so the router does not answer `UnknownService` for a URL this service
-//!   handed out;
+//! * [`crate::service::EmulatedService::can_handle`] also claims a request whose PATH is one
+//!   of the URLs this service published
+//!   ([`crate::state::provisioning::custom_resource::parse_response_path`]) — the path
+//!   namespace a plane served at the emulator's own endpoint is addressed under
+//!   ([`::service_common::data_plane_addressing`]), which no modelled route of this service
+//!   can collide with;
 //! * [`smithy_server_runtime::Service::override_routing_error`] serves it, and the router
 //!   reaches that seam BEFORE authentication — which is what lets the published URL be
 //!   followed unsigned.
 //!
 //! # What is served
 //!
-//! `PUT /<stack-id>|<logical-id>|<request-id>?<pre-signing query>` records the provider's
-//! answer against the request it answers, which releases the wait the resource is held at
-//! ([`crate::state::stabilising`]). The URL is single-purpose: it answers ONE request of one
-//! resource of one stack, and a write whose `X-Amz-Signature` is not the one this service
-//! published for that target is refused
-//! ([`crate::state::provisioning::custom_resource::signature_admits`]) — the path alone would
-//! admit a target a caller assembled, so the signature is what the write is held to, exactly
-//! as a pre-signed URL whose signature does not verify is refused rather than served.
+//! `PUT /_aws/cloudformation/<stack-id>|<logical-id>|<request-id>?<pre-signing query>`
+//! records the provider's answer against the request it answers, which releases the wait the
+//! resource is held at ([`crate::state::stabilising`]). The URL is single-purpose: it answers
+//! ONE request of one resource of one stack, and a write that does not present the signature
+//! this service published for that request is refused
+//! ([`crate::state::ComAmazonawsCloudformationCloudformationState::awaited_response_url`]) —
+//! the path alone would admit a target a caller assembled, and this seam is reached before
+//! the request is authenticated, so the comparison is this service's own, exactly as a
+//! pre-signed URL whose signature does not verify is refused rather than served.
 //!
 //! The write itself is otherwise accepted whether or not CloudFormation is still waiting for
 //! that answer, exactly as a pre-signed `PUT` is — a provider answering a request a cancelled
@@ -51,6 +53,7 @@
 use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse, StatusCode};
 use aws_smithy_types::body::SdkBody;
 
+use crate::state::provider_responses::ResponseOutcome;
 use crate::state::provisioning::custom_resource::{self, ProviderResponse, ResponseTarget};
 
 /// The media type a refusal of this plane is stated in.
@@ -86,7 +89,11 @@ const UNREADABLE_BODY_MESSAGE: &str = "The server could not read the response do
 /// What this plane says when this service's store is not reachable.
 const STORE_UNAVAILABLE_MESSAGE: &str = "The CloudFormation store is unavailable";
 
-/// Serve one write to a published `ResponseURL`.
+/// Serve one write to a published `ResponseURL`, and say whether the answer CONCLUDED
+/// anything: `true` is an answer recorded against the request this emulator was waiting for,
+/// which is what makes the work that answer owes due ([`crate::state::provider_driver`]);
+/// `false` is every other write, including a second one to a URL whose request has already
+/// been answered.
 ///
 /// Whether the target names a request this emulator is waiting for an answer to is the
 /// store's judgement
@@ -99,22 +106,45 @@ pub fn serve<Eng: Send + Sync + 'static>(
     req: &RtRequest,
     region: &str,
     target: &ResponseTarget,
-) -> RtResponse {
+) -> (RtResponse, bool) {
     if req.method() != "PUT" {
-        return refusal(405, "MethodNotAllowed", METHOD_NOT_ALLOWED_MESSAGE.to_string());
-    }
-    // The URL authorises ONE write, and its signature is what says so: a target assembled by
-    // a caller carries no signature this service published for it.
-    let query = req.uri().split('?').nth(1).unwrap_or_default();
-    if !custom_resource::signature_admits(target, query) {
-        return refusal(
-            403,
-            "SignatureDoesNotMatch",
-            SIGNATURE_MISMATCH_MESSAGE.to_string(),
+        return (
+            refusal(405, "MethodNotAllowed", METHOD_NOT_ALLOWED_MESSAGE.to_string()),
+            false,
         );
     }
+    // The URL authorises ONE write, and its signature is what says so: a target assembled by
+    // a caller carries no signature this service published for it. A write about a request
+    // this emulator is not waiting for an answer to is accepted and recorded against nothing
+    // — a pre-signed `PUT` is not told the resource has moved on — so there is a published
+    // signature to hold it to only where a request is still awaited.
+    let Some(state) = crate::state::service_state(engine) else {
+        return (
+            refusal(500, "InternalFailure", STORE_UNAVAILABLE_MESSAGE.to_string()),
+            false,
+        );
+    };
+    let query = req.uri().split('?').nth(1).unwrap_or_default();
+    if let Some(published) = state.lock().awaited_response_url(region, target) {
+        let published = published.split('?').nth(1).unwrap_or_default().to_string();
+        if custom_resource::presented_signature(query)
+            != custom_resource::presented_signature(&published)
+        {
+            return (
+                refusal(
+                    403,
+                    "SignatureDoesNotMatch",
+                    SIGNATURE_MISMATCH_MESSAGE.to_string(),
+                ),
+                false,
+            );
+        }
+    }
     let Some(body) = req.body().bytes() else {
-        return refusal(500, "InternalFailure", UNREADABLE_BODY_MESSAGE.to_string());
+        return (
+            refusal(500, "InternalFailure", UNREADABLE_BODY_MESSAGE.to_string()),
+            false,
+        );
     };
     // A document past the size a response may carry is one CloudFormation does not read:
     // the answer it records is the resource's failure with the response-too-long reason,
@@ -123,24 +153,21 @@ pub fn serve<Eng: Send + Sync + 'static>(
         ProviderResponse::too_long()
     } else {
         let Ok(document) = ::serde_json::from_slice::<::serde_json::Value>(body) else {
-            return malformed("a Status and a PhysicalResourceId");
+            return (malformed("a Status and a PhysicalResourceId"), false);
         };
         match ProviderResponse::read(&document) {
             Ok(answered) => answered,
-            Err(member) => return malformed(member),
+            Err(member) => return (malformed(member), false),
         }
-    };
-    let Some(state) = crate::state::service_state(engine) else {
-        return refusal(500, "InternalFailure", STORE_UNAVAILABLE_MESSAGE.to_string());
     };
     let outcome = state.lock().record_provider_response(region, target, answered);
     // The published URL is a WRITE TARGET the provider was handed: the write is accepted
     // whether or not CloudFormation is still waiting for it, exactly as a pre-signed `PUT`
     // is, so a provider answering a request a cancelled or concluded operation no longer
     // waits for is not told its own answer failed. Whether the answer CONCLUDES anything is
-    // CloudFormation's own question, and that is what the outcome decides.
-    let _ = outcome;
-    recorded()
+    // CloudFormation's own question, and that is what the outcome decides — and what the
+    // caller of this function drives the work of.
+    (recorded(), outcome == ResponseOutcome::Recorded)
 }
 
 /// The answer to a body that is not a well-formed response document, naming `member` — the
