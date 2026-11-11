@@ -319,7 +319,11 @@ fn template(logical_id: &str, properties: &Value) -> String {
 ///
 /// The shared `wait_for_stack_status` cannot serve this one: it requires every read to
 /// answer 200, and a stack whose deletion finished no longer answers at all under its name.
-async fn wait_for_stack_gone(
+///
+/// `pub(crate)` because more than one suite deletes a stack and then asks what its owning
+/// services still hold: the wait is written once, beside the `wait_for_stack_status` it
+/// complements, so two suites cannot disagree about when a deletion has finished.
+pub(crate) async fn wait_for_stack_gone(
     router: &MultiServiceRouter,
     stack_name: &str,
 ) -> (bool, String) {

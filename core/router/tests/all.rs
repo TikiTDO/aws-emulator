@@ -34,6 +34,12 @@ mod cloudformation_stackset_status_change_events;
 // once, so no single service's test target can ask it.
 #[path = "all/cloudformation_condition_gated_secrets_policy.rs"]
 mod cloudformation_condition_gated_secrets_policy;
+// Declared here, in this same head region, for the reason the entries above record: the
+// HANDLES a stack publishes for the Step Functions and Lambda resources it provisions, and
+// what a declaration Step Functions refuses leaves behind, which span CloudFormation, Step
+// Functions, Lambda, Amazon SQS and IAM at once.
+#[path = "all/cloudformation_sfn_lambda_published_handles.rs"]
+mod cloudformation_sfn_lambda_published_handles;
 // Declared here, in this same head region, for the reason the entry above records: what
 // LAMBDA makes of an access point EFS minted, which neither crate's own test target can
 // ask, since the ARN has to cross from one service to the other.

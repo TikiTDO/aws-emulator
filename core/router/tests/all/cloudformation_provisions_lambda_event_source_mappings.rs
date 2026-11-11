@@ -70,14 +70,23 @@ const ROLLBACK_COMPLETE: &str = "ROLLBACK_COMPLETE";
 
 /// Where `CreateEventSourceMapping` and `ListEventSourceMappings` are bound
 /// (`/2015-03-31/event-source-mappings`).
-const MAPPINGS_URI: &str = "/2015-03-31/event-source-mappings";
+///
+/// This constant and the three `State` values below, with [`is_mapping_uuid`],
+/// [`mapping_until_settled`] and [`mappings_of_source`], are `pub(crate)` because more than
+/// one suite of this crate reads a mapping a stack deployed: how a mapping is addressed, what
+/// form its id takes and when it has settled are written once, here, so two suites cannot
+/// disagree about them.
+pub(crate) const MAPPINGS_URI: &str = "/2015-03-31/event-source-mappings";
 
-/// The `State` a mapping that is still being stood up reports, and the one it settles into,
-/// from `EventSourceMappingConfiguration$State`: "It can be one of the following: Creating,
-/// Enabling, Enabled, Disabling, Disabled, Updating, or Deleting."
-const MAPPING_STATE_CREATING: &str = "Creating";
+/// The `State` a mapping that is still being stood up reports, and the terminal ones it
+/// settles into, from `EventSourceMappingConfiguration$State`: "It can be one of the
+/// following: Creating, Enabling, Enabled, Disabling, Disabled, Updating, or Deleting."
+pub(crate) const MAPPING_STATE_CREATING: &str = "Creating";
 /// See [`MAPPING_STATE_CREATING`].
-const MAPPING_STATE_ENABLED: &str = "Enabled";
+pub(crate) const MAPPING_STATE_ENABLED: &str = "Enabled";
+/// See [`MAPPING_STATE_CREATING`]. The state a mapping whose declaration asked it not to poll
+/// is created in: it has no poller to stand up, so it is terminal at once.
+pub(crate) const MAPPING_STATE_DISABLED: &str = "Disabled";
 
 /// How many times a poll for a documented asynchronous transition reads before this suite
 /// calls it a hang, and how long it sleeps between reads. Generous slack over the emulator's
@@ -269,7 +278,7 @@ fn function_arn(name: &str) -> String {
 /// Whether `value` is the id AWS Lambda assigns an event source mapping: a UUID, which the
 /// model pins to exactly 36 characters (`UUIDString`, `@length(min: 36, max: 36)`) in the
 /// `8-4-4-4-12` hexadecimal grouping `EventSourceMappingArn`'s own pattern spells.
-fn is_mapping_uuid(value: &str) -> bool {
+pub(crate) fn is_mapping_uuid(value: &str) -> bool {
     let groups: Vec<&str> = value.split('-').collect();
     groups.len() == 5
         && groups.iter().map(|group| group.len()).eq([8, 4, 4, 4, 12]) 
@@ -332,7 +341,11 @@ async fn physical_id(
 
 /// Poll `GetEventSourceMapping` until Lambda reports the mapping out of `Creating`, and
 /// answer the body it last reported.
-async fn mapping_until_settled(router: &MultiServiceRouter, case: &str, uuid: &str) -> Value {
+pub(crate) async fn mapping_until_settled(
+    router: &MultiServiceRouter,
+    case: &str,
+    uuid: &str,
+) -> Value {
     let uri = format!("{MAPPINGS_URI}/{uuid}");
     let mut last = Value::Null;
     for _ in 0..POLLS {
@@ -368,7 +381,11 @@ async fn mapping_until_gone(router: &MultiServiceRouter, uuid: &str) -> u16 {
 }
 
 /// Every mapping Lambda holds for one event source, through `ListEventSourceMappings`.
-async fn mappings_of_source(router: &MultiServiceRouter, case: &str, source: &str) -> Vec<Value> {
+pub(crate) async fn mappings_of_source(
+    router: &MultiServiceRouter,
+    case: &str,
+    source: &str,
+) -> Vec<Value> {
     let uri = format!("{MAPPINGS_URI}?EventSourceArn={}", form_encode(source));
     let (status, body) = lambda(router, "GET", &uri, None).await;
     assert_eq!(
