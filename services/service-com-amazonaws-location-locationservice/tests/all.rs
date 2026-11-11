@@ -29,6 +29,8 @@ mod listing_entry_members;
 mod maps;
 #[path = "all/resource_plane_fidelity.rs"]
 mod resource_plane_fidelity;
+#[path = "all/resource_tags.rs"]
+mod resource_tags;
 #[path = "all/route_calculators.rs"]
 mod route_calculators;
 #[path = "all/state_memory_bounds.rs"]

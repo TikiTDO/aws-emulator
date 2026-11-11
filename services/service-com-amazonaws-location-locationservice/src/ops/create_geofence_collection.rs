@@ -135,18 +135,13 @@ impl From<CreateGeofenceCollectionErrorModeled> for CreateGeofenceCollectionErro
     }
 }
 
-/// A member the request got wrong, stated the way this service states one: the
-/// sentence as `message`, the reason the model's enum has for a bad field value,
-/// and a `fieldList` entry naming the member and repeating the sentence.
+/// This operation's channel for a member the request got wrong: the shape comes from
+/// [`crate::state::field_validation_exception`], which every operation shares; only the
+/// lift into this operation's own error enum is local.
 fn field_validation_failed(member: &str, why: String) -> CreateGeofenceCollectionErrorModeled {
-    CreateGeofenceCollectionErrorModeled::ValidationException(ValidationException {
-        message: why.clone(),
-        reason: "FieldValidationFailed".to_string(),
-        field_list: vec![ValidationExceptionField {
-            name: member.to_string(),
-            message: why,
-        }],
-    })
+    CreateGeofenceCollectionErrorModeled::ValidationException(
+        crate::state::field_validation_exception(member, why),
+    )
 }
 
 /// The `CreateGeofenceCollection` operation.
@@ -196,6 +191,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `PricingPlan` is deprecated and admits only one of its enum's values.
         crate::state::validate_deprecated_pricing_plan(input.pricing_plan.as_deref())
             .map_err(|why| field_validation_failed("PricingPlan", why))?;
+        // The `Tags` member doc: 'Cannot use "aws:" as a prefix for a key.' The
+        // modelled key pattern admits `:`, so the reservation is this service's check,
+        // and every write of a tag map makes it.
+        crate::state::validate_tag_keys(input.tags.iter().flatten().map(|(key, _)| key.as_str()))
+            .map_err(|why| field_validation_failed(crate::state::TAGS_MEMBER, why))?;
 
         let region = crate::state::request_region(ctx.parts());
         let now = crate::state::now_millis();

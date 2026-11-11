@@ -14,6 +14,16 @@ use std::collections::{BTreeMap, BTreeSet};
 mod geofence_geometry;
 pub use geofence_geometry::validate_geofence_geometry;
 
+/// The resource a tag operation's `ResourceArn` names, and the tag map it reads and
+/// writes on it, kept beside this module because the three tag operations and the
+/// resources' own reads all reach the same per-resource tag map.
+mod resource_tags;
+pub use resource_tags::{
+    merge_tags, not_an_arn_of_this_service, remove_tags, unresolvable_arn_not_found,
+    validate_tag_keys, TagTarget, TaggedKind, UnresolvedArn, ANY_RESOURCE, ARN_VENDOR,
+    MAX_TAGS_PER_RESOURCE, RESERVED_TAG_KEY_PREFIX, RESOURCE_ARN_MEMBER, TAGS_MEMBER,
+};
+
 /// The map styles a map resource can carry and the data provider each is sourced
 /// from, kept beside this module because a map write checks the style and every map
 /// read reports its provider.
@@ -761,4 +771,28 @@ pub fn projected_tags(
             .collect(),
     )
 }
+
+/// The `ValidationException` this service states for a member the request got wrong:
+/// the sentence as `message`, the reason the model's enum has for a bad field value,
+/// and a `fieldList` entry naming the member and repeating the sentence.
+///
+/// Every operation lifts this into its OWN error enum's `ValidationException` variant,
+/// so the SHAPE of such a refusal is written once here rather than per operation.
+pub fn field_validation_exception(
+    member: &str,
+    why: String,
+) -> crate::ops::types::ValidationException {
+    crate::ops::types::ValidationException {
+        message: why.clone(),
+        reason: FIELD_VALIDATION_FAILED.to_string(),
+        field_list: vec![crate::ops::types::ValidationExceptionField {
+            name: member.to_string(),
+            message: why,
+        }],
+    }
+}
+
+/// The `ValidationExceptionReason` a bad member value carries: the model's enum member
+/// "FieldValidationFailed".
+pub const FIELD_VALIDATION_FAILED: &str = "FieldValidationFailed";
 

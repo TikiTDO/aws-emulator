@@ -8,6 +8,10 @@ build = "build.rs"
 
 [dependencies]
 engine = { workspace = true }
+# `service-common` carries the workspace's ONE caller-supplied-ARN parse, which the tag
+# operations read their `ResourceArn` against — the vendor field before any lookup, then
+# the resource type and id the ARN addresses — rather than splitting the value here.
+service-common = { path = "../common" }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }
 aws-smithy-schema-server = { workspace = true }
@@ -31,6 +35,9 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+# RFC 3986 percent-encoding, so a test can put an ARN in a single-segment
+# `@httpLabel` and tag keys in `@httpQuery` values the way an SDK does.
+percent-encoding = "2.3"
 
 [lints]
 workspace = true

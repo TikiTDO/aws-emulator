@@ -157,6 +157,15 @@ impl From<CreateTrackerErrorModeled> for CreateTrackerError {
     }
 }
 
+/// This operation's channel for a member the request got wrong: the shape comes from
+/// [`crate::state::field_validation_exception`], which every operation shares; only the
+/// lift into this operation's own error enum is local.
+fn field_validation_failed(member: &str, why: String) -> CreateTrackerErrorModeled {
+    CreateTrackerErrorModeled::ValidationException(crate::state::field_validation_exception(
+        member, why,
+    ))
+}
+
 /// The `CreateTracker` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -198,6 +207,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 message: "the Amazon Location state store is unavailable".to_string(),
             })
         })?;
+
+        // The `Tags` member doc: 'Cannot use "aws:" as a prefix for a key.' The
+        // modelled key pattern admits `:`, so the reservation is this service's check,
+        // and every write of a tag map makes it.
+        crate::state::validate_tag_keys(input.tags.iter().flatten().map(|(key, _)| key.as_str()))
+            .map_err(|why| field_validation_failed(crate::state::TAGS_MEMBER, why))?;
 
         let region = crate::state::request_region(ctx.parts());
         let now = crate::state::now_millis();
