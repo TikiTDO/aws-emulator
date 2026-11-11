@@ -468,7 +468,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // here — and the clock is left watching for the next breach, which a client drives in
         // CloudWatch and then looks for on the resource this policy scales rather than here.
         crate::state::policy_execution::settle_policy_executions(&*self.engine, &region);
-        crate::state::policy_execution::drive_scaling_clock(&self.engine, &region);
+        crate::state::policy_execution::drive_scaling_clock(&self.engine, &region, ctx.callback());
 
         // The audit record for a state-changing call.
         ::tracing::info!(

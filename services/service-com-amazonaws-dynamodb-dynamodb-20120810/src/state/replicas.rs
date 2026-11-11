@@ -767,6 +767,9 @@ impl Table {
         Table {
             name: self.name.clone(),
             arn: table_arn(&region, &self.name),
+            // Nothing has been charged against the replica: what the source table was
+            // charged is published for the source table.
+            pending_consumed: crate::state::consumed_capacity_metrics::Pending::default(),
             // Each regional table is a resource of its own, so it carries its own
             // `TableId` rather than the source table's.
             id: new_table_id(),

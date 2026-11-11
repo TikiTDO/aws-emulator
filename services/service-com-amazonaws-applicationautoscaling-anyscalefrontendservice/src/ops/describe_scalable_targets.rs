@@ -287,7 +287,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // with this service's lock released, and the clock is left watching for the next
         // breach of the target's policies.
         crate::state::policy_execution::settle_policy_executions(&*self.engine, &region);
-        crate::state::policy_execution::drive_scaling_clock(&self.engine, &region);
+        crate::state::policy_execution::drive_scaling_clock(&self.engine, &region, ctx.callback());
 
         Ok(DescribeScalableTargetsOutput {
             scalable_targets: Some(scalable_targets),

@@ -299,7 +299,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // whose alarm is in ALARM was owed its execution from the instant that alarm
         // transitioned: both are settled here, with this service's lock released.
         crate::state::policy_execution::settle_policy_executions(&*self.engine, &region);
-        crate::state::policy_execution::drive_scaling_clock(&self.engine, &region);
+        crate::state::policy_execution::drive_scaling_clock(&self.engine, &region, ctx.callback());
 
         Ok(DescribeScheduledActionsOutput {
             scheduled_actions: Some(scheduled_actions),

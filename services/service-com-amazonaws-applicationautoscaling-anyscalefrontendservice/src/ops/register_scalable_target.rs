@@ -491,7 +491,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // resource is owed, so both are settled here — and the clock is left watching for the
         // next breach of the target's policies.
         crate::state::policy_execution::settle_policy_executions(&*self.engine, &region);
-        crate::state::policy_execution::drive_scaling_clock(&self.engine, &region);
+        crate::state::policy_execution::drive_scaling_clock(&self.engine, &region, ctx.callback());
 
         // "Application Auto Scaling uses a service-linked role, which it creates if it does
         // not yet exist": the role this namespace's targets are scaled through is brought
@@ -589,9 +589,15 @@ fn enforce_capacity_window(
     }
     if moved != current {
         let cause = if moved > current {
-            format!("minimum capacity was set to {min_capacity}")
+            crate::state::capacity_bound_enforcement_cause(
+                crate::state::CapacityBound::Minimum,
+                min_capacity,
+            )
         } else {
-            format!("maximum capacity was set to {max_capacity}")
+            crate::state::capacity_bound_enforcement_cause(
+                crate::state::CapacityBound::Maximum,
+                max_capacity,
+            )
         };
         state.record_capacity_change(key, moved, cause, now);
     }

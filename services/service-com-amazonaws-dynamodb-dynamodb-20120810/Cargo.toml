@@ -68,7 +68,11 @@ service-com-amazonaws-kms-trentservice = { workspace = true }
 # CloudWatch owns the Contributor Insights rules this feature IS: enabling contributor
 # insights on a table or index mints them in that service's own insight-rule store, where
 # `DescribeInsightRules` lists them and `GetInsightRuleReport` reports the ranked keys
-# (`state::contributor_insights`).
+# (`state::contributor_insights`). It also owns the metric store a table's own throughput
+# observations are published into: every request this service serves counts the capacity it
+# consumed into that store (`state::consumed_capacity_metrics`), which is where a client reads
+# `AWS/DynamoDB` `ConsumedReadCapacityUnits`/`ConsumedWriteCapacityUnits` back and what an
+# alarm on those metrics is evaluated against.
 service-com-amazonaws-cloudwatch-graniteserviceversion20100801 = { workspace = true }
 # `query_error_envelope`: the tree's one statement of how a response names the request it
 # answers (`x-amzn-RequestId`), wired into this service's operation dispatch and its

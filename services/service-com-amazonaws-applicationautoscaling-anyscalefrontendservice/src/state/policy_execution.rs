@@ -87,7 +87,9 @@ use super::{
     service_state, ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState, PolicyKey,
     TargetKey,
 };
-use crate::ops::types::{StepScalingPolicyConfiguration, TargetTrackingScalingPolicyConfiguration};
+use crate::ops::types::{
+    NotScaledReason, StepScalingPolicyConfiguration, TargetTrackingScalingPolicyConfiguration,
+};
 
 /// The policy type whose own configuration states the arithmetic of its adjustment, and so the
 /// one an alarm breach can be executed from on the policy document alone.
@@ -261,6 +263,215 @@ pub fn settle_policy_executions<Eng: Send + Sync + 'static>(engine: &Eng, region
     deliver_pending_capacity(engine, &state);
 }
 
+/// Read and write what the resources this service scales OVER THE WIRE owe: the capacity each
+/// of them holds right now, and the movements this store has queued for them.
+///
+/// Two namespaces are reached that way. A `custom-resource` scalable target IS an endpoint of
+/// the caller's own application ([`super::custom_resource_endpoint`]), and an Amazon Keyspaces
+/// table is read and moved by CALLING that service ([`super::keyspaces_tables`]), whose crate
+/// cannot be named from here. So neither half of a decision about such a target can be taken
+/// against a store: the capacity it is compared against has to be asked for, and the capacity
+/// it moves to has to be sent. Both are calls, so they happen here — on the scaling clock,
+/// which is the one caller of this service's own work that can await them — rather than in
+/// [`settle_policy_executions`], which several handlers call with a store lock in hand.
+///
+/// The order is the order of a decision: the capacity is read BEFORE the occurrences and
+/// breaches the pass materialises are decided, and the movements they queued are written
+/// after.
+pub async fn settle_remote_resources<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    region: &str,
+    callback: &::smithy_server_runtime::EmbeddedEmulator,
+) {
+    let Some(state) = service_state(engine) else {
+        return;
+    };
+    refresh_remote_capacities(&state, region, callback).await;
+    settle_policy_executions(engine, region);
+    deliver_remote_capacity(&state, region, callback).await;
+}
+
+/// How often the capacity of a resource this service reads OVER THE WIRE is re-read.
+///
+/// The EMULATOR's own bound, not a published one: the in-process clock wakes up several times
+/// a second ([`SCALING_CLOCK_WAIT`]), and re-reading the caller's own endpoint that often
+/// would make this service the busiest client of it. One read a second is far finer than the
+/// shortest span any decision of this service is taken over, so nothing a decision depends on
+/// is ever read stale by more than that.
+const REMOTE_CAPACITY_READ_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How many of those reads ONE pass performs.
+///
+/// The pass's OWN bound, the sibling of [`MAX_EXECUTIONS_PER_PASS`] and for the same reason:
+/// how many targets a store holds is the CALLER's choice, and each read of one is a signed
+/// call with an answer to parse, so the work of a pass is fixed here rather than growing with
+/// the registered-target count. Nothing starves: the targets whose capacity was read longest
+/// ago go first, so what this pass leaves out is what the next pass takes.
+const MAX_REMOTE_READS_PER_PASS: usize = 32;
+
+/// Learn, for every target of this Region whose resource is reached OVER THE WIRE rather than
+/// in a store this emulator holds, the capacity that resource holds — and keep it as the
+/// capacity this service tracks for the target.
+///
+/// This RECORDS NO ACTIVITY and moves nothing: the capacity it writes is the one the resource
+/// already had, which is a fact about that resource rather than a change this service made.
+/// What it is for is the decisions taken afterwards: a scheduled action's firing and a
+/// policy's breach both compare the capacity the resource holds against the window the target
+/// carries, and for such a target that capacity can only be asked for.
+async fn refresh_remote_capacities(
+    state: &::engine::ServiceState<ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState>,
+    region: &str,
+    callback: &::smithy_server_runtime::EmbeddedEmulator,
+) {
+    let now = SystemTime::now();
+    let due: Vec<TargetKey> = {
+        let mut store = state.lock();
+        // A target that is no longer registered has no capacity to read, so its last-read
+        // instant goes with it: the index holds one entry per registered target and no more.
+        let registered: BTreeSet<TargetKey> = store.targets.keys().cloned().collect();
+        store
+            .remote_capacity_read_at
+            .retain(|key, _| registered.contains(key));
+        // Oldest read first, so the pass's budget cannot leave one target unread for ever.
+        let mut due: Vec<(Option<SystemTime>, TargetKey)> = store
+            .targets
+            .keys()
+            .filter(|key| key.region == region)
+            .filter(|key| is_remote_namespace(&key.service_namespace))
+            .filter(|key| {
+                store
+                    .remote_capacity_read_at
+                    .get(*key)
+                    .and_then(|read| read.checked_add(REMOTE_CAPACITY_READ_INTERVAL))
+                    .is_none_or(|due| due <= now)
+            })
+            .map(|key| (store.remote_capacity_read_at.get(key).copied(), key.clone()))
+            .collect();
+        due.sort();
+        due.truncate(MAX_REMOTE_READS_PER_PASS);
+        due.into_iter().map(|(_, key)| key).collect()
+    };
+    for key in due {
+        let reported = match key.service_namespace.as_str() {
+            CUSTOM_RESOURCE_NAMESPACE => {
+                super::custom_resource_endpoint::read_capacity(callback, region, &key.resource_id)
+                    .await
+            }
+            CASSANDRA_NAMESPACE => {
+                let reads =
+                    super::dimension_scaling_property(&key.scalable_dimension)
+                        == READ_CAPACITY_PROPERTY;
+                super::keyspaces_tables::read_table_capacity(
+                    callback,
+                    region,
+                    &key.resource_id,
+                    reads,
+                )
+                .await
+            }
+            _ => None,
+        };
+        let mut store = state.lock();
+        store.remote_capacity_read_at.insert(key.clone(), now);
+        if let (Some(capacity), Some(target)) = (reported, store.targets.get_mut(&key)) {
+            target.current_capacity = capacity;
+        }
+    }
+}
+
+/// Write every queued capacity movement whose resource is an ENDPOINT, in the Region that
+/// endpoint serves the target.
+///
+/// The queue is the same one [`deliver_pending_capacity`] drains, and the two share it by
+/// namespace: a movement this emulator can write into the owning service's store is taken
+/// there, and one that has to be sent to the caller's own endpoint is left queued for here.
+/// Delivery is at-most-once either way — a taken movement is gone from the queue.
+async fn deliver_remote_capacity(
+    state: &::engine::ServiceState<ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState>,
+    region: &str,
+    callback: &::smithy_server_runtime::EmbeddedEmulator,
+) {
+    let pending: Vec<(TargetKey, i32)> = {
+        let mut store = state.lock();
+        let taken: Vec<TargetKey> = store
+            .pending_capacity
+            .keys()
+            .filter(|key| key.region == region && is_remote_namespace(&key.service_namespace))
+            .cloned()
+            .collect();
+        taken
+            .into_iter()
+            .filter_map(|key| {
+                store
+                    .pending_capacity
+                    .remove(&key)
+                    .map(|capacity| (key, capacity))
+            })
+            .collect()
+    };
+    for (target, capacity) in pending {
+        let delivered = match target.service_namespace.as_str() {
+            CUSTOM_RESOURCE_NAMESPACE => {
+                super::custom_resource_endpoint::set_capacity(
+                    callback,
+                    region,
+                    &target.resource_id,
+                    capacity,
+                )
+                .await
+            }
+            CASSANDRA_NAMESPACE => {
+                let reads = super::dimension_scaling_property(&target.scalable_dimension)
+                    == READ_CAPACITY_PROPERTY;
+                super::keyspaces_tables::set_table_capacity(
+                    callback,
+                    region,
+                    &target.resource_id,
+                    reads,
+                    capacity,
+                )
+                .await
+            }
+            _ => false,
+        };
+        if !delivered {
+            // The resource did not take the movement this service already recorded as an
+            // activity — the endpoint refused it, or nothing on this engine serves it. The
+            // movement is not re-queued (the alarm or the schedule that asked for it is what
+            // asks again), and the refusal is reported where a developer can see it rather
+            // than passing silently.
+            ::tracing::warn!(
+                namespace = %target.service_namespace,
+                resource = %target.resource_id,
+                capacity,
+                "the resource this scalable target scales did not take the capacity movement \
+                 this service performed"
+            );
+        }
+    }
+}
+
+/// The namespace whose resources are the caller's own endpoints
+/// ([`super::custom_resource_endpoint`]).
+const CUSTOM_RESOURCE_NAMESPACE: &str = "custom-resource";
+
+/// The namespace whose resources are Amazon Keyspaces tables, which are reached by CALLING
+/// that service ([`super::keyspaces_tables`]) rather than by reading its store.
+const CASSANDRA_NAMESPACE: &str = "cassandra";
+
+/// The scaling property that names the READ half of a provisioned-throughput capacity
+/// specification; its sibling names the write half.
+const READ_CAPACITY_PROPERTY: &str = "ReadCapacityUnits";
+
+/// Whether a namespace's resources are reached over the wire rather than in a store this
+/// emulator holds, which is what decides WHICH of the two deliveries takes a movement of one.
+fn is_remote_namespace(service_namespace: &str) -> bool {
+    matches!(
+        service_namespace,
+        CUSTOM_RESOURCE_NAMESPACE | CASSANDRA_NAMESPACE
+    )
+}
+
 /// Write every queued capacity movement into the service that owns the resource it moved.
 ///
 /// Application Auto Scaling moves a resource's capacity through the owning service, and that
@@ -269,13 +480,20 @@ pub fn settle_policy_executions<Eng: Send + Sync + 'static>(engine: &Eng, region
 /// is gone from the queue, and the capacity delivered for a target is the last one queued for
 /// it, which is the capacity that target holds. Each movement is written in the REGION of the
 /// target it moved, which is where that resource lives.
+///
+/// A movement whose resource is an ENDPOINT is left queued for
+/// [`deliver_remote_capacity`], which can await the call it takes.
 fn deliver_pending_capacity<Eng: Send + Sync + 'static>(
     engine: &Eng,
     state: &::engine::ServiceState<ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState>,
 ) {
     let pending = {
         let mut store = state.lock();
-        ::std::mem::take(&mut store.pending_capacity)
+        let (local, remote) = ::std::mem::take(&mut store.pending_capacity)
+            .into_iter()
+            .partition(|(target, _)| !is_remote_namespace(&target.service_namespace));
+        store.pending_capacity = remote;
+        local
     };
     for (target, capacity) in pending {
         set_resource_capacity(engine, &target.region, &target, capacity);
@@ -299,6 +517,7 @@ fn deliver_pending_capacity<Eng: Send + Sync + 'static>(
 pub fn drive_scaling_clock<Eng: Send + Sync + 'static>(
     engine: &::std::sync::Arc<Eng>,
     region: &str,
+    callback: &::smithy_server_runtime::EmbeddedEmulator,
 ) {
     let Some(state) = service_state(&**engine) else {
         return;
@@ -311,6 +530,10 @@ pub fn drive_scaling_clock<Eng: Send + Sync + 'static>(
     };
     let engine = ::std::sync::Arc::clone(engine);
     let region = region.to_string();
+    // The clock outlives the handler that started it, so it carries a CLONE of the callback
+    // rather than the borrowed context it came from: the calls it makes on the caller's own
+    // endpoint are the same in-process calls, made by the same identity.
+    let callback = callback.clone();
     let claimed = ::engine::ServiceState::clone(&state);
     let handle = runtime.spawn(async move {
         // `true` only if the wake-up cap is what ended the loop; a clock that ran out of work
@@ -323,7 +546,7 @@ pub fn drive_scaling_clock<Eng: Send + Sync + 'static>(
             }
             // Every wake-up waits, which hands the runtime back between passes.
             ::tokio::time::sleep(SCALING_CLOCK_WAIT).await;
-            settle_policy_executions(&*engine, &region);
+            settle_remote_resources(&*engine, &region, &callback).await;
         }
         if capped {
             // Only THIS clock's claim, so a clock started since is left holding its own.
@@ -672,6 +895,17 @@ fn apply_breaches(
                     breach.transitioned_secs,
                 );
             }
+            Disposition::NotScaled { reason, consume } => {
+                record_not_scaled(store, policy, breach, reason, now);
+                if consume {
+                    remember_transition(
+                        store,
+                        &policy.key,
+                        &breach.alarm_name,
+                        breach.transitioned_secs,
+                    );
+                }
+            }
             Disposition::Move(movement) => {
                 perform_movement(store, policy, breach, movement, now);
             }
@@ -689,8 +923,61 @@ enum Disposition {
     /// Evaluated and done with: there is no capacity movement in it, so the transition is
     /// remembered and no later pass looks at it again.
     Consume,
+    /// Evaluated, and WITHHELD with a reason: there is no capacity movement in it, and the
+    /// decision is recorded as the not-scaled activity [`WithheldReason`] states.
+    NotScaled {
+        /// Why no capacity moved.
+        reason: WithheldReason,
+        /// Whether the transition is done with, or left for a later pass to perform once
+        /// what withheld the movement no longer does.
+        consume: bool,
+    },
     /// Move the target's capacity, as [`Movement`] states it.
     Move(Movement),
+}
+
+/// Why a scaling decision moved no capacity, as the model's `NotScaledReason$Code` names it.
+///
+/// The three codes a decision of this emulator can be withheld for, out of the value set that
+/// member declares (`AutoScalingAnticipatedFlapping`, `TargetServicePutResourceAsUnscalable`,
+/// `AlreadyAtMaxCapacity`, `AlreadyAtMinCapacity`, `AlreadyAtDesiredCapacity`): the two ends
+/// of the registered window the capacity may not be moved past, and the capacity the policy
+/// asked for already being the one the target holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WithheldReason {
+    /// The capacity asked for is above the registered `MaxCapacity`, which the target
+    /// already sits at.
+    Ceiling,
+    /// The capacity asked for is below the registered `MinCapacity`, which the target
+    /// already sits at.
+    Floor,
+    /// The capacity asked for is the one the target already holds.
+    Unchanged,
+}
+
+impl WithheldReason {
+    /// The `NotScaledReason$Code` value this reason is reported as.
+    fn code(self) -> &'static str {
+        match self {
+            Self::Ceiling => "AlreadyAtMaxCapacity",
+            Self::Floor => "AlreadyAtMinCapacity",
+            Self::Unchanged => "AlreadyAtDesiredCapacity",
+        }
+    }
+
+    /// The reason as the activity reports it: the code, the bound that withheld the movement
+    /// and the capacity the target was found at.
+    ///
+    /// Only the bound this reason is ABOUT is named — the other end of the window had no part
+    /// in withholding the movement, and `NotScaledReason`'s members are each optional.
+    fn reported(self, min_capacity: i32, max_capacity: i32, current: i32) -> NotScaledReason {
+        NotScaledReason {
+            code: self.code().to_string(),
+            max_capacity: matches!(self, Self::Ceiling).then_some(max_capacity),
+            min_capacity: matches!(self, Self::Floor).then_some(min_capacity),
+            current_capacity: Some(current),
+        }
+    }
 }
 
 /// The capacity movement one breach asks for.
@@ -814,10 +1101,27 @@ fn plan_breach(
     };
     let capacity = wanted.max(min_capacity).min(max_capacity);
     if capacity == current {
-        // Nothing moved, so there is no capacity movement to record: the policy asked for
-        // the capacity the resource already holds, or for one past a bound it already
-        // sits at.
-        return Disposition::Consume;
+        // The decision asks for no movement at all: either the policy asked for the
+        // capacity the target already holds, or it asked PAST a bound the target already
+        // sits at — "Application Auto Scaling will not scale capacity to values that are
+        // outside of the minimum and maximum range" — so the registered window withheld it.
+        // Nothing moves, and the reason the model's `NotScaledReason$Code` names is what the
+        // log says about the decision.
+        let reason = if wanted > max_capacity {
+            WithheldReason::Ceiling
+        } else if wanted < min_capacity {
+            WithheldReason::Floor
+        } else {
+            WithheldReason::Unchanged
+        };
+        return Disposition::NotScaled {
+            reason,
+            // A decision a BOUND withheld is left unconsumed: the alarm is still breaching,
+            // so the first pass after that bound is raised delivers the movement it was
+            // owed. One the metric itself asked nothing of is done with — only a new
+            // measurement, which arrives as a new transition, could change it.
+            consume: reason == WithheldReason::Unchanged,
+        };
     }
     // A policy that does not provide MORE capacity than the decision its target has already
     // settled is the one precedence is given against: it is fully suppressed, so its
@@ -866,10 +1170,7 @@ fn perform_movement(
     } = movement;
     // This transition has now been performed, so no later pass performs it again.
     remember_transition(store, &policy.key, &breach.alarm_name, breach.transitioned_secs);
-    let cause = format!(
-        "monitor alarm {} in state ALARM triggered policy {}",
-        breach.alarm_name, policy.key.policy_name
-    );
+    let cause = breach_cause(policy, breach);
     // The instant THIS movement is made at, which is not the instant the pass started:
     // the pass performs the breaches it found one after another, and two movements that
     // share an instant have no order in time at all — so the one a later movement
@@ -896,6 +1197,71 @@ fn perform_movement(
     if let Some(record) = store.policies.get_mut(&policy.key) {
         record.last_executed = Some(moved_at);
     }
+}
+
+/// The `Cause` of every activity one alarm breach produces: "a simple description of what
+/// caused the scaling activity to happen", which is the alarm that moved into `ALARM` and the
+/// policy its action list named. The same cause whether the decision moved capacity or was
+/// withheld — the breach is what caused the service to decide at all.
+fn breach_cause(policy: &FiringPolicy, breach: &Breach) -> String {
+    format!(
+        "monitor alarm {} in state ALARM triggered policy {}",
+        breach.alarm_name, policy.key.policy_name
+    )
+}
+
+/// What this service DESCRIBES a decision taken on an alarm breach as, for a decision that
+/// moved no capacity: the fixed text a not-scaled activity carries, which names the trigger
+/// rather than a movement — there is none to name.
+const NOT_SCALED_DESCRIPTION: &str = "Attempting to scale due to alarm triggered";
+
+/// Record the decision a breach produced no movement for as the not-scaled activity the
+/// model describes: `StatusCode` `Failed`, the fixed description, and the reason code beside
+/// the bound that withheld the movement and the capacity the target was found at.
+///
+/// A breach that keeps breaching is decided again by every pass, so the SAME reason is
+/// recorded once: the entry is added only when it is not what the target's newest activity
+/// already says. A movement of the target since, or a decision withheld for another reason,
+/// is a new thing to say about it and is recorded.
+fn record_not_scaled(
+    store: &mut ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState,
+    policy: &FiringPolicy,
+    breach: &Breach,
+    reason: WithheldReason,
+    now: SystemTime,
+) {
+    let Some(target) = store.targets.get(&policy.key.target) else {
+        return;
+    };
+    let reported = reason.reported(
+        target.min_capacity.min(target.max_capacity),
+        target.max_capacity.max(target.min_capacity),
+        target.current_capacity,
+    );
+    let already_said = store
+        .latest_not_scaled_reason(&policy.key.target)
+        .is_some_and(|held| {
+            held.code == reported.code
+                && held.max_capacity == reported.max_capacity
+                && held.min_capacity == reported.min_capacity
+                && held.current_capacity == reported.current_capacity
+        });
+    if already_said {
+        return;
+    }
+    let capacity = reported.current_capacity.unwrap_or_default();
+    store.record_activity(
+        &policy.key.target,
+        SystemTime::now().max(now),
+        super::ActivityEntry {
+            description: NOT_SCALED_DESCRIPTION.to_string(),
+            cause: breach_cause(policy, breach),
+            capacity,
+            status_code: super::ACTIVITY_FAILED.to_string(),
+            status_message: None,
+            not_scaled_reasons: vec![reported],
+        },
+    );
 }
 
 /// When each target's arbitration window closes, for the targets whose breaches are arbitrated
@@ -1169,9 +1535,11 @@ pub fn resource_capacity<Eng: Send + Sync + 'static>(
 /// Application Auto Scaling does not hold the capacity of anything: it moves the resource's own
 /// capacity through the owning service ("Application Auto Scaling scales […] the ECS service's
 /// desired count"), which is what a client reads back there. One arm per namespace whose
-/// resource store this emulator holds AND whose resources a policy of this kind can move; for
-/// any other namespace the movement is recorded as the scaling activity it is and the capacity
-/// this service tracks for the target is all there is to move.
+/// resource store this emulator holds AND whose resources a policy of this kind can move; a
+/// namespace whose resource is reached over the wire is written by
+/// [`deliver_remote_capacity`] instead, and for any other namespace the movement is recorded
+/// as the scaling activity it is and the capacity this service tracks for the target is all
+/// there is to move.
 fn set_resource_capacity<Eng: Send + Sync + 'static>(
     engine: &Eng,
     region: &str,

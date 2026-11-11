@@ -25,6 +25,8 @@ mod customized_metric_alarms;
 mod emulator;
 #[path = "all/keyspaces_table_resolution.rs"]
 mod keyspaces_table_resolution;
+#[path = "all/not_scaled_activities.rs"]
+mod not_scaled_activities;
 #[path = "all/policy_alarm_association.rs"]
 mod policy_alarm_association;
 #[path = "all/policy_refusal_sentences.rs"]
@@ -57,6 +59,8 @@ mod scaling_activities;
 mod scaling_activity_status_message;
 #[path = "all/scaling_policy_preconditions.rs"]
 mod scaling_policy_preconditions;
+#[path = "all/scheduled_action_activity_pair.rs"]
+mod scheduled_action_activity_pair;
 #[path = "all/scheduled_action_deletion.rs"]
 mod scheduled_action_deletion;
 #[path = "all/scheduled_action_dispatch.rs"]

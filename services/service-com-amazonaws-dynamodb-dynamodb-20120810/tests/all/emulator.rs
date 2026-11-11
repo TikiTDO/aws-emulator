@@ -348,7 +348,7 @@ async fn dispatch(
 
 /// The same, signed for the service `signing_name` — which is what the router claims a
 /// request by, so a call to another service mounted on the same engine names its own.
-async fn dispatch_as(
+pub async fn dispatch_as(
     router: &MultiServiceRouter,
     region: &str,
     signing_name: &str,

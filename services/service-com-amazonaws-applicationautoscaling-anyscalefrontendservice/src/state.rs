@@ -37,6 +37,10 @@ pub mod policy_execution;
 /// that owns it.
 pub mod keyspaces_tables;
 
+/// The endpoint a `custom-resource` scalable target is, which is where that target's
+/// capacity is read and moved.
+pub mod custom_resource_endpoint;
+
 /// The refusals whose wire identity this service's own error list does not express, and the
 /// error channel that carries them.
 pub mod wire_refusals;
@@ -222,15 +226,45 @@ pub struct ScalingActivityRecord {
     /// what makes this a "not scaled activity", which a `Describe` hides unless the
     /// caller asks for it.
     ///
-    /// Still empty on every stored activity: the only writer is
-    /// [`ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState::record_capacity_change`],
-    /// and a movement it records WAS scaled. A breach a policy declines to act on — the
-    /// capacity is already at the bound the adjustment asks past, so
-    /// [`policy_execution`] moves nothing — records no activity at all rather than one
-    /// carrying `AlreadyAtMaxCapacity` or another of the codes the model's
-    /// `NotScaledReason$Code` lists: this emulator has no recording of what AWS reports as
-    /// such an activity's `StatusCode` and `StatusMessage`, and would have to invent both.
-    /// Same for `details`.
+    /// Written by [`policy_execution`] for a scaling decision a registered bound WITHHELD:
+    /// the capacity the policy asked for is past a bound the target already sits at, so
+    /// nothing moved and the reason the model's `NotScaledReason$Code` names is what the
+    /// log says about it.
+    pub not_scaled_reasons: Vec<NotScaledReason>,
+    /// Whether this activity is a capacity MOVEMENT of the scalable target — a change of
+    /// the capacity the resource is driven to — rather than a record of something else this
+    /// service did to the target (a scheduled action's dispatch, a decision a bound
+    /// withheld).
+    ///
+    /// Only a movement can be taken over by a later movement, which is what
+    /// [`ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState::override_unfulfilled_activities`]
+    /// reads it for: an activity that moved no capacity has none a later movement could
+    /// displace, so it keeps the status it was recorded with.
+    pub movement: bool,
+}
+
+/// What one activity that is not a capacity movement says about itself:
+/// [`ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState::record_activity`]'s
+/// text, status and reasons.
+///
+/// The two members that are not free text are the ones the model constrains: `status_code`
+/// is one of `SCALING_ACTIVITY_STATUS_CODE_VALUES`, and a non-empty `not_scaled_reasons`
+/// makes the activity a not-scaled one, which a `Describe` hides unless the caller asked
+/// for them.
+#[derive(Debug, Clone)]
+pub struct ActivityEntry {
+    /// "A simple description of what action the scaling activity intends to accomplish."
+    pub description: String,
+    /// "A simple description of what caused the scaling activity to happen."
+    pub cause: String,
+    /// The capacity the activity is about: the bound a dispatch set, or the capacity a
+    /// withheld decision found the target at.
+    pub capacity: i32,
+    /// The status the activity carries from the instant it was recorded.
+    pub status_code: String,
+    /// "A simple message about the current status of the scaling activity."
+    pub status_message: Option<String>,
+    /// Why the decision was not scaled; empty for an activity that did what it describes.
     pub not_scaled_reasons: Vec<NotScaledReason>,
 }
 
@@ -316,6 +350,15 @@ pub struct ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState {
     /// target was last moved to is the capacity it holds, so a second movement of the same
     /// target replaces the first rather than queueing behind it.
     pub pending_capacity: BTreeMap<TargetKey, i32>,
+    /// When the capacity of each target whose resource is read OVER THE WIRE was last asked
+    /// for, so the clock's passes do not re-ask the caller's own endpoint several times a
+    /// second (`policy_execution::REMOTE_CAPACITY_READ_INTERVAL`), and so the reads one pass
+    /// performs can start with the targets read longest ago.
+    ///
+    /// One entry per REGISTERED target: `policy_execution::refresh_remote_capacities` drops
+    /// the entries of targets the store no longer holds before it reads, so a deregistered
+    /// target leaves nothing behind.
+    pub remote_capacity_read_at: BTreeMap<TargetKey, SystemTime>,
     /// Whether one in-process scaling clock is claimed for this store
     /// ([`policy_execution::drive_scaling_clock`]), which is what keeps a second from
     /// starting beside it.
@@ -376,13 +419,11 @@ impl ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState {
             terminal_status_message: Some(fulfilled_status_message(target, capacity)),
             details: None,
             not_scaled_reasons: Vec::new(),
+            movement: true,
         });
         // The emulator's own ceiling on the log: the oldest entries go first, exactly as
         // ageing out of the reported window would have dropped them.
-        let overflow = self.activities.len().saturating_sub(MAX_SCALING_ACTIVITIES);
-        if overflow > 0 {
-            self.activities.drain(..overflow);
-        }
+        self.trim_activity_log();
         activity_id
     }
 
@@ -428,12 +469,89 @@ impl ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState {
             if activity.start_time > at {
                 continue;
             }
+            // An activity that moved no capacity has none a later movement could displace:
+            // a scheduled action's dispatch, or a decision a registered bound withheld,
+            // keeps the status it was recorded with.
+            if !activity.movement {
+                continue;
+            }
             if activity.fulfilled_at.is_none_or(|due| due <= at) {
                 break;
             }
             activity.fulfilled_at = Some(at);
             activity.terminal_status_code = ACTIVITY_OVERRIDDEN.to_string();
             activity.terminal_status_message = Some(movement_description(target, capacity));
+        }
+    }
+
+    /// Record one activity of `target` that is NOT a capacity movement of it, and answer
+    /// its `ActivityId`.
+    ///
+    /// Two things this service does to a scalable target are recorded here rather than by
+    /// [`Self::record_capacity_change`]: a scheduled action's DISPATCH, which sets the
+    /// target's capacity bounds and is what a client joins an action to the history it
+    /// produced by, and a scaling decision a registered bound WITHHELD, which is the "not
+    /// scaled activity" the model's `NotScaledReason` describes. Neither moves the capacity
+    /// of the resource the target scales, so neither queues a delivery to the owning
+    /// service, neither ends a scaling decision the target's policies settled, and neither
+    /// takes an earlier movement over.
+    ///
+    /// The status is the one the entry states, and it is terminal from the instant the
+    /// activity was recorded: what it reports was decided by this service alone, so there
+    /// is no owning service for it to wait on.
+    pub fn record_activity(
+        &mut self,
+        target: &TargetKey,
+        at: SystemTime,
+        entry: ActivityEntry,
+    ) -> String {
+        let sequence = self.activities_recorded;
+        self.activities_recorded += 1;
+        let activity_id = scaling_activity_id(sequence, target);
+        self.activities.push(ScalingActivityRecord {
+            activity_id: activity_id.clone(),
+            sequence,
+            target: target.clone(),
+            description: entry.description,
+            cause: entry.cause,
+            capacity: entry.capacity,
+            start_time: at,
+            // "Not scaled activities are activities that aren't completed or started": one
+            // that was not scaled never started, so it has no `EndTime`, while one that did
+            // what it describes ended at the instant it was recorded.
+            fulfilled_at: entry.not_scaled_reasons.is_empty().then_some(at),
+            terminal_status_code: entry.status_code,
+            terminal_status_message: entry.status_message,
+            details: None,
+            not_scaled_reasons: entry.not_scaled_reasons,
+            movement: false,
+        });
+        self.trim_activity_log();
+        activity_id
+    }
+
+    /// The reason the newest activity of `target` was NOT scaled for, or `None` when that
+    /// activity was scaled.
+    ///
+    /// What a repeated decision is compared against: a breach that keeps being withheld for
+    /// the reason the log already states adds no further entry, while one withheld for
+    /// another reason — and one taken after a movement of the same target — is a new thing
+    /// to say about it.
+    pub fn latest_not_scaled_reason(&self, target: &TargetKey) -> Option<&NotScaledReason> {
+        self.activities
+            .iter()
+            .rev()
+            .find(|activity| &activity.target == target)?
+            .not_scaled_reasons
+            .first()
+    }
+
+    /// Drop the oldest entries past the emulator's own ceiling on the log, exactly as
+    /// ageing out of the reported window would have dropped them.
+    fn trim_activity_log(&mut self) {
+        let overflow = self.activities.len().saturating_sub(MAX_SCALING_ACTIVITIES);
+        if overflow > 0 {
+            self.activities.drain(..overflow);
         }
     }
 
@@ -545,6 +663,10 @@ pub const ACTIVITY_SUCCESSFUL: &str = "Successful";
 /// ([`ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState::override_unfulfilled_activities`]).
 /// See [`ACTIVITY_IN_PROGRESS`].
 pub const ACTIVITY_OVERRIDDEN: &str = "Overridden";
+/// The status an activity ends in when what it describes did not happen: a scheduled
+/// action's dispatch the target's registered bounds refused, and a scaling decision a
+/// bound withheld. See [`ACTIVITY_IN_PROGRESS`].
+pub const ACTIVITY_FAILED: &str = "Failed";
 
 // ---------------------------------------------------------------------------
 // Request-derived values
@@ -934,6 +1056,27 @@ impl CapacityBound {
             Self::Maximum => "Maximum",
         }
     }
+
+    /// How the service names the member a request SETS this bound through, in the text of
+    /// the activity that records the setting: the member's own short name
+    /// (`ScalableTargetAction$MinCapacity` is "min capacity"), as in "Setting min capacity
+    /// to 4".
+    fn action_member_phrase(self) -> &'static str {
+        match self {
+            Self::Minimum => "min capacity",
+            Self::Maximum => "max capacity",
+        }
+    }
+
+    /// How the service names this bound in the CAUSE of the capacity movement that
+    /// enforcing it performed, as in "minimum capacity was set to 4": the bound's own noun,
+    /// which is the subject of that sentence rather than a member of a request.
+    fn enforcement_noun(self) -> &'static str {
+        match self {
+            Self::Minimum => "minimum",
+            Self::Maximum => "maximum",
+        }
+    }
 }
 
 /// How this service states a capacity below the floor its dimension can be provisioned at.
@@ -1129,7 +1272,9 @@ pub fn scaling_policy_of(key: &PolicyKey, record: &ScalingPolicyRecord) -> Scali
 /// (the model's own documentation for the member), so the property is its last segment,
 /// and splitting that at its word boundaries gives the noun the model's own
 /// `DescribeScalingActivities` example carries: `ecs:service:DesiredCount` yields
-/// "desired count", as in "Setting desired count to 1.".
+/// "desired count", as in "Setting desired count to 1.". For a namespace whose own
+/// activities name the resource the property belongs to, the resource type opens the noun
+/// ([`RESOURCE_TYPE_IN_CAPACITY_NOUN`]).
 pub fn capacity_noun(scalable_dimension: &str) -> String {
     let property = scalable_dimension
         .rsplit(':')
@@ -1142,7 +1287,31 @@ pub fn capacity_noun(scalable_dimension: &str) -> String {
             _ => words.push(character.to_lowercase().to_string()),
         }
     }
+    // The namespace whose activities name the resource the property belongs to opens the
+    // noun with that resource type, which is the dimension's own middle segment.
+    if RESOURCE_TYPE_IN_CAPACITY_NOUN.contains(&dimension_namespace(scalable_dimension)) {
+        let resource_type = dimension_resource_type(scalable_dimension);
+        if !resource_type.is_empty() {
+            words.insert(0, resource_type.to_string());
+        }
+    }
     words.join(" ")
+}
+
+/// The namespaces whose scaling-activity text names the RESOURCE TYPE before the scaled
+/// property.
+///
+/// The noun is the owning service's own: an Amazon Keyspaces activity reads "Setting table
+/// read capacity units to 4." where a DynamoDB one reads "Setting read capacity units to 4."
+/// for the same property, so which spelling a dimension gets follows its namespace rather
+/// than being one rule for every dimension. A namespace with no row here names the property
+/// alone, as the model's own `DescribeScalingActivities` example does for
+/// `ecs:service:DesiredCount` ("Setting desired count to 1.").
+const RESOURCE_TYPE_IN_CAPACITY_NOUN: &[&str] = &["cassandra"];
+
+/// The service namespace a `ScalableDimension` names: its first segment.
+fn dimension_namespace(scalable_dimension: &str) -> &str {
+    scalable_dimension.split(':').next().unwrap_or_default()
 }
 
 /// What a capacity movement of `target` to `capacity` is described as: "a simple description
@@ -1185,6 +1354,73 @@ pub fn awaiting_fulfilment_status_message(target: &TargetKey, capacity: i32) -> 
         "Successfully set {} to {capacity}. Waiting for change to be fulfilled by {}.",
         capacity_noun(&target.scalable_dimension),
         target.service_namespace
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The text of an activity that is not a capacity movement
+// ---------------------------------------------------------------------------
+
+/// The `Cause` of the activity that records a scheduled action FIRING: the action's own
+/// name, which is how a client joins a scheduled action to the history it produced.
+///
+/// A firing and the capacity movement enforcing it are two activities, and this is the one
+/// the firing itself is recorded as: its cause is the action, so the sentence names the
+/// action by the name it is addressed by and says nothing about capacity — the bound it set
+/// is what its DESCRIPTION states ([`bounds_setting_description`]) and the movement is the
+/// other activity ([`capacity_bound_enforcement_cause`]).
+pub fn scheduled_action_dispatch_cause(scheduled_action_name: &str) -> String {
+    format!("scheduled action name {scheduled_action_name} was triggered")
+}
+
+/// The bounds one setting of a scalable target's capacity window names, as a phrase: `min
+/// capacity to 4`, and both bounds joined with "and" when one call sets both.
+///
+/// The members are named in the order `ScalableTargetAction` declares them, so a call that
+/// sets both reads the same way whichever order the request happened to carry.
+fn bounds_phrase(bounds: &[(CapacityBound, i32)]) -> String {
+    bounds
+        .iter()
+        .map(|(bound, capacity)| format!("{} to {capacity}", bound.action_member_phrase()))
+        .collect::<Vec<String>>()
+        .join(" and ")
+}
+
+/// The `Description` of the activity that records a scheduled action firing: "a simple
+/// description of what action the scaling activity intends to accomplish", which for a
+/// firing is the capacity bounds the action sets. It is a phrase rather than a sentence, so
+/// it carries no full stop.
+pub fn bounds_setting_description(bounds: &[(CapacityBound, i32)]) -> String {
+    format!("Setting {}", bounds_phrase(bounds))
+}
+
+/// The `StatusMessage` of a firing whose bounds the target now carries.
+pub fn bounds_set_status_message(bounds: &[(CapacityBound, i32)]) -> String {
+    format!("Successfully set {}", bounds_phrase(bounds))
+}
+
+/// The `StatusMessage` of a firing the target's registered window REFUSED, with the reason
+/// it was refused for.
+///
+/// The reason is the one every refusal of an inverted capacity window carries
+/// ([`CAPACITY_RANGE_INVERTED_MESSAGE`]) — the same sentence the operation that takes such
+/// a window answers inline — because it is the same rule: the bounds the firing would leave
+/// the target with are not a range.
+pub fn bounds_refused_status_message(bounds: &[(CapacityBound, i32)], reason: &str) -> String {
+    format!("Failed to set {}. Reason: {reason}", bounds_phrase(bounds))
+}
+
+/// The `Cause` of the capacity movement that ENFORCING a capacity bound performed: the
+/// bound that was set and the value it was set to.
+///
+/// A movement of a target's capacity to a bound is caused by that bound being set, whoever
+/// set it — a registration that narrows the window, or a scheduled action's firing — so
+/// both record the same cause, and the activity naming the action is the dispatch beside it
+/// ([`scheduled_action_dispatch_cause`]).
+pub fn capacity_bound_enforcement_cause(bound: CapacityBound, capacity: i32) -> String {
+    format!(
+        "{} capacity was set to {capacity}",
+        bound.enforcement_noun()
     )
 }
 
@@ -3463,9 +3699,15 @@ pub fn apply_managed_target<Eng: Send + Sync + 'static>(
                         let moved = existing.current_capacity.clamp(min_capacity, max_capacity);
                         let cause = (moved != existing.current_capacity).then(|| {
                             if moved > existing.current_capacity {
-                                format!("minimum capacity was set to {min_capacity}")
+                                capacity_bound_enforcement_cause(
+                                    CapacityBound::Minimum,
+                                    min_capacity,
+                                )
                             } else {
-                                format!("maximum capacity was set to {max_capacity}")
+                                capacity_bound_enforcement_cause(
+                                    CapacityBound::Maximum,
+                                    max_capacity,
+                                )
                             }
                         });
                         existing.current_capacity = moved;
@@ -3940,54 +4182,129 @@ pub fn apply_due_scheduled_actions(
                 .and_then(|suspended| suspended.scheduled_scaling_suspended)
                 .unwrap_or(false)
         });
-        let mut movement = None;
         if !scheduled_scaling_suspended {
-            if let (Some(target), Some(action)) = (state.targets.get_mut(&key.target), action) {
-                if let Some(min) = action.min_capacity {
-                    target.min_capacity = min;
-                }
-                if let Some(max) = action.max_capacity {
-                    target.max_capacity = max;
-                }
-                // The bounds are a range: an action that moves one past the other is
-                // applied as the point the two meet at rather than as an inverted window.
-                target.max_capacity = target.max_capacity.max(target.min_capacity);
-                // "At the scheduled time, if the current capacity is below the minimum
-                // capacity, Application Auto Scaling scales out to the minimum capacity.
-                // If the current capacity is above the maximum capacity, Application Auto
-                // Scaling scales in to the maximum capacity" — the same movement
-                // registering a narrower window makes, so it is the same kind of scaling
-                // activity, with the action that caused it named.
-                let moved = target
-                    .current_capacity
-                    .clamp(target.min_capacity, target.max_capacity);
-                if moved != target.current_capacity {
-                    movement = Some((
-                        moved,
-                        if moved > target.current_capacity {
-                            format!(
-                                "scheduled action {} set the minimum capacity to {}",
-                                key.scheduled_action_name, target.min_capacity
-                            )
-                        } else {
-                            format!(
-                                "scheduled action {} set the maximum capacity to {}",
-                                key.scheduled_action_name, target.max_capacity
-                            )
-                        },
-                    ));
-                    target.current_capacity = moved;
-                }
+            // The bounds this occurrence sets, in the order `ScalableTargetAction` declares
+            // them. An action that sets neither initiates nothing, so there is nothing to
+            // record for it.
+            let bounds: Vec<(CapacityBound, i32)> = action
+                .iter()
+                .flat_map(|action| {
+                    [
+                        (CapacityBound::Minimum, action.min_capacity),
+                        (CapacityBound::Maximum, action.max_capacity),
+                    ]
+                })
+                .filter_map(|(bound, capacity)| capacity.map(|capacity| (bound, capacity)))
+                .collect();
+            if !bounds.is_empty() {
+                // The activities are recorded at the instant the occurrence was DUE, not at
+                // the instant somebody happened to read it: what they describe was owed then.
+                initiate_scheduled_action(state, &key, &bounds, occurrence);
             }
-        }
-        // The activity is recorded at the instant the occurrence was DUE, not at the
-        // instant somebody happened to read it: the movement was owed then.
-        if let Some((moved, cause)) = movement {
-            state.record_capacity_change(&key.target, moved, cause, occurrence);
         }
         if let Some(record) = state.scheduled_actions.get_mut(&key) {
             record.last_applied = Some(occurrence);
         }
+    }
+}
+
+/// Initiate ONE occurrence of a scheduled action: set the bounds it names on its scalable
+/// target, enforce them on the target's capacity, and record what each of those two steps
+/// did.
+///
+/// A firing is recorded as TWO activities, because two things happened. The DISPATCH is the
+/// action firing: its cause is the action ([`scheduled_action_dispatch_cause`]) and its
+/// description is the bounds it sets ([`bounds_setting_description`]). The ENFORCEMENT is
+/// the capacity movement those bounds cause — "at the scheduled time, if the current
+/// capacity is below the minimum capacity, Application Auto Scaling scales out to the
+/// minimum capacity. If the current capacity is above the maximum capacity, Application Auto
+/// Scaling scales in to the maximum capacity" — recorded by the one recorder every capacity
+/// movement of this service goes through, caused by the bound that was set
+/// ([`capacity_bound_enforcement_cause`]), and present only when the capacity really moved.
+/// The dispatch is recorded FIRST, so a log read newest-first reports the movement and then
+/// the firing that caused it.
+///
+/// The bounds the firing would leave the target with have to be a RANGE: "Application Auto
+/// Scaling will not scale capacity to values that are outside of the minimum and maximum
+/// range", and a minimum above the maximum is no range. Such an occurrence is refused at
+/// dispatch — the target keeps the bounds and the capacity it had, and the dispatch activity
+/// settles `Failed` carrying the same reason the operations that take a capacity window
+/// answer inline ([`CAPACITY_RANGE_INVERTED_MESSAGE`]) — rather than applied as the point
+/// the two bounds meet at, which would drive the resource past a bound its own registration
+/// states.
+fn initiate_scheduled_action(
+    state: &mut ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState,
+    key: &ScheduledActionKey,
+    bounds: &[(CapacityBound, i32)],
+    occurrence: SystemTime,
+) {
+    let Some(target) = state.targets.get(&key.target) else {
+        return;
+    };
+    // The window the firing would leave the target with: the bound it sets, beside the one
+    // it does not, which the target keeps.
+    let mut min_capacity = target.min_capacity;
+    let mut max_capacity = target.max_capacity;
+    let current_capacity = target.current_capacity;
+    for (bound, capacity) in bounds {
+        match bound {
+            CapacityBound::Minimum => min_capacity = *capacity,
+            CapacityBound::Maximum => max_capacity = *capacity,
+        }
+    }
+    let dispatch_cause = scheduled_action_dispatch_cause(&key.scheduled_action_name);
+    let description = bounds_setting_description(bounds);
+    if min_capacity > max_capacity {
+        state.record_activity(
+            &key.target,
+            occurrence,
+            ActivityEntry {
+                description,
+                cause: dispatch_cause,
+                capacity: current_capacity,
+                status_code: ACTIVITY_FAILED.to_string(),
+                status_message: Some(bounds_refused_status_message(
+                    bounds,
+                    CAPACITY_RANGE_INVERTED_MESSAGE,
+                )),
+                not_scaled_reasons: Vec::new(),
+            },
+        );
+        return;
+    }
+    let moved = current_capacity.clamp(min_capacity, max_capacity);
+    if let Some(target) = state.targets.get_mut(&key.target) {
+        target.min_capacity = min_capacity;
+        target.max_capacity = max_capacity;
+        target.current_capacity = moved;
+    }
+    state.record_activity(
+        &key.target,
+        occurrence,
+        ActivityEntry {
+            description,
+            cause: dispatch_cause,
+            capacity: moved,
+            status_code: ACTIVITY_SUCCESSFUL.to_string(),
+            status_message: Some(bounds_set_status_message(bounds)),
+            not_scaled_reasons: Vec::new(),
+        },
+    );
+    if moved != current_capacity {
+        // WHICH bound the movement enforced is which end of the window the capacity was
+        // outside of: a capacity below the floor is scaled out to it, one above the ceiling
+        // is scaled in to it.
+        let bound = if moved > current_capacity {
+            CapacityBound::Minimum
+        } else {
+            CapacityBound::Maximum
+        };
+        state.record_capacity_change(
+            &key.target,
+            moved,
+            capacity_bound_enforcement_cause(bound, moved),
+            occurrence,
+        );
     }
 }
 

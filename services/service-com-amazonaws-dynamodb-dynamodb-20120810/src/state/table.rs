@@ -1346,9 +1346,21 @@ impl Table {
     /// read.
     pub fn admit_write(&mut self, units: f64, now: SystemTime) -> bool {
         let Some(provisioned) = self.provisioned_write_rate() else {
+            // On-demand: there is no capacity to exceed, and the write still consumed the
+            // units the response reports, so they are counted either way.
+            self.pending_consumed
+                .charge(Consumed::Write, units, now);
             return true;
         };
-        self.write_budget.take(provisioned, units, now)
+        let admitted = self.write_budget.take(provisioned, units, now);
+        if admitted {
+            // What a request consumed is what the service publishes as the table's own
+            // throughput metric: counted here, where the capacity is taken, so every write
+            // this store admits is in the series whatever operation made it.
+            self.pending_consumed
+                .charge(Consumed::Write, units, now);
+        }
+        admitted
     }
 
     /// Admit a read that consumes `units` read capacity units, reporting the throttle
@@ -1372,9 +1384,15 @@ impl Table {
     /// charged for work it was refused.
     pub fn admit_read(&mut self, units: f64, now: SystemTime) -> Result<(), ReadThrottle> {
         let Some(provisioned) = self.provisioned_read_rate() else {
+            // On-demand: there is no capacity to exceed, and the read still consumed the
+            // units the response reports, so they are counted either way.
+            self.pending_consumed.charge(Consumed::Read, units, now);
             return Ok(());
         };
         if self.read_budget.take(provisioned, units, now) {
+            // See [`Self::admit_write`]: the units a served read consumed are the table's own
+            // throughput metric, counted where the capacity is taken.
+            self.pending_consumed.charge(Consumed::Read, units, now);
             Ok(())
         } else {
             Err(ReadThrottle::TableProvisioned)
@@ -1457,6 +1475,11 @@ impl Table {
         }
         self.key_write_budgets
             .take(partition, capacity.table, now);
+        // What a request consumed is what this service publishes as the table's own
+        // throughput metric ([`crate::state::consumed_capacity_metrics`]): counted here,
+        // where the capacity is taken, so every item write this store admits is in the
+        // series whichever operation made it.
+        self.pending_consumed.charge(Consumed::Write, total, now);
         Ok(())
     }
 
@@ -1537,6 +1560,9 @@ impl Table {
         }
         self.key_write_budgets
             .take_borrowing(partition, capacity.table, now);
+        // See [`Self::admit_item_write`]: a write served by borrowing consumed its units
+        // just the same.
+        self.pending_consumed.charge(Consumed::Write, total, now);
         Ok(())
     }
 

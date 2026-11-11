@@ -421,9 +421,14 @@ fn served_states_clause_bare() -> bool {
 /// modelled operation unchanged, so deserialization, validation, the handler and the
 /// response are the framework's and the operation's own. The routing table holds only
 /// generated operations, so the inner lookup can never resolve back to this type.
-struct OperationScopedClauseForm;
+struct OperationScopedClauseForm<Eng: Send + Sync + 'static> {
+    /// The SAME shared engine the generated entry threads into every operation, so the
+    /// throughput each request charged is published into the one CloudWatch store this
+    /// process holds.
+    engine: Arc<Eng>,
+}
 
-impl ErasedOperation for OperationScopedClauseForm {
+impl<Eng: Send + Sync + 'static> ErasedOperation for OperationScopedClauseForm<Eng> {
     fn run<'r>(
         &'r self,
         svc: &'r dyn Service,
@@ -455,7 +460,11 @@ impl ErasedOperation for OperationScopedClauseForm {
             // This is the ONE place every response an operation of this service produces
             // passes through, so no operation can answer without naming the request it
             // answered — and each attempt gets its own id, because each attempt is served
-            // here once.
+            // here once. It is also where the throughput the request consumed is published:
+            // what it charged the table is taken under the store's lock, and the series it
+            // belongs to is CloudWatch's own, so the publish happens here, with that lock
+            // released and the request already served.
+            crate::state::publish_pending_consumed(&*self.engine);
             with_request_id_header(answered)
         })
     }
@@ -741,7 +750,7 @@ pub struct EmulatedService<Eng: Send + Sync + 'static> {
     /// operation's clause form into [`Service::override_refusal`] and names the request
     /// on the response. Held on the service because that seam returns a borrow of
     /// `self`.
-    clause_form_scope: OperationScopedClauseForm,
+    clause_form_scope: OperationScopedClauseForm<Eng>,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -751,10 +760,10 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
             entry: RequestIdEnvelopeDefinition::header_only(AuthenticationRefusalDefinition::new(
-                crate::ServiceDefinition::new(engine),
+                crate::ServiceDefinition::new(Arc::clone(&engine)),
                 AUTHENTICATION_REFUSAL,
             )),
-            clause_form_scope: OperationScopedClauseForm,
+            clause_form_scope: OperationScopedClauseForm { engine },
         }
     }
 }

@@ -78,7 +78,7 @@ pub async fn resolve_cassandra_table(
         ));
     };
     let request = ::serde_json::json!({"keyspaceName": keyspace, "tableName": table});
-    match get_table(ctx, region, &request).await {
+    match get_table(ctx.callback(), region, &request).await {
         // The table resolved: what decides the registration is the capacity mode it is in.
         // A mode the answer does not report is one this reader cannot judge, so it resolves
         // nothing rather than refusing. The refusal names the TABLE and the mode its
@@ -120,10 +120,94 @@ fn reported_throughput_mode(answered: &Value) -> Option<&str> {
         .filter(|mode| !mode.is_empty())
 }
 
+/// The capacity the table a `cassandra` scalable target names provisions right now, for the
+/// half of its capacity specification the dimension scales, or `None` when this emulator could
+/// not read it.
+pub async fn read_table_capacity(
+    callback: &::smithy_server_runtime::EmbeddedEmulator,
+    region: &str,
+    resource_id: &str,
+    reads: bool,
+) -> Option<i32> {
+    let (keyspace, table) = split_cassandra_resource_id(resource_id)?;
+    let identity = ::serde_json::json!({"keyspaceName": keyspace, "tableName": table});
+    let answered = get_table(callback, region, &identity).await.ok()?;
+    let member = if reads {
+        READ_CAPACITY_UNITS
+    } else {
+        WRITE_CAPACITY_UNITS
+    };
+    let units = answered
+        .get("capacitySpecification")
+        .and_then(|capacity| capacity.get(member))
+        .and_then(Value::as_i64)?;
+    i32::try_from(units).ok()
+}
+
+/// Move the provisioned throughput of the table a `cassandra` scalable target names, in Amazon
+/// Keyspaces itself, answering whether that table took the change.
+///
+/// This is what `cassandra:table:ReadCapacityUnits` and its write sibling scale: the table's own
+/// `capacitySpecification`, which is where a client reads the capacity back. The specification
+/// carries BOTH units, so the one this movement does not name is the one the table already has
+/// — read from the table itself, the same way the registration resolves it — and the mode is
+/// the provisioned one, which is the only mode a scalable target can be registered against.
+pub async fn set_table_capacity(
+    callback: &::smithy_server_runtime::EmbeddedEmulator,
+    region: &str,
+    resource_id: &str,
+    reads: bool,
+    units: i32,
+) -> bool {
+    let Some((keyspace, table)) = split_cassandra_resource_id(resource_id) else {
+        return false;
+    };
+    let identity = ::serde_json::json!({"keyspaceName": keyspace, "tableName": table});
+    let Ok(answered) = get_table(callback, region, &identity).await else {
+        return false;
+    };
+    let held = |member: &str| {
+        answered
+            .get("capacitySpecification")
+            .and_then(|capacity| capacity.get(member))
+            .and_then(Value::as_i64)
+    };
+    let (reads_now, writes_now) = (
+        held(READ_CAPACITY_UNITS).unwrap_or_else(|| i64::from(units)),
+        held(WRITE_CAPACITY_UNITS).unwrap_or_else(|| i64::from(units)),
+    );
+    let wanted = i64::from(units);
+    let request = ::serde_json::json!({
+        "keyspaceName": keyspace,
+        "tableName": table,
+        "capacitySpecification": {
+            "throughputMode": PROVISIONED_THROUGHPUT_MODE,
+            READ_CAPACITY_UNITS: if reads { wanted } else { reads_now },
+            WRITE_CAPACITY_UNITS: if reads { writes_now } else { wanted },
+        },
+    });
+    call(callback, region, "UpdateTable", &request).await.is_ok()
+}
+
+/// The members of a table's `capacitySpecification` that carry its provisioned units.
+const READ_CAPACITY_UNITS: &str = "readCapacityUnits";
+/// See [`READ_CAPACITY_UNITS`].
+const WRITE_CAPACITY_UNITS: &str = "writeCapacityUnits";
+
 /// Call Amazon Keyspaces' `GetTable` in-process and read the table it reports.
 async fn get_table(
-    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    callback: &::smithy_server_runtime::EmbeddedEmulator,
     region: &str,
+    request: &Value,
+) -> Result<Value, Refused> {
+    call(callback, region, "GetTable", request).await
+}
+
+/// Call one Amazon Keyspaces operation in-process and read the document it answers.
+async fn call(
+    callback: &::smithy_server_runtime::EmbeddedEmulator,
+    region: &str,
+    operation: &str,
     request: &Value,
 ) -> Result<Value, Refused> {
     let unreachable = || Refused {
@@ -138,17 +222,20 @@ async fn get_table(
             format!("{KEYSPACES_SIGNING_NAME}.{region}.amazonaws.com"),
         )
         .header("content-type", AWS_JSON_1_0)
-        .header("x-amz-target", format!("{KEYSPACES_TARGET_PREFIX}.GetTable"))
+        .header(
+            "x-amz-target",
+            format!("{KEYSPACES_TARGET_PREFIX}.{operation}"),
+        )
         .body(body)
         .map_err(|_| unreachable())?;
     // The emulator verifies every request signature, so an in-process call carries one too:
     // the credential the framework hands this handler, signed through the tree's one
     // in-process signer.
-    ::service_common::in_process_sigv4::sign_in_process_request(
+    ::service_common::in_process_sigv4::sign_callback_request(
         &mut call,
         KEYSPACES_SIGNING_NAME,
         region,
-        ctx,
+        callback,
     )
     .await
     .map_err(|_| unreachable())?;
@@ -158,7 +245,7 @@ async fn get_table(
         ::aws_smithy_types::body::SdkBody::from(::bytes::Bytes::from(body)),
     );
     let call = ::aws_smithy_runtime_api::http::Request::try_from(call).map_err(|_| unreachable())?;
-    let connector = ctx.callback().http_connector();
+    let connector = callback.http_connector();
     let answer = {
         use ::aws_smithy_runtime_api::client::http::HttpConnector;
         HttpConnector::call(&connector, call)

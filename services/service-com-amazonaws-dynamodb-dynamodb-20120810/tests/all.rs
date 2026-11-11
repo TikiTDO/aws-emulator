@@ -39,6 +39,8 @@ mod collection_cap_constraint_reports;
 mod conditioned_resource_policy_attach;
 #[path = "all/consumed_capacity_arms.rs"]
 mod consumed_capacity_arms;
+#[path = "all/consumed_capacity_metrics.rs"]
+mod consumed_capacity_metrics;
 #[path = "all/continuous_backups.rs"]
 mod continuous_backups;
 #[path = "all/contributor_insights.rs"]
