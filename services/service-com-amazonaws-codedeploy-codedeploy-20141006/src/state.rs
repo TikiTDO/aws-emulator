@@ -156,6 +156,15 @@ pub fn deployment_is_terminal(status: &str) -> bool {
 /// found in your deployment group").
 pub const ERROR_CODE_NO_INSTANCES: &str = "NO_INSTANCES";
 
+/// The `ErrorInformation$message` that goes with [`ERROR_CODE_NO_INSTANCES`]:
+/// this failure's own fixed sentence — what failed, where to look, and to try
+/// again — interpolating nothing from the deployment or its group, since every
+/// deployment that resolved no target failed the same way.
+pub const NO_INSTANCES_MESSAGE: &str = "The deployment failed because no instances were found \
+     for your deployment group. Check your deployment group settings to make sure the tags for \
+     your Amazon EC2 instances or Auto Scaling groups correctly identify the instances you want \
+     to deploy to, and then try again.";
+
 /// The characters a minted deployment-id suffix is drawn from, and how many of
 /// them one carries: CodeDeploy's `d-XXXXXXXXX` deployment ids.
 const DEPLOYMENT_ID_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -614,6 +623,36 @@ pub const MULTIPLE_IAM_ARNS_PROVIDED: &str = "The on-premises instance could not
      because both an IAM session ARN and an IAM user ARN were included in the request. Include \
      only one IAM ARN in the request, and then try again.";
 
+/// `IamUserArnAlreadyRegisteredException` (HTTP 400): the fixed sentence for a
+/// registration whose IAM user ARN already backs a registered instance.
+///
+/// Worded like [`IAM_ARN_MISSING`] and [`MULTIPLE_IAM_ARNS_PROVIDED`] — the
+/// refused action, then what to put in the request to make it — and
+/// interpolating nothing: the ARN is the one the caller sent, and WHICH instance
+/// holds the binding is this account's state rather than anything about this
+/// request, so the refusal states neither.
+pub const IAM_USER_ARN_ALREADY_REGISTERED: &str = "The on-premises instance could not be \
+     registered because the request included an IAM user ARN that has already been used to \
+     register an instance. Include either a different IAM user ARN or IAM session ARN in the \
+     request, and then try again.";
+
+/// `IamSessionArnAlreadyRegisteredException` (HTTP 400): the session-ARN half of
+/// the same uniqueness rule. See [`IAM_USER_ARN_ALREADY_REGISTERED`].
+pub const IAM_SESSION_ARN_ALREADY_REGISTERED: &str = "The on-premises instance could not be \
+     registered because the request included an IAM session ARN that has already been used to \
+     register a different instance. Include either a different IAM session ARN or IAM user ARN \
+     in the request, and then try again.";
+
+/// `InvalidLifecycleEventHookExecutionIdException` (HTTP 400): the fixed
+/// sentence for a `lifecycleEventHookExecutionId` that names no hook execution
+/// the deployment can take a result for — absent, empty, or an id this
+/// deployment never issued are one refusal, so they answer one sentence.
+///
+/// It interpolates nothing: the id is the one the caller sent, and the
+/// deployment it was reported against is the request's own `deploymentId`.
+pub const LIFECYCLE_EVENT_HOOK_EXECUTION_ID_INVALID: &str =
+    "The lifecycleEventHookExecutionId is invalid";
+
 /// `InstanceNameAlreadyRegisteredException` (HTTP 400): the fixed sentence for a
 /// host name a registration already holds, interpolating nothing — the name is
 /// the one the request carried, so the refusal does not quote it back.
@@ -631,18 +670,25 @@ pub const AUTO_ROLLBACK_WITHOUT_EVENTS: &str =
     "Deployment Groups need to have at least one event specified when auto rollback is enabled";
 
 /// `InvalidEC2TagCombinationException` (HTTP 400): a deployment group selects
-/// Amazon EC2 instances by EITHER the flat `ec2TagFilters` list or the grouped
-/// `ec2TagSet`, so a request naming both forms is refused with this sentence,
-/// which names the two members and interpolates nothing from the request. Both
-/// `CreateDeploymentGroup` and `UpdateDeploymentGroup` raise the shape, so it is
-/// worded once, here.
+/// Amazon EC2 instances by EITHER the flat tag-filter list or the grouped tag
+/// set, so a request naming both forms is refused with this sentence.
+///
+/// The sentence is this error class's own, fixed: it states which two data types
+/// the request specified and the remedy, names them as CodeDeploy's prose does,
+/// and interpolates nothing — neither tag the request carried is part of why it
+/// was refused. Both `CreateDeploymentGroup` and `UpdateDeploymentGroup` raise
+/// the shape, so it is worded once, here.
 pub const EC2_TAG_COMBINATION: &str =
-    "Only one of ec2TagFilters and ec2TagSet can be used in a single call";
+    "The request specified both Ec2TagFilters and Ec2TagSet, but only one of these data types \
+     can be used in a single call. Remove one tag specification type, and then try again.";
 
 /// `InvalidOnPremisesTagCombinationException` (HTTP 400): the on-premises
-/// selector's pair of the same rule. See [`EC2_TAG_COMBINATION`].
+/// selector's pair of the same rule, in the same sentence over its own two data
+/// types. See [`EC2_TAG_COMBINATION`].
 pub const ON_PREMISES_TAG_COMBINATION: &str =
-    "Only one of onPremisesInstanceTagFilters and onPremisesTagSet can be used in a single call";
+    "The request specified both OnPremisesTagFilters and OnPremisesTagSet, but only one of \
+     these data types can be used in a single call. Remove one tag specification type, and \
+     then try again.";
 
 /// The `DeploymentCreator` value for a deployment a client asked for, as opposed
 /// to one an auto-scaling event or a rollback created
@@ -3740,9 +3786,7 @@ fn deployment_error_information(
     (deployment.status == DEPLOYMENT_STATUS_FAILED && deployment.target_count() == 0).then(|| {
         crate::ops::types::ErrorInformation {
             code: Some(ERROR_CODE_NO_INSTANCES.to_string()),
-            message: Some(
-                "No instances found for the deployment group of this deployment".to_string(),
-            ),
+            message: Some(NO_INSTANCES_MESSAGE.to_string()),
         }
     })
 }

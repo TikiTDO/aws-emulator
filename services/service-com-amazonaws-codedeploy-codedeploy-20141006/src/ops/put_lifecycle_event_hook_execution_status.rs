@@ -247,13 +247,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 );
             }
             // The execution id is the hook execution's identity, so a request
-            // carrying none names no hook execution at all.
+            // carrying none names no hook execution at all — the same refusal,
+            // and the same fixed sentence, as an id that names none of this
+            // deployment's.
             if hook_execution_id.trim().is_empty() {
                 return Err(
                     PutLifecycleEventHookExecutionStatusErrorModeled::InvalidLifecycleEventHookExecutionIdException(
                         InvalidLifecycleEventHookExecutionIdException {
                             message: Some(
-                                "The lifecycle event hook execution ID was not specified"
+                                crate::state::LIFECYCLE_EVENT_HOOK_EXECUTION_ID_INVALID
                                     .to_string(),
                             ),
                         },
@@ -292,11 +294,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 return Err(
                     PutLifecycleEventHookExecutionStatusErrorModeled::InvalidLifecycleEventHookExecutionIdException(
                         InvalidLifecycleEventHookExecutionIdException {
-                            message: Some(format!(
-                                "The lifecycleEventHookExecutionId {hook_execution_id} is \
-                                 invalid: it names no lifecycle event hook execution of \
-                                 deployment {deployment_id}"
-                            )),
+                            message: Some(
+                                crate::state::LIFECYCLE_EVENT_HOOK_EXECUTION_ID_INVALID
+                                    .to_string(),
+                            ),
                         },
                     ),
                 );

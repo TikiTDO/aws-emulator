@@ -279,30 +279,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             // One IAM identity backs at most one REGISTERED instance. A LOOKUP in
             // the store's IAM-ARN index, so this refusal costs the same however
-            // many instances the store holds.
-            let holder = state
+            // many instances the store holds. Which instance holds the binding
+            // decides only WHETHER the registration is refused: the sentence each
+            // of these two error shapes carries is fixed, so the refusal names
+            // neither that instance nor the ARN the caller sent.
+            let taken = state
                 .instance_registered_with(identity.arn())
                 .map(|instance| instance.instance_name.clone())
-                .filter(|holder| *holder != name);
-            if let Some(holder) = holder {
+                .is_some_and(|holder| holder != name);
+            if taken {
                 return Err(match &identity {
-                    Identity::User(arn) => {
+                    Identity::User(_) => {
                         RegisterOnPremisesInstanceErrorModeled::IamUserArnAlreadyRegisteredException(
                             IamUserArnAlreadyRegisteredException {
-                                message: Some(format!(
-                                    "The user ARN {arn} is already registered with the \
-                                     on-premises instance {holder}"
-                                )),
+                                message: Some(
+                                    crate::state::IAM_USER_ARN_ALREADY_REGISTERED.to_string(),
+                                ),
                             },
                         )
                     }
-                    Identity::Session(arn) => {
+                    Identity::Session(_) => {
                         RegisterOnPremisesInstanceErrorModeled::IamSessionArnAlreadyRegisteredException(
                             IamSessionArnAlreadyRegisteredException {
-                                message: Some(format!(
-                                    "The IAM session ARN {arn} has already been used to register \
-                                     the on-premises instance {holder}"
-                                )),
+                                message: Some(
+                                    crate::state::IAM_SESSION_ARN_ALREADY_REGISTERED.to_string(),
+                                ),
                             },
                         )
                     }

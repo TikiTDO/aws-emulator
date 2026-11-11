@@ -49,6 +49,8 @@ mod deployment_progress_refusal_sentences;
 mod deployment_target_record_readability;
 #[path = "all/deployment_targets.rs"]
 mod deployment_targets;
+#[path = "all/fixed_error_sentences.rs"]
+mod fixed_error_sentences;
 #[path = "all/get_deployment_instance.rs"]
 mod get_deployment_instance;
 #[path = "all/get_deployment_target.rs"]
