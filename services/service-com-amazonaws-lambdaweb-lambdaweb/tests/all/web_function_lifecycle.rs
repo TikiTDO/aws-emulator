@@ -80,22 +80,56 @@ impl Reply {
     }
 }
 
-/// An emulator with just this service mounted on a fresh engine, driven in-process
-/// through the production router.
+/// An emulator with this service mounted on a fresh engine, driven in-process through the
+/// production router — the ONE request plumbing every suite of this test crate uses.
+///
+/// The engine and the router are kept, so a suite that needs more than the wire can reach
+/// them: [`Emulator::engine`] for this service's own store (the published data plane is
+/// served from it) and [`Emulator::router`] for an in-process client of another service
+/// mounted beside this one.
 pub(crate) struct Emulator {
     router: MultiServiceRouter,
+    engine: Arc<engine::InMemoryEngine>,
 }
 
 impl Emulator {
     pub(crate) fn new() -> Self {
+        Self::assembled(false)
+    }
+
+    /// This service with the emulator's own Amazon S3 mounted beside it on ONE engine —
+    /// exactly as the assembled router mounts them — for a suite whose behaviour depends
+    /// on the owner of objects (a revision's build fetches its deployment package from
+    /// it).
+    pub(crate) fn with_object_store() -> Self {
+        Self::assembled(true)
+    }
+
+    fn assembled(object_store: bool) -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
         let mut router = MultiServiceRouter::new();
         // Signatures are not what these tests are about; the router still routes by
         // the SigV4 credential scope below, which is also where an ARN's region
         // comes from.
         router.set_request_authentication(false);
-        router.register_service(EmulatedService::new(engine));
-        Self { router }
+        router.register_service(EmulatedService::new(Arc::clone(&engine)));
+        if object_store {
+            router.register_service(service_com_amazonaws_s3_amazons3::EmulatedService::new(
+                Arc::clone(&engine),
+            ));
+        }
+        Self { router, engine }
+    }
+
+    /// The ONE shared engine this emulator's services are mounted on.
+    pub(crate) fn engine(&self) -> &Arc<engine::InMemoryEngine> {
+        &self.engine
+    }
+
+    /// The router every request goes through, for a suite that drives another mounted
+    /// service through its own SDK client over the in-process callback.
+    pub(crate) fn router(&self) -> &MultiServiceRouter {
+        &self.router
     }
 
     pub(crate) async fn send(

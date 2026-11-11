@@ -196,6 +196,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 },
             )
         })?;
+
+        // What this revision's BUILD reads, established BEFORE the store guard is taken:
+        // the deployment package its code object names, fetched from the emulator's own
+        // Amazon S3. A package the build cannot read an archive in settles the revision
+        // `Failed` rather than `Active` — see `crate::state::code_package`.
+        let region = crate::state::request_region(ctx.parts());
+        let build_failure = crate::state::code_package::resolve(
+            ctx,
+            &region,
+            &input.build_config.code_config.s3_object,
+        )
+        .await
+        .failure_reason();
+
         let mut state = state.lock();
         let now = ::std::time::SystemTime::now();
         state.materialise_due_transitions(now);
@@ -247,6 +261,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     kms_key_arn: input.kms_key_arn,
                     build_config: input.build_config,
                     service_config: input.service_config,
+                    build_failure,
                 },
                 now,
             )

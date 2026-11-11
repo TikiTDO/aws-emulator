@@ -151,6 +151,53 @@ impl From<CreateWebFunctionErrorModeled> for CreateWebFunctionError {
     }
 }
 
+/// Refuse a create under a name the store already holds: a web function's name is its
+/// identity, so a create under a taken name conflicts with the stored resource.
+fn refuse_if_taken(
+    state: &crate::state::ComAmazonawsLambdawebLambdawebState,
+    function_name: &str,
+) -> Result<(), CreateWebFunctionError> {
+    let Some(existing) = state.functions.get(function_name) else {
+        return Ok(());
+    };
+    Err(
+        CreateWebFunctionErrorModeled::ConflictException(ConflictException {
+            message: format!(
+                "A web function named {} already exists.",
+                existing.function_name
+            ),
+            resource_id: Some(existing.function_arn.clone()),
+            resource_type: Some("WebFunction".to_string()),
+        })
+        .into(),
+    )
+}
+
+/// Refuse a create that would take the store past the web functions it holds for the
+/// account.
+fn refuse_if_at_the_quota(
+    state: &crate::state::ComAmazonawsLambdawebLambdawebState,
+) -> Result<(), CreateWebFunctionError> {
+    if state.functions.len() < crate::state::MAX_WEB_FUNCTIONS {
+        return Ok(());
+    }
+    Err(
+        CreateWebFunctionErrorModeled::ServiceQuotaExceededException(
+            ServiceQuotaExceededException {
+                message: format!(
+                    "The request would exceed the maximum number of web functions ({}) for this account",
+                    crate::state::MAX_WEB_FUNCTIONS
+                ),
+                resource_id: None,
+                resource_type: Some("WebFunction".to_string()),
+                service_code: Some(crate::state::ARN_NAMESPACE.to_string()),
+                quota_code: None,
+            },
+        )
+        .into(),
+    )
+}
+
 /// The `CreateWebFunction` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -251,39 +298,67 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 message: Some("the web function store is unavailable".to_string()),
             })
         })?;
+
+        // The refusals the STORE decides, taken under a guard of their own and BEFORE the
+        // two pieces of out-of-lock work below: a request that is going to be refused
+        // should neither fetch a deployment package nor bind a port. The same two
+        // refusals are checked again under the guard that does the writing, which is the
+        // one that decides, because the store may have moved in between.
+        {
+            let mut state = state.lock();
+            state.materialise_due_transitions(::std::time::SystemTime::now());
+            refuse_if_taken(&state, &input.function_name)?;
+            refuse_if_at_the_quota(&state)?;
+        }
+
+        // What the initial revision's BUILD reads, established with no store guard held:
+        // the deployment package its code object names, fetched from the emulator's own
+        // Amazon S3. A package the build cannot read an archive in settles the revision
+        // `Failed` rather than `Active` — see `crate::state::code_package`.
+        let build_failure = match &input.revision_config {
+            Some(config) => crate::state::code_package::resolve(
+                ctx,
+                &region,
+                &config.build_config.code_config.s3_object,
+            )
+            .await
+            .failure_reason(),
+            None => None,
+        };
+
+        // The ADDRESS the initial endpoint is published on, opened before anything is
+        // stored: the endpoint reports it as its `domainName`, and this emulator answers
+        // the endpoint's own HTTP requests there. An emulator that vends no listener
+        // answers a modelled server error rather than publishing a domain nothing serves.
+        let endpoint_plane = match (&input.endpoint_config, &input.revision_config) {
+            (Some(config), Some(_)) => Some(
+                crate::state::open_endpoint_plane(
+                    &*self.engine,
+                    &state,
+                    &input.function_name,
+                    &config.endpoint_name,
+                )
+                .await
+                .ok_or_else(|| {
+                    CreateWebFunctionErrorModeled::InternalServerException(
+                        InternalServerException {
+                            message: Some(
+                                "the web function endpoint's address could not be opened"
+                                    .to_string(),
+                            ),
+                        },
+                    )
+                })?,
+            ),
+            _ => None,
+        };
+
         let mut state = state.lock();
         let now = ::std::time::SystemTime::now();
         state.materialise_due_transitions(now);
 
-        // A web function's name is its identity, so a create under a name that is
-        // already taken conflicts with the stored resource.
-        if let Some(existing) = state.functions.get(&input.function_name) {
-            return Err(CreateWebFunctionErrorModeled::ConflictException(ConflictException {
-                message: format!(
-                    "A web function named {} already exists.",
-                    existing.function_name
-                ),
-                resource_id: Some(existing.function_arn.clone()),
-                resource_type: Some("WebFunction".to_string()),
-            })
-            .into());
-        }
-
-        if state.functions.len() >= crate::state::MAX_WEB_FUNCTIONS {
-            return Err(CreateWebFunctionErrorModeled::ServiceQuotaExceededException(
-                ServiceQuotaExceededException {
-                    message: format!(
-                        "The request would exceed the maximum number of web functions ({}) for this account",
-                        crate::state::MAX_WEB_FUNCTIONS
-                    ),
-                    resource_id: None,
-                    resource_type: Some("WebFunction".to_string()),
-                    service_code: Some(crate::state::ARN_NAMESPACE.to_string()),
-                    quota_code: None,
-                },
-            )
-            .into());
-        }
+        refuse_if_taken(&state, &input.function_name)?;
+        refuse_if_at_the_quota(&state)?;
 
         // The ARN names the region the call was signed for and the emulator's
         // canonical account, never anything the request body supplied.
@@ -321,6 +396,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     kms_key_arn: config.kms_key_arn,
                     build_config: config.build_config,
                     service_config: config.service_config,
+                    build_failure,
                 },
                 now,
             );
@@ -329,7 +405,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The initial endpoint serves the initial revision, with all of the traffic:
         // it is the only revision there is to route to.
         let mut initial_endpoint_name = None;
-        if let (Some(config), Some(revision_id)) = (input.endpoint_config, &initial_revision_id) {
+        if let (Some(config), Some(revision_id), Some(plane)) =
+            (input.endpoint_config, &initial_revision_id, &endpoint_plane)
+        {
             initial_endpoint_name = state.add_endpoint(
                 &input.function_name,
                 crate::state::NewEndpoint {
@@ -347,8 +425,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     }],
                 },
                 &region,
+                plane.authority(),
                 now,
             );
+        }
+        // The listener's handle lives in the store beside the endpoint record, under that
+        // endpoint's ARN: holding it is what keeps the published address answering, and a
+        // delete of the endpoint (or of its function) closes it.
+        if let (Some(endpoint_name), Some(plane)) = (&initial_endpoint_name, endpoint_plane) {
+            let endpoint_arn = state
+                .functions
+                .get(&input.function_name)
+                .and_then(|function| function.endpoints.get(endpoint_name))
+                .map(|endpoint| endpoint.endpoint_arn.clone());
+            if let Some(endpoint_arn) = endpoint_arn {
+                state.endpoint_planes.insert(endpoint_arn, plane);
+            }
         }
 
         // Every member below comes out of the stored record — including the revision

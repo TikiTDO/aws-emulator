@@ -24,8 +24,10 @@
 //!   correctly. The default returns `None`, so every request resolves through the
 //!   generated routing table. Return `Some(op)` to route one yourself.
 //! - `override_refusal` — how this service words a request the framework refused
-//!   before any handler ran. The default returns `None`, keeping the framework's
-//!   wording. See the inline note on that method for how to reword.
+//!   before any handler ran. This service restates ONE thing in it: the order an
+//!   enumerated type's admissible values are listed in (`enum_value_sets`), which is
+//!   the order its own table of those values is walked rather than the model's
+//!   declaration order. Every other refusal keeps the framework's wording.
 //! - `override_routing_error` — how this service words a request that reached it
 //!   but named no modeled operation. The default returns `None`, so the entry
 //!   renders the protocol-correct default (query -> 400 InvalidAction, awsJson ->
@@ -39,6 +41,10 @@
 //! table, and the default error renderers — lives in the generated `ServiceDefinition`
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
+
+/// The order this service lists an enumerated type's value set in when it refuses a
+/// value outside that type — the one thing it restates about a boundary refusal.
+mod enum_value_sets;
 
 use smithy_server_runtime::{
     http, ErasedOperation, Refusal, Refused, Service,
@@ -112,15 +118,11 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {
         // The centralized walk calls this on a framework-level refusal (an absent
         // required member, or a value outside a declared bound) to let this
-        // service reword it. Returning `None` keeps the framework's default
-        // wording. To state a refusal the way the emulated service states it,
-        // replace this body with a `match refusal { .. }` that returns
-        // `Some(Refused { code, message })` for the cases you reword and `None`
-        // for the rest. Replace BOTH the code and the message: a client branches
-        // on the code, so a message without its matching code is worse than
-        // leaving both alone.
-        let _ = refusal;
-        None
+        // service reword it. The ONE thing this service states differently is the
+        // order an enumerated type's admissible values are listed in; the code, the
+        // envelope, the clause and every other requirement stay the framework's, and
+        // a refusal carrying no enum clause is declined so the framework words it.
+        enum_value_sets::stated_refusal(refusal)
     }
 
     fn override_routing_error(

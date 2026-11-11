@@ -209,6 +209,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
+        // The function's endpoints went with it, so the listeners their published
+        // addresses answered on are released here: dropping a handle closes that port and
+        // severs the connections on it, which is what a deleted endpoint owes.
+        state.prune_endpoint_planes();
+
         // The audit record for the state change.
         ::tracing::info!(
             operation = "DeleteWebFunction",

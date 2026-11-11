@@ -13,8 +13,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::SystemTime;
 
-use sha2::{Digest, Sha256};
-
 use crate::ops::types::{
     FunctionEndpointSummary, RegionalEndpoint, RevisionWeight, ScalingConfig, ThrottleConfig,
 };
@@ -47,6 +45,20 @@ pub const FULL_WEIGHT: i32 = 100;
 /// member="autoDeploymentMode")`).
 pub const DEFAULT_AUTO_DEPLOYMENT_MODE: &str = "Disabled";
 
+/// The `autoDeploymentMode` under which "the endpoint automatically serves the newest
+/// revision" (`AutoDeploymentMode`), which is what
+/// [`super::WebFunction::deploy_latest_revision`] acts on.
+pub const AUTO_DEPLOYMENT_MODE_LATEST_REVISION: &str = "LatestRevision";
+
+/// The `authType` under which "Lambda uses IAM to authorize requests, which must be
+/// signed with Signature Version 4 (SigV4)" (`AuthType`) — the one the published data
+/// plane refuses an unsigned request on ([`super::endpoint_plane`]).
+pub const AUTH_TYPE_IAM: &str = "IamAuth";
+
+/// The `authType` under which "your application handles authorization" (`AuthType`), so
+/// the published data plane refuses nothing itself.
+pub const AUTH_TYPE_APPLICATION_MANAGED: &str = "ApplicationManaged";
+
 /// The `endpointType` that serves traffic only from the Region the function was
 /// created in.
 pub const ENDPOINT_TYPE_HOME_REGION: &str = "HomeRegion";
@@ -55,18 +67,20 @@ pub const ENDPOINT_TYPE_MULTI_REGION: &str = "MultiRegion";
 /// The `endpointType` that gives every configured Region its own endpoint.
 pub const ENDPOINT_TYPE_PER_REGION: &str = "PerRegion";
 
-/// The DNS suffix every endpoint domain name ends in, after the label that
-/// identifies the endpoint and (for a per-Region domain) the Region.
-///
-/// CHOSEN, not cited: the model gives `domainName` a pattern
-/// (`^([a-z0-9-]+\.)+[a-z]+$`) and a length bound but no layout, so this emulator
-/// mints a domain in the shape Lambda's other generated hostnames take — an opaque
-/// label, a service label, the Region, then the suffix.
-pub const DOMAIN_SUFFIX: &str = "on.aws";
-
-/// The service label the minted domain names carry between the endpoint's own label
-/// and [`DOMAIN_SUFFIX`].
-pub const DOMAIN_SERVICE_LABEL: &str = "lambda-web";
+// Where an endpoint's published `domainName` comes from: the ADDRESS this emulator answers
+// that endpoint's own HTTP requests on (`super::endpoint_plane`), as the `host:port` a
+// client dials.
+//
+// It is NOT a name in the shape AWS's own endpoint domains take, and it does NOT satisfy
+// the member's modelled `@pattern` (`^([a-z0-9-]+\.)+[a-z]+$`) — a deliberate deviation,
+// stated here so a client-side validator failure is traceable to this decision. That shape
+// is a property of the environment rather than a requirement of the API: AWS serves the
+// endpoint at port 443 under a zone AWS runs, and what a client DOES with the value is dial
+// it. A name under a zone this emulator does not serve resolves to nothing on the machine
+// it runs on and publishes a data plane no client can reach, so the address this emulator
+// answers on is the one value that keeps the member's documented meaning — "the domain name
+// assigned to the endpoint", the address the endpoint is served at. The member's modelled
+// LENGTH bound (4..256) is satisfied, and the tests pin it.
 
 /// The `EndpointState` of a stored endpoint: the model's enum values
 /// (`ENDPOINT_STATE_VALUES` in `ops::types`).
@@ -246,34 +260,6 @@ pub fn resolve_endpoint_name(value: &str) -> &str {
         .map_or(value, |(_, name)| name)
 }
 
-/// The opaque label an endpoint's domain names are built on: 32 lowercase hex
-/// digits of SHA-256 over the endpoint's identity (its function's ARN, which
-/// carries the account and the home Region, plus the endpoint name).
-///
-/// Derived from the resource's identity, so the same endpoint always reports the
-/// same domain and no two endpoints share one.
-fn domain_label(function_arn: &str, endpoint_name: &str) -> String {
-    let digest = Sha256::digest(format!("{function_arn}/{endpoint_name}").as_bytes());
-    digest
-        .iter()
-        .take(16)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-/// The domain name an endpoint answers on across every Region it serves:
-/// `<label>.<service>.<suffix>` — no Region, because one domain routes to whichever
-/// Region is nearest.
-fn global_domain_name(label: &str) -> String {
-    format!("{label}.{DOMAIN_SERVICE_LABEL}.{DOMAIN_SUFFIX}")
-}
-
-/// The domain name an endpoint answers on in ONE Region:
-/// `<label>.<service>.<region>.<suffix>`.
-fn regional_domain_name(label: &str, region: &str) -> String {
-    format!("{label}.{DOMAIN_SERVICE_LABEL}.{region}.{DOMAIN_SUFFIX}")
-}
-
 /// Why `config` is not an endpoint this service can create in `home_region`, or
 /// `None` when it is. The caller answers `Some` with a `ValidationException`.
 ///
@@ -328,21 +314,25 @@ pub fn endpoint_config_violation(
 /// answers on.
 ///
 /// The home Region is always one of them — "The home Region is added automatically
-/// if you don't include it" — and a Region gets its OWN domain name only for
-/// `PerRegion`, which "creates a separate endpoint in each Region that you choose";
-/// `MultiRegion` routes one domain to the nearest Region, and `HomeRegion` serves
-/// only the home one.
+/// if you don't include it" — and a Region reports a domain of its own except under
+/// `MultiRegion`, which "routes one domain to the nearest Region" and so declares none
+/// per Region (the member is optional on the modelled `RegionalEndpoint` for exactly
+/// that case).
+///
+/// The domain a Region reports is the endpoint's own published address: this emulator
+/// answers every Region's traffic for one endpoint at the ONE address that endpoint
+/// publishes, so that is the address each Region is reached at too.
 fn endpoint_regions(
     endpoint_type: &str,
     requested: Option<&[String]>,
     home_region: &str,
-    label: &str,
+    published_domain_name: &str,
 ) -> BTreeMap<String, EndpointRegion> {
     let mut regions: BTreeMap<String, EndpointRegion> = BTreeMap::new();
     let mut insert = |region: &str| {
         let domain_name = match endpoint_type {
             ENDPOINT_TYPE_MULTI_REGION => None,
-            _ => Some(regional_domain_name(label, region)),
+            _ => Some(published_domain_name.to_string()),
         };
         regions.insert(region.to_string(), EndpointRegion { domain_name });
     };
@@ -359,6 +349,11 @@ impl ComAmazonawsLambdawebLambdawebState {
     /// Mint and persist an endpoint of `function_name`, returning its
     /// `endpointName`, or `None` when no such function is stored.
     ///
+    /// `published_domain_name` is the address this emulator answers the endpoint's own
+    /// HTTP requests on ([`super::endpoint_plane`]), which is what the endpoint reports
+    /// as its `domainName`: the create opens that address before it stores the endpoint,
+    /// so no endpoint is ever stored announcing a domain nothing serves.
+    ///
     /// Creating an endpoint mutates the function, so its `updated_at` moves to
     /// `now`. The endpoint is `Pending` and the clock owes it `Active`: it serves a
     /// revision, so it is ready one [`PROVISIONING_DELAY`] after that revision is
@@ -369,14 +364,10 @@ impl ComAmazonawsLambdawebLambdawebState {
         function_name: &str,
         new: NewEndpoint,
         home_region: &str,
+        published_domain_name: &str,
         now: SystemTime,
     ) -> Option<String> {
         let function = self.functions.get_mut(function_name)?;
-        let label = domain_label(&function.function_arn, &new.endpoint_name);
-        let domain_name = match new.endpoint_type.as_str() {
-            ENDPOINT_TYPE_MULTI_REGION => global_domain_name(&label),
-            _ => regional_domain_name(&label, home_region),
-        };
         let endpoint = Endpoint {
             endpoint_arn: endpoint_arn(&function.function_arn, &new.endpoint_name),
             endpoint_name: new.endpoint_name.clone(),
@@ -385,10 +376,10 @@ impl ComAmazonawsLambdawebLambdawebState {
                 &new.endpoint_type,
                 new.regions.as_deref(),
                 home_region,
-                &label,
+                published_domain_name,
             ),
             endpoint_type: new.endpoint_type,
-            domain_name,
+            domain_name: published_domain_name.to_string(),
             auth_type: new.auth_type,
             auto_deployment_mode: new
                 .auto_deployment_mode

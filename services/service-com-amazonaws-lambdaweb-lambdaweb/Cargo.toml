@@ -18,13 +18,31 @@ emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 aws-smithy-types = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "sync"] }
 bytes = { workspace = true }
 http = { workspace = true }
+# Speaks HTTP/1.1 on the connections a published endpoint's own listener accepts
+# (`src/state/endpoint_plane.rs`), so one announced address serves both the `https://` a
+# client of AWS dials and the `http://` a client that does not verify a self-signed
+# certificate dials. `hyper-util` carries the tokio IO and timer adapters for it,
+# `http-body-util` the bounded body reader and the one-shot body.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 serde_json = { workspace = true }
 tracing = { workspace = true }
 # Digest behind the opaque, self-describing `nextToken` the list cursors carry.
 sha2 = { workspace = true }
+# The AWS SDK for Amazon S3, driven over the in-process callback
+# (`OperationContext::callback`): a revision's `buildConfig.codeConfig.s3Object` is an
+# object of the emulator's own object store, so `src/state/code_package.rs` fetches the
+# deployment package from Amazon S3 rather than deciding the build's outcome here. Only
+# the generated client is needed — the emulator supplies the transport.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# Reads a fetched deployment package as the .zip archive it has to be, so a revision whose
+# code object is no archive settles its build `Failed`. `deflate` alone: no other
+# compression method and no encryption support is needed to open an archive.
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -35,6 +53,20 @@ hex = { workspace = true }
 # segment the tag and resource-policy routes bind, and a tag key carrying a space,
 # a `:` or a `+` in the `tagKeys` query string, the way a client does.
 percent-encoding = "2.3"
+# Writes the .zip deployment packages the build-outcome suite stages, so a package the
+# build accepts is a real archive rather than bytes that happen to pass.
+zip = { version = "9", default-features = false, features = ["deflate"] }
+# `tokio::time::sleep` for the clock-owed transitions the tests wait out, and the socket
+# and byte-stream halves the data-plane suite dials a published endpoint's address with.
+tokio = { workspace = true, features = ["time", "net", "io-util"] }
+# Amazon S3, mounted beside this service in the build-outcome harness: that a revision's
+# build settles `Failed` exactly when the object store does not serve a readable archive
+# can only be driven end to end with the owner of objects on the same engine.
+# DEV-ONLY: this crate depends on no other service's crate outside its tests.
+service-com-amazonaws-s3-amazons3 = { workspace = true }
+# The Amazon S3 client the build-outcome harness stages objects with, over the same
+# in-process callback the build reads them through.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 
 [lints]
 workspace = true

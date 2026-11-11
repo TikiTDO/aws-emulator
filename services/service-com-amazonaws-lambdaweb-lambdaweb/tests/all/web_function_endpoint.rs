@@ -37,26 +37,25 @@ fn endpoint_settle_delay() -> Duration {
     PROVISIONING_DELAY + PROVISIONING_DELAY + Duration::from_millis(250)
 }
 
-/// Whether `value` satisfies the model's `DomainName` constraints: pattern
-/// `^([a-z0-9-]+\.)+[a-z]+$` and length 4..256 (source:
+/// Whether `value` is an ADDRESS this emulator answers on, which is what a published
+/// `domainName` has to be: the `host:port` of one of the emulator's own listeners, within
+/// the model's own length bound for the member (4..256, source:
 /// `smithy_query(query="shape", shape="DomainName")`).
-fn is_modelled_domain_name(value: &str) -> bool {
-    if value.chars().count() < 4 || value.chars().count() > 256 {
-        return false;
-    }
-    let mut labels: Vec<&str> = value.split('.').collect();
-    let Some(last) = labels.pop() else {
-        return false;
-    };
-    if labels.is_empty() || last.is_empty() || !last.chars().all(|c| c.is_ascii_lowercase()) {
-        return false;
-    }
-    labels.iter().all(|label| {
-        !label.is_empty()
-            && label
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-    })
+///
+/// The model's `DomainName` PATTERN (`^([a-z0-9-]+\.)+[a-z]+$`) is deliberately not
+/// asserted, and the published value does not satisfy it: that shape is a property of
+/// AWS's own environment — where the endpoint is served at port 443 under a zone AWS runs
+/// — and what a client DOES with the value is dial it. A name under a zone this emulator
+/// does not serve resolves to nothing on the machine it runs on, so the address the
+/// emulator answers on is the one value that keeps the member's documented meaning. The
+/// deviation is stated where the value is minted (`src/state/endpoints.rs`).
+fn is_an_address_the_emulator_answers_on(value: &str) -> bool {
+    let host = service_common::data_plane_addressing::host_only(value);
+    let port = service_common::data_plane_addressing::addressed_port(Some(value));
+    (4..=256).contains(&value.chars().count())
+        && port.is_some_and(|port| port > 0)
+        && !host.is_empty()
+        && !host.contains(':')
 }
 
 /// A `revisionConfig` good enough to create the initial revision an endpoint
@@ -308,8 +307,8 @@ async fn an_initial_endpoint_is_created_with_the_function_and_read_back() {
             .unwrap_or_default()
             .to_string();
         assert!(
-            is_modelled_domain_name(&domain_name),
-            "case {case:?}: expected a domainName matching the model's pattern, got \
+            is_an_address_the_emulator_answers_on(&domain_name),
+            "case {case:?}: expected a domainName the emulator answers on, got \
              {domain_name:?}"
         );
 
@@ -370,9 +369,11 @@ async fn an_initial_endpoint_is_created_with_the_function_and_read_back() {
             );
         }
 
-        // One regional entry per configured Region. A type that gives each Region
-        // its own endpoint reports a distinct domain per Region; `MultiRegion` routes
-        // ONE domain to the nearest Region, so its regional entries carry none.
+        // One regional entry per configured Region. Every Region of one endpoint is
+        // served at the ONE address that endpoint publishes — this emulator answers all
+        // of its traffic there — so each regional entry reports that address;
+        // `MultiRegion` routes one domain to the nearest Region, so its regional entries
+        // carry none.
         let regional = member(&fetched.body, "regionalEndpoints");
         let regional = regional
             .as_object()
@@ -382,7 +383,6 @@ async fn an_initial_endpoint_is_created_with_the_function_and_read_back() {
             region_set(&endpoint),
             "case {case:?}: expected one regional entry per Region, got {regional:?}"
         );
-        let mut regional_domains = BTreeSet::new();
         for (region, entry) in regional {
             assert_eq!(
                 member(entry, "authType"),
@@ -400,18 +400,11 @@ async fn an_initial_endpoint_is_created_with_the_function_and_read_back() {
                     "case {case:?}: regional entry {region} must carry its own domain, got \
                      {entry:?}"
                 ),
-                Some(regional_domain) => {
-                    assert!(
-                        is_modelled_domain_name(regional_domain)
-                            && regional_domain.contains(region),
-                        "case {case:?}: expected a domain naming Region {region}, got \
-                         {regional_domain:?}"
-                    );
-                    assert!(
-                        regional_domains.insert(regional_domain.to_string()),
-                        "case {case:?}: two Regions share the domain {regional_domain:?}"
-                    );
-                }
+                Some(regional_domain) => assert_eq!(
+                    regional_domain, domain_name,
+                    "case {case:?}: regional entry {region} must report the address the \
+                     endpoint is served at, got {regional_domain:?}"
+                ),
             }
         }
     }

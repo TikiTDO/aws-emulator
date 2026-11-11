@@ -27,6 +27,15 @@ use crate::ops::types::{
 mod account;
 pub use account::*;
 
+/// The deployment package a revision is built from: the object its `s3Object` names,
+/// and whether the build can read an archive there at all.
+pub mod code_package;
+
+/// The data plane an endpoint publishes: the listener this emulator answers the
+/// endpoint's own HTTP requests on, and the address it announces.
+pub mod endpoint_plane;
+pub use endpoint_plane::{open_endpoint_plane, EndpointPlane};
+
 /// The endpoint slice: what an endpoint of a web function is, and the rules the
 /// create paths validate it against.
 mod endpoints;
@@ -92,6 +101,25 @@ pub const DEFAULT_TIMEOUT_SECONDS: i32 = 30;
 /// `ServiceConfig$maxConcurrencyPerEnvironment`' modelled `@default` (model:
 /// range 1..128, default 64).
 pub const DEFAULT_MAX_CONCURRENCY_PER_ENVIRONMENT: i32 = 64;
+
+/// The `applicationLogLevel` a revision takes when the request names none: "If you don't
+/// specify a value, the default is `INFO`, and this default is returned in the response."
+/// (source: `smithy_query(query="doc", shape="LoggingConfig",
+/// member="applicationLogLevel")`).
+pub const DEFAULT_APPLICATION_LOG_LEVEL: &str = "INFO";
+
+/// The `systemLogLevel` a revision takes when the request names none: the same sentence,
+/// one member along (source: `smithy_query(query="doc", shape="LoggingConfig",
+/// member="systemLogLevel")`).
+pub const DEFAULT_SYSTEM_LOG_LEVEL: &str = "INFO";
+
+/// The `logGroup` a revision takes when the request names none: "If you don't specify a
+/// value, the default is `/aws/lambda/web/{functionName}`, and this default is returned in
+/// the response." (source: `smithy_query(query="doc", shape="LoggingConfig",
+/// member="logGroup")`).
+pub fn default_log_group(function_name: &str) -> String {
+    format!("/aws/lambda/web/{function_name}")
+}
 
 /// The page size `ListWebFunctions` uses when the caller sends no `maxResults`:
 /// the member's modelled `@default` (and the largest page its `@range` allows).
@@ -185,9 +213,15 @@ pub struct Revision {
     pub state_reason: String,
     pub errors: Vec<RevisionError>,
     pub created_at: SystemTime,
-    /// The instant the clock owes this revision its `Pending -> Active`
-    /// transition, or `None` once it has been materialised.
+    /// The instant the clock owes this revision the end of its BUILD, or `None` once
+    /// that has been materialised.
     pub activates_at: Option<SystemTime>,
+    /// Why this revision's build fails, as established by the read of its deployment
+    /// package ([`code_package`]) when the create was served, or `None` for a build
+    /// that succeeds. It is what decides whether the revision settles `Active` or
+    /// `Failed`, so a revision whose code is not an archive the build can read is never
+    /// reported as having built.
+    pub build_failure: Option<String>,
 }
 
 impl Revision {
@@ -213,15 +247,35 @@ impl Revision {
         Some(self.errors.clone())
     }
 
-    /// Apply the `Pending -> Active` transition if the clock has already made it
-    /// due. Owed at [`Self::activates_at`] whether or not anybody called, so
-    /// materialising it on a read reports what was already true.
+    /// The instant this revision's build was due to finish: its creation plus the one
+    /// provisioning span, which is when the clock owed it its `Active` (or `Failed`) state.
+    ///
+    /// The one instant a switch onto this revision is derived from, so the timestamp a
+    /// caller reads for that switch is stable across reads.
+    pub fn built_at(&self) -> SystemTime {
+        self.created_at + PROVISIONING_DELAY
+    }
+
+    /// Settle this revision's build if the clock has already made its end due: `Active`
+    /// for a build that succeeded, `Failed` carrying the build's own reason for one that
+    /// did not ([`Self::build_failure`]). Owed at [`Self::activates_at`] whether or not
+    /// anybody called, so materialising it on a read reports what was already true.
     fn materialise_due(&mut self, now: SystemTime) {
-        if self.state == RevisionState::Pending && self.activates_at.is_some_and(|due| now >= due) {
-            self.state = RevisionState::Active;
-            self.state_reason = REVISION_ACTIVE_REASON.to_string();
-            self.activates_at = None;
+        if self.state != RevisionState::Pending || !self.activates_at.is_some_and(|due| now >= due)
+        {
+            return;
         }
+        match &self.build_failure {
+            Some(reason) => {
+                self.state = RevisionState::Failed;
+                self.state_reason = reason.clone();
+            }
+            None => {
+                self.state = RevisionState::Active;
+                self.state_reason = REVISION_ACTIVE_REASON.to_string();
+            }
+        }
+        self.activates_at = None;
     }
 }
 
@@ -305,6 +359,48 @@ impl WebFunction {
         for endpoint in self.endpoints.values_mut() {
             endpoint.materialise_due(now);
         }
+        self.deploy_latest_revision();
+    }
+
+    /// Move every endpoint whose `autoDeploymentMode` is `LatestRevision` onto the newest
+    /// revision that has BUILT — "the endpoint automatically serves the newest revision"
+    /// (`AutoDeploymentMode`).
+    ///
+    /// A revision that is still building, or whose build failed, takes no traffic: only a
+    /// revision the service reports `Active` is "ready to serve traffic"
+    /// (`RevisionState`), so an endpoint in that mode keeps serving what it was serving
+    /// until the newest revision has built. Applied where the build itself settles, so
+    /// the switch is owed at the same instant the revision became ready whether or not
+    /// anybody called.
+    fn deploy_latest_revision(&mut self) {
+        let Some(newest) = self
+            .revisions
+            .values()
+            .filter(|revision| revision.state == RevisionState::Active)
+            .max_by_key(|revision| (revision.created_at, revision.revision_id.clone()))
+            .map(|revision| (revision.revision_id.clone(), revision.built_at()))
+        else {
+            return;
+        };
+        let (revision_id, became_ready) = newest;
+        for endpoint in self.endpoints.values_mut() {
+            if endpoint.auto_deployment_mode != AUTO_DEPLOYMENT_MODE_LATEST_REVISION {
+                continue;
+            }
+            let serving_only_newest = endpoint.revision_weights.len() == 1
+                && endpoint.revision_weights[0].revision_id == revision_id;
+            if serving_only_newest {
+                continue;
+            }
+            endpoint.revision_weights = vec![crate::ops::types::RevisionWeight {
+                revision_id: revision_id.clone(),
+                weight: FULL_WEIGHT,
+            }];
+            // The switch moves the endpoint, so its `updated_at` moves with it — to the
+            // instant that revision's build was due to finish, which is the one instant
+            // every reader derives this switch from, rather than to whenever it was read.
+            endpoint.updated_at = endpoint.updated_at.max(became_ready);
+        }
     }
 }
 
@@ -316,6 +412,10 @@ pub struct NewRevision {
     pub kms_key_arn: Option<String>,
     pub build_config: BuildConfig,
     pub service_config: ServiceConfig,
+    /// Why the build of this revision fails, as the read of its deployment package
+    /// established it ([`code_package::CodePackage::failure_reason`]), or `None` for a
+    /// build that succeeds.
+    pub build_failure: Option<String>,
 }
 
 /// Per-service state for com-amazonaws-lambdaweb-lambdaweb. A handler reaches it through [`service_state`].
@@ -332,6 +432,11 @@ pub struct ComAmazonawsLambdawebLambdawebState {
     /// generations of a resource-based policy — of one function or of two — never
     /// share an id.
     pub next_policy_revision_seq: u64,
+    /// The listener each endpoint's own data plane is served on, keyed by that
+    /// endpoint's ARN. Holding the handle is what keeps the port open and what makes
+    /// the published `domainName` an address this emulator answers on; removing the
+    /// entry closes it ([`Self::prune_endpoint_planes`]).
+    pub endpoint_planes: BTreeMap<String, EndpointPlane>,
 }
 
 impl ComAmazonawsLambdawebLambdawebState {
@@ -347,6 +452,33 @@ impl ComAmazonawsLambdawebLambdawebState {
         for function in self.functions.values_mut() {
             function.materialise_due(now);
         }
+    }
+
+    /// Close the listener of every endpoint this store no longer holds.
+    ///
+    /// An endpoint's address is the endpoint's: once the record is gone — its own delete,
+    /// or its function's, which takes its endpoints with it — the port it answered on is
+    /// released, so a deleted endpoint stops answering. Dropping the handle is what closes
+    /// it, and dropping it also severs every connection in flight on that port, which is
+    /// why it is done by the DELETE that removed the record and not on every read: a
+    /// client being served at a published address is never cut off by somebody else's
+    /// call.
+    pub fn prune_endpoint_planes(&mut self) {
+        if self.endpoint_planes.is_empty() {
+            return;
+        }
+        let live: ::std::collections::BTreeSet<String> = self
+            .functions
+            .values()
+            .flat_map(|function| {
+                function
+                    .endpoints
+                    .values()
+                    .map(|endpoint| endpoint.endpoint_arn.clone())
+            })
+            .collect();
+        self.endpoint_planes
+            .retain(|endpoint_arn, _| live.contains(endpoint_arn));
     }
 
     /// Mint a fresh `revisionId`: the counter rendered in the 8-4-4-4-12 shape
@@ -379,12 +511,13 @@ impl ComAmazonawsLambdawebLambdawebState {
             description: new.description,
             kms_key_arn: new.kms_key_arn,
             build_config: new.build_config,
-            service_config: adopt_service_config(new.service_config),
+            service_config: adopt_service_config(new.service_config, function_name),
             state: RevisionState::Pending,
             state_reason: REVISION_PENDING_REASON.to_string(),
             errors: Vec::new(),
             created_at: now,
             activates_at: Some(now + PROVISIONING_DELAY),
+            build_failure: new.build_failure,
         };
         function.revisions.insert(revision_id.clone(), revision);
         function.latest_revision_id = Some(revision_id.clone());
@@ -393,21 +526,41 @@ impl ComAmazonawsLambdawebLambdawebState {
     }
 }
 
-/// The `ServiceConfig` to store: the supplied one with the model's declared
-/// defaults applied to any member that arrived without a value.
+/// The `ServiceConfig` to store: the supplied one with the model's declared and
+/// DOCUMENTED defaults applied to any member that arrived without a value.
 ///
 /// `timeoutSeconds` is `@range(3..900) @default(30)` and
 /// `maxConcurrencyPerEnvironment` is `@range(1..128) @default(64)`. Those ranges
 /// are MODELLED, so the boundary validator has already refused any value outside
 /// them before a handler runs — which is why a 0 reaching here can only mean the
 /// member was absent, and why no range check belongs in this function.
-pub fn adopt_service_config(mut config: ServiceConfig) -> ServiceConfig {
+///
+/// The logging configuration's three members carry no `@default` but DOCUMENT one each,
+/// in the same words: "If you don't specify a value, the default is …, and this default is
+/// returned in the response" ([`DEFAULT_APPLICATION_LOG_LEVEL`],
+/// [`DEFAULT_SYSTEM_LOG_LEVEL`], [`default_log_group`]). Returning the default is part of
+/// the rule, so the effective configuration is materialised here — once, where it is
+/// stored — and every later read reports what was stored.
+pub fn adopt_service_config(mut config: ServiceConfig, function_name: &str) -> ServiceConfig {
     if config.timeout_seconds == 0 {
         config.timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
     }
     if config.max_concurrency_per_environment == 0 {
         config.max_concurrency_per_environment = DEFAULT_MAX_CONCURRENCY_PER_ENVIRONMENT;
     }
+    let mut telemetry = config.telemetry_config.unwrap_or_default();
+    let mut logging = telemetry.logging_config.unwrap_or_default();
+    if logging.log_group.is_none() {
+        logging.log_group = Some(default_log_group(function_name));
+    }
+    if logging.application_log_level.is_none() {
+        logging.application_log_level = Some(DEFAULT_APPLICATION_LOG_LEVEL.to_string());
+    }
+    if logging.system_log_level.is_none() {
+        logging.system_log_level = Some(DEFAULT_SYSTEM_LOG_LEVEL.to_string());
+    }
+    telemetry.logging_config = Some(logging);
+    config.telemetry_config = Some(telemetry);
     config
 }
 
@@ -596,7 +749,16 @@ pub fn resume_index(cursor: ListCursor, keys: &[&str]) -> usize {
 pub fn service_state<Eng: Send + Sync + 'static>(
     engine: &Eng,
 ) -> Option<::engine::ServiceState<ComAmazonawsLambdawebLambdawebState>> {
-    (engine as &dyn ::std::any::Any)
-        .downcast_ref::<::engine::InMemoryEngine>()
-        .map(::engine::InMemoryEngine::state::<ComAmazonawsLambdawebLambdawebState>)
+    shared_engine(engine).map(::engine::InMemoryEngine::state::<ComAmazonawsLambdawebLambdawebState>)
+}
+
+/// The ONE shared engine behind a handler's `&*self.engine`, for the things that are the
+/// ENGINE's rather than this service's store: the core-owned listener an endpoint's data
+/// plane is served on ([`endpoint_plane`]).
+///
+/// `None` for an engine this emulator was not assembled with, which is what leaves a
+/// caller answering a modelled server error instead of publishing an address nothing
+/// serves.
+pub fn shared_engine<Eng: Send + Sync + 'static>(engine: &Eng) -> Option<&::engine::InMemoryEngine> {
+    (engine as &dyn ::std::any::Any).downcast_ref::<::engine::InMemoryEngine>()
 }
