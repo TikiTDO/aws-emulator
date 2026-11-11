@@ -115,19 +115,24 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // service models that shape as a common error on every operation and
         // models no `ValidationException` at all, so answering the framework's
         // generic code would hand a client an error its own model cannot name.
-        // The MESSAGE keeps the framework's `<N> validation error(s) detected: `
-        // envelope, which is already the sentence AWS builds from the request —
-        // the offending value, the member it sat at, and the constraint it failed.
-        //
         // An authentication refusal keeps the framework's wording: it is not an
         // input-constraint failure.
-        match refusal {
-            Refusal::Invalid(violations) => Some(Refused {
-                code: INVALID_PARAMETER_EXCEPTION.to_string(),
-                message: aws_smithy_schema_server::envelope(violations)?,
-            }),
-            _ => None,
-        }
+        //
+        // The MESSAGE itself is the shared one
+        // (`service_common::validation_message::aws_validation_refusal`): the same
+        // `<N> validation error(s) detected: ` envelope over the same clauses, with the
+        // two renderings AWS words differently from the framework applied — a `@pattern`
+        // requirement quoted WITHOUT the pair of anchors a whole-value pattern wraps it
+        // in, and a collection that broke its `@length` stated with no value. The CHECK
+        // still runs the model's pattern as written; only the quoting changes. Only the
+        // CODE is this service's, so the two cannot drift. That one call also decides
+        // WHICH refusals are restated — it answers `None` for anything that is not a
+        // constraint refusal — so no second guard is spelled here.
+        let stated = ::service_common::validation_message::aws_validation_refusal(refusal)?;
+        Some(Refused {
+            code: INVALID_PARAMETER_EXCEPTION.to_string(),
+            message: stated.message,
+        })
     }
 
     fn override_routing_error(

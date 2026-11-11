@@ -8,6 +8,10 @@ build = "build.rs"
 
 [dependencies]
 engine = { workspace = true }
+# `validation_message`: the shared wording of a boundary refusal, including the
+# anchor-free quoting of a `@pattern` requirement, so this crate spells neither the
+# envelope nor a clause itself.
+service-common = { path = "../common" }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }
 aws-smithy-schema-server = { workspace = true }

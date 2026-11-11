@@ -15,6 +15,8 @@
 mod empty_selection;
 #[path = "all/get_products_offers.rs"]
 mod get_products_offers;
+#[path = "all/pattern_requirement_wording.rs"]
+mod pattern_requirement_wording;
 #[path = "all/pricing_catalog.rs"]
 mod pricing_catalog;
 #[path = "all/pricing_fidelity.rs"]
