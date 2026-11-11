@@ -217,7 +217,16 @@ fn age_the_operation_behind_the_wait(
 
 /// Move the wait for the provider's answer `by` further into the past, which is how a case
 /// reaches the instant that wait had already run out at without waiting for it.
-fn age_the_provider_wait(engine: &Arc<engine::InMemoryEngine>, stack_name: &str, by: Duration) {
+///
+/// `pub(crate)` for the reason the helpers of `custom_resource_providers.rs` are: the sibling
+/// suite `rolled_back_create_stays_describable.rs` drives a create to the same wait running
+/// out, and one spelling of "reach the instant the wait had expired" keeps the two from
+/// drifting about how that instant is reached.
+pub(crate) fn age_the_provider_wait(
+    engine: &Arc<engine::InMemoryEngine>,
+    stack_name: &str,
+    by: Duration,
+) {
     let held = store(engine);
     let mut locked = held.lock();
     let stack = locked
@@ -329,7 +338,11 @@ async fn answer_every_awaited_request(
 
 /// One instant past the window a provider's answer is waited for, which is where the wait has
 /// run out.
-fn past_the_window() -> Duration {
+///
+/// `pub(crate)` beside [`age_the_provider_wait`], which is what it is passed to: the sibling
+/// suite `rolled_back_create_stays_describable.rs` ages the same wait, and one spelling of
+/// "one instant past the window" keeps the two from drifting.
+pub(crate) fn past_the_window() -> Duration {
     CREATE_STABILISATION_WINDOW + Duration::from_secs(1)
 }
 

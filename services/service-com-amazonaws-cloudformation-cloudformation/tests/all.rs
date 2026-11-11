@@ -343,6 +343,8 @@ mod route53_resource_declarations;
 mod rollback_trigger_bounds;
 #[path = "all/rollback_trigger_types.rs"]
 mod rollback_trigger_types;
+#[path = "all/rolled_back_create_stays_describable.rs"]
+mod rolled_back_create_stays_describable;
 #[path = "all/rolled_back_resource_records.rs"]
 mod rolled_back_resource_records;
 #[path = "all/rolled_back_resource_retention.rs"]
