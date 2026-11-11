@@ -95,6 +95,8 @@ mod index_write_capacity_changes;
 mod item_write_expressions;
 #[path = "all/item_write_vocabularies.rs"]
 mod item_write_vocabularies;
+#[path = "all/key_refusal_classes_and_batch_bounds.rs"]
+mod key_refusal_classes_and_batch_bounds;
 #[path = "all/key_schema_and_vector_parameter_refusals.rs"]
 mod key_schema_and_vector_parameter_refusals;
 #[path = "all/key_schema_element_refusals.rs"]

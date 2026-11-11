@@ -2059,6 +2059,18 @@ pub struct ParsedUpdate {
 }
 
 impl ParsedUpdate {
+    /// Whether this update states NO action at all — an `UpdateItem` carrying neither an
+    /// `UpdateExpression` nor one `AttributeUpdates` entry.
+    ///
+    /// That is the one update that adds the item its key names without writing anything
+    /// into it: there is no clause whose effect on an item that is not there could be
+    /// nothing, so what the call asks for is the item at that key
+    /// ("adds a new item to the table if it does not already exist"). An update that DOES
+    /// state clauses adds an item only where one of them gave it a value.
+    pub fn states_no_action(&self) -> bool {
+        self.actions.is_empty()
+    }
+
     /// Parse one `UpdateExpression`: the `SET`, `REMOVE`, `ADD` and `DELETE` sections,
     /// each at most once, each a comma-separated list of actions.
     pub fn parse(

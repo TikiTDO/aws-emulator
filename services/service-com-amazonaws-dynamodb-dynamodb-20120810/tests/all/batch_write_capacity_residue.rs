@@ -140,12 +140,23 @@ fn handed_back(body: &Value, table: &str) -> Vec<Key> {
 
 /// Walk the documented retry loop over `residue` until nothing is held back, answering
 /// what is still held back when the attempts run out. `case` names the row.
+///
+/// An attempt is answered either way the operation documents: 200 with the requests it did
+/// not store, or `ProvisionedThroughputExceededException` when it "cannot process any
+/// items due to throttling", which the doc answers with the same instruction — "you should
+/// retry the batch operation on those items" — so the chunk stays in the residue and the
+/// loop goes round again. What is under test is that the loop TERMINATES, and that the
+/// capacity behind the table is what drains it: a residue the table has the capacity for
+/// must be SERVED, so a stream of attempts every one of which was throttled is a failure
+/// however the loop ended.
 async fn drain(
     router: &smithy_server_runtime::MultiServiceRouter,
     case: &str,
     table: &str,
     mut residue: Vec<Value>,
 ) -> Vec<Value> {
+    let asked = residue.len();
+    let mut served = 0usize;
     for attempt in 0..DRAIN_ATTEMPTS {
         if residue.is_empty() {
             break;
@@ -154,16 +165,26 @@ async fn drain(
         let mut still_held: Vec<Value> = Vec::new();
         for chunk in residue.chunks(25) {
             let (status, body, elapsed) = batch_write(router, table, chunk.to_vec()).await;
-            assert_eq!(
-                (status, elapsed < CALL_DEADLINE),
-                (200, true),
+            assert!(
+                (status == 200 || error_code(&body) == "ProvisionedThroughputExceededException")
+                    && elapsed < CALL_DEADLINE,
                 "case {case:?}, drain attempt {attempt}: the residue is answered promptly, got \
                  {status} after {elapsed:?} with {body}"
             );
-            still_held.extend(residue_of(&body, table));
+            if status == 200 {
+                served += 1;
+                still_held.extend(residue_of(&body, table));
+            } else {
+                still_held.extend(chunk.to_vec());
+            }
         }
         residue = still_held;
     }
+    assert!(
+        asked == 0 || served > 0,
+        "case {case:?}: a residue of {asked} request(s) the table has the capacity for is \
+         served, not throttled on every one of {DRAIN_ATTEMPTS} attempts"
+    );
     residue
 }
 
@@ -356,14 +377,18 @@ fn rows() -> Vec<Row> {
             answer: Answer::ServedPartly,
         },
         Row {
-            case: "capacity to spare, four 400 KB writes at one partition key",
+            // The per-partition-key ceiling lends ONE call what one call can ask of a
+            // partition (25 operations of up to 400 KB), so a batch of eight ~400-unit
+            // writes aimed at one key is inside what it serves and lands whole; what the
+            // ceiling bounds is the SUSTAINED rate, which the drain suite below walks.
+            case: "capacity to spare, eight 400 KB writes at one partition key",
             billing: provisioned(DRAIN_WRITE_UNITS),
             prime_batches: 0,
             prime_per_batch: 0,
             prime_payload: 0,
-            batch: vec![399 * 1024; 4],
+            batch: vec![399 * 1024; 8],
             one_key: true,
-            answer: Answer::ServedPartly,
+            answer: Answer::ServedWhole,
         },
     ]
 }

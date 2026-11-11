@@ -156,8 +156,11 @@ async fn a_refused_request_items_key_quotes_the_map_the_request_sent() {
         );
     }
 
-    // The BOUNDARY: `BatchWriteItem`'s recorded clause quotes a rendering nothing
-    // reachable from the model produces, so its clause states no value at all.
+    // The OTHER rendering: `BatchWriteItem`'s clause quotes the same map in the OBJECT
+    // form the service's own request validator states a refused structure value with, over
+    // the fields of its own request objects — which is what the recorded refusals of that
+    // member carry (`crate::state::rendered_batch_write_request_items`), and not the JSON
+    // the request arrived as.
     let (status, body) = call(
         &router,
         "BatchWriteItem",
@@ -165,10 +168,16 @@ async fn a_refused_request_items_key_quotes_the_map_the_request_sent() {
     )
     .await;
     let said = message(&body);
+    let expected = map_key_clause(Some(
+        "{ab=[WriteRequest(putRequest=PutRequest(item={pk=AttributeValue(s=a, n=null, b=null, \
+         iNT=null, dECIMAL=null, dOUBLE=null, sS=null, nS=null, bS=null, iNTSET=null, \
+         dECIMALSET=null, dOUBLESET=null, m=null, l=null, nULL=null, bOOL=null)}, \
+         workloadProfileName=null), deleteRequest=null)]}",
+    ));
     assert_eq!(
         (status, said.as_str()),
-        (400, map_key_clause(None).as_str()),
-        "case a batched WRITE: expected the valueless clause, got {status} with {body}"
+        (400, expected.as_str()),
+        "case a batched WRITE: expected {expected:?}, got {status} with {body}"
     );
 
     // Both spellings a key accepts still address the table, so the refusals above are

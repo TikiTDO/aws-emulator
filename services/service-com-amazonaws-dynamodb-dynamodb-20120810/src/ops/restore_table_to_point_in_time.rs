@@ -626,7 +626,8 @@ fn restore_point(
 /// The modelled refusal of a point in time outside the source table's restorable window,
 /// worded as the model states the error: "An invalid restore time was specified.
 /// RestoreDateTime must be between EarliestRestorableDateTime and
-/// LatestRestorableDateTime" (`InvalidRestoreTimeException`).
+/// LatestRestorableDateTime" (`InvalidRestoreTimeException`), with the two member names
+/// standing for the window as the recorded refusal of this operation writes them.
 ///
 /// The window's own bounds are NOT echoed: they move with the clock, and
 /// `DescribeContinuousBackups` is where a caller reads them.

@@ -654,12 +654,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // A page resumes at a key the condition SELECTS — "The primary key of the
             // first item that this operation will evaluate" (`Query$ExclusiveStartKey`)
             // — whichever schema the query walks; a key outside what the condition
-            // selects is refused rather than paged from
-            // ([`START_KEY_OUTSIDE_QUERY_BOUNDARIES_MESSAGE`]).
-            if !condition.starts_within(table, start).map_err(lift)? {
-                return Err(crate::scaffolded::Scaffolded::validation(
-                    START_KEY_OUTSIDE_QUERY_BOUNDARIES_MESSAGE,
-                ));
+            // selects is refused rather than paged from, by the half of the condition
+            // it falls outside ([`KeyCondition::starts_within`]).
+            if let Some(message) = condition.starts_within(table, start).map_err(lift)? {
+                return Err(crate::scaffolded::Scaffolded::validation(message));
             }
             // "Use this value to start a new operation, EXCLUDING this value in the
             // new request" (`Query$LastEvaluatedKey`): resume strictly after the key
@@ -825,17 +823,28 @@ fn lift(error: crate::state::RequestError) -> QueryError {
 /// The input member a projection travels in, which is what its refusals name.
 const PROJECTION_EXPRESSION: &str = "ProjectionExpression";
 
-/// How a `Query` whose `ExclusiveStartKey` is a key of the schema it walks but NOT one
-/// the `KeyConditionExpression` selects is refused.
+/// How a `Query` whose `ExclusiveStartKey` names a key of the schema it walks but a
+/// PARTITION the `KeyConditionExpression` does not select is refused.
 ///
 /// "The primary key of the first item that this operation will evaluate"
-/// (`Query$ExclusiveStartKey`) — so a token outside the boundaries the condition draws
-/// names nothing this query would evaluate. The sentence is FIXED: it reports neither
-/// the token nor the condition, so every client that matches this refusal matches one
-/// string whatever it sent, and it is NOT the invalid-token sentence a token that is no
-/// key of the schema at all gets ([`crate::state::START_KEY_INVALID_MESSAGE`]).
+/// (`Query$ExclusiveStartKey`) — so a token in another partition names nothing this
+/// query would evaluate. The sentence is FIXED: it reports neither the token nor the
+/// condition, so every client that matches this refusal matches one string whatever it
+/// sent, and it is NOT the invalid-token sentence a token that is no key of the schema
+/// at all gets ([`crate::state::START_KEY_INVALID_MESSAGE`]).
 const START_KEY_OUTSIDE_QUERY_BOUNDARIES_MESSAGE: &str =
     "The provided starting key is outside query boundaries based on provided conditions";
+
+/// How a `Query` whose `ExclusiveStartKey` sits in the partition the condition selects
+/// but whose SORT key value that condition's comparison excludes is refused.
+///
+/// The two halves of a key condition are refused separately: the partition is the
+/// boundary of what the query reads at all
+/// ([`START_KEY_OUTSIDE_QUERY_BOUNDARIES_MESSAGE`]), while the comparison on the sort
+/// key is a PREDICATE the resume point has to satisfy, and AWS names that predicate in
+/// the refusal. Fixed text again, naming neither the token nor the comparison.
+const START_KEY_OUTSIDE_RANGE_PREDICATE_MESSAGE: &str =
+    "The provided starting key does not match the range key predicate";
 
 /// A comparison one key condition makes against one attribute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1087,21 +1096,25 @@ impl KeyCondition {
     ///
     /// A `LastEvaluatedKey` is the key of an item the previous page evaluated, so a
     /// token a caller got from this same condition always passes; one from another
-    /// partition, or one whose sort key the comparison excludes, lies outside those
-    /// boundaries.
+    /// partition, and one whose sort key the comparison excludes, are each refused by
+    /// the half of the condition they fall outside, and the `Some` says which sentence
+    /// that is.
     fn starts_within(
         &self,
         table: &crate::state::Table,
         start: &crate::state::Item,
-    ) -> Result<bool, crate::state::RequestError> {
+    ) -> Result<Option<&'static str>, crate::state::RequestError> {
         if stored_key_value(table, start, &self.partition_name).as_ref() != Some(&self.partition) {
-            return Ok(false);
+            return Ok(Some(START_KEY_OUTSIDE_QUERY_BOUNDARIES_MESSAGE));
         }
         let Some(sort) = self.sort.as_ref() else {
-            return Ok(true);
+            return Ok(None);
         };
         let actual = stored_key_value(table, start, &sort.name);
-        self.matches_sort(actual.as_ref())
+        if self.matches_sort(actual.as_ref())? {
+            return Ok(None);
+        }
+        Ok(Some(START_KEY_OUTSIDE_RANGE_PREDICATE_MESSAGE))
     }
 
     /// Whether `attribute` is a key attribute of the schema this query reads, which is

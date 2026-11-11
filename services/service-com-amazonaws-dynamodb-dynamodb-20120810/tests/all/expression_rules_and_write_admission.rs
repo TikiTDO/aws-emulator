@@ -1051,27 +1051,48 @@ async fn a_batch_hands_back_the_writes_the_ceilings_did_not_admit() {
     .await;
     let payload = "x".repeat(399 * 1024);
 
-    // Four writes of ~400 units aimed at one partition key, in ONE batch: the key's
-    // ceiling covers the first two and the rest are handed back.
-    let requests: Vec<Value> = (0..4)
-        .map(|sort| json!({"PutRequest": {"Item": heavy_item("hot", sort, &payload)}}))
-        .collect();
-    let answered = ok(
-        &router,
-        "BatchWriteItem",
-        json!({"TableName": "HotBatch",
-               "RequestItems": {"HotBatch": requests},
-               "ReturnConsumedCapacity": "TOTAL"}),
-    )
-    .await;
-    let handed_back = answered["UnprocessedItems"]["HotBatch"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    // A STREAM of batches of eight ~400-unit writes aimed at ONE partition key. That key's
+    // ceiling serves one call whole — it lends a call what one call can ask of a partition
+    // — so what it bounds is the SUSTAINED rate: a caller that keeps batching past it runs
+    // the allowance out, and from then on a call lands what is left and hands the rest
+    // back.
+    let batch_of = |round: usize| -> Vec<Value> {
+        (0..8)
+            .map(|slot| {
+                let sort = round * 8 + slot;
+                json!({"PutRequest": {"Item": heavy_item("hot", sort, &payload)}})
+            })
+            .collect()
+    };
+    let mut handed_back: Vec<Value> = Vec::new();
+    let mut rounds = 0usize;
+    for round in 0..8usize {
+        let answered = ok(
+            &router,
+            "BatchWriteItem",
+            json!({"TableName": "HotBatch",
+                   "RequestItems": {"HotBatch": batch_of(round)},
+                   "ReturnConsumedCapacity": "TOTAL"}),
+        )
+        .await;
+        rounds = round + 1;
+        handed_back = answered["UnprocessedItems"]["HotBatch"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if !handed_back.is_empty() {
+            assert!(
+                handed_back.len() < 8,
+                "case one key in a stream of batches, round {round}: the ceiling admits what \
+                 it can and hands the rest back, got {answered}"
+            );
+            break;
+        }
+    }
     assert!(
-        !handed_back.is_empty() && handed_back.len() < 4,
-        "case one key in one batch: the ceiling admits some writes and hands the rest \
-         back, got {answered}"
+        !handed_back.is_empty(),
+        "case one key in a stream of batches: the key's ceiling bounds the sustained rate, \
+         so a stream past it must hand something back, {rounds} rounds landed whole"
     );
     // Every operation the response handed back is absent from the store, and every one it
     // did not is there: `UnprocessedItems` is "in the same form as RequestItems", so the
@@ -1086,13 +1107,13 @@ async fn a_batch_hands_back_the_writes_the_ceilings_did_not_admit() {
                 .expect("the handed-back request carries its sort key")
         })
         .collect();
-    for sort in 0..4usize {
+    for sort in 0..rounds * 8 {
         let present = stored(&router, "HotBatch", "hot", sort).await;
         assert_eq!(
             present,
             !unprocessed_sorts.contains(&sort),
-            "case one key in one batch, write {sort}: a handed-back write stores nothing \
-             and an admitted one is stored, got {answered}"
+            "case one key in a stream of batches, write {sort}: a handed-back write stores \
+             nothing and an admitted one is stored, the residue held {unprocessed_sorts:?}"
         );
     }
 

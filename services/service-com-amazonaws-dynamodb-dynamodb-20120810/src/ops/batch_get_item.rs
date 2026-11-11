@@ -378,10 +378,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             let mut withheld: Vec<crate::state::Item> = Vec::new();
             let mut accesses: Vec<crate::state::contributor_insights::KeyAccess> = Vec::new();
             for key_map in &requested_keys.keys {
+                // A READ states a clause about a value it was handed as the sentence it
+                // is, outside the `<N> validation error(s) detected: ` envelope
+                // ([`crate::state::unenveloped`]).
                 for (attribute, value) in key_map {
-                    crate::state::check_attribute_value(attribute, value).map_err(lift)?;
+                    crate::state::check_attribute_value(attribute, value)
+                        .map_err(crate::state::unenveloped)
+                        .map_err(lift)?;
                 }
-                let key = table.key_of_key_map(key_map).map_err(lift)?;
+                let key = table
+                    .key_of_key_map(key_map)
+                    .map_err(crate::state::unenveloped)
+                    .map_err(lift)?;
                 if !keyed.insert((name.clone(), key.clone())) {
                     return Err(crate::scaffolded::Scaffolded::validation(
                         crate::state::DUPLICATE_BATCH_KEYS_MESSAGE,

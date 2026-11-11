@@ -491,6 +491,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )));
             }
         }
+        // "Edits an existing item's attributes, OR ADDS A NEW ITEM to the table if it
+        // does not already exist" (this operation's doc): an update that STATES clauses
+        // adds the item at its key only where one of those clauses gave it a value, so an
+        // update whose every clause only takes something away — removing an attribute, or
+        // taking members out of a set — adds nothing at all when the key holds no item,
+        // and `ReturnValues` then has no item to report. The key attributes are what the
+        // update started from rather than anything it wrote, so an item carrying nothing
+        // else is an item no clause gave a value to. An update that states NO clause is
+        // the one that adds the key's item without writing into it
+        // ([`crate::state::ParsedUpdate::states_no_action`]).
+        let creates_nothing = before.is_none()
+            && !update.states_no_action()
+            && item.keys().all(|attribute| {
+                attribute.as_str() == partition_key.as_str()
+                    || Some(attribute.as_str()) == sort_key.as_deref()
+            });
 
         // The result is held to the same bounds a `PutItem` of it would be: the
         // documented 32 levels of nesting, this emulator's collection-member ceiling
@@ -522,12 +538,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // The write is ADMITTED before it lands, against the capacity the table is
         // provisioned for and the per-partition-key ceiling beneath it: a write neither
-        // covers is throttled and leaves nothing behind.
+        // covers is throttled and leaves nothing behind. An update that adds no item is
+        // still a write the call is charged for, so it is admitted from the same budgets
+        // as one that stores something.
         let (capacity, throttle) = {
             let table = store
                 .active_table_mut(&region, &name, now)
                 .map_err(lift)?;
-            let capacity = table.write_capacity(before.as_ref(), Some(&item));
+            let capacity = table.write_capacity(
+                before.as_ref(),
+                (!creates_nothing).then_some(&item),
+            );
             let throttle = table
                 .admit_item_write(&key.partition, &capacity, now)
                 .err();
@@ -558,17 +579,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
-        store
-            .put_item(&region, &name, now, key, item.clone())
-            .map_err(lift)?;
+        if !creates_nothing {
+            store
+                .put_item(&region, &name, now, key, item.clone())
+                .map_err(lift)?;
+        }
 
         // Both figures are read back from the table the write landed in, so the
         // capacity fan-out and the item-collection size are computed from stored state:
         // the table is charged for the larger of the two versions of the item, and each
         // index only for the ones this update actually moved.
         let table = store.active_table(&region, &name, now).map_err(lift)?;
-        let item_collection_metrics =
-            report_item_collection.then(|| table.item_collection_metrics(&item));
+        let item_collection_metrics = (report_item_collection && !creates_nothing)
+            .then(|| table.item_collection_metrics(&item));
         // The change this write made reaches the table's stream before the response
         // does, so a consumer that reads the stream after seeing this answer sees it.
         crate::state::publish_item_changes(&*self.engine, &mut store, now);
@@ -577,7 +600,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             attributes: crate::state::projected_return_values(
                 Some(return_values),
                 before.as_ref(),
-                Some(&item),
+                (!creates_nothing).then_some(&item),
                 &touched,
             ),
             consumed_capacity: crate::state::consumed_write_capacity(

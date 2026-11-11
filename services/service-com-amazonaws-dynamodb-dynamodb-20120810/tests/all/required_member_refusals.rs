@@ -380,8 +380,8 @@ async fn a_table_listing_states_its_page_size_clause_before_its_cursor_clause() 
 /// gives a key of `TableArn`, length 1..1024).
 ///
 /// `quoted` is the map the clause states as the value it refused, which `BatchGetItem`
-/// renders as the JSON the request carried and `BatchWriteItem` states none of
-/// (`request_shape_validation_classes` spans that rule).
+/// renders as the JSON the request carried and `BatchWriteItem` as the request
+/// validator's own object form (`request_shape_validation_classes` spans that rule).
 fn map_key_clause(quoted: Option<&str>) -> String {
     let value = match quoted {
         Some(rendered) => format!("Value '{rendered}' at"),
@@ -448,9 +448,18 @@ async fn a_request_items_key_that_addresses_no_table_is_refused_as_a_map_key() {
             json!({"RequestItems": {key: [{"PutRequest": {"Item": {"pk": {"S": "one"}}}}]}}),
         )
         .await;
+        let written = format!(
+            "{{{key}=[WriteRequest(putRequest=PutRequest(item={{pk=AttributeValue(s=one, \
+             n=null, b=null, iNT=null, dECIMAL=null, dOUBLE=null, sS=null, nS=null, bS=null, \
+             iNTSET=null, dECIMALSET=null, dOUBLESET=null, m=null, l=null, nULL=null, \
+             bOOL=null)}}, workloadProfileName=null), deleteRequest=null)]}}"
+        );
         assert_eq!(
             (code.as_str(), stated.as_str()),
-            ("ValidationException", map_key_clause(None).as_str()),
+            (
+                "ValidationException",
+                map_key_clause(Some(&written)).as_str()
+            ),
             "case {case:?} (BatchWriteItem): expected the map-key clause, got {code} with \
              {stated:?}"
         );

@@ -35,9 +35,12 @@
 //! nothing — so a hot partition key is throttled while the same rate spread over many
 //! keys is served. How much capacity a table has left decides HOW MANY of a batch's
 //! requests land, not WHETHER the call gets anything done: while nothing has landed, the
-//! request in hand may be served from capacity BORROWED against the budget's own refill
-//! ([`crate::state::Table::admit_item_write_with_progress`]), so every call answers at
-//! once with a residue its caller can resend and the documented drain loop converges.
+//! request in hand may be served from capacity BORROWED against the budget's own refill,
+//! and once something has landed the internal per-partition-key ceiling may still lend
+//! ([`crate::state::Table::admit_item_write_with_progress`]), so a batch of small writes
+//! aimed at one partition key lands whole with an empty `UnprocessedItems` and every call
+//! answers at once with a residue its caller can resend, so the documented drain loop
+//! converges.
 //! Borrowed units are charged in full and repay at the provisioned rate, and the
 //! borrowing is bounded, so a caller that keeps writing past what its table is
 //! provisioned for runs that allowance out: from then on a batch of writes the budget
@@ -291,12 +294,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .map_err(lift)?;
 
-        // "up to 25 item put or delete operations": the ceiling is on the OPERATIONS,
+        // "up to 25 item put or delete operations", and "a map of ONE OR MORE table
+        // names": the bound the model declares for this member is on the OPERATIONS,
         // counted across every table the request grouped them under, so a batch that
-        // spreads 26 writes over two tables is refused as well.
+        // spreads 26 writes over two tables is refused as well, and so is one that asks
+        // for no operation at all ([`crate::state::batch_write_requests_outside_bound`]).
         let requested: usize = input.request_items.values().map(Vec::len).sum();
-        if requested > crate::state::MAX_BATCH_WRITE_REQUESTS {
-            return Err(lift(crate::state::too_many_batch_items("BatchWriteItem")));
+        if let Some(refusal) =
+            crate::state::batch_write_requests_outside_bound(&input.request_items, requested)
+        {
+            return Err(lift(refusal));
         }
 
         // WHO this request speaks for, resolved before this service's store is locked
@@ -315,10 +322,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut keyed: std::collections::BTreeSet<(String, crate::state::ItemKey)> =
             std::collections::BTreeSet::new();
         for (table_name, requests) in addressed {
-            // The clause a refused key earns states no value here: the recorded one quotes
-            // a rendering nothing reachable from the model produces
-            // ([`crate::state::batch_table_key`]).
-            let name = crate::state::batch_table_key(table_name, &region, || None).map_err(lift)?;
+            // The clause a refused key earns quotes the map that key sat in, in the
+            // rendering the refusals of this member state
+            // ([`crate::state::rendered_batch_write_request_items`]).
+            let name = crate::state::batch_table_key(table_name, &region, || {
+                Some(crate::state::rendered_batch_write_request_items(
+                    &input.request_items,
+                ))
+            })
+            .map_err(lift)?;
             // The table and the caller's authorization for it are decided BEFORE any of
             // its requests is read: a table that is not there, or that the policies in
             // force do not let this caller write, is answered with that rather than with
@@ -432,23 +444,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                             table.write_capacity(before.as_ref(), None)
                         }
                     };
-                    // While the batch has stored NOTHING, the request in hand is the one
-                    // that makes the call make progress: the capacity the table has left
-                    // decides how many of the batch's requests land, not whether the call
-                    // got anything done, so a request the budgets are merely short for is
-                    // served from capacity borrowed against their own refill — charged in
-                    // full, bounded, and repaid at the provisioned rate. Once something
-                    // has landed, the rest of the batch is held to the capacity that is
-                    // actually there.
-                    if processed == 0 {
-                        table.admit_item_write_with_progress(
-                            &write.key().partition,
-                            &capacity,
-                            now,
-                        )
+                    // The capacity a table has left decides how many of the batch's
+                    // requests land, not whether the call got anything done: a request
+                    // the budgets are merely SHORT for is served from capacity borrowed
+                    // against their own refill — charged in full, bounded, and repaid at
+                    // the rate in force. While the batch has stored NOTHING the request
+                    // in hand may borrow against BOTH ceilings, because it is the one
+                    // that makes the call make progress; once something has landed the
+                    // rest of the batch is held to the capacity the table is actually
+                    // provisioned for, and only the internal per-partition-key ceiling
+                    // may still lend — which is what makes a batch of small writes aimed
+                    // at one partition key land whole and hand nothing back
+                    // ([`crate::state::Table::admit_item_write_with_progress`]).
+                    let borrowing = if processed == 0 {
+                        crate::state::Borrowing::BothCeilings
                     } else {
-                        table.admit_item_write(&write.key().partition, &capacity, now)
-                    }
+                        crate::state::Borrowing::PartitionCeiling
+                    };
+                    table.admit_item_write_with_progress(
+                        &write.key().partition,
+                        &capacity,
+                        now,
+                        borrowing,
+                    )
                 };
                 if let Err(throttle) = admitted {
                     throttled = Some((name.clone(), throttle));

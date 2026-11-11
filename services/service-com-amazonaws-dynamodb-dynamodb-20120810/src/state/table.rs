@@ -221,7 +221,10 @@ impl Table {
                 // The numeric rules (38 significant digits, the documented exponent
                 // range, and this emulator's own numeric-text limit) are the same ones
                 // every `N` value in a request is held to; the refusal names the one
-                // this text broke.
+                // this text broke, inside the validation envelope this service states a
+                // clause about a value a request carried in. A READ states it bare, as
+                // it does every other refusal about a value it was handed
+                // ([`unenveloped`] is where each reader does that).
                 NumberKey::try_parse(text).map_err(|fault| number_rejection(text, fault))?,
             ),
             (_, actual) => {
@@ -368,10 +371,11 @@ impl Table {
     /// item's own business.
     ///
     /// A missing key attribute is refused the way the service words it for an ITEM —
-    /// "One of the required keys was not given a value" — which is not how it words the
-    /// same gap in a `Key`-shaped member (see [`Self::key_of_key_map`]).
+    /// "One or more parameter values were invalid: Missing the key <name> in the item",
+    /// which NAMES the attribute ([`missing_item_key_message`]) — and that is not how it
+    /// words the same gap in a `Key`-shaped member (see [`Self::key_of_key_map`]).
     pub fn key_of_item(&self, item: &Item) -> Result<ItemKey, RequestError> {
-        self.key_from(item, KeySource::Item)
+        self.key_from(item, KeySource::Item).map_err(Into::into)
     }
 
     /// The primary key of an item ONE ELEMENT of a batched or transactional write
@@ -386,7 +390,7 @@ impl Table {
     /// ([`Self::key_of_item`]), and a `Key`-shaped member of either surface is read
     /// through [`Self::key_of_key_map`], which states the same mismatch sentence.
     pub fn key_of_multi_item(&self, item: &Item) -> Result<ItemKey, RequestError> {
-        self.key_from(item, KeySource::MultiItem)
+        self.key_from(item, KeySource::MultiItem).map_err(Into::into)
     }
 
     /// The primary key named by a `Key` member: exactly the key attributes, no more.
@@ -396,22 +400,42 @@ impl Table {
     /// attribute it omits, a key attribute of another type — is the one mismatch
     /// AWS states with [`KEY_SCHEMA_MISMATCH_MESSAGE`].
     pub fn key_of_key_map(&self, key: &Item) -> Result<ItemKey, RequestError> {
-        self.key_of_map(key, KeySource::Key)
+        self.key_of_map(key, KeySource::Key).map_err(Into::into)
     }
 
     /// The primary key a paging member (`ExclusiveStartKey`) resumes from: read
     /// through the same key schema as a `Key`, and refused as the INVALID RESUME
     /// TOKEN it is when it is not a key of that schema ([`START_KEY_INVALID_MESSAGE`]).
     pub fn key_of_start_key(&self, key: &Item) -> Result<ItemKey, RequestError> {
-        self.key_of_map(key, KeySource::StartKey)
+        self.key_of_map(key, KeySource::StartKey).map_err(Into::into)
+    }
+
+    /// The primary key of the ITEM a transactional `Put` carries, with WHICH side
+    /// decided a refusal of it ([`KeyRefusal`]).
+    ///
+    /// The same walk and the same sentences as [`Self::key_of_multi_item`]; what the
+    /// caller also learns is whether the key was refused against the table's key schema
+    /// or against the request's own shape, which is what decides whether the transaction
+    /// cancels that element or refuses the call.
+    pub fn key_of_transact_item(&self, item: &Item) -> Result<ItemKey, KeyRefusal> {
+        self.key_from(item, KeySource::MultiItem)
+    }
+
+    /// The primary key named by the `Key` member of a transactional `Delete`,
+    /// `ConditionCheck` or `Update`, with WHICH side decided a refusal of it
+    /// ([`KeyRefusal`]) — the classified half of [`Self::key_of_key_map`].
+    pub fn key_of_transact_key_map(&self, key: &Item) -> Result<ItemKey, KeyRefusal> {
+        self.key_of_map(key, KeySource::Key)
     }
 
     /// The one walk a `Key`-shaped map is read through, whichever member carried it:
     /// exactly the key attributes the schema declares, with their declared types.
-    fn key_of_map(&self, key: &Item, source: KeySource) -> Result<ItemKey, RequestError> {
+    fn key_of_map(&self, key: &Item, source: KeySource) -> Result<ItemKey, KeyRefusal> {
         for name in key.keys() {
             if name != self.partition_key_name() && Some(name.as_str()) != self.sort_key_name() {
-                return Err(source.mismatch());
+                // A map carrying an attribute that is no key of this schema is not
+                // shaped like a key, which is the request's own defect.
+                return Err(KeyRefusal::Request(source.mismatch()));
             }
         }
         self.key_from(key, source)
@@ -420,12 +444,14 @@ impl Table {
     /// The one walk over the key schema both `Key` and `Item` are read through:
     /// each declared key attribute is taken from `supplied` and encoded, and
     /// `source` decides only how a missing or wrongly-typed element is WORDED.
-    fn key_from(&self, supplied: &Item, source: KeySource) -> Result<ItemKey, RequestError> {
+    fn key_from(&self, supplied: &Item, source: KeySource) -> Result<ItemKey, KeyRefusal> {
         let mut partition = None;
         let mut sort = None;
         for element in &self.key_schema {
             let name = element.attribute_name.as_str();
-            let value = supplied.get(name).ok_or_else(|| source.absent())?;
+            let value = supplied
+                .get(name)
+                .ok_or_else(|| KeyRefusal::Request(source.absent(name)))?;
             // Read out of a `Key`, an element of the wrong type does not name
             // this key either, so it is the same mismatch rather than a report
             // of the declared and the supplied type.
@@ -434,9 +460,11 @@ impl Table {
                     .declared_type(name)
                     .is_some_and(|declared| declared != attribute_value_type(value))
             {
-                return Err(source.mismatch());
+                return Err(KeyRefusal::Schema(source.mismatch()));
             }
-            let encoded = self.key_value(name, value)?;
+            let encoded = self
+                .key_value(name, value)
+                .map_err(|error| self.classified_key_value_refusal(name, value, error))?;
             if element.key_type == "HASH" {
                 partition = Some(encoded);
             } else {
@@ -444,9 +472,33 @@ impl Table {
             }
         }
         Ok(ItemKey {
-            partition: partition.ok_or_else(|| source.mismatch())?,
+            partition: partition
+                .ok_or_else(|| KeyRefusal::Request(source.mismatch()))?,
             sort,
         })
+    }
+
+    /// WHICH side decided the refusal [`Self::key_value`] raised for one key attribute.
+    ///
+    /// The two classes the SCHEMA decides are read back through the very checks that
+    /// raise them, so nothing about a type or a size is restated here: the declared type
+    /// of the attribute, and the limit of the role the schema gives it
+    /// ([`Self::check_key_limits`]). Everything else about a key value — a text that is
+    /// no number, an empty `S`/`B` value, a key attribute the table declares no type for
+    /// — is a fact of the value the request sent.
+    fn classified_key_value_refusal(
+        &self,
+        attribute: &str,
+        value: &AttributeValue,
+        error: RequestError,
+    ) -> KeyRefusal {
+        let typed_against_schema = self
+            .declared_type(attribute)
+            .is_some_and(|declared| declared != attribute_value_type(value));
+        if typed_against_schema || self.check_key_limits(attribute, value).is_err() {
+            return KeyRefusal::Schema(error);
+        }
+        KeyRefusal::Request(error)
     }
 
     /// Hold every SECONDARY-INDEX key attribute the item carries to the type the
@@ -1508,15 +1560,25 @@ impl Table {
     /// What this serves is the batch write surface, whose residue a caller is documented
     /// to resend ("you can provide this value directly to a subsequent BatchWriteItem
     /// operation"): the capacity a table has left decides HOW MANY of a batch's requests
-    /// land, not WHETHER the call got anything done, so a batch that could otherwise
-    /// store nothing stores the first request it can and hands the rest back — which is
+    /// land, not WHETHER the call got anything done, so a write the budgets are merely
+    /// short for can be served from borrowed capacity rather than handed back — which is
     /// what keeps that retry loop converging.
+    ///
+    /// WHICH ceiling may lend is `borrowing`, and the two differ because the two ceilings
+    /// are different promises. The capacity a table is PROVISIONED for is the rate its
+    /// caller asked for and is billed at, so only the request that makes the call make
+    /// progress at all is served ahead of it, and only by one partition-second of it
+    /// ([`progress_borrowing_allowance`]). The per-partition-key ceiling is the storage
+    /// layer's own, and it lends every request of a call what ONE call can ask of a
+    /// partition ([`batch_partition_borrowing_allowance`]), so a batch of writes aimed at
+    /// one partition key lands whole and hands nothing back, as it does on the real
+    /// service.
     ///
     /// The units borrowed are charged in full and repay at the rate in force, so the
     /// SUSTAINED rate either ceiling admits is exactly the rate it is provisioned for;
     /// and the borrowing is bounded ([`progress_borrowing_allowance`]), so a caller that
-    /// keeps writing past what its table is provisioned for runs the allowance out and
-    /// is refused from then on. Two writes are refused here as they are there: one past
+    /// keeps writing past either ceiling runs the allowance out and is refused from then
+    /// on. Two writes are refused here as they are there: one past
     /// what the ceilings can ever hold ([`Self::can_ever_admit_item_write`]), because no
     /// later attempt at it would be admitted either, and one whose shortfall is deeper
     /// than the allowance.
@@ -1525,6 +1587,7 @@ impl Table {
         partition: &AttributeValueKey,
         capacity: &WriteCapacity,
         now: SystemTime,
+        borrowing: Borrowing,
     ) -> Result<(), WriteThrottle> {
         let Err(throttle) = self.admit_item_write(partition, capacity, now) else {
             return Ok(());
@@ -1535,23 +1598,33 @@ impl Table {
         // Neither budget is borrowed from unless BOTH have the room to lend: a write
         // that is refused did no work, so it owes no capacity anywhere.
         let total = capacity.total();
-        let allowance = progress_borrowing_allowance();
         let provisioned = self.provisioned_write_rate();
         if let Some(provisioned) = provisioned {
-            if !self.write_budget.covers_borrowing(
-                provisioned,
-                BURST_CAPACITY_WINDOW,
-                total,
-                now,
-                allowance,
-            ) {
+            let covered = match borrowing {
+                Borrowing::BothCeilings => self.write_budget.covers_borrowing(
+                    provisioned,
+                    BURST_CAPACITY_WINDOW,
+                    total,
+                    now,
+                    progress_borrowing_allowance(),
+                ),
+                Borrowing::PartitionCeiling => self.write_budget.covers_within(
+                    provisioned,
+                    BURST_CAPACITY_WINDOW,
+                    total,
+                    now,
+                ),
+            };
+            if !covered {
                 return Err(WriteThrottle::TableProvisioned);
             }
         }
-        if !self
-            .key_write_budgets
-            .covers_borrowing(partition, capacity.table, now, allowance)
-        {
+        if !self.key_write_budgets.covers_borrowing(
+            partition,
+            capacity.table,
+            now,
+            batch_partition_borrowing_allowance(),
+        ) {
             return Err(WriteThrottle::KeyRange);
         }
         if let Some(provisioned) = provisioned {

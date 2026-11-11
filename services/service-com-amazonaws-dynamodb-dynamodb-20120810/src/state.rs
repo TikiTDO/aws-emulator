@@ -102,17 +102,34 @@ pub const ITEM_SIZE_EXCEEDED_MESSAGE: &str = "Item size has exceeded the maximum
 pub const KEY_SCHEMA_MISMATCH_MESSAGE: &str =
     "The provided key element does not match the schema";
 
-/// How an `Item` that omits a key attribute the schema declares is refused:
-/// AWS's FIXED sentence for that case, again naming no attribute.
-pub const MISSING_KEY_VALUE_MESSAGE: &str = "One of the required keys was not given a value";
+/// How an `Item` a SINGLE-item write carries is refused when it omits a key
+/// attribute the schema declares: the clause every refusal of a parameter value in
+/// this service opens with ([`INVALID_PARAMETER_CLAUSE`]) over AWS's fixed sentence
+/// for that defect, which NAMES the key attribute the item gave no value for.
+///
+/// An `Item` is the whole item rather than a key, so the refusal is about the key
+/// the item did not carry — which is the same template the type mismatch on that
+/// path states (`Type mismatch for key <name> expected: <T> actual: <T>`), with the
+/// attribute name taken from the table's key schema. A `Key`-shaped member states
+/// the one mismatch sentence instead ([`KEY_SCHEMA_MISMATCH_MESSAGE`]).
+pub fn missing_item_key_message(attribute: &str) -> String {
+    format!("{INVALID_PARAMETER_CLAUSE}: Missing the key {attribute} in the item")
+}
+
+/// How an `ExclusiveStartKey` that does not give a value for every key attribute of the
+/// schema being paged is refused: a resume token is not an item selector — a caller gets
+/// it from the previous page's `LastEvaluatedKey` — so AWS states the TOKEN invalid, in
+/// this one fixed sentence that names neither the attribute nor the schema.
+pub const START_KEY_INCOMPLETE_MESSAGE: &str = "The provided starting key is invalid";
 
 /// How an `ExclusiveStartKey` that is not a key of the schema being paged is
-/// refused. A resume token is not an item selector: a caller gets it from the
-/// previous page's `LastEvaluatedKey`, so AWS states the TOKEN invalid and then
+/// refused. It names attributes that schema does not declare as its key, or one
+/// of a type it does not declare for it, so AWS states the TOKEN invalid and then
 /// says WHY after a colon — the same key-schema sentence a `Key` member is
 /// refused with ([`KEY_SCHEMA_MISMATCH_MESSAGE`]), which is what tells the caller
 /// its token's attributes are not this schema's key rather than the token being
-/// malformed. Both halves are fixed text, naming no attribute of either side.
+/// incomplete ([`START_KEY_INCOMPLETE_MESSAGE`]). Both halves are fixed text,
+/// naming no attribute of either side.
 pub const START_KEY_INVALID_MESSAGE: &str =
     "The provided starting key is invalid: The provided key element does not match the schema";
 
@@ -124,8 +141,9 @@ pub const START_KEY_INVALID_MESSAGE: &str =
 /// mismatch; an `Item` a SINGLE-item write carries is the whole item, so a key
 /// attribute it does not carry is reported as the value it did not give, and one
 /// of another type as the mismatch between the two types; an `ExclusiveStartKey`
-/// is a resume token, so any way it differs from the schema makes it an invalid
-/// token; and the item an element of a BATCHED or TRANSACTIONAL write carries is
+/// is a resume token, so a key attribute it gives no value for leaves it
+/// INCOMPLETE and anything else about it makes it an invalid token; and the item
+/// an element of a BATCHED or TRANSACTIONAL write carries is
 /// held to the schema as a whole, so every way it differs from it is the one
 /// mismatch sentence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,11 +156,14 @@ enum KeySource {
 
 impl KeySource {
     /// How this source words a key attribute the schema declares and the
-    /// request did not carry.
-    fn absent(self) -> RequestError {
+    /// request did not carry, named by that attribute.
+    fn absent(self, attribute: &str) -> RequestError {
         match self {
-            Self::Item => RequestError::Validation(MISSING_KEY_VALUE_MESSAGE.to_string()),
-            Self::MultiItem | Self::Key | Self::StartKey => self.mismatch(),
+            Self::Item => RequestError::Validation(missing_item_key_message(attribute)),
+            Self::StartKey => {
+                RequestError::Validation(START_KEY_INCOMPLETE_MESSAGE.to_string())
+            }
+            Self::MultiItem | Self::Key => self.mismatch(),
         }
     }
 
@@ -469,6 +490,27 @@ pub const PARTITION_BURST_WINDOW: Duration = Duration::from_secs(1);
 /// sustained rate a table admits.
 fn progress_borrowing_allowance() -> f64 {
     burst_ceiling(PARTITION_WRITE_UNITS_PER_SECOND, PARTITION_BURST_WINDOW)
+}
+
+/// How far ahead of its own refill the PER-PARTITION-KEY ceiling may be drawn by ONE
+/// batch write ([`Table::admit_item_write_with_progress`]).
+///
+/// The most capacity one `BatchWriteItem` can ask of a single partition: its documented
+/// ceiling of operations ([`MAX_BATCH_WRITE_REQUESTS`]), each writing an item up to the
+/// documented maximum size ([`MAX_ITEM_SIZE_BYTES`]), charged a unit per KB. A batch is
+/// ONE call, and AWS serves a batch of writes aimed at one partition key whole rather
+/// than handing part of it back — "the failed operations are returned in the
+/// UnprocessedItems response parameter" is about the throughput a table RUNS OUT of, and
+/// a partition absorbs a call's worth of writes out of the credit it accumulates — so
+/// lending a call exactly what one call can ask for is what makes a batch inside the
+/// rate this ceiling sustains come back with an empty `UnprocessedItems`.
+///
+/// Borrowed units are charged in full and repay at [`PARTITION_WRITE_UNITS_PER_SECOND`],
+/// so the SUSTAINED rate one partition key admits is still that rate: a caller that keeps
+/// batching past it runs the allowance out and is throttled from then on.
+fn batch_partition_borrowing_allowance() -> f64 {
+    write_capacity_units(MAX_ITEM_SIZE_BYTES)
+        * f64::from(u32::try_from(MAX_BATCH_WRITE_REQUESTS).unwrap_or(u32::MAX))
 }
 
 /// How many partition key values one table keeps a write budget for at a time.
@@ -2020,6 +2062,19 @@ impl KeyWriteBudgets {
             }
         }
     }
+}
+
+/// Which ceiling a batch's write may be served from BORROWED capacity, when the one it
+/// asks for is more than that ceiling has left
+/// ([`Table::admit_item_write_with_progress`] states why the two differ).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Borrowing {
+    /// Both of them: the request in hand is the one that makes the whole call make
+    /// progress, so the capacity the table is provisioned for may lend too.
+    BothCeilings,
+    /// The per-partition-key ceiling alone, which is the storage layer's own rather than
+    /// the rate the table was provisioned for.
+    PartitionCeiling,
 }
 
 /// Why the write path refused a write: WHICH of the ceilings a write is admitted from

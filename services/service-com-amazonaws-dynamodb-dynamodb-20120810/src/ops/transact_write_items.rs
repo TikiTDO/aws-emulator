@@ -379,6 +379,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // no table to decide, so it stays a request-level refusal and [`lift`]
             // answers it directly.
             let keying = |error| cancelled_by_element(at, elements, error);
+            // A bad KEY is answered by the side that decided it: the table's own key
+            // schema cancels this element, the request's shape refuses the call
+            // ([`refused_key`]).
+            let keyed_by = |refusal| refused_key(at, elements, refusal);
             // The name this element addresses, resolved in the pass above.
             let name = names[at].clone();
             let substitutions = crate::state::Substitutions::new(
@@ -411,7 +415,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     table.check_index_key_values(&item).map_err(lift)?;
                     table.check_vector_attributes(&item).map_err(lift)?;
                     Prepared {
-                        key: table.key_of_multi_item(&item).map_err(keying)?,
+                        key: table.key_of_transact_item(&item).map_err(keyed_by)?,
                         addressed: item.clone(),
                         write: PlannedWrite::Put(item),
                     }
@@ -420,7 +424,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     let table = store.active_table(&region, &name, now).map_err(lift)?;
                     deny(&caller, table, action, now)?;
                     Prepared {
-                        key: table.key_of_key_map(&delete.key).map_err(lift)?,
+                        key: table.key_of_transact_key_map(&delete.key).map_err(keyed_by)?,
                         addressed: delete.key.clone(),
                         write: PlannedWrite::Delete,
                     }
@@ -429,7 +433,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     let table = store.active_table(&region, &name, now).map_err(lift)?;
                     deny(&caller, table, action, now)?;
                     Prepared {
-                        key: table.key_of_key_map(&check.key).map_err(lift)?,
+                        key: table.key_of_transact_key_map(&check.key).map_err(keyed_by)?,
                         addressed: check.key.clone(),
                         write: PlannedWrite::Check,
                     }
@@ -448,7 +452,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .map_err(lift)?;
                     let table = store.active_table(&region, &name, now).map_err(lift)?;
                     deny(&caller, table, action, now)?;
-                    let key = table.key_of_key_map(&update.key).map_err(lift)?;
+                    let key = table.key_of_transact_key_map(&update.key).map_err(keyed_by)?;
                     let partition_key = table.partition_key_name().to_string();
                     let sort_key = table.sort_key_name().map(ToString::to_string);
                     // An update of a key that holds no item starts from the key itself,
@@ -469,10 +473,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                             // What the update may change is decided against the TABLE's
                             // own key schema, so it is this element the transaction
                             // refuses and the answer is that element's cancellation
-                            // ([`cancelled_by_element`]).
+                            // ([`cancelled_by_element`]), carrying the sentence the
+                            // single-item `UpdateItem` states for the same defect.
                             return Err(keying(crate::state::RequestError::Validation(format!(
-                                "Cannot update attribute {attribute}. This attribute is part \
-                                 of the key"
+                                "{}: Cannot update attribute {attribute}. This attribute is \
+                                 part of the key",
+                                crate::state::INVALID_PARAMETER_CLAUSE
                             ))));
                         }
                     }
@@ -491,10 +497,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         .check_index_key_values_of_update(&item)
                         .map_err(lift)?;
                     table.check_vector_attributes(&item).map_err(lift)?;
+                    // An update that wrote nothing into a key that holds no item adds no
+                    // item, exactly as the single-item `UpdateItem` of the same
+                    // expression does: what the key holds afterwards is what one of the
+                    // update's clauses gave it a value for, and the key attributes it
+                    // started from are not that.
+                    let adds_nothing = !applied.states_no_action()
+                        && !store
+                            .active_table(&region, &name, now)
+                            .map_err(lift)?
+                            .items
+                            .contains_key(&key)
+                        && item.keys().all(|attribute| {
+                            attribute.as_str() == partition_key.as_str()
+                                || Some(attribute.as_str()) == sort_key.as_deref()
+                        });
                     Prepared {
                         key,
                         addressed: item.clone(),
-                        write: PlannedWrite::Update(item),
+                        write: if adds_nothing {
+                            PlannedWrite::Nothing
+                        } else {
+                            PlannedWrite::Update(item)
+                        },
                     }
                 }
             };
@@ -575,12 +600,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         for action in &planned {
             let after = match &action.write {
                 PlannedWrite::Put(item) | PlannedWrite::Update(item) => Some(item.clone()),
-                PlannedWrite::Check | PlannedWrite::Delete => None,
+                PlannedWrite::Check | PlannedWrite::Delete | PlannedWrite::Nothing => None,
             };
-            if matches!(action.write, PlannedWrite::Check) {
-                // A `ConditionCheck` writes nothing, so it lands in no item collection;
-                // it is still part of the transactional write, and it reads one item,
-                // so the table is charged for that item and no index is.
+            if matches!(action.write, PlannedWrite::Check | PlannedWrite::Nothing) {
+                // A `ConditionCheck`, and an `Update` that adds no item, write nothing,
+                // so neither lands in an item collection; both are still part of the
+                // transactional write and both read one item, so the table is charged for
+                // that item and no index is.
                 ledger.record(
                     &action.table,
                     &crate::state::WriteCapacity {
@@ -792,6 +818,21 @@ impl<'a> Requested<'a> {
         }
     }
 
+    /// Whether the map [`Self::addressed`] answers is a `Key` — the primary key the
+    /// action addresses an item BY — rather than the whole `Item` a `Put` writes.
+    ///
+    /// A refusal about a value in an ELEMENT's `Key` is stated as the sentence it is,
+    /// outside the `<N> validation error(s) detected: ` envelope: the member it is about
+    /// belongs to that ELEMENT rather than to the request, which is the same rule this
+    /// service already states for an element's expression members
+    /// ([`crate::state::refused_in_element`]). The `Item` a `Put` carries is the item the
+    /// transaction WRITES, held to the value rules a written item is held to everywhere,
+    /// so a refusal about one of its attribute values keeps the envelope the single-item
+    /// writes state it in.
+    fn addresses_key(&self) -> bool {
+        !matches!(self, Self::Put(_))
+    }
+
     /// The IAM action this one performs, which is the action a table's resource-based
     /// policy is read for: a transaction performs the item actions of the operations it
     /// is made of, and `dynamodb:ConditionCheckItem` for a `ConditionCheck`.
@@ -910,8 +951,19 @@ fn check_element_shape(
     // so the element is held to them before any table is looked up; the item an `Update`
     // LEAVES is read against the stored one, so it is held to the same rules where it is
     // computed.
+    // The clause a value in an ELEMENT's `Key` earns is stated as the sentence it is: the
+    // member is that element's, not the request's, which is the rule this service states
+    // for every refusal about an element's own members ([`Requested::addresses_key`]).
     for (attribute, value) in action.addressed() {
-        crate::state::check_attribute_value(attribute, value).map_err(lift)?;
+        crate::state::check_attribute_value(attribute, value)
+            .map_err(|error| {
+                if action.addresses_key() {
+                    crate::state::unenveloped(error)
+                } else {
+                    error
+                }
+            })
+            .map_err(lift)?;
     }
     if let Requested::Put(put) = action {
         let mut item = put.item.clone();
@@ -1056,6 +1108,8 @@ enum PlannedWrite {
     Delete,
     /// The item an `Update` leaves at its key.
     Update(crate::state::Item),
+    /// An `Update` that wrote nothing into a key that held no item, which adds none.
+    Nothing,
 }
 
 /// The modelled server error for a request that cannot reach this service's store.
@@ -1083,7 +1137,8 @@ fn lift(error: crate::state::RequestError) -> TransactWriteItemsError {
 
 /// Report a refusal the transaction decided for ONE element — the item it writes
 /// carrying a key attribute of a type the table does not declare, for its own key schema
-/// or for a secondary index's — as the cancellation it is.
+/// or for a secondary index's, or a key value past the size limit of the role that schema
+/// gives it — as the cancellation it is.
 ///
 /// "All of which must either succeed or fail": an element the transaction itself
 /// refuses when it prepares that element's item against the TABLE's schema cancels the
@@ -1091,10 +1146,10 @@ fn lift(error: crate::state::RequestError) -> TransactWriteItemsError {
 /// [`crate::state::cancelled_by_element_reasons`] builds — the documented reason shape,
 /// shared with every other transactional operation — wrapped in this operation's error.
 /// A refusal about the REQUEST rather than about the item as the table's schema sees it
-/// — a `Key` member that does not name this table's key attributes, a key value that is
-/// empty or past its size limit, an item addressed twice, an entry naming no operation,
+/// — a key attribute the element supplied no value for, a value that is no value of its
+/// own type, an empty key value, an item addressed twice, an entry naming no operation,
 /// a table that is not there — is still answered directly, which is what [`lift`] does
-/// with it.
+/// with it ([`crate::state::KeyRefusal`] is which of the two a bad key is).
 fn cancelled_by_element(
     at: usize,
     elements: usize,
@@ -1110,4 +1165,18 @@ fn cancelled_by_element(
         cancellation_reasons: Some(cancellation_reasons),
     })
     .into()
+}
+
+/// How the element at `at` answers a bad key: the cancellation its table's key schema
+/// decided, or the request-level refusal its own shape earned
+/// ([`crate::state::KeyRefusal`] owns which is which).
+fn refused_key(
+    at: usize,
+    elements: usize,
+    refusal: crate::state::KeyRefusal,
+) -> TransactWriteItemsError {
+    if refusal.cancels() {
+        return cancelled_by_element(at, elements, refusal.into_error());
+    }
+    lift(refusal.into_error())
 }

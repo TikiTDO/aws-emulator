@@ -315,25 +315,31 @@ fn stated_enum_order(allowed: &[String]) -> Vec<String> {
 // =============================================================================
 // WHICH FORM A CONSTRAINT CLAUSE TAKES
 //
-// DynamoDB states a clause about a member's declared bound in one of two forms:
+// DynamoDB states a clause about a member's declared bound in one of three forms:
 //
 //   * the ITEM-REQUEST form, which names the member by its WIRE spelling and
 //     echoes NO value — `Value at 'Limit' failed to satisfy constraint: Member
 //     must have value greater than or equal to 1` for a `Query` page size below
 //     its `@range` minimum, and `Value at 'RequestItems.<table>.member.Keys' …`
 //     for a batched key list past its cap;
-//   * the REQUEST-VALIDATOR form, which names the member by the lowerCamel path
-//     that validator builds and DOES echo the rejected value — `Value '0' at
+//   * the VALIDATOR-PATH form, which echoes no value either but names the member
+//     by the lowerCamel path the request validator builds — `Value at
+//     'requestItems' …` for a `BatchWriteItem` request map past either end of its
+//     `@length` bound;
+//   * the REQUEST-VALIDATOR form, which names the member by that same lowerCamel
+//     path and DOES echo the rejected value — `Value '0' at
 //     'limit' …` for a backup listing's page size, `Value '26' at 'maxResults'
 //     …` for an export listing's, `Value '' at
 //     'timeToLiveSpecification.attributeName' …` for an empty TTL attribute name.
 //
-// Both forms are observed for the SAME violation class on the SAME member name
-// (`Limit`, `@range` min 1, on `Query` and on `ListBackups`), so nothing about
+// All three are observed for the SAME violation class on the SAME member name
+// (`Limit`, `@range` min 1, on `Query` and on `ListBackups`; `RequestItems`,
+// `@length` min 1, on `BatchGetItem` and on `BatchWriteItem`), so nothing about
 // the model or about the violation distinguishes them: only the OPERATION being
-// served does, which is why [`ITEM_REQUEST_FORM_OPERATIONS`] lists the operations
-// whose refusals are observed to take the first form and every other operation
-// takes the second. [`OperationScopedClauseForm`] is how the served operation
+// served does, which is why [`ITEM_REQUEST_FORM_OPERATIONS`] and
+// [`VALIDATOR_PATH_FORM_OPERATIONS`] list the operations whose refusals are
+// observed to take the first two forms and every other operation takes the last.
+// [`OperationScopedClauseForm`] is how the served operation
 // reaches [`Service::override_refusal`], which the framework hands no request.
 //
 // TWO CLASSES ARE NOT PART OF THAT CHOICE, because neither is found by a
@@ -360,25 +366,69 @@ fn stated_enum_order(allowed: &[String]) -> Vec<String> {
 /// `item_request_form_operations_are_sorted` pins.
 const ITEM_REQUEST_FORM_OPERATIONS: &[&str] = &[
     "BatchGetItem",
-    "BatchWriteItem",
     "Query",
     "TransactGetItems",
     "TransactWriteItems",
 ];
 
-/// Which of the two forms above a clause names its member and its value by.
+/// The operations that echo NO value either, and name the member by the VALIDATOR's
+/// lowerCamel path rather than its wire spelling.
+///
+/// A third form, observed for `BatchWriteItem`: its `RequestItems` map past either end of
+/// its declared bound is reported as `Value at 'requestItems' failed to satisfy
+/// constraint: …`, where the SAME violation class on `BatchGetItem`'s map of the same
+/// name is reported as `Value at 'RequestItems' …`. Nothing about the model or the
+/// violation distinguishes the two — one member name, one trait, two spellings — so, like
+/// the split above, only the OPERATION being served does, and this is the only place that
+/// is recorded. `tests/all/collection_cap_constraint_reports.rs` pins the two operations'
+/// spellings side by side.
+///
+/// The form is stated per OPERATION rather than per member because `requestItems` is the
+/// only member of that operation a clause raised HERE can name. `BatchWriteItemInput`
+/// declares that map and the two `ReturnConsumedCapacity`/`ReturnItemCollectionMetrics`
+/// enums (`smithy_query(query="operation", operation="BatchWriteItem")`), and a value
+/// outside an enumerated member's set keeps the reader's own rendering whichever form was
+/// served; nothing NESTED under the map reaches this seam either — the write-request list
+/// inside each entry is bounded by the HANDLER over the operations the whole map carries
+/// (`crate::state::batch_write_requests_outside_bound`), and the map's KEY is the
+/// service's own table-name check (`crate::state::batch_table_key`), neither of which is a
+/// violation the validating walk reports.
+/// `tests/all/collection_cap_constraint_reports.rs` pins both of those beside the
+/// top-level member's spelling.
+///
+/// Sorted, for the reason the list above is.
+const VALIDATOR_PATH_FORM_OPERATIONS: &[&str] = &["BatchWriteItem"];
+
+/// Which of the forms above a clause names its member and its value by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClauseForm {
     /// The member as the model spells it on the wire, with no value echoed.
     WireMemberOnly,
+    /// The validator's lowerCamel path, with no value echoed.
+    ValidatorMemberOnly,
     /// The validator's lowerCamel path, with the rejected value echoed.
     PathAndValue,
+}
+
+impl ClauseForm {
+    /// The path a clause in this form names `path` by.
+    fn stated_path(self, path: &str) -> String {
+        match self {
+            Self::WireMemberOnly => wire_member_path(path),
+            Self::ValidatorMemberOnly | Self::PathAndValue => path.to_string(),
+        }
+    }
 }
 
 /// The form `operation`'s refusals take.
 fn clause_form(operation: &str) -> ClauseForm {
     if ITEM_REQUEST_FORM_OPERATIONS.binary_search(&operation).is_ok() {
         ClauseForm::WireMemberOnly
+    } else if VALIDATOR_PATH_FORM_OPERATIONS
+        .binary_search(&operation)
+        .is_ok()
+    {
+        ClauseForm::ValidatorMemberOnly
     } else {
         ClauseForm::PathAndValue
     }
@@ -501,18 +551,20 @@ impl<Eng: Send + Sync + 'static> ErasedOperation for OperationScopedClauseForm<E
 /// A COLLECTION member past its cap is a clause like any other: in the item-request
 /// form the member and the bound, with nothing echoed. Some recorded AWS refusals of a
 /// capped collection — the transactional `TransactItems` lists — instead echo the
-/// rejected list as AWS's OWN internal object rendering
+/// rejected list as the service's OWN object rendering of it
 /// (`[TransactGetItem(get=Get(key={pk=AttributeValue(s=k0, n=null, …,
 /// iNT=null, dECIMALSET=null, …)}, …, workloadProfileName=null)), …]`), over
-/// members this service's model does not declare:
+/// fields this service's model does not declare:
 /// `smithy_query(query="shape", shape="com.amazonaws.dynamodb#AttributeValue")`
 /// gives `S N B SS NS BS M L NULL BOOL` and no `iNT`/`dECIMALSET`, and `Get`
-/// and `Put` carry no `workloadProfileName`. No rule reachable from the model
-/// or the docs renders that text, two recorded refusals of the SAME violation
-/// class (a `BatchGetItem` key list past the same 100 cap) state the
-/// no-value, wire-path form this function builds, and the framework hands this
-/// seam a count rather than the collection — so the clause states what is
-/// derivable: the member and the bound it broke.
+/// and `Put` carry no `workloadProfileName`. Those clauses are NOT rendered here, for a
+/// reason about this seam rather than about the rendering: the framework hands it a count
+/// (`<n> items`) rather than the collection, so there is nothing to render FROM — while
+/// the one member whose refusal this service does quote is reported by the HANDLER, which
+/// has the request in hand (`crate::state::rendered_batch_write_request_items`, the frame
+/// those fields belong to). Two recorded refusals of the SAME violation class (a
+/// `BatchGetItem` key list past the same 100 cap) state the no-value form this function
+/// builds, so a clause raised here states what it has: the member and the bound it broke.
 /// `tests/all/collection_cap_constraint_reports.rs` pins that over the capped
 /// collections of the batched and transactional operations.
 fn violation_clause(violation: &Violation, form: ClauseForm) -> Option<String> {
@@ -545,11 +597,13 @@ fn violation_clause(violation: &Violation, form: ClauseForm) -> Option<String> {
         // `@pattern`, `@uniqueItems` — in the served operation's form.
         _ => match form {
             ClauseForm::PathAndValue => Some(as_stated(violation).message()),
-            ClauseForm::WireMemberOnly => Some(crate::state::constraint_clause(
-                &wire_member_path(&violation.path),
-                None,
-                &requirement(&violation.kind)?,
-            )),
+            ClauseForm::WireMemberOnly | ClauseForm::ValidatorMemberOnly => {
+                Some(crate::state::constraint_clause(
+                    &form.stated_path(&violation.path),
+                    None,
+                    &requirement(&violation.kind)?,
+                ))
+            }
         },
     }
 }
@@ -865,6 +919,7 @@ mod tests {
     use super::{
         clause_form, stated_enum_order, states_service_checked_clause_bare, ClauseForm,
         BARE_CLAUSE_OPERATIONS, ITEM_REQUEST_FORM_OPERATIONS, PUBLISHED_ENUM_ORDERS,
+        VALIDATOR_PATH_FORM_OPERATIONS,
     };
 
     /// The admissible sets as the walk hands them over.
@@ -955,14 +1010,15 @@ mod tests {
 
     #[test]
     fn item_request_form_operations_are_sorted() {
-        let mut sorted = ITEM_REQUEST_FORM_OPERATIONS.to_vec();
-        sorted.sort_unstable();
-        assert_eq!(
-            ITEM_REQUEST_FORM_OPERATIONS,
-            sorted.as_slice(),
-            "case the item-request list: expected it sorted for `binary_search`, got \
-             {ITEM_REQUEST_FORM_OPERATIONS:?}"
-        );
+        for list in [ITEM_REQUEST_FORM_OPERATIONS, VALIDATOR_PATH_FORM_OPERATIONS] {
+            let mut sorted = list.to_vec();
+            sorted.sort_unstable();
+            assert_eq!(
+                list,
+                sorted.as_slice(),
+                "case the clause-form list {list:?}: expected it sorted for `binary_search`"
+            );
+        }
     }
 
     #[test]
@@ -973,6 +1029,14 @@ mod tests {
                 form,
                 ClauseForm::WireMemberOnly,
                 "case {operation:?}: expected the item-request form, got {form:?}"
+            );
+        }
+        for operation in VALIDATOR_PATH_FORM_OPERATIONS {
+            let form = clause_form(operation);
+            assert_eq!(
+                form,
+                ClauseForm::ValidatorMemberOnly,
+                "case {operation:?}: expected the validator-path form, got {form:?}"
             );
         }
         for operation in [

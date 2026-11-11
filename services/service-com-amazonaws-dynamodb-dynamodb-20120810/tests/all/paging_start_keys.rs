@@ -31,6 +31,12 @@ use crate::emulator::{call, emulator, error_code, message, ok};
 const START_KEY_INVALID: &str =
     service_com_amazonaws_dynamodb_dynamodb_20120810::state::START_KEY_INVALID_MESSAGE;
 
+/// The sentence AWS states for a starting key that gives no value for a key attribute the
+/// schema declares, which leaves the token INCOMPLETE rather than a key of some other
+/// schema.
+const START_KEY_INCOMPLETE: &str =
+    service_com_amazonaws_dynamodb_dynamodb_20120810::state::START_KEY_INCOMPLETE_MESSAGE;
+
 /// The sentence AWS states for a `Key` MEMBER that is not the table's primary key, which
 /// the paged reads must NOT borrow.
 const KEY_SCHEMA_MISMATCH: &str =
@@ -161,9 +167,10 @@ async fn a_starting_key_that_is_not_a_key_of_the_schema_is_an_invalid_token() {
 
     // Rows differ in HOW the token fails to name a key of the schema: an attribute the
     // schema does not declare, an extra attribute beside the key, a key attribute of
-    // another type, a key attribute that is no scalar at all, an omitted key attribute,
-    // and an empty map. Each is refused the same way, whichever of the two paged reads
-    // carries it and whichever key schema the table declares.
+    // another type, and a key attribute that is no scalar at all. Each is refused the same
+    // way, whichever of the two paged reads carries it and whichever key schema the table
+    // declares. A token that merely gives no value for a key attribute is INCOMPLETE
+    // rather than a key of another schema, and states the other sentence (below).
     let simple_tokens: Vec<(&str, Value)> = vec![
         (
             "an attribute the schema does not declare",
@@ -181,17 +188,8 @@ async fn a_starting_key_that_is_not_a_key_of_the_schema_is_an_invalid_token() {
             "the key attribute as a set",
             json!({"Part": {"SS": ["p0"]}}),
         ),
-        ("no attribute at all", json!({})),
     ];
     let composite_tokens: Vec<(&str, Value)> = vec![
-        (
-            "only the partition key of a composite schema",
-            json!({"Part": {"S": "one"}}),
-        ),
-        (
-            "only the sort key of a composite schema",
-            json!({"Sort": {"N": "1"}}),
-        ),
         (
             "the sort key as a string",
             json!({"Part": {"S": "one"}, "Sort": {"S": "1"}}),
@@ -222,6 +220,39 @@ async fn a_starting_key_that_is_not_a_key_of_the_schema_is_an_invalid_token() {
                      got {status} with {body}"
                 );
             }
+        }
+    }
+
+    // A token that gives no value for a key attribute the schema declares is INCOMPLETE:
+    // there is nothing about it that names another schema's key, so the refusal states the
+    // token invalid and nothing more. The rows span an empty map, a composite schema's
+    // partition key alone and its sort key alone.
+    for (table, case, token) in [
+        ("TokensSimple", "no attribute at all", json!({})),
+        (
+            "TokensComposite",
+            "only the partition key of a composite schema",
+            json!({"Part": {"S": "one"}}),
+        ),
+        (
+            "TokensComposite",
+            "only the sort key of a composite schema",
+            json!({"Sort": {"N": "1"}}),
+        ),
+    ] {
+        for operation in ["Query", "Scan"] {
+            let mut request = json!({"TableName": table, "ExclusiveStartKey": token.clone()});
+            if operation == "Query" {
+                request["KeyConditionExpression"] = json!("Part = :p");
+                request["ExpressionAttributeValues"] = json!({":p": {"S": "one"}});
+            }
+            let (status, body) = call(&router, operation, request.clone()).await;
+            assert_eq!(
+                (status, error_code(&body).as_str(), message(&body).as_str()),
+                (400, "ValidationException", START_KEY_INCOMPLETE),
+                "case {case:?} on {operation} over {table}: the token is refused as \
+                 incomplete, got {status} with {body}"
+            );
         }
     }
 

@@ -256,11 +256,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The key activity each `Get` makes — `(table, contributor keys, units)` — attributed
         // once the transaction is settled ([`record_key_activity`]).
         let mut key_activity: Vec<GetKeyActivity> = Vec::with_capacity(input.transact_items.len());
-        for (requested, projected) in input.transact_items.iter().zip(&projections) {
+        for (at, (requested, projected)) in
+            input.transact_items.iter().zip(&projections).enumerate()
+        {
             let name = crate::state::resolve_table_name_in(&requested.get.table_name, &region)
                 .map_err(lift)?;
+            // A refusal about the value the `Key` carried is stated as the sentence it
+            // is: this is a READ, and a read states a clause about a value it was handed
+            // outside the `<N> validation error(s) detected: ` envelope
+            // ([`crate::state::unenveloped`]).
             for (attribute, value) in &requested.get.key {
-                crate::state::check_attribute_value(attribute, value).map_err(lift)?;
+                crate::state::check_attribute_value(attribute, value)
+                    .map_err(crate::state::unenveloped)
+                    .map_err(lift)?;
             }
             let table = store.active_table(&region, &name, now).map_err(lift)?;
             // A table the policies in force do not let this caller read answers the
@@ -280,7 +288,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // transaction is rejected" when any part of it cannot be served
             // ([`crate::state::check_table_key_accessible`]).
             crate::state::check_table_key_accessible(&*self.engine, table).map_err(lift)?;
-            let key = table.key_of_key_map(&requested.get.key).map_err(lift)?;
+            // A key the TABLE's key schema does not admit — a type it does not declare
+            // for that attribute, a value past the size limit of the role it gives it —
+            // is decided against that table, so it is a refusal OF THIS ELEMENT and the
+            // transaction cancels with the documented `ValidationError` reason; a member
+            // that is not shaped like a key at all is the request's own defect and
+            // refuses the call ([`crate::state::KeyRefusal`] is which of the two).
+            let key = table
+                .key_of_transact_key_map(&requested.get.key)
+                .map_err(|refusal| refused_key(at, input.transact_items.len(), refusal))?;
             if !keyed.insert((name.clone(), key.clone())) {
                 return Err(crate::scaffolded::Scaffolded::validation(
                     crate::state::DUPLICATE_TRANSACT_ITEM_MESSAGE,
@@ -407,5 +423,40 @@ fn lift(error: crate::state::RequestError) -> TransactGetItemsError {
         crate::state::RequestError::Validation(message) => {
             crate::scaffolded::Scaffolded::validation(message)
         }
+    }
+}
+
+/// How the element at `at` answers a bad key: the cancellation its table's key schema
+/// decided, or the request-level refusal its own shape earned
+/// ([`crate::state::KeyRefusal`] owns which is which).
+///
+/// "The entire transaction is rejected" when any part of it cannot be served, and an
+/// element the transaction itself refuses while preparing it against the TABLE is
+/// reported as that element's cancellation reason — the documented reason shape
+/// [`crate::state::cancelled_by_element_reasons`] builds, shared with the transactional
+/// WRITE, so one defect is reported one way on both transactional surfaces.
+fn refused_key(
+    at: usize,
+    elements: usize,
+    refusal: crate::state::KeyRefusal,
+) -> TransactGetItemsError {
+    if !refusal.cancels() {
+        return lift(refusal.into_error());
+    }
+    match refusal.into_error() {
+        crate::state::RequestError::Validation(message) => {
+            let (message, cancellation_reasons) =
+                crate::state::cancelled_by_element_reasons(at, elements, &message);
+            TransactGetItemsErrorModeled::TransactionCanceledException(
+                TransactionCanceledException {
+                    message: Some(message),
+                    cancellation_reasons: Some(cancellation_reasons),
+                },
+            )
+            .into()
+        }
+        // A key the schema does not admit is a validation refusal; any other refusal is
+        // answered as the refusal it is.
+        other => lift(other),
     }
 }

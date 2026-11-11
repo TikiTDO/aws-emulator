@@ -16,6 +16,13 @@
 //! rule. The rows span the defect, the key's role in the schema, the supplied type and the
 //! surface.
 //!
+//! WHICH ANSWER states that sentence inside a transaction follows the side that decided
+//! it: a key the TABLE's key schema does not admit — a type it does not declare for that
+//! attribute, a value past the size limit of the role it gives it — cancels the element
+//! (RULE 3), while a member that is not shaped like a key at all — a key attribute the
+//! element supplied no value for, an empty key value — is the request's own defect and
+//! refuses the call.
+//!
 //! RULE 2 — an empty `S`/`B` value in a secondary index key is refused either way, and the
 //! sentence depends on HOW it arrived: an item a write carried names the index and the
 //! index key, while an UPDATE that would leave one empty names the update as what
@@ -52,9 +59,11 @@ const TABLE: &str = "Catalog";
 /// The one key-schema sentence a key that is not the table's primary key is refused with.
 const KEY_SCHEMA_MISMATCH: &str = "The provided key element does not match the schema";
 
-/// The clause a cancellation reason opens with ("Code: ValidationError, Message: One or
-/// more parameter values were invalid" — the `TransactWriteItems` doc's own list of
-/// cancellation reason codes), which the detail of the defect follows.
+/// The clause a cancellation reason opens with when the sentence it carries is about a
+/// parameter VALUE ("Code: ValidationError, Message: One or more parameter values were
+/// invalid" — the `TransactWriteItems` doc's own list of cancellation reason codes). A
+/// reason states the SAME sentence the single-item path states for the same defect, so a
+/// sentence that does not open with this clause does not gain it.
 const CANCELLATION_CLAUSE: &str = "One or more parameter values were invalid";
 
 /// Create [`TABLE`] and wait out the `CREATING` -> `ACTIVE` transition the clock owes it.
@@ -110,19 +119,21 @@ async fn refusal(router: &MultiServiceRouter, case: &str, operation: &str, body:
     message(&answered)
 }
 
-/// Call `operation`, require the transaction to be CANCELLED, and answer the
-/// `CancellationReasons` codes beside the message of the reason at `at`.
+/// Call the transactional `operation`, require the transaction to be CANCELLED, and
+/// answer the `CancellationReasons` codes beside the message of the reason at `at`.
 async fn cancellation(
     router: &MultiServiceRouter,
     case: &str,
+    operation: &str,
     body: Value,
     at: usize,
 ) -> (Vec<String>, String) {
-    let (status, answered) = call(router, "TransactWriteItems", body).await;
+    let (status, answered) = call(router, operation, body).await;
     assert_eq!(
         (status, error_code(&answered).as_str()),
         (400, "TransactionCanceledException"),
-        "case {case:?}: expected the transaction cancelled, got {status} with {answered}"
+        "case {case:?} ({operation}): expected the transaction cancelled, got {status} with \
+         {answered}"
     );
     let reasons = answered["CancellationReasons"]
         .as_array()
@@ -159,47 +170,76 @@ async fn a_multi_item_key_defect_states_the_one_key_schema_sentence() {
     let router = emulator();
     create_indexed_table(&router).await;
 
-    // Each row: the case and the item the element carries. They span the defect (a key
-    // attribute omitted, a key attribute of another type), the key's ROLE in the schema
-    // (partition and sort), the supplied type (`N`, `B`, a set, a map) and an item that
-    // breaks both halves at once.
-    let rows: Vec<(&str, Value)> = vec![
+    // Each row: the case, the item the element carries, the sentence the defect earns, and
+    // whether a TRANSACTION cancels for it (the table's key schema decided it) or refuses
+    // the request (the element is not shaped like a key). They span the defect (a key
+    // attribute omitted, one of another type, one whose value is empty), the key's ROLE in
+    // the schema (partition and sort), the supplied type (`N`, `B`, a set, a map) and an
+    // item that breaks both halves at once.
+    let empty_key_value = "One or more parameter values are not valid. The AttributeValue for a \
+                           key attribute cannot contain an empty string value. Key: pk";
+    let rows: Vec<(&str, Value, &str, bool)> = vec![
         (
             "an item omitting the sort key",
             item(&[("pk", json!({"S": "k"}))]),
+            KEY_SCHEMA_MISMATCH,
+            false,
         ),
         (
             "an item omitting the partition key",
             item(&[("sk", json!({"S": "s"}))]),
+            KEY_SCHEMA_MISMATCH,
+            false,
         ),
         (
             "an item omitting both key attributes",
             item(&[("note", json!({"S": "plain"}))]),
+            KEY_SCHEMA_MISMATCH,
+            false,
+        ),
+        (
+            // An empty key VALUE is its own documented refusal, which names the key it was
+            // supplied for rather than the schema.
+            "an item whose only key attribute carries an empty value",
+            item(&[("pk", json!({"S": ""})), ("sk", json!({"S": "s"}))]),
+            empty_key_value,
+            false,
         ),
         (
             "a partition key supplied as a number",
             item(&[("pk", json!({"N": "7"})), ("sk", json!({"S": "s"}))]),
+            KEY_SCHEMA_MISMATCH,
+            true,
         ),
         (
             "a sort key supplied as a number",
             item(&[("pk", json!({"S": "k"})), ("sk", json!({"N": "7"}))]),
+            KEY_SCHEMA_MISMATCH,
+            true,
         ),
         (
             "a partition key supplied as binary",
             item(&[("pk", json!({"B": "AQI="})), ("sk", json!({"S": "s"}))]),
+            KEY_SCHEMA_MISMATCH,
+            true,
         ),
         (
             "a sort key supplied as a string set",
             item(&[("pk", json!({"S": "k"})), ("sk", json!({"SS": ["s"]}))]),
+            KEY_SCHEMA_MISMATCH,
+            true,
         ),
         (
             "a partition key supplied as a map, the sort key omitted",
             item(&[("pk", json!({"M": {"inner": {"S": "s"}}}))]),
+            KEY_SCHEMA_MISMATCH,
+            true,
         ),
     ];
 
-    for (case, carried) in rows {
-        // The batched surface refuses the whole request with that sentence.
+    for (case, carried, stated_defect, cancels) in rows {
+        // The batched surface refuses the whole request with that sentence, whichever of
+        // the two defects it was.
         let stated = refusal(
             &router,
             case,
@@ -207,30 +247,35 @@ async fn a_multi_item_key_defect_states_the_one_key_schema_sentence() {
             json!({"RequestItems": {TABLE: [{"PutRequest": {"Item": carried.clone()}}]}}),
         )
         .await;
+        let expected_batch = stated_defect.to_string();
         assert_eq!(
-            stated, KEY_SCHEMA_MISMATCH,
-            "case {case:?} (BatchWriteItem): expected {KEY_SCHEMA_MISMATCH:?}, got {stated:?}"
+            stated, expected_batch,
+            "case {case:?} (BatchWriteItem): expected {expected_batch:?}, got {stated:?}"
         );
 
-        // The transactional one decides it about the element's item against the table's
-        // schema, so it is that element's cancellation reason — carrying the same
-        // sentence behind the documented reason clause.
-        let (codes, reason) = cancellation(
-            &router,
-            case,
-            json!({"TransactItems": [
-                {"Put": {"TableName": TABLE, "Item": carried.clone()}},
-            ]}),
-            0,
-        )
-        .await;
+        let transaction = json!({"TransactItems": [
+            {"Put": {"TableName": TABLE, "Item": carried.clone()}},
+        ]});
+        if !cancels {
+            // The element is not shaped like a key, which is a fact of the REQUEST: the
+            // call is refused and nothing is cancelled.
+            let stated = refusal(&router, case, "TransactWriteItems", transaction).await;
+            assert_eq!(
+                stated, expected_batch,
+                "case {case:?} (TransactWriteItems): expected {expected_batch:?}, got {stated:?}"
+            );
+            continue;
+        }
+        // The table's own key schema decided it, so it is that element's cancellation
+        // reason — carrying the same sentence behind the documented reason clause.
+        let (codes, reason) = cancellation(&router, case, "TransactWriteItems", transaction, 0).await;
         assert_eq!(
             codes,
             vec!["ValidationError".to_string()],
             "case {case:?} (TransactWriteItems): expected the element named ValidationError, got \
              {codes:?}"
         );
-        let expected = format!("{CANCELLATION_CLAUSE}: {KEY_SCHEMA_MISMATCH}");
+        let expected = KEY_SCHEMA_MISMATCH.to_string();
         assert_eq!(
             reason, expected,
             "case {case:?} (TransactWriteItems): expected {expected:?}, got {reason:?}"
@@ -246,6 +291,9 @@ async fn a_key_member_of_every_surface_states_the_same_sentence() {
     // A `Key` IS the primary key, so every way it differs from the schema is the same
     // sentence — on the single-item surfaces and inside the batched and transactional
     // ones. The rows span the operation, the defect and the member the key arrived in.
+    // The transactional WRITE's `Key` members are not here: a type the table's schema
+    // does not declare is decided against that table, so the element cancels with that
+    // same sentence (`a_transactional_key_the_schema_does_not_admit_cancels_the_element`).
     let bad_key = json!({"pk": {"S": "k"}, "sk": {"N": "7"}});
     let rows: Vec<(&str, &str, Value)> = vec![
         (
@@ -287,21 +335,16 @@ async fn a_key_member_of_every_surface_states_the_same_sentence() {
             json!({"RequestItems": {TABLE: {"Keys": [bad_key.clone()]}}}),
         ),
         (
-            "a transactional delete's key",
+            "a transactional write's key omitting the sort key",
             "TransactWriteItems",
-            json!({"TransactItems": [{"Delete": {"TableName": TABLE, "Key": bad_key.clone()}}]}),
+            json!({"TransactItems": [{"Delete": {
+                "TableName": TABLE, "Key": {"pk": {"S": "k"}}}}]}),
         ),
         (
-            "a transactional condition check's key",
-            "TransactWriteItems",
-            json!({"TransactItems": [{"ConditionCheck": {
-                "TableName": TABLE, "Key": bad_key.clone(),
-                "ConditionExpression": "attribute_exists(pk)"}}]}),
-        ),
-        (
-            "a transactional get's key",
+            "a transactional get's key omitting the sort key",
             "TransactGetItems",
-            json!({"TransactItems": [{"Get": {"TableName": TABLE, "Key": bad_key.clone()}}]}),
+            json!({"TransactItems": [{"Get": {
+                "TableName": TABLE, "Key": {"pk": {"S": "k"}}}}]}),
         ),
     ];
 
@@ -310,6 +353,87 @@ async fn a_key_member_of_every_surface_states_the_same_sentence() {
         assert_eq!(
             stated, KEY_SCHEMA_MISMATCH,
             "case {case:?} ({operation}): expected {KEY_SCHEMA_MISMATCH:?}, got {stated:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_transactional_key_the_schema_does_not_admit_cancels_the_element() {
+    let router = emulator();
+    create_indexed_table(&router).await;
+
+    // The `Key`-shaped members of a transactional WRITE, each carrying a key the TABLE's
+    // key schema does not admit: a sort key of a type it does not declare, and a partition
+    // key one byte past the size limit of the role it plays in that schema. Deciding
+    // either needs the table, so each is the element's own cancellation under the
+    // documented `ValidationError` code rather than a refusal of the request. The rows
+    // span the action the key arrived in and which half of the schema refused it.
+    let bad_key = json!({"pk": {"S": "k"}, "sk": {"N": "7"}});
+    // "The maximum length of any partition key value is 2048 bytes" ("Service, Account,
+    // and Table Quotas"), so this is one byte past it.
+    let oversize_key = json!({"pk": {"S": "x".repeat(2049)}, "sk": {"S": "s"}});
+    let rows: Vec<(&str, &str, Value, &str)> = vec![
+        (
+            "a transactional delete's wrong-typed sort key",
+            "TransactWriteItems",
+            json!({"TransactItems": [{"Delete": {"TableName": TABLE, "Key": bad_key.clone()}}]}),
+            KEY_SCHEMA_MISMATCH,
+        ),
+        (
+            "a transactional condition check's wrong-typed sort key",
+            "TransactWriteItems",
+            json!({"TransactItems": [{"ConditionCheck": {
+                "TableName": TABLE, "Key": bad_key.clone(),
+                "ConditionExpression": "attribute_exists(pk)"}}]}),
+            KEY_SCHEMA_MISMATCH,
+        ),
+        (
+            "a transactional update's wrong-typed sort key",
+            "TransactWriteItems",
+            json!({"TransactItems": [{"Update": {
+                "TableName": TABLE, "Key": bad_key.clone(),
+                "UpdateExpression": "SET note = :v",
+                "ExpressionAttributeValues": {":v": {"S": "x"}}}}]}),
+            KEY_SCHEMA_MISMATCH,
+        ),
+        (
+            "a transactional delete's oversize partition key",
+            "TransactWriteItems",
+            json!({"TransactItems": [{"Delete": {
+                "TableName": TABLE, "Key": oversize_key.clone()}}]}),
+            // The size sentence is itself a refusal of a parameter value, so it carries
+            // the clause the documented reason opens with.
+            "One or more parameter values were invalid: Size of hashkey has exceeded the \
+             maximum size limit of2048 bytes",
+        ),
+        (
+            // The same two keys read out of a transactional GET, which is the other
+            // transactional surface: one defect, one answer.
+            "a transactional get's wrong-typed sort key",
+            "TransactGetItems",
+            json!({"TransactItems": [{"Get": {"TableName": TABLE, "Key": bad_key.clone()}}]}),
+            KEY_SCHEMA_MISMATCH,
+        ),
+        (
+            "a transactional get's oversize partition key",
+            "TransactGetItems",
+            json!({"TransactItems": [{"Get": {
+                "TableName": TABLE, "Key": oversize_key.clone()}}]}),
+            "One or more parameter values were invalid: Size of hashkey has exceeded the \
+             maximum size limit of2048 bytes",
+        ),
+    ];
+
+    for (case, operation, request, detail) in rows {
+        let (codes, reason) = cancellation(&router, case, operation, request, 0).await;
+        assert_eq!(
+            codes,
+            vec!["ValidationError".to_string()],
+            "case {case:?}: expected the element named ValidationError, got {codes:?}"
+        );
+        assert_eq!(
+            reason, detail,
+            "case {case:?}: expected {detail:?}, got {reason:?}"
         );
     }
 }
@@ -604,6 +728,7 @@ async fn a_transactional_update_of_a_key_attribute_cancels_the_transaction() {
         let (stated_codes, reason) = cancellation(
             &router,
             case,
+            "TransactWriteItems",
             json!({"TransactItems": elements.clone()}),
             at,
         )

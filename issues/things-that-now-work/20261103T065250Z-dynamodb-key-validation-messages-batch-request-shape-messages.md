@@ -20,6 +20,67 @@ Issue-Commit: ce4f28f15b4841beefbad6c596b9d2158570753e
 
 # DynamoDB key-validation messages, batch request-shape messages, and 4 item-op behaviour defects (REMOVE creates an item, spurious UnprocessedItems)
 
+## Resolution
+
+Causes 1, 3, 4 and 5 are fixed, and cause 2's accepted-shape half is addressed; 9 of the
+13 checks this issue names now pass:
+
+- a single-item write names the key its `Item` gave no value for ("One or more parameter
+  values were invalid: Missing the key `<name>` in the item"), while the batched and
+  transactional surfaces keep the one key-schema sentence;
+- WHICH side decided a bad key now decides the answer inside a transaction: a key the
+  TABLE's key schema does not admit (a type it does not declare, a value past the size
+  limit of the role it plays) cancels that element with the documented `ValidationError`
+  reason — on `TransactWriteItems` and `TransactGetItems` alike — while a member that is
+  not shaped like a key refuses the call;
+- a cancellation reason states the sentence the single-item path states, with nothing
+  prepended to it;
+- a refusal about a VALUE a request carried carries the validation envelope on the
+  operations that WRITE an item and is the sentence alone on the ones that READ one;
+- an `UpdateItem` whose clauses give the key no value adds no item (a `REMOVE` on an
+  absent key is a no-op), while one that sets or adds an attribute, or that states no
+  clause at all, still adds it;
+- a `BatchWriteItem` of writes aimed at one partition key lands whole: the per-partition
+  ceiling lends one call what one call can ask of a partition, so `UnprocessedItems` comes
+  back empty for a batch inside the rate it sustains;
+- an `ExclusiveStartKey` whose sort key the key condition's comparison excludes is refused
+  with "The provided starting key does not match the range key predicate", and one that
+  gives no value for a key attribute with "The provided starting key is invalid";
+- `BatchWriteItem` holds the WRITE REQUESTS its `RequestItems` carries to the model's 1..25
+  bound (so an empty map, and a map whose tables were all given empty lists, are refused
+  rather than answered with an empty residue), reports it over the member path the request
+  validator builds, and quotes the submitted map in the object rendering the recorded
+  refusals of that member carry.
+
+Four checks still fail, each on a recorded expectation the replay withholds:
+
+- `dynamodb.batch-request-shape-defects-rejected` — the empty-`RequestItems` clause. Three
+  renderings were tried against the recording and all three diverge: the valueless clause
+  this issue quotes as AWS's, the same clause quoting `'{}'`, and the wire-spelled member
+  path. The replay reports only what the emulator answered, so the recorded text cannot be
+  recovered from here; the clause left in place is the one this issue quotes.
+- `dynamodb.batch-write-over-25-rejected` — the over-25 clause now renders the submitted
+  map in the object form, and matches the recorded expectation for every byte the replay
+  discloses (it is truncated inside the first `AttributeValue`); what differs past that
+  point is not visible.
+- `dynamodb.validation-messages-are-customer-intelligible` — one `BatchWriteItem` shape AWS
+  refuses is still served. The replay names neither the shape nor the message; the one
+  shape this change could identify (a map carrying no write request) is now refused and is
+  not it.
+- `dynamodb.restore-invalid-time` — the probe's pattern rejects the sentence this issue
+  quotes as recorded, and also rejects the same sentence with the window's bounds
+  interpolated as epoch seconds and as ISO-8601, and with the model's closing full stop.
+  The refusal left in place is the model's own published sentence for
+  `InvalidRestoreTimeException`.
+
+The hash-key size sentence this issue reports as missing a space is NOT changed: the
+recorded wire expectation in
+`issues/things-that-now-work/20261022T113745Z-dynamodb-requests-aws-rejects-are-accepted-oversize-key-attributes.md`
+states it as `… maximum size limit of2048 bytes`, so the recording disagrees with this
+issue's account and the recording is followed.
+
+`tests/all/key_refusal_classes_and_batch_bounds.rs` pins all of it over the wire.
+
 > _Note: this issue was identified against the code base at commit `ce4f28f15b4841beefbad6c596b9d2158570753e`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
 
 ## Operation

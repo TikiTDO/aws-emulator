@@ -1216,8 +1216,10 @@ async fn a_refusals_class_says_whether_the_transaction_was_cancelled() {
                     "ExpressionAttributeValues": {":one": {"N": "1"}},
                 }}),
             ],
-            code: "ValidationException",
-            reasons: None,
+            // A type the TABLE's key schema does not declare is decided against that
+            // table, so the element that carried it cancels the transaction.
+            code: "TransactionCanceledException",
+            reasons: Some(vec!["None", "ValidationError"]),
         },
         Row {
             case: "one item addressed twice",
@@ -1284,10 +1286,10 @@ async fn a_refusals_class_says_whether_the_transaction_was_cancelled() {
                     .as_str()
                     .unwrap_or_default()
                     .to_string();
-                assert!(
-                    message.starts_with("One or more parameter values were invalid"),
-                    "case {case}: the refused element's reason states the documented clause, \
-                     got {message:?}"
+                assert_eq!(
+                    message, "The provided key element does not match the schema",
+                    "case {case}: the refused element's reason states the sentence the \
+                     single-item path states for that defect, got {message:?}"
                 );
                 for (index, reason) in refused["CancellationReasons"]
                     .as_array()

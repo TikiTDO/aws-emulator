@@ -289,7 +289,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // not use leaves nothing this read could decrypt: the KMS fault is reported
             // rather than the item ([`crate::state::check_table_key_accessible`]).
             crate::state::check_table_key_accessible(&*self.engine, table).map_err(lift)?;
-            let key = table.key_of_key_map(&input.key).map_err(lift)?;
+            // A refusal about the value the `Key` carried is stated as the SENTENCE it
+            // is: a READ states a clause about a value it was handed outside the
+            // `<N> validation error(s) detected: ` envelope, which is the same split this
+            // service states everywhere else between the members a write states its
+            // intent through and the members a read is pointed at
+            // ([`crate::state::unenveloped`]).
+            let key = table
+                .key_of_key_map(&input.key)
+                .map_err(crate::state::unenveloped)
+                .map_err(lift)?;
             table.items.get(&key).cloned()
         };
 

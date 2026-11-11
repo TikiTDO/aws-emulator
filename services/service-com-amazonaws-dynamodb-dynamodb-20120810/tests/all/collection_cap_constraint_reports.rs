@@ -30,6 +30,12 @@
 //! `TransactWriteItemList` are `@length{min:1,max:100}`, `KeyList` and
 //! `BatchGetRequestMap` are `@length{min:1,max:100}`, and
 //! `BatchWriteItemRequestMap` and `WriteRequests` are `@length{min:1,max:25}`.
+//!
+//! WHICH SPELLING the member is named by is a property of the OPERATION, not of the
+//! member: `BatchGetItem` names its `RequestItems` map by the wire spelling and
+//! `BatchWriteItem` names the map of the same name by the lowerCamel path the request
+//! validator builds, so both are pinned here side by side (see "Which form a constraint
+//! clause takes" in `src/service.rs`).
 
 use serde_json::{json, Value};
 
@@ -217,13 +223,26 @@ async fn a_collection_outside_its_modelled_length_bound_is_reported_against_that
             "a batched write one past the 25-table cap",
             "BatchWriteItem",
             json!({"RequestItems": write_request_tables(26)}),
-            report("RequestItems", &at_most(25)),
+            report("requestItems", &at_most(25)),
         ),
         (
             "a batched write naming no table at all, one below the same map's minimum",
             "BatchWriteItem",
             json!({"RequestItems": {}}),
-            report("RequestItems", &at_least(1)),
+            report("requestItems", &at_least(1)),
+        ),
+        (
+            // The same member, the same bound and the same empty residue as the row
+            // above, reached by giving the one table it names an empty list: the bound is
+            // on the write requests the map carries, not on its entries.
+            "a batched write whose only table was given no request, below the same minimum",
+            "BatchWriteItem",
+            json!({"RequestItems": for_table(json!([]))}),
+            format!(
+                "1 validation error detected: Value '{{{TABLE}=[]}}' at 'requestItems' failed \
+                 to satisfy constraint: {}",
+                at_least(1)
+            ),
         ),
     ];
 
