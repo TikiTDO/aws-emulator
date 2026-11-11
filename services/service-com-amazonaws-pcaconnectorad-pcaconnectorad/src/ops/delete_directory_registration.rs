@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteDirectoryRegistration
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteDirectoryRegistration`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteDirectoryRegistration::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Deauthorizes this service with the Active Directory the addressed registration
+//! names: the registration moves to `DELETING` and then stops existing, after which
+//! every reporting operation refuses its ARN as a resource that is not there.
+//! `@idempotent`, so an ARN that is already gone is answered with the modelled 202
+//! rather than a refusal.
 //!
 //! ## Shape of an operation
 //!
@@ -176,18 +173,45 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteDirectoryRegistration` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteDirectoryRegistrationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteDirectoryRegistration"))
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                DeleteDirectoryRegistrationErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: "the pca-connector-ad state store is unavailable".to_string(),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        // Every move the clock already owes is materialised first, so a registration
+        // whose own deletion has come due is already gone when this delete looks for
+        // the ARN it addresses.
+        store.settle(now);
+
+        // @idempotent: an ARN this store holds no registration for is a success —
+        // the resource is not there, which is what the caller asked for — and a
+        // second delete of the same ARN leaves the removal the first one scheduled
+        // where it is rather than pushing it further out.
+        if let Some(record) = store
+            .directory_registrations
+            .get_mut(&input.directory_registration_arn)
+        {
+            if record.deleted_at.is_none() {
+                record.status = crate::state::DIRECTORY_REGISTRATION_STATUS_DELETING.to_string();
+                // `StatusReason` is "additional information about the directory
+                // registration status if the status is failed", so a registration
+                // being deleted carries none.
+                record.status_reason = None;
+                record.updated_at = now;
+                record.deleted_at =
+                    Some(now + crate::state::DIRECTORY_REGISTRATION_DELETION_DELAY);
+            }
+        }
+
+        Ok(DeleteDirectoryRegistrationOutput)
     }
 }

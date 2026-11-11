@@ -181,6 +181,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx);
         let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
+        // Every move the clock already owes is materialised before this create
+        // decides anything, so a registration whose deletion has come due is gone
+        // and the directory it held is free to be registered again.
+        store.settle(now);
 
         // @idempotencyToken: a retry carrying the ClientToken of an earlier call
         // names the registration that call minted, instead of refusing it as a
@@ -239,16 +243,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let arn = crate::state::directory_registration_arn(&region, &input.directory_id);
         let seq = store.next_seq();
+        // Whether the directory this registration authorizes is one the account
+        // holds, asked of the plane that creates directories: a registration whose
+        // directory is not there terminates in FAILED instead of ACTIVE. Read while
+        // this service's own store is held, which is the lock order every reader of
+        // that inventory keeps.
+        let (terminal_status, terminal_status_reason) =
+            crate::state::directory_registration_outcome(&*self.engine, &input.directory_id);
         let record = crate::state::DirectoryRegistrationRecord {
             arn: arn.clone(),
             directory_id: input.directory_id,
             // A registration AWS answers 202 for is not authorized yet; the clock
-            // owes it the move to ACTIVE at `active_at`.
+            // owes it the move to its terminal status at `settles_at`.
             status: crate::state::DIRECTORY_REGISTRATION_STATUS_CREATING.to_string(),
             status_reason: None,
             created_at: now,
             updated_at: now,
-            active_at: now + crate::state::DIRECTORY_REGISTRATION_ACTIVATION_DELAY,
+            settles_at: now + crate::state::DIRECTORY_REGISTRATION_ACTIVATION_DELAY,
+            terminal_status,
+            terminal_status_reason,
+            deleted_at: None,
             tags: input.tags.unwrap_or_default(),
             seq,
         };

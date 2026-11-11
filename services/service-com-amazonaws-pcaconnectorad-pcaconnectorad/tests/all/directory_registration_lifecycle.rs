@@ -7,9 +7,14 @@
 //! Every case drives the real wire path through [`super::harness`] — the same
 //! `MultiServiceRouter::dispatch` the production front door uses — so routing,
 //! `@httpLabel` binding, constraint validation, the handler and serialization are
-//! all exercised. The only case that reaches into the state struct is the one
-//! about the clock-owed `CREATING` -> `ACTIVE` move, and it moves the DUE INSTANT
-//! only — never the status, which the handlers still compute from that record.
+//! all exercised. The only cases that reach into the state struct are the ones
+//! about a clock-owed move, and they move the DUE INSTANT only — never the status,
+//! which the handlers still compute from that record.
+//!
+//! No service that creates Active Directory directories is mounted here, so the
+//! account holds none: a registration of this suite settles on the failure its
+//! unheld directory earns it. The ACTIVE branch of that rule, and the removal a
+//! delete owes, are in [`super::directory_registration_authorization`].
 
 use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime};
@@ -46,7 +51,10 @@ const DIRECTORY_IDS: &[&str] = &[
 ];
 
 /// `CreateDirectoryRegistration` for `directory_id`, answering the ARN it minted.
-async fn create_registration(router: &MultiServiceRouter, directory_id: &str) -> String {
+pub(crate) async fn create_registration(
+    router: &MultiServiceRouter,
+    directory_id: &str,
+) -> String {
     let (status, _, parsed) = call(
         router,
         "POST",
@@ -67,7 +75,10 @@ async fn create_registration(router: &MultiServiceRouter, directory_id: &str) ->
         .to_string()
 }
 
-async fn get_registration(router: &MultiServiceRouter, arn: &str) -> (u16, String, Value) {
+pub(crate) async fn get_registration(
+    router: &MultiServiceRouter,
+    arn: &str,
+) -> (u16, String, Value) {
     call(
         router,
         "GET",
@@ -78,7 +89,7 @@ async fn get_registration(router: &MultiServiceRouter, arn: &str) -> (u16, Strin
 }
 
 /// One `ListDirectoryRegistrations` page.
-async fn list_page(
+pub(crate) async fn list_page(
     router: &MultiServiceRouter,
     max_results: Option<usize>,
     next_token: Option<&str>,
@@ -112,23 +123,24 @@ fn page_arns(page: &Value) -> Vec<String> {
 }
 
 /// The ARN prefix every directory registration of this Region carries.
-fn registration_arn_prefix() -> String {
+pub(crate) fn registration_arn_prefix() -> String {
     format!("arn:aws:pca-connector-ad:{REGION}:{ACCOUNT}:directory-registration/")
 }
 
-/// Move the instant the clock owes the registration `arn` its `CREATING` ->
-/// `ACTIVE` move to `due_at`, through the service's own state.
+/// Move the instant the clock owes the registration `arn` its move out of
+/// `CREATING` to `due_at`, through the service's own state.
 ///
-/// Strictly a clock move: it rewrites only the due instant, never the status or
-/// the timestamps — the handlers still compute those from this same record.
-fn set_active_due(engine: &engine::InMemoryEngine, arn: &str, due_at: SystemTime) {
+/// Strictly a clock move: it rewrites only the due instant, never the status, the
+/// terminal status it settles on or the timestamps — the handlers still compute
+/// those from this same record.
+pub(crate) fn set_settle_due(engine: &engine::InMemoryEngine, arn: &str, due_at: SystemTime) {
     let shared = pcad::state::service_state(engine).expect("the service's own state");
     let mut store = shared.lock();
     let record = store
         .directory_registrations
         .get_mut(arn)
         .unwrap_or_else(|| panic!("no directory registration is stored under {arn:?}"));
-    record.active_at = due_at;
+    record.settles_at = due_at;
 }
 
 #[tokio::test]
@@ -146,7 +158,7 @@ async fn create_directory_registration_mints_an_arn_naming_the_directory_and_get
 
         // Hold the clock-owed transition so this case reads the status the 202
         // reported rather than racing the activation span.
-        set_active_due(&engine, &arn, SystemTime::now() + NOT_DUE_FOR);
+        set_settle_due(&engine, &arn, SystemTime::now() + NOT_DUE_FOR);
 
         let (status, _, parsed) = get_registration(&router, &arn).await;
         assert_eq!(
@@ -311,7 +323,7 @@ async fn a_listed_registration_carries_the_same_summary_the_read_path_reports() 
     let mut arns = Vec::new();
     for directory_id in &DIRECTORY_IDS[..3] {
         let arn = create_registration(&router, directory_id).await;
-        set_active_due(&engine, &arn, SystemTime::now() + NOT_DUE_FOR);
+        set_settle_due(&engine, &arn, SystemTime::now() + NOT_DUE_FOR);
         arns.push(arn);
     }
 
@@ -340,13 +352,13 @@ async fn a_listed_registration_carries_the_same_summary_the_read_path_reports() 
 }
 
 #[tokio::test]
-async fn a_registration_settles_from_creating_to_active_when_the_clock_owes_the_move() {
+async fn a_registration_settles_out_of_creating_when_the_clock_owes_the_move() {
     let (router, engine) = router();
     let arn = create_registration(&router, DIRECTORY_IDS[0]).await;
 
     // Until the activation instant the registration is the CREATING the create's
     // 202 reported, and reading it repeatedly does not advance it.
-    set_active_due(&engine, &arn, SystemTime::now() + NOT_DUE_FOR);
+    set_settle_due(&engine, &arn, SystemTime::now() + NOT_DUE_FOR);
     for attempt in 0..2 {
         let (_, _, parsed) = get_registration(&router, &arn).await;
         assert_eq!(
@@ -364,12 +376,23 @@ async fn a_registration_settles_from_creating_to_active_when_the_clock_owes_the_
     );
 
     // Once the instant has passed, both read paths report the move the clock owed.
-    set_active_due(&engine, &arn, SystemTime::now() - ALREADY_DUE);
+    // This router mounts nothing that creates directories, so the account holds no
+    // directory of that id: the authorization the registration asked for has
+    // nothing to act on, and the terminal state is the failure with its reason
+    // code. The ACTIVE branch, for a directory the account DOES hold, is in
+    // `directory_registration_authorization`.
+    set_settle_due(&engine, &arn, SystemTime::now() - ALREADY_DUE);
     let (_, _, settled) = get_registration(&router, &arn).await;
     assert_eq!(
         settled["DirectoryRegistration"]["Status"].as_str(),
-        Some("ACTIVE"),
-        "a registration past its activation instant is ACTIVE, got {settled}"
+        Some("FAILED"),
+        "a registration of a directory the account does not hold terminates in FAILED, \
+         got {settled}"
+    );
+    assert_eq!(
+        settled["DirectoryRegistration"]["StatusReason"].as_str(),
+        Some("DIRECTORY_RESOURCE_NOT_FOUND"),
+        "the failure must name why the directory could not be authorized, got {settled}"
     );
     assert_eq!(
         settled["DirectoryRegistration"]["Arn"].as_str(),
@@ -379,8 +402,13 @@ async fn a_registration_settles_from_creating_to_active_when_the_clock_owes_the_
     let (_, _, listed) = list_page(&router, None, None).await;
     assert_eq!(
         listed["DirectoryRegistrations"][0]["Status"].as_str(),
-        Some("ACTIVE"),
+        Some("FAILED"),
         "the listing must report the settled status too, got {listed}"
+    );
+    assert_eq!(
+        listed["DirectoryRegistrations"][0]["StatusReason"].as_str(),
+        Some("DIRECTORY_RESOURCE_NOT_FOUND"),
+        "the listing must report the settled reason too, got {listed}"
     );
 }
 

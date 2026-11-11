@@ -4,8 +4,8 @@
 //!
 //! The persisted records every handler in `src/ops/` reads and writes, plus the
 //! small helpers several of them share (ARN minting, the request's region, the
-//! clock-due `CREATING` -> `ACTIVE` settle, pagination tokens). Keeping them here
-//! means two operations never grow two copies of one resource.
+//! clock-due settle of a resource still in a transient status, pagination tokens).
+//! Keeping them here means two operations never grow two copies of one resource.
 //!
 //! The store is keyed on ARN alone and is therefore region-agnostic: a connector
 //! minted under one Region's credential scope is readable from a request signed
@@ -36,6 +36,21 @@ pub const CONNECTOR_STATUS_ACTIVE: &str = "ACTIVE";
 pub const DIRECTORY_REGISTRATION_STATUS_CREATING: &str = "CREATING";
 /// See [`DIRECTORY_REGISTRATION_STATUS_CREATING`].
 pub const DIRECTORY_REGISTRATION_STATUS_ACTIVE: &str = "ACTIVE";
+/// See [`DIRECTORY_REGISTRATION_STATUS_CREATING`]: the status a registration the
+/// delete accepted carries until it stops existing.
+pub const DIRECTORY_REGISTRATION_STATUS_DELETING: &str = "DELETING";
+/// See [`DIRECTORY_REGISTRATION_STATUS_CREATING`]: the terminal status of a
+/// registration whose directory could not be authorized.
+pub const DIRECTORY_REGISTRATION_STATUS_FAILED: &str = "FAILED";
+
+/// The `DirectoryRegistrationStatusReason` a failed registration reports when the
+/// `DirectoryId` it names is not a directory the account holds, spelled as
+/// `types::DIRECTORY_REGISTRATION_STATUS_REASON_VALUES` holds it. `StatusReason` is
+/// "additional information about the directory registration status if the status is
+/// failed", so it is set only beside
+/// [`DIRECTORY_REGISTRATION_STATUS_FAILED`].
+pub const DIRECTORY_REGISTRATION_STATUS_REASON_DIRECTORY_RESOURCE_NOT_FOUND: &str =
+    "DIRECTORY_RESOURCE_NOT_FOUND";
 
 /// `TemplateStatus` values, spelled as `types::TEMPLATE_STATUS_VALUES` holds them.
 /// The enum has only `ACTIVE` and `DELETING`, so a created template is `ACTIVE`.
@@ -51,14 +66,24 @@ pub const TEMPLATE_STATUS_ACTIVE: &str = "ACTIVE";
 /// `CREATING` — and it is never zero.
 pub const CONNECTOR_ACTIVATION_DELAY: Duration = Duration::from_millis(750);
 
-/// How long after `CreateDirectoryRegistration` the registration settles from
-/// `CREATING` to `ACTIVE`.
+/// How long after `CreateDirectoryRegistration` the registration settles out of
+/// `CREATING` into the terminal status the authorization of its directory reaches
+/// ([`directory_registration_outcome`]).
 ///
 /// A CHOSEN span, not a documented one: AWS publishes no duration for directory
 /// registration. It is a few seconds and never zero, so a caller (or a test) that
 /// reads the registration straight after creating it reliably observes the
 /// `CREATING` the 202 reported.
 pub const DIRECTORY_REGISTRATION_ACTIVATION_DELAY: Duration = Duration::from_secs(3);
+
+/// How long after `DeleteDirectoryRegistration` the registration stops existing.
+///
+/// A CHOSEN span, not a documented one: AWS publishes no duration for
+/// deauthorizing a directory. It matches
+/// [`DIRECTORY_REGISTRATION_ACTIVATION_DELAY`] and is never zero, so a caller that
+/// reads the registration straight after deleting it observes the `DELETING` the
+/// 202 accepted before the resource is gone.
+pub const DIRECTORY_REGISTRATION_DELETION_DELAY: Duration = Duration::from_secs(3);
 
 /// `MaxResults` for a list call that supplies none: the modelled maximum of the
 /// `MaxResults` member (`range 1..1000`), so an un-paged call returns everything.
@@ -166,8 +191,8 @@ pub struct ConnectorRecord {
 
 /// One persisted directory registration. Mirrors the modelled
 /// `DirectoryRegistration`/`DirectoryRegistrationSummary` members, plus the
-/// bookkeeping the wire shapes do not carry (`seq` for stable list ordering,
-/// `active_at` for the clock-due settle, `tags`).
+/// bookkeeping the wire shapes do not carry (`seq` for stable list ordering, the
+/// clock-due settle of its transient statuses, `tags`).
 #[derive(Debug, Clone)]
 pub struct DirectoryRegistrationRecord {
     pub arn: String,
@@ -176,8 +201,21 @@ pub struct DirectoryRegistrationRecord {
     pub status_reason: Option<String>,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
-    /// The instant the clock owes this registration its `CREATING` -> `ACTIVE` move.
-    pub active_at: SystemTime,
+    /// The instant the clock owes this registration the move out of `CREATING`
+    /// into [`Self::terminal_status`].
+    pub settles_at: SystemTime,
+    /// What the authorization of this registration's directory reaches: `ACTIVE`
+    /// when the account holds the directory the create named, `FAILED` when it
+    /// does not ([`directory_registration_outcome`] is what decides it, once, on
+    /// the create path).
+    pub terminal_status: String,
+    /// The `StatusReason` that terminal status carries, set only for a failure.
+    pub terminal_status_reason: Option<String>,
+    /// The instant the clock owes this registration its REMOVAL: set by
+    /// `DeleteDirectoryRegistration`, which moves the record to `DELETING` and
+    /// leaves it to the clock to stop existing. `None` for a registration nobody
+    /// has deleted.
+    pub deleted_at: Option<SystemTime>,
     pub tags: HashMap<String, String>,
     /// Monotonic creation sequence: the stable list order and paging cursor.
     pub seq: u64,
@@ -231,23 +269,46 @@ impl ComAmazonawsPcaconnectoradPcaconnectoradState {
         self.next_seq
     }
 
-    /// Materialise every `CREATING` -> `ACTIVE` move the clock already owes at `now`,
-    /// for every resource of this service that has one.
+    /// Materialise every move of this service's resources the clock already owes at
+    /// `now`: a connector's and a registration's move out of `CREATING`, and the
+    /// REMOVAL of a registration whose delete has come due.
     ///
-    /// A reporting operation calls this before it reads: the transition was due at
-    /// `active_at` whether or not anybody called, so applying it is not a mutation
-    /// caused by the read.
+    /// A reporting operation calls this before it reads: each move was due at its
+    /// own recorded instant whether or not anybody called, so applying it is not a
+    /// mutation caused by the read. Nothing here decides an OUTCOME — a
+    /// registration's terminal status was decided on its create path and is only
+    /// applied here — so two reads a moment apart cannot settle one resource two
+    /// ways.
     pub fn settle(&mut self, now: SystemTime) {
         for connector in self.connectors.values_mut() {
             if connector.status == CONNECTOR_STATUS_CREATING && now >= connector.active_at {
                 connector.status = CONNECTOR_STATUS_ACTIVE.to_string();
             }
         }
+        // A registration the clock owes its removal STOPS EXISTING: the delete
+        // answered 202 and moved it to `DELETING`, and past that instant nothing
+        // reports it any more.
+        let gone: Vec<String> = self
+            .directory_registrations
+            .values()
+            .filter(|registration| {
+                registration
+                    .deleted_at
+                    .is_some_and(|due_at| now >= due_at)
+            })
+            .map(|registration| registration.arn.clone())
+            .collect();
+        for arn in &gone {
+            self.remove_directory_registration(arn);
+        }
         for registration in self.directory_registrations.values_mut() {
             if registration.status == DIRECTORY_REGISTRATION_STATUS_CREATING
-                && now >= registration.active_at
+                && now >= registration.settles_at
             {
-                registration.status = DIRECTORY_REGISTRATION_STATUS_ACTIVE.to_string();
+                registration.status = registration.terminal_status.clone();
+                registration.status_reason = registration.terminal_status_reason.clone();
+                // The resource changed when the move was DUE, not when it was read.
+                registration.updated_at = registration.settles_at;
             }
         }
     }
@@ -331,6 +392,22 @@ impl ComAmazonawsPcaconnectoradPcaconnectoradState {
         }
     }
 
+    /// Remove the directory registration `arn`, dropping any idempotency token that
+    /// pointed at it (so a later create reusing that token mints a new registration
+    /// rather than naming one that no longer exists).
+    ///
+    /// Returns whether a registration was actually present. The REMOVAL is the
+    /// deauthorization completing: a deleted registration stops existing, so every
+    /// reporting operation refuses the ARN afterwards.
+    pub fn remove_directory_registration(&mut self, arn: &str) -> bool {
+        let removed = self.directory_registrations.remove(arn).is_some();
+        let idempotency = &mut self.idempotency;
+        idempotency.retain(|_, recorded| recorded != arn);
+        self.idempotency_order
+            .retain(|key| idempotency.contains_key(key));
+        removed
+    }
+
     /// Remove `connector_arn` and cascade-remove its templates, dropping any
     /// idempotency token that pointed at a now-gone ARN (so a later create reusing
     /// that token mints a new resource rather than naming a deleted one).
@@ -373,6 +450,62 @@ pub fn request_region(ctx: &smithy_server_runtime::OperationContext<'_>) -> Stri
         .map(|scope| scope.region)
         .filter(|region| !region.is_empty())
         .unwrap_or_else(|| DEFAULT_REGION.to_string())
+}
+
+/// The SHARED Active Directory inventory in the shared engine: which directories the
+/// account holds, as the Directory Service control plane that creates and deletes
+/// them recorded it. Call it with a handler's `&*self.engine`.
+///
+/// This service creates no directory — a `DirectoryId` arriving here names one of
+/// another service's resources — so whether the account holds it is knowable only
+/// from that plane's own record. It is the ONE record under the shared type
+/// ([`::service_common::ad_directories::AdDirectoryInventory`]) rather than a copy
+/// inside [`ComAmazonawsPcaconnectoradPcaconnectoradState`]: the engine keys state
+/// by TYPE, so a copy of its own here would be invisible to the plane that writes
+/// it.
+///
+/// LOCK ORDER: this service takes its OWN store first and this inventory second,
+/// which is the order every other reader of the inventory keeps.
+pub fn ad_directory_inventory<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+) -> Option<::engine::ServiceState<::service_common::ad_directories::AdDirectoryInventory>> {
+    (engine as &dyn ::std::any::Any)
+        .downcast_ref::<::engine::InMemoryEngine>()
+        .map(
+            ::engine::InMemoryEngine::state::<
+                ::service_common::ad_directories::AdDirectoryInventory,
+            >,
+        )
+}
+
+/// The terminal state a registration of `directory_id` settles on — the status and
+/// the `StatusReason` the clock applies at
+/// [`DirectoryRegistrationRecord::settles_at`].
+///
+/// A directory registration AUTHORIZES this service with an Active Directory, so it
+/// can only reach `ACTIVE` for a directory that is there to be authorized: the
+/// account holds the directory exactly when the plane that creates directories
+/// recorded it ([`ad_directory_inventory`]). For an id it holds no directory for the
+/// authorization has nothing to act on, and the registration terminates in `FAILED`
+/// carrying [`DIRECTORY_REGISTRATION_STATUS_REASON_DIRECTORY_RESOURCE_NOT_FOUND`].
+///
+/// Decided ONCE, on the create path, so the outcome a caller polls for is a function
+/// of the request and of what the account held when the registration was created —
+/// never of when somebody read it.
+pub fn directory_registration_outcome<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    directory_id: &str,
+) -> (String, Option<String>) {
+    let held = ad_directory_inventory(engine)
+        .is_some_and(|inventory| inventory.lock().holds(directory_id));
+    if held {
+        (DIRECTORY_REGISTRATION_STATUS_ACTIVE.to_string(), None)
+    } else {
+        (
+            DIRECTORY_REGISTRATION_STATUS_FAILED.to_string(),
+            Some(DIRECTORY_REGISTRATION_STATUS_REASON_DIRECTORY_RESOURCE_NOT_FOUND.to_string()),
+        )
+    }
 }
 
 /// A fresh connector ARN of the modelled form

@@ -188,8 +188,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )?;
 
         let mut store = state.lock();
-        // Reporting operation: the only write is materialising the CREATING ->
-        // ACTIVE moves the clock already owed, which were due whether or not
+        // Reporting operation: the only write is materialising the moves the clock
+        // already owed — a registration's settle out of CREATING and the removal of
+        // one whose delete has come due — each of which was due whether or not
         // anybody called.
         store.settle(::std::time::SystemTime::now());
 
