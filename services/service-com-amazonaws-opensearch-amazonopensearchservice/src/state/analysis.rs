@@ -659,6 +659,16 @@ const DEFINITION_TYPE: &str = "type";
 /// every other mapped type holds its value whole.
 const ANALYZED_FIELD_TYPES: [&str; 3] = ["text", "match_only_text", "search_as_you_type"];
 
+/// The member a field's mapping switches per-document values ON for an analyzed text field
+/// with: "set fielddata=true on [<field>] in order to load field data".
+const FIELDDATA_SETTING: &str = "fielddata";
+
+/// The most fields one mapping document names that a pattern expands against.
+///
+/// The emulator's OWN bound on that expansion: a mapping is a document a caller wrote, so
+/// without it the fields one pattern resolves to would be sized by that document.
+const MAX_MAPPED_FIELDS: usize = 1_000;
+
 /// The member a mapping lists an object's own fields under: the first of the containers
 /// this crate names ([`MAPPING_CONTAINERS`]), which is also the one an index's mappings
 /// list their top-level fields under.
@@ -918,6 +928,64 @@ impl IndexAnalysis {
             .and_then(|mapped| mapped.get(MAPPING_TYPE))
             .and_then(Value::as_str)
             .is_some_and(|kind| !ANALYZED_FIELD_TYPES.contains(&kind))
+    }
+
+    /// Whether `field` is one the index holds no PER-DOCUMENT values for: a text field whose
+    /// values are only the terms of its analysis, with `fielddata` left off.
+    ///
+    /// Ordering hits by a field and bucketing them by one both read per-document values, so
+    /// both are refused on such a field rather than answered from its terms.
+    pub fn needs_fielddata(&self, field: &str) -> bool {
+        let Some(mapped) = self.field(field) else {
+            return false;
+        };
+        mapped
+            .get(MAPPING_TYPE)
+            .and_then(Value::as_str)
+            .is_some_and(|kind| ANALYZED_FIELD_TYPES.contains(&kind))
+            && mapped.get(FIELDDATA_SETTING).and_then(Value::as_bool) != Some(true)
+    }
+
+    /// Every field these mappings map a VALUE at, as the dotted paths that address it — a
+    /// field of an object field and a field's multi-fields alike — which is what a pattern
+    /// naming fields expands against. An object field itself holds no value, so only what is
+    /// mapped under it is named. Bounded by [`MAX_MAPPED_FIELDS`], so a pattern's expansion
+    /// costs a constant rather than the mapping document a caller wrote.
+    pub fn mapped_fields(&self) -> Vec<String> {
+        let mut named: Vec<String> = Vec::new();
+        let Some(Value::Object(properties)) = self.mappings.get(MAPPING_PROPERTIES) else {
+            return named;
+        };
+        let [object, multi] = MAPPING_CONTAINERS;
+        let mut pending: Vec<(String, &Map<String, Value>)> = vec![(String::new(), properties)];
+        let mut visited = 0_usize;
+        while let Some((prefix, properties)) = pending.pop() {
+            for (name, mapped) in properties {
+                visited += 1;
+                if visited > MAX_MAPPED_FIELDS {
+                    named.sort();
+                    return named;
+                }
+                let path = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix}.{name}")
+                };
+                let mut holds_value = true;
+                if let Some(Value::Object(children)) = mapped.get(object) {
+                    holds_value = false;
+                    pending.push((path.clone(), children));
+                }
+                if let Some(Value::Object(children)) = mapped.get(multi) {
+                    pending.push((path.clone(), children));
+                }
+                if holds_value {
+                    named.push(path);
+                }
+            }
+        }
+        named.sort();
+        named
     }
 
     /// The filter one element of a chain names: one this index defines, one configured

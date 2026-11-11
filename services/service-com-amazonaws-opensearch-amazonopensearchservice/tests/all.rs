@@ -223,6 +223,8 @@ mod saved_object_migrations;
 mod scheduled_action_updates;
 #[path = "all/scheduled_actions.rs"]
 mod scheduled_actions;
+#[path = "all/search_ordering_and_highlighting.rs"]
+mod search_ordering_and_highlighting;
 #[path = "all/service_software_rollback.rs"]
 mod service_software_rollback;
 #[path = "all/service_software_update.rs"]
