@@ -139,6 +139,12 @@ rand = "0.9"
 # evaluation, dropped with it. Pinned EXACTLY for the same reason — the memory ceiling of
 # an evaluation is enforced through this crate's allocation limit.
 bumpalo = "=3.20.3"
+# `feature_store_offline_store`: the caller-supplied Amazon S3 URI a feature group's offline
+# store is configured with is read by the maintained URL parser rather than split by hand.
+url = "2"
+# ... and the path of that URI spells an Amazon S3 key, so its percent-escaping is resolved
+# by the maintained encoder the URL parser itself uses.
+percent-encoding = "2"
 
 [lints]
 workspace = true

@@ -212,6 +212,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // helper, which every reader that takes either form uses.
         let name = crate::state::name_from_arn_or_name(&input.feature_group_name);
 
+        // The store guard is taken for this read and released with this block, before the
+        // offline-store status below is asked of IAM: no guard is ever held across an await.
+        let (output, group_arn, settled) = {
         let mut store = state.lock();
         let Some(group) = store.feature_group_mut(name) else {
             // Never a 200 with empty fields: a caller cannot tell that from a group that
@@ -244,12 +247,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             feature_group_status: Some(group.status.clone()),
             // "The status of the OfflineStore. Notifies you if replicating data into the
             // OfflineStore has failed": a group with no offline store has no replication
-            // to report on, and one that has it replicates without failing here, so the
-            // status is `Active` and carries no `BlockedReason`.
-            offline_store_status: group.offline_store_config.as_ref().map(|_| OfflineStoreStatus {
-                status: crate::state::OFFLINE_STORE_STATUS_ACTIVE.to_string(),
-                blocked_reason: None,
-            }),
+            // to report on, and one that has it reports whether the role that replication
+            // runs under may write at the group's output path — filled in below, once this
+            // service's own store guard is released, because the answer is IAM's
+            // (`crate::state::offline_store_status`).
+            offline_store_status: None,
             // "A value indicating whether the update made to the feature group was
             // successful": absent until an update has been made to this group.
             last_update_status: None,
@@ -272,6 +274,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let group_arn = group.arn.clone();
         drop(store);
+        (output, group_arn, settled)
+        };
+
+        // The offline store's status is the permission in force on the group's role, which
+        // is IAM's answer rather than this store's: asked with no guard held, and answered
+        // by the one reader both planes of the Feature Store share.
+        let mut output = output;
+        output.offline_store_status = crate::state::offline_store_status(
+            ctx.callback(),
+            &crate::state::request_region(ctx),
+            output.offline_store_config.as_ref(),
+            output.role_arn.as_deref(),
+        )
+        .await;
 
         if settled {
             // The transition is a state change, so it leaves the same record a create

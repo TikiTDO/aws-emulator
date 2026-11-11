@@ -379,6 +379,11 @@ pub mod event_pattern;
 /// `@streaming` output member needs, which the scaffold does not generate.
 pub mod event_stream;
 pub mod feature_store_groups;
+/// Where a SageMaker Feature Store feature group's records are replicated to in Amazon S3,
+/// under which role, and when that destination is reported as blocked — the one layout and
+/// the one permission question the control plane that CONFIGURES an offline store and the
+/// data plane that WRITES it share.
+pub mod feature_store_offline_store;
 pub mod front_door;
 /// The request-claim rule for the two emulated services whose SigV4 signing name is
 /// `greengrass` — the 2017-06-07 and 2020-11-30 API versions of one product, which AWS

@@ -8,8 +8,8 @@
 //! with the modelled `ValidationError` (HTTP 400), never accepted and never reported as a
 //! missing record (`ResourceNotFound`, 404). A group created with NO `OnlineStore` is
 //! refused the same way on a read, which has nothing to serve from it, while a write to it
-//! leaves the online store alone and succeeds — AWS replicates such a write to the
-//! OfflineStore, which this emulator does not model.
+//! leaves the online store alone and succeeds — such a write goes to the group's
+//! OfflineStore, where the group has one.
 //!
 //! The runtime API carries no feature-group definition — a `PutRecord` names a group and
 //! nothing else — so the two services are only able to agree because the control plane
@@ -194,9 +194,10 @@ async fn the_data_plane_serves_the_feature_groups_the_control_plane_created_and_
             true,
         ),
         (
-            // A write to a group with no OnlineStore is the OfflineStore's business (not
-            // modelled here), so it is accepted and stores nothing online; a read of it
-            // has nothing to serve and is refused.
+            // A write to a group with no OnlineStore is the OfflineStore's business (this
+            // group was created with `EnableOnlineStore` false and no `OfflineStoreConfig`,
+            // so it has nowhere to replicate to), so it is accepted and stores nothing
+            // online; a read of it has nothing to serve and is refused.
             "a group created without an OnlineStore",
             "wire-offlineonly".to_owned(),
             true,

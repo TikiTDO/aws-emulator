@@ -2,19 +2,21 @@
 
 //! @op PutRecord
 //! IMPLEMENTED: this operation ingests one record into the feature group's OnlineStore
-//! held in [`crate::state`]. The `FeatureGroupName` is resolved against the feature
+//! held in [`crate::state`] and replicates it into the group's OfflineStore
+//! ([`crate::state::offline_store`]). The `FeatureGroupName` is resolved against the feature
 //! groups the SageMaker control plane holds ([`crate::state::resolve_group`]) and a name
 //! that resolves to none is refused with the modelled `ValidationError` (400) rather than
-//! ingested. The write is a full over-write of the identified record's feature values —
-//! the record's identifier is the value of the group's own
+//! ingested. The online write is a full over-write of the identified record's feature
+//! values — the record's identifier is the value of the group's own
 //! `RecordIdentifierFeatureName` — ; it is skipped when the posted record is historic
 //! (its event time is not later than the stored record's) or when `TargetStores` names
 //! only the OfflineStore, and it carries `ExpiresAt = EventTime + TtlDuration` when the
-//! caller asked for a TTL.
+//! caller asked for a TTL. The offline write is made for a group the control plane gave an
+//! `OfflineStoreConfig`, under that group's own `RoleArn`, whether or not the online store
+//! took the record.
 //!
-//! Authorization is not emulated, so the modelled `AccessForbidden` is unreachable, and
-//! the OfflineStore is not modelled at all: this file serves the OnlineStore side of
-//! the operation only.
+//! Authorization of the CALLER is not emulated, so the modelled `AccessForbidden` is
+//! unreachable.
 //!
 //! ## Shape of an operation
 //!
@@ -245,40 +247,62 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // `TargetStores` is "A list of stores to which you're adding the record. By
         // default, Feature Store adds the record to all of the stores that you're using
-        // for the FeatureGroup." This service is the OnlineStore data plane, so a request
-        // naming only the OfflineStore leaves the online store alone — as does a record
-        // written to a feature group that HAS no OnlineStore (AWS replicates that one to
-        // the OfflineStore, which this emulator does not model), rather than being
-        // refused, which no recording shows. Answered HERE, after the request's own rules,
-        // so the same record is judged the same way whichever stores it is aimed at.
-        if !crate::state::targets_online_store(input.target_stores.as_ref())
-            || !definition.online_store_enabled
+        // for the FeatureGroup." The two stores are written independently: the online one
+        // takes the record only when the group HAS an online store and the request names
+        // it, and the offline one only when the group was created with an
+        // `OfflineStoreConfig` and the request names it. A record aimed at neither is
+        // accepted and written nowhere, which no recording shows refused.
+        if crate::state::targets_online_store(input.target_stores.as_ref())
+            && definition.online_store_enabled
         {
-            return Ok(PutRecordOutput);
-        }
+            // The store guard is taken for the ingestion and released with this block,
+            // before the offline replication below is awaited: no guard is held across an
+            // await.
+            let mut store = state.lock();
+            let Some(group) = store.group_or_create(&input.feature_group_name) else {
+                return Err(at_capacity(format!(
+                    "the emulator's online store already holds {} feature groups",
+                    crate::state::MAX_FEATURE_GROUPS
+                )));
+            };
 
-        let mut store = state.lock();
-        let Some(group) = store.group_or_create(&input.feature_group_name) else {
-            return Err(at_capacity(format!(
-                "the emulator's online store already holds {} feature groups",
-                crate::state::MAX_FEATURE_GROUPS
-            )));
-        };
-
-        // "If a new record's EventTime is greater, the new record is written to both
-        // the OnlineStore and OfflineStore. Otherwise, the record is a historic record
-        // and it is written only to the OfflineStore." Only the OnlineStore is served
-        // here, so a historic record leaves the stored record standing — the ingestion
-        // every whole-record write of this data plane shares.
-        match group.ingest(prepared) {
-            crate::state::Ingested::Stored | crate::state::Ingested::Historic => {
-                Ok(PutRecordOutput)
+            // "If a new record's EventTime is greater, the new record is written to both
+            // the OnlineStore and OfflineStore. Otherwise, the record is a historic record
+            // and it is written only to the OfflineStore." So a historic record leaves the
+            // stored ONLINE record standing — the ingestion every whole-record write of
+            // this data plane shares — while the offline write below is made either way.
+            match group.ingest(prepared) {
+                crate::state::Ingested::Stored | crate::state::Ingested::Historic => {}
+                crate::state::Ingested::AtCapacity => {
+                    return Err(at_capacity(format!(
+                        "the online store of feature group '{key}' already holds {} records",
+                        crate::state::MAX_RECORDS_PER_GROUP
+                    )))
+                }
             }
-            crate::state::Ingested::AtCapacity => Err(at_capacity(format!(
-                "the online store of feature group '{key}' already holds {} records",
-                crate::state::MAX_RECORDS_PER_GROUP
-            ))),
         }
+
+        // The OfflineStore side of the ingestion: the record is replicated into the
+        // location the control plane configured for this feature group, under the role it
+        // recorded with it. A group created without an `OfflineStoreConfig` has nowhere to
+        // replicate to, and the replication is the service's own asynchronous work, so
+        // neither a withheld permission nor a failed write changes the answer this call
+        // gives its client.
+        if crate::state::targets_offline_store(input.target_stores.as_ref()) {
+            if let Some(delivery) = definition.offline_store.as_ref() {
+                crate::state::offline_store::replicate(
+                    ctx.callback(),
+                    &crate::state::request_region(ctx),
+                    &key,
+                    delivery,
+                    &crate::state::offline_store::OfflineRecord::of(&definition, &input.record),
+                    ::std::time::SystemTime::now(),
+                )
+                .await;
+            }
+        }
+
+        Ok(PutRecordOutput)
     }
 }
 

@@ -51,9 +51,79 @@ pub const FEATURE_GROUP_STATUS_CREATED: &str = "Created";
 /// `DeleteFeatureGroup` that asked for its deletion until the clock completes it.
 pub const FEATURE_GROUP_STATUS_DELETING: &str = "Deleting";
 
-/// The `OfflineStoreStatusValue` an offline store this emulator holds reports: the
-/// replication it describes never fails here, so it is never `Blocked`.
+/// The `OfflineStoreStatusValue` an offline store reports while the replication it
+/// describes is being made: "An `OfflineStore` status."
 pub const OFFLINE_STORE_STATUS_ACTIVE: &str = "Active";
+
+/// The `OfflineStoreStatusValue` an offline store reports while the replication CANNOT be
+/// made: the role it runs under may not write the objects at the group's offline location,
+/// so nothing a client ingests is retained there ([`offline_store_status`]).
+pub const OFFLINE_STORE_STATUS_BLOCKED: &str = "Blocked";
+
+/// The status of a feature group's offline store, as every report of that group carries it:
+/// `None` for a group created with no `OfflineStoreConfig` (there is no replication to
+/// report on), `Blocked` with a `BlockedReason` while the role the replication runs under
+/// may not write the objects at the group's resolved output path, and `Active` otherwise.
+///
+/// "The status of the OfflineStore. Notifies you if replicating data into the OfflineStore
+/// has failed" (`DescribeFeatureGroup$OfflineStoreStatus`): what can fail is the WRITE, made
+/// under the group's own `RoleArn` — "the IAM execution role used to persist data into the
+/// OfflineStore" — so the status is a function of the permission that role holds at the
+/// moment the group is reported, which is why a client that repairs the role's policy sees
+/// the status return to `Active` and one that revokes it sees `Blocked`. The permission
+/// question is the shared one the data plane authorizes each of its own writes with
+/// ([`::service_common::feature_store_offline_store::write_is_withheld`]), so a status this
+/// control plane reports and a record that plane retains cannot disagree.
+///
+/// Reporting only: nothing is written here, and a role this emulator's IAM holds nothing
+/// under withholds nothing (see the shared question's own docs).
+pub async fn offline_store_status(
+    callback: &smithy_server_runtime::EmbeddedEmulator,
+    region: &str,
+    offline_store_config: Option<&crate::ops::types::OfflineStoreConfig>,
+    role_arn: Option<&str>,
+) -> Option<crate::ops::types::OfflineStoreStatus> {
+    let config = offline_store_config?;
+    let active = crate::ops::types::OfflineStoreStatus {
+        status: OFFLINE_STORE_STATUS_ACTIVE.to_string(),
+        blocked_reason: None,
+    };
+    let storage = &config.s3_storage_config;
+    // The resolved output path is what the records are written under, so it is the location
+    // the permission is asked about; a group whose create could not resolve one falls back
+    // to the `S3Uri` the create named, which is the only location it has.
+    let resolved = storage
+        .resolved_output_s3_uri
+        .as_deref()
+        .unwrap_or(storage.s3_uri.as_str());
+    let (Some(location), Some(role_arn)) = (
+        ::service_common::feature_store_offline_store::OfflineStoreLocation::parse(resolved),
+        role_arn,
+    ) else {
+        return Some(active);
+    };
+    let key = ::service_common::feature_store_offline_store::status_key(&location);
+    if ::service_common::feature_store_offline_store::write_is_withheld(
+        callback,
+        region,
+        role_arn,
+        &location,
+        &key,
+    )
+    .await
+    {
+        return Some(crate::ops::types::OfflineStoreStatus {
+            status: OFFLINE_STORE_STATUS_BLOCKED.to_string(),
+            blocked_reason: Some(
+                ::service_common::feature_store_offline_store::blocked_reason(
+                    role_arn,
+                    &location.uri(),
+                ),
+            ),
+        });
+    }
+    Some(active)
+}
 
 /// The `ThroughputMode` a feature group runs under when its create stated no
 /// `ThroughputConfig`: the mode that bills per read and write and needs no stated

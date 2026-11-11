@@ -18,11 +18,21 @@
 //! feature values. A write past any of the three is refused (the handler answers the
 //! modelled `ServiceUnavailable`) rather than growing without limit, and a record
 //! carrying a `TtlDuration` is additionally evicted once its expiry is due.
+//!
+//! The group's OFFLINE store is not held here at all: it is a location in Amazon S3 the
+//! control plane configured, which each ingestion REPLICATES one object into
+//! ([`offline_store`]).
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 use aws_smithy_types::date_time::{DateTime, Format};
+
+/// The OfflineStore side of an ingestion: the Amazon S3 object a replicated record lands
+/// as, and the write that puts it there. The ONLINE store is what the rest of this module
+/// holds; a feature group's offline store is a location in another service, which is why
+/// its own slice lives beside this one.
+pub mod offline_store;
 
 /// The most feature groups one emulator keeps an OnlineStore for.
 ///
@@ -162,9 +172,10 @@ impl FeatureGroupStore {
     ///
     /// "If a new record's EventTime is greater, the new record is written to both the
     /// OnlineStore and OfflineStore. Otherwise, the record is a historic record and it is
-    /// written only to the OfflineStore": only the OnlineStore is modelled here, so a
-    /// posted record whose event time is not later than the stored record's leaves that
-    /// record standing ([`Ingested::Historic`]). A record the group does not hold yet is
+    /// written only to the OfflineStore": this is the ONLINE store, so a posted record
+    /// whose event time is not later than the stored record's leaves that record standing
+    /// ([`Ingested::Historic`]) while the caller still replicates it into the group's
+    /// offline store ([`offline_store`]). A record the group does not hold yet is
     /// stored unless the group is full ([`Ingested::AtCapacity`]).
     pub fn ingest(&mut self, prepared: PreparedRecord) -> Ingested {
         if let (Some(posted), Some(stored)) = (
@@ -313,8 +324,8 @@ pub enum Ingested {
     /// Stored, over-writing any record the group held under the same identifier.
     Stored,
     /// Not stored: the posted record is historic — its event time is not later than
-    /// that of the record the group already holds — so only the OfflineStore, which this
-    /// emulator does not model, would take it. Not a failure.
+    /// that of the record the group already holds — so only the OfflineStore takes it
+    /// ([`offline_store`]). Not a failure.
     Historic,
     /// Not stored: the record is new and the group already holds
     /// [`MAX_RECORDS_PER_GROUP`] of them.
@@ -632,6 +643,15 @@ pub fn targets_online_store(target_stores: Option<&Vec<String>>) -> bool {
     target_stores.is_none_or(|stores| stores.iter().any(|store| store == "OnlineStore"))
 }
 
+/// Whether a `TargetStores` list includes the OfflineStore a record is replicated into.
+///
+/// Read the same way as [`targets_online_store`], for the same sentence: an absent list is
+/// every store the feature group uses, so a request that names no `TargetStores` replicates
+/// into the offline store of a group that has one.
+pub fn targets_offline_store(target_stores: Option<&Vec<String>>) -> bool {
+    target_stores.is_none_or(|stores| stores.iter().any(|store| store == "OfflineStore"))
+}
+
 /// Wall-clock now, in epoch seconds, for the TTL comparison.
 pub fn now_secs() -> f64 {
     std::time::SystemTime::now()
@@ -702,8 +722,8 @@ pub enum Unresolved {
 /// Whether the group has an `OnlineStore` is NOT decided here, because the two sides of
 /// this API answer it differently and only one of them is recorded. A READ of a group
 /// with no online store has nothing this service could serve, so it is refused
-/// ([`no_online_store`]); a WRITE to one is accepted by AWS and replicated to the
-/// OfflineStore, which this emulator does not model, so a write leaves the online store
+/// ([`no_online_store`]); a WRITE to one is accepted and replicated to the group's
+/// OfflineStore where it has one ([`offline_store`]), so a write leaves the online store
 /// alone and answers success — exactly as a write whose `TargetStores` names only the
 /// OfflineStore does.
 pub fn resolve_group<Eng: Send + Sync + 'static>(

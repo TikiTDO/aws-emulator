@@ -122,6 +122,8 @@ impl Emulator {
                 record_identifier_feature_name: record_identifier_feature_name.to_owned(),
                 event_time_feature_name: EVENT_TIME_FEATURE.to_owned(),
                 online_store_enabled,
+                // Online-only feature groups: no offline store to replicate into.
+                offline_store: None,
                 default_ttl_seconds: None,
             });
     }
@@ -821,8 +823,8 @@ async fn target_stores_decides_whether_the_online_store_takes_the_entry() {
 
 #[tokio::test]
 async fn an_entry_written_to_a_feature_group_with_no_online_store_is_not_a_failure() {
-    // A write to a group that HAS no `OnlineStore` is accepted by AWS and replicated to
-    // the OfflineStore, which this emulator does not model — so it leaves the online
+    // A write to a group that HAS no `OnlineStore` is accepted and replicated to the
+    // group's OfflineStore where it has one (this group has none) — so it leaves the online
     // store alone and is reported in neither `Errors` nor `UnprocessedEntries`, exactly
     // as an entry naming only the OfflineStore is.
     let emulator = Emulator::new();

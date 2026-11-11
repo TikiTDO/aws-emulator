@@ -25,12 +25,38 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 # Encodes/decodes the opaque ListRecords pagination token.
 hex = { workspace = true }
+# The AWS SDK for Amazon S3, driven over the emulator's in-process callback: a record
+# ingested into a feature group that has an OfflineStore is replicated into the configured
+# Amazon S3 location, and the one object store in this emulator is that service's. Only the
+# generated client is needed — the emulator supplies the transport.
+aws-sdk-s3 = { version = "1", default-features = false }
+# The Apache implementation of the Parquet format, which writes the object one replicated
+# record lands as: the offline store holds its data as Parquet. Pure Rust; `snap` is the
+# SNAPPY compression those objects are written with.
+parquet = { version = "60", default-features = false, features = ["snap"] }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
 sha2 = { workspace = true }
+# The SageMaker CONTROL plane, mounted beside this data plane on one shared engine by the
+# offline-store suite: a feature group with an `OfflineStoreConfig` is created through its
+# own `CreateFeatureGroup` and its `OfflineStoreStatus` read back through its
+# `DescribeFeatureGroup`.
+service-com-amazonaws-sagemaker-sagemaker = { workspace = true }
+# The one object store in this emulator: the replicated objects are read back through
+# Amazon S3's own wire.
+service-com-amazonaws-s3-amazons3 = { workspace = true }
+# The holder of the role a replication is made under: the suite creates that role and
+# grants, revokes and restores its `s3:PutObject` permission through IAM itself.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# The Amazon S3 listing the suite reads the written keys out of is XML, read with the
+# maintained reader rather than by slicing the document.
+quick-xml = "0.41"
+# The `application/x-www-form-urlencoded` encoding IAM's awsQuery requests carry their
+# parameters in, from the maintained encoder.
+percent-encoding = "2"
 
 [lints]
 workspace = true

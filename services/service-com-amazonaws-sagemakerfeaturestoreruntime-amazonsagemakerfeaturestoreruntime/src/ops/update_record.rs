@@ -33,8 +33,9 @@
 //! Standard_V2 or InMemory online store type". The recorded units that exercise this
 //! operation's rejections create their feature group with no `StorageType` at all and
 //! AWS still answered those rejections rather than refusing the update, so the recording
-//! rules that gate out. The OfflineStore is not modelled at all: this file serves the
-//! OnlineStore side of the operation only.
+//! rules that gate out. The OfflineStore side of an UPDATE — the partially updated record
+//! AWS replicates there — is left to the issue that owns this operation: the ingestion of a
+//! WHOLE record is what [`crate::state::offline_store`] replicates today.
 //!
 //! ## Shape of an operation
 //!
@@ -366,7 +367,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // A feature group that HAS no `OnlineStore` holds no online record to update, and
-        // the update AWS would replicate to the OfflineStore is not modelled here, so
+        // the update AWS would replicate to the OfflineStore is not replicated here (see
+        // the module docs), so
         // there is nothing for this handler to do once the request itself has been found
         // well-formed — the same answer a request naming only the OfflineStore gets
         // below, and not a refusal, which no recording shows.

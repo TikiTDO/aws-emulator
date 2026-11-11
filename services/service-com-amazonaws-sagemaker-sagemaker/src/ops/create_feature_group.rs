@@ -10,7 +10,10 @@
 //! feature-group directory ([`crate::state::feature_group_directory`]), which is how the
 //! FeatureStore Runtime data plane — whose API carries no feature-group definition —
 //! resolves a `FeatureGroupName` and learns the group's record-identifier and event-time
-//! features. This is the ONLY file to touch for this operation.
+//! features, and where its OfflineStore replicates to. A create that names an
+//! `OfflineStoreConfig` resolves that store's output path
+//! (`S3StorageConfig$ResolvedOutputS3Uri`) here, since the path carries the group's
+//! creation instant. This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -218,6 +221,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 crate::state::FEATURE_GROUP_ARN_KIND,
                 &input.feature_group_name,
             );
+        // "The S3 path where offline records are written"
+        // (`S3StorageConfig$ResolvedOutputS3Uri`): the published layout under the `S3Uri`
+        // the create named, which carries the instant the group is created, so it is
+        // resolved HERE — once, for the describe that reports it and the data plane that
+        // writes the records under it. A group created with no offline store resolves none.
+        let mut offline_store_config = input.offline_store_config;
+        if let Some(config) = offline_store_config.as_mut() {
+            config.s3_storage_config.resolved_output_s3_uri =
+                ::service_common::feature_store_offline_store::resolved_output_s3_uri(
+                    &config.s3_storage_config.s3_uri,
+                    ::emulator_server::emulator_account_id(),
+                    &region,
+                    &input.feature_group_name,
+                    now,
+                );
+        }
 
         let mut store = state.lock();
         // The removals the clock already completed are materialised first, so the name and
@@ -277,6 +296,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .as_ref()
                 .and_then(|config| config.enable_online_store)
                 .unwrap_or(false),
+            // Where this group's records are replicated to, which the data plane needs on
+            // every ingestion and its own API carries nothing about: the resolved output
+            // path above and the role the replication runs as. Recorded only for a group
+            // that HAS an offline store — a create with an `OfflineStoreConfig` always
+            // carries a `RoleArn` (`validate_schema` refuses one that does not).
+            offline_store: offline_store_config.as_ref().and_then(|config| {
+                let resolved = config.s3_storage_config.resolved_output_s3_uri.clone()?;
+                Some(
+                    ::service_common::feature_store_offline_store::OfflineStoreDelivery {
+                        resolved_output_s3_uri: resolved,
+                        role_arn: input.role_arn.clone()?,
+                    },
+                )
+            }),
             // "Amazon SageMaker Feature Store deletes the record when EventTime +
             // TtlDuration elapses" (`OnlineStoreConfig$TtlDuration`): the group's default
             // duration governs the records the DATA PLANE writes, so it is recorded with
@@ -295,7 +328,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 event_time_feature_name: input.event_time_feature_name,
                 feature_definitions: input.feature_definitions,
                 online_store_config: input.online_store_config,
-                offline_store_config: input.offline_store_config,
+                offline_store_config,
                 // The throughput mode the group runs under, which the service resolves
                 // for a create that stated none: on-demand needs no stated capacity, so
                 // it is the mode a group gets without asking

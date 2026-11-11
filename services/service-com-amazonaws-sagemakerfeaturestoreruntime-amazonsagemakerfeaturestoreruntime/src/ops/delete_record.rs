@@ -11,10 +11,11 @@
 //! strictly older one does not delete — `SoftDelete` leaves the record standing,
 //! `HardDelete` answers 400 ([`DELETE_EVENT_TIME_OUT_OF_ORDER`]).
 //!
-//! Authorization is not emulated, so the modelled `AccessForbidden` is unreachable, and
-//! the OfflineStore is not modelled: the deleted-record marker the model says Feature
-//! Store appends there is out of scope for this slice, so only the OnlineStore side is
-//! served.
+//! Authorization is not emulated, so the modelled `AccessForbidden` is unreachable. The
+//! deleted-record marker the model says Feature Store appends to the OfflineStore is a
+//! DELETE's own rule — `HardDelete` and `SoftDelete` leave different marks there — and is
+//! left to the issue that owns this operation, so only the OnlineStore side is served here;
+//! an INGESTION's replication is [`crate::state::offline_store`].
 //!
 //! ## Shape of an operation
 //!

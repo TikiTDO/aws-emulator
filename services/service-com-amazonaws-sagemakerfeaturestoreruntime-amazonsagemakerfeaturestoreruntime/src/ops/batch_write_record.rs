@@ -17,11 +17,12 @@
 //! The request-level `TtlDuration` applies to every entry that names none of its own, and
 //! an entry's own `TtlDuration` overrides it.
 //!
-//! Authorization is not emulated, so the modelled `AccessForbidden` is unreachable, and
-//! so is `ResourceNotFound`: a write names no record that has to exist already, and an
-//! entry whose feature group cannot be found is that entry's own error rather than a
-//! failure of the batch. The OfflineStore is not modelled at all: this file serves the
-//! OnlineStore side of the operation only.
+//! Authorization of the CALLER is not emulated, so the modelled `AccessForbidden` is
+//! unreachable, and so is `ResourceNotFound`: a write names no record that has to exist
+//! already, and an entry whose feature group cannot be found is that entry's own error
+//! rather than a failure of the batch. An entry written to a feature group that has an
+//! OfflineStore is replicated into it by the same write `PutRecord` makes
+//! ([`crate::state::offline_store`]).
 //!
 //! ## Shape of an operation
 //!
@@ -203,16 +204,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let mut errors: Vec<BatchWriteRecordError2> = Vec::new();
         let mut unprocessed_entries: Vec<BatchWriteRecordEntry> = Vec::new();
+        /// One entry's replication into its feature group's OfflineStore, held until the
+        /// store guard below is released: the write is awaited, the online ingestion is not.
+        type OfflineWrite = (
+            String,
+            ::service_common::feature_store_offline_store::OfflineStoreDelivery,
+            crate::state::offline_store::OfflineRecord,
+        );
+        let mut offline_writes: Vec<OfflineWrite> = Vec::new();
         // A feature group an entry names is reported by its ARN, which carries the region
         // the request was signed for.
         let region = crate::state::request_region(ctx);
 
         // ONE critical section for the whole batch, so a batch is never half-visible to
         // a concurrent reader. Nothing below can panic — each entry's failure is recorded
-        // and the loop goes on to the next entry — and nothing below awaits, so the guard
-        // is never held across a suspension point. LOCK ORDER: this service's own store
-        // first, the shared feature-group directory second (the order every other caller
-        // of the directory takes).
+        // and the loop goes on to the next entry — and nothing inside the block awaits, so
+        // the guard is never held across a suspension point: the offline replications are
+        // collected here and written after it. LOCK ORDER: this service's own store first,
+        // the shared feature-group directory second (the order every other caller of the
+        // directory takes).
+        {
         let mut store = state.lock();
         // The fan-out is bounded by the request: `Entries` is modelled `len 1..25`,
         // refused at the boundary before this handler runs, so no cardinality check is
@@ -283,11 +294,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     }
                 };
 
+            // The OfflineStore side of the entry, held for the awaited write below: the
+            // same replication `PutRecord` makes, so a record written in a batch lands in
+            // the offline store exactly as the same record written on its own — including a
+            // historic one, which is written ONLY there.
+            if crate::state::targets_offline_store(entry.target_stores.as_ref()) {
+                if let Some(delivery) = definition.offline_store.as_ref() {
+                    offline_writes.push((
+                        definition.name.clone(),
+                        delivery.clone(),
+                        crate::state::offline_store::OfflineRecord::of(&definition, &entry.record),
+                    ));
+                }
+            }
+
             // This service is the OnlineStore data plane, so an entry naming only the
             // OfflineStore leaves the online store alone — as does an entry written to a
-            // feature group that HAS no OnlineStore (AWS replicates that one to the
-            // OfflineStore, which this emulator does not model). Neither is a failure of
-            // the entry, so neither is reported in `Errors`.
+            // feature group that HAS no OnlineStore. Neither is a failure of the entry, so
+            // neither is reported in `Errors`.
             if !crate::state::targets_online_store(entry.target_stores.as_ref())
                 || !definition.online_store_enabled
             {
@@ -302,11 +326,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 continue;
             };
             match group.ingest(prepared) {
-                // A historic entry is written only to the OfflineStore, which this
-                // emulator does not model: nothing was stored online and nothing failed.
+                // A historic entry is written only to the OfflineStore, which the
+                // replication above delivers: nothing was stored online and nothing failed.
                 crate::state::Ingested::Stored | crate::state::Ingested::Historic => {}
                 crate::state::Ingested::AtCapacity => unprocessed_entries.push(entry.clone()),
             }
+        }
+        }
+
+        // The replications, once this service's own store guard is released: each is a write
+        // into another service, and the batch's answer does not depend on it — the
+        // replication is the service's own asynchronous work.
+        let region_ref = region.as_str();
+        let written_at = ::std::time::SystemTime::now();
+        for (group_name, delivery, record) in &offline_writes {
+            crate::state::offline_store::replicate(
+                ctx.callback(),
+                region_ref,
+                group_name,
+                delivery,
+                record,
+                written_at,
+            )
+            .await;
         }
 
         Ok(BatchWriteRecordOutput {

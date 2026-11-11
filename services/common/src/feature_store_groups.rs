@@ -15,8 +15,10 @@
 //! This is that record: ONE directory in the shared engine, written by the control plane
 //! when it creates a feature group (and cleared when the group is deleted), read by the
 //! data plane on every call. Nothing here names a wire shape: the directory holds the
-//! group's name, its ARN, the two feature names its definition fixes and whether its
-//! `OnlineStore` is on, and a reader projects those onto the shapes ITS model declares.
+//! group's name, its ARN, the two feature names its definition fixes, whether its
+//! `OnlineStore` is on and where its `OfflineStore` replicates to
+//! ([`crate::feature_store_offline_store`]), and a reader projects those onto the shapes
+//! ITS model declares.
 //!
 //! Unlike [`crate::db_data_sources`], a name this directory does not hold is a FACT and
 //! not a guess: a feature group exists only because `CreateFeatureGroup` minted it, so
@@ -61,6 +63,14 @@ pub struct FeatureGroupRecord {
     /// The runtime data plane serves the OnlineStore, so a group without one holds no
     /// record it can read or write.
     pub online_store_enabled: bool,
+    /// Where the group's records are replicated to, for a group created with an
+    /// `OfflineStoreConfig`, and `None` for a group that has no offline store at all.
+    ///
+    /// "If a new record's EventTime is greater, the new record is written to both the
+    /// OnlineStore and OfflineStore. Otherwise, the record is a historic record and it is
+    /// written only to the OfflineStore" (`PutRecord`), so the data plane needs the
+    /// destination and the role of EVERY ingestion — and the runtime API carries neither.
+    pub offline_store: Option<crate::feature_store_offline_store::OfflineStoreDelivery>,
     /// The DEFAULT time-to-live the group's `OnlineStoreConfig.TtlDuration` states, in
     /// seconds ([`ttl_duration_seconds`]), and `None` for a group configured with none.
     ///
@@ -183,6 +193,7 @@ mod tests {
             record_identifier_feature_name: "record_id".to_owned(),
             event_time_feature_name: "event_time".to_owned(),
             online_store_enabled: true,
+            offline_store: None,
             default_ttl_seconds: None,
         }
     }

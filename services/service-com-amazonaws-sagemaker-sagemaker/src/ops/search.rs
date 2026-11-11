@@ -1077,6 +1077,10 @@ fn feature_group_entity(group: &crate::state::FeatureGroup) -> FeatureGroup {
             .offline_store_config
             .as_ref()
             .map(|_| OfflineStoreStatus {
+                // The status of a group's offline store is the permission in force on its
+                // role, which is IAM's answer and not this store's, so it is asked for the
+                // page's own records once this candidate walk has released the store guard
+                // (`crate::state::offline_store_status`). This is what that answer replaces.
                 status: crate::state::OFFLINE_STORE_STATUS_ACTIVE.to_string(),
                 blocked_reason: None,
             }),
@@ -1598,6 +1602,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             None => DOCUMENTED_DEFAULT_SORT_BY,
         };
 
+        // The store guard is taken for the whole candidate walk and released with this
+        // block, before the offline-store status below is asked of IAM: no guard is ever
+        // held across an await.
+        let (mut output, settled) = {
         let mut store = state.lock();
         let now = ::std::time::SystemTime::now();
         let settled = settle_due(&input.resource, &mut store, now);
@@ -1672,6 +1680,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }),
         };
         drop(store);
+        (output, settled)
+        };
+
+        // A feature group's `OfflineStoreStatus` is the permission in force on the group's
+        // own role, which is IAM's answer rather than this store's: asked for the records of
+        // THIS page only, with no guard held, through the one reader every report of a
+        // feature group shares, so a group reported here and the same group described carry
+        // one status.
+        let region = crate::state::request_region(ctx);
+        for record in output.results.iter_mut().flatten() {
+            if let Some(group) = record.feature_group.as_mut() {
+                group.offline_store_status = crate::state::offline_store_status(
+                    ctx.callback(),
+                    &region,
+                    group.offline_store_config.as_ref(),
+                    group.role_arn.as_deref(),
+                )
+                .await;
+            }
+        }
 
         for arn in &settled {
             // A transition is a state change, so it leaves the same record a create does

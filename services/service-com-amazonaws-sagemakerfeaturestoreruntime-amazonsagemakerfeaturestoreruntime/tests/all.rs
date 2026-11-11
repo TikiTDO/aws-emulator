@@ -17,6 +17,8 @@ mod batch_write_record_bulk_ingestion;
 mod feature_group_name_validation;
 #[path = "all/feature_group_resolution.rs"]
 mod feature_group_resolution;
+#[path = "all/offline_store_replication.rs"]
+mod offline_store_replication;
 #[path = "all/online_store_record_lifecycle.rs"]
 mod online_store_record_lifecycle;
 #[path = "all/pattern_refusal_rendering.rs"]

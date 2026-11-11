@@ -40,14 +40,14 @@ const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/FeatureStoreRole";
 
 /// The members `DescribeFeatureGroup` replays verbatim from the create: the whole input
 /// schema except the group's own name (asserted separately, beside its ARN), `Tags`
-/// (which the describe response does not carry) and `ThroughputConfig` (which the service
-/// resolves for a create that stated none, asserted separately).
+/// (which the describe response does not carry), `ThroughputConfig` (which the service
+/// resolves for a create that stated none, asserted separately) and `OfflineStoreConfig`
+/// (whose `ResolvedOutputS3Uri` the service resolves, also asserted separately).
 const ECHOED_MEMBERS: &[&str] = &[
     "RecordIdentifierFeatureName",
     "EventTimeFeatureName",
     "FeatureDefinitions",
     "OnlineStoreConfig",
-    "OfflineStoreConfig",
     "RoleArn",
     "Description",
 ];
@@ -218,6 +218,49 @@ async fn describe_feature_group_replays_exactly_what_create_feature_group_stored
             described.get("CreationTime").and_then(Value::as_f64).is_some(),
             "case {case}: CreationTime must be reported, got {described:?}"
         );
+        // `OfflineStoreConfig` replays as created with ONE member added: the output path
+        // the service RESOLVED for this group — "The S3 path where offline records are
+        // written" (`S3StorageConfig$ResolvedOutputS3Uri`), the published layout under the
+        // configured `S3Uri`, which a create cannot state.
+        match (
+            request.get("OfflineStoreConfig"),
+            described.get("OfflineStoreConfig"),
+        ) {
+            (None, None) => {}
+            (Some(stated), Some(replayed)) => {
+                let resolved = str_field(&replayed["S3StorageConfig"], "ResolvedOutputS3Uri");
+                // The published layout under the configured location, in either spelling
+                // the member admits: the account, `sagemaker`, the Region, this group, and
+                // the `data` directory the record objects go under. The exact path is
+                // pinned by `service_common::feature_store_offline_store`'s own suite.
+                for expected in [
+                    "s3://".to_string(),
+                    format!("/{ACCOUNT}/sagemaker/"),
+                    format!("/offline-store/{case}-"),
+                    "/data".to_string(),
+                ] {
+                    assert!(
+                        resolved.contains(&expected),
+                        "case {case}: the resolved output path must carry {expected:?}, got \
+                         {resolved:?}"
+                    );
+                }
+                let mut without_resolved = replayed.clone();
+                without_resolved["S3StorageConfig"]
+                    .as_object_mut()
+                    .expect("S3StorageConfig is an object")
+                    .remove("ResolvedOutputS3Uri");
+                assert_eq!(
+                    &without_resolved, stated,
+                    "case {case}: every other OfflineStoreConfig member must read back \
+                     exactly as created, got {replayed:?}"
+                );
+            }
+            (stated, replayed) => panic!(
+                "case {case}: OfflineStoreConfig is replayed exactly when the create stated \
+                 one, stated {stated:?} and got {replayed:?}"
+            ),
+        }
         // The offline store's replication status exists only for a group that has one.
         let offline_status = described
             .get("OfflineStoreStatus")

@@ -67,6 +67,8 @@ impl Emulator {
                 record_identifier_feature_name: record_identifier_feature_name.to_owned(),
                 event_time_feature_name: event_time_feature_name.to_owned(),
                 online_store_enabled,
+                // Online-only feature groups: no offline store to replicate into.
+                offline_store: None,
                 default_ttl_seconds: None,
             });
     }

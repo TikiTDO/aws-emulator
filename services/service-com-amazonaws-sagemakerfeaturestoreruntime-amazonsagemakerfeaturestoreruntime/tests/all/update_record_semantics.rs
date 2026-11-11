@@ -71,6 +71,9 @@ impl Emulator {
                 record_identifier_feature_name: IDENTIFIER_FEATURE.to_owned(),
                 event_time_feature_name: EVENT_TIME_FEATURE.to_owned(),
                 online_store_enabled: true,
+                // The feature groups these cases write to are online-only: no offline store
+                // to replicate into.
+                offline_store: None,
                 default_ttl_seconds: None,
             });
     }
