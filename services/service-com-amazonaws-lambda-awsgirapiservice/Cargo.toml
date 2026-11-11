@@ -256,6 +256,10 @@ service-com-amazonaws-secretsmanager-secretsmanager = { workspace = true }
 # bucket policy and the role policies that decide such a read are written with S3's and
 # IAM's own operations.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
+# The Parameter Store a handler's own Systems Manager call reads and writes, mounted beside
+# lambda on ONE engine: a parameter a handler wrote is asserted where a client reads it,
+# through that service's own GetParameter.
+service-com-amazonaws-ssm-amazonssm = { workspace = true }
 # The bus a publication made with an invocation's own credential is decided by, mounted
 # beside lambda on ONE engine: the event is asserted where a client sees it — off the queue
 # the matching rule targets — and the role policies that decide the publication are written

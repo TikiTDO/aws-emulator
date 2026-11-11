@@ -103,6 +103,8 @@ mod kinesis_target_delivery;
 mod kinesis_target_shard_affinity;
 #[path = "all/kinesis_target_stream_consumption.rs"]
 mod kinesis_target_stream_consumption;
+#[path = "all/lambda_target_handler_records_the_invoking_rule.rs"]
+mod lambda_target_handler_records_the_invoking_rule;
 #[path = "all/log_group_target_delivery.rs"]
 mod log_group_target_delivery;
 #[path = "all/missing_resource_wording.rs"]

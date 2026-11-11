@@ -300,6 +300,26 @@ pub const APIS: &[Api] = &[
         },
         answer_model: Some(&SECRETSMANAGER),
     },
+    // `services/service-com-amazonaws-ssm-amazonssm/smithy-model/
+    // com-amazonaws-ssm-amazonssm.json`: awsJson1_1, sigv4Name `ssm`, endpointPrefix `ssm`,
+    // sdkId `SSM`, service shape `AmazonSSM`.
+    //
+    // PARAMETER STORE is where a function keeps the configuration it reads and the state it
+    // records: a handler reads the parameter that tells it what to do (`GetParameter`) and
+    // writes what it did (`PutParameter`), which is how the work ONE invocation performed is
+    // observed from outside it, so a handler that cannot reach this service can neither read
+    // its own configuration nor record anything.
+    Api {
+        sdk_token: "ssm",
+        signing_name: "ssm",
+        endpoint_prefix: "ssm",
+        model: Some(SSM_MODEL),
+        protocol: Protocol::AwsJson {
+            target_prefix: "AmazonSSM",
+            json_version: "1.1",
+        },
+        answer_model: Some(&SSM),
+    },
     // `services/service-com-amazonaws-opensearch-amazonopensearchservice/smithy-model/
     // com-amazonaws-opensearch-amazonopensearchservice.json`: restJson1, sigv4Name `es`,
     // endpointPrefix `es`, sdkId `OpenSearch`. Its requests are bound per operation out of
@@ -588,6 +608,10 @@ pub(super) const SECRETSMANAGER_MODEL: &str = include_str!(
     "../../../../service-com-amazonaws-secretsmanager-secretsmanager/smithy-model/\
      com-amazonaws-secretsmanager-secretsmanager.json"
 );
+pub(super) const SSM_MODEL: &str = include_str!(
+    "../../../../service-com-amazonaws-ssm-amazonssm/smithy-model/\
+     com-amazonaws-ssm-amazonssm.json"
+);
 pub(super) const APIGATEWAY_MODEL: &str = include_str!(
     "../../../../service-com-amazonaws-apigateway-backplanecontrolservice/smithy-model/\
      com-amazonaws-apigateway-backplanecontrolservice.json"
@@ -686,6 +710,10 @@ static SECRETSMANAGER: super::blob_members::ServiceModel = super::blob_members::
 };
 static SFN: super::blob_members::ServiceModel = super::blob_members::ServiceModel {
     source: SFN_MODEL,
+    plan: ::std::sync::OnceLock::new(),
+};
+static SSM: super::blob_members::ServiceModel = super::blob_members::ServiceModel {
+    source: SSM_MODEL,
     plan: ::std::sync::OnceLock::new(),
 };
 static APIGATEWAY_ANSWERS: super::blob_members::ServiceModel = super::blob_members::ServiceModel {

@@ -1034,6 +1034,10 @@ mod events_lambda_target_dead_letter_capture;
 mod events_lambda_target_resource_policy;
 #[path = "all/events_lambda_target_runs_the_handler.rs"]
 mod events_lambda_target_runs_the_handler;
+// Declared here, beside the other suites of this pipeline rather than in the contended tail:
+// the services an events-invoked handler records its work in are mounted by this router.
+#[path = "all/events_lambda_target_handler_records_the_invoking_rule.rs"]
+mod events_lambda_target_handler_records_the_invoking_rule;
 #[path = "all/cloudformation_provisions_lambda_functions.rs"]
 mod cloudformation_provisions_lambda_functions;
 #[path = "all/cloudformation_updates_lambda_functions.rs"]

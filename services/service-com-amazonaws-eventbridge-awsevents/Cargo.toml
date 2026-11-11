@@ -143,6 +143,10 @@ service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
 # signed as, and this service decides the publication.
 service-com-amazonaws-lambda-awsgirapiservice = { workspace = true }
 service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# The Parameter Store a RUNNING function target's handler writes into, mounted beside
+# EventBridge and Lambda on one engine: the invocation a permitted target really made is
+# asserted at the function's OWN side effect, read back through that service's GetParameter.
+service-com-amazonaws-ssm-amazonssm = { workspace = true }
 # The deployment package that suite uploads is a .zip archive it writes in memory.
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
