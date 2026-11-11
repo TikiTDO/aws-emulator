@@ -219,8 +219,6 @@ mod describe_internet_gateways_selection;
 // What `DescribeNatGateways` reports out of the NAT gateway store: every member a stored
 // gateway holds, how the id list, the documented filters and the page size narrow it, what it
 // refuses, and the address status the clock owes a gateway it is read through. Declared beside
-// `prefix_lists` for the reason the note above gives: the sorted neighbourhood and the tail of
-// this file are where every new ec2 suite inserts its lines.
 #[path = "all/describe_nat_gateways.rs"]
 mod describe_nat_gateways;
 // The FIXED TEXT of a refusal's message, per class: the sentence the service words that error
@@ -1847,3 +1845,9 @@ mod launch_template_override_instance_selection;
 // gives: the sorted neighbourhood is where concurrent ec2 landings insert their lines.
 #[path = "all/attach_network_interface.rs"]
 mod attach_network_interface;
+// `ReleaseAddress`: the one Elastic IP allocation a release gives back to the address pool,
+// the `<return>` envelope it reports, the second release and the border group that name no
+// address of the account, the association that makes an address unreleasable, and the dry run
+// that gives up nothing. Declared at the tail of this list, where every new ec2 suite inserts
+#[path = "all/release_address.rs"]
+mod release_address;

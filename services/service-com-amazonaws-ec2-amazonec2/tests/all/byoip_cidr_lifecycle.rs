@@ -754,8 +754,8 @@ async fn a_range_with_an_address_still_allocated_from_it_fails_its_release() {
 
     // The outcome is decided when the release ENDS, not when it starts: give the address
     // back while the range is `pending-deprovision` and the retry under way succeeds.
-    // (`ReleaseAddress` is still a scaffold, so the allocation is dropped straight from the
-    // store, the way the ranges here are seeded.)
+    // (The allocation is dropped straight from the store, the way the ranges here are
+    // seeded, so this suite drives only the BYOIP calls it is about.)
     {
         let store = engine.state::<Ec2State>();
         let mut guard = store.lock();
