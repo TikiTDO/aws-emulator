@@ -82,29 +82,130 @@ const GEOGRAPHIES: &[(&str, &str, &[&str])] = &[
 ];
 
 /// The base models that catalog publishes a cross-region profile for, each with the brand
-/// its published name carries — the provider's name and the model's name as
-/// `ListFoundationModels` reports them, the model's name alone for a model AWS publishes
-/// itself: `(modelId, brand)`, in `modelId` order. The listing reports them in
-/// `inferenceProfileName` order, which [`published_in`] sorts them into.
-const CROSS_REGION_MODELS: &[(&str, &str)] = &[
-    ("amazon.nova-lite-v1:0", "Nova Lite"),
-    ("amazon.nova-micro-v1:0", "Nova Micro"),
-    ("amazon.nova-pro-v1:0", "Nova Pro"),
+/// its published name carries and the regions the model is offered in — the provider's name
+/// and the model's name as `ListFoundationModels` reports them, the model's name alone for
+/// a model AWS publishes itself: `(modelId, brand, regions)`, in `modelId` order. The
+/// listing reports them in `inferenceProfileName` order, which [`published_in`] sorts them
+/// into.
+const CROSS_REGION_MODELS: &[(&str, &str, &[&str])] = &[
+    ("amazon.nova-lite-v1:0", "Nova Lite", EVERY_REGION),
+    ("amazon.nova-micro-v1:0", "Nova Micro", EVERY_REGION),
+    ("amazon.nova-pro-v1:0", "Nova Pro", EVERY_REGION),
+    (
+        "anthropic.claude-3-5-sonnet-20240620-v1:0",
+        "Anthropic Claude 3.5 Sonnet",
+        &[
+            "ap-northeast-1",
+            "ap-northeast-2",
+            "ap-south-1",
+            "ap-southeast-1",
+            "ap-southeast-2",
+            "eu-central-1",
+            "eu-west-1",
+            "eu-west-3",
+            "us-east-1",
+            "us-east-2",
+            "us-west-2",
+        ],
+    ),
     (
         "anthropic.claude-3-5-sonnet-20241022-v2:0",
         "Anthropic Claude 3.5 Sonnet",
+        &[
+            "ap-northeast-1",
+            "ap-northeast-2",
+            "ap-south-1",
+            "ap-southeast-1",
+            "ap-southeast-2",
+            "us-east-1",
+            "us-east-2",
+            "us-west-2",
+        ],
     ),
     (
         "anthropic.claude-3-haiku-20240307-v1:0",
         "Anthropic Claude 3 Haiku",
+        &[
+            "ap-northeast-1",
+            "ap-northeast-2",
+            "ap-south-1",
+            "ap-southeast-1",
+            "ap-southeast-2",
+            "eu-central-1",
+            "eu-west-1",
+            "eu-west-3",
+            "us-east-1",
+            "us-west-2",
+        ],
     ),
     (
         "anthropic.claude-3-sonnet-20240229-v1:0",
         "Anthropic Claude 3 Sonnet",
+        &[
+            "ap-northeast-1",
+            "ap-southeast-1",
+            "ap-southeast-2",
+            "eu-central-1",
+            "eu-west-1",
+            "eu-west-3",
+            "us-east-1",
+            "us-west-2",
+        ],
     ),
-    ("meta.llama3-1-70b-instruct-v1:0", "Meta Llama 3.1 70B"),
-    ("meta.llama3-1-8b-instruct-v1:0", "Meta Llama 3.1 8B"),
+    (
+        "deepseek.r1-v1:0",
+        "DeepSeek DeepSeek-R1",
+        &["us-east-1", "us-east-2", "us-west-2"],
+    ),
+    (
+        "meta.llama3-1-70b-instruct-v1:0",
+        "Meta Llama 3.1 70B",
+        LLAMA_3_1_REGIONS,
+    ),
+    (
+        "meta.llama3-1-8b-instruct-v1:0",
+        "Meta Llama 3.1 8B",
+        LLAMA_3_1_REGIONS,
+    ),
+    (
+        "meta.llama3-3-70b-instruct-v1:0",
+        "Meta Llama 3.3 70B",
+        &["us-east-1", "us-east-2", "us-west-2"],
+    ),
 ];
+
+/// Every region every geography above carries — what a model offered in all of them lists.
+const EVERY_REGION: &[&str] = &[
+    "ap-northeast-1",
+    "ap-northeast-2",
+    "ap-south-1",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "eu-central-1",
+    "eu-north-1",
+    "eu-west-1",
+    "eu-west-3",
+    "us-east-1",
+    "us-east-2",
+    "us-west-2",
+];
+
+/// The regions the two sizes of the Meta Llama 3.1 line are offered in.
+const LLAMA_3_1_REGIONS: &[&str] = &[
+    "ap-northeast-1",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "eu-central-1",
+    "eu-west-1",
+    "eu-west-3",
+    "us-east-1",
+    "us-east-2",
+    "us-west-2",
+];
+
+/// How many regions of a geography must hold a model for a profile to be published there:
+/// routing across one region is not cross-region routing.
+const MIN_ROUTED_REGIONS: usize = 2;
 
 /// The geography a region belongs to, or `None` when the catalog publishes none there.
 fn geography_of(region: &str) -> Option<(&'static str, &'static str, &'static [&'static str])> {
@@ -114,31 +215,44 @@ fn geography_of(region: &str) -> Option<(&'static str, &'static str, &'static [&
         .copied()
 }
 
+/// The regions of the geography a profile for this model routes to: the regions of the
+/// geography that hold a copy of the model, in the geography's own order.
+fn routed_regions(geography_regions: &[&'static str], model_regions: &[&str]) -> Vec<&'static str> {
+    geography_regions
+        .iter()
+        .copied()
+        .filter(|region| model_regions.contains(region))
+        .collect()
+}
+
 /// The `SYSTEM_DEFINED` summaries the catalog publishes in `region`, in
 /// `inferenceProfileName` order — what the listing must report, member for member, beside
 /// the `description`, `createdAt` and `updatedAt` a published profile carries, which the
-/// row below asserts on their own because they come off the MODEL's own published launch
-/// rather than out of this table.
+/// row below asserts on their own.
 fn published_in(region: &str) -> Vec<Value> {
     let Some((prefix, label, regions)) = geography_of(region) else {
         return Vec::new();
     };
     let mut profiles: Vec<Value> = CROSS_REGION_MODELS
         .iter()
-        .map(|(model_id, model_label)| {
+        .filter_map(|(model_id, model_label, model_regions)| {
+            let routed = routed_regions(regions, model_regions);
+            if routed.len() < MIN_ROUTED_REGIONS {
+                return None;
+            }
             let id = format!("{prefix}.{model_id}");
-            json!({
+            Some(json!({
                 "inferenceProfileName": format!("{label} {model_label}"),
                 "inferenceProfileArn":
                     format!("arn:aws:bedrock:{region}:{ACCOUNT}:inference-profile/{id}"),
                 "inferenceProfileId": id,
-                "models": regions
+                "models": routed
                     .iter()
                     .map(|routed| json!({ "modelArn": foundation_model_arn(routed, model_id) }))
                     .collect::<Vec<Value>>(),
                 "status": "ACTIVE",
                 "type": TYPE_SYSTEM_DEFINED,
-            })
+            }))
         })
         .collect();
     profiles.sort_by_key(|profile| {
@@ -152,9 +266,14 @@ fn published_in(region: &str) -> Vec<Value> {
 }
 
 /// The `description` a published profile carries, as the catalogue states it: the model it
-/// routes to, and the geography it routes within.
-fn published_description(label: &str, model_label: &str) -> String {
-    format!("Routes requests to {model_label} in {label} regions")
+/// routes to, and the concrete regions it routes that model's requests to.
+fn published_description(model_label: &str, routed: &[&str]) -> String {
+    let regions = match routed {
+        [] => String::new(),
+        [only] => (*only).to_string(),
+        [leading @ .., last] => format!("{} and {last}", leading.join(", ")),
+    };
+    format!("Routes requests to {model_label} in {regions}.")
 }
 
 /// One listed summary without the three members a published profile computes rather than
@@ -491,24 +610,30 @@ async fn the_published_cross_region_profiles_of_the_region_are_listed() {
             listing.body
         );
         // A published profile carries the three members the table above leaves to this row:
-        // the description stating what it routes and where, and the instant it came into
-        // being — the same for `createdAt` and `updatedAt`, because no call has updated a
-        // resource no call created.
-        let label = geography_of(region).map(|(_, label, _)| label);
+        // the description stating which model it routes and to which regions, and the
+        // instant it came into being — the same for `createdAt` and `updatedAt`, because no
+        // call has updated a resource no call created.
+        let geography = geography_of(region);
         for summary in summaries(case, &listing) {
-            let name = summary
-                .get("inferenceProfileName")
+            let id = summary
+                .get("inferenceProfileId")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let model_label = label
-                .and_then(|label| name.strip_prefix(&format!("{label} ")))
-                .unwrap_or_default();
+            let (_, _, geography_regions) = geography
+                .unwrap_or_else(|| panic!("case {case:?}: a listed profile has a geography"));
+            let (model_label, routed) = CROSS_REGION_MODELS
+                .iter()
+                .find(|(model_id, _, _)| id.ends_with(&format!(".{model_id}")))
+                .map(|(_, model_label, model_regions)| {
+                    (*model_label, routed_regions(geography_regions, model_regions))
+                })
+                .unwrap_or_else(|| panic!("case {case:?}: {id:?} must be a catalogued model"));
             assert_eq!(
                 summary.get("description").and_then(Value::as_str),
-                Some(published_description(label.unwrap_or_default(), model_label).as_str()),
+                Some(published_description(model_label, &routed).as_str()),
                 "case {case:?}: the published description must name the model and the \
-                 geography, got {summary:?}"
+                 regions it routes to, got {summary:?}"
             );
             let created = summary
                 .get("createdAt")
@@ -536,8 +661,15 @@ async fn the_published_cross_region_profiles_of_the_region_are_listed() {
     let there = published_in("us-east-2");
     assert_eq!(
         here.len(),
-        CROSS_REGION_MODELS.len(),
-        "case \"the us geography\": one published profile per cross-region model, got {here:?}"
+        CROSS_REGION_MODELS
+            .iter()
+            .filter(|(_, _, model_regions)| {
+                routed_regions(&["us-east-1", "us-east-2", "us-west-2"], model_regions).len()
+                    >= MIN_ROUTED_REGIONS
+            })
+            .count(),
+        "case \"the us geography\": one published profile per cross-region model the \
+         geography holds at least two regions of, got {here:?}"
     );
     for (left, right) in here.iter().zip(there.iter()) {
         assert_eq!(

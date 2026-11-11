@@ -334,6 +334,7 @@ pub fn expected_max_output_tokens(model: &bedrock::state::FoundationModel) -> Op
         ("amazon.nova-pro-v1:0", 5120),
         ("amazon.titan-text-lite-v1", 4096),
         ("amazon.titan-text-premier-v1:0", 3072),
+        ("anthropic.claude-3-5-sonnet-20240620-v1:0", 8192),
         ("anthropic.claude-3-5-sonnet-20241022-v2:0", 8192),
         ("anthropic.claude-3-haiku-20240307-v1:0", 4096),
         ("anthropic.claude-3-sonnet-20240229-v1:0", 4096),

@@ -48,19 +48,20 @@ const TYPE_DEFAULT: &str = "default";
 const SYSTEM_DEFINED: &str = "SYSTEM_DEFINED";
 
 /// The resource half of the `promptRouterArn` of every router this emulator's Amazon
-/// Bedrock publishes, with the brand each one is published under and the published model
-/// FAMILY it routes a prompt up to: `(router id, brand, family)`.
+/// Bedrock publishes, with the brand each one is published under and the model LINE it
+/// routes within: `(router id, brand, line)`.
 ///
-/// One row per model family AWS publishes a default router for in "Intelligent prompt
+/// One row per model line AWS publishes a default router for in "Intelligent prompt
 /// routing"; the ids are the `<provider>.<family>:<n>` form `PromptRouterArn`'s pattern
-/// admits after `default-prompt-router/`. The families are the `modelFamily`
-/// `ListFoundationModels` reports for the model each router falls back to, which this
-/// suite checks rather than assumes. Includes the Amazon Nova router, which no earlier row
-/// of this suite cited.
+/// admits after `default-prompt-router/`. A line is named WITHOUT a version qualifier,
+/// which is why it is not the `modelFamily` `ListFoundationModels` reports for the model a
+/// router falls back to — that family is one GENERATION of the line, a relation this suite
+/// checks rather than assumes. Includes the Amazon Nova router, which no earlier row of
+/// this suite cited.
 const PUBLISHED_ROUTERS: &[(&str, &str, &str)] = &[
     ("amazon.nova:1", "Nova", "Nova"),
-    ("anthropic.claude:1", "Anthropic", "Claude 3.5"),
-    ("meta.llama:1", "Meta", "Llama 3.1"),
+    ("anthropic.claude:1", "Anthropic", "Claude"),
+    ("meta.llama:1", "Meta", "LLaMA"),
 ];
 
 /// Regions this suite addresses: one of each published geography, a second region of one
@@ -187,7 +188,7 @@ async fn every_published_router_is_listed_with_every_member_it_carries() {
             listed.body
         );
 
-        for (summary, (id, label, family)) in summaries.iter().zip(PUBLISHED_ROUTERS.iter()) {
+        for (summary, (id, label, line)) in summaries.iter().zip(PUBLISHED_ROUTERS.iter()) {
             let case = format!("{case} / {id}");
             assert_eq!(
                 text(summary, "status"),
@@ -216,12 +217,12 @@ async fn every_published_router_is_listed_with_every_member_it_carries() {
                 "case {case:?}: routingCriteria is @required, got {summary:?}"
             );
 
-            // The description states the published FAMILY of the models the router routes
-            // between — two sizes of one line.
+            // The description states the model LINE the router routes within, named at line
+            // level: a router is published for the line and not for one generation of it.
             assert_eq!(
                 text(summary, "description"),
-                format!("Routes requests among models in the {family} family"),
-                "case {case:?}: the description must name the family the router routes \
+                format!("Routes requests among models in the {line} family"),
+                "case {case:?}: the description must name the line the router routes \
                  within, got {summary:?}"
             );
 
@@ -262,7 +263,7 @@ async fn every_router_target_is_a_published_inference_profile_of_the_region() {
         );
         let families = model_families(&emu, region).await;
 
-        for (summary, (_, _, family)) in summaries.iter().zip(PUBLISHED_ROUTERS.iter()) {
+        for (summary, (_, _, line)) in summaries.iter().zip(PUBLISHED_ROUTERS.iter()) {
             let router = text(summary, "promptRouterArn");
             let targets = target_arns(summary);
             assert!(
@@ -319,17 +320,22 @@ async fn every_router_target_is_a_published_inference_profile_of_the_region() {
                 );
             }
 
-            // The line the router's own description names is the published family of the
-            // model it routes a prompt UP to: the fallback.
+            // The line the router's own description names is the line the fallback model's
+            // published family is a generation OF: the family carries the version
+            // qualifier, the line does not.
             let fallback_model = profile_model_id(&fallback[0]);
-            assert_eq!(
-                families
-                    .iter()
-                    .find(|(id, _)| *id == fallback_model)
-                    .map(|(_, listed_family)| listed_family.as_str()),
-                Some(*family),
-                "case {case:?} / {router:?}: the fallback model {fallback_model:?} must be \
-                 the one ListFoundationModels reports in the {family:?} family"
+            let fallback_family = families
+                .iter()
+                .find(|(id, _)| *id == fallback_model)
+                .map(|(_, listed_family)| listed_family.clone())
+                .unwrap_or_default();
+            assert!(
+                fallback_family
+                    .to_lowercase()
+                    .starts_with(&line.to_lowercase()),
+                "case {case:?} / {router:?}: the fallback model {fallback_model:?} is \
+                 reported in the {fallback_family:?} family, which must be a generation of \
+                 the {line:?} line the router names"
             );
         }
     }

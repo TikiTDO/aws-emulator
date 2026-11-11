@@ -143,6 +143,8 @@ mod path_label_values_are_not_echoed;
 mod prompt_routers;
 #[path = "all/published_catalogues.rs"]
 mod published_catalogues;
+#[path = "all/published_routing_metadata.rs"]
+mod published_routing_metadata;
 #[path = "all/range_refusal_wording.rs"]
 mod range_refusal_wording;
 #[path = "all/refusal_message_fidelity.rs"]

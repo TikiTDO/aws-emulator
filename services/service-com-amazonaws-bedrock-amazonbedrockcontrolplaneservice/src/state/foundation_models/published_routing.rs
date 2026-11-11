@@ -38,16 +38,33 @@ pub struct DefaultPromptRouter {
     /// The router's `promptRouterName` is built from it ([`default_prompt_router_name`]),
     /// so the brand a router is published under is stated once.
     pub label: &'static str,
+    /// The model LINE the router routes within, as its publisher brands that line: the
+    /// family name WITHOUT the per-generation version qualifier, which is what the router's
+    /// description names ([`default_prompt_router_description`]).
+    ///
+    /// Published data of the ROUTER rather than of one of its targets, and not derivable
+    /// from them: a target's [`FoundationModel::model_family`] is the version-qualified
+    /// family of that one model ("the 3.5 generation of the line"), while a router is
+    /// published for the line itself, and the line is spelled as its publisher spells it,
+    /// which re-casing a family name cannot produce.
+    pub line: &'static str,
+    /// The instant the router came into being: `createdAt`, and — because no operation of
+    /// this service updates a published router — `updatedAt` too.
+    ///
+    /// Published data of the router, as RFC 3339. The day AWS published the router is a
+    /// fact about the ROUTER and not about the models it routes between: a router is
+    /// published when intelligent prompt routing began offering it, which is no earlier
+    /// than its targets' launches but need not be the day any one of them launched.
+    pub published_at: &'static str,
     /// The `modelId`s the router routes between, in the order the summary reports them —
     /// the smaller model first, because the criteria are what sends a prompt UP to the
     /// larger one. The set AWS publishes for the router; the last of them is the fallback,
-    /// the strongest model a prompt is routed up to, and ITS published family
-    /// ([`FoundationModel::model_family`]) is the line the router's description names — the
-    /// line a caller gets when the criteria are not met. The two need not share a family:
-    /// AWS publishes a router across two generations of a provider's line as readily as
-    /// within one. Every id is a row of [`FOUNDATION_MODELS`] that also carries a
-    /// cross-region profile ([`CROSS_REGION_MODELS`]), because that profile is what a
-    /// target is reported as.
+    /// the strongest model a prompt is routed up to — the model a caller gets when the
+    /// criteria are not met. The two need not share a `modelFamily`: AWS publishes a router
+    /// across two generations of a provider's line as readily as within one, which is why
+    /// the line the description names is the row's own [`DefaultPromptRouter::line`].
+    /// Every id is a row of [`FOUNDATION_MODELS`] that also carries a cross-region profile
+    /// ([`CROSS_REGION_MODELS`]), because that profile is what a target is reported as.
     pub models: &'static [&'static str],
     /// The `modelId` of the model the router falls back to when the criteria are not met;
     /// one of [`DefaultPromptRouter::models`].
@@ -57,31 +74,37 @@ pub struct DefaultPromptRouter {
 /// The prompt routers this emulator's Amazon Bedrock publishes, in `id` order — the order
 /// their ARNs sort in, which is the order a listing pages through.
 ///
-/// The ids, brands and model sets are the ones AWS publishes in "Intelligent prompt
-/// routing": one router per provider line, routing a prompt from a smaller model to the
-/// stronger model it falls back to — which AWS publishes ACROSS two generations of a line
-/// as readily as within one, so a row's two models need not share a `modelFamily`. The
-/// model ids are the rows [`FOUNDATION_MODELS`] carries, so the two catalogs agree about
-/// which models exist.
+/// The ids, brands, lines, publication days and model sets are the ones AWS publishes in
+/// "Intelligent prompt routing": one router per provider LINE, routing a prompt from a
+/// smaller model to the stronger model it falls back to — which AWS publishes ACROSS two
+/// generations of a line as readily as within one, so a row's two models need not share a
+/// `modelFamily`. The model ids are the rows [`FOUNDATION_MODELS`] carries, so the two
+/// catalogs agree about which models exist.
 pub const DEFAULT_PROMPT_ROUTERS: &[DefaultPromptRouter] = &[
     DefaultPromptRouter {
         id: "amazon.nova:1",
         label: "Nova",
+        line: "Nova",
+        published_at: "2025-04-21T07:00:00Z",
         models: &["amazon.nova-lite-v1:0", "amazon.nova-pro-v1:0"],
         fallback_model: "amazon.nova-pro-v1:0",
     },
     DefaultPromptRouter {
         id: "anthropic.claude:1",
         label: "Anthropic",
+        line: "Claude",
+        published_at: "2024-11-20T00:00:00Z",
         models: &[
             "anthropic.claude-3-haiku-20240307-v1:0",
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "anthropic.claude-3-5-sonnet-20240620-v1:0",
         ],
-        fallback_model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        fallback_model: "anthropic.claude-3-5-sonnet-20240620-v1:0",
     },
     DefaultPromptRouter {
         id: "meta.llama:1",
         label: "Meta",
+        line: "LLaMA",
+        published_at: "2024-11-20T00:00:00Z",
         models: &[
             "meta.llama3-1-8b-instruct-v1:0",
             "meta.llama3-1-70b-instruct-v1:0",
@@ -101,22 +124,17 @@ pub fn default_prompt_router_name(router: &DefaultPromptRouter) -> String {
     format!("{} Prompt Router", router.label)
 }
 
-/// The `description` a published router reports: the published family of the model it
-/// routes a prompt UP to.
+/// The `description` a published router reports: the model LINE it routes within.
 ///
 /// `PromptRouterDescription` is modelled (len 1..200, `^([0-9a-zA-Z:.][ _-]?)+$`) and a
 /// published router carries one, so it is stated for every row by ONE rule rather than
-/// written out per router: what a default router IS, is the published family of the model
-/// it routes a prompt UP to ([`FoundationModel::model_family`]) — the stronger model it
-/// falls back to, which is the line a caller is choosing when it picks the router.
-///
-/// `None` for a router whose fallback model the catalogue offers no row for, because the
-/// family of a model nothing publishes is not something to invent; such a router publishes
-/// no targets either ([`default_prompt_routers`]), so no listing reports it.
+/// written out per router: what a default router IS, is the line of models it routes a
+/// prompt within, named at LINE level as its publisher brands that line
+/// ([`DefaultPromptRouter::line`]) — without a version qualifier, because a router is
+/// published for the line and not for one generation of it.
 #[must_use]
-pub fn default_prompt_router_description(router: &DefaultPromptRouter) -> Option<String> {
-    let family = catalogued_model(router.fallback_model)?.model_family;
-    Some(format!("Routes requests among models in the {family} family"))
+pub fn default_prompt_router_description(router: &DefaultPromptRouter) -> String {
+    format!("Routes requests among models in the {} family", router.line)
 }
 
 /// Every prompt router Amazon Bedrock publishes in `region`, as the `PromptRouterSummary`
@@ -132,10 +150,10 @@ pub fn default_prompt_router_description(router: &DefaultPromptRouter) -> Option
 /// offered in a region exactly while every model it routes between has a published profile
 /// there, which is why a region of no geography publishes none.
 ///
-/// `createdAt` and `updatedAt` are the instant the router came into being, which for a
-/// resource no caller created is the day the LAST of the models it routes between launched
-/// ([`FoundationModel::start_of_life_time`]): a router cannot route to a model that does
-/// not exist yet, and nothing has updated it since, so the two instants agree.
+/// `createdAt` and `updatedAt` are the instant the router was published
+/// ([`DefaultPromptRouter::published_at`]), and the same instant for both: no operation of
+/// this service updates a published router, so nothing has moved `updatedAt` off the
+/// instant the router came into being.
 #[must_use]
 pub fn default_prompt_routers(region: &str) -> Vec<PromptRouterSummary> {
     let published = system_defined_inference_profiles(region);
@@ -156,19 +174,13 @@ pub fn default_prompt_routers(region: &str) -> Vec<PromptRouterSummary> {
                 .iter()
                 .map(|model_id| target(model_id))
                 .collect::<Option<_>>()?;
-            let published_at = router
-                .models
-                .iter()
-                .filter_map(|model_id| catalogued_model(model_id))
-                .map(|model| model.start_of_life_time)
-                .max()
-                .and_then(published_instant);
+            let published_at = published_instant(router.published_at);
             Some(PromptRouterSummary {
                 prompt_router_name: default_prompt_router_name(router),
                 routing_criteria: RoutingCriteria {
                     response_quality_difference: PUBLISHED_ROUTING_QUALITY_DIFFERENCE,
                 },
-                description: default_prompt_router_description(router),
+                description: Some(default_prompt_router_description(router)),
                 created_at: published_at,
                 updated_at: published_at,
                 prompt_router_arn: prompt_router_arn(region, router.id),
@@ -224,9 +236,11 @@ pub struct InferenceProfileGeography {
     /// How the published `inferenceProfileName` spells the geography, ahead of the model's
     /// own brand ([`cross_region_model_brand`]).
     pub label: &'static str,
-    /// The regions of the geography: where the profile is offered, and where it routes
-    /// invocations to. At most five, because `InferenceProfileModels` is
-    /// `@length(min: 1, max: 5)` and a published profile reports one model per region.
+    /// The regions of the geography: where the profile is offered, and the regions it may
+    /// route invocations to — which are the ones its own model is offered in
+    /// ([`CrossRegionModel::regions`]). At most five, because `InferenceProfileModels` is
+    /// `@length(min: 1, max: 5)` and a published profile reports one model per routed
+    /// region.
     pub regions: &'static [&'static str],
 }
 
@@ -262,30 +276,206 @@ pub const INFERENCE_PROFILE_GEOGRAPHIES: &[InferenceProfileGeography] = &[
     },
 ];
 
+/// One base model this emulator's Amazon Bedrock publishes a cross-region inference
+/// profile for, with the regions that model is offered in.
+///
+/// The regions travel WITH the model because they are what a published profile reports and
+/// describes: a profile fans a request out to the regions of its geography that hold a copy
+/// of its own model, which is a per-model published fact and not a property of the
+/// geography — two models of one geography are offered in different subsets of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CrossRegionModel {
+    /// The `modelId` of the base model, a row of [`FOUNDATION_MODELS`].
+    pub model_id: &'static str,
+    /// Every region the model is offered in, in region order.
+    ///
+    /// A profile for this model is published in a geography while the geography holds at
+    /// least two of them — a profile that could route to one region only would route
+    /// across no region at all — and the ones it holds are the regions that profile reports
+    /// a model for and names in its description.
+    pub regions: &'static [&'static str],
+}
+
 /// The base models this emulator's Amazon Bedrock publishes a cross-region inference
-/// profile for, by `modelId`, in `modelId` order.
+/// profile for, in `modelId` order.
 ///
 /// The models AWS lists as supported for cross-region inference on "Supported Regions and
-/// models for inference profiles", restricted to the ids [`FOUNDATION_MODELS`] carries so
-/// no published profile routes to a model this control plane does not offer — an id with
-/// no row publishes no profile rather than one naming a model nothing serves. A SUBSET of
-/// what AWS offers, spanning three providers, and CLOSED under
-/// [`DEFAULT_PROMPT_ROUTERS`]: every model a published router routes between has a profile
-/// here, because that profile is what the router reports as its target.
+/// models for inference profiles", with the regions that page publishes each model in,
+/// restricted to the ids [`FOUNDATION_MODELS`] carries so no published profile routes to a
+/// model this control plane does not offer — an id with no row publishes no profile rather
+/// than one naming a model nothing serves. A SUBSET of what AWS offers, spanning three
+/// providers and models offered in one geography as well as in all of them, and CLOSED
+/// under [`DEFAULT_PROMPT_ROUTERS`]: every model a published router routes between has a
+/// profile here, because that profile is what the router reports as its target.
 ///
-/// Only the ids are written here. Everything else a profile reports about its model — the
-/// brand its name carries, the instant it came into being — is read off that model's
-/// published row, so the two catalogs cannot disagree about one model.
-pub const CROSS_REGION_MODELS: &[&str] = &[
-    "amazon.nova-lite-v1:0",
-    "amazon.nova-micro-v1:0",
-    "amazon.nova-pro-v1:0",
-    "anthropic.claude-3-5-sonnet-20241022-v2:0",
-    "anthropic.claude-3-haiku-20240307-v1:0",
-    "anthropic.claude-3-sonnet-20240229-v1:0",
-    "meta.llama3-1-70b-instruct-v1:0",
-    "meta.llama3-1-8b-instruct-v1:0",
+/// Only the ids and the regions are written here. Everything else a profile reports about
+/// its model — the brand its name carries, the launch its instants are bounded below by —
+/// is read off that model's published row, so the two catalogs cannot disagree about one
+/// model.
+pub const CROSS_REGION_MODELS: &[CrossRegionModel] = &[
+    CrossRegionModel {
+        model_id: "amazon.nova-lite-v1:0",
+        regions: NOVA_REGIONS,
+    },
+    CrossRegionModel {
+        model_id: "amazon.nova-micro-v1:0",
+        regions: NOVA_REGIONS,
+    },
+    CrossRegionModel {
+        model_id: "amazon.nova-pro-v1:0",
+        regions: NOVA_REGIONS,
+    },
+    CrossRegionModel {
+        model_id: "anthropic.claude-3-5-sonnet-20240620-v1:0",
+        regions: &[
+            "ap-northeast-1",
+            "ap-northeast-2",
+            "ap-south-1",
+            "ap-southeast-1",
+            "ap-southeast-2",
+            "eu-central-1",
+            "eu-west-1",
+            "eu-west-3",
+            "us-east-1",
+            "us-east-2",
+            "us-west-2",
+        ],
+    },
+    CrossRegionModel {
+        model_id: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        regions: &[
+            "ap-northeast-1",
+            "ap-northeast-2",
+            "ap-south-1",
+            "ap-southeast-1",
+            "ap-southeast-2",
+            "us-east-1",
+            "us-east-2",
+            "us-west-2",
+        ],
+    },
+    CrossRegionModel {
+        model_id: "anthropic.claude-3-haiku-20240307-v1:0",
+        regions: &[
+            "ap-northeast-1",
+            "ap-northeast-2",
+            "ap-south-1",
+            "ap-southeast-1",
+            "ap-southeast-2",
+            "eu-central-1",
+            "eu-west-1",
+            "eu-west-3",
+            "us-east-1",
+            "us-west-2",
+        ],
+    },
+    CrossRegionModel {
+        model_id: "anthropic.claude-3-sonnet-20240229-v1:0",
+        regions: &[
+            "ap-northeast-1",
+            "ap-southeast-1",
+            "ap-southeast-2",
+            "eu-central-1",
+            "eu-west-1",
+            "eu-west-3",
+            "us-east-1",
+            "us-west-2",
+        ],
+    },
+    CrossRegionModel {
+        model_id: "deepseek.r1-v1:0",
+        regions: &["us-east-1", "us-east-2", "us-west-2"],
+    },
+    CrossRegionModel {
+        model_id: "meta.llama3-1-70b-instruct-v1:0",
+        regions: LLAMA_3_1_REGIONS,
+    },
+    CrossRegionModel {
+        model_id: "meta.llama3-1-8b-instruct-v1:0",
+        regions: LLAMA_3_1_REGIONS,
+    },
+    CrossRegionModel {
+        model_id: "meta.llama3-3-70b-instruct-v1:0",
+        regions: &["us-east-1", "us-east-2", "us-west-2"],
+    },
 ];
+
+/// The regions the Amazon Nova text models are offered in: every region of every geography
+/// this catalog carries.
+const NOVA_REGIONS: &[&str] = &[
+    "ap-northeast-1",
+    "ap-northeast-2",
+    "ap-south-1",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "eu-central-1",
+    "eu-north-1",
+    "eu-west-1",
+    "eu-west-3",
+    "us-east-1",
+    "us-east-2",
+    "us-west-2",
+];
+
+/// The regions the Meta Llama 3.1 models are offered in — the two sizes of that line are
+/// offered in the same ones, which is why the list is stated once.
+const LLAMA_3_1_REGIONS: &[&str] = &[
+    "ap-northeast-1",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "eu-central-1",
+    "eu-west-1",
+    "eu-west-3",
+    "us-east-1",
+    "us-east-2",
+    "us-west-2",
+];
+
+/// The day Amazon Bedrock began publishing cross-region inference profiles: no profile came
+/// into being before the capability it belongs to was offered, however long its model had
+/// been available by then.
+///
+/// The lower bound of every published profile's instants
+/// ([`cross_region_profile_published_at`]); a profile for a model that launched later came
+/// into being with THAT model instead.
+pub const CROSS_REGION_PROFILES_PUBLISHED_AT: &str = "2024-08-26T00:00:00Z";
+
+/// How many regions of a geography must hold a model's copy for a cross-region profile to
+/// be published there: a profile that could reach one region only would route across none.
+pub const MIN_CROSS_REGION_ROUTED_REGIONS: usize = 2;
+
+/// The regions of `geography` a profile for `model` routes invocations to, in the
+/// geography's own region order: the regions of the geography that hold a copy of the
+/// model.
+#[must_use]
+pub(super) fn cross_region_routed_regions(
+    geography: &InferenceProfileGeography,
+    model: &CrossRegionModel,
+) -> Vec<&'static str> {
+    geography
+        .regions
+        .iter()
+        .copied()
+        .filter(|region| model.regions.contains(region))
+        .collect()
+}
+
+/// The instant a published cross-region profile for `model` came into being: the later of
+/// the day cross-region inference profiles began being published
+/// ([`CROSS_REGION_PROFILES_PUBLISHED_AT`]) and the day the model itself launched
+/// ([`FoundationModel::start_of_life_time`]).
+///
+/// A profile can be no older than either of the two, and nothing has updated it since, so
+/// it is what both `createdAt` and `updatedAt` report. Both are RFC 3339 days written in
+/// this file, which order lexicographically as they order in time.
+#[must_use]
+pub fn cross_region_profile_published_at(model: &FoundationModel) -> &'static str {
+    if model.start_of_life_time > CROSS_REGION_PROFILES_PUBLISHED_AT {
+        model.start_of_life_time
+    } else {
+        CROSS_REGION_PROFILES_PUBLISHED_AT
+    }
+}
 
 /// The BRAND a published cross-region profile names its model by, after the geography's
 /// own label.
@@ -344,22 +534,43 @@ pub fn inference_profile_geography(region: &str) -> Option<&'static InferencePro
         .find(|geography| geography.regions.contains(&region))
 }
 
-/// The `description` a published profile reports: the model it routes to, and the
-/// geography it routes within.
+/// The `description` a published profile reports: the model it routes to, and the CONCRETE
+/// regions it routes that model's requests to, as one sentence.
 ///
-/// `InferenceProfileDescription` is modelled (len 1..200, `^([0-9a-zA-Z:.][ _-]?)+$`) and
-/// a published profile carries one, so it is stated for every row by ONE rule rather than
-/// written out per profile: what a cross-region profile IS, is that pair.
+/// `InferenceProfileDescription` is modelled (len 1..200, `@sensitive`) and a published
+/// profile carries one, so it is stated for every row by ONE rule rather than written out
+/// per profile: what a cross-region profile IS, is the model it fans out and the regions it
+/// fans it out to — the same regions its `models` member reports, named rather than
+/// summarised, so a reader of the sentence and a reader of the member learn the same set.
+///
+/// The shape also declares `^([0-9a-zA-Z:.][ _-]?)+$`, which admits no comma, so a sentence
+/// naming three or more regions does not satisfy it. That pattern constrains the
+/// description a CALLER may give a profile of its own — the validating walk runs on
+/// operation inputs — while this is the description Amazon Bedrock itself publishes for a
+/// profile no caller created, and it names the regions comma-separated; re-spelling it to
+/// fit an input constraint would report a region list no client could read. The same split
+/// holds of a published profile's NAME ([`cross_region_model_brand`]).
 #[must_use]
 pub fn system_defined_inference_profile_description(
-    geography: &InferenceProfileGeography,
     model: &FoundationModel,
+    routed_regions: &[&str],
 ) -> String {
     format!(
-        "Routes requests to {} in {} regions",
+        "Routes requests to {} in {}.",
         cross_region_model_brand(model),
-        geography.label
+        region_list(routed_regions)
     )
+}
+
+/// A list of regions as a sentence names them: comma-separated, with the last joined by
+/// `and`, which is how a description that names more than one region reads.
+#[must_use]
+pub(super) fn region_list(regions: &[&str]) -> String {
+    match regions {
+        [] => String::new(),
+        [only] => (*only).to_string(),
+        [leading @ .., last] => format!("{} and {last}", leading.join(", ")),
+    }
 }
 
 /// Every system-defined inference profile Amazon Bedrock publishes in `region`, as the
@@ -368,11 +579,13 @@ pub fn system_defined_inference_profile_description(
 /// so has nothing else to be ordered by.
 ///
 /// A profile is published in the regions of its own geography, so a region belonging to no
-/// geography this catalog carries has none. Each one reports one model per region of that
-/// geography — the base model it routes invocations to there — and the instants a resource
-/// nobody created has: the day the model it routes to launched
-/// ([`FoundationModel::start_of_life_time`]), which is when the profile for it came into
-/// being, for both `createdAt` and `updatedAt`, because nothing has updated it since.
+/// geography this catalog carries has none, and so does a geography holding fewer than two
+/// of the regions the profile's own model is offered in ([`cross_region_routed_regions`]):
+/// routing across one region is not cross-region routing. Each one reports one model per
+/// region it routes to — the base model's copy there, and only where that copy exists —
+/// names those same regions in its description, and carries the instant a resource nobody
+/// created came into being ([`cross_region_profile_published_at`]) as both `createdAt` and
+/// `updatedAt`, because nothing has updated it since.
 #[must_use]
 pub fn system_defined_inference_profiles(region: &str) -> Vec<InferenceProfileSummary> {
     let Some(geography) = inference_profile_geography(region) else {
@@ -380,24 +593,25 @@ pub fn system_defined_inference_profiles(region: &str) -> Vec<InferenceProfileSu
     };
     let mut profiles: Vec<InferenceProfileSummary> = CROSS_REGION_MODELS
         .iter()
-        .filter_map(|model_id| catalogued_model(model_id))
-        .map(|model| {
+        .filter_map(|published| {
+            let model = catalogued_model(published.model_id)?;
+            let routed = cross_region_routed_regions(geography, published);
+            if routed.len() < MIN_CROSS_REGION_ROUTED_REGIONS {
+                return None;
+            }
             let id = format!("{}.{}", geography.prefix, model.model_id);
-            let published_at = published_instant(model.start_of_life_time);
-            InferenceProfileSummary {
+            let published_at = published_instant(cross_region_profile_published_at(model));
+            Some(InferenceProfileSummary {
                 inference_profile_name: format!(
                     "{} {}",
                     geography.label,
                     cross_region_model_brand(model)
                 ),
-                description: Some(system_defined_inference_profile_description(
-                    geography, model,
-                )),
+                description: Some(system_defined_inference_profile_description(model, &routed)),
                 created_at: published_at,
                 updated_at: published_at,
                 inference_profile_arn: system_defined_inference_profile_arn(region, &id),
-                models: geography
-                    .regions
+                models: routed
                     .iter()
                     .map(|routed| InferenceProfileModel {
                         model_arn: Some(foundation_model_arn(routed, model.model_id)),
@@ -406,7 +620,7 @@ pub fn system_defined_inference_profiles(region: &str) -> Vec<InferenceProfileSu
                 inference_profile_id: id,
                 status: INFERENCE_PROFILE_ACTIVE.to_string(),
                 r#type: INFERENCE_PROFILE_TYPE_SYSTEM_DEFINED.to_string(),
-            }
+            })
         })
         .collect();
     profiles.sort_by(|left, right| {

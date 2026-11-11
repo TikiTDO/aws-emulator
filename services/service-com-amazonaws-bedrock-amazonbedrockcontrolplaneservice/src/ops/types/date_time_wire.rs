@@ -44,6 +44,15 @@
 //! * `@xmlName`/`@jsonName`. No member of the shapes below declares either: each one's
 //!   wire name IS its Smithy member name.
 //!
+//! THE FRACTION A DATE-TIME KEEPS. `aws_smithy_types` renders an RFC 3339 instant with its
+//! fractional second TRIMMED of trailing zeros, and with no fraction at all when the
+//! instant falls on a whole second. Amazon Bedrock renders the two instants of a PROMPT
+//! ROUTER record at a fixed millisecond width instead, so a whole second still carries
+//! `.000` there. The `date_time_fixed_millis` member kind below keeps that width: the value
+//! on the wire is the same RFC 3339 JSON STRING the `date_time` kind writes — same member
+//! schema, same `@timestampFormat`, never an epoch number — and only the digits between the
+//! second and the `Z` differ ([`millis_text`]).
+//!
 //! REMOVE THIS MODULE when the vendored codegen learns `smithy.api#timestampFormat`: the
 //! fix belongs there, because every `@timestampFormat` member of every service in this
 //! workspace has the same defect, and this is not the first service to have to compensate
@@ -63,6 +72,38 @@
 //! `types` through an `include!`, so a `macro_rules!` declared under it counts as
 //! macro-expanded and cannot be named by an absolute `$crate::` path (rust-lang #52234).
 
+use ::aws_smithy_schema::serde::SerdeError;
+use ::aws_smithy_types::date_time::Format;
+use ::aws_smithy_types::DateTime;
+
+/// The number of fractional-second digits a millisecond-width rendering keeps.
+const MILLISECOND_DIGITS: usize = 3;
+
+/// `value` as the RFC 3339 text of a `date-time` member whose fraction is kept at
+/// millisecond width: the rendering `aws_smithy_types` produces, with its fractional
+/// second padded or truncated to exactly [`MILLISECOND_DIGITS`] digits.
+///
+/// The calendar rendering itself stays in the crate that owns it — this adjusts only the
+/// fraction of the text that crate returns, which is the one part of the form that crate
+/// decides for us: it trims a zero fraction away entirely. A fraction FINER than a
+/// millisecond is truncated rather than rounded, so the rendered instant is never later
+/// than the one it renders.
+pub fn millis_text(value: &DateTime) -> Result<String, SerdeError> {
+    let rendered = value
+        .fmt(Format::DateTime)
+        .map_err(|error| SerdeError::custom(format!("invalid timestamp: {error}")))?;
+    let instant = rendered.strip_suffix('Z').unwrap_or(&rendered);
+    let (seconds, fraction) = match instant.split_once('.') {
+        Some((seconds, fraction)) => (seconds, fraction),
+        None => (instant, ""),
+    };
+    let mut digits: String = fraction.chars().take(MILLISECOND_DIGITS).collect();
+    while digits.len() < MILLISECOND_DIGITS {
+        digits.push('0');
+    }
+    Ok(format!("{seconds}.{digits}Z"))
+}
+
 /// The `ShapeType` one member kind names. Mirrors the vendored codegen's
 /// `codegen::shape_type_ident`.
 macro_rules! bedrock_shape_type {
@@ -70,6 +111,9 @@ macro_rules! bedrock_shape_type {
         ::aws_smithy_schema::ShapeType::String
     };
     (date_time) => {
+        ::aws_smithy_schema::ShapeType::Timestamp
+    };
+    (date_time_fixed_millis) => {
         ::aws_smithy_schema::ShapeType::Timestamp
     };
     (integer) => {
@@ -122,6 +166,12 @@ macro_rules! bedrock_member_schema {
         // The one call the vendored codegen omits; see the module note.
         .with_timestamp_format(::aws_smithy_schema::traits::TimestampFormat::DateTime)
     };
+    // The SAME member schema: a `date_time_fixed_millis` member is a `date-time`
+    // `Timestamp` member like any other, and differs only in the fraction its RENDERING
+    // keeps (see [`millis_text`]), so what it reports about itself must not differ.
+    ($ns:literal, $local:literal, $wire:literal, $idx:literal, date_time_fixed_millis) => {
+        bedrock_member_schema!($ns, $local, $wire, $idx, date_time)
+    };
     ($ns:literal, $local:literal, $wire:literal, $idx:literal, $kind:tt $(($inner:ty))?) => {
         ::aws_smithy_schema::Schema::new_member(
             ::aws_smithy_schema::ShapeId::from_static(
@@ -141,6 +191,15 @@ macro_rules! bedrock_member_schema {
 macro_rules! bedrock_write_member {
     ($s:ident, $m:expr, $v:expr, string) => { $s.write_string($m, $v.as_str())?; };
     ($s:ident, $m:expr, $v:expr, date_time) => { $s.write_timestamp($m, $v)?; };
+    // A `date-time` whose fraction is kept at millisecond width: the JSON codec's
+    // `write_timestamp` renders through `aws_smithy_types`, which TRIMS a zero fraction,
+    // so the text is rendered here and written as the JSON string a `date-time` member is
+    // on the wire. The member key and the string the writer emits are the ones
+    // `write_timestamp` would emit; only the digits between the second and the `Z` differ.
+    // See [`millis_text`].
+    ($s:ident, $m:expr, $v:expr, date_time_fixed_millis) => {
+        $s.write_string($m, &date_time_wire::millis_text($v)?)?;
+    };
     ($s:ident, $m:expr, $v:expr, boolean) => { $s.write_boolean($m, *$v)?; };
     ($s:ident, $m:expr, $v:expr, integer) => { $s.write_integer($m, *$v)?; };
     ($s:ident, $m:expr, $v:expr, long) => { $s.write_long($m, *$v)?; };
@@ -193,6 +252,7 @@ macro_rules! bedrock_write_member {
 macro_rules! bedrock_read_member {
     ($d:ident, $m:expr, string) => { $d.read_string($m)? };
     ($d:ident, $m:expr, date_time) => { $d.read_timestamp($m)? };
+    ($d:ident, $m:expr, date_time_fixed_millis) => { $d.read_timestamp($m)? };
     ($d:ident, $m:expr, boolean) => { $d.read_boolean($m)? };
     ($d:ident, $m:expr, integer) => { $d.read_integer($m)? };
     ($d:ident, $m:expr, long) => { $d.read_long($m)? };

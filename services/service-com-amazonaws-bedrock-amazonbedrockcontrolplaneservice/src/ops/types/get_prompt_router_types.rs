@@ -62,8 +62,8 @@ bedrock_schema_and_codec!(
         struct_of(RoutingCriteria)
     ),
     (M_DESCRIPTION, description, "description", 2, opt, string),
-    (M_CREATED_AT, created_at, "createdAt", 3, opt, date_time),
-    (M_UPDATED_AT, updated_at, "updatedAt", 4, opt, date_time),
+    (M_CREATED_AT, created_at, "createdAt", 3, opt, date_time_fixed_millis),
+    (M_UPDATED_AT, updated_at, "updatedAt", 4, opt, date_time_fixed_millis),
     (
         M_PROMPT_ROUTER_ARN,
         prompt_router_arn,
