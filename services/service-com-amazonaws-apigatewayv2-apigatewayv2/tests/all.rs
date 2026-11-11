@@ -105,6 +105,8 @@ mod http_api_jwt_data_plane;
 mod http_api_jwt_scope_gate;
 #[path = "all/http_api_payload_quota.rs"]
 mod http_api_payload_quota;
+#[path = "all/http_api_published_endpoint_reporters.rs"]
+mod http_api_published_endpoint_reporters;
 #[path = "all/http_api_published_invoke_address.rs"]
 mod http_api_published_invoke_address;
 #[path = "all/http_api_request_authorizer.rs"]
