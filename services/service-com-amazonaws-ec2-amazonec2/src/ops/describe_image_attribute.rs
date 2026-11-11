@@ -238,7 +238,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(dry_run_operation());
         }
 
-        reported_attribute(attribute, image).ok_or_else(|| {
+        // "Base64 representation of the non-volatile UEFI variable store"
+        // (`ImageAttribute$UefiData`): a fact of the image the modelled `Image` shape carries
+        // no member for, so it is read from where the one writer of an image keeps it, under
+        // the same id.
+        let uefi_data = store.image_uefi_data.get(&input.image_id);
+
+        reported_attribute(attribute, image, uefi_data).ok_or_else(|| {
             // Unreachable: the catalog check above admits only the attributes
             // `reported_attribute` answers, and the deprecated one is refused before it.
             internal_error(format!(
@@ -336,7 +342,11 @@ fn launch_permissions(image: &Image) -> Vec<LaunchPermission> {
 /// different answer from "this AMI has no such attribute" — and a list attribute is
 /// reported as the list the image carries, empty or not, the way `DescribeVolumeAttribute`
 /// reports a volume's product codes.
-fn reported_attribute(attribute: &str, image: &Image) -> Option<DescribeImageAttributeOutput> {
+fn reported_attribute(
+    attribute: &str,
+    image: &Image,
+    uefi_data: Option<&String>,
+) -> Option<DescribeImageAttributeOutput> {
     let text = |value: Option<&String>| {
         Some(AttributeValue {
             value: value.cloned(),
@@ -359,10 +369,11 @@ fn reported_attribute(attribute: &str, image: &Image) -> Option<DescribeImageAtt
             reported.deregistration_protection = text(image.deregistration_protection.as_ref());
         }
         // "Base64 representation of the non-volatile UEFI variable store"
-        // (`ImageAttribute$UefiData`): a value only a register of an AMI can give it, and
-        // `RegisterImage` is still a scaffold, so no stored image holds one and the
-        // attribute is reported with no value rather than with one this emulator invented.
-        "uefiData" => reported.uefi_data = Some(AttributeValue::default()),
+        // (`ImageAttribute$UefiData`): a value only a register of an AMI can give it, held
+        // beside the image under the same id because the `Image` shape has no member for
+        // it. An image registered without one is reported with no value at all rather than
+        // with one this emulator invented.
+        "uefiData" => reported.uefi_data = text(uefi_data),
         "launchPermission" => reported.launch_permissions = Some(launch_permissions(image)),
         "productCodes" => {
             reported.product_codes = Some(image.product_codes.clone().unwrap_or_default());

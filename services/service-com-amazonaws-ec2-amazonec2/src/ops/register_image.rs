@@ -1,15 +1,36 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op RegisterImage
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `RegisterImage`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: mints one AMI of the calling account from what the request says about it and
+//! stores it, answering the new `ImageId`. This is the ONLY file to touch for this
+//! operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`RegisterImage::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! "Registers an AMI": every fact of the registered image comes from the request or from
+//! this store, so a `DescribeImages` of the new id reports exactly what was registered and a
+//! snapshot one of its devices restores from is a snapshot this account holds.
+//!
+//! * `BlockDeviceMappings` — "you can use RegisterImage to create an Amazon EBS-backed Linux
+//!   AMI from a snapshot of a root device volume. You specify the snapshot using a block
+//!   device mapping": the mappings are stored as the request gave them, with each snapshot
+//!   RESOLVED against the account's snapshots first (both sides of the one snapshot resource
+//!   this account has, as `DeleteSnapshot` resolves one), so no AMI can name a snapshot that
+//!   does not exist — which is also what makes the snapshot behind a registered AMI
+//!   undeletable. A mapping that names no volume size takes the snapshot's own size, as
+//!   `EbsBlockDevice$VolumeSize` documents ("if you specify a snapshot, the default is the
+//!   snapshot size").
+//! * `ImageLocation` — "the full path to your AMI manifest in Amazon S3 storage", the form a
+//!   register of an INSTANCE STORE-backed AMI takes. This emulator stores no Amazon S3
+//!   objects, so a manifest a request names can only be one that cannot be read, and such a
+//!   register is refused with the crate's one answer for a storage location it cannot reach,
+//!   the way `CreateRestoreImageTask` refuses the object it would have restored from. No AMI
+//!   is minted for it: an AMI registered from a manifest nothing read would be an image this
+//!   emulator invented. A register that names no manifest reads none.
+//! * `Name` — held to the character set the member documents, and to "the name must be
+//!   unique for AMIs in the Region for this account", against the AMIs this account owns.
+//! * `Architecture`, `VirtualizationType` — the documented defaults (`i386` and
+//!   `paravirtual`) when the request names neither.
+//! * `UefiData` — the `Image` shape carries no member for it, so it is stored beside the
+//!   image under the same id and reported by `DescribeImageAttribute`'s `uefiData`.
 //!
 //! ## Shape of an operation
 //!
@@ -223,18 +244,424 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `RegisterImage` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(RegisterImageErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("RegisterImage"))
+        use crate::state;
+
+        // `ctx` carries request metadata only, and nothing about an AMI is a fact of the
+        // Region the request was signed for (the modelled `Image` carries no Region member),
+        // so this operation reads none of it. The store is reached through the engine held on
+        // `self`.
+        let _ = ctx;
+
+        // "A name for your AMI" (`Name`) is `@required` but modelled `clientOptional`, so a
+        // request that left it out reaches this handler as an empty string rather than being
+        // refused at the boundary. A parameter the request did not carry is EC2's
+        // `MissingParameter`.
+        if input.name.is_empty() {
+            return Err(state::missing_parameter(
+                "The request must contain the parameter name",
+            ));
+        }
+        // The character set the member documents. Its LENGTH half is the member's own
+        // `@length` constraint, already refused by the request walk.
+        if !state::image_name_is_well_formed(&input.name) {
+            return Err(state::invalid_ami_name_malformed());
+        }
+
+        // "The tags to apply to the AMI. To tag the AMI, the value for ResourceType must be
+        // image. If you specify another value for ResourceType, the request fails"
+        // (`TagSpecifications`) — the shared reader refuses any other resource type and holds
+        // the payload to the documented bounds.
+        let tags: Vec<Tag> = state::tags_from_specifications(
+            input.tag_specifications.as_deref(),
+            state::IMAGE_TAGGABLE_RESOURCE,
+            Self::NAME,
+        )?;
+
+        // "The type of virtualization (hvm | paravirtual). Default: paravirtual"
+        // (`VirtualizationType`): modelled as a free string, so the two values it may take
+        // are read here, against the modelled `VirtualizationType` catalog.
+        let virtualization_type = input
+            .virtualization_type
+            .clone()
+            .unwrap_or_else(|| state::REGISTERED_IMAGE_DEFAULT_VIRTUALIZATION_TYPE.to_string());
+        if !VIRTUALIZATION_TYPE_VALUES.contains(&virtualization_type.as_str()) {
+            return Err(state::invalid_parameter_value(format!(
+                "Value ({virtualization_type}) for parameter virtualizationType is invalid. \
+                 Valid values: {}",
+                VIRTUALIZATION_TYPE_VALUES.join(" | ")
+            )));
+        }
+        // "Set to simple to enable enhanced networking with the Intel 82599 Virtual Function
+        // interface" (`SriovNetSupport`): the one value the member takes, also modelled as a
+        // free string.
+        if let Some(requested) = input
+            .sriov_net_support
+            .as_deref()
+            .filter(|requested| *requested != state::IMAGE_SRIOV_NET_SUPPORT_SIMPLE)
+        {
+            return Err(state::invalid_parameter_value(format!(
+                "Value ({requested}) for parameter sriovNetSupport is invalid. Valid value: {}",
+                state::IMAGE_SRIOV_NET_SUPPORT_SIMPLE
+            )));
+        }
+
+        // "The billing product codes. Your account must be authorized to specify billing
+        // product codes" (`BillingProducts`), which is an authorization of the ACCOUNT held
+        // on the Amazon Web Services Marketplace — this emulator's account is registered as
+        // no seller, so a request that names any is refused rather than answered with an AMI
+        // whose billing information was invented for it.
+        if input
+            .billing_products
+            .as_deref()
+            .is_some_and(|codes| !codes.is_empty())
+        {
+            return Err(crate::scaffolded::Scaffolded::auth_failure(
+                "Your account is not authorized to specify billing product codes",
+            ));
+        }
+
+        // "The architecture of the AMI. Default: For Amazon EBS-backed AMIs, i386"
+        // (`Architecture`). The member is a modelled enum, so a value outside the catalog is
+        // already refused by the request walk.
+        let architecture = input
+            .architecture
+            .clone()
+            .unwrap_or_else(|| state::REGISTERED_IMAGE_DEFAULT_ARCHITECTURE.to_string());
+
+        let state_handle = state::require_service_state(&*self.engine)?;
+        let mut store = state_handle.lock();
+        // A move the clock already owes a record of this store fell due whether or not
+        // anybody called, so those moves are applied before this call reads it.
+        store.materialize_due_transitions();
+
+        // The mappings the AMI is registered with, each resolved against this account's
+        // snapshots and completed with the defaults `EbsBlockDevice` documents. The RESOURCES
+        // the request names are resolved before the state the register would create is read,
+        // so a mapping naming a snapshot that does not exist is refused whatever else the
+        // request would have clashed with.
+        let mappings = registered_mappings(
+            &store,
+            &*self.engine,
+            input.block_device_mappings.as_deref().unwrap_or_default(),
+        )?;
+
+        // "The name must be unique for AMIs in the Region for this account": the one reader
+        // of that question, so the refusal names the AMI that already holds the name.
+        if let Some(image_id) = store.image_named(&input.name) {
+            return Err(state::invalid_ami_name_duplicate(&input.name, &image_id));
+        }
+
+        // "The device name of the root device volume (for example, /dev/sda1)"
+        // (`RootDeviceName`): the device the AMI boots from. A request that names none boots
+        // from the first device its own mappings describe, and one that describes no device
+        // at all from where an instance store-backed AMI carries its root file system.
+        let named_root_device = input
+            .root_device_name
+            .clone()
+            .filter(|name| !name.is_empty());
+        let image_location = input
+            .image_location
+            .clone()
+            .filter(|location| !location.is_empty());
+        // The two forms a register takes: the Amazon S3 manifest of an instance store-backed
+        // AMI, or the root device of an Amazon EBS-backed one. A request that names neither
+        // describes no root file system at all, so there is nothing to register.
+        if image_location.is_none() && named_root_device.is_none() {
+            return Err(state::invalid_parameter_combination(
+                "Either imageLocation or rootDeviceName must be specified",
+            ));
+        }
+        let root_device_name = named_root_device
+            .or_else(|| {
+                mappings
+                    .first()
+                    .and_then(|mapping| mapping.device_name.clone())
+            })
+            .unwrap_or_else(|| state::INSTANCE_STORE_ROOT_DEVICE_NAME.to_string());
+
+        // Which kind of AMI this is follows how its ROOT device is described: a mapping that
+        // restores the root device from a snapshot makes it Amazon EBS-backed, and an AMI
+        // whose root device no mapping describes carries its root file system on the instance
+        // store, which is the form registered from a manifest in Amazon S3.
+        let root_is_ebs_backed = mappings.iter().any(|mapping| {
+            mapping.device_name.as_deref() == Some(root_device_name.as_str())
+                && mapping.ebs.is_some()
+        });
+
+        let spec = state::ImageSpec {
+            name: input.name.clone(),
+            description: input.description.clone().unwrap_or_default(),
+            architecture,
+            boot_mode: input.boot_mode.clone(),
+            imds_support: input.imds_support.clone(),
+            tpm_support: input.tpm_support.clone(),
+            kernel_id: input.kernel_id.clone(),
+            ramdisk_id: input.ramdisk_id.clone(),
+            sriov_net_support: input.sriov_net_support.clone(),
+            // "Set to `true` to ENABLE enhanced networking with ENA for the AMI"
+            // (`EnaSupport`): the member reports the facility being enabled, so an AMI
+            // registered without asking for it reports nothing at all.
+            ena_support: input.ena_support.filter(|enabled| *enabled),
+            root_device_name,
+            root_device_type: if root_is_ebs_backed {
+                state::IMAGE_ROOT_DEVICE_TYPE_EBS.to_string()
+            } else {
+                state::IMAGE_ROOT_DEVICE_TYPE_INSTANCE_STORE.to_string()
+            },
+            virtualization_type,
+            // "The images available to you include public images, private images that you
+            // own": a newly registered AMI is private to the account that registered it
+            // until something shares it.
+            public: false,
+            image_location: image_location.clone(),
+            uefi_data: input.uefi_data.clone(),
+            block_device_mappings: Some(mappings),
+            // "`available` - The AMI is successfully registered and can be used to launch an
+            // instance" (`Image$State`): a register of a snapshot the account already holds
+            // copies nothing, so the AMI is usable as soon as it is registered.
+            state: state::IMAGE_STATE_AVAILABLE.to_string(),
+            tags,
+            ..state::ImageSpec::default()
+        };
+
+        // The caller-chosen bytes this register would retain, counted by the ONE definition
+        // of that charge, so the gates below ask exactly what the insert will take.
+        let payload_bytes = state::image_payload_bytes(&spec);
+        // A count ceiling first, then the byte budget: a record count on its own admits
+        // gigabytes, because each record holds strings the caller chose the length of. Both
+        // are the bounds `insert_image` itself works under, asked HERE so the refusal names
+        // what is full and so a dry run of a register the store has no room for is refused
+        // with that reason.
+        if !store.has_image_capacity() {
+            return Err(state::resource_limit_exceeded(format!(
+                "This emulator holds {max} images, which is as many as it stores",
+                max = state::MAX_IMAGES,
+            )));
+        }
+        if store.would_exceed_stored_bytes(payload_bytes) {
+            return Err(state::resource_limit_exceeded(format!(
+                "This emulator holds {held} of at most {max} bytes of caller-supplied data, \
+                 so it cannot store {payload_bytes} more",
+                held = store.stored_bytes(),
+                max = state::MAX_STORED_BYTES,
+            )));
+        }
+
+        // The permission question, answered once the request's own form has been read and
+        // before anything is written or read out of Amazon S3: "If you have the required
+        // permissions, the error response is DryRunOperation" (`DryRun`).
+        if input.dry_run.unwrap_or(false) {
+            return Err(state::dry_run_operation());
+        }
+
+        // A register that NAMED a manifest reads that Amazon S3 object, and this emulator
+        // stores no Amazon S3 objects at all (see the module docs), so there is nothing to
+        // register from. The location that could not be read is reported with the crate's one
+        // answer for that class, naming the bucket and the key the path gave. A register that
+        // named no manifest reads none: it describes its AMI with its own members, and the
+        // AMI it mints is stored below.
+        if let Some(location) = image_location.filter(|_| !root_is_ebs_backed) {
+            let (bucket, key) = location
+                .split_once('/')
+                .unwrap_or((location.as_str(), ""));
+            return Err(state::inaccessible_s3_resource(bucket, key));
+        }
+
+        let image_id = store.insert_image(spec);
+        // The answer is the id the store gave the image it holds, so `RegisterImage` and
+        // `DescribeImages` cannot drift apart.
+        if !store.images.contains_key(&image_id) {
+            return Err(state::internal_error(
+                "the image just registered could not be read back",
+            ));
+        }
+        Ok(RegisterImageOutput {
+            image_id: Some(image_id),
+        })
     }
+}
+
+/// The code EC2 answers for a block device mapping it cannot use: "a block device mapping
+/// parameter is not valid. The returned message indicates the incorrect parameter" (EC2 API
+/// "Error codes", `InvalidBlockDeviceMapping`).
+///
+/// It lives in this file rather than in `crate::state` because `RegisterImage` is the only
+/// operation of this crate that answers it, the same reason
+/// `crate::ops::describe_image_attribute::CLIENT_AUTH_FAILURE` lives in its own operation's
+/// file.
+const INVALID_BLOCK_DEVICE_MAPPING: &str = "InvalidBlockDeviceMapping";
+
+/// The code EC2's block-device-mapping validator answers for a well-formed snapshot id no
+/// snapshot of the account has: `InvalidSnapshotID.NotFound`, which is what AWS answered the
+/// recorded `RegisterImage` call of the corpus unit `ec2.op-contract-register-image`.
+///
+/// EC2's per-operation validators do NOT agree about an id they cannot resolve, and this
+/// crate already keeps that distinction for an AMI id
+/// (`crate::state::unresolvable_image_id` against `crate::state::require_visible_image`).
+/// The describes and the delete of a snapshot answer `InvalidSnapshot.NotFound`
+/// (`crate::state::INVALID_SNAPSHOT_ID_NOT_FOUND`) on their own recorded evidence; THIS
+/// validator answers the code that carries the `ID` of the id-parser family
+/// `InvalidSnapshotID.Malformed` belongs to.
+const INVALID_SNAPSHOT_ID_NOT_FOUND: &str = "InvalidSnapshotID.NotFound";
+
+/// Refuse a snapshot id a block device mapping named that this account holds no snapshot
+/// for: HTTP 400.
+///
+/// A value that is no snapshot id at all is refused through the crate's one reader of that
+/// id's form ([`crate::state::unresolvable_snapshot_id`]), so "not a snapshot id" never reads
+/// as "no such snapshot"; a well-formed id nothing holds carries this validator's own code
+/// ([`INVALID_SNAPSHOT_ID_NOT_FOUND`]) and the sentence EC2's id-parser family words that
+/// cause with — `The <kind> ID '<id>' does not exist`, the same template its refusals for an
+/// absent subnet, local gateway, capacity reservation and IPAM pool carry, with the id from
+/// the REQUEST bounded the way every echoed id in this crate is
+/// ([`crate::state::echoed_resource_id`]).
+fn unresolvable_mapping_snapshot_id(snapshot_id: &str) -> RegisterImageError {
+    // The STRUCTURAL reading of the id — `snap-` and 8 or 17 hexadecimal digits — and not
+    // the stricter one the describes of a snapshot keep: the all-zero id every client reaches
+    // for as a placeholder is `Invalid<Kind>.Malformed` to the readers whose recorded evidence
+    // shows that (`crate::state::snapshot_id_is_well_formed`), and the recorded answer HERE
+    // for an id nothing holds is the not-found code, so this validator reads the form alone.
+    if !crate::state::prefixed_id_is_well_formed(
+        crate::state::SNAPSHOT_ID_PREFIX,
+        snapshot_id,
+    ) {
+        return crate::state::unresolvable_snapshot_id(snapshot_id);
+    }
+    crate::scaffolded::Scaffolded::service_error(
+        INVALID_SNAPSHOT_ID_NOT_FOUND,
+        400,
+        format!(
+            "The snapshot ID '{}' does not exist",
+            crate::state::echoed_resource_id(snapshot_id)
+        ),
+    )
+}
+
+/// Refuse a block device mapping the AMI cannot be registered with: HTTP 400
+/// [`INVALID_BLOCK_DEVICE_MAPPING`], with `message` naming the mapping and what about it is
+/// wrong — "the returned message indicates the incorrect parameter".
+fn invalid_block_device_mapping(message: impl Into<String>) -> RegisterImageError {
+    crate::scaffolded::Scaffolded::service_error(INVALID_BLOCK_DEVICE_MAPPING, 400, message)
+}
+
+/// The block device mappings the AMI is registered with: the `requested` ones, each resolved
+/// against this account's snapshots and completed with the defaults `EbsBlockDevice`
+/// documents.
+///
+/// Every entry is stored as the request gave it except for the two members the model gives a
+/// default for — the volume size of a device restored from a snapshot ("if you specify a
+/// snapshot, the default is the snapshot size") and whether that volume is deleted on
+/// instance termination, which an AMI's own mapping sets so a launch from it has one answer.
+/// A mapping this account cannot back is refused rather than stored:
+///
+/// * a snapshot no snapshot of the account has, under the code this operation's own
+///   validator answers ([`unresolvable_mapping_snapshot_id`]), refused before anything else
+///   about the mapping is read, so "not a snapshot id" never reads as "no such snapshot";
+/// * a device with no name names no device;
+/// * "you must specify either a snapshot ID or a volume size" for a device with an Amazon EBS
+///   half;
+/// * a volume smaller than the snapshot it restores, since "you can specify a volume size
+///   that is equal to or larger than the snapshot size";
+/// * "you can't set the encryption state of the volume using the block device mapping"
+///   (`RegisterImage`) — "if you are creating a block device mapping from an existing
+///   encrypted or unencrypted snapshot, you must omit this parameter. If you include this
+///   parameter, the request will fail, regardless of the value that you specify"
+///   (`EbsBlockDevice$Encrypted`).
+fn registered_mappings<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>(
+    store: &crate::state::ComAmazonawsEc2Amazonec2State,
+    engine: &Eng,
+    requested: &[BlockDeviceMapping],
+) -> Result<Vec<BlockDeviceMapping>, RegisterImageError> {
+    use crate::state;
+
+    let mut mappings: Vec<BlockDeviceMapping> = Vec::with_capacity(requested.len());
+    for mapping in requested {
+        // The SNAPSHOT first: a mapping that names a snapshot this account does not hold is
+        // refused before anything else about the request is read, so the caller learns about
+        // the resource it named rather than about the mapping around it.
+        let snapshot_size = match mapping
+            .ebs
+            .as_ref()
+            .and_then(|ebs| ebs.snapshot_id.as_deref())
+        {
+            Some(snapshot_id) => {
+                // The snapshot is looked for on BOTH sides of the one snapshot resource this
+                // account has — this store and the snapshots the EBS direct APIs hold —
+                // which is where `DeleteSnapshot` resolves one too.
+                let held_here = store
+                    .snapshots
+                    .get(snapshot_id)
+                    .map(|record| record.view.volume_size);
+                let held_in_direct_api = match held_here {
+                    Some(_) => None,
+                    None => state::direct_api_snapshot(
+                        engine,
+                        snapshot_id,
+                        ::std::time::SystemTime::now(),
+                    )
+                    .map(|snapshot| snapshot.volume_size),
+                };
+                match held_here.or(held_in_direct_api) {
+                    Some(volume_size) => volume_size,
+                    // No snapshot of this account under that id, so no AMI can restore a
+                    // device from it.
+                    None => return Err(unresolvable_mapping_snapshot_id(snapshot_id)),
+                }
+            }
+            None => None,
+        };
+        let device_name = mapping
+            .device_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                invalid_block_device_mapping("Each blockDeviceMapping must name a device")
+            })?
+            .to_string();
+        let mut stored = mapping.clone();
+        stored.device_name = Some(device_name.clone());
+        if let Some(ebs) = stored.ebs.as_mut() {
+            if ebs.encrypted.is_some() {
+                return Err(state::invalid_parameter_value(format!(
+                    "Value ({encrypted}) for parameter encrypted is invalid. You can't set \
+                     the encryption state of the volume of device {device_name} using the \
+                     block device mapping",
+                    encrypted = ebs.encrypted.unwrap_or_default(),
+                )));
+            }
+            match (ebs.volume_size, snapshot_size) {
+                // "You can specify a volume size that is equal to or larger than the
+                // snapshot size."
+                (Some(requested_size), Some(snapshot_size)) if requested_size < snapshot_size => {
+                    return Err(invalid_block_device_mapping(format!(
+                        "Volume of size {requested_size}GB is smaller than snapshot \
+                         '{snapshot_id}', expect size >= {snapshot_size}GB",
+                        snapshot_id = ebs.snapshot_id.as_deref().unwrap_or_default(),
+                    )));
+                }
+                // "If you specify a snapshot, the default is the snapshot size."
+                (None, Some(snapshot_size)) => ebs.volume_size = Some(snapshot_size),
+                // "You must specify either a snapshot ID or a volume size."
+                (None, None) => {
+                    return Err(invalid_block_device_mapping(format!(
+                        "The blockDeviceMapping for device {device_name} must specify either \
+                         a snapshot ID or a volume size"
+                    )));
+                }
+                _ => {}
+            }
+            // "Indicates whether the EBS volume is deleted on instance termination": an
+            // AMI's own mapping answers it, so a launch from this AMI has one answer.
+            if ebs.delete_on_termination.is_none() {
+                ebs.delete_on_termination = Some(true);
+            }
+            // "The volume type … Default: gp2" (`CreateVolumeRequest$VolumeType`), the one
+            // default this crate reads a volume type's absence as.
+            if ebs.volume_type.is_none() {
+                ebs.volume_type = Some(state::DEFAULT_VOLUME_TYPE.to_string());
+            }
+        }
+        mappings.push(stored);
+    }
+    Ok(mappings)
 }

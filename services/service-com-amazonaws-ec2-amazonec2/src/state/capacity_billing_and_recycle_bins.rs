@@ -387,8 +387,12 @@ pub const FPGA_IMAGE_TAGGABLE_RESOURCE: &str = "fpga-image";
 /// snapshots, or both. To tag the AMI, the value for `ResourceType` must be `image`. To tag
 /// the snapshots, the value for `ResourceType` must be `snapshot`"
 /// (`CreateRestoreImageTaskRequest$TagSpecifications`) — the `image` and `snapshot` members
-/// of `ResourceType`.
-pub const IMAGE_TAGGABLE_RESOURCES: [&str; 2] = ["image", "snapshot"];
+/// of `ResourceType`, each named once in this crate ([`super::IMAGE_TAGGABLE_RESOURCE`] and
+/// [`super::SNAPSHOT_TAGGABLE_RESOURCE`]).
+pub const IMAGE_TAGGABLE_RESOURCES: [&str; 2] = [
+    super::IMAGE_TAGGABLE_RESOURCE,
+    super::SNAPSHOT_TAGGABLE_RESOURCE,
+];
 
 /// The id prefix of the global identifier of an Amazon FPGA Image: `agfi-`
 /// ("The global FPGA image identifier (AGFI ID)", `CreateFpgaImageResult$FpgaImageGlobalId`).

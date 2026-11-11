@@ -893,6 +893,80 @@ pub const IMAGE_ROOT_VOLUME_TYPE_STANDARD: &str = "standard";
 /// (`Image$DeregistrationProtection`) — off, nothing having enabled it.
 pub const IMAGE_DEREGISTRATION_PROTECTION_DISABLED: &str = "disabled";
 
+/// The one resource type an AMI create's `TagSpecifications` may name: "to tag the AMI, the
+/// value for `ResourceType` must be `image`. If you specify another value for
+/// `ResourceType`, the request fails" (`RegisterImageRequest$TagSpecifications`) — the
+/// `image` member of `ResourceType`, and the first of the two
+/// [`IMAGE_TAGGABLE_RESOURCES`] a restore of an AMI from Amazon S3 may name.
+pub const IMAGE_TAGGABLE_RESOURCE: &str = "image";
+
+/// The architecture an AMI is registered with when the request names none: "Default: For
+/// Amazon EBS-backed AMIs, `i386`" (`RegisterImageRequest$Architecture`), which is the
+/// `ArchitectureValues` enum's `i386` member. The instance-store default is "the
+/// architecture specified in the manifest file", a file nothing here reads, so the one
+/// documented default stands for both.
+pub const REGISTERED_IMAGE_DEFAULT_ARCHITECTURE: &str = "i386";
+
+/// The virtualization type an AMI is registered with when the request names none:
+/// "Default: `paravirtual`" (`RegisterImageRequest$VirtualizationType`), which is
+/// [`IMAGE_VIRTUALIZATION_TYPE_PARAVIRTUAL`]. The published catalog's own default is
+/// `hvm` ([`ImageSpec::default`]), because that is what Amazon publishes today; this is
+/// what the REQUEST means by leaving the member out.
+pub const REGISTERED_IMAGE_DEFAULT_VIRTUALIZATION_TYPE: &str =
+    IMAGE_VIRTUALIZATION_TYPE_PARAVIRTUAL;
+
+/// The code EC2 answers for an AMI name outside the published name constraints.
+pub const INVALID_AMI_NAME_MALFORMED: &str = "InvalidAMIName.Malformed";
+
+/// The code EC2 answers for an AMI name another AMI of the account already carries.
+pub const INVALID_AMI_NAME_DUPLICATE: &str = "InvalidAMIName.Duplicate";
+
+/// Is `name` a name an AMI may carry?
+///
+/// "Constraints: 3-128 alphanumeric characters, parentheses (`()`), square brackets (`[]`),
+/// spaces (` `), periods (`.`), slashes (`/`), dashes (`-`), single quotes (`'`), at-signs
+/// (`@`), or underscores(`_`)" (`RegisterImageRequest$Name`). The LENGTH half of that
+/// sentence is the member's own `@length` constraint, refused at the boundary before any
+/// handler runs, so this reads the character set — the half no constraint expresses.
+pub fn image_name_is_well_formed(name: &str) -> bool {
+    name.chars().all(|character| {
+        character.is_ascii_alphanumeric()
+            || matches!(
+                character,
+                '(' | ')' | '[' | ']' | ' ' | '.' | '/' | '-' | '\'' | '@' | '_'
+            )
+    })
+}
+
+/// Refuse an AMI name outside those constraints, the way EC2 does: HTTP 400
+/// `InvalidAMIName.Malformed`.
+///
+/// The message is the service's own fixed sentence for this error class, which states the
+/// bounds and the characters rather than echoing the name back.
+pub fn invalid_ami_name_malformed<E>() -> Scaffolded<E> {
+    Scaffolded::service_error(
+        INVALID_AMI_NAME_MALFORMED,
+        400,
+        "AMI names must be between 3 and 128 characters long, and may contain letters, \
+         digits, '(', ')', '.', '-', '/' and '_'",
+    )
+}
+
+/// Refuse an AMI name another AMI of the account already carries: HTTP 400
+/// `InvalidAMIName.Duplicate`, naming the name at fault and the AMI that already has it.
+///
+/// "The name must be unique for AMIs in the Region for this account"
+/// (`CreateRestoreImageTaskRequest$Name` states the rule the whole API holds a name to), so
+/// both variable parts come from the request and from this store: the name the caller sent
+/// and the id of the image [`ComAmazonawsEc2Amazonec2State::image_named`] resolved it to.
+pub fn invalid_ami_name_duplicate<E>(name: &str, image_id: &str) -> Scaffolded<E> {
+    Scaffolded::service_error(
+        INVALID_AMI_NAME_DUPLICATE,
+        400,
+        format!("AMI name {name} is already in use by AMI {image_id}"),
+    )
+}
+
 /// `Image$BootMode`'s `uefi-preferred`: the image boots UEFI where the instance type
 /// supports it and legacy BIOS otherwise.
 pub const BOOT_MODE_UEFI_PREFERRED: &str = "uefi-preferred";
@@ -1183,6 +1257,36 @@ pub struct ImageSpec {
     pub public_ssm_parameter_name: Option<String>,
     /// "Any tags assigned to the image" (`Image$Tags`).
     pub tags: Vec<Tag>,
+    /// "Any block device mapping entries" (`Image$BlockDeviceMappings`) the image was
+    /// REGISTERED with, each restoring its device from a snapshot the caller named.
+    ///
+    /// `None` for an image whose mappings this store derives instead: one root mapping
+    /// restored from a snapshot [`ComAmazonawsEc2Amazonec2State::insert_image`] mints, which
+    /// is what the published catalog and an import's AMI carry.
+    pub block_device_mappings: Option<Vec<BlockDeviceMapping>>,
+    /// "The ID of the kernel" (`Image$KernelId`), for an image that boots one.
+    pub kernel_id: Option<String>,
+    /// "The ID of the RAM disk associated with the image" (`Image$RamdiskId`).
+    pub ramdisk_id: Option<String>,
+    /// "A value of `simple` indicates that enhanced networking with the Intel 82599 VF
+    /// interface is enabled" (`Image$SriovNetSupport`) — `None` for an image nothing
+    /// enabled it for.
+    pub sriov_net_support: Option<String>,
+    /// "Indicates whether enhanced networking with ENA is enabled" (`Image$EnaSupport`), for
+    /// an image that reports the facility at all: `None` is an image that reports nothing for
+    /// it, which is what an AMI nothing enabled ENA for carries.
+    pub ena_support: Option<bool>,
+    /// "If the image is configured for NitroTPM support, the value is `v2.0`"
+    /// (`Image$TpmSupport`).
+    pub tpm_support: Option<String>,
+    /// "The location of the AMI" (`Image$ImageLocation`), for an image registered from a
+    /// manifest the request named. `None` derives it as `<owner>/<name>`.
+    pub image_location: Option<String>,
+    /// "Base64 representation of the non-volatile UEFI variable store"
+    /// (`ImageAttribute$UefiData`), for an image registered with one. The `Image` shape
+    /// carries no member for it, so it is held beside the image in
+    /// [`ComAmazonawsEc2Amazonec2State::image_uefi_data`].
+    pub uefi_data: Option<String>,
 }
 
 /// An EBS-backed Linux machine image of the calling account, created now and available:
@@ -1214,6 +1318,18 @@ impl Default for ImageSpec {
             free_tier_eligible: false,
             public_ssm_parameter_name: None,
             tags: Vec::new(),
+            block_device_mappings: None,
+            kernel_id: None,
+            ramdisk_id: None,
+            sriov_net_support: Some(IMAGE_SRIOV_NET_SUPPORT_SIMPLE.to_string()),
+            // An HVM image offers enhanced networking with ENA, which is what this default
+            // describes; "enhanced networking with the Intel 82599 VF interface" above and
+            // ENA are both HVM facilities, so a paravirtual row of the published catalog
+            // reports neither.
+            ena_support: Some(true),
+            tpm_support: None,
+            image_location: None,
+            uefi_data: None,
         }
     }
 }
@@ -1259,6 +1375,42 @@ pub fn image_payload_bytes(spec: &ImageSpec) -> usize {
         .saturating_add(optional(spec.boot_mode.as_ref()))
         .saturating_add(optional(spec.imds_support.as_ref()))
         .saturating_add(product_code_list_bytes(&spec.product_codes))
+        // The mappings a register supplied, and the few strings of a registered AMI the
+        // published catalog's rows leave to this module. The explicit `ImageLocation` is
+        // charged ON TOP of the name it replaces rather than instead of it, which can only
+        // refuse a later write earlier — never admit one the budget forbids.
+        .saturating_add(block_device_mapping_list_bytes(
+            spec.block_device_mappings.as_deref().unwrap_or_default(),
+        ))
+        .saturating_add(optional(spec.kernel_id.as_ref()))
+        .saturating_add(optional(spec.ramdisk_id.as_ref()))
+        .saturating_add(optional(spec.sriov_net_support.as_ref()))
+        .saturating_add(optional(spec.tpm_support.as_ref()))
+        .saturating_add(optional(spec.image_location.as_ref()))
+        .saturating_add(optional(spec.uefi_data.as_ref()))
+}
+
+/// The caller-chosen bytes a block device mapping list holds: each entry's device name, its
+/// virtual name, the empty-string marker that omits a device, and the strings of its Amazon
+/// EBS half — the snapshot it restores from, the volume type, and the KMS key and Outpost it
+/// names.
+///
+/// The ONE definition of that charge, the way [`tag_list_bytes`] is for a tag list, so every
+/// store that keeps mappings beside a resource charges them the same way. The numbers and
+/// flags of a mapping are fixed-size, so only the strings are counted.
+pub fn block_device_mapping_list_bytes(mappings: &[BlockDeviceMapping]) -> usize {
+    let optional = |value: Option<&String>| -> usize { value.map_or(0, String::len) };
+    mappings.iter().fold(0usize, |total, mapping| {
+        let ebs = mapping.ebs.as_ref();
+        total
+            .saturating_add(optional(mapping.device_name.as_ref()))
+            .saturating_add(optional(mapping.virtual_name.as_ref()))
+            .saturating_add(optional(mapping.no_device.as_ref()))
+            .saturating_add(optional(ebs.and_then(|ebs| ebs.snapshot_id.as_ref())))
+            .saturating_add(optional(ebs.and_then(|ebs| ebs.volume_type.as_ref())))
+            .saturating_add(optional(ebs.and_then(|ebs| ebs.kms_key_id.as_ref())))
+            .saturating_add(optional(ebs.and_then(|ebs| ebs.outpost_arn.as_ref())))
+    })
 }
 
 /// The caller-chosen bytes a `ProductCode` list holds: each entry's code and its type.
@@ -1307,7 +1459,11 @@ impl ComAmazonawsEc2Amazonec2State {
         let payload_bytes = image_payload_bytes(&spec);
         let image_id = self.next_id("ami");
         let ebs_backed = spec.root_device_type == IMAGE_ROOT_DEVICE_TYPE_EBS;
-        let snapshot_id = ebs_backed.then(|| self.next_id("snap"));
+        // A snapshot is minted only for an image this module DERIVES the root mapping of:
+        // the mappings a register supplied name the caller's own snapshots, so there is
+        // nothing to mint for them.
+        let derived_root_snapshot_id = (ebs_backed && spec.block_device_mappings.is_none())
+            .then(|| self.next_id("snap"));
         let owner = spec
             .owner_alias
             .clone()
@@ -1315,11 +1471,13 @@ impl ComAmazonawsEc2Amazonec2State {
         let image = Image {
             platform_details: Some(spec.platform_details),
             usage_operation: Some(spec.usage_operation),
-            // "Any block device mapping entries" (`Image$BlockDeviceMappings`): the root
-            // volume's, restored from the snapshot minted above — and none at all for an
-            // image whose root device is the instance store, which restores none.
-            block_device_mappings: Some(
-                snapshot_id
+            // "Any block device mapping entries" (`Image$BlockDeviceMappings`): the ones the
+            // image was REGISTERED with when the spec carries them — each restoring its
+            // device from the snapshot the request named — and otherwise the root volume's,
+            // restored from the snapshot minted above, with none at all for an image whose
+            // root device is the instance store, which restores none.
+            block_device_mappings: Some(spec.block_device_mappings.unwrap_or_else(|| {
+                derived_root_snapshot_id
                     .map(|snapshot_id| BlockDeviceMapping {
                         ebs: Some(EbsBlockDevice {
                             delete_on_termination: Some(true),
@@ -1341,26 +1499,29 @@ impl ComAmazonawsEc2Amazonec2State {
                         virtual_name: None,
                     })
                     .into_iter()
-                    .collect(),
-            ),
+                    .collect()
+            })),
             description: Some(spec.description),
-            // "enhanced networking with the Intel 82599 VF interface" is an HVM facility:
-            // a paravirtual image offers neither it nor ENA.
-            ena_support: Some(spec.virtualization_type == IMAGE_VIRTUALIZATION_TYPE_HVM),
+            // "Indicates whether enhanced networking with ENA is enabled"
+            // (`Image$EnaSupport`): reported where the image has it enabled, and left out
+            // where it has not — an image nothing enabled it for reports nothing.
+            ena_support: spec.ena_support,
             hypervisor: Some(IMAGE_HYPERVISOR_XEN.to_string()),
             image_owner_alias: spec.owner_alias,
             name: Some(spec.name.clone()),
             root_device_name: Some(spec.root_device_name),
             root_device_type: Some(spec.root_device_type),
-            sriov_net_support: Some(IMAGE_SRIOV_NET_SUPPORT_SIMPLE.to_string()),
+            sriov_net_support: spec.sriov_net_support,
             // "The reason for the state change" (`Image$StateReason`): an image that
             // never left `available` has had no state change to report.
             state_reason: None,
             tags: Some(spec.tags),
             virtualization_type: Some(spec.virtualization_type),
             boot_mode: spec.boot_mode,
-            // NitroTPM is not configured for any image this store holds.
-            tpm_support: None,
+            // "If the image is configured for NitroTPM support, the value is `v2.0`"
+            // (`Image$TpmSupport`): set for an image registered with that support, and for
+            // no other image this store holds.
+            tpm_support: spec.tpm_support,
             deprecation_time: spec.deprecation_time,
             imds_support: spec.imds_support,
             // Set only "if the AMI was created using CreateImage" (`Image$SourceInstanceId`).
@@ -1391,9 +1552,13 @@ impl ComAmazonawsEc2Amazonec2State {
             // compatible with every instance type its architecture offers.
             instance_type_specification: None,
             image_id: Some(image_id.clone()),
-            // "The location of the AMI" (`Image$ImageLocation`): `<owner>/<name>`, the
-            // manifest location the `manifest-location` filter selects on.
-            image_location: Some(format!("{owner}/{}", spec.name)),
+            // "The location of the AMI" (`Image$ImageLocation`): the manifest location the
+            // register named, and otherwise `<owner>/<name>` — the location the
+            // `manifest-location` filter selects on either way.
+            image_location: Some(
+                spec.image_location
+                    .unwrap_or_else(|| format!("{owner}/{}", spec.name)),
+            ),
             state: Some(spec.state),
             owner_id: Some(spec.owner_id),
             creation_date: Some(spec.creation_date),
@@ -1404,14 +1569,46 @@ impl ComAmazonawsEc2Amazonec2State {
             product_codes: Some(spec.product_codes),
             architecture: Some(spec.architecture),
             image_type: Some(IMAGE_TYPE_MACHINE.to_string()),
-            // An HVM image carries neither a kernel nor a RAM disk image.
-            kernel_id: None,
-            ramdisk_id: None,
+            // "The ID of the kernel" / "the ID of the RAM disk associated with the image"
+            // (`Image$KernelId`, `Image$RamdiskId`): the ones the image was registered
+            // with. An HVM image carries neither, which is what leaving both out means.
+            kernel_id: spec.kernel_id,
+            ramdisk_id: spec.ramdisk_id,
             platform: spec.platform,
         };
         self.add_stored_bytes(payload_bytes);
+        // "Base64 representation of the non-volatile UEFI variable store"
+        // (`ImageAttribute$UefiData`): a fact of the image the `Image` shape carries no
+        // member for, so it is held beside it under the same id — written here, with the
+        // image, so no path can store one without the other.
+        if let Some(uefi_data) = spec.uefi_data {
+            self.image_uefi_data.insert(image_id.clone(), uefi_data);
+        }
         self.images.insert(image_id.clone(), image);
         image_id
+    }
+
+    /// The id of the AMI of the calling account that carries the name `name`, or `None` when
+    /// no image of this account does.
+    ///
+    /// "The name must be unique for AMIs in the Region for this account"
+    /// (`CreateRestoreImageTaskRequest$Name`), so a register that would take a name already
+    /// in use is refused with [`invalid_ami_name_duplicate`] naming the image this resolves
+    /// to. The scope is the ACCOUNT's own AMIs: a public image of another account, which
+    /// this account can see but does not own, does not reserve a name against it. An AMI in
+    /// the Recycle Bin is deregistered and holds no name against a register either — it is
+    /// restorable, so what it would clash with is the restore rather than this call.
+    ///
+    /// The lowest such id, the store being ordered by id, so one name is always reported
+    /// against the same image.
+    pub fn image_named(&self, name: &str) -> Option<String> {
+        let account = ::engine::emulator_account_id();
+        self.images
+            .iter()
+            .find(|(_, image)| {
+                image.owner_id.as_deref() == Some(account) && image.name.as_deref() == Some(name)
+            })
+            .map(|(image_id, _)| image_id.clone())
     }
 
     /// The snapshot id of `image_id`'s ROOT block device mapping, or `None` when this

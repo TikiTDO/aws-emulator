@@ -15,13 +15,13 @@
 // exactly that. The lines above are the file header, which no landing edits.
 #[path = "all/prefix_lists.rs"]
 mod prefix_lists;
-// Deleting LAUNCH TEMPLATE VERSIONS: the per-version outcome a request gets for the versions
-// it names, the default version no request may delete, the numbering a delete does not give
-// back, and what the call refuses without deleting anything. Declared beside `prefix_lists`
-// for the reason the note above gives: the sorted neighbourhood and the tail of this file are
-// where every new ec2 suite inserts its lines.
-#[path = "all/delete_launch_template_versions.rs"]
-mod delete_launch_template_versions;
+// `RegisterImage`: the AMI a register mints from the request's own description — its members
+// and block device mappings read back through `DescribeImages`, what it refuses, and the state
+// it writes (a snapshot its AMI uses cannot be deleted). Declared beside `prefix_lists` for the
+// reason the note above gives: the sorted neighbourhood and the tail of this file are where
+// every new ec2 suite inserts its lines.
+#[path = "all/register_image.rs"]
+mod register_image;
 // The FILTERS a describe serves for the members of the records it reports — the reported
 // record's own id, and the tag pair for a record that carries tags — whether or not that
 // operation's own documentation enumerates them. Declared beside `prefix_lists` for the reason
@@ -43,6 +43,7 @@ mod query_empty_list_members;
 // its documented filters and `LocalGatewayIds` do, the pages it cuts the store into, the
 // bounds on one request's match, and what it refuses. Declared beside `prefix_lists` for
 // the reason the note above gives: the sorted neighbourhood and the tail of this file are
+// where every new ec2 suite inserts its lines.
 #[path = "all/local_gateways.rs"]
 mod local_gateways;
 // `RunInstances` driven from a LAUNCH TEMPLATE: the version's parameters overlaid with the
@@ -100,8 +101,6 @@ mod bundle_tasks;
 // `ModifyVpcBlockPublicAccessOptions` puts it into, the default a Region no modify was made
 // for reports, the clock-owed `update-in-progress` -> `update-complete` move, and what each
 // of the two operations refuses without writing. Declared beside `prefix_lists` for the
-// reason the note above gives: the sorted neighbourhood and the tail of this file are where
-// every new ec2 suite inserts its lines.
 #[path = "all/vpc_block_public_access_options.rs"]
 mod vpc_block_public_access_options;
 // How this service refuses a request that violates a PUBLISHED parameter limit: the
@@ -710,12 +709,6 @@ mod classic_link_instances;
 // landings insert their two lines, and these two already lost a serialized squash merge at
 #[path = "all/delete_vpn_connection.rs"]
 mod delete_vpn_connection;
-// What `DeleteVpnConnectionRoute` takes out of the Site-to-Site VPN connection it names,
-// what it refuses, and what the clock then owes the route it left `deleting`. Declared HERE,
-// beside the connection-delete suite it shares its fixtures with, for the reason that suite
-// gives: the head and the tail of this list are where concurrent ec2 landings insert lines.
-#[path = "all/delete_vpn_connection_route.rs"]
-mod delete_vpn_connection_route;
 // What `CreateSnapshots` makes of the volumes one instance holds — one snapshot each, the
 // two exclusions, the tags, and the refusals. Declared in the MIDDLE of the list for the
 // reason the suite above gives: the head and the tail are both where concurrent ec2 landings
@@ -933,9 +926,6 @@ mod snapshot_imports;
 // refuses.
 #[path = "all/import_task_cancellation.rs"]
 mod import_task_cancellation;
-// How every operation that names an import task answers an id it cannot resolve to one.
-#[path = "all/import_task_id_resolution.rs"]
-mod import_task_id_resolution;
 #[path = "all/instance_connect_endpoints.rs"]
 mod instance_connect_endpoints;
 // The fixed detail every instance reports, and the monitoring state a caller moves.
@@ -1080,12 +1070,6 @@ mod principal_id_format;
 // head of the list are where every new ec2 suite inserts its two lines.
 #[path = "all/aggregate_id_format.rs"]
 mod aggregate_id_format;
-// The settings of ONE principal, out of the same store `principal_id_format` writes and
-// reports for every principal. Declared beside its sibling suites rather than in sorted
-// position, for the reason the note at the head of this file gives: the sorted
-// neighbourhood and the head of the list are where every new ec2 suite inserts its two
-#[path = "all/identity_id_format.rs"]
-mod identity_id_format;
 // What `CreateRouteServerEndpoint` resolves before it writes, what it replays for a repeated
 // idempotency token, and what a dry run of it performs. Declared here rather than in sorted
 // position, for the reason the note at the head of this file gives: the sorted neighbourhood
@@ -1785,6 +1769,27 @@ mod spot_instance_request_cancellation;
 // ec2 suite lands, for the reason the note at the top records.
 #[path = "all/traffic_mirror_targets.rs"]
 mod traffic_mirror_targets;
+// Deleting LAUNCH TEMPLATE VERSIONS: the per-version outcome a request gets for the versions
+// it names, the default version no request may delete, the numbering a delete does not give
+// back, and what the call refuses without deleting anything. Declared beside `prefix_lists`
+// for the reason the note above gives: the sorted neighbourhood and the tail of this file are
+#[path = "all/delete_launch_template_versions.rs"]
+mod delete_launch_template_versions;
+// What `DeleteVpnConnectionRoute` takes out of the Site-to-Site VPN connection it names,
+// what it refuses, and what the clock then owes the route it left `deleting`. Declared HERE,
+// beside the connection-delete suite it shares its fixtures with, for the reason that suite
+// gives: the head and the tail of this list are where concurrent ec2 landings insert lines.
+#[path = "all/delete_vpn_connection_route.rs"]
+mod delete_vpn_connection_route;
+// How every operation that names an import task answers an id it cannot resolve to one.
+#[path = "all/import_task_id_resolution.rs"]
+mod import_task_id_resolution;
+// The settings of ONE principal, out of the same store `principal_id_format` writes and
+// reports for every principal. Declared beside its sibling suites rather than in sorted
+// position, for the reason the note at the head of this file gives: the sorted
+// neighbourhood and the head of the list are where every new ec2 suite inserts its two
+#[path = "all/identity_id_format.rs"]
+mod identity_id_format;
 // `DeleteKeyPair`: the key pair a delete removes, the id it reports for it, what it refuses
 // and what a dry run of it leaves behind. Declared beside `prefix_lists` for the reason the
 #[path = "all/delete_key_pair.rs"]

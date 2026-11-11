@@ -114,15 +114,23 @@ impl ComAmazonawsEc2Amazonec2State {
     /// forbids.
     pub fn purge_expired_recycled_images(&mut self, now: SystemTime) {
         let mut released = 0usize;
-        self.images_in_recycle_bin.retain(|_image_id, record| {
+        let mut purged: Vec<String> = Vec::new();
+        self.images_in_recycle_bin.retain(|image_id, record| {
             if !record.has_expired(now) {
                 return true;
             }
             released = released.saturating_add(tag_list_bytes(
                 record.image.tags.as_deref().unwrap_or_default(),
             ));
+            purged.push(image_id.clone());
             false
         });
+        // The UEFI variable store of a permanently deleted AMI goes with it: it is a fact of
+        // that image, held beside it under the same id, and nothing can restore the image
+        // any more. Its bytes stay counted for the reason given above.
+        for image_id in purged {
+            self.image_uefi_data.remove(&image_id);
+        }
         self.release_stored_bytes(released);
     }
 }

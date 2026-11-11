@@ -177,6 +177,10 @@ fn amazon_linux_specs() -> Vec<ImageSpec> {
                 // HVM boot facility.
                 boot_mode: (!paravirtual)
                     .then(|| hvm_boot_mode(ARCHITECTURE_X86_64, false)),
+                // Enhanced networking with ENA is an HVM facility too, so a paravirtual row
+                // reports it as not enabled, which is what the `ena-support` filter of
+                // `DescribeImages` selects those rows on.
+                ena_support: Some(!paravirtual),
                 virtualization_type: if paravirtual {
                     IMAGE_VIRTUALIZATION_TYPE_PARAVIRTUAL.to_string()
                 } else {

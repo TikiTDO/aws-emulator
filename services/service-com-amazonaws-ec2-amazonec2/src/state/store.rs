@@ -1882,6 +1882,13 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// plus any image a writer stores later. Ordered by id, which is the order the
     /// describe reports and pages over.
     pub images: BTreeMap<String, Image>,
+    /// The non-volatile UEFI variable store of each AMI registered with one, by `ImageId`:
+    /// "Base64 representation of the non-volatile UEFI variable store"
+    /// (`ImageAttribute$UefiData`), which only a register of an AMI can give it. The
+    /// modelled [`Image`] shape carries no member for it, so it is held here beside
+    /// [`Self::images`] under the same id, written by the one writer of an image
+    /// ([`Self::insert_image`]) and reported by `DescribeImageAttribute`'s `uefiData`.
+    pub image_uefi_data: BTreeMap<String, String>,
     /// Every AMI of the account that is currently in the Recycle Bin, by `ImageId` — see
     /// the module docs. An image is in EITHER this store or [`Self::images`], never both:
     /// a recycled AMI is not one of the images the account can see until it is restored.
@@ -3312,6 +3319,7 @@ impl Default for ComAmazonawsEc2Amazonec2State {
             network_insights_analyses: BTreeMap::new(),
             network_insights_analysis_client_tokens: HashMap::new(),
             images: BTreeMap::new(),
+            image_uefi_data: BTreeMap::new(),
             images_in_recycle_bin: BTreeMap::new(),
             security_groups: BTreeMap::new(),
             // A fresh account holds exactly the network ACLs its VPCs come with, which
