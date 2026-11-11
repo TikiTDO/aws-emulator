@@ -28,6 +28,7 @@
 //!   the key — so whichever form the rule carries, the object reports that key's own ARN; a
 //!   rule naming no key at all leaves the write under this account's Amazon Web Services
 //!   managed key for Amazon S3, whose ARN the object then reports.
+//!   [`super::sse_kms_key_identity`] is the suite that spans that resolution over every write.
 //! * "Specifies whether Amazon S3 should use an S3 Bucket Key for object encryption with
 //!   server-side encryption using Key Management Service (KMS) keys (SSE-KMS)"
 //!   (`PutObjectRequest$BucketKeyEnabled`): the Bucket Key belongs to SSE-KMS alone, so a

@@ -251,7 +251,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the bucket's default encryption configuration for the CreateSession request" —
         // so a request that names an algorithm is answered with its own configuration, and
         // one that names none with the bucket's own default.
-        let encryption = {
+        let mut encryption = {
             let store = state.lock();
             let Some(bucket) = store.bucket(&input.bucket) else {
                 // The one error this operation models, worded as the endpoint that would
@@ -297,6 +297,44 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 requested
             }
         };
+
+        // WHICH key that encryption names is resolved against KMS, through the resolution
+        // every write of this service settles its KMS key with
+        // ([`crate::state::sse_kms::write_key`]): the session's encryption settings are what
+        // "Amazon S3 will use … to protect new objects in the directory bucket", so this call
+        // reports the key those objects are encrypted under — the identity of a key is its ARN
+        // rather than whichever of Key ID, Key ARN or Key Alias the request addressed it by —
+        // and a key KMS will mint no data key under can protect no object of this session, so
+        // the session is refused instead of established: "incorrect key specification results
+        // in an HTTP 400 Bad Request error" (`PutObjectRequest$SSEKMSKeyId`, of the SSE-KMS
+        // configuration of a directory bucket), which is the status every relay of KMS's own
+        // refusal in this service carries.
+        //
+        // Only a key the request or the bucket's default NAMES is asked about: a session that
+        // names none is established under whatever the bucket's own configuration settles,
+        // and this call resolves nothing and materialises nothing for it.
+        //
+        // Asked with no guard of this service's held — the read above takes and releases its
+        // own — because it reads KMS's store through the shared engine.
+        if encryption.kms_key_id.is_some() {
+            match crate::state::sse_kms::write_key(
+                &*self.engine,
+                &crate::state::request_region(ctx.parts()),
+                &encryption,
+            ) {
+                crate::state::sse_kms::WriteKey::Refused(relay) => {
+                    return Err(crate::scaffolded::Scaffolded::unmodeled(
+                        relay.code,
+                        relay.status,
+                        relay.message,
+                    ))
+                }
+                crate::state::sse_kms::WriteKey::Resolved(key_arn) => {
+                    encryption.kms_key_id = Some(key_arn);
+                }
+                crate::state::sse_kms::WriteKey::Unasked => {}
+            }
+        }
 
         // "Temporary security credentials are scoped to the bucket and EXPIRE AFTER 5
         // MINUTES. After the expiration time, any calls that you make with those

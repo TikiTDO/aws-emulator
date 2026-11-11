@@ -14,7 +14,8 @@
 //!   (HTTP 400, the KMS exception's name qualified by the service that raised it, and the
 //!   sentence KMS words for the form the request supplied) and the object is not created. A
 //!   reference KMS DOES resolve names ONE key whatever spelling it took, so the object is
-//!   stored under — and reports — that key's own ARN.
+//!   stored under — and reports — that key's own ARN; the suite that spans that identity over
+//!   every write and every form is [`super::sse_kms_key_identity`].
 //! * A listing's `AnnotationPrefix` selects annotation NAMES — "filter results to
 //!   annotations whose name begins with the specified prefix"
 //!   (`ListObjectAnnotationsRequest$AnnotationPrefix`) — so a selector no name of the
@@ -77,9 +78,9 @@ pub(crate) fn router_with_kms() -> MultiServiceRouter {
 /// One KMS call over the shared engine. KMS is an awsJson1_1 service reached by
 /// `X-Amz-Target: TrentService.<Operation>`.
 ///
-/// `pub(crate)`: the SSE-KMS data-key and write-key suites beside this one drive their keys,
-/// key policies and key STATES through this one dispatcher, and ask KMS what it holds through
-/// it, rather than building a second one.
+/// `pub(crate)`: the SSE-KMS data-key, write-key and key-identity suites beside this one
+/// drive their keys, key policies and key STATES through this one dispatcher, and ask KMS
+/// what it holds through it, rather than building a second one.
 pub(crate) async fn kms(
     router: &MultiServiceRouter,
     operation: &str,
@@ -149,7 +150,10 @@ pub(crate) async fn created_alias(router: &MultiServiceRouter, alias: &str, key_
 
 /// The ARN of a KMS resource of this account at this endpoint: what KMS names a reference by
 /// when it reports one it could not resolve.
-fn kms_arn(resource: &str) -> String {
+///
+/// `pub(crate)`: the key-identity suite ([`super::sse_kms_key_identity`]) names the same
+/// resources through this one helper rather than a second copy of the format.
+pub(crate) fn kms_arn(resource: &str) -> String {
     format!(
         "arn:aws:kms:{REGION}:{}:{resource}",
         engine::emulator_account_id()
@@ -314,11 +318,7 @@ async fn a_write_naming_a_key_kms_holds_is_stored_under_that_key_s_arn() {
         ("the key ARN", key_arn.clone(), false),
         ("the bare key id", key_id.clone(), false),
         ("an alias of that key", "alias/ledger".to_string(), false),
-        (
-            "an alias ARN of that key",
-            kms_arn("alias/ledger"),
-            false,
-        ),
+        ("an alias ARN of that key", kms_arn("alias/ledger"), false),
         (
             "the predefined Amazon Web Services alias for this service",
             "alias/aws/s3".to_string(),
@@ -575,7 +575,10 @@ async fn a_write_inheriting_a_bucket_default_whose_key_is_gone_is_refused_and_st
 
 /// `PUT /<bucket>/<key>` carrying `x-amz-copy-source` — `CopyObject`, whose own write of the
 /// destination object is what the reference is resolved for.
-async fn copy_object(
+///
+/// `pub(crate)`: the key-identity suite beside this one copies through this one rather than
+/// keeping a second copy of the same request.
+pub(crate) async fn copy_object(
     router: &MultiServiceRouter,
     destination_bucket: &str,
     destination_key: &str,
