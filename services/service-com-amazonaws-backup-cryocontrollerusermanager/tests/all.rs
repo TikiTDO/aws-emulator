@@ -11,6 +11,8 @@
 // points it into `tests/all/`.
 #[path = "all/backup_job_listing.rs"]
 mod backup_job_listing;
+#[path = "all/backup_job_role_outcome.rs"]
+mod backup_job_role_outcome;
 #[path = "all/backup_plan.rs"]
 mod backup_plan;
 #[path = "all/backup_plan_deletion.rs"]

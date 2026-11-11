@@ -29,9 +29,11 @@
 //!
 //! The request harness (`call_reported`, `router`, `ACCOUNT`, `REGION`) is the
 //! one `vault_and_backup_job.rs` exposes to this test binary, so there is ONE
-//! wire path for the service's suites; the region-varying sender and the
-//! IAM-mounted router below are this suite's own, since no other suite signs for
-//! a second region or resolves a role.
+//! wire path for the service's suites; the region-varying sender below is this
+//! suite's own, since no other suite signs for a second region. The IAM-mounted
+//! router and the `CreateRole` sender beside it are `pub(crate)`, because every
+//! suite whose rule turns on what IAM holds for a role needs exactly that one
+//! emulator and that one way of creating the role it names.
 
 use std::sync::Arc;
 
@@ -651,7 +653,7 @@ async fn a_refused_plan_read_names_what_it_could_not_read() {
 /// This service AND IAM on ONE engine, plus that engine's router: the role
 /// resolution asks IAM over the emulator's own in-process callback, so IAM has
 /// to be mounted for it to answer at all.
-fn router_with_iam() -> MultiServiceRouter {
+pub(crate) fn router_with_iam() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
@@ -668,7 +670,7 @@ fn router_with_iam() -> MultiServiceRouter {
 
 /// Percent-encode one value of IAM's `application/x-www-form-urlencoded`
 /// awsQuery body.
-fn form_value(value: &str) -> String {
+pub(crate) fn form_value(value: &str) -> String {
     value
         .bytes()
         .map(|byte| match byte {
@@ -684,7 +686,12 @@ fn form_value(value: &str) -> String {
 /// `AssumeRolePolicyDocument`, through IAM's OWN awsQuery wire, and answer the
 /// ARN IAM minted for it — read off the response rather than constructed, so the
 /// value the backup request names is the one IAM actually holds.
-async fn create_role(router: &MultiServiceRouter, path: &str, name: &str, trust: &str) -> String {
+pub(crate) async fn create_role(
+    router: &MultiServiceRouter,
+    path: &str,
+    name: &str,
+    trust: &str,
+) -> String {
     let body = format!(
         "Action=CreateRole&Version=2010-05-08&Path={}&RoleName={}&AssumeRolePolicyDocument={}",
         form_value(path),

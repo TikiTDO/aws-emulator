@@ -49,8 +49,9 @@ aws-sdk-dynamodb = { version = "1", default-features = false }
 # client, so this service configures the publication hop exactly as every other
 # publisher does. `iam_role`: the shared reading of a caller-supplied IAM role ARN
 # and of what this account's IAM answers about it, for the role a backup
-# selection's jobs would run as; `iam_client` under it is the in-process hop that
-# asks IAM.
+# selection's jobs would run as and for what a backup job's role is allowed to
+# create; `iam_client` under it is the in-process hop that asks IAM, and
+# `iam_authorization` is the tree's one wording of the denial that answers.
 service-common = { path = "../common" }
 
 [build-dependencies]

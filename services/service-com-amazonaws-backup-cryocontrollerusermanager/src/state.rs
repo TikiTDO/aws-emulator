@@ -80,6 +80,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 mod events;
 pub use events::*;
 
+/// What a started backup job comes to: whether the role it runs under may perform the
+/// backup, which is what selects its terminal state. Re-exported for the reason given on
+/// `events`.
+mod job_outcome;
+pub use job_outcome::*;
+
 /// The restore jobs this service stores, and the resolution steps the calls that
 /// name one share. Re-exported for the reason given on `events`.
 mod restore;
@@ -185,6 +191,11 @@ pub const MAX_LOCK_RETENTION_DAYS: i64 = 36_500;
 pub const BACKUP_JOB_STATE_CREATED: &str = "CREATED";
 /// `BackupJobState` a settled job is in.
 pub const BACKUP_JOB_STATE_COMPLETED: &str = "COMPLETED";
+/// `BackupJobState` a job that could not produce its recovery point ends in (same
+/// enum, `ABORTED | ABORTING | COMPLETED | CREATED | EXPIRED | FAILED | PARTIAL |
+/// PENDING | RUNNING`); it carries the reason as the job's `StatusMessage`
+/// ([`job_outcome`]).
+pub const BACKUP_JOB_STATE_FAILED: &str = "FAILED";
 /// `CopyJobState` a freshly started copy job is in (model enum `CopyJobState`,
 /// `CREATED | RUNNING | COMPLETED | FAILED | PARTIAL`).
 pub const COPY_JOB_STATE_CREATED: &str = "CREATED";
@@ -1593,7 +1604,9 @@ pub fn is_supported_framework_control(name: &str) -> bool {
 ///
 /// The size of the list is NOT checked here: a list past
 /// [`MAX_CONTROLS_PER_FRAMEWORK`] is a quota condition, which AWS answers with a
-/// different modelled exception than a value it refuses.
+/// different modelled exception than a value it refuses, so every caller resolves
+/// that quota BEFORE asking this — which is also what keeps the walk below sized
+/// by the quota rather than by the request.
 pub fn rejected_framework_controls(
     controls: &[FrameworkControl],
 ) -> Option<InvalidParameterValueException> {
@@ -1605,21 +1618,23 @@ pub fn rejected_framework_controls(
 }
 
 /// Why `controls` is not a framework's control list, or `None` when it is.
+///
+/// ONE pass over the list: the names already seen are carried in a set, so the
+/// cost is linear in the number of controls rather than quadratic, whatever the
+/// quota the callers resolve first admits.
 fn framework_controls_refusal(controls: &[FrameworkControl]) -> Option<String> {
     if controls.is_empty() {
         return Some("FrameworkControls must contain at least one control".to_string());
     }
-    for (index, control) in controls.iter().enumerate() {
+    let mut named = ::std::collections::BTreeSet::new();
+    for control in controls {
         // The control the entry names before anything else about the entry: a
         // name no control in the catalog carries cannot be stored, whatever
         // parameters or scope accompany it.
         if !is_supported_framework_control(&control.control_name) {
             return Some(unsupported_framework_control_message(&control.control_name));
         }
-        if controls[..index]
-            .iter()
-            .any(|earlier| earlier.control_name == control.control_name)
-        {
+        if !named.insert(control.control_name.as_str()) {
             return Some(format!(
                 "ControlName {} is used by more than one control; control names must be \
                  unique within a framework",
@@ -2281,6 +2296,16 @@ pub struct BackupJob {
     pub iam_role_arn: String,
     pub state: String,
     pub status_message: Option<String>,
+    /// Why this job can create no recovery point, decided from the permissions of
+    /// the role it runs under before the job was stored ([`job_outcome`]).
+    ///
+    /// Its PRESENCE is what makes the terminal state the clock owes this job
+    /// [`BACKUP_JOB_STATE_FAILED`] rather than [`BACKUP_JOB_STATE_COMPLETED`], and
+    /// its sentence is the `StatusMessage` that state carries — so a job can never
+    /// report a failure with no reason, nor a reason it did not fail for. It is
+    /// also why no recovery point was stored for the job at all. `None` for a job
+    /// nothing shows cannot be performed.
+    pub failure_status_message: Option<String>,
     pub percent_done: String,
     /// The emulator copies no bytes, so a job it ran moved nothing: this stays
     /// 0 rather than reporting a size no backup produced.
@@ -3340,21 +3365,37 @@ impl ComAmazonawsBackupCryocontrollerusermanagerState {
     /// Materialise the transition the clock has already made due, for ONE job.
     ///
     /// This is the ONLY write a reporting operation performs: a job whose
-    /// `settles_at` has passed was owed its completion at that instant whether
-    /// or not anybody called, so a describe settles it before reporting.
+    /// `settles_at` has passed was owed its terminal state at that instant
+    /// whether or not anybody called, so a describe settles it before reporting.
     /// Nothing else about the job changes, and the completion instant recorded
     /// is the instant it came due — not the instant somebody happened to look.
     /// Only the job asked about is touched, so the cost of a read does not grow
     /// with the store.
+    ///
+    /// WHICH terminal state is owed was decided when the job was started: a job
+    /// whose role withholds the backup it was started for carries the reason
+    /// ([`BackupJob::failure_status_message`]) and settles `FAILED` with that
+    /// reason as its `StatusMessage`, having transferred nothing; every other job
+    /// settles `COMPLETED`.
     pub fn settle_job(&mut self, job_id: &str, now: SystemTime) {
-        if let Some(job) = self.backup_jobs.get_mut(job_id) {
-            if job.state == BACKUP_JOB_STATE_CREATED && now >= job.settles_at {
-                job.state = BACKUP_JOB_STATE_COMPLETED.to_string();
-                job.completion_date = Some(job.settles_at);
-                job.percent_done = PERCENT_DONE_COMPLETE.to_string();
-                job.bytes_transferred = job.backup_size_in_bytes;
-            }
+        let Some(job) = self.backup_jobs.get_mut(job_id) else {
+            return;
+        };
+        if job.state != BACKUP_JOB_STATE_CREATED || now < job.settles_at {
+            return;
         }
+        job.completion_date = Some(job.settles_at);
+        let Some(reason) = job.failure_status_message.clone() else {
+            job.state = BACKUP_JOB_STATE_COMPLETED.to_string();
+            job.percent_done = PERCENT_DONE_COMPLETE.to_string();
+            job.bytes_transferred = job.backup_size_in_bytes;
+            return;
+        };
+        // A failed job produced nothing, so it reports no progress and no bytes
+        // moved, and no recovery point was ever written for it (`StartBackupJob`
+        // stores one only for a job that can produce it).
+        job.state = BACKUP_JOB_STATE_FAILED.to_string();
+        job.status_message = Some(reason);
     }
 
     /// The same for every stored job, for an operation that reports them all:
