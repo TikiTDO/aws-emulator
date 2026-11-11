@@ -17,6 +17,8 @@ mod batch_length_clause_value;
 mod channel_arn_refusals;
 #[path = "all/channel_arn_syntax.rs"]
 mod channel_arn_syntax;
+#[path = "all/clause_value_slot.rs"]
+mod clause_value_slot;
 #[path = "all/constraint_refusals.rs"]
 mod constraint_refusals;
 #[path = "all/put_audit_events.rs"]

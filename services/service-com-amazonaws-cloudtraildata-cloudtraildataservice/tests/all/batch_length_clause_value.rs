@@ -18,18 +18,15 @@
 //! The client is this crate's one test harness, reached from the suite that owns it.
 
 use crate::constraint_refusals::{
-    message_of, one_violation, rendered_batch, rendered_event, MAX_BATCH,
+    at_most_requirement, batch_length_clause, message_of, one_violation, rendered_event,
+    MAX_BATCH,
 };
 use crate::put_audit_events::{channel_arn, ev, Ev, Harness};
 use service_com_amazonaws_cloudtraildata_cloudtraildataservice::state::Channel;
 
 /// The whole message a batch past the declared maximum is refused with.
 fn expected_message(events: &[Ev]) -> String {
-    one_violation(&format!(
-        "Value '{}' at 'auditEvents' failed to satisfy constraint: Member must have length \
-         less than or equal to {MAX_BATCH}",
-        rendered_batch(events)
-    ))
+    one_violation(&batch_length_clause(events, &at_most_requirement(MAX_BATCH)))
 }
 
 /// One audit-event payload per shape a caller sends, cycled through a batch so no row of

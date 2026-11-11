@@ -23,7 +23,7 @@ use service_com_amazonaws_cloudtraildata_cloudtraildataservice::state::Channel;
 
 /// A JSON audit event that passes per-event validation, so nothing but the member under
 /// test decides these calls.
-const GOOD_EVENT: &str = r#"{"eventSource":"custom.app","eventName":"Login"}"#;
+pub const GOOD_EVENT: &str = r#"{"eventSource":"custom.app","eventName":"Login"}"#;
 
 /// The largest batch `auditEvents` admits, from the member's own `@length`
 /// (`smithy_query(query="shape", shape="AuditEvents")`: min 1, max 100).
@@ -33,8 +33,8 @@ const MIN_BATCH: usize = 1;
 /// The expression `AuditEvent$id` is modelled with, and the bounds on it
 /// (`smithy_query(query="shape", shape="Uuid")`: `@pattern ^[-_A-Za-z0-9]+$`,
 /// `@length 1..128`).
-const ID_PATTERN: &str = "^[-_A-Za-z0-9]+$";
-const ID_MAX_LENGTH: usize = 128;
+pub const ID_PATTERN: &str = "^[-_A-Za-z0-9]+$";
+pub const ID_MAX_LENGTH: usize = 128;
 
 /// The expression `PutAuditEventsRequest$externalId` is modelled with
 /// (`smithy_query(query="shape", shape="ExternalId")`).
@@ -62,6 +62,45 @@ pub fn message_of(reply: &Reply) -> String {
 /// The envelope one clause travels in.
 pub fn one_violation(clause: &str) -> String {
     format!("1 validation error detected: {clause}")
+}
+
+/// The requirement half a `@length` MAXIMUM states, for a member of any type.
+pub fn at_most_requirement(maximum: usize) -> String {
+    format!("Member must have length less than or equal to {maximum}")
+}
+
+/// The requirement half a `@length` MINIMUM states.
+pub fn at_least_requirement(minimum: usize) -> String {
+    format!("Member must have length greater than or equal to {minimum}")
+}
+
+/// The requirement half a `@pattern` violation states: the expression as a clause quotes
+/// it, without the whole-value anchors the model wraps it in.
+pub fn pattern_requirement(pattern: &str) -> String {
+    format!(
+        "Member must satisfy regular expression pattern: {}",
+        unanchored(pattern)
+    )
+}
+
+/// ONE clause of a refusal: the value the request carried at `member_path`, and the
+/// requirement it broke. THE one home for that template, so a change in how AWS words it
+/// is edited once; every clause builder below and in the sibling suites is expressed over
+/// it.
+pub fn clause(value: &str, member_path: &str, requirement: &str) -> String {
+    format!("Value '{value}' at '{member_path}' failed to satisfy constraint: {requirement}")
+}
+
+/// The clause the `auditEvents` member's own `@length` states under `requirement`: the
+/// batch the request carried, quoted whole.
+pub fn batch_length_clause(events: &[Ev], requirement: &str) -> String {
+    clause(&rendered_batch(events), "auditEvents", requirement)
+}
+
+/// The clause one batch element's own `id` violation states: the rejected value verbatim
+/// at the element's 1-BASED position under the list member.
+pub fn element_id_clause(position: usize, value: &str, requirement: &str) -> String {
+    clause(value, &format!("auditEvents.{position}.member.id"), requirement)
 }
 
 /// How the rendering of an `AuditEvent` reads inside a clause: the shape's name over every
@@ -105,28 +144,18 @@ async fn a_batch_outside_its_declared_length_is_quoted_whole() {
     // (case, the batch, the requirement the clause states). The two rows inside the bound
     // are the control: they are served, so the bound is reported only where it is broken.
     let rows: Vec<(&str, Vec<Ev>, Option<String>)> = vec![
-        (
-            "an empty batch",
-            batch(0),
-            Some(format!(
-                "Member must have length greater than or equal to {MIN_BATCH}"
-            )),
-        ),
+        ("an empty batch", batch(0), Some(at_least_requirement(MIN_BATCH))),
         ("one event, the smallest batch admitted", batch(MIN_BATCH), None),
         ("a batch at the declared maximum", batch(MAX_BATCH), None),
         (
             "one event past the declared maximum",
             batch(MAX_BATCH + 1),
-            Some(format!(
-                "Member must have length less than or equal to {MAX_BATCH}"
-            )),
+            Some(at_most_requirement(MAX_BATCH)),
         ),
         (
             "twenty events past the declared maximum",
             batch(MAX_BATCH + 20),
-            Some(format!(
-                "Member must have length less than or equal to {MAX_BATCH}"
-            )),
+            Some(at_most_requirement(MAX_BATCH)),
         ),
     ];
 
@@ -146,10 +175,7 @@ async fn a_batch_outside_its_declared_length_is_quoted_whole() {
                     reply.status,
                     reply.body
                 );
-                let expected = one_violation(&format!(
-                    "Value '{}' at 'auditEvents' failed to satisfy constraint: {requirement}",
-                    rendered_batch(events)
-                ));
+                let expected = one_violation(&batch_length_clause(events, requirement));
                 let stated = message_of(&reply);
                 assert_eq!(
                     stated, expected,
@@ -179,54 +205,39 @@ async fn a_constraint_clause_states_the_expression_without_its_anchors() {
             "an event id carrying a space",
             "event id".to_string(),
             None,
-            format!(
-                "Value 'event id' at 'auditEvents.1.member.id' failed to satisfy \
-                 constraint: Member must satisfy regular expression pattern: {}",
-                unanchored(ID_PATTERN)
-            ),
+            element_id_clause(1, "event id", &pattern_requirement(ID_PATTERN)),
         ),
         (
             "an event id carrying punctuation",
             "event!".to_string(),
             None,
-            format!(
-                "Value 'event!' at 'auditEvents.1.member.id' failed to satisfy constraint: \
-                 Member must satisfy regular expression pattern: {}",
-                unanchored(ID_PATTERN)
-            ),
+            element_id_clause(1, "event!", &pattern_requirement(ID_PATTERN)),
         ),
         (
             "an event id carrying a multi-byte character",
             "événement".to_string(),
             None,
-            format!(
-                "Value 'événement' at 'auditEvents.1.member.id' failed to satisfy \
-                 constraint: Member must satisfy regular expression pattern: {}",
-                unanchored(ID_PATTERN)
-            ),
+            element_id_clause(1, "événement", &pattern_requirement(ID_PATTERN)),
         ),
         (
             "an event id one character past its declared maximum",
             over_long_id.clone(),
             None,
-            format!(
-                "Value '{over_long_id}' at 'auditEvents.1.member.id' failed to satisfy \
-                 constraint: Member must have length less than or equal to {ID_MAX_LENGTH}"
-            ),
+            element_id_clause(1, &over_long_id, &at_most_requirement(ID_MAX_LENGTH)),
         ),
         (
             "an external id outside its expression",
             "evt-1".to_string(),
             Some("external$id"),
-            format!(
-                "Value 'external$id' at 'externalId' failed to satisfy constraint: Member \
-                 must satisfy regular expression pattern: {}",
-                unanchored(EXTERNAL_ID_PATTERN)
+            clause(
+                "external$id",
+                "externalId",
+                &pattern_requirement(EXTERNAL_ID_PATTERN),
             ),
         ),
     ];
 
-    for (case, id, external_id, clause) in &rows {
+    for (case, id, external_id, expected) in &rows {
         let reply = harness
             .put(&arn, *external_id, &[ev(id.as_str(), GOOD_EVENT)])
             .await;
@@ -240,9 +251,9 @@ async fn a_constraint_clause_states_the_expression_without_its_anchors() {
         let stated = message_of(&reply);
         assert_eq!(
             stated,
-            one_violation(clause),
+            one_violation(expected),
             "case {case:?}: expected {:?}, got {stated:?}",
-            one_violation(clause)
+            one_violation(expected)
         );
         // The REQUIREMENT half is what loses the anchors; a value the request carried
         // keeps whatever characters it had, a dollar sign included.
