@@ -10,14 +10,16 @@
 //!
 //! * the VALUE half is dropped. A refusal of IAM's states the member and the requirement and
 //!   nothing the request carried — for a value outside a declared bound, outside an
-//!   enumerated set, outside a member's `@pattern`, and for a SCALAR member that was absent;
-//! * a `@pattern` requirement quotes the expression the way AWS publishes one for a member:
-//!   without the pair of anchors the model writes around a whole-value expression
-//!   ([`::service_common::validation::unanchored`]). The CHECK still runs the model's pattern
-//!   as written; only the rendering drops the pair. The member a clause is about is the
-//!   member the model constrained, whether the value reached it at the top of an operation's
-//!   input or inside one of its collections, so one key of a list is stated the same way as
-//!   the input's own member;
+//!   enumerated set, outside the `@pattern` of a member of the input ITSELF, and for a SCALAR
+//!   member that was absent;
+//! * a `@pattern` requirement on a member of the input ITSELF quotes the expression the way
+//!   AWS publishes one for a member: without the pair of anchors the model writes around a
+//!   whole-value expression ([`::service_common::validation::unanchored`]). The CHECK still
+//!   runs the model's pattern as written; only the rendering drops the pair. A `@pattern`
+//!   requirement about a value reached INSIDE one of the input's collections keeps the
+//!   framework's own clause instead — the value it carried and the expression as the model
+//!   writes it — which is the clause this service answers one with
+//!   (`tests/all/server_certificate_untag_input_bounds.rs`);
 //! * an enumerated set is stated in the order IAM publishes for that enum
 //!   ([`PUBLISHED_ENUM_ORDERS`]) rather than the model's declaration order.
 //!
@@ -210,12 +212,12 @@ fn names_a_top_level_member(path: &str) -> bool {
 /// The clause for a value outside its member's `@pattern`: the member and the expression,
 /// with the expression quoted as AWS publishes it and nothing of the value.
 ///
-/// The restatement is about the MEMBER the model constrained, which a validation path names
-/// in its last segment — `tagKeys.1.member` is one key of a list, constrained by the key
-/// shape's own `@pattern` — so a value reached inside a collection is stated exactly as one
-/// supplied for a member of the input itself (`tests/all/validation_error_clauses.rs` pins
-/// the input's own members, `tests/all/server_certificate_untag_input_bounds.rs` one key of a
-/// list).
+/// The restatement is for a member of the input ITSELF. A value reached inside one of the
+/// input's collections keeps the framework's own clause — the value it carried and the
+/// model's expression as written — which is the clause this service answers one with
+/// (`tests/all/server_certificate_untag_input_bounds.rs` pins one key of a list, and
+/// `tests/all/validation_error_clauses.rs` with `tests/all/range_refusal_wording.rs` the
+/// restated form over the input's own members).
 fn pattern_clause(violation: &Violation, pattern: &str) -> Option<String> {
     if !names_a_top_level_member(&violation.path) {
         return None;

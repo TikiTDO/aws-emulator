@@ -1491,3 +1491,211 @@ async fn a_runbook_with_no_walkable_steps_is_refused_at_the_start() {
         );
     }
 }
+
+/// A runbook of one `aws:sleep` step named `step`, so which VERSION of a runbook an
+/// execution walked is visible in the walk itself.
+fn versioned_runbook(step: &str) -> Value {
+    json!({
+        "schemaVersion": "0.3",
+        "mainSteps": [
+            {"name": step, "action": "aws:sleep", "inputs": {"Duration": "PT0S"}, "isEnd": true},
+        ],
+    })
+}
+
+/// Update the runbook `name` with `content`, asserting it succeeded, and answering the
+/// version number that update minted.
+async fn updated(router: &MultiServiceRouter, name: &str, content: &Value) -> String {
+    let (status, response) = call(
+        router,
+        "UpdateDocument",
+        &json!({"Name": name, "Content": content.to_string()}),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "updating the runbook {name} must succeed, got {status} with {response:?}"
+    );
+    text(&response["DocumentDescription"], "DocumentVersion")
+}
+
+/// Switch the default version of the runbook `name` to `version`, asserting it succeeded.
+async fn default_version(router: &MultiServiceRouter, name: &str, version: &str) {
+    let (status, response) = call(
+        router,
+        "UpdateDocumentDefaultVersion",
+        &json!({"Name": name, "DocumentVersion": version}),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "switching {name} to default version {version} must succeed, got {status} with \
+         {response:?}"
+    );
+}
+
+/// One row of the version table: the `DocumentVersion` a start names, the version number
+/// the execution must report, and the step only that version of the runbook declares.
+struct VersionRow {
+    case: &'static str,
+    requested: Option<&'static str>,
+    reported: &'static str,
+    walks: &'static str,
+}
+
+/// A start runs the version of the runbook its `DocumentVersion` names — the three
+/// spellings the modelled selector admits (`$LATEST` the newest, `$DEFAULT` the document's
+/// default version, a number that numbered version), defaulting to `$DEFAULT` when the
+/// start names none — reports the version number it resolved, and walks THAT version's own
+/// content, whatever a later update does to the document.
+///
+/// The selector's spellings are the modelled `DocumentVersion` pattern
+/// (`^([$]LATEST|[$]DEFAULT|^[1-9][0-9]*$)$`, `StartAutomationExecutionRequest`), so each
+/// row below is one of them rather than the one spelling a recorded start happened to use.
+#[tokio::test]
+async fn a_start_runs_the_runbook_version_it_names() {
+    let (router, engine) = service();
+    let name = "Versioned";
+    runbook(&router, name, &versioned_runbook("sleepV1")).await;
+    for (expected, step) in [("2", "sleepV2"), ("3", "sleepV3")] {
+        let minted = updated(&router, name, &versioned_runbook(step)).await;
+        assert_eq!(
+            minted, expected,
+            "case {step:?}: expected the update to mint version {expected}, got {minted:?}"
+        );
+    }
+    // The default version is the one a switch names, not the newest one: that is what
+    // tells `$DEFAULT` and `$LATEST` apart below.
+    default_version(&router, name, "2").await;
+
+    let rows = [
+        VersionRow {
+            case: "no version, so the document's default",
+            requested: None,
+            reported: "2",
+            walks: "sleepV2",
+        },
+        VersionRow {
+            case: "the default version by selector",
+            requested: Some("$DEFAULT"),
+            reported: "2",
+            walks: "sleepV2",
+        },
+        VersionRow {
+            case: "the newest version by selector",
+            requested: Some("$LATEST"),
+            reported: "3",
+            walks: "sleepV3",
+        },
+        VersionRow {
+            case: "the first version by number",
+            requested: Some("1"),
+            reported: "1",
+            walks: "sleepV1",
+        },
+        VersionRow {
+            case: "the newest version by number",
+            requested: Some("3"),
+            reported: "3",
+            walks: "sleepV3",
+        },
+    ];
+
+    for VersionRow {
+        case,
+        requested,
+        reported,
+        walks,
+    } in rows
+    {
+        let mut body = json!({"DocumentName": name});
+        if let Some(requested) = requested {
+            body["DocumentVersion"] = json!(requested);
+        }
+        let id = started(&router, case, &body).await;
+        let pending = read(&router, case, &id).await;
+        assert_eq!(
+            text(&pending, "DocumentVersion"),
+            reported,
+            "case {case:?}: expected the execution to report version {reported}, got {pending}"
+        );
+
+        pick_up(&engine, REGION);
+        let walked = read(&router, case, &id).await;
+        assert_eq!(
+            text(&walked, "AutomationExecutionStatus"),
+            "Success",
+            "case {case:?}: expected the walk of version {reported} to succeed, got {walked}"
+        );
+        assert_eq!(
+            steps(&walked),
+            vec![(walks.to_string(), "Success".to_string())],
+            "case {case:?}: expected the steps version {reported} declares, got {walked}"
+        );
+        assert_eq!(
+            text(&walked, "DocumentVersion"),
+            reported,
+            "case {case:?}: expected the resolved version to stay reported, got {walked}"
+        );
+    }
+
+    // A number the document holds no version for names none of its versions: the modelled
+    // miss, naming the version asked for, and nothing started. The newest version here is
+    // 3, so the rows are the number one past it and one far past it.
+    let held = stored(&engine);
+    for (case, requested) in [
+        ("one past the newest version", "4"),
+        ("far past the newest version", "99"),
+    ] {
+        let (status, refused) = call(
+            &router,
+            "StartAutomationExecution",
+            &json!({"DocumentName": name, "DocumentVersion": requested}),
+        )
+        .await;
+        assert_eq!(
+            (status, error_code(&refused).as_str()),
+            (400, "AutomationDefinitionVersionNotFoundException"),
+            "case {case:?}: expected the modelled version miss, got {status} with {refused}"
+        );
+        assert_eq!(
+            error_message(&refused),
+            format!("Document {name} version {requested} does not exist."),
+            "case {case:?}: expected the refusal to name the runbook and the version asked \
+             for, got {refused}"
+        );
+        assert_eq!(
+            stored(&engine),
+            held,
+            "case {case:?}: expected a refused start to persist nothing"
+        );
+    }
+
+    // The execution walks the version it RESOLVED at the start, so a version minted after
+    // it started is not the content it runs.
+    let case = "a version minted after the start";
+    let id = started(
+        &router,
+        case,
+        &json!({"DocumentName": name, "DocumentVersion": "$LATEST"}),
+    )
+    .await;
+    let minted = updated(&router, name, &versioned_runbook("sleepV4")).await;
+    assert_eq!(
+        minted, "4",
+        "case {case:?}: expected the update to mint version 4, got {minted:?}"
+    );
+    pick_up(&engine, REGION);
+    let walked = read(&router, case, &id).await;
+    assert_eq!(
+        text(&walked, "DocumentVersion"),
+        "3",
+        "case {case:?}: expected the execution to stay on the version it started on, got \
+         {walked}"
+    );
+    assert_eq!(
+        steps(&walked),
+        vec![("sleepV3".to_string(), "Success".to_string())],
+        "case {case:?}: expected the steps of the version it started on, got {walked}"
+    );
+}
