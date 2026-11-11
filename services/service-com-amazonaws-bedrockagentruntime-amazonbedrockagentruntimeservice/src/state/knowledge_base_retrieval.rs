@@ -3,8 +3,10 @@
 //! What a knowledge-base retrieval reads: the chunks the knowledge base's bound vector
 //! index holds, and the provenance recorded with each of them.
 //!
-//! `Retrieve` RANKS and REPORTS chunks; this module is where they come from, so the
-//! provenance of every retrieval result is settled in one place.
+//! `Retrieve` RANKS and REPORTS chunks and `RetrieveAndGenerate` CITES them; this module is
+//! where they come from, and where what a request asks of the search is read
+//! ([`search_configuration`]), so the provenance of every retrieval result and the meaning
+//! of every `KnowledgeBaseRetrievalConfiguration` are settled in one place for both.
 //!
 //! A knowledge base's content lives in the vector store it is BOUND to: an ingestion job
 //! of the Bedrock Agent build-time plane reads the data source's source documents, writes
@@ -42,12 +44,153 @@ use ::service_com_amazonaws_bedrockagent_amazonbedrockagentbuildtimelambda::stat
 use ::service_com_amazonaws_s3vectors_s3vectors::state as vectors_state;
 
 use crate::ops::types::{
-    RetrievalFilter, RetrievalResultLocation, RetrievalResultS3Location,
+    KnowledgeBaseRetrievalConfiguration, RetrievalFilter, RetrievalResultLocation,
+    RetrievalResultS3Location,
 };
 
 /// The `RetrievalResultLocationType` an ingested S3 object is reported under
 /// (`smithy_query(query="shape",shape="RetrievalResultLocationType")`).
 pub const LOCATION_TYPE_S3: &str = "S3";
+
+/// How many results a retrieval reports when the request names no `numberOfResults`: the
+/// `default` the model puts on that member
+/// (`smithy_query(query="shape",shape="KnowledgeBaseVectorSearchConfiguration")`).
+pub const DEFAULT_NUMBER_OF_RESULTS: usize = 5;
+
+/// What a request asks of the search: how many results it may carry, and the filter every
+/// reported chunk has to satisfy.
+///
+/// Read by every operation of this service that queries a knowledge base, so `Retrieve` and
+/// `RetrieveAndGenerate` cannot disagree about what a `KnowledgeBaseRetrievalConfiguration`
+/// asks for — the ONE difference between them is the member PATH the configuration travelled
+/// in, which each passes in so a refusal names the member the request actually carried.
+#[derive(Debug)]
+pub struct SearchConfiguration<'request> {
+    /// The most results the search reports.
+    pub results: usize,
+    /// The filter a chunk's metadata has to satisfy, when the request carries one.
+    pub filter: Option<&'request RetrievalFilter>,
+    /// The member path the filter travelled in.
+    pub member: String,
+}
+
+/// Read a request's `retrievalConfiguration`, which travelled at `member` (the member path
+/// of the configuration itself, without a trailing dot).
+///
+/// The two sibling configurations are the two KINDS of knowledge base a retrieval serves, so
+/// a request naming both names no one search; a request naming neither takes the model's own
+/// default page of results.
+///
+/// `Err` carries the sentence the caller's modelled `ValidationException` states: a leg this
+/// service cannot compute is REFUSED rather than ignored, because a retrieval that dropped
+/// the member would report chunks the caller asked to have filtered, reordered or withheld.
+pub fn search_configuration<'request>(
+    member: &str,
+    configuration: Option<&'request KnowledgeBaseRetrievalConfiguration>,
+) -> Result<SearchConfiguration<'request>, String> {
+    let vector_member = format!("{member}.vectorSearchConfiguration");
+    let managed_member = format!("{member}.managedSearchConfiguration");
+    let Some(configuration) = configuration else {
+        return Ok(SearchConfiguration {
+            results: DEFAULT_NUMBER_OF_RESULTS,
+            filter: None,
+            member: vector_member,
+        });
+    };
+    match (
+        configuration.vector_search_configuration.as_ref(),
+        configuration.managed_search_configuration.as_ref(),
+    ) {
+        (Some(_), Some(_)) => Err(format!(
+            "{member} must carry exactly one of vectorSearchConfiguration and \
+             managedSearchConfiguration: they configure the retrieval of the two different \
+             kinds of knowledge base, and this request carries both"
+        )),
+        (Some(vector), None) => {
+            if vector.implicit_filter_configuration.is_some() {
+                return Err(format!(
+                    "{vector_member}.implicitFilterConfiguration: this service generates no \
+                     metadata filter from the query text, so a retrieval cannot be narrowed \
+                     the way an implicit filter would narrow it; supply \
+                     {vector_member}.filter to filter on metadata"
+                ));
+            }
+            if vector.reranking_configuration.is_some() {
+                return Err(reranking_refusal(&vector_member));
+            }
+            Ok(SearchConfiguration {
+                results: results_bound(vector.number_of_results),
+                filter: vector.filter.as_ref(),
+                member: vector_member,
+            })
+        }
+        (None, Some(managed)) => {
+            if managed.reranking_configuration.is_some() {
+                return Err(reranking_refusal(&managed_member));
+            }
+            Ok(SearchConfiguration {
+                results: results_bound(managed.number_of_results),
+                filter: managed.filter.as_ref(),
+                member: managed_member,
+            })
+        }
+        (None, None) => Ok(SearchConfiguration {
+            results: DEFAULT_NUMBER_OF_RESULTS,
+            filter: None,
+            member: vector_member,
+        }),
+    }
+}
+
+/// The sentence a `rerankingConfiguration` earns: a reranking model REORDERS the results a
+/// retrieval would otherwise report, and no such model runs in this process — so honouring
+/// only the count it keeps would answer a success whose ordering is the one the caller asked
+/// to have replaced.
+fn reranking_refusal(member: &str) -> String {
+    format!(
+        "{member}.rerankingConfiguration: this service runs no reranking model, so the order \
+         a reranker would put the results in cannot be computed; omit \
+         {member}.rerankingConfiguration to take the retrieval's own order"
+    )
+}
+
+/// The most results one search reports: `numberOfResults`, or the model's default when the
+/// request names none.
+///
+/// A value outside the modelled `range 1..100` never reaches here — the boundary validator
+/// refuses it before a handler runs — so the filter below is the unreachable arm of a total
+/// function rather than a page size quietly substituted for one the caller asked for.
+fn results_bound(number_of_results: Option<i32>) -> usize {
+    number_of_results
+        .and_then(|requested| usize::try_from(requested).ok())
+        .filter(|requested| *requested > 0)
+        .unwrap_or(DEFAULT_NUMBER_OF_RESULTS)
+}
+
+/// How big a filter may be is decided BEFORE anything is ranked — how deeply it nests AND
+/// how many nodes it holds, because the filter is evaluated once per chunk and the model
+/// bounds neither. Past either bound the request is refused rather than evaluated, so no
+/// caller can drive the filter walk without end.
+///
+/// `Some` carries the sentence the caller's modelled `ValidationException` states.
+pub fn filter_bounds_refusal(search: &SearchConfiguration<'_>) -> Option<String> {
+    use crate::state::retrieval_filter as filters;
+
+    let filter = search.filter?;
+    match filters::within_bounds(filter) {
+        Ok(()) => None,
+        Err(filters::FilterTooBig::Depth) => Some(format!(
+            "{}.filter nests andAll/orAll more than {} levels deep",
+            search.member,
+            filters::MAX_FILTER_DEPTH
+        )),
+        Err(filters::FilterTooBig::Nodes) => Some(format!(
+            "{}.filter holds more than the {} comparisons this service evaluates",
+            search.member,
+            filters::MAX_FILTER_NODES
+        )),
+    }
+}
 
 /// The `RetrievalResultContentType` of a chunk of text
 /// (`smithy_query(query="shape",shape="RetrievalResultContentType")`).

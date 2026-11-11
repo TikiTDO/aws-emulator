@@ -31,6 +31,8 @@ mod pattern_constraint_messages;
 mod prompt_optimization;
 #[path = "all/reranking.rs"]
 mod reranking;
+#[path = "all/retrieve_and_generate.rs"]
+mod retrieve_and_generate;
 #[path = "all/session_error_messages.rs"]
 mod session_error_messages;
 #[path = "all/sessions.rs"]

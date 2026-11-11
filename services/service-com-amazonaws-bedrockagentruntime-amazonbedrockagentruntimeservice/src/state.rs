@@ -30,7 +30,12 @@
 //!
 //! * [`knowledge_base_retrieval`] — which chunks of which ingested source a knowledge
 //!   base holds, and where each one came from;
-//! * [`retrieval_filter`] — which of those chunks a request's `filter` admits.
+//! * [`retrieval_filter`] — which of those chunks a request's `filter` admits;
+//! * [`generated_answer`] — the response a knowledge-base query is answered with, composed
+//!   of the passages retrieved for it, and the model it is generated against;
+//! * [`knowledge_base_session`] — the conversational session such a query is served in,
+//!   which IS this service's own store: the turns one caller has taken against a knowledge
+//!   base, under a `sessionId` only this service mints.
 //!
 //! The MEMORY of an agent alias is this plane's own ([`agent_memory`]): the summaries of
 //! the sessions an alias held live in the store below, while the agent and the alias they
@@ -42,8 +47,13 @@
 pub mod agent_memory;
 /// See the module docs: where the content of one ingested document lives.
 pub mod document_content;
+/// See the module docs: the response a knowledge-base query is answered with, and the
+/// model it is generated against.
+pub mod generated_answer;
 /// See the module docs: what a knowledge-base retrieval may report.
 pub mod knowledge_base_retrieval;
+/// See the module docs: the conversational session a knowledge-base query is served in.
+pub mod knowledge_base_session;
 /// See the module docs: which chunks a retrieval's `filter` admits.
 pub mod retrieval_filter;
 /// See the module docs: the model a prompt optimization is asked to optimize for.
@@ -197,6 +207,10 @@ pub struct ComAmazonawsBedrockagentruntimeAmazonbedrockagentruntimeserviceState 
     /// is an alias that has held no session, which is an empty memory rather than a
     /// missing resource. See [`agent_memory`] for what writes a summary.
     pub agent_memories: BTreeMap<agent_memory::MemoryKey, Vec<agent_memory::SessionSummaryRecord>>,
+    /// Every conversational session a `RetrieveAndGenerate` has opened, keyed by the
+    /// `sessionId` this service minted for it. See [`knowledge_base_session`] for what a
+    /// session holds and why a caller can only continue one it was handed.
+    pub knowledge_base_sessions: BTreeMap<String, knowledge_base_session::KnowledgeBaseSession>,
     /// Monotonic counter handing out [`InvocationStepRecord::order`] values.
     pub order_counter: u64,
 }

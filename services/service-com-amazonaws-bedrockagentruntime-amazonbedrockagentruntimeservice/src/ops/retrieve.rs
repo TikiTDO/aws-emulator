@@ -130,10 +130,9 @@ use crate::state::knowledge_base_retrieval as retrieval;
 /// one the model defaults to (`KNOWLEDGE_BASE_QUERY_TYPE_VALUES`).
 const QUERY_TYPE_TEXT: &str = "TEXT";
 
-/// How many results a retrieval reports when the request names no `numberOfResults`: the
-/// `default` the model puts on that member
-/// (`smithy_query(query="shape",shape="KnowledgeBaseVectorSearchConfiguration")`).
-const DEFAULT_NUMBER_OF_RESULTS: usize = 5;
+/// The member path this operation's `retrievalConfiguration` travels in, which a refusal
+/// about it names ([`retrieval::search_configuration`]).
+const RETRIEVAL_CONFIGURATION_MEMBER: &str = "retrievalConfiguration";
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -243,29 +242,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .to_string(),
             ));
         }
-        let search = search_configuration(input.retrieval_configuration.as_ref())?;
-        // How big a filter may be is decided ONCE, before anything is ranked — how deeply
-        // it nests AND how many nodes it holds, because the filter is evaluated once per
-        // chunk and the model bounds neither. Past either bound the request is refused
-        // rather than evaluated, so no caller can drive the walk below without end.
-        if let Some(filter) = search.filter {
-            use crate::state::retrieval_filter as filters;
-
-            if let Err(too_big) = filters::within_bounds(filter) {
-                return Err(refuse(match too_big {
-                    filters::FilterTooBig::Depth => format!(
-                        "{}.filter nests andAll/orAll more than {} levels deep",
-                        search.member,
-                        filters::MAX_FILTER_DEPTH
-                    ),
-                    filters::FilterTooBig::Nodes => format!(
-                        "{}.filter holds more than the {} comparisons this service \
-                         evaluates",
-                        search.member,
-                        filters::MAX_FILTER_NODES
-                    ),
-                }));
-            }
+        let search = retrieval::search_configuration(
+            RETRIEVAL_CONFIGURATION_MEMBER,
+            input.retrieval_configuration.as_ref(),
+        )
+        .map_err(refuse)?;
+        // How big a filter may be is decided ONCE, before anything is ranked: past the
+        // bounds the service evaluates, the request is refused rather than walked.
+        if let Some(too_big) = retrieval::filter_bounds_refusal(&search) {
+            return Err(refuse(too_big));
         }
 
         // Authorization is decided against the knowledge base the call retrieves from —
@@ -402,110 +387,3 @@ fn query_text(query: &KnowledgeBaseQuery) -> Result<String, RetrieveError> {
     Ok(text.to_string())
 }
 
-/// What the request asks of the search: how many results it may carry, and the filter
-/// every reported chunk has to satisfy.
-#[derive(Debug)]
-struct SearchConfiguration<'request> {
-    /// The most results the response carries.
-    results: usize,
-    /// The filter a chunk's metadata has to satisfy, when the request carries one.
-    filter: Option<&'request RetrievalFilter>,
-    /// The member path the filter travelled in, so a refusal about it names the member
-    /// the request actually carried.
-    member: &'static str,
-}
-
-/// The `vectorSearchConfiguration` member path, which a vector knowledge base's retrieval
-/// is configured through.
-const VECTOR_SEARCH_MEMBER: &str = "retrievalConfiguration.vectorSearchConfiguration";
-
-/// The `managedSearchConfiguration` member path, which a service-managed knowledge
-/// base's retrieval is configured through.
-const MANAGED_SEARCH_MEMBER: &str = "retrievalConfiguration.managedSearchConfiguration";
-
-/// Read the request's `retrievalConfiguration`.
-///
-/// The two sibling configurations are the two KINDS of knowledge base this operation
-/// serves, so a request naming both names no one search; a request naming neither takes
-/// the model's own default page of results.
-fn search_configuration(
-    configuration: Option<&KnowledgeBaseRetrievalConfiguration>,
-) -> Result<SearchConfiguration<'_>, RetrieveError> {
-    let Some(configuration) = configuration else {
-        return Ok(SearchConfiguration {
-            results: DEFAULT_NUMBER_OF_RESULTS,
-            filter: None,
-            member: VECTOR_SEARCH_MEMBER,
-        });
-    };
-    match (
-        configuration.vector_search_configuration.as_ref(),
-        configuration.managed_search_configuration.as_ref(),
-    ) {
-        (Some(_), Some(_)) => Err(refuse(
-            "retrievalConfiguration must carry exactly one of vectorSearchConfiguration \
-             and managedSearchConfiguration: they configure the retrieval of the two \
-             different kinds of knowledge base, and this request carries both"
-                .to_string(),
-        )),
-        (Some(vector), None) => {
-            if vector.implicit_filter_configuration.is_some() {
-                return Err(refuse(format!(
-                    "{VECTOR_SEARCH_MEMBER}.implicitFilterConfiguration: this service \
-                     generates no metadata filter from the query text, so a retrieval \
-                     cannot be narrowed the way an implicit filter would narrow it; \
-                     supply {VECTOR_SEARCH_MEMBER}.filter to filter on metadata"
-                )));
-            }
-            if vector.reranking_configuration.is_some() {
-                return Err(refuse(reranking_refusal(VECTOR_SEARCH_MEMBER)));
-            }
-            Ok(SearchConfiguration {
-                results: results_bound(vector.number_of_results),
-                filter: vector.filter.as_ref(),
-                member: VECTOR_SEARCH_MEMBER,
-            })
-        }
-        (None, Some(managed)) => {
-            if managed.reranking_configuration.is_some() {
-                return Err(refuse(reranking_refusal(MANAGED_SEARCH_MEMBER)));
-            }
-            Ok(SearchConfiguration {
-                results: results_bound(managed.number_of_results),
-                filter: managed.filter.as_ref(),
-                member: MANAGED_SEARCH_MEMBER,
-            })
-        }
-        (None, None) => Ok(SearchConfiguration {
-            results: DEFAULT_NUMBER_OF_RESULTS,
-            filter: None,
-            member: VECTOR_SEARCH_MEMBER,
-        }),
-    }
-}
-
-/// The `ValidationException` message a `rerankingConfiguration` earns: a reranking model
-/// REORDERS the results a retrieval would otherwise report, and no such model runs in
-/// this process — so honouring only the count it keeps would answer a success whose
-/// ordering is the one the caller asked to have replaced.
-fn reranking_refusal(member: &str) -> String {
-    format!(
-        "{member}.rerankingConfiguration: this service runs no reranking model, so the \
-         order a reranker would put the results in cannot be computed; omit \
-         {member}.rerankingConfiguration to take the retrieval's own order"
-    )
-}
-
-/// The most results one response carries: `numberOfResults`, or the model's default when
-/// the request names none.
-///
-/// A value outside the modelled `range 1..100` never reaches here — the boundary validator
-/// refuses it before the handler runs — so the filter below is the unreachable arm of a
-/// total function rather than a page size quietly substituted for one the caller asked
-/// for.
-fn results_bound(number_of_results: Option<i32>) -> usize {
-    number_of_results
-        .and_then(|requested| usize::try_from(requested).ok())
-        .filter(|requested| *requested > 0)
-        .unwrap_or(DEFAULT_NUMBER_OF_RESULTS)
-}

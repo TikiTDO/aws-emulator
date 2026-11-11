@@ -19,6 +19,10 @@
 //! when the SOURCE moves, so a citation of an object deleted since stands until another
 //! job reconciles it.
 //!
+//! The [`Emulator`] harness below is `pub(crate)`, so the sibling suite that drives
+//! `RetrieveAndGenerate` over the same four services uses it rather than growing a second
+//! copy of it (see `tests/all/retrieve_and_generate.rs`).
+//!
 //! The rows below span what that rule generalises over: how many source documents a data
 //! source holds and how long each one is, which keys the inclusion prefixes admit,
 //! whether a metadata file sits beside a document, how many data sources one knowledge
@@ -78,15 +82,15 @@ const RESULT_METADATA_KEYS: [&str; 3] = [
 /// One emulator: a router over one shared engine carrying the four services the retrieval
 /// path spans, plus the engine handle, so a test can set up the vector index and the
 /// source objects the way a caller does before naming them.
-struct Emulator {
-    router: MultiServiceRouter,
-    engine: Arc<engine::InMemoryEngine>,
+pub(crate) struct Emulator {
+    pub(crate) router: MultiServiceRouter,
+    pub(crate) engine: Arc<engine::InMemoryEngine>,
 }
 
 impl Emulator {
     /// One emulator whose bound vector index exists, as a caller sets it up before the
     /// knowledge base names it.
-    fn new(index: &str) -> Self {
+    pub(crate) fn new(index: &str) -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
         seed_index(&engine, index);
         let mut router = MultiServiceRouter::new();
@@ -113,7 +117,7 @@ impl Emulator {
     /// Store `text` at `bucket`/`key`, creating the bucket on the first write — the state
     /// a caller's `CreateBucket` + `PutObject` leaves behind, written through S3's own
     /// store so the objects an ingestion crawls are the objects S3 serves.
-    fn put_object(&self, bucket: &str, key: &str, text: &str) {
+    pub(crate) fn put_object(&self, bucket: &str, key: &str, text: &str) {
         let state = s3_state::service_state(&*self.engine).expect("the S3 store is on this engine");
         let mut store = state.lock();
         let _ = store.create_bucket(bucket, REGION);
@@ -160,7 +164,7 @@ impl Emulator {
 
     /// Create a knowledge base bound to the index `index` of [`VECTOR_BUCKET`] and answer
     /// its minted id.
-    async fn knowledge_base(&self, name: &str, index: &str) -> String {
+    pub(crate) async fn knowledge_base(&self, name: &str, index: &str) -> String {
         let (status, body) = call(
             &self.router,
             "PUT",
@@ -193,7 +197,7 @@ impl Emulator {
     }
 
     /// Attach an S3 data source over `bucket` and answer its minted id.
-    async fn data_source(
+    pub(crate) async fn data_source(
         &self,
         knowledge_base_id: &str,
         name: &str,
@@ -247,7 +251,7 @@ impl Emulator {
 
     /// Run one ingestion job to completion: start it, wait out the spans the clock owes
     /// it, and assert the plane reports it `COMPLETE`.
-    async fn ingest(&self, knowledge_base_id: &str, data_source_id: &str) {
+    pub(crate) async fn ingest(&self, knowledge_base_id: &str, data_source_id: &str) {
         let job = self.start_ingestion(knowledge_base_id, data_source_id).await;
         tokio::time::sleep(INGESTION_JOB_START_SPAN + INGESTION_JOB_RUN_SPAN + MARGIN).await;
         let (status, body) = call(
@@ -365,7 +369,7 @@ fn seed_index(engine: &Arc<engine::InMemoryEngine>, index: &str) {
 
 /// `text` with every run of whitespace collapsed to one space — the form a chunk's text
 /// is a substring of.
-fn collapsed(text: &str) -> String {
+pub(crate) fn collapsed(text: &str) -> String {
     text.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
