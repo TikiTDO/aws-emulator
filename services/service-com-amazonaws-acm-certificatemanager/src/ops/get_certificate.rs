@@ -191,7 +191,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // request whose validation fell due before this call is answered as it stands
         // now, which is what makes a poll for the issued certificate terminate.
         let mut store = state.lock();
-        store.materialize_due(::std::time::SystemTime::now());
+        store.materialize_due_in(&*self.engine, ::std::time::SystemTime::now());
         let Some(certificate) = store.certificates.get(&input.certificate_arn) else {
             return Err(GetCertificateErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {

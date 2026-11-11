@@ -205,7 +205,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Materialise what the clock already owes before deciding whether this
         // certificate may be revoked, so the decision is made on the record a caller
         // would see rather than a stale one.
-        store.materialize_due(now);
+        store.materialize_due_in(&*self.engine, now);
 
         let Some(certificate) = store.certificates.get_mut(&input.certificate_arn) else {
             return Err(RevokeCertificateErrorModeled::ResourceNotFoundException(

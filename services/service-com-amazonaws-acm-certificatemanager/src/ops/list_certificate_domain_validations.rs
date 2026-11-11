@@ -225,7 +225,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // reported as it stands now, so this reader and `DescribeCertificate` cannot
         // report one store at two different instants.
         let mut store = state.lock();
-        store.materialize_due(::std::time::SystemTime::now());
+        store.materialize_due_in(&*self.engine, ::std::time::SystemTime::now());
         let Some(certificate) = store.certificates.get(&input.certificate_arn) else {
             return Err(
                 ListCertificateDomainValidationsErrorModeled::ResourceNotFoundException(

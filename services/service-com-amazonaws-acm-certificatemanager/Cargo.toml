@@ -26,6 +26,11 @@ tracing = { workspace = true }
 service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
 # The IAM store, for the identity-based policy documents in force on that principal.
 service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# The Route 53 store, for the DNS a public certificate's domain validation is proven in:
+# whether the CNAME this service handed out is published in one of the account's public
+# hosted zones is that service's fact, read through the shared engine, which needs the
+# owning service's state TYPE.
+service-com-amazonaws-route53-awsdnsv20130401 = { workspace = true }
 # `iam_authorization`: the shared evaluation of those documents against an action on a
 # resource, so every service that enforces authorization decides alike.
 service-common = { path = "../common" }
@@ -71,6 +76,10 @@ rcgen = "0.13"
 # performs with an imported certificate: import it here, then build a regional custom
 # domain on the ARN this service answered. TEST-ONLY — nothing in `src/` reaches it.
 service-com-amazonaws-apigatewayv2-apigatewayv2 = { workspace = true }
+# The Amazon EC2 service, so the DNS-validation tests can register the VPC a PRIVATE
+# hosted zone is created with: which VPCs the account holds is that service's fact.
+# TEST-ONLY — nothing in `src/` reaches it.
+service-com-amazonaws-ec2-amazonec2 = { workspace = true }
 
 [lints]
 workspace = true

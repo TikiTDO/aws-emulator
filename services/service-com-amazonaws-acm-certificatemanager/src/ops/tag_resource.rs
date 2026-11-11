@@ -187,7 +187,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut store = state.lock();
         // Every handler materialises what the clock already owes first, so tagging a
         // resource cannot hold back a transition that was already due.
-        store.materialize_due(::std::time::SystemTime::now());
+        store.materialize_due_in(&*self.engine, ::std::time::SystemTime::now());
         let Some(stored) = store.resource_tags_mut(&input.resource_arn) else {
             return Err(TagResourceErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {

@@ -161,7 +161,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // what the clock already owes first, so no two operations can report one store
         // at two different instants. This operation writes nothing of its own.
         let mut store = state.lock();
-        store.materialize_due(::std::time::SystemTime::now());
+        store.materialize_due_in(&*self.engine, ::std::time::SystemTime::now());
         let Some(stored) = store.resource_tags(&input.resource_arn) else {
             return Err(ListTagsForResourceErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {

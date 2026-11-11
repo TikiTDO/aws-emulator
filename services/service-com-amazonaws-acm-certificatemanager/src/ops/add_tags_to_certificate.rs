@@ -210,7 +210,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut store = state.lock();
         // Every handler materialises what the clock already owes first, so tagging a
         // certificate cannot hold back a validation outcome that was already due.
-        store.materialize_due(::std::time::SystemTime::now());
+        store.materialize_due_in(&*self.engine, ::std::time::SystemTime::now());
         let Some(certificate) = store.certificates.get_mut(&input.certificate_arn) else {
             return Err(AddTagsToCertificateErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {

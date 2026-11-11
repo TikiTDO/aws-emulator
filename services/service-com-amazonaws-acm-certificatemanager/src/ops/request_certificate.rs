@@ -12,8 +12,9 @@
 //! the outcome the clock owes it ([`crate::state::PendingValidation`]) and the instant
 //! it falls due, which whichever call next touches the store materialises. For a public
 //! request that is the end of the documented 72-hour validation window, so the
-//! certificate stays pending — with its evidence live — until then; see
-//! [`validation_outcome`].
+//! certificate stays pending — with its evidence live — until then, or until the
+//! validation CNAME it handed out is published in the account's public DNS, which is
+//! what takes it to `ISSUED` instead; see [`validation_outcome`].
 //!
 //! ## Shape of an operation
 //!
@@ -316,7 +317,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let now = std::time::SystemTime::now();
 
         let mut store = state.lock();
-        store.materialize_due(now);
+        store.materialize_due_in(&*self.engine, now);
 
         // A re-sent request resolves to the certificate it already created. The pass
         // above has already dropped every entry that stands for nothing — a token that
@@ -480,9 +481,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     }
 }
 
-/// How the validation of the certificate this request creates will resolve.
+/// How the validation of the certificate this request creates will resolve, as far as
+/// the REQUEST alone decides it.
 ///
-/// Three outcomes, and which one is owed is decided here, once, from the request:
+/// Three outcomes:
 ///
 /// * "If you are requesting a private certificate, domain validation is not required"
 ///   (`RequestCertificate` doc), so a request naming a private certificate authority
@@ -499,11 +501,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 ///   doc), which happens out of band. ACM waits for it — "ACM makes repeated attempts
 ///   to validate a certificate for 72 hours and then times out"
 ///   (`CertificateDetail$Status` doc) — so the request stays `PENDING_VALIDATION` with
-///   its evidence live for the whole documented window, and the only outcome the clock
-///   owes it is that timeout. This emulator observes no published evidence, so nothing
-///   shortens the wait; a challenge it has not seen published is not a request failure
-///   either, which is what keeps every operation that acts on a pending validation
+///   its evidence live for the whole documented window, and the outcome the REQUEST
+///   leaves it owed is that timeout. A challenge nobody has published is not a request
+///   failure, which is what keeps every operation that acts on a pending validation
 ///   (`ResendValidationEmail`, the published CNAME) reachable.
+///
+/// The last one is the outcome the proof can still change: once the CNAME this service
+/// handed out for every covered name is published, the certificate is owed an issuance
+/// instead ([`crate::state::ComAmazonawsAcmCertificatemanagerState::materialize_due_in`]),
+/// which is why that wait is what a public request starts out owing rather than what it
+/// is stuck with.
 fn validation_outcome(
     input: &RequestCertificateInput,
     names: &[String],

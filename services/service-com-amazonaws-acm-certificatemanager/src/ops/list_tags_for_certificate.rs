@@ -166,7 +166,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // materialises what the clock already owes first, so no two operations can
         // report one store at two different instants.
         let mut store = state.lock();
-        store.materialize_due(::std::time::SystemTime::now());
+        store.materialize_due_in(&*self.engine, ::std::time::SystemTime::now());
         let Some(certificate) = store.certificates.get(&input.certificate_arn) else {
             return Err(
                 ListTagsForCertificateErrorModeled::ResourceNotFoundException(

@@ -219,7 +219,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Every handler materialises what the clock already owes first, so this call
         // decides on the status a reader would see at this instant rather than on a
         // validation outcome that had fallen due with nobody to apply it.
-        store.materialize_due(::std::time::SystemTime::now());
+        store.materialize_due_in(&*self.engine, ::std::time::SystemTime::now());
         let Some(certificate) = store.certificates.get_mut(&input.certificate_arn) else {
             return Err(
                 UpdateCertificateOptionsErrorModeled::ResourceNotFoundException(

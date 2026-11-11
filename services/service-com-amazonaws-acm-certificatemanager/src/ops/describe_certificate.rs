@@ -5,9 +5,10 @@
 //! projects it into a `CertificateDetail`.
 //!
 //! Reporting, not mutating: the only write it makes is
-//! [`crate::state::ComAmazonawsAcmCertificatemanagerState::materialize_due`], which
+//! [`crate::state::ComAmazonawsAcmCertificatemanagerState::materialize_due_in`], which
 //! applies the validation outcome the clock already owed a pending certificate at
-//! this instant whether or not anybody polled for it.
+//! this instant whether or not anybody polled for it — including the issuance owed to
+//! one whose validation CNAME is already published in the account's public DNS.
 //!
 //! ## Shape of an operation
 //!
@@ -176,10 +177,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // A read of one record, except for the outcomes the clock already owes: a
         // certificate whose validation fell due before this call is reported as it
-        // stands now, which is what makes a poll for a terminal status terminate.
+        // stands now, which is what makes a poll for a terminal status terminate. The
+        // pass resolves each pending DNS validation against the published DNS first, so
+        // a certificate whose validation CNAME is up is reported as the proof already
+        // left it.
         let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
-        store.materialize_due(now);
+        store.materialize_due_in(&*self.engine, now);
         let Some(certificate) = store.certificates.get(&input.certificate_arn) else {
             return Err(DescribeCertificateErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {

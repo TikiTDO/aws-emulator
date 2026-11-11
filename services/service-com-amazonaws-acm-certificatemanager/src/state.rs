@@ -90,6 +90,15 @@
 //! Nothing sleeps for those instants —
 //! [`ComAmazonawsAcmCertificatemanagerState::materialize_due`] applies whatever was
 //! already due, and every handler calls it before reading or writing the store.
+//!
+//! What a PUBLIC request waiting on proof of domain control is owed is not fixed for
+//! good, though: the proof can arrive. A handler that reads or acts on a certificate
+//! goes through [`ComAmazonawsAcmCertificatemanagerState::materialize_due_in`], which
+//! first resolves each pending DNS validation against the account's hosted zones in the
+//! shared engine (`dns_validation`) — a published CNAME is what takes such a request to
+//! issuance.
+
+mod dns_validation;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, SystemTime};
@@ -830,13 +839,15 @@ pub struct DomainValidationRecord {
 
 /// How the validation of a requested certificate resolves.
 ///
-/// Decided by the call that starts the transition, from what the request asks for,
-/// and applied when the transition falls due.
+/// Decided by the call that starts the transition, from what the request asks for, and
+/// revised by the proof the DNS later carries (`dns_validation`); applied when the
+/// transition falls due.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidationOutcome {
     /// The certificate is issued: "If you are requesting a private certificate,
     /// domain validation is not required" (`RequestCertificate` doc), so there is
-    /// nothing left to prove and the request completes.
+    /// nothing left to prove and the request completes — and likewise for a public
+    /// request whose domains the published DNS has since proven (`dns_validation`).
     Issued,
     /// The request fails with [`FAILURE_REASON_ADDITIONAL_VERIFICATION_REQUIRED`]
     /// before ACM waits on anything: the request names a domain the public DNS
@@ -848,12 +859,15 @@ pub enum ValidationOutcome {
     Failed,
     /// The request times out unvalidated: "If you are requesting a public certificate,
     /// each domain name that you specify must be validated to verify that you own or
-    /// control the domain" (`RequestCertificate` doc) — proof that arrives out of band,
-    /// which this emulator cannot observe — and "ACM makes repeated attempts to
-    /// validate a certificate for 72 hours and then times out"
-    /// (`CertificateDetail$Status` doc). Until then the request stays
+    /// control the domain" (`RequestCertificate` doc) — proof that arrives out of band —
+    /// and "ACM makes repeated attempts to validate a certificate for 72 hours and then
+    /// times out" (`CertificateDetail$Status` doc). Until then the request stays
     /// `PENDING_VALIDATION`, so everything a pending validation is for (the published
     /// CNAME, the approval mail `ResendValidationEmail` resends) stays reachable.
+    ///
+    /// It is what a public request is owed WHILE its evidence is missing, not a verdict:
+    /// a DNS-validated request whose CNAME is published is owed [`Self::Issued`] instead
+    /// (`dns_validation`).
     TimedOut,
 }
 

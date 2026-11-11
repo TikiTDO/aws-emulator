@@ -212,7 +212,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Every handler materialises what the clock already owes first, so this call
         // decides on the record a caller would see at this instant — including a renewal
         // that has since completed, which is not one still in progress.
-        store.materialize_due(now);
+        store.materialize_due_in(&*self.engine, now);
         let Some(certificate) = store.certificates.get_mut(&input.certificate_arn) else {
             return Err(RenewCertificateErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {

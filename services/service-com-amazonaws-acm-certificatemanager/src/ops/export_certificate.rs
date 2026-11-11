@@ -204,7 +204,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // request whose validation fell due before this call is answered as it stands
         // now rather than as it stood when it was made.
         let mut store = state.lock();
-        store.materialize_due(::std::time::SystemTime::now());
+        store.materialize_due_in(&*self.engine, ::std::time::SystemTime::now());
         let Some(certificate) = store.certificates.get(&input.certificate_arn) else {
             return Err(ExportCertificateErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {

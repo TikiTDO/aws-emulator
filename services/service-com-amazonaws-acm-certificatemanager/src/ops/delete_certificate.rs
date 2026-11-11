@@ -227,7 +227,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // certificate may be deleted, so the refusal is judged on the record's
         // current state rather than a stale one.
         let now = ::std::time::SystemTime::now();
-        store.materialize_due(now);
+        store.materialize_due_in(&*self.engine, now);
         if !store.certificates.contains_key(&input.certificate_arn) {
             return Err(DeleteCertificateErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {

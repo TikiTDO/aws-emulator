@@ -241,7 +241,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx.parts());
 
         let mut store = state.lock();
-        store.materialize_due(now);
+        store.materialize_due_in(&*self.engine, now);
 
         // "To import a new certificate, omit the CertificateArn argument. Include this
         // argument only when you want to replace a previously imported certificate"

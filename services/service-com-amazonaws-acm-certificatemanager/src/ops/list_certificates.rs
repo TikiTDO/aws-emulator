@@ -217,7 +217,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // already made due, so a `CertificateStatuses` filter and a `DescribeCertificate`
         // of the same certificate cannot disagree.
         let now = ::std::time::SystemTime::now();
-        store.materialize_due(now);
+        store.materialize_due_in(&*self.engine, now);
 
         // Which certificates something is using is the referencing services' fact, taken
         // from the SHARED association directory once for this call — with the releases

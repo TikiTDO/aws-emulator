@@ -238,7 +238,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut store = state.lock();
         // Every handler materialises what the clock already owes first, so a resend
         // cannot hold back a validation outcome that was already due.
-        store.materialize_due(now);
+        store.materialize_due_in(&*self.engine, now);
         let Some(certificate) = store.certificates.get_mut(&input.certificate_arn) else {
             return Err(
                 ResendValidationEmailErrorModeled::ResourceNotFoundException(

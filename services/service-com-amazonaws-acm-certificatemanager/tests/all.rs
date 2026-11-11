@@ -105,6 +105,8 @@ mod certificate_tag_removal;
 mod certificate_validation_state_machine;
 #[path = "all/certificate_wire_representation.rs"]
 mod certificate_wire_representation;
+#[path = "all/dns_validation_published_record.rs"]
+mod dns_validation_published_record;
 #[path = "all/email_validation_dispatch.rs"]
 mod email_validation_dispatch;
 #[path = "all/generic_tagging_certificate_refusal_text.rs"]
