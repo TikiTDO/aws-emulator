@@ -24,8 +24,20 @@
 //!
 //! The envelope — this service's `[Validation]` message tag, `Reason` and the `Fields`
 //! list — is built by the one place this service builds a field validation
-//! ([`crate::state::field_validation_exception`]), so what lives here is the SENTENCES
-//! these failures are worded with and the rule that decides them.
+//! ([`crate::state::field_validation_exception`]) for a member that IDENTIFIES the lens
+//! content addressed, and by [`fields_failed`] for one whose value was MATCHED against that
+//! content and found outside it. What lives here is the SENTENCES these failures are worded
+//! with and the rule that decides them.
+//!
+//! Those two kinds of value are worded differently, because the caller has to do different
+//! things about them. A member that IDENTIFIES the lens content addressed — the lens whose
+//! review it is, the question an answer is of — reports the lookup that found nothing, in
+//! `Message` as well as in its `Fields` entry. A member whose value is MATCHED against that
+//! content — a choice of the question being answered, a pillar a read is scoped to — leaves
+//! `Message` stating only the class of the failure and carries, in its `Fields` entry, the
+//! rule the value broke together with the values that content DOES define: those are what
+//! the caller needs to repair the request, and they are not discoverable from the refusal
+//! otherwise.
 
 use std::collections::HashMap;
 
@@ -118,34 +130,61 @@ pub fn no_question(lens: &str, question_id: &str) -> ValidationException {
     )])
 }
 
-/// The refusal for a `PillarId` a request supplies that the lens under review does not
-/// define — or `None` when it names a pillar of that lens, carries none, or names a lens
-/// this emulator holds no content for, which has no pillar set to judge a value against.
+/// The refusal for a `PillarId` a request supplies to SCOPE a read of a lens review that
+/// the lens under review does not define — or `None` when it names a pillar of that lens,
+/// carries none, or names a lens this emulator holds no content for, which has no pillar
+/// set to judge a value against.
 ///
 /// The pillars of a lens are that lens's own content (`content`, the lens as of the version
 /// the review is pinned at), so a value naming none of them belongs to no pillar of this
 /// review: it SELECTS nothing because there is nothing of that name to select, which is a
 /// bad value rather than an empty answer set.
+///
+/// The value is MATCHED against that content rather than naming the resource the request
+/// addresses, so it is refused the way [`undefined_choices`] refuses a choice outside a
+/// question's catalog — the envelope [`fields_failed`] builds, whose finding hands back the
+/// pillars the lens defines — instead of reporting a lookup that found nothing: a caller
+/// cannot discover a lens's pillar set from a sentence that only repeats the value it
+/// already sent.
 pub fn undefined_pillar(
-    lens: &str,
     content: &state::LensContentView,
     pillar_id: Option<&str>,
 ) -> Option<ValidationException> {
     let pillar_id = pillar_id?;
-    let defined = content.pillar_ids();
+    // The pillar set is resolved ONCE, in the lens's own pillar order and with a pillar a
+    // document names twice kept once, and serves both the membership test and the valid
+    // values the finding hands back — so the list is exactly the set `GetLensReview` serves
+    // and the order rule lives in one place.
+    let mut defined: Vec<&str> = Vec::new();
+    for (pillar, _) in content.pillars() {
+        if !defined.contains(&pillar.as_str()) {
+            defined.push(pillar.as_str());
+        }
+    }
     if defined.is_empty() || defined.contains(&pillar_id) {
         return None;
     }
-    Some(no_pillar(lens, pillar_id))
+    Some(undefined_pillar_finding(&defined))
 }
 
-/// The finding [`undefined_pillar`] reports: worded like the other refusals about lens
-/// content, because that is what a `PillarId` names.
-fn no_pillar(lens: &str, pillar_id: &str) -> ValidationException {
-    state::field_validation_exception(&[(
-        state::PILLAR_ID_MEMBER.to_string(),
-        format!("No pillar with ID {pillar_id} was found in the lens with alias {lens}."),
-    )])
+/// The finding [`undefined_pillar`] reports: the member that carried the value, and the
+/// lens's whole pillar set as the valid values, in the lens's own pillar order — the order
+/// every read of that lens's review reports its pillars in, so the list reads the same way
+/// the caller saw them.
+///
+/// Worded in the form this service states a value outside a catalog in — the member, then
+/// the values that catalog defines, as [`invalid_choices`] states a choice outside a
+/// question's — with the noun of what this member names and in the singular, because
+/// `PillarId` carries ONE pillar where `SelectedChoices` carries a list.
+fn undefined_pillar_finding(defined: &[&str]) -> ValidationException {
+    fields_failed(
+        state::PILLAR_ID_MEMBER,
+        format!(
+            "{} contains an invalid pillar. Valid pillars are: [{}].",
+            state::PILLAR_ID_MEMBER,
+            defined.join(", ")
+        ),
+    )
 }
 
 /// The refusal for the `ChoiceId`s an answer-recording request names that the question it
@@ -200,15 +239,31 @@ fn invalid_choices(member: &str, question: &state::ReviewQuestion) -> Validation
         .iter()
         .map(|best_practice| best_practice.id.as_str())
         .collect();
+    fields_failed(
+        member,
+        format!(
+            "{member} contains invalid choices. Valid choices are: [{}].",
+            valid.join(", ")
+        ),
+    )
+}
+
+/// The envelope a value MATCHED against lens content and found outside it is refused with:
+/// the CLASS of the failure in `Message` — which therefore carries no value from the
+/// request or from the store — the modelled `FIELD_VALIDATION_FAILED` classification, and
+/// ONE `Fields` entry naming the input member the value arrived in and carrying that
+/// member's own detail, which is where the values the content defines are handed back.
+///
+/// Every finding of this class is built here, so the member a client attributes the failure
+/// to, and the place the actionable detail lives, cannot drift between the members and the
+/// operations that carry one.
+fn fields_failed(member: &str, detail: String) -> ValidationException {
     ValidationException {
         message: tagged(FIELDS_FAILED_SENTENCE),
         reason: Some(state::REASON_FIELD_VALIDATION_FAILED.to_string()),
         fields: Some(vec![ValidationExceptionField {
             name: member.to_string(),
-            message: format!(
-                "{member} contains invalid choices. Valid choices are: [{}].",
-                valid.join(", ")
-            ),
+            message: detail,
         }]),
     }
 }

@@ -1011,8 +1011,17 @@ pub const JIRA_CONFIGURATION_MEMBER: &str = "JiraConfiguration";
 ///
 /// `member` is the member the finding names, `lens` the lens as the request named it, and
 /// the offending ids are sorted and deduplicated, so the refusal does not depend on the
-/// order the request listed them in. Shared by every operation that takes a `PillarId` of
-/// a lens under review, so they cannot word it differently.
+/// order the request listed them in. Shared by every operation that names pillars of a lens
+/// review in a member of ITS OWN — the pillars a workload prioritises, the pillars a Jira
+/// configuration selects, the pillar of the best practice a check read addresses — so those
+/// cannot word it differently: each reports WHICH ids it refused, because that is what tells
+/// the caller which entry of its request to fix.
+///
+/// The member that merely SCOPES a read of one lens review to one pillar is worded by
+/// [`crate::service::lens_content_validation::undefined_pillar`] instead: there the request
+/// names a single pillar and there is no offending entry to point at, so the finding hands
+/// back the pillars the lens defines, in the envelope this service's recorded refusal of
+/// that class uses.
 pub fn undefined_pillar_refusal<'id>(
     member: &str,
     lens: &str,

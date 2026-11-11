@@ -241,7 +241,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // refusal (`crate::service::lens_content_validation`) rather than silently selecting
         // nothing.
         if let Some(exception) = crate::service::lens_content_validation::undefined_pillar(
-            &input.lens_alias,
             &store.lens_content_at(
                 &input.lens_alias,
                 workload.lens_review_version(&input.lens_alias),

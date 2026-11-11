@@ -1136,14 +1136,14 @@ pub(crate) fn assert_not_found(
 }
 
 /// The refusal a request that NAMES lens content the service cannot resolve gets — a lens
-/// review, a question of one, a pillar of one — : `400 ValidationException` whose `Reason`
-/// is `FIELD_VALIDATION_FAILED`, whose `Fields` carries ONE entry naming the member the
-/// value came in, and whose `Message` is that entry's sentence behind this service's
+/// review, a question of one — : `400 ValidationException` whose `Reason` is
+/// `FIELD_VALIDATION_FAILED`, whose `Fields` carries ONE entry naming the member the value
+/// came in, and whose `Message` is that entry's sentence behind this service's
 /// `[Validation]` tag.
 ///
 /// The counterpart of [`assert_not_found`] for the values a request carries, as opposed to
-/// the resources it identifies; the one validation-envelope assertion this crate's suites
-/// share.
+/// the resources it identifies, and of [`assert_fields_failed`] for the ones the service
+/// MATCHES against lens content rather than resolving.
 pub(crate) fn assert_field_validation(
     case: &str,
     answer: &Answer,
@@ -1172,6 +1172,42 @@ pub(crate) fn assert_field_validation(
         answer.body.get("Fields").cloned().unwrap_or(Value::Null),
         json!([{ "Name": member_name, "Message": sentence }]),
         "case {case:?}: Fields must name the member that carried the value, got {answer:?}"
+    );
+}
+
+/// The refusal a request whose VALUE was matched against lens content and found outside it
+/// gets — a choice the question does not offer, a pillar the lens does not define: `400
+/// ValidationException` whose `Reason` is `FIELD_VALIDATION_FAILED`, whose `Message` states
+/// only the CLASS of the failure and so carries no value from the request or the store, and
+/// whose `Fields` carries ONE entry naming the member the value came in with `detail` — the
+/// rule the value broke and the values that content does define.
+///
+/// The counterpart of [`assert_field_validation`] for that class, which words its finding
+/// the other way round; the one envelope assertion this crate's suites share for it.
+pub(crate) fn assert_fields_failed(case: &str, answer: &Answer, member_name: &str, detail: &str) {
+    assert_eq!(
+        answer.status, 400,
+        "case {case:?}: expected HTTP 400, got {answer:?}"
+    );
+    assert_eq!(
+        answer.error_code, "ValidationException",
+        "case {case:?}: expected ValidationException, got {answer:?}"
+    );
+    assert_eq!(
+        member(answer, "Reason"),
+        "FIELD_VALIDATION_FAILED",
+        "case {case:?}: expected Reason FIELD_VALIDATION_FAILED, got {answer:?}"
+    );
+    assert_eq!(
+        member(answer, "Message"),
+        "[Validation] The validation of one or more fields has failed.",
+        "case {case:?}: unexpected Message, got {answer:?}"
+    );
+    assert_eq!(
+        answer.body.get("Fields").cloned().unwrap_or(Value::Null),
+        json!([{ "Name": member_name, "Message": detail }]),
+        "case {case:?}: Fields must name the member that carried the value and hand back \
+         the valid values, got {answer:?}"
     );
 }
 

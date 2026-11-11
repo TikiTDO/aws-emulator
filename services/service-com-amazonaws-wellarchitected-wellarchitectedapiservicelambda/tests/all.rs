@@ -348,3 +348,7 @@ mod cleared_answer_risk;
 mod submitted_name_conflict_echo;
 #[path = "all/enum_refusal_wording.rs"]
 mod enum_refusal_wording;
+// Appended at the end for the reason the notes above give: the sorted position for a lens
+// suite falls in a crowded run of this list.
+#[path = "all/pillar_filter_refusal.rs"]
+mod pillar_filter_refusal;

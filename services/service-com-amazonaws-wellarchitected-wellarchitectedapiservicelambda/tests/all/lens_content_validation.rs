@@ -25,9 +25,11 @@
 
 use serde_json::{json, Value};
 
+use super::pillar_filter_refusal::reported_pillars;
 use super::workload_harness::{
-    assert_field_validation, assert_unresolvable_lens, created_id, encode_path_segment, member,
-    minimal_create, official_lens_arn, review_template, Answer, Client, SIGNED_REGION,
+    assert_field_validation, assert_fields_failed, assert_unresolvable_lens, created_id,
+    encode_path_segment, member, minimal_create, official_lens_arn, review_template, Answer,
+    Client, SIGNED_REGION,
 };
 
 /// The AWS-official lens this emulator ships a question set for, and one AWS-official lens
@@ -500,7 +502,10 @@ async fn a_question_the_lens_does_not_ask_is_refused_naming_the_question() {
 
 /// A `PillarId` the lens under review does not define is the modelled 400 naming
 /// `PillarId`, on every operation that takes one — rather than an empty page, which a
-/// client cannot tell from a rejected filter.
+/// client cannot tell from a rejected filter. The value is MATCHED against the lens's
+/// pillar set rather than naming a resource, so the finding states the rule and hands back
+/// the pillars that lens defines; the whole table of lenses, forms and operations the rule
+/// covers is `super::pillar_filter_refusal`.
 #[tokio::test]
 async fn a_pillar_the_lens_does_not_define_is_refused_naming_the_pillar() {
     let client = Client::new();
@@ -509,7 +514,12 @@ async fn a_pillar_the_lens_does_not_define_is_refused_naming_the_pillar() {
 
     // The forms a `PillarId` that is no pillar of the lens can take: a bare word, a pillar
     // of the lens in another case, and a word a custom lens document might define but this
-    // lens does not.
+    // lens does not. The valid values the finding must hand back are read back over the
+    // wire from the lens review itself (`super::pillar_filter_refusal`), so the expectation
+    // comes from a READ of the lens content rather than from a list spelled here.
+    let valid = reported_pillars(&client, "pillar-host", &workload_id, FRAMEWORK_LENS)
+        .await
+        .join(", ");
     for (form, pillar_id) in [
         ("bare-word", "notapillar"),
         ("right-pillar-in-another-case", "OPERATIONALEXCELLENCE"),
@@ -544,13 +554,12 @@ async fn a_pillar_the_lens_does_not_define_is_refused_naming_the_pillar() {
                     .await,
             ),
         ] {
-            assert_field_validation(
+            assert_fields_failed(
                 &format!("{form}/{operation}"),
                 &answer,
                 "PillarId",
                 &format!(
-                    "No pillar with ID {pillar_id} was found in the lens with alias \
-                     {FRAMEWORK_LENS}."
+                    "PillarId contains an invalid pillar. Valid pillars are: [{valid}]."
                 ),
             );
         }
@@ -682,33 +691,10 @@ async fn a_choice_the_question_does_not_offer_is_refused_with_the_questions_cata
                 ),
             ] {
                 let case = format!("{form}/{member_name}/{operation}");
-                assert_eq!(
-                    answer.status, 400,
-                    "case {case:?}: a choice the question does not offer is refused, got \
-                     {answer:?}"
-                );
-                assert_eq!(
-                    answer.error_code, "ValidationException",
-                    "case {case:?}: expected ValidationException, got {answer:?}"
-                );
-                assert_eq!(
-                    member(&answer, "Reason"),
-                    "FIELD_VALIDATION_FAILED",
-                    "case {case:?}: expected Reason FIELD_VALIDATION_FAILED, got {answer:?}"
-                );
-                // The findings are all in `Fields`, so the `Message` states the class of
-                // the failure and carries no variable part.
-                assert_eq!(
-                    member(&answer, "Message"),
-                    "[Validation] The validation of one or more fields has failed.",
-                    "case {case:?}: unexpected Message, got {answer:?}"
-                );
-                assert_eq!(
-                    answer.body.get("Fields").cloned().unwrap_or(Value::Null),
-                    json!([{ "Name": member_name, "Message": sentence }]),
-                    "case {case:?}: the finding must hand back the question's own choices, \
-                     got {answer:?}"
-                );
+                // The findings are all in `Fields`, so `Message` states the class of the
+                // failure and carries no variable part — the one envelope assertion this
+                // crate shares for that class.
+                assert_fields_failed(&case, &answer, member_name, &sentence);
             }
         }
     }
