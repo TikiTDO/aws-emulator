@@ -850,6 +850,14 @@ fn resolve_pools(
         let mut stored_overrides: Vec<FleetLaunchTemplateOverrides> = Vec::new();
         for over in overrides {
             if let Some(over) = over {
+                // "If you specify `InstanceRequirements`, you can't specify `InstanceType`"
+                // (`FleetLaunchTemplateOverridesRequest$InstanceRequirements`): an override
+                // carrying both says which instance type its pool launches twice. Asked
+                // FIRST, through the one place that rule lives, so a request that names both
+                // is told about the combination rather than about the member below.
+                if over.instance_type.is_some() && over.instance_requirements.is_some() {
+                    return Err(crate::state::instance_requirements_with_instance_type());
+                }
                 // The override members this launch path does not apply to the instance it
                 // launches. Refused rather than accepted and dropped: an instance that does
                 // not carry the profile, the metadata options or the volumes the caller

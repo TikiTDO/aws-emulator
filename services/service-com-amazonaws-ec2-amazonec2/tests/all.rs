@@ -1794,3 +1794,20 @@ mod identity_id_format;
 // and what a dry run of it leaves behind. Declared beside `prefix_lists` for the reason the
 #[path = "all/delete_key_pair.rs"]
 mod delete_key_pair;
+// What a `DeleteKeyPair` gives BACK to the store, read through the engine: the name, the id
+// and the share of the caller-supplied byte budget the record charged, over a create/delete
+// cycle repeated many times. Declared beside `prefix_lists` for the reason the note above
+#[path = "all/key_pair_deletion.rs"]
+mod key_pair_deletion;
+// The ONE set of instances a Spot Fleet reports: that the instances
+// `DescribeSpotFleetInstances` reports are the ones whose capacity the fleet reports as
+// fulfilled, over the launch specifications and the launch-template overrides a fleet
+// describes its pools with. Declared beside `prefix_lists` for the reason the note above
+#[path = "all/spot_fleet_fulfilled_capacity.rs"]
+mod spot_fleet_fulfilled_capacity;
+// How a LAUNCH TEMPLATE OVERRIDE says which instance type its pool launches: the instance
+// type and the instance requirements of one override cannot both be given, a requirement set
+// this service resolves no instance type from is refused rather than quietly dropped, and an
+// instance type alone is the pool it names — over both fleet APIs that take overrides.
+#[path = "all/launch_template_override_instance_selection.rs"]
+mod launch_template_override_instance_selection;

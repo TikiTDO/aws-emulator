@@ -507,6 +507,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 Some(entries) => entries.iter().map(Some).collect(),
             };
             for over in overrides {
+                // "If you specify `InstanceRequirements`, you can't specify `InstanceType`"
+                // (`LaunchTemplateOverrides$InstanceRequirements`): the two members are two
+                // ways of saying which instance type a pool launches, so an override that
+                // gives both says it twice — refused through the one place that rule lives,
+                // so this operation and `CreateFleet` answer it alike.
+                if over.is_some_and(|over| {
+                    over.instance_type.is_some() && over.instance_requirements.is_some()
+                }) {
+                    return Err(crate::state::instance_requirements_with_instance_type());
+                }
+                // An override that names its pool by instance REQUIREMENTS asks EC2 to
+                // "identify instance types with the provided requirements" and launch from
+                // those (`$InstanceRequirements`), which this slice does not do: nothing here
+                // resolves a requirement set to the instance types that satisfy it. Refused
+                // rather than accepted and dropped, because a pool that launched the
+                // template's own instance type instead would not be the pool the request
+                // described — the answer `CreateFleet` gives for the same override member.
+                if over.is_some_and(|over| over.instance_requirements.is_some()) {
+                    return Err(crate::state::unsupported_operation(
+                        "RequestSpotFleet places the Spot pools the instance type of a launch \
+                         template or of an override names; the override member \
+                         'instanceRequirements' is not one this service resolves instance \
+                         types from",
+                    ));
+                }
                 if let Some(subnet_id) = over.and_then(|over| over.subnet_id.as_deref()) {
                     if !store.subnets.contains_key(subnet_id) {
                         return Err(invalid_subnet_id_not_found(subnet_id));

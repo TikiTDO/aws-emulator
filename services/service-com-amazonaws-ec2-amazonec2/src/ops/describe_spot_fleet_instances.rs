@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeSpotFleetInstances
-//! IMPLEMENTED: reports the RUNNING instances of the one Spot Fleet request the call names,
+//! IMPLEMENTED: reports the instances the one Spot Fleet request the call names is running,
 //! projected from [`crate::state`]'s instance store through the Spot Instance requests the
 //! fleet placed, and cut into `MaxResults`-sized pages in `InstanceId` order. It reports the
 //! instances as the instance store holds them, so this operation and `DescribeInstances`
-//! cannot describe one instance differently. This is the ONLY file to touch for this
-//! operation.
+//! cannot describe one instance differently — and it reports every instance whose capacity
+//! the fleet counts as fulfilled, which is each one the fleet placed that has not reached
+//! `terminated`. This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!

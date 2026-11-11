@@ -5,11 +5,12 @@
 //!
 //! The rules under test are:
 //!
-//! 1. the report is the EC2 Fleet's RUNNING instances read out of the INSTANCE store:
+//! 1. the report is the instances the EC2 Fleet is running, read out of the INSTANCE store:
 //!    "Describes the running instances for the specified EC2 Fleet"
-//!    (`DescribeFleetInstances`), so an instance of the fleet in any other state — and one
-//!    the store no longer holds — is not an active instance, and the type reported for one
-//!    is the type `DescribeInstances` reports for the same instance;
+//!    (`DescribeFleetInstances`), so every instance the fleet launched that the store still
+//!    holds un-terminated is one of them — an instance that has reached `terminated`, and
+//!    one the store no longer holds, is not — and the type reported for one is the type
+//!    `DescribeInstances` reports for the same instance;
 //! 2. a `FleetId` that is not a fleet id at all is refused with `InvalidFleetId.Malformed`
 //!    and a well-formed one this account holds no fleet for with `InvalidFleetId.NotFound`,
 //!    in that order;
@@ -41,7 +42,7 @@ use ec2::state::{
 use service_com_amazonaws_ec2_amazonec2 as ec2;
 use smithy_server_runtime::MultiServiceRouter;
 
-use super::ec2_query::{call, error_code, filters};
+use super::ec2_query::{call, described_instance_state, error_code, filters};
 use super::wire::{child, child_text, document};
 
 /// The Region every call here is signed for. A fleet carries no Region member, so the
@@ -268,13 +269,18 @@ async fn a_fleets_running_instances_are_reported_from_the_instance_store() {
         "a fleet id must carry the {FLEET_ID_PREFIX:?} prefix, got {fleet_id:?}"
     );
 
-    // A just-launched instance is `pending`, so it is not yet a RUNNING instance of the
-    // fleet; the clock owes it `running`.
+    // A just-launched instance is `pending`, and it is one of the fleet's from the moment the
+    // fleet launched it: the clock owes it `running`, which is a fact about the INSTANCE and
+    // not about whether the fleet is running it.
     let body = described(&router, "while pending", &fleet_id, &[]).await;
-    let pending_rows = active_ids("while pending", &body);
-    assert!(
-        pending_rows.is_empty(),
-        "while pending: a pending instance is not a running instance of the fleet, got \
+    let mut pending_rows = active_ids("while pending", &body);
+    pending_rows.sort();
+    let mut expected_pending: Vec<String> =
+        launched.iter().map(|(id, _)| id.clone()).collect();
+    expected_pending.sort();
+    assert_eq!(
+        pending_rows, expected_pending,
+        "while pending: every instance the fleet launched is one of its instances, got \
          {pending_rows:?}"
     );
 
@@ -342,21 +348,21 @@ async fn a_fleets_running_instances_are_reported_from_the_instance_store() {
     }
 }
 
-/// An instance of the fleet is active only while the store reports it RUNNING, whatever
-/// else the fleet record says — one row per member of the modelled `InstanceStateName`
-/// catalog (`smithy_query(query="shape",shape="InstanceStateName")`), plus an instance id
-/// the store holds no instance for at all.
+/// An instance of the fleet is one of its active instances until it reaches `terminated`,
+/// whatever else the fleet record says — one row per member of the modelled
+/// `InstanceStateName` catalog (`smithy_query(query="shape",shape="InstanceStateName")`),
+/// plus an instance id the store holds no instance for at all.
 #[tokio::test]
-async fn only_a_running_instance_of_the_fleet_is_active() {
-    /// The six states `InstanceStateName` models, and whether an instance in one is a
-    /// running instance of its fleet.
+async fn an_instance_of_the_fleet_is_active_until_it_is_terminated() {
+    /// The six states `InstanceStateName` models, and whether an instance in one is an
+    /// instance its fleet is running.
     const STATES: [(InstanceStateName, bool); 6] = [
-        (InstanceStateName::Pending, false),
+        (InstanceStateName::Pending, true),
         (InstanceStateName::Running, true),
-        (InstanceStateName::ShuttingDown, false),
+        (InstanceStateName::ShuttingDown, true),
         (InstanceStateName::Terminated, false),
-        (InstanceStateName::Stopping, false),
-        (InstanceStateName::Stopped, false),
+        (InstanceStateName::Stopping, true),
+        (InstanceStateName::Stopped, true),
     ];
 
     let (router, engine) = emulator();
@@ -385,7 +391,7 @@ async fn only_a_running_instance_of_the_fleet_is_active() {
         };
         assert_eq!(
             reported, expected,
-            "case {case:?}: expected {expected:?} to be the fleet's running instances, got \
+            "case {case:?}: expected {expected:?} to be the fleet's instances, got \
              {reported:?}"
         );
     }
@@ -406,10 +412,11 @@ async fn only_a_running_instance_of_the_fleet_is_active() {
     );
 }
 
-/// The `pending` -> `running` move the CLOCK owes a launch is what makes an instance
-/// active: nobody has to call for it, and the instance is not active before it falls due.
+/// The `pending` -> `running` move the CLOCK owes a launch is observed on the INSTANCE, not
+/// on whether the fleet is running it: the fleet reports the instance it launched on both
+/// sides of that move, and `DescribeInstances` reports the state it is in.
 #[tokio::test]
-async fn the_clock_makes_a_pending_instance_active() {
+async fn the_clock_moves_a_pending_instance_of_the_fleet_to_running() {
     let (router, engine) = emulator();
     let instance_id = launch(&router, LAUNCHED_TYPES[1]).await;
     let fleet_id = seed_fleet(&engine, FLEET_TYPE_MAINTAIN, vec![on_demand(&instance_id)]);
@@ -431,9 +438,16 @@ async fn the_clock_makes_a_pending_instance_active() {
 
     let body = described(&router, "transition owed", &fleet_id, &[]).await;
     let before = active_ids("transition owed", &body);
-    assert!(
-        before.is_empty(),
-        "transition owed: the instance is still pending, so it is not active, got {before:?}"
+    assert_eq!(
+        before,
+        vec![instance_id.clone()],
+        "transition owed: the fleet is running the instance it launched, got {before:?}"
+    );
+    let state = described_instance_state(&router, REGION, &instance_id).await;
+    assert_eq!(
+        state,
+        InstanceStateName::Pending.as_str(),
+        "transition owed: the instance is still pending, got {state:?}"
     );
 
     past_the_transition().await;
@@ -443,8 +457,13 @@ async fn the_clock_makes_a_pending_instance_active() {
     assert_eq!(
         after,
         vec![instance_id.clone()],
-        "transition due: the clock owes the instance `running`, so it is now active, got \
-         {after:?}"
+        "transition due: the fleet is still running the same instance, got {after:?}"
+    );
+    let state = described_instance_state(&router, REGION, &instance_id).await;
+    assert_eq!(
+        state,
+        InstanceStateName::Running.as_str(),
+        "transition due: the clock owed the instance `running`, got {state:?}"
     );
 }
 

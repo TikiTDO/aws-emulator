@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeFleetInstances
-//! IMPLEMENTED: reports the RUNNING instances of the EC2 Fleet the request names, read out
-//! of [`crate::state`] — the fleet's launched instances as the instance store holds them —
-//! narrowed by the documented `instance-type` filter and paged by `MaxResults`/`NextToken`.
+//! IMPLEMENTED: reports the instances the EC2 Fleet the request names is running, read out
+//! of [`crate::state`] — the instances the fleet launched that the store still holds
+//! un-terminated, as the instance store holds them — narrowed by the documented
+//! `instance-type` filter and paged by `MaxResults`/`NextToken`.
 //! This is the ONLY file to touch for this operation.
 //!
 //! A fleet id that is not a fleet id at all is refused with `InvalidFleetId.Malformed` and

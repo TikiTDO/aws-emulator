@@ -449,14 +449,16 @@ pub fn spot_fleet_has_running_instances(
         })
 }
 
-/// The RUNNING instances of one Spot Fleet request, as the modelled
+/// The instances of one Spot Fleet request, as the modelled
 /// [`ActiveInstance`](crate::ops::types::ActiveInstance) shape.
 ///
 /// "Describes the running instances for the specified Spot Fleet"
-/// (`DescribeSpotFleetInstances`), so an instance the fleet placed that the instance store
-/// reports in any other state — one still `pending`, one `stopped`, one the account has
-/// terminated — is not an active instance, and one the store no longer holds at all is not one
-/// either.
+/// (`DescribeSpotFleetInstances`): the instances the fleet is running for the account, which
+/// are the ones its placements launched and the instance store still holds un-terminated —
+/// the SAME set whose capacity the fleet reports as fulfilled
+/// ([`spot_fleet_fulfilled_capacity`]), so a fleet that reports its target capacity fulfilled
+/// reports the instances that fulfil it. An instance the account has terminated, and one the
+/// store no longer holds at all, is not one of them.
 ///
 /// Reached through the Spot Instance requests the fleet placed ([`spot_fleet_instance_ids`] is
 /// the same walk for the ids alone) and projected from the INSTANCE store by the one

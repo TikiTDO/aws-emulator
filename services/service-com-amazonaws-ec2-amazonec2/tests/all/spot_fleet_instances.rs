@@ -5,10 +5,11 @@
 //!
 //! The rules under test are:
 //!
-//! 1. the report is the Spot Fleet's RUNNING instances read out of the INSTANCE store:
+//! 1. the report is the instances the Spot Fleet is running, read out of the INSTANCE store:
 //!    "Describes the running instances for the specified Spot Fleet"
-//!    (`DescribeSpotFleetInstances`), so an instance the fleet placed that is still `pending`,
-//!    or that the account has terminated, is not an active instance, and each one reported
+//!    (`DescribeSpotFleetInstances`), so every instance the fleet placed that the store still
+//!    holds un-terminated is one of them — the same instances whose capacity the fleet reports
+//!    as fulfilled — while one the account has terminated is not, and each one reported
 //!    carries the instance type the instance store holds for it and the Spot Instance request
 //!    it was placed through;
 //! 2. a `SpotFleetRequestId` that is not a Spot Fleet request id at all is refused with
@@ -292,9 +293,9 @@ fn stored_instance_state(engine: &engine::InMemoryEngine, instance_id: &str) -> 
         .map(|instance| instance.state.as_str().to_string())
 }
 
-/// Rule 1: the report is the fleet's RUNNING instances, with the type and the Spot Instance
-/// request each was placed through — and nothing while they are still being placed or are still
-/// `pending`.
+/// Rule 1: the report is the instances the fleet is running, with the type and the Spot Instance
+/// request each was placed through — nothing while its requests are still being placed, and every
+/// instance it has launched from then on, whether that instance is still `pending` or `running`.
 #[tokio::test]
 async fn the_report_is_the_fleets_running_instances() {
     let (router, engine) = emulator();
@@ -330,8 +331,9 @@ async fn the_report_is_the_fleets_running_instances() {
         );
     }
 
-    // One span on: the clock has fulfilled each request and launched its instance, but an
-    // instance AWS has just launched is `pending`, and a pending instance is not a running one.
+    // One span on: the clock has fulfilled each request and launched its instance, so the fleet
+    // is running every one of them — an instance AWS has just launched is `pending`, which is
+    // what `DescribeInstances` reports about the INSTANCE and not whether its fleet holds it.
     past_the_transition().await;
     for (row, fleet_id) in &fleets {
         let case = row.case;
@@ -340,17 +342,20 @@ async fn the_report_is_the_fleets_running_instances() {
             status, 200,
             "case {case:?}: expected HTTP 200, got {status}: {body}"
         );
-        assert_eq!(
-            active_instances(case, &body),
-            Vec::new(),
-            "case {case:?}: an instance still pending is not an active instance: {body}"
-        );
         let launched = fleet_launched_instances(&engine, fleet_id);
         assert_eq!(
             launched.len(),
             row.expected_total(),
             "case {case:?}: expected {} launched instance(s), got {launched:?}",
             row.expected_total()
+        );
+        let mut reported = active_ids(case, &body);
+        reported.sort();
+        let mut expected = launched.clone();
+        expected.sort();
+        assert_eq!(
+            reported, expected,
+            "case {case:?}: the fleet reports every instance it has launched, got {reported:?}"
         );
         // Read out of the store rather than over the wire: the instances were launched by the
         // describe above, so this assertion is about the state they are in AT THAT INSTANT, and

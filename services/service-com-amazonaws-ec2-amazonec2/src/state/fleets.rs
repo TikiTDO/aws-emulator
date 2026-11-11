@@ -389,15 +389,27 @@ impl ComAmazonawsEc2Amazonec2State {
     }
 }
 
-/// The instances `launched` names that are RUNNING, as the modelled
+/// The instances `launched` names that the account still HOLDS, as the modelled
 /// [`ActiveInstance`](crate::ops::types::ActiveInstance) shape.
 ///
 /// `launched` names each instance a fleet placed, with the Spot Instance request it was placed
 /// through when it was placed through one. The ONE projection of an active instance, so an EC2
 /// Fleet ([`fleet_active_instances`]) and a Spot Fleet request
-/// ([`spot_fleet_active_instances`]) cannot report one instance two ways: "the running
-/// instances" are the ones the INSTANCE store holds in `running`, with the type that store
-/// holds for them, and an instance it no longer holds is not reported at all.
+/// ([`spot_fleet_active_instances`]) cannot report one instance two ways: an instance the
+/// INSTANCE store holds is one of its fleet's from the moment the placement launched it until
+/// it reaches `terminated`, reported with the type that store holds for it; an instance that
+/// has reached `terminated`, and one the store no longer holds at all, belongs to no fleet.
+///
+/// That is the same set whose capacity the fleet counts as FULFILLED
+/// ([`spot_fleet_fulfilled_capacity`]) and the same set a cancelled fleet waits for
+/// ([`spot_fleet_has_running_instances`]), so a fleet cannot report capacity fulfilled by
+/// instances it does not report, or wait for instances it says it has none of: an instance's
+/// position in the `pending` -> `running` -> `stopped` lifecycle is reported by
+/// `DescribeInstances`, and is not what puts it in or out of its fleet. `InstanceHealth` is
+/// what this shape carries about an instance's condition — "if the status of either the
+/// instance status check or the system status check is `impaired`, the health status of the
+/// instance is `unhealthy`. Otherwise, the health status is `healthy`"
+/// (`ActiveInstance$InstanceHealth`).
 pub fn active_instances<'a>(
     store: &ComAmazonawsEc2Amazonec2State,
     launched: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
@@ -406,7 +418,7 @@ pub fn active_instances<'a>(
         .into_iter()
         .filter_map(|(instance_id, spot_instance_request_id)| {
             let instance = store.instances.get(instance_id)?;
-            (instance.state == InstanceStateName::Running).then(|| {
+            (instance.state != InstanceStateName::Terminated).then(|| {
                 crate::ops::types::ActiveInstance {
                     instance_id: Some(instance.instance_id.clone()),
                     instance_type: Some(instance.instance_type.clone()),
@@ -418,13 +430,13 @@ pub fn active_instances<'a>(
         .collect()
 }
 
-/// The running instances of `record`, as the modelled
+/// The instances of `record`, as the modelled
 /// [`ActiveInstance`](crate::ops::types::ActiveInstance) shape.
 ///
-/// "Describes the running instances for the specified EC2 Fleet" (`DescribeFleetInstances`),
-/// so an instance of the fleet that the instance store reports in any other state — one
-/// still `pending`, one `stopped`, one the account has terminated — is not an active
-/// instance, and one the store no longer holds at all is not one either.
+/// "Describes the running instances for the specified EC2 Fleet" (`DescribeFleetInstances`):
+/// the instances the fleet is running for the account, which is every instance it placed that
+/// the instance store still holds un-terminated ([`active_instances`]) — an instance it has
+/// terminated, and one the store no longer holds at all, is not one of them.
 ///
 /// Projected from the INSTANCE store rather than from anything the fleet record copies, so
 /// the instance type a fleet reports for an instance is the one `DescribeInstances` reports
@@ -508,6 +520,39 @@ pub fn require_known_fleet<'a, E>(
 /// `UnsupportedOperation`.
 pub fn unsupported_operation<E>(message: impl Into<String>) -> Scaffolded<E> {
     Scaffolded::service_error(UNSUPPORTED_OPERATION, 400, message)
+}
+
+/// The code EC2 answers for a launch template override that says which instance type its pool
+/// launches TWICE — once as an instance type and once as a set of instance requirements.
+///
+/// The `Exception` suffix is NOT this crate's usual ec2Query spelling
+/// ([`INVALID_PARAMETER_COMBINATION`] is), and it is not a second spelling of that code by
+/// accident: the recorded response to an override carrying both members answers
+/// `InvalidParameterCombinationException` for this one refusal, so this is the code it is
+/// answered with and nothing else uses it.
+pub const INVALID_PARAMETER_COMBINATION_EXCEPTION: &str = "InvalidParameterCombinationException";
+
+/// EC2's sentence for that override, which carries no variable part: it names the two members
+/// and what to do about them, whichever fleet API the override was sent to.
+pub const INSTANCE_REQUIREMENTS_WITH_INSTANCE_TYPE_MESSAGE: &str =
+    "You can specify either InstanceRequirements or InstanceType, but not both. Remove either \
+     InstanceRequirements or Instance Type, and try again.";
+
+/// Refuse a launch template override that carries both an instance type and a set of instance
+/// requirements: HTTP 400 [`INVALID_PARAMETER_COMBINATION_EXCEPTION`].
+///
+/// "If you specify `InstanceRequirements`, you can't specify `InstanceType`"
+/// (`LaunchTemplateOverrides$InstanceRequirements`, and the same note on
+/// `FleetLaunchTemplateOverridesRequest$InstanceRequirements`): the two members are two ways of
+/// saying which instance type a pool launches, so an override carrying both describes its pool
+/// twice. The ONE place that rule lives, so every fleet API that takes launch template
+/// overrides refuses it with one code and one sentence.
+pub fn instance_requirements_with_instance_type<E>() -> Scaffolded<E> {
+    Scaffolded::service_error(
+        INVALID_PARAMETER_COMBINATION_EXCEPTION,
+        400,
+        INSTANCE_REQUIREMENTS_WITH_INSTANCE_TYPE_MESSAGE,
+    )
 }
 
 // ---------------------------------------------------------------------------
