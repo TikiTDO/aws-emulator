@@ -626,9 +626,17 @@ fn resolve_app_components(
 ) -> Vec<ComponentBinding> {
     let mut bindings: Vec<ComponentBinding> = Vec::new();
     let mut bound: BTreeSet<String> = BTreeSet::new();
+    // A version nothing has been written to yet still carries the AppCommon
+    // component, so the names are resolved against an empty version rather than
+    // against nothing.
+    let empty = crate::state::AppVersionContents::default();
+    let contents = draft.unwrap_or(&empty);
     for name in names {
-        let binding = match draft.and_then(|draft| draft.app_component_named(name)) {
-            Some(held) => ComponentBinding::Held(held.clone()),
+        // Resolved against the version's whole component set, so a name that is the
+        // AppCommon component's binds to THAT component rather than creating a
+        // second one under its id.
+        let binding = match contents.app_component_matching(name) {
+            Some(held) => ComponentBinding::Held(held),
             None => ComponentBinding::New(name.clone()),
         };
         if bound.insert(binding.identity().to_string()) {

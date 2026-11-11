@@ -15,6 +15,8 @@
 mod app_assessment;
 #[path = "all/app_component_and_resource_identity.rs"]
 mod app_component_and_resource_identity;
+#[path = "all/app_template_document.rs"]
+mod app_template_document;
 #[path = "all/app_version_app_components.rs"]
 mod app_version_app_components;
 #[path = "all/app_version_resource_listing.rs"]
@@ -47,5 +49,7 @@ mod reported_output_members;
 mod resiliency_policy_deletion;
 #[path = "all/resiliency_policy_update.rs"]
 mod resiliency_policy_update;
+#[path = "all/resource_tags.rs"]
+mod resource_tags;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;

@@ -34,8 +34,25 @@ const ACCOUNT: &str = "000000000000";
 /// The `version` every rendered `appTemplateBody` carries: the version of the
 /// app-template DOCUMENT, which is the same for every app version of every
 /// application — the body is the document the template operations read and write,
-/// so no part of it depends on which label a read addressed the version by.
-const APP_TEMPLATE_VERSION: i64 = 2;
+/// so no part of it depends on which label a read addressed the version by. A
+/// DECIMAL number, as the document states it.
+const APP_TEMPLATE_VERSION: f64 = 2.0;
+
+/// The `id` and `name` of the AppCommon Application Component every app version
+/// carries, and its `type` — the component the SERVICE maintains, which is part of
+/// every template document rather than something a caller created.
+const APP_COMMON_COMPONENT: (&str, &str) = ("appcommon", "AWS::ResilienceHub::AppCommonAppComponent");
+
+/// That component as a template renders it: no resource is assigned to it unless a
+/// caller names it, so it carries an empty `resourceNames`.
+fn app_common_component() -> Value {
+    json!({
+        "id": APP_COMMON_COMPONENT.0,
+        "name": APP_COMMON_COMPONENT.0,
+        "type": APP_COMMON_COMPONENT.1,
+        "resourceNames": [],
+    })
+}
 
 /// An emulator holding only this service, over one shared engine.
 fn emulator() -> MultiServiceRouter {
@@ -461,7 +478,11 @@ async fn the_template_renders_every_stored_resource_and_component() {
             "AWS::S3::Bucket",
             json!({}),
             json!({
-                "logicalResourceId": {"identifier": "PlainBucket"},
+                "logicalResourceId": {
+                    "identifier": "PlainBucket",
+                    "logicalStackName": null,
+                    "resourceGroupName": null,
+                },
                 "type": "AWS::S3::Bucket",
                 "name": "plain-bucket",
             }),
@@ -475,6 +496,7 @@ async fn the_template_renders_every_stored_resource_and_component() {
                 "logicalResourceId": {
                     "identifier": "StackedTable",
                     "logicalStackName": "my-stack",
+                    "resourceGroupName": null,
                 },
                 "type": "AWS::DynamoDB::Table",
                 "name": "stacked-table",
@@ -488,6 +510,7 @@ async fn the_template_renders_every_stored_resource_and_component() {
             json!({
                 "logicalResourceId": {
                     "identifier": "GroupedQueue",
+                    "logicalStackName": null,
                     "resourceGroupName": "my-group",
                 },
                 "type": "AWS::SQS::Queue",
@@ -500,7 +523,11 @@ async fn the_template_renders_every_stored_resource_and_component() {
             "AWS::Lambda::Function",
             json!({"additionalInfo": {"some-key": ["one", "two"]}}),
             json!({
-                "logicalResourceId": {"identifier": "AnnotatedFunction"},
+                "logicalResourceId": {
+                    "identifier": "AnnotatedFunction",
+                    "logicalStackName": null,
+                    "resourceGroupName": null,
+                },
                 "type": "AWS::Lambda::Function",
                 "name": "annotated-function",
                 "additionalInfo": {"some-key": ["one", "two"]},
@@ -518,6 +545,7 @@ async fn the_template_renders_every_stored_resource_and_component() {
         (
             "storage".to_string(),
             json!({
+                "id": "storage",
                 "name": "storage",
                 "type": "AWS::ResilienceHub::StorageAppComponent",
                 "resourceNames": ["grouped-queue", "plain-bucket", "stacked-table"],
@@ -526,11 +554,15 @@ async fn the_template_renders_every_stored_resource_and_component() {
         (
             "compute".to_string(),
             json!({
+                "id": "compute",
                 "name": "compute",
                 "type": "AWS::ResilienceHub::ComputeAppComponent",
                 "resourceNames": ["annotated-function"],
             }),
         ),
+        // The component the service maintains in every app version, whatever the
+        // caller created in it.
+        (APP_COMMON_COMPONENT.0.to_string(), app_common_component()),
     ]);
 
     let draft = template(&router, &app_arn, DRAFT_APP_VERSION).await;
@@ -621,15 +653,22 @@ async fn an_unknown_version_is_refused_and_an_untouched_draft_is_empty() {
     let app_arn = create_an_app(&router, "template-refusals").await;
 
     // Nothing has been written to this application at all: the draft exists, and
-    // its template holds nothing.
+    // its template holds no resources and no component beyond the AppCommon one
+    // every app version carries.
     let draft = template(&router, &app_arn, DRAFT_APP_VERSION).await;
     assert_eq!(
         (
             resource_identifiers(&draft),
-            components_by_name(&draft).len()
+            components_by_name(&draft)
+                .into_iter()
+                .collect::<Vec<(String, Value)>>()
         ),
-        (BTreeSet::new(), 0),
-        "case \"an untouched draft\": expected an empty template, got {draft:?}"
+        (
+            BTreeSet::new(),
+            vec![(APP_COMMON_COMPONENT.0.to_string(), app_common_component())]
+        ),
+        "case \"an untouched draft\": expected an empty template carrying only the \
+         AppCommon component, got {draft:?}"
     );
 
     // The versions this application does NOT have: the release alias before any

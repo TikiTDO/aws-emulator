@@ -239,8 +239,9 @@ fn app_version_not_found(
 ) -> DescribeAppVersionResourcesResolutionStatusError {
     DescribeAppVersionResourcesResolutionStatusErrorModeled::ResourceNotFoundException(
         ResourceNotFoundException {
-            message: Some(format!(
-                "App version {app_version} not found for appArn {app_arn}"
+            message: Some(crate::state::app_version_not_found_message(
+                app_arn,
+                app_version,
             )),
             resource_id: Some(app_version.to_string()),
             resource_type: Some("AppVersion".to_string()),

@@ -131,6 +131,11 @@ pub(crate) async fn get(router: &MultiServiceRouter, target: &str) -> Reply {
     call(router, REGION, "GET", target, None).await
 }
 
+/// A DELETE request with no body, which is how the model binds `UntagResource`.
+pub(crate) async fn delete(router: &MultiServiceRouter, target: &str) -> Reply {
+    call(router, REGION, "DELETE", target, None).await
+}
+
 /// A resiliency policy to point applications at, and its ARN.
 pub(crate) async fn create_a_policy(router: &MultiServiceRouter, policy_name: &str) -> String {
     let reply = post(

@@ -75,6 +75,34 @@ pub const MAX_PUBLISHED_APP_VERSIONS_PER_APP: usize = 200;
 /// resource cannot be created because a limit is reached.
 pub const MAX_APP_COMPONENTS_PER_APP_VERSION: usize = 200;
 
+/// The `id` and the `name` of the AppCommon Application Component.
+///
+/// The one Application Component the SERVICE maintains in every app version,
+/// rather than one a caller created in it: it is addressed by the same token as
+/// its id and its name.
+pub const APP_COMMON_COMPONENT_ID: &str = "appcommon";
+
+/// The `type` of that component — the `AppComponent$type` value the Resilience Hub
+/// grouping documentation gives the application-wide component, as against the
+/// per-tier types (`AWS::ResilienceHub::StorageAppComponent` and the rest) a
+/// caller picks from.
+pub const APP_COMMON_COMPONENT_TYPE: &str = "AWS::ResilienceHub::AppCommonAppComponent";
+
+/// The AppCommon Application Component of an app version.
+///
+/// DERIVED, never stored: this component belongs to an app version by virtue of
+/// the application existing, so nothing creates it, nothing deletes it, and it
+/// counts against no per-version ceiling — while every reader of a version's
+/// components reports it alongside the components the version holds.
+pub fn app_common_component() -> AppComponent {
+    AppComponent {
+        name: APP_COMMON_COMPONENT_ID.to_string(),
+        r#type: APP_COMMON_COMPONENT_TYPE.to_string(),
+        id: Some(APP_COMMON_COMPONENT_ID.to_string()),
+        additional_info: None,
+    }
+}
+
 /// The most physical resources this emulator stores in ONE app version.
 ///
 /// A MEMORY BOUND, not an AWS quota, for the same reason as [`MAX_APPS`]:
@@ -261,6 +289,55 @@ impl AppVersionContents {
             .values()
             .find(|component| component.name == name || component.id.as_deref() == Some(name))
     }
+
+    /// The Application Component of this version's whole component set the caller
+    /// names — one it holds ([`Self::app_component_named`]), or the AppCommon
+    /// component every app version carries, which answers to its own name and id
+    /// just as a created one does.
+    pub fn app_component_matching(&self, name: &str) -> Option<AppComponent> {
+        if let Some(held) = self.app_component_named(name) {
+            return Some(held.clone());
+        }
+        let implicit = app_common_component();
+        (implicit.name == name || implicit.id.as_deref() == Some(name)).then_some(implicit)
+    }
+
+    /// Every Application Component of this app version: the ones created in it, in
+    /// the stable order they are stored in, followed by the AppCommon component
+    /// ([`app_common_component`]) every app version carries.
+    pub fn app_component_set(&self) -> Vec<AppComponent> {
+        let created = self.app_components.values().cloned();
+        if self.app_components.contains_key(APP_COMMON_COMPONENT_ID) {
+            return created.collect();
+        }
+        created.chain(::std::iter::once(app_common_component())).collect()
+    }
+
+    /// The Application Component of this app version addressed by `id`: one the
+    /// version holds, or the AppCommon component every version carries.
+    pub fn app_component_by_id(&self, id: &str) -> Option<AppComponent> {
+        self.app_components
+            .get(id)
+            .cloned()
+            .or_else(|| (id == APP_COMMON_COMPONENT_ID).then(app_common_component))
+    }
+    /// The resources this version holds that are IN the application — what its
+    /// template's `resources` reports and what an assessment walks.
+    pub fn included_resources(&self) -> Vec<&PhysicalResource> {
+        self.resources
+            .values()
+            .filter(|resource| resource.excluded != Some(true))
+            .collect()
+    }
+
+    /// The resources this version holds that are EXCLUDED from the application —
+    /// what its template's `excludedResources` reports.
+    pub fn excluded_resources(&self) -> Vec<&PhysicalResource> {
+        self.resources
+            .values()
+            .filter(|resource| resource.excluded == Some(true))
+            .collect()
+    }
 }
 
 /// One application assessment: the record `StartAppAssessment` starts and
@@ -316,6 +393,17 @@ impl AppAssessmentRecord {
     /// The application this assessment is of.
     pub fn app_arn(&self) -> Option<&str> {
         self.assessment.app_arn.as_deref()
+    }
+
+    /// The tag set assigned to this assessment, when it carries one.
+    pub fn tags(&self) -> Option<&HashMap<String, String>> {
+        self.assessment.tags.as_ref()
+    }
+
+    /// The tag set assigned to this assessment, for writing — what the tagging
+    /// operations change when the ARN they are given is an assessment's.
+    pub fn tags_mut(&mut self) -> &mut Option<HashMap<String, String>> {
+        &mut self.assessment.tags
     }
 }
 
@@ -461,6 +549,27 @@ impl ComAmazonawsResiliencehubAwsresiliencehubState {
             .or_default()
             .entry(DRAFT_APP_VERSION.to_string())
             .or_default()
+    }
+
+    /// The Application Component `id` addresses in `app_version` of `app_arn` —
+    /// one the version holds, or the AppCommon component every app version carries
+    /// ([`app_common_component`]).
+    ///
+    /// A version that EXISTS while holding nothing — a draft nobody has written to
+    /// — still carries that component, which is why "nothing stored" is not
+    /// "nothing to report" here. The caller has already established that the
+    /// version exists ([`Self::app_version_exists`]); `None` means the version
+    /// holds no component under that id.
+    pub fn app_version_app_component(
+        &self,
+        app_arn: &str,
+        app_version: &str,
+        id: &str,
+    ) -> Option<AppComponent> {
+        match self.app_version(app_arn, app_version) {
+            Some(contents) => contents.app_component_by_id(id),
+            None => AppVersionContents::default().app_component_by_id(id),
+        }
     }
 
     /// How many PUBLISHED versions `app_arn` has: every stored version except the
@@ -756,6 +865,41 @@ impl ComAmazonawsResiliencehubAwsresiliencehubState {
     pub fn remembered_token_count(&self) -> usize {
         self.idempotency_tokens.len()
     }
+
+    /// The tag set assigned to `resource_arn`, or `None` when this service holds
+    /// no resource under that ARN.
+    ///
+    /// One lookup for every TAGGABLE resource this service stores — an
+    /// application, a resiliency policy, an application assessment — because a
+    /// tag is assigned by ARN and the operations that assign one take any of them.
+    /// A resource carrying no tags answers an EMPTY map, which is what makes a
+    /// read of its tags agree with the `tags` member of a read of the resource
+    /// itself (see [`reported_tags`]).
+    pub fn tags_of(&self, resource_arn: &str) -> Option<HashMap<String, String>> {
+        let tags = if let Some(app) = self.apps.get(resource_arn) {
+            app.tags.as_ref()
+        } else if let Some(policy) = self.policies.get(resource_arn) {
+            policy.tags.as_ref()
+        } else {
+            self.assessments.get(resource_arn)?.tags()
+        };
+        Some(tags.cloned().unwrap_or_default())
+    }
+
+    /// The tag set assigned to `resource_arn`, for writing — materialised empty
+    /// when the resource carries none yet. `None` when this service holds no
+    /// resource under that ARN, which is the refusal every tagging operation
+    /// answers rather than tagging something that does not exist.
+    pub fn tags_mut(&mut self, resource_arn: &str) -> Option<&mut HashMap<String, String>> {
+        let tags = if self.apps.contains_key(resource_arn) {
+            &mut self.apps.get_mut(resource_arn)?.tags
+        } else if self.policies.contains_key(resource_arn) {
+            &mut self.policies.get_mut(resource_arn)?.tags
+        } else {
+            self.assessments.get_mut(resource_arn)?.tags_mut()
+        };
+        Some(tags.get_or_insert_with(HashMap::new))
+    }
 }
 
 /// This service's store in the shared engine: call it with a handler's `&*self.engine`.
@@ -798,6 +942,71 @@ pub fn reported_app_component(component: &AppComponent) -> AppComponent {
 /// resiliency policy is a clone of the stored record.
 pub fn reported_tags(tags: Option<HashMap<String, String>>) -> Option<HashMap<String, String>> {
     Some(tags.unwrap_or_default())
+}
+
+/// The most tags one resource carries: `TagMap`'s modelled `@length` maximum
+/// (`smithy_query query="shape" shape="TagMap"`: length 1..50), which bounds the
+/// tag set of a resource just as it bounds the map one request carries.
+///
+/// Also the memory bound on tagging: `TagResource` is reachable by any caller and
+/// stores a caller-sized map per call, so the stored set needs a ceiling and the
+/// modelled one is it.
+pub const MAX_TAGS_PER_RESOURCE: usize = 50;
+
+/// The modelled `@length` of `TagKey` — the key target of `TagMap`
+/// (`smithy_query query="shape" shape="TagKey"`: length 1..128).
+const TAG_KEY_MIN_LENGTH: usize = 1;
+
+/// The upper half of that bound; see [`TAG_KEY_MIN_LENGTH`].
+const TAG_KEY_MAX_LENGTH: usize = 128;
+
+/// `TagKey`'s modelled `@pattern`, from the same shape: anything but a control
+/// character or a double quote.
+const TAG_KEY_PATTERN: &str = r#"^[^\x00-\x1f\x22]+$"#;
+
+/// The refusal message for a tag key outside `TagKey`'s modelled `@length` or
+/// `@pattern` — `None` when every key of `keys` is within both.
+///
+/// The boundary constraint validator walks a map's VALUE target but not its KEY
+/// target (the same gap [`enum_violation`] covers), so a `TagMap` key reaches the
+/// handler unchecked and this is where that member's constraints are enforced.
+/// The sentence is NOT written here: it is built from the framework's own
+/// [`::smithy_server_runtime::Violation`] and rendered by
+/// `aws_smithy_schema_server::constraints::envelope`, so a handler refusal and a
+/// boundary refusal read identically. `TagMap` is `@sensitive`, so the violation
+/// is marked sensitive and the message states the constraint without echoing the
+/// key.
+pub fn tag_key_violation<'a>(
+    member: &str,
+    keys: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    let violations: Vec<::smithy_server_runtime::Violation> = keys
+        .into_iter()
+        // Sorted, because a `HashMap` iterates in an arbitrary order and the same
+        // request must be refused with the same sentence every time.
+        .collect::<::std::collections::BTreeSet<&str>>()
+        .into_iter()
+        .filter_map(|key| {
+            let length = key.chars().count();
+            let kind = if length < TAG_KEY_MIN_LENGTH {
+                ::smithy_server_runtime::ViolationKind::MinLength(TAG_KEY_MIN_LENGTH as i64)
+            } else if length > TAG_KEY_MAX_LENGTH {
+                ::smithy_server_runtime::ViolationKind::MaxLength(TAG_KEY_MAX_LENGTH as i64)
+            } else if key.chars().any(|character| character <= '\u{1f}' || character == '"') {
+                ::smithy_server_runtime::ViolationKind::Pattern(TAG_KEY_PATTERN.to_string())
+            } else {
+                return None;
+            };
+            Some(::smithy_server_runtime::Violation {
+                path: member.to_string(),
+                kind,
+                value: None,
+                sensitive: true,
+            })
+        })
+        .collect();
+
+    ::aws_smithy_schema_server::constraints::envelope(&violations)
 }
 
 /// The `DataLocationConstraint` a resiliency policy that names none is stored with.
@@ -1209,6 +1418,28 @@ pub fn now() -> ::aws_smithy_types::DateTime {
 /// resolve and the value it carried.
 pub fn app_not_found_message(app_arn: &str) -> String {
     format!("App not found for appArn {app_arn}")
+}
+
+/// The `ResourceNotFoundException` message for an `appVersion` the application it
+/// was asked for does not have.
+///
+/// The APP-VERSION member of the same family as [`app_not_found_message`]: both
+/// refusals reach a client as `ResourceNotFoundException`/404 on the same
+/// operation, so the sentence names the entity that did not resolve — the app
+/// version — and the application it was looked for in, which is what lets a
+/// client probing for a version tell "no such version" from "no such
+/// application". Written ONCE here because every operation that addresses an app
+/// version can refuse for this reason.
+pub fn app_version_not_found_message(app_arn: &str, app_version: &str) -> String {
+    format!("App version {app_version} not found for appArn {app_arn}")
+}
+
+/// The `ResourceNotFoundException` message for a `resourceArn` this service holds
+/// no taggable resource under — the refusal the tagging operations state, which
+/// address an application, a resiliency policy or an assessment alike by the one
+/// `resourceArn` member.
+pub fn tagged_resource_not_found_message(resource_arn: &str) -> String {
+    format!("Resource not found for resourceArn {resource_arn}")
 }
 
 /// The `ResourceNotFoundException` message for a `policyArn` this service holds no

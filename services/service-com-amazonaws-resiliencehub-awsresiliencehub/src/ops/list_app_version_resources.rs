@@ -319,8 +319,9 @@ fn app_not_found(app_arn: &str) -> ListAppVersionResourcesError {
 /// A 404 for an `appVersion` the application does not have.
 fn app_version_not_found(app_arn: &str, app_version: &str) -> ListAppVersionResourcesError {
     ListAppVersionResourcesErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
-        message: Some(format!(
-            "App version {app_version} not found for appArn {app_arn}"
+        message: Some(crate::state::app_version_not_found_message(
+            app_arn,
+            app_version,
         )),
         resource_id: Some(app_version.to_string()),
         resource_type: Some("AppVersion".to_string()),

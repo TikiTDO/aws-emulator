@@ -35,9 +35,14 @@ const REGION: &str = "us-east-1";
 /// The members the rendered document carries for the versions these cases build:
 /// the structure the model documents for `appTemplateBody` (`smithy_query
 /// query="doc" shape="DescribeAppVersionTemplateResponse"
-/// member="appTemplateBody"`), less `excludedResources` — nothing here excludes a
-/// resource.
-const DOCUMENT_MEMBERS: [&str; 3] = ["appComponents", "resources", "version"];
+/// member="appTemplateBody"`), every one of which the document always carries —
+/// `excludedResources` included, as an empty list when nothing is excluded.
+const DOCUMENT_MEMBERS: [&str; 4] = [
+    "appComponents",
+    "excludedResources",
+    "resources",
+    "version",
+];
 
 /// An emulator holding only this service, over one shared engine.
 fn emulator() -> MultiServiceRouter {

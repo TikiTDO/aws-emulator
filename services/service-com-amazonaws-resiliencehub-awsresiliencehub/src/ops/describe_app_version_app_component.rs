@@ -179,9 +179,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if !store.app_version_exists(&input.app_arn, &input.app_version) {
             return Err(app_version_not_found(&input.app_arn, &input.app_version));
         }
-        let app_component = store
-            .app_version(&input.app_arn, &input.app_version)
-            .and_then(|version| version.app_components.get(&input.id));
+        // The version's component set, which holds the components created in it
+        // and the AppCommon component every app version carries — so a version
+        // nothing has been added to still answers that one.
+        let app_component =
+            store.app_version_app_component(&input.app_arn, &input.app_version, &input.id);
         let Some(app_component) = app_component else {
             return Err(app_component_not_found(&input.id, &input.app_version));
         };
@@ -189,7 +191,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         Ok(DescribeAppVersionAppComponentOutput {
             app_arn: input.app_arn,
             app_version: input.app_version,
-            app_component: Some(crate::state::reported_app_component(app_component)),
+            app_component: Some(crate::state::reported_app_component(&app_component)),
         })
     }
 }
@@ -222,8 +224,9 @@ fn app_version_not_found(
 ) -> DescribeAppVersionAppComponentError {
     DescribeAppVersionAppComponentErrorModeled::ResourceNotFoundException(
         ResourceNotFoundException {
-            message: Some(format!(
-                "application {app_arn} has no version {app_version}"
+            message: Some(crate::state::app_version_not_found_message(
+                app_arn,
+                app_version,
             )),
             resource_id: Some(app_version.to_string()),
             resource_type: Some("AppVersion".to_string()),

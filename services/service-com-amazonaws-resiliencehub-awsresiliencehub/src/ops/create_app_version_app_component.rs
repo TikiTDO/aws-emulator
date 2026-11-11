@@ -253,8 +253,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let draft = store.draft_app_version_mut(&input.app_arn);
 
         // The `id` identifies the component within the app version, so a second
-        // component cannot take one that is already in use.
-        if draft.app_components.contains_key(&id) {
+        // component cannot take one that is already in use — including the id of
+        // the AppCommon component every app version carries, which the service
+        // maintains and no caller creates or redefines.
+        if draft.app_component_by_id(&id).is_some() {
             return Err(conflict(
                 format!(
                     "an Application Component with id {id} already exists in the {} version of \

@@ -203,8 +203,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// `appTemplateBody` (`smithy_query query="doc"
 /// shape="DescribeAppVersionTemplateResponse" member="appTemplateBody"`):
 /// `resources` (each with its `logicalResourceId`, `type`, `name` and
-/// `additionalInfo`), `appComponents` (each with its `name`, `type`,
-/// `resourceNames` and `additionalInfo`) and `version`.
+/// `additionalInfo`), `appComponents` (each with its `id`, `name`, `type`,
+/// `resourceNames` and `additionalInfo`), `excludedResources` (the
+/// `logicalResourceIds` of the resources kept out of the application) and
+/// `version`.
 ///
 /// `version` is the TEMPLATE DOCUMENT's version — [`APP_TEMPLATE_VERSION`] — and no
 /// part of the request: this body is the same document
@@ -217,10 +219,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// last write to that version persisted: a published version's body cannot change,
 /// because the version it is rendered from is a frozen copy.
 ///
-/// `excludedResources` is not rendered: it reports the resources EXCLUDED from the
-/// application, and the stored versions hold none — nothing in this service marks a
-/// resource excluded (`UpdateAppVersionResource$excluded`, the member that would, is
-/// still a stub), so there is nothing to report under it.
+/// Every member of the structure is ALWAYS rendered, including the ones the
+/// addressed version has nothing under: the body is a document clients parse,
+/// edit and write back, so a reader can read `excludedResources.logicalResourceIds`
+/// or a component's `id` without first testing whether this particular version
+/// happened to have one.
 ///
 /// The rendered body is bounded by what one version can hold —
 /// [`crate::state::MAX_RESOURCES_PER_APP_VERSION`] resources and
@@ -229,12 +232,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 fn app_template_body(contents: &crate::state::AppVersionContents) -> String {
     // "Don't add the resources that you want to exclude" (the member's own
     // documentation), so an excluded resource is no part of the template's
-    // `resources`.
-    let included: Vec<&PhysicalResource> = contents
-        .resources
-        .values()
-        .filter(|resource| resource.excluded != Some(true))
-        .collect();
+    // `resources` — it is reported under `excludedResources` instead.
+    let included: Vec<&PhysicalResource> = contents.included_resources();
 
     let resources: Vec<::serde_json::Value> = included
         .iter()
@@ -255,11 +254,17 @@ fn app_template_body(contents: &crate::state::AppVersionContents) -> String {
         })
         .collect();
 
+    // The version's whole component set — the components created in it and the
+    // AppCommon component every app version carries, which is part of every
+    // template a client round-trips.
     let app_components: Vec<::serde_json::Value> = contents
-        .app_components
-        .values()
+        .app_component_set()
+        .iter()
         .map(|component| {
             let mut rendered = ::serde_json::Map::new();
+            if let Some(id) = component.id.as_deref() {
+                rendered.insert("id".to_string(), ::serde_json::json!(id));
+            }
             rendered.insert("name".to_string(), ::serde_json::json!(component.name));
             rendered.insert("type".to_string(), ::serde_json::json!(component.r#type));
             rendered.insert(
@@ -273,9 +278,19 @@ fn app_template_body(contents: &crate::state::AppVersionContents) -> String {
         })
         .collect();
 
+    // The resources kept OUT of the application, by the same `logicalResourceId`
+    // the included ones are rendered with. Always present, as an empty list when
+    // the version excludes nothing.
+    let excluded: Vec<::serde_json::Value> = contents
+        .excluded_resources()
+        .iter()
+        .map(|resource| logical_resource_id(&resource.logical_resource_id))
+        .collect();
+
     ::serde_json::json!({
         "resources": resources,
         "appComponents": app_components,
+        "excludedResources": {"logicalResourceIds": excluded},
         "version": APP_TEMPLATE_VERSION,
     })
     .to_string()
@@ -289,20 +304,27 @@ fn app_template_body(contents: &crate::state::AppVersionContents) -> String {
 /// takes back in, so it cannot carry a value that depends on the read that produced
 /// it. Recorded behaviour is what fixes that: one published snapshot read through
 /// the release alias and read again through its own publish sequence number answers
-/// the SAME body, which no per-read label satisfies. The document the template
-/// operations of this service exchange is version 2.
-const APP_TEMPLATE_VERSION: i64 = 2;
+/// the SAME body, which no per-read label satisfies, and the number it answers is
+/// rendered as the DECIMAL `2.0` the document states it with. The document the
+/// template operations of this service exchange is version 2.
+const APP_TEMPLATE_VERSION: f64 = 2.0;
 
-/// One resource's `logicalResourceId`, carrying the members the stored
-/// `LogicalResourceId` names: the required `identifier`, plus whichever source the
-/// resource belongs to — a CloudFormation stack, a resource group, a Terraform state
-/// file or an EKS cluster namespace — when it belongs to one.
+/// One resource's `logicalResourceId`, as the template document states it: the
+/// required `identifier`, then the CloudFormation stack and the resource group the
+/// resource belongs to — as JSON `null` when it belongs to neither, because a
+/// client parsing the document reads those members without testing for them — and
+/// a Terraform state file or an EKS cluster namespace only when the resource comes
+/// from one of those sources.
 fn logical_resource_id(logical: &LogicalResourceId) -> ::serde_json::Value {
     let mut rendered = ::serde_json::Map::new();
     rendered.insert("identifier".to_string(), ::serde_json::json!(logical.identifier));
     for (member, value) in [
         ("logicalStackName", logical.logical_stack_name.as_deref()),
         ("resourceGroupName", logical.resource_group_name.as_deref()),
+    ] {
+        rendered.insert(member.to_string(), ::serde_json::json!(value));
+    }
+    for (member, value) in [
         ("terraformSourceName", logical.terraform_source_name.as_deref()),
         ("eksSourceName", logical.eks_source_name.as_deref()),
     ] {
@@ -369,7 +391,10 @@ fn app_not_found(app_arn: &str) -> DescribeAppVersionTemplateError {
 /// A 404 for an `appVersion` the application does not have.
 fn app_version_not_found(app_arn: &str, app_version: &str) -> DescribeAppVersionTemplateError {
     DescribeAppVersionTemplateErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
-        message: Some(format!("application {app_arn} has no version {app_version}")),
+        message: Some(crate::state::app_version_not_found_message(
+            app_arn,
+            app_version,
+        )),
         resource_id: Some(app_version.to_string()),
         resource_type: Some("AppVersion".to_string()),
     })
