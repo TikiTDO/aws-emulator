@@ -66,6 +66,23 @@
 //! An expired session credential speaks for nobody: it carries no documents and no principal
 //! spelling, so every action it asks for is refused. (In the assembled emulator the layer
 //! that authenticates a request refuses such a credential before any handler runs.)
+//!
+//! ## The caller that is another service
+//!
+//! One class of request is no customer principal's at all: a call ANOTHER emulated service
+//! makes as its OWN service principal for one of its resources — CloudFront fetching an
+//! origin object for a distribution whose origin access control signed the fetch. AWS decides
+//! such a call for that service principal, with `aws:SourceArn` and `aws:SourceAccount`
+//! naming the resource it acts for, and a service principal holds no identity-based policies:
+//! the BUCKET's own policy is the only document in force, so the call needs a grant in it that
+//! names the service principal and whose conditions the call's own source keys satisfy.
+//!
+//! Which calls are in that class is recorded by the CALLING service, under the access key id
+//! of the credential it minted for the one call and signed it with, for only as long as that
+//! call is in flight ([`::service_common::service_principal_calls`]) — so it is resolved here
+//! from the access key id the request PRESENTS ([`service_principal_call`]), which is the one
+//! thing about a request a client cannot choose for itself. Every other request is resolved
+//! from the credential's own principal, as above.
 
 use std::time::SystemTime;
 
@@ -118,6 +135,69 @@ pub const PUT_BUCKET_POLICY_ACTION: &str = "s3:PutBucketPolicy";
 /// expired: that credential speaks for nobody, and the key it presented is not quoted back.
 const EXPIRED_CREDENTIAL_PRINCIPAL: &str = "an expired session credential";
 
+/// The cross-service call a request IS, when another emulated service made it as its own
+/// service principal on behalf of one of its resources (see the module docs).
+#[derive(Debug, Clone)]
+pub struct ServicePrincipalCall {
+    /// The service principal the call was made as, which is the principal a bucket policy
+    /// names to grant it.
+    pub principal: String,
+    /// `aws:SourceArn`: the resource the call was made on behalf of, which is what a grant to
+    /// that principal is scoped by.
+    pub source_arn: String,
+    /// `aws:SourceAccount`: the account that resource belongs to.
+    pub source_account: String,
+}
+
+/// The cross-service call this request IS, or `None` for every other request — a request
+/// whose access key id the shared directory holds no live record of, and one on an engine
+/// carrying no such directory.
+///
+/// The record is read for the access key id the request PRESENTS, which the emulator's
+/// verifier resolves and checks the signature against when request authentication is on, and
+/// only for a call of the account this service serves
+/// ([`::service_common::service_principal_calls::ServicePrincipalCalls::call`] carries both
+/// bounds).
+///
+/// LOCKING: this takes the directory's lock and no other, so a handler may ask it while
+/// holding this service's own store guard — which is what the decision an SSE-KMS read makes
+/// about the key does ([`crate::state::sse_kms`]).
+#[must_use]
+pub fn service_principal_call<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+) -> Option<ServicePrincipalCall> {
+    let directory = in_flight_service_principal_calls(engine)?;
+    let access_key_id = ::engine::extract_akid(&ctx.parts().headers);
+    let held = directory.lock();
+    let call = held.call(
+        &access_key_id,
+        ::engine::emulator_account_id(),
+        SystemTime::now(),
+    )?;
+    Some(ServicePrincipalCall {
+        principal: call.principal.clone(),
+        source_arn: call.source_arn.clone(),
+        source_account: call.source_account.clone(),
+    })
+}
+
+/// The shared directory of the cross-service calls another service is making as its own
+/// service principal, in the one shared engine: written by that service, read here.
+fn in_flight_service_principal_calls<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+) -> Option<
+    ::engine::ServiceState<::service_common::service_principal_calls::ServicePrincipalCalls>,
+> {
+    (engine as &dyn ::std::any::Any)
+        .downcast_ref::<::engine::InMemoryEngine>()
+        .map(
+            ::engine::InMemoryEngine::state::<
+                ::service_common::service_principal_calls::ServicePrincipalCalls,
+            >,
+        )
+}
+
 /// The principal a request speaks for, and everything the decision is made from.
 ///
 /// Resolved once per request and BEFORE this service's own store is locked, so the STS and
@@ -144,6 +224,11 @@ pub struct Caller {
     /// Set when the principal carries a policy whose document the IAM store does not hold —
     /// an AWS-managed policy (see the module docs).
     pub unreadable_attachment: bool,
+    /// Set when this request is a call another service made as its own SERVICE PRINCIPAL for
+    /// one of its resources (see the module docs): the resource's policy is then the only
+    /// document in force, and the call carries the two source condition keys a grant to such
+    /// a principal is scoped by.
+    pub service_principal: Option<ServicePrincipalCall>,
 }
 
 impl Caller {
@@ -160,6 +245,26 @@ impl Caller {
     fn identity_is_unbounded(&self) -> bool {
         self.account_credential || self.unreadable_attachment
     }
+
+    /// The caller a request another service made as its own service principal speaks for: the
+    /// principal itself, named by nothing else.
+    ///
+    /// It holds no identity-based documents and no account spelling — a service principal is
+    /// not a principal OF the account, so a statement about the account says nothing about it
+    /// — and it is not one of the callers the identity-based half leaves unbounded: the
+    /// resource's own policy is the only document in force, so the call needs a grant there.
+    /// It carries no `aws:PrincipalArn` value either: that key names an IAM identity, and this
+    /// call is made by none, so the key is reported ABSENT — the same treatment a caller
+    /// speaking for nobody gets ([`authorization::global_conditions`]) — rather than being
+    /// decided against a principal spelling AWS does not report for such a call.
+    fn of_service_principal(call: ServicePrincipalCall) -> Self {
+        Self {
+            arn: call.principal.clone(),
+            principals: vec![call.principal.clone()],
+            service_principal: Some(call),
+            ..Self::default()
+        }
+    }
 }
 
 /// Who this request speaks for, resolved from the access key id it signed with.
@@ -168,10 +273,23 @@ impl Caller {
 /// through STS's own resolution, which first materialises the session expiries the clock has
 /// already made due: that write is owed at the same instant whether or not anybody called,
 /// which is why a REPORTING operation of this service may take this decision too.
+///
+/// A request another service made as its own SERVICE PRINCIPAL is that principal and nothing
+/// else ([`service_principal_call`], and the module docs for why): its credential is one the
+/// emulator minted for that one call, so no session and no IAM identity stands behind it.
 pub fn request_caller<Eng: Send + Sync + 'static>(
     engine: &Eng,
     ctx: &::smithy_server_runtime::OperationContext<'_>,
 ) -> Caller {
+    if let Some(call) = service_principal_call(engine, ctx) {
+        ::tracing::debug!(
+            principal = %call.principal,
+            source_arn = %call.source_arn,
+            "this request is one another service is making as its own service principal, so it \
+             is authorized as that principal acting for that resource"
+        );
+        return Caller::of_service_principal(call);
+    }
     let access_key_id = ::engine::extract_akid(&ctx.parts().headers);
     let iam_state = sts_store::iam_state(engine);
     // A long-term access key speaks for the IAM user that holds it, which is the identity
@@ -241,6 +359,13 @@ pub fn request_caller<Eng: Send + Sync + 'static>(
 /// ([`authorization::ObjectWriteContext`], [`authorization::read_conditions`]). The decision
 /// is the module docs' rule.
 ///
+/// A caller that is another service's own SERVICE PRINCIPAL carries two condition keys more —
+/// the resource it acts for and that resource's account
+/// ([`authorization::service_principal_conditions`]) — because a grant to such a principal is
+/// scoped by them, and it is refused in S3's own published wording
+/// ([`state::ACCESS_DENIED_MESSAGE`]) rather than in the sentence IAM words about a USER:
+/// there is no IAM identity to name in one.
+///
 /// ## A request made through an ACCESS POINT
 ///
 /// An access point is a named data path onto one bucket, with a policy of its own, and that
@@ -275,7 +400,15 @@ pub fn denial(
     let named = through
         .as_ref()
         .map_or_else(|| resource.to_string(), |route| route.resource_for(resource));
-    let refusal = |reason: &str| Some(state::authorization_denial(&caller.arn, action, &named, reason));
+    // A call another service made as its own service principal is refused in S3's own
+    // published wording: the sentence IAM words names a USER, and no IAM identity made it.
+    let refusal = |reason: &str| {
+        Some(if caller.service_principal.is_some() {
+            state::ACCESS_DENIED_MESSAGE.to_string()
+        } else {
+            state::authorization_denial(&caller.arn, action, &named, reason)
+        })
+    };
     let prepared = policy.map(iam::PreparedDocument::read);
     let access_point_policy = through
         .as_ref()
@@ -292,7 +425,24 @@ pub fn denial(
     if let Some(route) = &through {
         context.extend(authorization::access_point_conditions(route));
     }
+    // The keys this decision PUBLISHES: a service principal's call knows two more than any
+    // other request does (the resource it acts for and that resource's account), and every
+    // other request is judged against the list as it stands — borrowed rather than copied,
+    // since that is the common case.
+    let published: ::std::borrow::Cow<'_, [&str]> = match &caller.service_principal {
+        None => ::std::borrow::Cow::Borrowed(PUBLISHED_CONDITION_KEYS),
+        Some(call) => {
+            context.extend(authorization::service_principal_conditions(
+                &call.source_arn,
+                &call.source_account,
+            ));
+            let mut published = PUBLISHED_CONDITION_KEYS.to_vec();
+            published.extend(authorization::SERVICE_PRINCIPAL_CONDITION_KEYS);
+            ::std::borrow::Cow::Owned(published)
+        }
+    };
     let conditions: &[(String, String)] = &context;
+    let published: &[&str] = &published;
     // Every resource this request addresses: the bucket-scoped one the operation asked
     // about, and the access point's own when the request came through one.
     let mut addressed = vec![resource.to_string()];
@@ -309,10 +459,10 @@ pub fn denial(
         .flatten()
     {
         let denies = addressed.iter().any(|resource| {
-            let denying = request_over(action, resource, &denied_spellings, conditions);
+            let denying = request_over(action, resource, &denied_spellings, conditions, published);
             authorization::deny_is_decided(
                 &iam::resource_outcome_prepared(document, &denying),
-                PUBLISHED_CONDITION_KEYS,
+                published,
             )
         });
         if denies {
@@ -325,13 +475,13 @@ pub fn denial(
         .map(|resource| {
             iam::identity_outcome_prepared(
                 &documents,
-                &request_over(action, resource, &caller.principals, conditions),
+                &request_over(action, resource, &caller.principals, conditions, published),
             )
         })
         .collect();
     if identity_said
         .iter()
-        .any(|said| authorization::deny_is_decided(said, PUBLISHED_CONDITION_KEYS))
+        .any(|said| authorization::deny_is_decided(said, published))
     {
         return refusal(IDENTITY_POLICY_DENY_REASON);
     }
@@ -349,7 +499,7 @@ pub fn denial(
         addressed.iter().any(|resource| {
             iam::resource_outcome_prepared(
                 document,
-                &request_over(action, resource, &caller.principals, conditions),
+                &request_over(action, resource, &caller.principals, conditions, published),
             )
             .decision
                 == Decision::Allowed
@@ -368,20 +518,21 @@ pub fn denial(
 const IDENTITY_POLICY_DENY_REASON: &str = "with an explicit deny in an identity-based policy";
 
 /// One decision's request: `action` on `resource`, asked for the principal spellings
-/// `principals`, in the condition context `conditions`.
+/// `principals`, in the condition context `conditions`, declaring the keys `published`.
 ///
 /// One place, so every leg of [`denial`] — the deny legs and the grant legs, over the bucket
 /// resource and over the access point's own — asks about the same request and publishes the
-/// same keys ([`PUBLISHED_CONDITION_KEYS`]).
+/// same keys ([`PUBLISHED_CONDITION_KEYS`], plus the two a service principal's call knows).
 fn request_over<'a>(
     action: &'a str,
     resource: &'a str,
     principals: &'a [String],
     conditions: &'a [(String, String)],
+    published: &'a [&'a str],
 ) -> iam::Request<'a> {
     iam::Request::new(action, resource, principals)
         .with_context(conditions)
-        .with_published_keys(PUBLISHED_CONDITION_KEYS)
+        .with_published_keys(published)
 }
 
 /// [`denial`], for one of the three operations that read, write or remove the BUCKET POLICY

@@ -347,6 +347,8 @@ mod role_session_object_authorization;
 mod scratch_probe;
 #[path = "all/served_envelope_values.rs"]
 mod served_envelope_values;
+#[path = "all/service_principal_object_access.rs"]
+mod service_principal_object_access;
 #[path = "all/service_set_tag_keys.rs"]
 mod service_set_tag_keys;
 #[path = "all/signature_refusal_wording.rs"]

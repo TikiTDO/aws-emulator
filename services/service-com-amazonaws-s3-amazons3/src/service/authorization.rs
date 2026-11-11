@@ -119,6 +119,38 @@ const PRINCIPAL_ACCOUNT_KEY: &str = "aws:PrincipalAccount";
 /// account this emulator serves rather than parsed out of the resource.
 const RESOURCE_ACCOUNT_KEY: &str = "aws:ResourceAccount";
 
+/// The global condition keys naming the resource a CROSS-SERVICE call was made on behalf of
+/// and the account that resource belongs to: "aws:SourceArn — the ARN of the resource making
+/// a service-to-service request" and "aws:SourceAccount — the account the resource making the
+/// request belongs to" (AWS General Reference, *Global condition context keys*).
+///
+/// They are the two keys a grant to a SERVICE PRINCIPAL is scoped by, so only a request
+/// another service made as its own service principal carries a value for them
+/// ([`service_principal_conditions`]).
+const SOURCE_ARN_KEY: &str = "aws:SourceArn";
+const SOURCE_ACCOUNT_KEY: &str = "aws:SourceAccount";
+
+/// The keys a decision about a request another service made AS ITS OWN SERVICE PRINCIPAL
+/// publishes beside [`PUBLISHED_CONDITION_KEYS`]: such a call knows each of them exactly (the
+/// resource it acts for and that resource's account), so a statement asking whether one is
+/// present — rather than what it equals — is decided rather than left undecided.
+///
+/// A request no such call was recorded for carries neither, so neither is published for it:
+/// this service answers a key only where it knows the value.
+pub const SERVICE_PRINCIPAL_CONDITION_KEYS: &[&str] = &[SOURCE_ARN_KEY, SOURCE_ACCOUNT_KEY];
+
+/// The two pairs above, for a call made on behalf of `source_arn` in `source_account`.
+#[must_use]
+pub fn service_principal_conditions(
+    source_arn: &str,
+    source_account: &str,
+) -> Vec<(String, String)> {
+    vec![
+        (SOURCE_ARN_KEY.to_string(), source_arn.to_string()),
+        (SOURCE_ACCOUNT_KEY.to_string(), source_account.to_string()),
+    ]
+}
+
 /// The two condition keys that name the ACCESS POINT a request was made through: its ARN
 /// ("s3:DataAccessPointArn") and the account that owns it ("s3:DataAccessPointAccount"),
 /// both of S3's own published list (Amazon S3 User Guide, *Amazon S3 condition key

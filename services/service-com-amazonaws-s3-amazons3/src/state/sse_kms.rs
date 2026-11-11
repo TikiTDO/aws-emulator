@@ -29,10 +29,12 @@
 //! object's bytes for that distribution's fetches and for nothing else. Which calls are in
 //! that class is recorded by the calling service, under the access key id of the credential
 //! it created for the one call and signed it with, for only as long as that call is in flight
-//! ([`::service_common::service_principal_calls`]) — so the record is resolved here from the
-//! access key id the request PRESENTS, which the emulator's verifier resolves and checks the
-//! signature against when request authentication is on, and from the account this service
-//! serves; a read presenting any other credential is decided as above.
+//! ([`::service_common::service_principal_calls`]) — so the record is resolved here through
+//! this service's one reading of who a request speaks for
+//! ([`crate::service::request_authorization::service_principal_call`]), from the access key id
+//! the request PRESENTS, which the emulator's verifier resolves and checks the signature
+//! against when request authentication is on, and from the account this service serves; a read
+//! presenting any other credential is decided as above.
 //!
 //! Both halves are the KMS service's OWN ([`kms_store::authorization`]), made against the
 //! key policy, caller identity policies and grants that KMS's and IAM's handlers wrote, so
@@ -374,50 +376,29 @@ fn not_found(region: &str, reference: &str) -> Relay {
 /// A read ANOTHER AWS SERVICE is performing as its own service principal for one of its
 /// resources is that principal, acting for that resource: the calling service signed the call
 /// with a credential it created for it alone and recorded both under that credential's access
-/// key id, so the record is resolved from the access key id the request PRESENTS — the
-/// credential the emulator's verifier resolves, and checks the signature against when request
-/// authentication is on — and only for a call of this account (see the module docs). Every
-/// other read is the principal of the credential it presents, which is KMS's own resolution
+/// key id, so the record is resolved from the access key id the request PRESENTS — through
+/// this service's ONE reading of who a request speaks for
+/// ([`crate::service::request_authorization::service_principal_call`], which carries both the
+/// credential and the account the record is kept to). Every other read is the principal of the
+/// credential it presents, which is KMS's own resolution
 /// ([`kms_store::authorization::caller`]).
 fn caller<Eng: Send + Sync + 'static>(
     engine: &Eng,
     ctx: &::smithy_server_runtime::OperationContext<'_>,
 ) -> kms_store::authorization::Caller {
-    if let Some(directory) = service_principal_calls(engine) {
-        let access_key_id = ::engine::extract_akid(&ctx.parts().headers);
-        let account = ::engine::emulator_account_id();
-        let now = ::std::time::SystemTime::now();
-        let held = directory.lock();
-        if let Some(call) = held.call(&access_key_id, account, now) {
-            ::tracing::debug!(
-                principal = %call.principal,
-                source_arn = %call.source_arn,
-                "this read is one another service is making as its own service principal, so \
-                 the object's key is asked about that principal"
-            );
-            return kms_store::authorization::Caller::service_principal(
-                &call.principal,
-                &call.source_arn,
-            );
-        }
+    if let Some(call) = crate::service::request_authorization::service_principal_call(engine, ctx) {
+        ::tracing::debug!(
+            principal = %call.principal,
+            source_arn = %call.source_arn,
+            "this read is one another service is making as its own service principal, so \
+             the object's key is asked about that principal"
+        );
+        return kms_store::authorization::Caller::service_principal(
+            &call.principal,
+            &call.source_arn,
+        );
     }
     kms_store::authorization::caller(engine, ctx)
-}
-
-/// The shared directory of the cross-service calls another service is making as its own
-/// service principal, in the one shared engine: written by that service, read here.
-fn service_principal_calls<Eng: Send + Sync + 'static>(
-    engine: &Eng,
-) -> Option<
-    ::engine::ServiceState<::service_common::service_principal_calls::ServicePrincipalCalls>,
-> {
-    (engine as &dyn ::std::any::Any)
-        .downcast_ref::<::engine::InMemoryEngine>()
-        .map(
-            ::engine::InMemoryEngine::state::<
-                ::service_common::service_principal_calls::ServicePrincipalCalls,
-            >,
-        )
 }
 
 /// The encryption context the data key of `object` is bound to, which is what a key policy
