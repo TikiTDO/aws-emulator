@@ -22,6 +22,8 @@
 //! is pinned is the wire behaviour rather than any handler's internals, and every assertion
 //! names its case and the value it actually saw.
 
+use smithy_server_runtime::MultiServiceRouter;
+
 use super::bucket_lifecycle::{router, send};
 use super::object_and_tagging_roundtrip::{bucket, text};
 // The percent-decode a client applies to every key-name element of a page, owned by the
@@ -126,6 +128,35 @@ fn owner_ids(listing: &Listing) -> Vec<String> {
         .iter()
         .map(|entry| Listing::entry_field(entry, "ID"))
         .collect()
+}
+
+/// The canonical user id this service reports as the owner of what the account holds, read
+/// out of `ListBuckets` — "the owner of the buckets listed" (`ListBucketsOutput$Owner`) — so
+/// a suite checking an owner checks it against ANOTHER operation's answer rather than against
+/// the handler under test, and asserts it has the shape a canonical user id has: "a 64-digit
+/// hexadecimal encoded, 256-bit value" (AWS General Reference, *AWS account identifiers*).
+///
+/// `pub(crate)`: the version listing's owner suite
+/// ([`super::version_listing_owner`]) reads the same id through this one helper, so the shape
+/// check cannot drift between the two.
+pub(crate) async fn account_owner(router: &MultiServiceRouter) -> String {
+    let buckets = send(router, "GET", "/?x-id=ListBuckets", &[], "").await;
+    assert_eq!(
+        buckets.status,
+        200,
+        "ListBuckets must answer 200, got {} with body {:?}",
+        buckets.status,
+        text(&buckets)
+    );
+    let account = buckets.element("ID").unwrap_or_default();
+    assert!(
+        account.len() == 64
+            && account
+                .chars()
+                .all(|digit| digit.is_ascii_hexdigit() && !digit.is_ascii_uppercase()),
+        "a canonical user id is 64 lowercase hex digits, got {account:?}"
+    );
+    account
 }
 
 #[tokio::test]
@@ -235,22 +266,7 @@ async fn the_owner_a_listing_fetches_is_the_account_the_service_reports_elsewher
     // The account that owns what this store holds, read from a DIFFERENT operation
     // (`ListBuckets`, whose `Owner` is "the owner of the buckets listed"), so the id below
     // is checked against the service's own answer rather than against the handler's.
-    let buckets = send(&router, "GET", "/?x-id=ListBuckets", &[], "").await;
-    assert_eq!(
-        buckets.status,
-        200,
-        "ListBuckets must answer 200, got {} with body {:?}",
-        buckets.status,
-        text(&buckets)
-    );
-    let account = buckets.element("ID").unwrap_or_default();
-    assert!(
-        account.len() == 64
-            && account
-                .chars()
-                .all(|digit| digit.is_ascii_hexdigit() && !digit.is_ascii_uppercase()),
-        "a canonical user id is 64 lowercase hex digits, got {account:?}"
-    );
+    let account = account_owner(&router).await;
 
     let fetched = list_objects_v2(&router, bucket_name, "&fetch-owner=true").await;
     assert_eq!(

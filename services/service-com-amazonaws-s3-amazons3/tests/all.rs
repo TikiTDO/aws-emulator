@@ -363,6 +363,10 @@ mod stored_payload_checksums;
 mod version_id_classification;
 #[path = "all/version_listing_echoed_members.rs"]
 mod version_listing_echoed_members;
+#[path = "all/version_listing_owner.rs"]
+mod version_listing_owner;
+#[path = "all/version_listing_resume_markers.rs"]
+mod version_listing_resume_markers;
 #[path = "all/write_checksum_header_count.rs"]
 mod write_checksum_header_count;
 #[path = "all/write_response_identity.rs"]

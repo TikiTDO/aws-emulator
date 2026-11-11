@@ -68,20 +68,27 @@ const DELIMITER_ENCODED: &str = "%7C";
 
 /// Whether `encoding-type=url` changes how `key` is written: the encoding escapes every
 /// character outside RFC 3986's unreserved set, which is what [`in_path`] escapes too.
-fn touched_by_the_encoder(key: &str) -> bool {
+///
+/// `pub(crate)`, like [`Rendering`]: the version listing's own walk
+/// ([`super::version_listing_resume_markers`]) judges its key names by the same predicate
+/// rather than keeping a second copy that could drift from this one.
+pub(crate) fn touched_by_the_encoder(key: &str) -> bool {
     in_path(key) != key
 }
 
 /// The two renderings of ONE listing: the request asks for an encoding type, or it does not.
+///
+/// `pub(crate)`: every suite that walks a listing in both renderings asks for them through
+/// this one type.
 #[derive(Clone, Copy, Debug)]
-enum Rendering {
+pub(crate) enum Rendering {
     Verbatim,
     Encoded,
 }
 
 impl Rendering {
     /// What a request carries to be answered in this rendering.
-    fn query(self) -> &'static str {
+    pub(crate) fn query(self) -> &'static str {
         match self {
             Self::Verbatim => "",
             Self::Encoded => "&encoding-type=url",
@@ -89,7 +96,7 @@ impl Rendering {
     }
 
     /// How a failing case names this rendering.
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Verbatim => "no encoding type",
             Self::Encoded => "encoding-type=url",
@@ -99,7 +106,7 @@ impl Rendering {
     /// A key-name element of this rendering as the key a client stored: the decode step a
     /// client applies to every key-name element of an encoded page, and nothing at all where
     /// the request asked for no encoding.
-    fn as_stored(self, written: &str) -> String {
+    pub(crate) fn as_stored(self, written: &str) -> String {
         match self {
             Self::Verbatim => written.to_string(),
             Self::Encoded => decoded(written),
