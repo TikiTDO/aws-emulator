@@ -34,7 +34,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
     MAINTENANCE_STATUS_SUCCESS, NODE_TYPE_DATA, NODE_TYPE_MASTER, NODE_TYPE_ULTRAWARM,
 };
 
-use super::domain_lifecycle::{error_code, string_member, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, string_member, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 
 /// The `MaintenanceType` values the model publishes (`smithy_query(query="shape",
 /// shape="MaintenanceType")`), every one of which names a process on a node.
@@ -234,8 +236,9 @@ async fn maintenance_is_started_only_on_an_eligible_data_node() {
     ] {
         let answer = start(&emulator, name, "RESTART_SEARCH_PROCESS", Some(node_id)).await;
         assert_eq!(
-            answer.status, 409,
-            "case {case}: expected the modelled not-found's HTTP 409, got {} with {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case {case}: expected the missing resource's HTTP {RECORDED_NOT_FOUND_STATUS}, got \
+             {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(
@@ -417,8 +420,9 @@ async fn an_accepted_action_is_read_back_and_walked_by_the_clock() {
     ] {
         let answer = status(&emulator, name, id).await;
         assert_eq!(
-            answer.status, 409,
-            "case {case}: expected the modelled not-found's HTTP 409, got {} with {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case {case}: expected the missing resource's HTTP {RECORDED_NOT_FOUND_STATUS}, got \
+             {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(

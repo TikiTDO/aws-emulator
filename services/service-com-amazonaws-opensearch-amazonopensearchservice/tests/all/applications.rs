@@ -41,7 +41,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
 };
 
 use super::application_updates::read_list;
-use super::domain_lifecycle::{error_code, string_member, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, string_member, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 use super::resource_tags::{add_tags, list_tags, reported_tags};
 
 /// The Region every request of this suite is signed for, so the ARN and the endpoint
@@ -603,7 +605,7 @@ async fn an_id_that_names_no_application_is_refused() {
     for id in absent {
         let read = get_application(&emulator, &id).await;
         assert_eq!(
-            read.status, 409,
+            read.status, RECORDED_NOT_FOUND_STATUS,
             "case {id}: an id naming no application is refused, got {} with {:?}",
             read.status, read.body
         );

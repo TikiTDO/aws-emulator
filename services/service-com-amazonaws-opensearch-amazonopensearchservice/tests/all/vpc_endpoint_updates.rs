@@ -32,7 +32,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
     VPC_ENDPOINT_STATUS_ACTIVE, VPC_ENDPOINT_STATUS_CREATING, VPC_ENDPOINT_STATUS_UPDATING,
 };
 
-use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 use super::vpc_endpoints::{create_endpoint, describe_endpoints, member, minted, vpc_domain};
 
 /// The sentence the service refuses a change with while another change to the SAME
@@ -541,8 +543,8 @@ async fn an_id_that_names_no_endpoint_is_refused_and_nothing_is_changed() {
         )
         .await;
         assert_eq!(
-            answer.status, 409,
-            "case {case:?}: expected 409, got {} with {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case {case:?}: expected {RECORDED_NOT_FOUND_STATUS}, got {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(

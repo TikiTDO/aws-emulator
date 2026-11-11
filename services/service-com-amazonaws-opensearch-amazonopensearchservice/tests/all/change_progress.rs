@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 
 use super::domain_lifecycle::{
     baseline_create, change_rows, create_baseline, error_code, string_member, Answer, Emulator,
-    CHANGE_LOG_GROUP, PREFIX, SETTLE_WAIT,
+    CHANGE_LOG_GROUP, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
 };
 
 /// A well-formed `GUID` that names no change: the id space is 128 bits wide and the
@@ -474,13 +474,13 @@ async fn an_absent_domain_is_the_generic_envelope_and_an_absent_change_the_model
         (
             "present-domain",
             Some(ABSENT_CHANGE_ID),
-            409,
+            RECORDED_NOT_FOUND_STATUS,
             "ResourceNotFoundException",
         ),
         (
             "present-domain",
             Some(other.as_str()),
-            409,
+            RECORDED_NOT_FOUND_STATUS,
             "ResourceNotFoundException",
         ),
     ] {
@@ -613,7 +613,7 @@ async fn a_malformed_change_id_is_refused_by_the_modelled_constraint() {
     // groups reach the handler, which answers for the change they name.
     let answer = progress(&emulator, name, Some(ABSENT_CHANGE_ID)).await;
     assert_eq!(
-        answer.status, 409,
+        answer.status, RECORDED_NOT_FOUND_STATUS,
         "case DescribeDomainChangeProgress(changeid={ABSENT_CHANGE_ID:?}): a well-formed id \
          reaches the handler, got {} with {:?}",
         answer.status, answer.body

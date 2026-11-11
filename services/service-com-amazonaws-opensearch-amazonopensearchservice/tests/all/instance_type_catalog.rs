@@ -45,7 +45,7 @@ use serde_json::{json, Value};
 use service_com_amazonaws_opensearch_amazonopensearchservice::ops::types::OPEN_SEARCH_PARTITION_INSTANCE_TYPE_VALUES;
 use service_com_amazonaws_opensearch_amazonopensearchservice::state::publishes_every_modelled_instance_type;
 
-use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX};
+use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS};
 
 /// The engine versions every table below spans: the oldest Elasticsearch release, each
 /// release an instance family or a feature is gated on, one either side of it, and
@@ -1181,8 +1181,8 @@ async fn a_request_naming_no_domain_or_no_release_is_refused() {
     for absent in ["nosuch", "absent-domain", "zzz"] {
         let answer = list(&emulator, version, &format!("domainName={absent}")).await;
         assert_eq!(
-            answer.status, 409,
-            "case {absent}: expected HTTP 409, got {} {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case {absent}: expected HTTP {RECORDED_NOT_FOUND_STATUS}, got {} {:?}",
             answer.status, answer.body
         );
         assert_eq!(
@@ -1207,8 +1207,8 @@ async fn a_request_naming_no_domain_or_no_release_is_refused() {
         .await;
     let after = list(&emulator, version, &format!("domainName={name}")).await;
     assert_eq!(
-        after.status, 409,
-        "case deleted domain: expected HTTP 409, got {} {:?}",
+        after.status, RECORDED_NOT_FOUND_STATUS,
+        "case deleted domain: expected HTTP {RECORDED_NOT_FOUND_STATUS}, got {} {:?}",
         after.status, after.body
     );
 

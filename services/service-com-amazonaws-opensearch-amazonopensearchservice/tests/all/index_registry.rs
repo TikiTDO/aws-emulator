@@ -246,8 +246,9 @@ async fn every_created_index_is_read_back_with_the_schema_it_was_created_with() 
         let case = format!("other-domain/{:?}", row.name);
         let read = get(&emulator, "other-domain", &row.name).await;
         assert_eq!(
-            read.status, 409,
-            "case GetIndex({case}): expected 409 for another domain's index, got {} with {:?}",
+            read.status, RECORDED_NOT_FOUND_STATUS,
+            "case GetIndex({case}): expected {RECORDED_NOT_FOUND_STATUS} for another domain's \
+             index, got {} with {:?}",
             read.status, read.body
         );
         assert_eq!(
@@ -495,9 +496,9 @@ async fn both_operations_refuse_a_domain_or_an_index_the_store_does_not_hold() {
 
         let read = get(&emulator, domain, "any-index").await;
         assert_eq!(
-            read.status, 409,
-            "case GetIndex({domain:?}): expected 409 for a domain the store does not hold, got \
-             {} with {:?}",
+            read.status, RECORDED_NOT_FOUND_STATUS,
+            "case GetIndex({domain:?}): expected {RECORDED_NOT_FOUND_STATUS} for a domain the \
+             store does not hold, got {} with {:?}",
             read.status, read.body
         );
         assert_eq!(
@@ -521,9 +522,9 @@ async fn both_operations_refuse_a_domain_or_an_index_the_store_does_not_hold() {
     for index in ["absent-index", "present-index.v2"] {
         let read = get(&emulator, "held-domain", index).await;
         assert_eq!(
-            read.status, 409,
-            "case GetIndex(held-domain/{index:?}): expected 409 for a name that names no index, \
-             got {} with {:?}",
+            read.status, RECORDED_NOT_FOUND_STATUS,
+            "case GetIndex(held-domain/{index:?}): expected {RECORDED_NOT_FOUND_STATUS} for a \
+             name that names no index, got {} with {:?}",
             read.status, read.body
         );
         assert_eq!(

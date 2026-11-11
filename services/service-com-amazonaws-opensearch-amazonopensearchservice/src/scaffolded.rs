@@ -177,18 +177,53 @@ impl SerializableStruct for ValidationException {
     }
 }
 
-/// The HTTP status this service answers the missing-resource refusals BELOW with.
+/// The HTTP status this service answers EVERY missing-resource refusal with.
 ///
-/// The model annotates `ResourceNotFoundException` with `@httpError(409)`, which is
-/// the status the shape renders by default; the recorded wire answer of each refusal
-/// that reaches for this is HTTP 404. What a client sees is the requirement and no
-/// modeled annotation can express it, so the status is stated once here and named at
-/// each refusal that carries it ([`Scaffolded::not_found`]).
+/// The model annotates `ResourceNotFoundException` with `@httpError(409)`, which is the
+/// status the shape would render by default; the recorded wire answer of a refusal
+/// carrying that shape is HTTP 404, on every operation of this service a recording
+/// covers. What a client sees is the requirement and no modeled annotation can express
+/// it, so the status is stated once here and applied wherever the shape is serialized
+/// ([`wire_status`]) rather than at each refusal: a client branching on the status
+/// (404 -> absent, 409 -> a conflict worth retrying) must take the same branch for
+/// every resource this service cannot resolve.
 ///
-/// It is NOT applied to every refusal of the shape: which operations' refusals the
-/// recordings cover is what the evidence bounds, and the status of the rest is their
-/// own open question.
+/// It is NOT split per operation, and an earlier reading that it was is superseded: the
+/// sweep that produced this mapping found the recorded answer to be 404 for the whole
+/// SET of this service's not-found refusals — 28 operations' clusters, the maintenance
+/// start and the maintenance read among them — so a per-operation status was the absence
+/// of a recording for that operation rather than evidence of a different status. Do not
+/// re-split it; a refusal that the recordings show on another status is a different
+/// error SHAPE (the generic envelope on 400, the conflict on 409), which this mapping
+/// leaves alone.
+///
+/// `pub` on purpose: the handlers that raise the shape cite it in their comments instead
+/// of restating the number, and so does the cross-service suite that reads a
+/// stack-deleted domain back.
 pub const RESOURCE_NOT_FOUND_STATUS: u16 = 404;
+
+/// The wire error code of this service's missing-resource error shape — what
+/// [`OperationError::shape_name`] renders into `__type` and `x-amzn-errortype`, and so
+/// the one thing that tells that shape apart from every other modeled error here.
+///
+/// The code rather than the shape id, because the code is what the status travels beside
+/// on the wire: a client reads the pair, and an error widened in from another namespace
+/// that renders this code is the same answer to it.
+const RESOURCE_NOT_FOUND_CODE: &str = "ResourceNotFoundException";
+
+/// The status this service answers `error` on: the modeled status of the shape, except
+/// for the missing-resource shape, which answers [`RESOURCE_NOT_FOUND_STATUS`].
+///
+/// ONE function decides it for every operation, so no two refusals carrying one shape
+/// can answer on different statuses and a handler states a refusal by its shape alone.
+/// Neither the error code nor the body is touched: only the status line.
+fn wire_status<E: OperationError + ?Sized>(error: &E) -> u16 {
+    if error.shape_name() == RESOURCE_NOT_FOUND_CODE {
+        RESOURCE_NOT_FOUND_STATUS
+    } else {
+        error.http_status()
+    }
+}
 
 /// An operation's error channel: either the synthetic scaffold signal, or one of the
 /// operation's own modeled errors.
@@ -196,19 +231,9 @@ pub const RESOURCE_NOT_FOUND_STATUS: u16 = 404;
 pub enum Scaffolded<E> {
     /// The operation is generated but has no implementation. Renders as HTTP 501.
     NotImplemented(NotImplemented),
-    /// A modeled error the operation declares. Renders with the model's own status.
+    /// A modeled error the operation declares. Renders on the status this service
+    /// answers that shape on ([`wire_status`]).
     Modeled(E),
-    /// A modeled error answered with the status the REAL service returns, where that
-    /// is not the status the model annotates.
-    ///
-    /// The error code and the body are the model's own; only the HTTP status is the
-    /// handler's. This service annotates `ResourceNotFoundException` with
-    /// `@httpError(409)` while the recorded wire answer of the refusals that reach for
-    /// [`Scaffolded::not_found`] is HTTP 404 — which no modeled annotation can express.
-    /// Reach for this ONLY with recorded evidence of the status the service answers
-    /// with, and cite that evidence where you construct it: a status chosen without
-    /// evidence silently contradicts the model.
-    ModeledWithStatus { error: E, status: u16 },
     /// The request was refused as invalid. Renders as HTTP 400 with the error code
     /// `ValidationException`.
     ///
@@ -226,21 +251,6 @@ impl<E> Scaffolded<E> {
     /// The scaffold signal for `operation`.
     pub fn not_implemented(operation: &str) -> Self {
         Self::NotImplemented(NotImplemented::new(operation))
-    }
-
-    /// Answer `error` with `status` rather than the status its `@httpError` trait
-    /// declares. See [`Scaffolded::ModeledWithStatus`].
-    pub fn modeled_with_status(error: E, status: u16) -> Self {
-        Self::ModeledWithStatus { error, status }
-    }
-
-    /// Answer `error` — a MISSING-RESOURCE refusal whose recorded wire answer is
-    /// [`RESOURCE_NOT_FOUND_STATUS`] — on that status rather than the shape's own.
-    ///
-    /// One place states the status, so the refusals that carry it cannot drift apart;
-    /// cite the recorded refusal where you call this.
-    pub fn not_found(error: E) -> Self {
-        Self::modeled_with_status(error, RESOURCE_NOT_FOUND_STATUS)
     }
 
     /// Refuse the request as invalid, with HTTP 400 `ValidationException`.
@@ -266,7 +276,7 @@ impl<E: std::fmt::Display> std::fmt::Display for Scaffolded<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotImplemented(e) => write!(f, "{e}"),
-            Self::Modeled(e) | Self::ModeledWithStatus { error: e, .. } => write!(f, "{e}"),
+            Self::Modeled(e) => write!(f, "{e}"),
             Self::ValidationException(e) => write!(f, "{e}"),
         }
     }
@@ -278,7 +288,7 @@ impl<E: std::error::Error + 'static> std::error::Error for Scaffolded<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::NotImplemented(e) => e.source(),
-            Self::Modeled(e) | Self::ModeledWithStatus { error: e, .. } => e.source(),
+            Self::Modeled(e) => e.source(),
             Self::ValidationException(e) => e.source(),
         }
     }
@@ -292,7 +302,7 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
     fn as_serializable(&self) -> &dyn SerializableStruct {
         match self {
             Self::NotImplemented(e) => e,
-            Self::Modeled(e) | Self::ModeledWithStatus { error: e, .. } => e.as_serializable(),
+            Self::Modeled(e) => e.as_serializable(),
             Self::ValidationException(e) => e,
         }
     }
@@ -300,7 +310,7 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
     fn variant_schema(&self) -> &'static Schema {
         match self {
             Self::NotImplemented(_) => &NOT_IMPLEMENTED_SCHEMA,
-            Self::Modeled(e) | Self::ModeledWithStatus { error: e, .. } => e.variant_schema(),
+            Self::Modeled(e) => e.variant_schema(),
             Self::ValidationException(_) => &VALIDATION_EXCEPTION_SCHEMA,
         }
     }
@@ -312,7 +322,7 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
     fn shape_name(&self) -> &'static str {
         match self {
             Self::NotImplemented(_) => "NotImplemented",
-            Self::Modeled(e) | Self::ModeledWithStatus { error: e, .. } => e.shape_name(),
+            Self::Modeled(e) => e.shape_name(),
             Self::ValidationException(_) => "ValidationException",
         }
     }
@@ -324,10 +334,10 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
     fn http_status(&self) -> u16 {
         match self {
             Self::NotImplemented(_) => 501,
-            Self::Modeled(e) => e.http_status(),
-            // The one variant that does NOT take the model's status: the handler
-            // states the status the service was recorded answering with.
-            Self::ModeledWithStatus { status, .. } => *status,
+            // Not `e.http_status()`: the status a modeled shape is answered on is this
+            // service's ([`wire_status`]), which is the model's for every shape but the
+            // missing-resource one.
+            Self::Modeled(e) => wire_status(e),
             Self::ValidationException(_) => 400,
         }
     }
@@ -338,7 +348,7 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
             // no `awsQueryError` trait to honour. The 501 + `<Code>NotImplemented`
             // envelope carries the signal on the query protocols too.
             Self::NotImplemented(_) => None,
-            Self::Modeled(e) | Self::ModeledWithStatus { error: e, .. } => e.query_error_code(),
+            Self::Modeled(e) => e.query_error_code(),
             // Same reason: the synthetic shape carries no `awsQueryError` trait.
             Self::ValidationException(_) => None,
         }

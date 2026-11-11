@@ -44,7 +44,7 @@ use super::connection_decisions::{
     status_code, walks_to_rejected, POLL_INTERVAL,
 };
 use super::cross_cluster_connections::{created_domain, domain_info, ACCOUNT, REGION};
-use super::domain_lifecycle::{error_code, Answer, Emulator, SETTLE_WAIT};
+use super::domain_lifecycle::{error_code, Answer, Emulator, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT};
 
 /// The two deletes of one connection, named so an assertion says which one answered.
 const DELETES: [&str; 2] = ["DeleteOutboundConnection", "DeleteInboundConnection"];
@@ -225,8 +225,8 @@ async fn an_id_this_account_never_held_is_refused_by_both_deletes() {
         for operation in DELETES {
             let answer = delete_through(&emulator, operation, id).await;
             assert_eq!(
-                answer.status, 409,
-                "case {operation}({id:?}): expected 409, got {} with {:?}",
+                answer.status, RECORDED_NOT_FOUND_STATUS,
+                "case {operation}({id:?}): expected {RECORDED_NOT_FOUND_STATUS}, got {} with {:?}",
                 answer.status, answer.body
             );
             assert_eq!(

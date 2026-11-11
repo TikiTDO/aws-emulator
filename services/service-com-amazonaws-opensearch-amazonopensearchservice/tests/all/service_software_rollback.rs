@@ -32,7 +32,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
     ROLLBACK_WINDOW,
 };
 
-use super::domain_lifecycle::{create_baseline, error_code, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    create_baseline, error_code, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 
 /// `POST /2021-01-01/opensearch/serviceSoftwareUpdate/rollback`.
 async fn rollback(emulator: &Emulator, name: &str) -> Answer {
@@ -371,8 +373,9 @@ async fn a_rollback_on_a_domain_that_does_not_exist_is_the_modelled_not_found() 
     for name in ["absent-domain", "deleted-domain"] {
         let answer = rollback(&emulator, name).await;
         assert_eq!(
-            answer.status, 409,
-            "case RollbackServiceSoftwareUpdate({name:?}): expected 409, got {} with {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case RollbackServiceSoftwareUpdate({name:?}): expected \
+             {RECORDED_NOT_FOUND_STATUS}, got {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(

@@ -40,6 +40,7 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::epoch_milli
 
 use super::domain_lifecycle::{
     baseline_create, create_baseline, error_code, Answer, Emulator, PREFIX,
+    RECORDED_NOT_FOUND_STATUS,
 };
 use super::scheduled_actions::{base_instant, base_millis, rows, seed, Row};
 
@@ -564,8 +565,8 @@ async fn an_action_id_that_names_no_change_of_the_domain_is_refused() {
         )
         .await;
         assert_eq!(
-            answer.status, 409,
-            "case {case}: expected HTTP 409, got {} with {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case {case}: expected HTTP {RECORDED_NOT_FOUND_STATUS}, got {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(
@@ -716,8 +717,8 @@ async fn a_domain_the_account_does_not_hold_has_no_change_to_reschedule() {
         )
         .await;
         assert_eq!(
-            answer.status, 409,
-            "case {case}: expected HTTP 409, got {} with {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case {case}: expected HTTP {RECORDED_NOT_FOUND_STATUS}, got {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(

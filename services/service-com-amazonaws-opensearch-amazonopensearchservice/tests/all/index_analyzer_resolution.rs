@@ -29,14 +29,14 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::BUILT_IN_AN
 
 use super::control_plane_refusal_wording::message;
 use super::data_source_registry::created_domain;
-use super::domain_lifecycle::{error_code, Emulator};
+use super::domain_lifecycle::{error_code, Emulator, RECORDED_NOT_FOUND_STATUS};
 use super::index_registry::{create as create_index, created_index, get as get_index, stored_names};
 use super::index_schema_updates::{read_schema, update, updated_index};
 
 /// The status `GetIndex` answers for a name that names no index of a domain the store
-/// does hold — the modelled status of its `ResourceNotFoundException`, the one the
-/// sibling index suite pins.
-const INDEX_NOT_FOUND_STATUS: u16 = 409;
+/// does hold — the status this service carries every missing-resource refusal on, the
+/// one the sibling index suite pins.
+const INDEX_NOT_FOUND_STATUS: u16 = RECORDED_NOT_FOUND_STATUS;
 
 /// The domain every case in this suite drives.
 const DOMAIN: &str = "analysis-domain";

@@ -30,7 +30,9 @@
 
 use serde_json::{json, Value};
 
-use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 use super::instance_type_limits::published_volume_size_range;
 
 /// The pairings the table spans: one row per instance SIZE the published maximum
@@ -161,7 +163,7 @@ async fn a_volume_outside_the_published_range_is_a_service_limit_refusal_on_crea
                 // A refused create stores nothing.
                 let stored = emulator.describe(&name).await;
                 assert_eq!(
-                    stored.status, 409,
+                    stored.status, RECORDED_NOT_FOUND_STATUS,
                     "case {case}: expected no domain to have been created, got {} {:?}",
                     stored.status, stored.body
                 );
@@ -439,7 +441,7 @@ async fn a_create_refused_by_the_published_bounds_materialises_no_domain() {
                 ("DescribeDomainConfig", emulator.describe_config(&name).await),
             ] {
                 assert_eq!(
-                    answer.status, 409,
+                    answer.status, RECORDED_NOT_FOUND_STATUS,
                     "case {case} {reader}: expected no domain to have been created, got {} {:?}",
                     answer.status, answer.body
                 );

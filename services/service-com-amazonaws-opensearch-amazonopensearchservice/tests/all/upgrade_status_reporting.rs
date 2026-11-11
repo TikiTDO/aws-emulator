@@ -31,7 +31,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
     UPGRADE_STEP_UPGRADE,
 };
 
-use super::domain_lifecycle::{error_code, string_member, Emulator, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, string_member, Emulator, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 use super::upgrade_history::{entries, expected_name, history, settled_domain, upgrade};
 use super::upgrade_status::{reported, seed_run, status, PROGRESS};
 
@@ -320,8 +322,9 @@ async fn repeated_polls_report_no_step_where_there_is_none_and_mint_nothing() {
         for poll in 0..POLLS {
             let answer = status(&emulator, name).await;
             assert_eq!(
-                answer.status, 409,
-                "case absent {name:?} poll {poll}: expected HTTP 409, got {} with {:?}",
+                answer.status, RECORDED_NOT_FOUND_STATUS,
+                "case absent {name:?} poll {poll}: expected HTTP {RECORDED_NOT_FOUND_STATUS}, got \
+                 {} with {:?}",
                 answer.status, answer.body
             );
             assert_eq!(
@@ -342,7 +345,10 @@ async fn repeated_polls_report_no_step_where_there_is_none_and_mint_nothing() {
         let described = emulator.describe(name).await;
         assert_eq!(
             (described.status, error_code(&described)),
-            (409, "ResourceNotFoundException".to_string()),
+            (
+                RECORDED_NOT_FOUND_STATUS,
+                "ResourceNotFoundException".to_string(),
+            ),
             "case absent {name:?}: expected the polls to mint no domain, got {} with {:?}",
             described.status,
             described.body

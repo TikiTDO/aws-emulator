@@ -44,7 +44,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
     ATTACHMENT_STATUS_PENDING,
 };
 
-use super::domain_lifecycle::{error_code, string_member, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, string_member, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 
 /// `AttachDataSource`: `POST /2021-01-01/opensearch/application/{id}/attachDataSource`.
 pub(crate) async fn attach(emulator: &Emulator, id: &str, body: Value) -> Answer {
@@ -839,8 +841,8 @@ async fn a_detached_data_source_leaves_the_set() {
         ),
     ] {
         assert_eq!(
-            answer.status, 409,
-            "case {case}: expected 409, got {} with {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case {case}: expected {RECORDED_NOT_FOUND_STATUS}, got {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(
@@ -1090,8 +1092,8 @@ async fn every_attachment_operation_refuses_an_id_that_names_no_application() {
         ] {
             let case = format!("{operation} for the unknown application {id:?}");
             assert_eq!(
-                answer.status, 409,
-                "case {case}: expected 409, got {} with {:?}",
+                answer.status, RECORDED_NOT_FOUND_STATUS,
+                "case {case}: expected {RECORDED_NOT_FOUND_STATUS}, got {} with {:?}",
                 answer.status, answer.body
             );
             assert_eq!(

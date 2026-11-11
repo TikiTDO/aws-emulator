@@ -31,7 +31,7 @@ use serde_json::{json, Value};
 
 use super::domain_lifecycle::{
     change_rows, create_baseline, error_code, string_member, Answer, Emulator, CHANGE_LOG_GROUP,
-    PREFIX, SETTLE_WAIT,
+    PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
 };
 
 /// A well-formed `GUID` that names no dry run: the id space is 128 bits wide and the
@@ -396,9 +396,9 @@ async fn an_absent_domain_or_dry_run_is_the_modelled_not_found() {
     ] {
         let answer = dry_run_progress(&emulator, name, dry_run_id, None).await;
         assert_eq!(
-            answer.status, 409,
-            "case DescribeDryRunProgress({name:?}, {dry_run_id:?}): expected 409, got {} with \
-             {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case DescribeDryRunProgress({name:?}, {dry_run_id:?}): expected \
+             {RECORDED_NOT_FOUND_STATUS}, got {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(
@@ -488,7 +488,7 @@ async fn only_a_verbose_dry_run_leaves_a_run_to_report_on() {
             );
         } else {
             assert_eq!(
-                progress.status, 409,
+                progress.status, RECORDED_NOT_FOUND_STATUS,
                 "case DescribeDryRunProgress({case}): a mode that starts no analysis leaves \
                  nothing to report, got {} with {:?}",
                 progress.status, progress.body
@@ -541,7 +541,7 @@ async fn a_malformed_dry_run_id_is_refused_by_the_modelled_constraint() {
     // reach the handler, which answers for the run they name.
     let answer = dry_run_progress(&emulator, name, Some(ABSENT_DRY_RUN_ID), None).await;
     assert_eq!(
-        answer.status, 409,
+        answer.status, RECORDED_NOT_FOUND_STATUS,
         "case DescribeDryRunProgress(dryRunId={ABSENT_DRY_RUN_ID:?}): a well-formed id reaches \
          the handler, got {} with {:?}",
         answer.status, answer.body

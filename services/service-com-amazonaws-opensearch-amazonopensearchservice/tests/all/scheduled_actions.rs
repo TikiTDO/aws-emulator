@@ -36,7 +36,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::ops::types::{
 };
 use service_com_amazonaws_opensearch_amazonopensearchservice::state::ScheduledChange;
 
-use super::domain_lifecycle::{create_baseline, error_code, Answer, Emulator, PREFIX};
+use super::domain_lifecycle::{
+    create_baseline, error_code, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS,
+};
 
 /// One row of the scheduled-change table: the action id, its type, its severity, how
 /// far from the base instant it is scheduled, its description, who scheduled it, its
@@ -520,8 +522,9 @@ async fn a_domain_the_account_does_not_hold_has_no_listing() {
     ] {
         let answer = list(&emulator, name, "").await;
         assert_eq!(
-            answer.status, 409,
-            "case ListScheduledActions({name:?}): expected 409, got {} with {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case ListScheduledActions({name:?}): expected {RECORDED_NOT_FOUND_STATUS}, got {} \
+             with {:?}",
             answer.status, answer.body
         );
         assert_eq!(

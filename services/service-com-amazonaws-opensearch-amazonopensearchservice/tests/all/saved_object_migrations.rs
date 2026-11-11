@@ -743,18 +743,14 @@ async fn an_id_naming_no_job_is_refused() {
 
     for (case, held_by, pinned) in rows {
         let answer = get_migration(&emulator, &case).await;
-        // The refusal for an APPLICATION this account does not hold is answered on the
-        // status this service's recorded wire answer carries it on; the refusal for a
-        // JOB of an application it DOES hold is covered by no recording, so it keeps the
-        // status its shape declares.
-        let expected_status = match held_by {
-            Some(_) => 409,
-            None => RECORDED_NOT_FOUND_STATUS,
-        };
+        // Both refusals are a resource this account does not hold — the APPLICATION the
+        // id's leading segment names, or the JOB an application it holds carries none of
+        // — so both are answered on the one status this service carries that shape on.
         assert_eq!(
             (answer.status, error_code(&answer).as_str()),
-            (expected_status, "ResourceNotFoundException"),
-            "case {case:?}: expected {expected_status} ResourceNotFoundException, got {} with {:?}",
+            (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
+            "case {case:?}: expected {RECORDED_NOT_FOUND_STATUS} ResourceNotFoundException, got \
+             {} with {:?}",
             answer.status,
             answer.body
         );

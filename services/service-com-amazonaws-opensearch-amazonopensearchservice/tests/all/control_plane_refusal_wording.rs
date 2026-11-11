@@ -145,7 +145,7 @@ async fn an_application_refusal_states_the_sentence_of_the_surface_it_was_asked_
             let case = format!("{operation} for the absent application {id:?}");
             assert_eq!(
                 (answer.status, error_code(&answer).as_str()),
-                (409, "ResourceNotFoundException"),
+                (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
                 "case {case}: expected the modelled not-found, got {} with {:?}",
                 answer.status,
                 answer.body
@@ -184,7 +184,7 @@ async fn an_application_refusal_states_the_sentence_of_the_surface_it_was_asked_
             let case = format!("{operation} for the absent application {id:?}");
             assert_eq!(
                 (answer.status, error_code(&answer).as_str()),
-                (409, "ResourceNotFoundException"),
+                (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
                 "case {case}: expected the modelled not-found, got {} with {:?}",
                 answer.status,
                 answer.body
@@ -198,17 +198,18 @@ async fn an_application_refusal_states_the_sentence_of_the_surface_it_was_asked_
         }
 
         // `StartMigration` states what the CRUD surface states about such an id — that
-        // no such application exists — with the id named in it, under the status the
-        // service answers its miss with: the modelled shape's `@httpError` is 409 and
-        // the recorded answer for a start naming an application this account does not
-        // hold is 404.
+        // no such application exists — with the id named in it, under the status this
+        // service answers a missing resource on: the modelled shape's `@httpError` is
+        // 409 and the recorded answer for a start naming an application this account
+        // does not hold is 404.
         let started = start_migration(&emulator, &id).await;
         let case = format!("StartMigration for the absent application {id:?}");
         let states = format!("Application {id} does not exist");
         assert_eq!(
             (started.status, error_code(&started).as_str()),
-            (404, "ResourceNotFoundException"),
-            "case {case}: expected the modelled not-found under 404, got {} with {:?}",
+            (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
+            "case {case}: expected the modelled not-found under {RECORDED_NOT_FOUND_STATUS}, got \
+             {} with {:?}",
             started.status,
             started.body
         );
@@ -244,7 +245,7 @@ async fn an_application_refusal_states_the_sentence_of_the_surface_it_was_asked_
             format!("{expected} for account {}", ::engine::emulator_account_id());
         assert_eq!(
             (attached.status, error_code(&attached).as_str()),
-            (409, "ResourceNotFoundException"),
+            (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
             "case AttachDataSource for the absent application {id:?}: expected the modelled \
              not-found, got {} with {:?}",
             attached.status,
@@ -336,7 +337,7 @@ async fn the_attachment_refusals_name_the_application_and_the_data_source() {
             let case = format!("{operation} for the unattached data source {arn:?}");
             assert_eq!(
                 (answer.status, error_code(&answer).as_str()),
-                (409, "ResourceNotFoundException"),
+                (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
                 "case {case}: expected the modelled not-found, got {} with {:?}",
                 answer.status,
                 answer.body
@@ -596,7 +597,7 @@ async fn the_observability_reads_of_an_absent_domain_answer_the_generic_envelope
             (
                 "ListScheduledActions",
                 format!("{PREFIX}/opensearch/domain/{name}/scheduledActions"),
-                409,
+                RECORDED_NOT_FOUND_STATUS,
                 "ResourceNotFoundException",
                 not_found.as_str(),
             ),

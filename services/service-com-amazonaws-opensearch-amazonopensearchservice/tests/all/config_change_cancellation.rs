@@ -27,7 +27,7 @@ use serde_json::{json, Value};
 
 use super::domain_lifecycle::{
     change_rows, create_baseline, error_code, string_member, Answer, Emulator, CHANGE_LOG_GROUP,
-    PREFIX, SETTLE_WAIT,
+    PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
 };
 
 /// `POST /2021-01-01/opensearch/domain/{DomainName}/config/cancel`.
@@ -409,7 +409,7 @@ async fn a_domain_outside_the_states_a_change_exists_in_is_refused() {
     let answer = cancel(&emulator, "absent-domain", None).await;
     assert_eq!(
         (answer.status, error_code(&answer).as_str()),
-        (409, "ResourceNotFoundException"),
+        (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
         "case an unknown domain: expected the modelled not-found, got {} with {:?}",
         answer.status,
         answer.body

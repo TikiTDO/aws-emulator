@@ -201,19 +201,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // naming neither half of the address: which half failed to resolve is not
         // disclosed, exactly as the feedback submission that addresses an insight the
         // same way reports it ([`crate::state::insight_resource_not_found`]) — on the
-        // status its recorded wire answer carries
-        // ([`crate::scaffolded::RESOURCE_NOT_FOUND_STATUS`]).
+        // status this service answers that shape on
+        // (`crate::scaffolded::RESOURCE_NOT_FOUND_STATUS`).
         //
         // The ID is not resolved that way: a detail read of an id the entity holds no
         // insight under is ANSWERED, which is what the recorded wire answer for such a
         // read does, so it resolves to no insight of that entity rather than to a
         // refusal.
-        let address_not_found = || {
-            crate::scaffolded::Scaffolded::not_found(
-                DescribeInsightDetailsErrorModeled::ResourceNotFoundException(
-                    crate::state::insight_resource_not_found(),
-                ),
+        let address_not_found = || -> DescribeInsightDetailsError {
+            DescribeInsightDetailsErrorModeled::ResourceNotFoundException(
+                crate::state::insight_resource_not_found(),
             )
+            .into()
         };
         let insight = store
             .insight_of_entity(&input.entity, &input.insight_id)

@@ -218,14 +218,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         // The recorded wire answer for a filter naming an offering the
                         // catalog publishes nothing for is HTTP 404, which is not the
                         // status this model's `ResourceNotFoundException` annotates — so
-                        // the refusal states it
-                        // ([`crate::scaffolded::RESOURCE_NOT_FOUND_STATUS`]) rather than
-                        // taking the shape's own.
-                        return Err(crate::scaffolded::Scaffolded::not_found(
+                        // this service answers the shape on
+                        // (`crate::scaffolded::RESOURCE_NOT_FOUND_STATUS`) wherever it
+                        // is serialized rather than on the shape's own.
+                        return Err(
                             DescribeReservedInstanceOfferingsErrorModeled::ResourceNotFoundException(
                                 crate::state::offering_not_found(),
-                            ),
-                        ));
+                            )
+                            .into(),
+                        );
                     };
                     vec![offering]
                 }

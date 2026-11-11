@@ -398,9 +398,8 @@ async fn a_domain_with_work_in_flight_refuses_every_call_that_needs_a_quiet_one(
             &format!("DescribeDomainNodes({work:?})"),
         );
 
-        // The two calls that name a node of that same census. The listing carries the
-        // status the service was recorded answering it with; the start carries the one
-        // its shape declares.
+        // The two calls that name a node of that same census. Both carry the status
+        // this service answers a missing resource on.
         assert_refusal(
             &maintenances(&emulator, name).await,
             RECORDED_NOT_FOUND_STATUS,
@@ -410,7 +409,7 @@ async fn a_domain_with_work_in_flight_refuses_every_call_that_needs_a_quiet_one(
         );
         assert_refusal(
             &start_maintenance(&emulator, name, ABSENT_NODE_ID).await,
-            409,
+            RECORDED_NOT_FOUND_STATUS,
             "ResourceNotFoundException",
             INVALID_NODE_ID,
             &format!("StartDomainMaintenance({work:?})"),
@@ -694,7 +693,7 @@ async fn a_cancel_is_served_only_in_the_states_a_change_exists_in() {
             Work::Deploying => {
                 assert_eq!(
                     (answer.status, error_code(&answer).as_str()),
-                    (409, "ResourceNotFoundException"),
+                    (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
                     "case {case}: expected the state to be allowed and no change to be found, \
                      got {} with {:?}",
                     answer.status,

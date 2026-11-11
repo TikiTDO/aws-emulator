@@ -33,7 +33,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
     APPLICATION_DOES_NOT_EXIST, APPLICATION_STATUS_ACTIVE, APPLICATION_STATUS_CREATING,
 };
 
-use super::domain_lifecycle::{error_code, string_member, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, string_member, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 
 /// The two values `AppConfigType` declares
 /// (`smithy_query(query="shape",shape="AppConfigType")`), so the table below changes a
@@ -658,7 +660,7 @@ async fn an_update_of_an_id_that_names_no_application_is_refused() {
         )
         .await;
         assert_eq!(
-            refused.status, 409,
+            refused.status, RECORDED_NOT_FOUND_STATUS,
             "case {id}: an id naming no application is refused, got {} with {:?}",
             refused.status, refused.body
         );
@@ -679,7 +681,7 @@ async fn an_update_of_an_id_that_names_no_application_is_refused() {
         // application at all.
         let read = get_application(&emulator, &id).await;
         assert_eq!(
-            read.status, 409,
+            read.status, RECORDED_NOT_FOUND_STATUS,
             "case {id}: a refused update mints no application, got {} with {:?}",
             read.status, read.body
         );

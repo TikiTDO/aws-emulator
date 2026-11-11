@@ -30,7 +30,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
     UPGRADE_STEP_PRE_UPGRADE_CHECK, UPGRADE_STEP_SNAPSHOT, UPGRADE_STEP_UPGRADE,
 };
 
-use super::domain_lifecycle::{error_code, string_member, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, string_member, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 
 /// The span the seeded runs below are given: long enough that reading a fraction of it
 /// back through the wire lands well inside the step that fraction falls in, whatever
@@ -418,8 +420,8 @@ async fn a_domain_with_no_run_and_a_name_with_no_domain_report_no_step() {
     for name in ["status-absent", "sta", "status-absent-with-a-much-l"] {
         let answer = status(&emulator, name).await;
         assert_eq!(
-            answer.status, 409,
-            "case absent {name:?}: expected HTTP 409, got {} with {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case absent {name:?}: expected HTTP {RECORDED_NOT_FOUND_STATUS}, got {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(

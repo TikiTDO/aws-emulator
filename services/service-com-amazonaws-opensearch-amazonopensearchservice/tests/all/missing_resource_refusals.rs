@@ -24,10 +24,9 @@
 //!   published set stays the malformed request it is, the insight an entity DOES hold is
 //!   reported, and an id a resolved entity holds no insight under is answered with the
 //!   guidance the service states about an insight's details;
-//! * each of those refusals is answered on the status this service's recorded wire
-//!   answer carries a missing-resource refusal on
-//!   ([`RECORDED_NOT_FOUND_STATUS`]), which is not the status the error shape's own
-//!   `@httpError` declares.
+//! * each of those refusals is answered the way every missing-resource refusal of this
+//!   service is answered ([`assert_missing_resource`]), which is not the status the error
+//!   shape's own `@httpError` declares.
 
 use std::time::SystemTime;
 
@@ -36,13 +35,12 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::ops::types::INSIGH
 
 use super::control_plane_refusal_wording::message;
 use super::data_source_registry::created_domain;
-use super::domain_lifecycle::{
-    error_code, Answer, Emulator, RECORDED_NOT_FOUND_STATUS,
-};
+use super::domain_lifecycle::{error_code, Answer, Emulator};
 use super::domain_maintenance::{start as start_maintenance, MAINTENANCE_TYPES};
 use super::index_registry::{create as create_index, stored_names};
 use super::index_schema_updates::update as update_index;
 use super::insight_details::{describe_insight, domain_entity, guid, raise_on_domain, record};
+use super::missing_resource_status::{absent_domains, assert_missing_resource};
 use super::saved_object_migrations::get_migration;
 
 /// The index name every row below writes under: inside `IndexName`'s own modelled
@@ -51,14 +49,6 @@ const INDEX: &str = "catalog";
 
 /// A `NodeId` inside `NodeId`'s `@length(10, 40)` that no node census publishes.
 const ABSENT_NODE_ID: &str = "0123456789abcdef0123456789abcdef";
-
-/// Domain names inside `DomainName`'s own constraint (`@length(3, 28)` and
-/// `^[a-z][a-z0-9\-]+$`) that this account holds no domain under: the shortest the model
-/// admits, the longest, and one of ordinary length — so each rule is asserted over the
-/// shape of the name as well as over the request.
-fn absent_domains() -> [&'static str; 3] {
-    ["abc", "a-domain-name-at-its-upper-b", "never-created-domain"]
-}
 
 /// The `IndexSchema` documents an index write's own rule refuses: the member is a
 /// modelled document "defining index mappings, settings, and semantic enrichment
@@ -73,18 +63,11 @@ fn malformed_schemas() -> Vec<(&'static str, Value)> {
     ]
 }
 
-/// Assert `answer` is the missing-resource refusal of the domain `name`: the modelled
-/// error code, on the status this service's recorded wire answer carries it on, naming
-/// the name the request carried.
+/// Assert `answer` is the missing-resource refusal of the domain `name`: the status and
+/// the error code every missing-resource refusal of this service carries
+/// ([`assert_missing_resource`]), naming the name the request carried.
 fn assert_missing_domain(answer: &Answer, case: &str, name: &str) {
-    assert_eq!(
-        (answer.status, error_code(answer).as_str()),
-        (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
-        "case {case}: expected {RECORDED_NOT_FOUND_STATUS} ResourceNotFoundException, got {} \
-         with {:?}",
-        answer.status,
-        answer.body
-    );
+    assert_missing_resource(answer, case);
     let expected = format!("Domain not found: {name}");
     assert_eq!(
         message(answer),
@@ -221,14 +204,7 @@ async fn a_read_of_one_insight_names_neither_half_of_an_entity_it_cannot_resolve
         for id in &ids {
             let answer = describe_insight(&emulator, domain_entity(absent), id, json!({})).await;
             let case = format!("DescribeInsightDetails(DomainName {absent:?}, {id})");
-            assert_eq!(
-                (answer.status, error_code(&answer).as_str()),
-                (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
-                "case {case}: expected {RECORDED_NOT_FOUND_STATUS} ResourceNotFoundException, \
-                 got {} with {:?}",
-                answer.status,
-                answer.body
-            );
+            assert_missing_resource(&answer, &case);
             let said = message(&answer);
             assert_eq!(
                 said, resource_not_found,
@@ -351,13 +327,6 @@ async fn each_refusal_the_recording_covers_is_answered_on_the_recorded_status() 
     ];
 
     for (case, answer) in rows {
-        assert_eq!(
-            (answer.status, error_code(&answer).as_str()),
-            (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
-            "case {case}: expected {RECORDED_NOT_FOUND_STATUS} ResourceNotFoundException, got \
-             {} with {:?}",
-            answer.status,
-            answer.body
-        );
+        assert_missing_resource(&answer, &case);
     }
 }

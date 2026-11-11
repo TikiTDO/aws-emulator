@@ -47,7 +47,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
     VPC_ENDPOINT_STATUS_ACTIVE, VPC_ENDPOINT_STATUS_CREATING, VPC_ENDPOINT_STATUS_DELETING,
 };
 
-use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 
 /// The sentence the service refuses a `DomainArn` it cannot create an endpoint for
 /// with: one refusal for every reason, naming none of them.
@@ -560,8 +562,9 @@ async fn an_id_that_names_no_endpoint_is_reported_in_the_channel_the_call_has() 
         for id in &missing {
             let released = delete_endpoint(&emulator, id).await;
             assert_eq!(
-                released.status, 409,
-                "case {case:?}: expected 409 from DeleteVpcEndpoint({id:?}), got {} with {:?}",
+                released.status, RECORDED_NOT_FOUND_STATUS,
+                "case {case:?}: expected {RECORDED_NOT_FOUND_STATUS} from \
+                 DeleteVpcEndpoint({id:?}), got {} with {:?}",
                 released.status, released.body
             );
             assert_eq!(

@@ -44,7 +44,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
     InsightDetailField, InsightFeedbackRecord,
 };
 
-use super::domain_lifecycle::{create_baseline, Answer, Emulator, PREFIX};
+use super::domain_lifecycle::{
+    create_baseline, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS,
+};
 use super::insight_details::{raise_on_domain, record};
 use super::insights::refused;
 
@@ -508,7 +510,12 @@ async fn a_submission_naming_no_insight_of_the_domain_is_refused() {
             submission(entity, &insight_id, "Up", Some("Not applicable.")),
         )
         .await;
-        refused(&answer, case, 409, "ResourceNotFoundException");
+        refused(
+            &answer,
+            case,
+            RECORDED_NOT_FOUND_STATUS,
+            "ResourceNotFoundException",
+        );
         assert_eq!(
             answer.body["message"].as_str(),
             Some("Resource not found"),

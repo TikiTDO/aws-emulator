@@ -34,7 +34,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
     UPGRADE_STEP_UPGRADE,
 };
 
-use super::domain_lifecycle::{error_code, string_member, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, string_member, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 
 /// The steps an upgrade performs, in order — the catalog `UpgradeStep` declares, as
 /// `state`'s own constants, so a case naming a step outside it would assert nothing
@@ -863,8 +865,9 @@ async fn a_name_no_domain_answers_to_has_no_upgrade_surface() {
     for absent in ["no-such-domain", "upgrade-presentx", "abc"] {
         let read = history(&emulator, absent, "").await;
         assert_eq!(
-            read.status, 409,
-            "case GetUpgradeHistory({absent:?}): expected HTTP 409, got {} with {:?}",
+            read.status, RECORDED_NOT_FOUND_STATUS,
+            "case GetUpgradeHistory({absent:?}): expected HTTP {RECORDED_NOT_FOUND_STATUS}, got \
+             {} with {:?}",
             read.status, read.body
         );
         assert_eq!(
@@ -877,8 +880,9 @@ async fn a_name_no_domain_answers_to_has_no_upgrade_surface() {
 
         let started = upgrade(&emulator, absent, "OpenSearch_2.19", false).await;
         assert_eq!(
-            started.status, 409,
-            "case UpgradeDomain({absent:?}): expected HTTP 409, got {} with {:?}",
+            started.status, RECORDED_NOT_FOUND_STATUS,
+            "case UpgradeDomain({absent:?}): expected HTTP {RECORDED_NOT_FOUND_STATUS}, got {} \
+             with {:?}",
             started.status, started.body
         );
         assert_eq!(

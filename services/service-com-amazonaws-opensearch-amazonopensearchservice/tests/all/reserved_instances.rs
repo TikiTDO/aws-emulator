@@ -720,8 +720,9 @@ async fn an_id_filter_names_one_resource_and_an_unknown_one_is_refused() {
         let case = format!("DescribeReservedInstances with {unknown}");
         let answer = reservations(&emulator, &format!("?reservationId={unknown}")).await;
         assert_eq!(
-            answer.status, 409,
-            "case {case}: expected the modelled not-found's HTTP 409, got {} {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case {case}: expected the missing resource's HTTP {RECORDED_NOT_FOUND_STATUS}, got \
+             {} {:?}",
             answer.status, answer.body
         );
         assert_eq!(

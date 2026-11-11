@@ -38,7 +38,8 @@ use serde_json::{json, Value};
 
 use super::application_updates::{create_application, get_application};
 use super::domain_lifecycle::{
-    error_code, string_member, Answer, Emulator, DEFAULT_ACCESS_KEY_ID, PREFIX, SETTLE_WAIT,
+    error_code, string_member, Answer, Emulator, DEFAULT_ACCESS_KEY_ID, PREFIX,
+    RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
 };
 use super::migration_listing::list_migrations;
 
@@ -410,7 +411,7 @@ async fn the_arn_a_create_mints_is_the_arn_the_default_setting_takes() {
         let after = get_default(&emulator).await;
         assert_eq!(
             (after.status, error_code(&after).as_str()),
-            (409, "ResourceNotFoundException"),
+            (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
             "case GetDefaultApplicationSetting after the clear of {name:?}: expected the \
              modelled not-found, got {} with {:?}",
             after.status,

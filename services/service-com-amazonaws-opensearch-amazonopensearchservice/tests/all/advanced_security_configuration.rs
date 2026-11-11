@@ -29,7 +29,7 @@
 use serde_json::{json, Value};
 
 use super::control_plane_refusal_wording::message;
-use super::domain_lifecycle::{error_code, Emulator, SETTLE_WAIT};
+use super::domain_lifecycle::{error_code, Emulator, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT};
 
 /// The sentences the service states for the three prerequisites of fine-grained access
 /// control, as the fine-grained-access-control guide `AdvancedSecurityOptionsInput`'s
@@ -104,7 +104,7 @@ async fn absent(emulator: &Emulator, name: &str, case: &str) {
     let read = emulator.describe(name).await;
     assert_eq!(
         (read.status, error_code(&read).as_str()),
-        (409, "ResourceNotFoundException"),
+        (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
         "case {case}: expected the refused create to have left no domain, got {} with {:?}",
         read.status,
         read.body

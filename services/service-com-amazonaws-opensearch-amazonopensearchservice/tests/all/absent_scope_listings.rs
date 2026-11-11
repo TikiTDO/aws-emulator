@@ -42,7 +42,8 @@ use super::application_updates::{
     app_configs, create_application, get_application, update_application,
 };
 use super::domain_lifecycle::{
-    create_baseline, error_code, string_member, Answer, Emulator, PREFIX, SETTLE_WAIT,
+    create_baseline, error_code, string_member, Answer, Emulator, PREFIX,
+    RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
 };
 use super::insight_details::{guid, raise_on_domain, record};
 use super::insights::{insights, list_domain as list_insights_for};
@@ -302,7 +303,7 @@ async fn the_reads_are_served_where_the_calls_that_change_the_scope_are_refused(
         let refused = authorize(&emulator, name, json!({ "Account": "000000000002" })).await;
         assert_eq!(
             (refused.status, error_code(&refused).as_str()),
-            (409, "ResourceNotFoundException"),
+            (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
             "case AuthorizeVpcEndpointAccess({name:?}, {row}): expected the name to be refused, \
              got {} with {:?}",
             refused.status,
@@ -321,7 +322,7 @@ async fn the_reads_are_served_where_the_calls_that_change_the_scope_are_refused(
             .await;
         assert_eq!(
             (refused.status, error_code(&refused).as_str()),
-            (409, "ResourceNotFoundException"),
+            (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
             "case InsightFeedback({name:?}, {row}): expected the name to be refused, got {} \
              with {:?}",
             refused.status,
@@ -348,14 +349,14 @@ async fn the_reads_are_served_where_the_calls_that_change_the_scope_are_refused(
 
         let described = emulator.describe(name).await;
         assert_eq!(
-            described.status, 409,
+            described.status, RECORDED_NOT_FOUND_STATUS,
             "case DescribeDomain({name:?}, {row}): expected the reads to have created no \
              domain, got {} with {:?}",
             described.status, described.body
         );
         let still_refused = authorize(&emulator, name, json!({ "Account": "000000000003" })).await;
         assert_eq!(
-            still_refused.status, 409,
+            still_refused.status, RECORDED_NOT_FOUND_STATUS,
             "case AuthorizeVpcEndpointAccess({name:?}, {row}, after the reads): expected the \
              name to still be refused, got {} with {:?}",
             still_refused.status,

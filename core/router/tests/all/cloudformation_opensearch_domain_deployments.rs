@@ -42,7 +42,7 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use crate::cloudformation_provisions_opensearch_domains::{
     build_router, cloudformation, describe_domain, opensearch, resource_reasons, settle_stack,
-    xml_text,
+    xml_text, MISSING_RESOURCE_STATUS,
 };
 use crate::query_wire::outputs_of;
 
@@ -657,7 +657,7 @@ async fn a_domain_the_owning_service_refuses_rolls_the_stack_back_with_its_reaso
         // Nothing survives the rollback: the domain was never created.
         let (status, reported) = describe_domain(&router, domain).await;
         assert_eq!(
-            status, 409,
+            status, MISSING_RESOURCE_STATUS,
             "case {case:?}: the refused domain must not exist, got {status} with {reported}"
         );
     }

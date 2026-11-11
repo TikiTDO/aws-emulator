@@ -198,15 +198,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // A job belongs to the application it imports into, and its id names that
         // application, so the application is where the id is resolved: an id naming one
         // this account does not hold addresses no job because there is nothing to address
-        // it in, which is what the refusal states. Answered on the status its recorded
-        // wire answer carries ([`crate::scaffolded::RESOURCE_NOT_FOUND_STATUS`]).
+        // it in, which is what the refusal states. Answered on the status this service
+        // answers that shape on (`crate::scaffolded::RESOURCE_NOT_FOUND_STATUS`).
         let application_id = migration_application_id(&input.migration_id);
         if !store.applications.contains_key(application_id) {
-            return Err(crate::scaffolded::Scaffolded::not_found(
-                GetMigrationErrorModeled::ResourceNotFoundException(
-                    migration_application_not_found(application_id),
-                ),
-            ));
+            return Err(GetMigrationErrorModeled::ResourceNotFoundException(
+                migration_application_not_found(application_id),
+            )
+            .into());
         }
 
         let migration = store

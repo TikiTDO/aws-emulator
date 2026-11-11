@@ -50,7 +50,7 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
 
 use crate::cloudformation_provisions_opensearch_domains::{
     build_router, cloudformation, describe_domain, opensearch, resource_reasons, settle_stack,
-    xml_text,
+    xml_text, MISSING_RESOURCE_STATUS,
 };
 use crate::query_wire::outputs_of;
 
@@ -69,10 +69,12 @@ const DOMAIN_NAME_PARAMETER: &str = "DomainNameParam";
 const DOMAIN_ARN: &str = "@DOMAIN_ARN@";
 
 /// The modelled error a read or a write of an index the domain does not hold is refused with,
-/// and its status: `ResourceNotFoundException` {client, httpError 409} on `GetIndex`,
-/// `UpdateIndex` and `DeleteIndex`
-/// (`smithy_query(query="operation", operation="GetIndex,UpdateIndex,DeleteIndex")`).
-const INDEX_ABSENT: (u16, &str) = (409, "ResourceNotFoundException");
+/// and the status the owning service answers that refusal on: `ResourceNotFoundException`
+/// {client, httpError 409} on `GetIndex`, `UpdateIndex` and `DeleteIndex`
+/// (`smithy_query(query="operation", operation="GetIndex,UpdateIndex,DeleteIndex")`), carried
+/// on the status that service answers EVERY missing resource on
+/// ([`MISSING_RESOURCE_STATUS`]) — which no `@httpError` annotation of its model expresses.
+const INDEX_ABSENT: (u16, &str) = (MISSING_RESOURCE_STATUS, "ResourceNotFoundException");
 
 /// The wire error code of a refused `restJson1` answer: the `__type` of the error envelope,
 /// without the namespace an envelope may qualify the shape with.

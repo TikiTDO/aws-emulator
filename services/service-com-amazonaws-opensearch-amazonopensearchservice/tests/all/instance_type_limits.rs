@@ -39,7 +39,9 @@ use std::collections::BTreeSet;
 
 use serde_json::{json, Value};
 
-use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 
 /// The engine versions the role and storage tables span: one release of each engine
 /// that offers every family named below, so no rule rests on a single version.
@@ -767,8 +769,8 @@ async fn a_request_naming_no_release_no_type_or_no_domain_is_refused() {
             describe_limits(&emulator, version, instance_type, &format!("domainName={absent}"))
                 .await;
         assert_eq!(
-            answer.status, 409,
-            "case {absent}: expected HTTP 409, got {} {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case {absent}: expected HTTP {RECORDED_NOT_FOUND_STATUS}, got {} {:?}",
             answer.status, answer.body
         );
         assert_eq!(
@@ -802,8 +804,8 @@ async fn a_request_naming_no_release_no_type_or_no_domain_is_refused() {
     let after =
         describe_limits(&emulator, version, instance_type, &format!("domainName={name}")).await;
     assert_eq!(
-        after.status, 409,
-        "case deleted domain: expected HTTP 409, got {} {:?}",
+        after.status, RECORDED_NOT_FOUND_STATUS,
+        "case deleted domain: expected HTTP {RECORDED_NOT_FOUND_STATUS}, got {} {:?}",
         after.status, after.body
     );
 }
@@ -960,7 +962,7 @@ async fn a_volume_outside_the_published_range_is_refused_on_create() {
                 // A refused create stores nothing.
                 let stored = emulator.describe(&name).await;
                 assert_eq!(
-                    stored.status, 409,
+                    stored.status, RECORDED_NOT_FOUND_STATUS,
                     "case {case}: expected no domain to have been created, got {} {:?}",
                     stored.status, stored.body
                 );

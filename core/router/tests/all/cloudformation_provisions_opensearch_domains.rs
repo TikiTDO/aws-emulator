@@ -69,6 +69,19 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// — so a slow machine does not fail the suite.
 const POLL_LIMIT: usize = 40;
 
+/// The HTTP status the owning service answers a read of a resource it does not hold on —
+/// a domain here, an index in the sibling suite that deploys one.
+///
+/// That service's `ResourceNotFoundException` carries `@httpError(409)` in its model, and
+/// the recorded wire answer of a missing-resource refusal is HTTP 404 — the status a client
+/// needs to tell an absent resource from a conflict worth retrying. Stated here, and
+/// independently of the constant that service decides it by, so this suite asserts the
+/// recorded status rather than whatever the handler currently answers. `pub(crate)` because
+/// the sibling suites read a rolled-back domain, and the indexes of a deployed one, back the
+/// same way ([`crate::cloudformation_opensearch_domain_deployments`],
+/// [`crate::cloudformation_deployed_domain_index_lifecycle`]).
+pub(crate) const MISSING_RESOURCE_STATUS: u16 = 404;
+
 /// The emulator with the three services this suite exercises, mounted on ONE engine exactly
 /// as `core/router/src/lib.rs` mounts them.
 ///
@@ -595,7 +608,7 @@ async fn a_domain_the_owning_service_refuses_rolls_the_whole_stack_back() {
         // `DependsOn` — created first — is deleted again by the rollback.
         let (status, reported) = describe_domain(&router, row.domain).await;
         assert_eq!(
-            status, 409,
+            status, MISSING_RESOURCE_STATUS,
             "case {case:?}: the refused domain must not exist, got {status} with {reported}"
         );
         assert_eq!(
@@ -731,7 +744,7 @@ async fn a_domain_the_owning_service_offers_is_created_and_reads_back() {
         }
         let (status, reported) = describe_domain(&router, row.domain).await;
         assert_eq!(
-            status, 409,
+            status, MISSING_RESOURCE_STATUS,
             "case {case:?}: deleting the stack must delete the domain, got {status} with \
              {reported}"
         );
@@ -889,7 +902,7 @@ async fn a_domain_whose_storage_exceeds_a_published_limit_reports_the_service_li
         // deleted again by the rollback.
         let (status, reported) = describe_domain(&router, domain).await;
         assert_eq!(
-            status, 409,
+            status, MISSING_RESOURCE_STATUS,
             "case {case:?}: the refused domain must not exist, got {status} with {reported}"
         );
         assert_eq!(

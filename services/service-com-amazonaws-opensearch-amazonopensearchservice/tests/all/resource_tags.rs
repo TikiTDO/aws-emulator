@@ -35,7 +35,9 @@
 use serde_json::{json, Value};
 use service_com_amazonaws_opensearch_amazonopensearchservice::state::TAG_QUOTA;
 
-use super::domain_lifecycle::{error_code, string_member, Answer, Emulator, PREFIX};
+use super::domain_lifecycle::{
+    error_code, string_member, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS,
+};
 
 /// `AddTags`: `POST /2021-01-01/tags`.
 pub(crate) async fn add_tags(emulator: &Emulator, arn: &str, tag_list: Value) -> Answer {
@@ -747,7 +749,7 @@ async fn a_resource_carries_at_most_the_documented_number_of_tags() {
     );
     let described = emulator.describe("quota-create-refused").await;
     assert_eq!(
-        described.status, 409,
+        described.status, RECORDED_NOT_FOUND_STATUS,
         "case CreateDomain(past the quota): the refused create must persist no domain, got {} \
          with {:?}",
         described.status, described.body

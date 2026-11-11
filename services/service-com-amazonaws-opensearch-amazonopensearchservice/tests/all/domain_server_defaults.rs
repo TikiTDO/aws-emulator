@@ -31,7 +31,9 @@
 
 use serde_json::{json, Value};
 
-use super::domain_lifecycle::{create_baseline, error_code, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    create_baseline, error_code, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 
 /// The option blocks and members the service fills in for a domain created without
 /// them, with the value it sets for each. The expectations are stated here, once, and
@@ -458,7 +460,7 @@ async fn a_performance_member_the_volume_type_does_not_provision_is_refused() {
         // A refused create leaves no domain behind, so the name is still free.
         let described = emulator.describe(name).await;
         assert_eq!(
-            described.status, 409,
+            described.status, RECORDED_NOT_FOUND_STATUS,
             "case DescribeDomain({name:?}): a refused create stores nothing, got {} with {:?}",
             described.status, described.body
         );

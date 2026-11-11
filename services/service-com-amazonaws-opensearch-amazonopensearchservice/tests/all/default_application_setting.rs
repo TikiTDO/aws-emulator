@@ -29,7 +29,7 @@
 use serde_json::{json, Value};
 
 use super::constraint_refusal_messages::{clause, expression, message, report};
-use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX};
+use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS};
 
 /// The expression the service validates an application ARN against, as the refusal
 /// quotes it — the one the wire refusal recorded for this operation states.
@@ -184,8 +184,9 @@ async fn an_unset_default_application_setting_is_not_found_and_clearing_reports_
         // Nothing is default yet, so the setting resolves to no resource.
         let unset = get(&emulator).await;
         assert_eq!(
-            unset.status, 409,
-            "case {case}: expected 409 while nothing is default, got {} with {:?}",
+            unset.status, RECORDED_NOT_FOUND_STATUS,
+            "case {case}: expected {RECORDED_NOT_FOUND_STATUS} while nothing is default, got {} \
+             with {:?}",
             unset.status, unset.body
         );
         assert_eq!(
@@ -215,8 +216,8 @@ async fn an_unset_default_application_setting_is_not_found_and_clearing_reports_
 
         let after = get(&emulator).await;
         assert_eq!(
-            after.status, 409,
-            "case {case}: expected 409 after the clear, got {} with {:?}",
+            after.status, RECORDED_NOT_FOUND_STATUS,
+            "case {case}: expected {RECORDED_NOT_FOUND_STATUS} after the clear, got {} with {:?}",
             after.status, after.body
         );
         assert_eq!(

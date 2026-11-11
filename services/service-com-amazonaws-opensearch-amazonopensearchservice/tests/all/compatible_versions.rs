@@ -37,7 +37,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
     SUPPORTED_ENGINE_VERSIONS,
 };
 
-use super::domain_lifecycle::{error_code, string_member, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, string_member, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 
 /// The oldest release the published upgrade table has a row for — the suite's own
 /// expectation of the floor the service offers an upgrade from.
@@ -453,8 +455,8 @@ async fn domain_filter_reports_the_version_that_domain_runs() {
     for absent in ["no-such-domain", "filter-es-fivex", "abc"] {
         let answer = compatible(&emulator, Some(absent)).await;
         assert_eq!(
-            answer.status, 409,
-            "case {absent}: expected HTTP 409, got {} {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case {absent}: expected HTTP {RECORDED_NOT_FOUND_STATUS}, got {} {:?}",
             answer.status, answer.body
         );
         assert_eq!(

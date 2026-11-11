@@ -34,7 +34,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
     APPLICATION_STATUS_CREATING, APPLICATION_STATUS_DELETING,
 };
 
-use super::domain_lifecycle::{error_code, string_member, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, string_member, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 use super::resource_tags::{add_tags, list_tags, reported_tags, tag, wire_tags};
 
 /// A customer-managed key ARN satisfying `KmsKeyArn`'s own pattern, for a create that
@@ -119,7 +121,7 @@ fn listed_status(answer: &Answer, id: &str, case: &str) -> Option<String> {
 async fn assert_gone(emulator: &Emulator, id: &str, case: &str) {
     let read = get_application(emulator, id).await;
     assert_eq!(
-        read.status, 409,
+        read.status, RECORDED_NOT_FOUND_STATUS,
         "case {case}: a removed application resolves for nobody, got {} with {:?}",
         read.status, read.body
     );
@@ -352,7 +354,7 @@ async fn an_id_that_names_no_application_is_answered_and_removes_nothing() {
         let read = get_application(&emulator, &id).await;
         assert_eq!(
             (read.status, error_code(&read).as_str()),
-            (409, "ResourceNotFoundException"),
+            (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
             "case {case}: the id still names no application, got {} with {:?}",
             read.status,
             read.body

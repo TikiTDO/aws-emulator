@@ -41,7 +41,7 @@
 
 use serde_json::json;
 
-use super::domain_lifecycle::{error_code, Answer, Emulator};
+use super::domain_lifecycle::{error_code, Answer, Emulator, RECORDED_NOT_FOUND_STATUS};
 use super::package_listing_for_missing_domain::missing_names;
 use super::vpc_endpoint_access::{authorize, created_domain, list, principal_list, principal_of};
 use super::vpc_endpoint_access_revocation::revoke;
@@ -128,7 +128,7 @@ async fn only_the_mutating_siblings_resolve_the_domain_the_request_names() {
             let case = format!("{form}({name:?}, {row})");
             assert_eq!(
                 (answer.status, error_code(&answer).as_str()),
-                (409, "ResourceNotFoundException"),
+                (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
                 "case {case}: expected the modelled missing-resource refusal, got {} / {} \
                  with {:?}",
                 answer.status,

@@ -26,7 +26,9 @@
 
 use serde_json::{json, Value};
 
-use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 
 /// Pairings the service does not offer: an instance type together with an engine
 /// release that does not run it, one row per family the published instance-type
@@ -224,7 +226,7 @@ async fn create_refuses_the_same_pairing_with_the_same_text_and_stores_nothing()
         // A refused create mints nothing: the name is still free of any record.
         let read = emulator.describe(&name).await;
         assert_eq!(
-            read.status, 409,
+            read.status, RECORDED_NOT_FOUND_STATUS,
             "case {case}: a refused create stores no domain, got {} {:?}",
             read.status, read.body
         );

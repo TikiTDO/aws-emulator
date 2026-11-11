@@ -1029,9 +1029,9 @@ async fn an_update_refuses_what_the_store_does_not_hold_and_a_malformed_request(
     for index in ["absent-index", "present-index.v2"] {
         let answer = update(&emulator, "update-refusals", index, &change).await;
         assert_eq!(
-            answer.status, 409,
-            "case UpdateIndex({index:?}): expected 409 for a name that names no index, got {} \
-             with {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case UpdateIndex({index:?}): expected {RECORDED_NOT_FOUND_STATUS} for a name that \
+             names no index, got {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(
@@ -1042,7 +1042,7 @@ async fn an_update_refuses_what_the_store_does_not_hold_and_a_malformed_request(
         );
         let read = get_index(&emulator, "update-refusals", index).await;
         assert_eq!(
-            read.status, 409,
+            read.status, RECORDED_NOT_FOUND_STATUS,
             "case GetIndex({index:?}): a refused update must mint nothing, got {} with {:?}",
             read.status, read.body
         );

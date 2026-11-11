@@ -106,7 +106,7 @@ fn rows() -> Vec<Row> {
             index: "catalog-absent",
             schema: added_property(ADDED_PROPERTY, "text"),
             refused_with: Some("ResourceNotFoundException"),
-            refused_on: None,
+            refused_on: Some(RECORDED_NOT_FOUND_STATUS),
         },
         Row {
             case: "an index name no index could carry",

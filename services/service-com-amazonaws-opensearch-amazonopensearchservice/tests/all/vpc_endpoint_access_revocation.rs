@@ -28,7 +28,7 @@
 use serde_json::{json, Value};
 use service_com_amazonaws_opensearch_amazonopensearchservice::state::PRINCIPAL_TYPE_AWS_ACCOUNT;
 
-use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX};
+use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS};
 use super::vpc_endpoint_access::{
     authorize, created_domain, list, principal_list, principal_of, service_principal,
 };
@@ -351,8 +351,8 @@ async fn a_revoke_naming_a_domain_the_registry_does_not_resolve_is_refused() {
         let case = format!("RevokeVpcEndpointAccess({name})");
         let answer = revoke(&emulator, name, json!({ "Account": "123456789012" })).await;
         assert_eq!(
-            answer.status, 409,
-            "case {case}: expected HTTP 409, got {} with {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case {case}: expected HTTP {RECORDED_NOT_FOUND_STATUS}, got {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(

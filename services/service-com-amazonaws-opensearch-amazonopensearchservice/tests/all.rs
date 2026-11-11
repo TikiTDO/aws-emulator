@@ -179,6 +179,8 @@ mod migration_source_constraint;
 mod missing_offering_refusals;
 #[path = "all/missing_resource_refusals.rs"]
 mod missing_resource_refusals;
+#[path = "all/missing_resource_status.rs"]
+mod missing_resource_status;
 #[path = "all/package_association_listings.rs"]
 mod package_association_listings;
 #[path = "all/package_associations.rs"]

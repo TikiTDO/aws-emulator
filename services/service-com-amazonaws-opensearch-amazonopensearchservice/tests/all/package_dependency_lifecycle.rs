@@ -48,7 +48,8 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
 };
 
 use super::domain_lifecycle::{
-    create_baseline, error_code, string_member, Answer, Emulator, SETTLE_WAIT,
+    create_baseline, error_code, string_member, Answer, Emulator, RECORDED_NOT_FOUND_STATUS,
+    SETTLE_WAIT,
 };
 use super::index_deletion::deleted_index;
 use super::index_registry::{create as create_index, created_index, get as get_index};
@@ -330,7 +331,7 @@ async fn a_package_an_index_resolves_stays_on_the_domain_until_the_index_is_gone
         deleted_index(&emulator, &domain, row.index, row.case).await;
         let read = get_index(&emulator, &domain, row.index).await;
         assert_eq!(
-            read.status, 409,
+            read.status, RECORDED_NOT_FOUND_STATUS,
             "case {}: expected the deleted index to be gone, got {} with {:?}",
             row.case, read.status, read.body
         );
@@ -544,7 +545,7 @@ async fn a_schema_naming_a_file_no_package_in_place_provides_is_refused_and_serv
         // A refused create mints NOTHING: the name still names no index of the domain.
         let read = get_index(&emulator, &domain, row.index).await;
         assert_eq!(
-            read.status, 409,
+            read.status, RECORDED_NOT_FOUND_STATUS,
             "case {case}: a refused create must mint nothing, got {} with {:?}",
             read.status, read.body
         );

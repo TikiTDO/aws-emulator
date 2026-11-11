@@ -42,7 +42,7 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
     PRINCIPAL_TYPE_AWS_ACCOUNT, PRINCIPAL_TYPE_AWS_SERVICE, VPC_ENDPOINT_ACCESS_QUOTA,
 };
 
-use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX};
+use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS};
 
 /// `AuthorizeVpcEndpointAccess`:
 /// `POST /opensearch/domain/{DomainName}/authorizeVpcEndpointAccess`.
@@ -485,9 +485,9 @@ async fn the_authorization_set_belongs_to_the_domain_the_request_names() {
     // the domain — while the listing of such a name reports that empty set.
     let refused = authorize(&emulator, "search-absent", grant.body.clone()).await;
     assert_eq!(
-        refused.status, 409,
-        "case authorize(search-absent): expected 409 for a domain the registry does not hold, \
-         got {} with {:?}",
+        refused.status, RECORDED_NOT_FOUND_STATUS,
+        "case authorize(search-absent): expected {RECORDED_NOT_FOUND_STATUS} for a domain the \
+         registry does not hold, got {} with {:?}",
         refused.status, refused.body
     );
     assert_eq!(

@@ -178,13 +178,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // rules about the request are applied: a name this account holds no domain
         // under addresses nothing for those rules to be about, so it is the
         // missing-resource refusal whatever else the request carries — answered on the
-        // status its recorded wire answer carries
-        // ([`crate::scaffolded::RESOURCE_NOT_FOUND_STATUS`]).
+        // status this service answers that shape on
+        // (`crate::scaffolded::RESOURCE_NOT_FOUND_STATUS`).
         let domain = store.settled_mut(&input.domain_name, now).ok_or_else(|| {
-            crate::scaffolded::Scaffolded::not_found(
-                StartDomainMaintenanceErrorModeled::ResourceNotFoundException(
-                    crate::state::domain_not_found(&input.domain_name),
-                ),
+            StartDomainMaintenanceErrorModeled::ResourceNotFoundException(
+                crate::state::domain_not_found(&input.domain_name),
             )
         })?;
 

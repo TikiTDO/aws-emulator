@@ -36,7 +36,7 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
     DATA_SOURCE_QUOTA, DATA_SOURCE_STATUSES, DATA_SOURCE_STATUS_ACTIVE,
 };
 
-use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX};
+use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS};
 
 /// `AddDataSource`: `POST /opensearch/domain/{DomainName}/dataSource`.
 pub(crate) async fn add(emulator: &Emulator, domain: &str, body: Value) -> Answer {
@@ -381,8 +381,9 @@ async fn a_data_source_call_on_a_domain_the_store_does_not_hold_is_refused_as_no
         ] {
             let case = format!("{operation}({domain:?})");
             assert_eq!(
-                answer.status, 409,
-                "case {case}: expected 409 for a domain the store does not hold, got {} with {:?}",
+                answer.status, RECORDED_NOT_FOUND_STATUS,
+                "case {case}: expected {RECORDED_NOT_FOUND_STATUS} for a domain the store does \
+                 not hold, got {} with {:?}",
                 answer.status, answer.body
             );
             assert_eq!(

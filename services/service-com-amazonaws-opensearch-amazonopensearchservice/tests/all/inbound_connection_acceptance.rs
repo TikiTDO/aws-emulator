@@ -41,7 +41,9 @@ use super::cross_cluster_connections::{
     create_connection, created_domain, describe_connections as describe_outbound, domain_info,
     reported, ACCOUNT, REGION,
 };
-use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 use super::inbound_connections::describe_inbound;
 
 /// The statuses an accepted connection holds, in the order its lifecycle visits them:
@@ -430,8 +432,8 @@ async fn an_id_addressing_no_inbound_connection_is_refused_as_missing() {
     for (case, id, unchanged) in &table {
         let answer = accept(&emulator, id).await;
         assert_eq!(
-            answer.status, 409,
-            "case {case}: expected 409, got {} with {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case {case}: expected {RECORDED_NOT_FOUND_STATUS}, got {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(

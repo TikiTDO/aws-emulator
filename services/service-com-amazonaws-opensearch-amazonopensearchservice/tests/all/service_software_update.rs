@@ -13,10 +13,12 @@
 //! nothing else is deploying; a request the record has nothing to deploy for cannot be
 //! served as asked, so it is refused with the operation's modelled
 //! `ValidationException` (HTTP 400) and deploys nothing. The operation models exactly
-//! `BaseException` 400, `InternalException` 500, `ResourceNotFoundException` 409 and
+//! `BaseException` 400, `InternalException` 500, `ResourceNotFoundException` and
 //! `ValidationException` 400
 //! (`smithy_query(query="operation",operation="StartServiceSoftwareUpdate")`), so no
-//! other code or status is part of its contract.
+//! other code or status is part of its contract — the missing-resource refusal being
+//! answered on the status this service carries that shape on
+//! ([`RECORDED_NOT_FOUND_STATUS`]) rather than on the one the model annotates.
 //!
 //! The assertions span SETS of inputs: three release pairs and three forms of
 //! `ScheduleAt` on the deploying side, and on the refused side a domain as
@@ -39,7 +41,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
     DOMAIN_NOT_AVAILABLE_FOR_UPDATE, ROLLBACK_WINDOW,
 };
 
-use super::domain_lifecycle::{create_baseline, error_code, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    create_baseline, error_code, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 
 /// `POST /2021-01-01/opensearch/serviceSoftwareUpdate/start`, with the schedule
 /// members a row sends (none for a request that sends only the domain name).
@@ -695,8 +699,9 @@ async fn a_start_on_a_domain_that_does_not_exist_is_the_modelled_not_found() {
     for name in ["absent-domain", "deleted-domain"] {
         let answer = start(&emulator, name, json!({})).await;
         assert_eq!(
-            answer.status, 409,
-            "case StartServiceSoftwareUpdate({name:?}): expected 409, got {} with {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case StartServiceSoftwareUpdate({name:?}): expected {RECORDED_NOT_FOUND_STATUS}, got \
+             {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(

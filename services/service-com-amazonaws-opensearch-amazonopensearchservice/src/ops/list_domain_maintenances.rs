@@ -210,14 +210,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // work in flight has none: its nodes do not exist yet, or are being replaced.
         // There is then no node whose actions could be listed, which is the same
         // invalid-node refusal `StartDomainMaintenance` answers an id the census does
-        // not publish with — answered on the status its recorded wire answer carries
-        // ([`crate::scaffolded::RESOURCE_NOT_FOUND_STATUS`]).
+        // not publish with — answered on the status this service answers that shape on
+        // (`crate::scaffolded::RESOURCE_NOT_FOUND_STATUS`).
         if domain.work_in_flight() {
-            return Err(crate::scaffolded::Scaffolded::not_found(
-                ListDomainMaintenancesErrorModeled::ResourceNotFoundException(
-                    crate::state::invalid_node_id(),
-                ),
-            ));
+            return Err(ListDomainMaintenancesErrorModeled::ResourceNotFoundException(
+                crate::state::invalid_node_id(),
+            )
+            .into());
         }
 
         // `Action` is "the name of the action" and `Status` "the status of the

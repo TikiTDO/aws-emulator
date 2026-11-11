@@ -46,8 +46,8 @@ pub(crate) const DEFAULT_ACCESS_KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
 /// so the next read materialises the settled record.
 pub(crate) const SETTLE_WAIT: Duration = Duration::from_millis(3_300);
 
-/// The HTTP status this service's RECORDED wire answer carries a missing-resource
-/// refusal on, where the shape's own `@httpError(409)` is not what a client sees.
+/// The HTTP status this service's RECORDED wire answer carries EVERY missing-resource
+/// refusal on, whatever status the error shape's own `@httpError(409)` declares.
 ///
 /// Stated here, independently of the constant the implementation decides it by, so an
 /// expectation asserts the recorded status rather than whatever the handler currently
@@ -1199,21 +1199,19 @@ async fn a_deleted_domain_is_gone_from_every_read_path() {
         "case DeleteDomain(to-delete): expected the final status Deleted true, got {status:?}"
     );
 
-    for (label, answer, status) in [
-        ("DescribeDomain", emulator.describe("to-delete").await, 409),
+    // Every read path answers a domain this account no longer holds with the
+    // missing-resource refusal, on the one status this service carries that shape on.
+    for (label, answer) in [
+        ("DescribeDomain", emulator.describe("to-delete").await),
         (
             "DescribeDomainConfig",
             emulator.describe_config("to-delete").await,
-            409,
         ),
-        // A delete of a domain this account does not hold answers with the status the
-        // service is recorded answering it with, which is not the one this model
-        // annotates the error with.
-        ("DeleteDomain again", emulator.delete("to-delete").await, 404),
+        ("DeleteDomain again", emulator.delete("to-delete").await),
     ] {
         assert_eq!(
-            answer.status, status,
-            "case {label}(deleted): expected {status}, got {} with {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case {label}(deleted): expected {RECORDED_NOT_FOUND_STATUS}, got {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(
@@ -1244,26 +1242,20 @@ async fn an_unknown_domain_name_is_not_found_on_every_path_that_resolves_one() {
     create_baseline(&emulator, "present-domain").await;
 
     for name in ["never-created", "also-missing", "gone-domain"] {
-        for (label, answer, status) in [
-            ("DescribeDomain", emulator.describe(name).await, 409),
-            (
-                "DescribeDomainConfig",
-                emulator.describe_config(name).await,
-                409,
-            ),
+        for (label, answer) in [
+            ("DescribeDomain", emulator.describe(name).await),
+            ("DescribeDomainConfig", emulator.describe_config(name).await),
             (
                 "UpdateDomainConfig",
                 emulator
                     .update_config(name, json!({ "ClusterConfig": { "InstanceCount": 2 } }))
                     .await,
-                409,
             ),
-            // See the delete row in `a_deleted_domain_is_gone_from_every_read_path`.
-            ("DeleteDomain", emulator.delete(name).await, 404),
+            ("DeleteDomain", emulator.delete(name).await),
         ] {
             assert_eq!(
-                answer.status, status,
-                "case {label}({name:?}): expected {status}, got {} with {:?}",
+                answer.status, RECORDED_NOT_FOUND_STATUS,
+                "case {label}({name:?}): expected {RECORDED_NOT_FOUND_STATUS}, got {} with {:?}",
                 answer.status, answer.body
             );
             assert_eq!(

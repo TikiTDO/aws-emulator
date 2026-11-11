@@ -69,15 +69,6 @@ use super::types::*;
 
 use crate::state::PROCESSING_STATUS_DELETING;
 
-/// The status the service is recorded answering a `DeleteDomain` for a domain this
-/// account does not hold with: the resource named is not there.
-///
-/// This model annotates `ResourceNotFoundException` with `@httpError(409)`, which is
-/// not the status the wire answer carries, so the error is answered with the recorded
-/// status (`crate::scaffolded::Scaffolded::ModeledWithStatus`) and the model's own
-/// error code and body.
-const DOMAIN_NOT_FOUND_STATUS: u16 = 404;
-
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -158,13 +149,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // The modelled status for this error is 409, and the status the service is
             // recorded answering a delete of a domain it does not hold with is 404:
             // the resource named is not there, which no `@httpError` annotation of
-            // this model expresses.
-            crate::scaffolded::Scaffolded::modeled_with_status(
-                DeleteDomainErrorModeled::ResourceNotFoundException(
-                    crate::state::domain_not_found(&input.domain_name),
-                ),
-                DOMAIN_NOT_FOUND_STATUS,
-            )
+            // this model expresses. The status is this service's for the shape, stated
+            // where the shape is serialized rather than here.
+            DeleteDomainErrorModeled::ResourceNotFoundException(crate::state::domain_not_found(
+                &input.domain_name,
+            ))
         })?;
 
         // The record is gone from the store, so the two read paths no longer find it.

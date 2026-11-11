@@ -200,15 +200,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // a name the store holds no domain for addresses nothing those rules could be
         // about, so it is the missing-resource refusal whatever the body carries.
         // `settled_mut` first materialises any configuration change the clock already
-        // owes that domain, which this call neither starts nor changes. Answered on the
-        // status its recorded wire answer carries
-        // ([`crate::scaffolded::RESOURCE_NOT_FOUND_STATUS`]).
+        // owes that domain, which this call neither starts nor changes. The status the
+        // refusal is answered on is the one this service answers the shape on
+        // (`crate::scaffolded::RESOURCE_NOT_FOUND_STATUS`), decided where the shape is
+        // serialized rather than here.
         let domain = store.settled_mut(&input.domain_name, now).ok_or_else(|| {
-            crate::scaffolded::Scaffolded::not_found(
-                UpdateIndexErrorModeled::ResourceNotFoundException(crate::state::domain_not_found(
-                    &input.domain_name,
-                )),
-            )
+            UpdateIndexErrorModeled::ResourceNotFoundException(crate::state::domain_not_found(
+                &input.domain_name,
+            ))
         })?;
 
         // The schema is a set of named sections, so a document carrying a scalar or

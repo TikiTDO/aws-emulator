@@ -28,7 +28,9 @@
 use serde_json::json;
 
 use super::control_plane_refusal_wording::message;
-use super::domain_lifecycle::{create_baseline, error_code, Emulator, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    create_baseline, error_code, Emulator, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 use super::package_associations::available_packages;
 use super::package_dissociation::{associate, dissociate_many};
 use super::scheduled_action_updates::{body as reschedule_body, update as reschedule};
@@ -154,7 +156,7 @@ async fn an_action_id_that_names_no_change_is_refused_with_the_fixed_sentence() 
         .await;
         assert_eq!(
             (answer.status, error_code(&answer).as_str()),
-            (409, "ResourceNotFoundException"),
+            (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
             "case {case}: expected the modelled not-found refusal, got {} with {:?}",
             answer.status,
             answer.body
@@ -254,7 +256,7 @@ async fn vpc_endpoint_access_on_a_domain_it_cannot_serve_states_the_non_committa
             let case = format!("{operation} for the unservable domain {name:?}");
             assert_eq!(
                 (answer.status, error_code(&answer).as_str()),
-                (409, "ResourceNotFoundException"),
+                (RECORDED_NOT_FOUND_STATUS, "ResourceNotFoundException"),
                 "case {case}: expected the modelled not-found refusal, got {} with {:?}",
                 answer.status,
                 answer.body

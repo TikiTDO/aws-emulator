@@ -28,7 +28,9 @@
 
 use serde_json::Value;
 
-use super::domain_lifecycle::{create_baseline, error_code, Emulator, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    create_baseline, error_code, Emulator, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+};
 use super::index_registry::delete_domain;
 use super::package_associations::available_packages;
 use super::package_listing_page_bounds::{
@@ -247,7 +249,7 @@ async fn listing_a_name_no_domain_holds_changes_nothing_a_later_caller_sees() {
         // domain, and so the associate that needs one is still refused.
         let described = emulator.describe(name).await;
         assert_eq!(
-            described.status, 409,
+            described.status, RECORDED_NOT_FOUND_STATUS,
             "case DescribeDomain({name:?}, {case}): expected the listing to have created no \
              domain, got {} with {:?}",
             described.status, described.body

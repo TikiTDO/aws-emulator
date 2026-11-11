@@ -28,7 +28,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::ops::types::INDEX_
 use service_com_amazonaws_opensearch_amazonopensearchservice::state::INDEX_STATUS_DELETED;
 
 use super::data_source_registry::created_domain;
-use super::domain_lifecycle::{error_code, string_member, Answer, Emulator, PREFIX};
+use super::domain_lifecycle::{
+    error_code, string_member, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS,
+};
 use super::index_registry::{created_index, delete_domain, get, stored_names, wide_schema};
 
 /// `DeleteIndex`: `DELETE /opensearch/domain/{DomainName}/index/{IndexName}`
@@ -132,9 +134,9 @@ async fn a_delete_removes_exactly_the_named_index_and_reports_deleted() {
         // The record is gone, so the modelled reader no longer finds it.
         let read = get(&emulator, "delete-domain", row.name).await;
         assert_eq!(
-            read.status, 409,
-            "case GetIndex({case}, after the delete): expected 409 for a deleted index, got {} \
-             with {:?}",
+            read.status, RECORDED_NOT_FOUND_STATUS,
+            "case GetIndex({case}, after the delete): expected {RECORDED_NOT_FOUND_STATUS} for a \
+             deleted index, got {} with {:?}",
             read.status, read.body
         );
         assert_eq!(
@@ -326,8 +328,9 @@ async fn a_delete_is_refused_where_there_is_no_index_to_remove() {
         let case = format!("DeleteIndex({domain:?}/present-index)");
         let answer = delete(&emulator, domain, "present-index").await;
         assert_eq!(
-            answer.status, 409,
-            "case {case}: expected 409 for a domain the store does not hold, got {} with {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case {case}: expected {RECORDED_NOT_FOUND_STATUS} for a domain the store does not \
+             hold, got {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(
@@ -344,8 +347,9 @@ async fn a_delete_is_refused_where_there_is_no_index_to_remove() {
         let case = format!("DeleteIndex(refusal-domain/{index:?})");
         let answer = delete(&emulator, "refusal-domain", index).await;
         assert_eq!(
-            answer.status, 409,
-            "case {case}: expected 409 for a name that names no index, got {} with {:?}",
+            answer.status, RECORDED_NOT_FOUND_STATUS,
+            "case {case}: expected {RECORDED_NOT_FOUND_STATUS} for a name that names no index, \
+             got {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(
@@ -373,9 +377,9 @@ async fn a_delete_is_refused_where_there_is_no_index_to_remove() {
     deleted_index(&emulator, "refusal-domain", "present-index", "first delete").await;
     let again = delete(&emulator, "refusal-domain", "present-index").await;
     assert_eq!(
-        again.status, 409,
-        "case DeleteIndex(present-index, again): expected 409 once the record is gone, got {} \
-         with {:?}",
+        again.status, RECORDED_NOT_FOUND_STATUS,
+        "case DeleteIndex(present-index, again): expected {RECORDED_NOT_FOUND_STATUS} once the \
+         record is gone, got {} with {:?}",
         again.status, again.body
     );
     assert_eq!(

@@ -17,7 +17,8 @@
 //! starting another, and an `applicationId` naming no application of this account names
 //! nothing to migrate into: that miss is the modelled not-found shape stating that no
 //! such application exists and naming the id ([`application_does_not_exist`]), under
-//! the status the service answers it with ([`APPLICATION_NOT_FOUND_STATUS`]).
+//! the status this service answers that shape on
+//! ([`crate::scaffolded::RESOURCE_NOT_FOUND_STATUS`]).
 //!
 //! ## Shape of an operation
 //!
@@ -141,15 +142,6 @@ impl From<StartMigrationErrorModeled> for StartMigrationError {
     }
 }
 
-/// The status this operation answers an `applicationId` naming no application of this
-/// account with.
-///
-/// This model annotates `ResourceNotFoundException` with `@httpError(409)`, and the
-/// recorded wire answer for a start naming an application this account does not hold is
-/// HTTP 404 — the status a missing resource is reported under — so the modelled shape
-/// and its message travel under that status instead.
-const APPLICATION_NOT_FOUND_STATUS: u16 = 404;
-
 /// The `ResourceNotFoundException` payload for an `applicationId` naming no application
 /// of this account.
 ///
@@ -254,17 +246,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // The job migrates saved objects INTO an application's workspace, so an id
         // naming no application of this account names nothing to migrate into. The
-        // refusal is the modelled not-found shape carried under the status the service
-        // was recorded answering THIS operation's miss with
-        // ([`APPLICATION_NOT_FOUND_STATUS`]) rather than the status the shape's own
-        // `@httpError` annotates.
+        // refusal is the modelled not-found shape, carried under the status this service
+        // answers that shape on (`crate::scaffolded::RESOURCE_NOT_FOUND_STATUS`) rather
+        // than the status the shape's own `@httpError` annotates.
         if !store.applications.contains_key(&input.application_id) {
-            return Err(crate::scaffolded::Scaffolded::modeled_with_status(
-                StartMigrationErrorModeled::ResourceNotFoundException(application_does_not_exist(
-                    &input.application_id,
-                )),
-                APPLICATION_NOT_FOUND_STATUS,
-            ));
+            return Err(StartMigrationErrorModeled::ResourceNotFoundException(
+                application_does_not_exist(&input.application_id),
+            )
+            .into());
         }
 
         // The store is bounded: past its quota a start is refused rather than adding

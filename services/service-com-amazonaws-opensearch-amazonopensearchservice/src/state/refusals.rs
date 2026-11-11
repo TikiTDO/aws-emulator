@@ -425,18 +425,6 @@ pub fn invalid_node_id() -> ResourceNotFoundException {
     }
 }
 
-/// The HTTP status this service answers a maintenance LISTING's not-found refusal
-/// with.
-///
-/// `ResourceNotFoundException` carries `@httpError(409)` in the model, which is the
-/// status the shape renders by default and the one `StartDomainMaintenance` and
-/// `GetDomainMaintenanceStatus` are recorded answering. The wire answer recorded for
-/// `ListDomainMaintenances` is HTTP 404 instead, so that operation states the status
-/// rather than taking the shape's — see
-/// [`crate::scaffolded::Scaffolded::ModeledWithStatus`], which is the only place a
-/// status may differ from the model's and requires exactly this kind of evidence.
-pub const MAINTENANCE_LISTING_NOT_FOUND_STATUS: u16 = 404;
-
 /// The `ValidationException` payload for a maintenance request that names no node:
 /// the action is "the node maintenance process on the data node", so there is no
 /// action to start without one.
