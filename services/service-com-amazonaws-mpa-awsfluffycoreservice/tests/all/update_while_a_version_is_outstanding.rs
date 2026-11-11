@@ -132,7 +132,7 @@ async fn team_with_an_outstanding_version(
 /// The `SyncStatus` of every device of every approver one read reports, in response order.
 /// `from` names the member the approver list hangs off: `None` is the team's live set,
 /// `Some("PendingUpdate")` the set of the version it is waiting on.
-fn sync_statuses(team: &Value, from: Option<&str>) -> Vec<Vec<String>> {
+pub(crate) fn sync_statuses(team: &Value, from: Option<&str>) -> Vec<Vec<String>> {
     let holder = match from {
         Some(member) => &team[member],
         None => team,
@@ -156,7 +156,7 @@ fn sync_statuses(team: &Value, from: Option<&str>) -> Vec<Vec<String>> {
 
 /// Assert every device of every approver in one reported set carries `expected`, and that
 /// the set has `approvers` entries.
-fn assert_every_device(
+pub(crate) fn assert_every_device(
     label: &str,
     set: &str,
     statuses: &[Vec<String>],

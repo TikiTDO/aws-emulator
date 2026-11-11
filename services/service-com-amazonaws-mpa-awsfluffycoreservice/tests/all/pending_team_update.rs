@@ -117,7 +117,7 @@ pub(crate) fn with_pending_update(
 }
 
 /// The `MinApprovalsRequired` a team or a requested version reports.
-fn min_approvals(body: &Value, member: Option<&str>) -> Option<i64> {
+pub(crate) fn min_approvals(body: &Value, member: Option<&str>) -> Option<i64> {
     let strategy = match member {
         None => &body["ApprovalStrategy"],
         Some(member) => &body[member]["ApprovalStrategy"],
@@ -142,17 +142,20 @@ fn approver_ids(body: &Value, member: Option<&str>) -> Vec<String> {
 
 /// One row: the team the change is asked of, the change itself, and the configuration the
 /// team must report once the change is approved and activated.
-struct UpdateCase {
-    case: &'static str,
-    team_approvers: usize,
-    team_min_approvals: i64,
-    patch: Value,
-    description_after: String,
-    min_approvals_after: i64,
-    approvers_after: usize,
+///
+/// Shared with `handshake_live_version_identity.rs`, which pairs every row with a form of
+/// `UpdateActions`: one table of configuration changes, read by both rules.
+pub(crate) struct UpdateCase {
+    pub(crate) case: &'static str,
+    pub(crate) team_approvers: usize,
+    pub(crate) team_min_approvals: i64,
+    pub(crate) patch: Value,
+    pub(crate) description_after: String,
+    pub(crate) min_approvals_after: i64,
+    pub(crate) approvers_after: usize,
 }
 
-fn update_cases() -> Vec<UpdateCase> {
+pub(crate) fn update_cases() -> Vec<UpdateCase> {
     vec![
         UpdateCase {
             case: "a description, one approver, M = N",
@@ -499,8 +502,9 @@ async fn an_update_to_an_active_team_waits_for_the_teams_approval() {
 }
 
 /// An update action and a configuration change in ONE request on an ACTIVE team: the
-/// action takes effect where it was asked for, under a version of its own, while the
-/// configuration change waits for the team under the version the call answered with.
+/// action takes effect where it was asked for, while the configuration change waits for
+/// the team under the version the call answered with — the only version the call
+/// announced, so the live version id stays the one the approvers approved.
 #[tokio::test]
 async fn an_update_action_applies_at_once_while_the_configuration_change_waits() {
     let harness = Harness::new();
@@ -524,7 +528,7 @@ async fn an_update_action_applies_at_once_while_the_configuration_change_waits()
     let (status, waiting) = harness.get(&arn).await;
     assert_eq!(status, 200, "get returned {waiting:?}");
     // The action asks for no configuration member to change, so it is applied at once:
-    // every device is read back off the identity source, under a new live version.
+    // every device is read back off the identity source.
     for (index, approver) in waiting["Approvers"]
         .as_array()
         .cloned()
@@ -545,14 +549,15 @@ async fn an_update_action_applies_at_once_while_the_configuration_change_waits()
             "case approver {index}: the action must be applied at once, got {devices:?}"
         );
     }
-    let synchronized_version = text(&waiting, "VersionId");
     assert_ne!(
-        synchronized_version, live_version,
-        "the applied action records a new live version: {waiting:?}"
+        requested_version, live_version,
+        "the update must answer with a version of its own, got {requested_version:?}"
     );
-    assert_ne!(
-        synchronized_version, requested_version,
-        "the live version is not the one the requested change carries: {waiting:?}"
+    assert_eq!(
+        text(&waiting, "VersionId"),
+        live_version,
+        "the live VersionId moved while the change was still the team's to approve: \
+         {waiting:?}"
     );
     // The configuration change is still the team's to approve.
     assert_eq!(

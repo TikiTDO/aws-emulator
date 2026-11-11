@@ -37,6 +37,8 @@ mod clock_owed_order;
 mod create_tag_ceiling;
 #[path = "all/filtered_listing_pagination.rs"]
 mod filtered_listing_pagination;
+#[path = "all/handshake_live_version_identity.rs"]
+mod handshake_live_version_identity;
 #[path = "all/idempotent_create_replay.rs"]
 mod idempotent_create_replay;
 #[path = "all/identity_source_approval_portal.rs"]

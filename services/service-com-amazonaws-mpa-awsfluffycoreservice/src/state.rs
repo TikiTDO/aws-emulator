@@ -94,8 +94,8 @@
 //! A change to the configuration an ACTIVE team's approvers approved is not applied where
 //! it is asked for: `UpdateApprovalTeam` records it as a REQUESTED version
 //! ([`PendingTeamUpdate`], [`ApprovalTeam::request_update`]) and puts it to the team in an
-//! update session, so the team keeps its description, strategy, approvers and version id
-//! until that change is approved and activated
+//! update session, so the team keeps its description, strategy, approvers, version id and
+//! last update time until that change is approved and activated
 //! ([`ApprovalTeam::activate_pending_update`]). A team whose configuration has never been
 //! activated takes the change in place ([`ApprovalTeam::bump_version`]): it has no
 //! approved configuration to protect. The handshake protects the CONFIGURATION, so a
@@ -1562,9 +1562,15 @@ impl ApprovalTeam {
     /// time.
     ///
     /// This is the change a team whose configuration no approver has approved yet takes —
-    /// a team still waiting on its activation, or one no longer active. A change to the
+    /// a team still waiting on its activation, or one no longer active — and the change an
+    /// ACTIVE team takes where the request asks for no configuration member to change at
+    /// all (an update action alone), which its approvers have nothing to approve. Either
+    /// way the caller is answered with the version recorded here. A change to the
     /// configuration an ACTIVE team's approvers approved goes through
-    /// [`ApprovalTeam::request_update`] instead.
+    /// [`ApprovalTeam::request_update`] instead, which leaves the live version id and
+    /// update time alone: the version that change mints is the one the caller is answered
+    /// with, and it becomes live only at its activation
+    /// ([`ApprovalTeam::activate_pending_update`]).
     pub fn bump_version(&mut self, now: SystemTime) {
         self.version = self.mint_version();
         self.version_id = self.version.to_string();

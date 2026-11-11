@@ -63,6 +63,12 @@
 //! carries no field and no action to apply leaves the team — and therefore its version —
 //! as it was.
 //!
+//! A call answers with ONE version id, and the team's live version id and
+//! `LastUpdateTime` only ever move to the version a call announced: so where the change is
+//! recorded for the approvers rather than applied, the announced version is the REQUESTED
+//! one and the live version id and `LastUpdateTime` stay as the approvers left them,
+//! whatever else the same request applies in place.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -355,8 +361,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // A change to the configuration an ACTIVE team's approvers approved has to be
         // approved by them too, so it is REQUESTED here rather than applied: the team
-        // keeps its description, strategy, approvers and version id, and reports the
-        // requested version until the team approves it and it is activated.
+        // keeps its description, strategy, approvers, version id and last update time, and
+        // reports the requested version until the team approves it and it is activated.
         if status == crate::state::TeamStatus::Active && changes_configuration {
             // Nothing is written until every instant this handshake records can be
             // computed, so a requested change can never be left waiting on an approval
@@ -455,9 +461,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // An update action is applied where it was asked for, to the team as it
             // stands: it changes no member the team's approvers approved. The set the
             // change produces is synchronized above, because it is not on the team yet.
+            //
+            // The live version id and `LastUpdateTime` stay where the approvers left
+            // them: the ONE version id this request answers with is the REQUESTED one
+            // (`version` below), so moving the live one here would make a version no
+            // response ever announced the team's live one, while the configuration it
+            // names is still the one awaiting the team's approval.
             if synchronize_mfa_devices {
                 team.synchronize_mfa_devices();
-                team.bump_version(now);
             }
             let version = team.mint_version();
             team.request_update(crate::state::PendingTeamUpdate::requested(
