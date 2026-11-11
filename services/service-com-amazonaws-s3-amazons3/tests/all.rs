@@ -175,6 +175,8 @@ mod listing_encoding_type;
 mod lifecycle_transition_rules;
 #[path = "all/listing_optional_members.rs"]
 mod listing_optional_members;
+#[path = "all/listing_query_value_decoding.rs"]
+mod listing_query_value_decoding;
 #[path = "all/listing_resume_markers.rs"]
 mod listing_resume_markers;
 #[path = "all/metadata_table_update_journal_status.rs"]

@@ -49,6 +49,24 @@ pub(crate) fn in_path(key: &str) -> String {
     utf8_percent_encode(key, PATH_LITERAL).to_string()
 }
 
+/// The bytes a signing SDK leaves literal in a query VALUE: RFC 3986's unreserved set alone,
+/// [`PATH_LITERAL`] without the `/` exemption — a query value is escaped byte by byte, which
+/// is why the separator of a key prefix reaches the service as `%2F`.
+const QUERY_VALUE_LITERAL: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+/// `value` as an SDK that signs the request puts it in a query string.
+///
+/// `pub(crate)`, beside [`in_path`] and for the same reason: a suite that hands a value to a
+/// listing as a query parameter escapes it through one helper. Use [`in_path`] where the `/`
+/// may stay literal and this one where the point is that it does not have to.
+pub(crate) fn in_query(value: &str) -> String {
+    utf8_percent_encode(value, QUERY_VALUE_LITERAL).to_string()
+}
+
 /// What a client does with every key-name element of an `encoding-type=url` page: the
 /// plus-aware unquoting botocore applies to each of them, where `+` is a space and `%XX` is
 /// the byte it names.
