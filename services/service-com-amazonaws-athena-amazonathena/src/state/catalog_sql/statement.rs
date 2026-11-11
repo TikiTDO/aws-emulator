@@ -3,9 +3,10 @@
 //! What ONE submitted Athena statement IS: the class it belongs to, and the plan for
 //! running it.
 //!
-//! Athena is a query service in front of a DATA CATALOG: a statement either defines or
-//! reports a catalog object (`CREATE EXTERNAL TABLE`, `CREATE VIEW`, `DROP VIEW`,
-//! `SHOW TABLES`), or it reads data through relations the catalog resolves
+//! Athena is a query service in front of a DATA CATALOG: a statement either defines,
+//! drops or reports a catalog object (`CREATE DATABASE`, `DROP DATABASE`,
+//! `CREATE EXTERNAL TABLE`, `DROP TABLE`, `CREATE VIEW`, `DROP VIEW`, `SHOW TABLES`,
+//! `SHOW DATABASES`), or it reads data through relations the catalog resolves
 //! (`SELECT … FROM <database>.<table>`). Which of those a statement is, and the names it
 //! addresses, are facts about its GRAMMAR, so they are read off a PARSE by the
 //! maintained SQL parser this crate already depends on — never off the statement's
@@ -21,8 +22,9 @@ use ::std::ops::ControlFlow;
 use ::service_com_amazonaws_glue_awsglue::state as glue_state;
 use ::sqlparser::ast::{
     ColumnDef, ColumnOption, CreateTable, CreateTableOptions, Expr, HiveDelimiter, HiveFormat,
-    HiveIOFormat, HiveRowFormat, Ident, ObjectName, ObjectNamePart, ObjectType, ShowCreateObject,
-    ShowStatementOptions, SqlOption, Statement as SqlStatement, Value, Visit, Visitor,
+    HiveIOFormat, HiveRowFormat, Ident, ObjectName, ObjectNamePart, ObjectType,
+    ShowCreateObject, ShowStatementOptions, SqlOption, Statement as SqlStatement, Value, Visit,
+    Visitor,
 };
 use ::sqlparser::dialect::{GenericDialect, HiveDialect};
 use ::sqlparser::parser::Parser;
@@ -258,6 +260,13 @@ pub enum CatalogStatement {
     },
     /// `CREATE EXTERNAL TABLE`: registers a table over data that already exists.
     CreateExternalTable(ExternalTable),
+    /// `DROP TABLE`.
+    DropTable {
+        /// The table to drop.
+        target: Relation,
+        /// Whether the statement tolerates its absence.
+        if_exists: bool,
+    },
     /// `CREATE [OR REPLACE] VIEW`: registers a view over a query.
     CreateView(ViewStatement),
     /// `DROP VIEW`.
@@ -815,6 +824,21 @@ fn plan_of(statement: SqlStatement, context: &QueryContext) -> Plan {
         } => match names.as_slice() {
             [name] => match relation_of(name, context) {
                 Some(target) => Plan::Catalog(Box::new(CatalogStatement::DropView {
+                    target,
+                    if_exists: *if_exists,
+                })),
+                None => Plan::Engine,
+            },
+            _ => Plan::Engine,
+        },
+        SqlStatement::Drop {
+            object_type: ObjectType::Table,
+            if_exists,
+            names,
+            ..
+        } => match names.as_slice() {
+            [name] => match relation_of(name, context) {
+                Some(target) => Plan::Catalog(Box::new(CatalogStatement::DropTable {
                     target,
                     if_exists: *if_exists,
                 })),
@@ -1425,6 +1449,11 @@ mod tests {
                 "show databases like shop%",
             ),
             (
+                "a table dropped",
+                "DROP TABLE shop.events",
+                "drop table shop.events",
+            ),
+            (
                 "Hive DDL with back-quoted names and a location",
                 "CREATE EXTERNAL TABLE `shop`.`ddl_tbl` (id bigint) LOCATION 's3://b/ddl/'",
                 "external table shop.ddl_tbl",
@@ -1524,6 +1553,9 @@ mod tests {
                             Some(RelationFilter::Other(form)) => format!(" where {form}"),
                         }
                     ),
+                    CatalogStatement::DropTable { target, .. } => {
+                        format!("drop table {}.{}", target.database, target.table)
+                    }
                     CatalogStatement::CreateExternalTable(table) => {
                         format!(
                             "external table {}.{}",

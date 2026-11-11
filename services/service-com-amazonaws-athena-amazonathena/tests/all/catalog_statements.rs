@@ -9,11 +9,17 @@
 //! over a data catalog whose `AwsDataCatalog` IS the account's Glue Data Catalog:
 //!
 //! * a statement that DEFINES a catalog object is performed against that catalog, so Hive
-//!   `CREATE EXTERNAL TABLE` and Presto `CREATE [OR REPLACE] VIEW` reach State SUCCEEDED
-//!   with StatementType DDL and leave an entry Glue's own reads report — an
+//!   `CREATE DATABASE` (and its `CREATE SCHEMA` spelling), Hive `CREATE EXTERNAL TABLE`
+//!   and Presto `CREATE [OR REPLACE] VIEW` reach State SUCCEEDED with StatementType DDL
+//!   and leave an entry Glue's own reads report — a database carrying the catalog's
+//!   identity, assigned id, create instant and seeded Lake Formation grant, an
 //!   `EXTERNAL_TABLE` owned by the DDL engine, carrying `EXTERNAL=TRUE`, the declared
 //!   columns and the location with its trailing separator dropped, or a `VIRTUAL_VIEW`
 //!   carrying the view's query and an empty location;
+//! * a statement that DROPS one removes that same record, so a dropped table and a dropped
+//!   database are gone from Glue's reads and from its own deletes — a `CASCADE` takes the
+//!   tables of a database with it, and a drop naming a database the catalog holds no record
+//!   of is the engine's own to perform;
 //! * a statement that addresses an object the catalog ALREADY holds, or does NOT hold,
 //!   fails with the category and the error type Athena publishes for that class, and
 //!   leaves the catalog exactly as it was;
@@ -33,6 +39,12 @@
 //! `POST /` with `X-Amz-Target`, and Amazon S3 through its own REST data plane, all on one
 //! `MultiServiceRouter` over ONE shared engine, so what is asserted is HTTP behaviour and
 //! the three services see each other's state exactly as they do in the emulator.
+//!
+//! `tests/all/database_statements.rs` holds the EXECUTION axis of the database statements —
+//! which clause forms reach SUCCEEDED, and the classification of each metastore refusal —
+//! and owns those refusal classes; the axis here is what the CATALOG then holds for them:
+//! the record Glue's own reads report for a database the DDL defined, the listing of the
+//! tables it holds, and the catalog's own delete of it.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -44,6 +56,8 @@ use service_com_amazonaws_athena_amazonathena::state::{
     query_engine, QUERY_EXECUTION_COMPLETION, QUERY_STATE_FAILED, QUERY_STATE_SUCCEEDED,
 };
 use smithy_server_runtime::MultiServiceRouter;
+
+use crate::harness::error_code;
 
 /// The name Athena reaches the account's AWS Glue Data Catalog by.
 const GLUE_CATALOG: &str = "AwsDataCatalog";
@@ -623,6 +637,578 @@ async fn hive_ddl_registers_the_table_it_declares_in_the_data_catalog() {
             Some(ddl::TABLE_TYPE_EXTERNAL),
             "case {:?}: unexpected metadata in {metadata:?}",
             case.case
+        );
+    }
+}
+
+/// The stored Glue database `name`, or `None` when the catalog holds none.
+async fn glue_database(router: &MultiServiceRouter, name: &str) -> Option<Value> {
+    let (status, answer) = glue(router, "GetDatabase", &json!({ "Name": name })).await;
+    (status == 200).then(|| answer["Database"].clone())
+}
+
+/// One row of the database-DDL table: a statement that DEFINES a database, and the
+/// catalog record it must leave.
+struct DatabaseCase {
+    /// What this row is about.
+    case: &'static str,
+    /// The database the statement runs in, which an unqualified name resolves against.
+    context: &'static str,
+    /// The statement submitted.
+    sql: &'static str,
+    /// The folded name the catalog must then hold the database under.
+    name: &'static str,
+    /// The `LocationUri` it must carry.
+    location: Option<&'static str>,
+}
+
+/// A statement that DEFINES a database writes the Data Catalog's own database record, so
+/// every catalog read of it answers: `GetDatabase` reports the record with the catalog's
+/// identity, its assigned id, its create instant and the Lake Formation grant the catalog
+/// seeds, and `GetTables` lists the (so far empty) set of tables it holds rather than
+/// refusing a database it does not know.
+#[tokio::test]
+async fn database_ddl_writes_the_catalog_database_glue_reads_report() {
+    let router = emulator();
+    let account = ::engine::emulator_account_id();
+
+    // The rows differ along the grammar word the statement uses for the object, whether it
+    // tolerates an existing database, how the name is cased and quoted, whether the name
+    // is qualified by its catalog, and whether a location is declared.
+    let cases: Vec<DatabaseCase> = vec![
+        DatabaseCase {
+            case: "a bare CREATE DATABASE",
+            context: "ddl_shop",
+            sql: "CREATE DATABASE ddl_shop",
+            name: "ddl_shop",
+            location: None,
+        },
+        DatabaseCase {
+            case: "a SCHEMA, which names the same catalog object",
+            context: "ddl_shop",
+            sql: "CREATE SCHEMA ddl_depot",
+            name: "ddl_depot",
+            location: None,
+        },
+        DatabaseCase {
+            case: "a mixed-case name, folded the way the catalog folds one",
+            context: "ddl_shop",
+            sql: "CREATE DATABASE DDL_Mixed",
+            name: "ddl_mixed",
+            location: None,
+        },
+        DatabaseCase {
+            case: "a back-quoted name under IF NOT EXISTS",
+            context: "ddl_shop",
+            sql: "CREATE DATABASE IF NOT EXISTS `ddl_quoted`",
+            name: "ddl_quoted",
+            location: None,
+        },
+        DatabaseCase {
+            case: "a name whose hyphens oblige the statement to quote it",
+            context: "ddl_shop",
+            sql: "CREATE DATABASE `ddl-hyphen-name`",
+            name: "ddl-hyphen-name",
+            location: None,
+        },
+        DatabaseCase {
+            case: "a database whose location the statement declares",
+            context: "ddl_shop",
+            sql: "CREATE DATABASE ddl_located LOCATION 's3://athena-catalog-data/located/'",
+            name: "ddl_located",
+            // A location names a PREFIX, which the catalog records without the separator
+            // that closed it.
+            location: Some("s3://athena-catalog-data/located"),
+        },
+    ];
+
+    let mut started: Vec<(&DatabaseCase, String)> = Vec::new();
+    for case in &cases {
+        let id = start(&router, case.case, case.context, case.sql).await;
+        started.push((case, id));
+    }
+    settle().await;
+
+    let mut seen_ids: BTreeMap<String, &str> = BTreeMap::new();
+    for (case, id) in started {
+        let found = succeeded(&router, case.case, &id).await;
+        assert_eq!(
+            found["StatementType"].as_str(),
+            Some(query_engine::STATEMENT_TYPE_DDL),
+            "case {:?}: a statement that defines an object is a DDL statement, got {found:?}",
+            case.case
+        );
+        let database = glue_database(&router, case.name)
+            .await
+            .unwrap_or_else(|| {
+                panic!(
+                    "case {:?}: the Data Catalog must hold {} after the DDL",
+                    case.case, case.name
+                )
+            });
+        assert_eq!(
+            database["Name"].as_str(),
+            Some(case.name),
+            "case {:?}: unexpected name in {database:?}",
+            case.case
+        );
+        assert_eq!(
+            (
+                database["CatalogId"].as_str(),
+                database["CatalogIdentifier"].as_str(),
+            ),
+            (Some(account), Some(account)),
+            "case {:?}: the record names the catalog that owns it, got {database:?}",
+            case.case
+        );
+        assert!(
+            database["CreateTime"].as_f64().is_some(),
+            "case {:?}: a stored database carries its create instant, got {database:?}",
+            case.case
+        );
+        assert_eq!(
+            database["CreateTableDefaultPermissions"],
+            json!([ {
+                "__type": "PrincipalPermissions",
+                "Permissions": [ "ALL" ],
+                "Principal": { "DataLakePrincipalIdentifier": "IAM_ALLOWED_PRINCIPALS" },
+            } ]),
+            "case {:?}: the catalog seeds the Lake Formation default grant, got {database:?}",
+            case.case
+        );
+        assert_eq!(
+            database["LocationUri"].as_str(),
+            case.location,
+            "case {:?}: unexpected location in {database:?}",
+            case.case
+        );
+        let assigned = database["DatabaseId"]
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!(
+                    "case {:?}: a stored database carries the id the catalog assigned it, \
+                     got {database:?}",
+                    case.case
+                )
+            })
+            .to_string();
+        if let Some(owner) = seen_ids.insert(assigned.clone(), case.case) {
+            let case = case.case;
+            panic!(
+                "case {case:?}: the catalog assigns each database its own id, but \
+                 {assigned:?} is already {owner:?}'s"
+            );
+        }
+
+        // A database the DDL created holds no tables yet, which a listing REPORTS as an
+        // empty list — the answer that tells "no tables" from "no database".
+        let listed = glue_ok(
+            &router,
+            case.case,
+            "GetTables",
+            &json!({ "DatabaseName": case.name }),
+        )
+        .await;
+        assert_eq!(
+            listed["TableList"],
+            json!([]),
+            "case {:?}: a database with no tables lists an empty TableList, got {listed:?}",
+            case.case
+        );
+    }
+
+    // The control: a database no statement defined is still absent, so the reads above
+    // report what the DDL wrote and not every name asked for.
+    assert!(
+        glue_database(&router, "ddl_never_created").await.is_none(),
+        "a database no statement created must not be in the catalog"
+    );
+}
+
+/// A statement that defines a database the catalog ALREADY holds is answered by the
+/// statement's own words: `IF NOT EXISTS` succeeds and changes nothing, and without it the
+/// statement fails with the already-exists class Athena publishes — the same refusal the
+/// catalog API answers for that name, because both doors write one record.
+#[tokio::test]
+async fn a_database_statement_over_one_the_catalog_holds_is_kept_or_refused() {
+    let router = emulator();
+
+    let created = start(
+        &router,
+        "the first create",
+        "ddl_twice",
+        "CREATE DATABASE ddl_twice",
+    )
+    .await;
+    let before = glue_database(&router, "ddl_twice")
+        .await
+        .expect("the first create must store the database");
+
+    // (case, the statement, whether it must succeed)
+    let cases: Vec<(&str, &str, bool)> = vec![
+        ("a plain create of a database that exists", "CREATE DATABASE ddl_twice", false),
+        (
+            "a create that tolerates an existing database",
+            "CREATE DATABASE IF NOT EXISTS ddl_twice",
+            true,
+        ),
+        (
+            "a SCHEMA naming the database a CREATE DATABASE defined",
+            "CREATE SCHEMA ddl_twice",
+            false,
+        ),
+    ];
+
+    let mut started: Vec<(&str, bool, String)> = Vec::new();
+    for (case, sql, succeeds) in &cases {
+        started.push((case, *succeeds, start(&router, case, "ddl_twice", sql).await));
+    }
+    settle().await;
+
+    succeeded(&router, "the first create", &created).await;
+    for (case, succeeds, id) in started {
+        if succeeds {
+            succeeded(&router, case, &id).await;
+            continue;
+        }
+        let message = failed(&router, case, &id, 2, Some(1006)).await;
+        assert!(
+            message.contains("Database ddl_twice already exists"),
+            "case {case:?}: expected the metastore's already-exists sentence, got {message:?}"
+        );
+    }
+
+    // Neither answer rewrote the record: the id the catalog assigned it is the one it
+    // still reports.
+    let after = glue_database(&router, "ddl_twice")
+        .await
+        .expect("the database is still stored");
+    assert_eq!(
+        after["DatabaseId"], before["DatabaseId"],
+        "a refused or tolerated create leaves the stored database as it was, got {after:?} \
+         against {before:?}"
+    );
+
+    // The catalog API refuses that name for the same reason: one record, one name.
+    let (status, refused) = glue(
+        &router,
+        "CreateDatabase",
+        &json!({ "DatabaseInput": { "Name": "ddl_twice" } }),
+    )
+    .await;
+    assert_eq!(
+        status, 400,
+        "a catalog create of a database the DDL defined is refused, got {status} with \
+         {refused:?}"
+    );
+    assert_eq!(
+        error_code(&refused),
+        "AlreadyExistsException",
+        "expected the catalog's already-exists exception, got {refused:?}"
+    );
+}
+
+/// One row of the drop table: a statement that DROPS a catalog object, and what it must
+/// answer.
+struct DropCase {
+    /// What this row is about.
+    case: &'static str,
+    /// The database the statement runs in, which an unqualified name resolves against.
+    context: &'static str,
+    /// The statement submitted.
+    sql: &'static str,
+    /// `None` when the statement must succeed, else the fragment its refusal must carry
+    /// and the error type Athena publishes for that refusal's class.
+    refusal: Option<(&'static str, Option<i64>)>,
+}
+
+/// A statement that DROPS a catalog object removes it from the Data Catalog, so no reader
+/// is left holding what the other dropped: a dropped table is gone from `GetTable` and from
+/// the partition-index records kept beside it, a dropped database is gone from
+/// `GetDatabase` — and from `DeleteDatabase`, which then refuses it as an absent entity — and
+/// a `CASCADE` takes the tables of a database with it. A `DROP TABLE` naming a database the
+/// catalog holds no record of addresses a table of the engine's own and is performed where
+/// that table's create was, and one naming a VIEW addresses no table at all.
+#[tokio::test]
+async fn dropping_a_catalog_object_removes_it_from_the_catalog() {
+    let router = emulator();
+    create_bucket(&router).await;
+
+    // Everything these drops address is created through the DDL, so what is dropped is
+    // what that DDL wrote.
+    for (case, sql) in [
+        ("the empty database", "CREATE DATABASE ddl_empty"),
+        ("the database whose table is dropped", "CREATE DATABASE ddl_full"),
+        ("the database dropped with its tables", "CREATE DATABASE ddl_cascade"),
+        ("the database the catalog API deletes", "CREATE DATABASE ddl_glue"),
+        ("the database holding a view", "CREATE DATABASE ddl_views"),
+    ] {
+        start(&router, case, "ddl_empty", sql).await;
+    }
+    for (case, database) in [
+        ("the table that is dropped", "ddl_full"),
+        ("the table dropped with its database", "ddl_cascade"),
+    ] {
+        start(
+            &router,
+            case,
+            database,
+            &format!(
+                "CREATE EXTERNAL TABLE {database}.items (id bigint) \
+                 LOCATION 's3://{BUCKET}/items/'"
+            ),
+        )
+        .await;
+    }
+
+    // A VIEW, which a `DROP TABLE` must leave alone: the two statements address different
+    // kinds of catalog entry.
+    start(
+        &router,
+        "the view a DROP TABLE must not remove",
+        "ddl_views",
+        "CREATE VIEW ddl_views.v_items AS SELECT 1 AS id",
+    )
+    .await;
+
+    // Both tables are in the catalog before anything is dropped, so the assertions below
+    // are about the drops and not about a table that was never registered.
+    for database in ["ddl_full", "ddl_cascade"] {
+        assert!(
+            glue_table(&router, database, "items").await.is_some(),
+            "setup: the Data Catalog must hold {database}.items after the DDL"
+        );
+    }
+
+    // A table of the ENGINE's own, in a database the catalog holds no record of: a
+    // `CREATE TABLE` that declares no location is not a catalog statement, so the drop of
+    // it below is answered where its create was.
+    let engine_table = start(
+        &router,
+        "the table the engine itself defines",
+        "engine_only",
+        "CREATE TABLE engine_tbl (id integer)",
+    )
+    .await;
+
+    // The rows differ along which kind of object the statement drops, whether it tolerates
+    // its absence, whether it states CASCADE, and whether the name it addresses is one the
+    // catalog holds at all.
+    let cases: Vec<DropCase> = vec![
+        DropCase {
+            case: "a table the catalog holds",
+            context: "ddl_full",
+            sql: "DROP TABLE ddl_full.items",
+            refusal: None,
+        },
+        DropCase {
+            case: "an empty database",
+            context: "ddl_full",
+            sql: "DROP DATABASE ddl_empty",
+            refusal: None,
+        },
+        DropCase {
+            case: "a database dropped with the tables it holds",
+            context: "ddl_full",
+            sql: "DROP DATABASE ddl_cascade CASCADE",
+            refusal: None,
+        },
+        DropCase {
+            case: "a SCHEMA naming a database the catalog does not hold",
+            context: "ddl_full",
+            sql: "DROP SCHEMA ddl_absent",
+            refusal: Some(("Database does not exist: ddl_absent", Some(1301))),
+        },
+        DropCase {
+            case: "an absent database the statement tolerates",
+            context: "ddl_full",
+            sql: "DROP DATABASE IF EXISTS ddl_absent",
+            refusal: None,
+        },
+        DropCase {
+            case: "a view, which a DROP TABLE addresses no table of",
+            context: "ddl_views",
+            sql: "DROP TABLE ddl_views.v_items",
+            refusal: Some((
+                "Table 'awsdatacatalog.ddl_views.v_items' does not exist",
+                Some(1301),
+            )),
+        },
+        DropCase {
+            case: "an absent table the statement tolerates",
+            context: "ddl_full",
+            sql: "DROP TABLE IF EXISTS ddl_full.items",
+            refusal: None,
+        },
+        DropCase {
+            case: "an absent table in a database the catalog holds",
+            context: "ddl_full",
+            sql: "DROP TABLE ddl_full.never_registered",
+            refusal: Some((
+                "Table 'awsdatacatalog.ddl_full.never_registered' does not exist",
+                Some(1301),
+            )),
+        },
+        DropCase {
+            case: "a table of the engine's own, in no catalog database",
+            context: "engine_only",
+            sql: "DROP TABLE engine_tbl",
+            refusal: None,
+        },
+    ];
+
+    let mut started: Vec<(&DropCase, String)> = Vec::new();
+    for case in &cases {
+        let id = start(&router, case.case, case.context, case.sql).await;
+        started.push((case, id));
+    }
+    settle().await;
+
+    // The engine's own create and drop both succeed, and leave the catalog with no record
+    // of either the database or the table.
+    succeeded(&router, "the table the engine itself defines", &engine_table).await;
+    assert!(
+        glue_database(&router, "engine_only").await.is_none(),
+        "a table the engine defines registers no catalog database"
+    );
+
+    for (case, id) in started {
+        let Some((expected, error_type)) = case.refusal else {
+            succeeded(&router, case.case, &id).await;
+            continue;
+        };
+        let message = failed(&router, case.case, &id, 2, error_type).await;
+        assert!(
+            message.contains(expected),
+            "case {:?}: expected a refusal carrying {expected:?}, got {message:?}",
+            case.case
+        );
+    }
+
+    assert!(
+        glue_table(&router, "ddl_full", "items").await.is_none(),
+        "a dropped table is gone from the catalog"
+    );
+    // The database that held it is untouched, and still lists its tables — now none.
+    let listed = glue_ok(
+        &router,
+        "the database whose table was dropped",
+        "GetTables",
+        &json!({ "DatabaseName": "ddl_full" }),
+    )
+    .await;
+    assert_eq!(
+        listed["TableList"],
+        json!([]),
+        "the database of a dropped table lists no tables, got {listed:?}"
+    );
+    for database in ["ddl_empty", "ddl_cascade"] {
+        assert!(
+            glue_database(&router, database).await.is_none(),
+            "the dropped database {database} is gone from the catalog"
+        );
+    }
+    assert!(
+        glue_table(&router, "ddl_cascade", "items").await.is_none(),
+        "the tables of a database dropped with CASCADE go with it"
+    );
+    // The VIEW the refused DROP TABLE named is still there: that statement addresses
+    // tables, and `DROP VIEW` is what addresses a view.
+    assert!(
+        glue_table(&router, "ddl_views", "v_items").await.is_some(),
+        "a DROP TABLE naming a view leaves the view in the catalog"
+    );
+
+    // A delete of a database the catalog no longer holds is refused as an absent entity,
+    // so a client can tell a real delete from a no-op.
+    let (status, refused) = glue(&router, "DeleteDatabase", &json!({ "Name": "ddl_empty" })).await;
+    assert_eq!(
+        status, 400,
+        "deleting a database the DDL dropped is refused, got {status} with {refused:?}"
+    );
+    assert_eq!(
+        (
+            error_code(&refused),
+            refused["Message"].as_str().unwrap_or_default(),
+        ),
+        (
+            "EntityNotFoundException".to_string(),
+            "Database ddl_empty not found.",
+        ),
+        "expected the catalog's absent-entity refusal, got {refused:?}"
+    );
+
+    // And the catalog API deletes a database the DDL created, exactly as it deletes one
+    // of its own: the first delete succeeds, the second finds nothing.
+    glue_ok(
+        &router,
+        "the database the catalog API deletes",
+        "DeleteDatabase",
+        &json!({ "Name": "ddl_glue" }),
+    )
+    .await;
+    assert!(
+        glue_database(&router, "ddl_glue").await.is_none(),
+        "a database the catalog API deleted is gone"
+    );
+    let (status, again) = glue(&router, "DeleteDatabase", &json!({ "Name": "ddl_glue" })).await;
+    assert_eq!(
+        status, 400,
+        "a second delete of the same database is refused, got {status} with {again:?}"
+    );
+}
+
+/// `SHOW DATABASES` and `SHOW SCHEMAS` report the databases the Data Catalog holds, in the
+/// catalog's own name order, whichever door created each one — and a statement that states
+/// a pattern lists only the names it matches as a whole.
+#[tokio::test]
+async fn show_databases_lists_the_catalog_databases() {
+    let router = emulator();
+    create_database(&router, "show_api_db").await;
+    for sql in [
+        "CREATE DATABASE show_ddl_one",
+        "CREATE SCHEMA show_ddl_two",
+    ] {
+        start(&router, "setup", "show_ddl_one", sql).await;
+    }
+
+    // (case, the statement, the names it must list)
+    let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+        (
+            "every database the catalog holds",
+            "SHOW DATABASES",
+            vec!["show_api_db", "show_ddl_one", "show_ddl_two"],
+        ),
+        (
+            "the same listing under the SCHEMAS spelling",
+            "SHOW SCHEMAS",
+            vec!["show_api_db", "show_ddl_one", "show_ddl_two"],
+        ),
+        (
+            "a listing narrowed by a pattern",
+            "SHOW DATABASES LIKE 'show_ddl%'",
+            vec!["show_ddl_one", "show_ddl_two"],
+        ),
+        (
+            "a pattern no database matches",
+            "SHOW DATABASES LIKE 'nothing%'",
+            vec![],
+        ),
+    ];
+
+    let mut started: Vec<(&str, &Vec<&str>, String)> = Vec::new();
+    for (case, sql, expected) in &cases {
+        started.push((case, expected, start(&router, case, "show_ddl_one", sql).await));
+    }
+    settle().await;
+
+    for (case, expected, id) in started {
+        succeeded(&router, case, &id).await;
+        let listed = names_in(&rows_of(&router, case, &id).await);
+        assert_eq!(
+            listed,
+            expected.iter().map(|name| (*name).to_string()).collect::<Vec<_>>(),
+            "case {case:?}: expected the databases {expected:?}, got {listed:?}"
         );
     }
 }

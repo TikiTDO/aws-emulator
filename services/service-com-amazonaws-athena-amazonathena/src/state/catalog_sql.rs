@@ -8,7 +8,8 @@
 //! catalog resolves. So a statement is first read as what it is
 //! ([`statement::read`]), and then:
 //!
-//! * a catalog statement — `CREATE EXTERNAL TABLE`, `CREATE VIEW`, `DROP VIEW`,
+//! * a catalog statement — `CREATE DATABASE`, `DROP DATABASE`, `SHOW DATABASES`,
+//!   `CREATE EXTERNAL TABLE`, `DROP TABLE`, `CREATE VIEW`, `DROP VIEW`,
 //!   `SHOW CREATE VIEW`, `SHOW TABLES`, `SHOW VIEWS` — is performed against the AWS Glue
 //!   Data Catalog ([`ddl`]), which is the one catalog `AwsDataCatalog` names, so what this
 //!   DDL writes is what Glue's own reads report and what Glue writes is what these
@@ -369,6 +370,14 @@ pub fn execute<Eng: Send + Sync + 'static>(
 ) -> Completion {
     match reading.plan {
         Plan::Engine => query_engine::run(handle, sql, reading.counts_rows, parameters),
+        // A `DROP TABLE` naming a database the catalog does not hold addresses no catalog
+        // table, so it is the ENGINE's to perform — the same engine whose own database a
+        // `CREATE TABLE` that declares no location defines its table in ([`Plan::Engine`]),
+        // which is the only way a relation outside the catalog comes to exist here. Decided
+        // before the catalog's guard is taken for the drop itself.
+        Plan::Catalog(statement) if drops_a_table_of_the_engines_own(engine, &statement) => {
+            query_engine::run(handle, sql, reading.counts_rows, parameters)
+        }
         Plan::Catalog(statement) => {
             let started = Instant::now();
             let outcome = match perform(engine, &statement, now) {
@@ -437,6 +446,7 @@ fn perform<Eng: Send + Sync + 'static>(
         }
         CatalogStatement::CreateView(view) => (view.target.catalog.clone(), view.target.at),
         CatalogStatement::DropView { target, .. }
+        | CatalogStatement::DropTable { target, .. }
         | CatalogStatement::ShowCreateView { target } => (target.catalog.clone(), target.at),
         CatalogStatement::ShowRelations { schema, .. } => (schema.catalog.clone(), schema.at),
     };
@@ -462,7 +472,12 @@ fn perform<Eng: Send + Sync + 'static>(
             target,
             if_exists,
             cascade,
-        } => ddl::drop_database(&mut store, &catalog_id, target, *if_exists, *cascade),
+        } => {
+            let dropped =
+                ddl::drop_database(&mut store, &catalog_id, target, *if_exists, *cascade)?;
+            forget_partition_indexes(engine, &dropped);
+            Ok(StoredResultSet::default())
+        }
         CatalogStatement::ShowDatabases { filter, .. } => {
             ddl::show_databases(&store, &catalog_id, filter.as_ref())
         }
@@ -471,6 +486,11 @@ fn perform<Eng: Send + Sync + 'static>(
         }
         CatalogStatement::CreateView(view) => {
             ddl::create_view(&mut store, &catalog_id, view, now)
+        }
+        CatalogStatement::DropTable { target, if_exists } => {
+            let dropped = ddl::drop_table(&mut store, &catalog_id, target, *if_exists)?;
+            forget_partition_indexes(engine, &dropped);
+            Ok(StoredResultSet::default())
         }
         CatalogStatement::DropView { target, if_exists } => {
             ddl::drop_view(&mut store, &catalog_id, target, *if_exists)
@@ -483,6 +503,55 @@ fn perform<Eng: Send + Sync + 'static>(
             views_only,
             filter,
         } => ddl::show_relations(&store, &catalog_id, schema, *views_only, filter.as_ref()),
+    }
+}
+
+/// Whether `statement` is a `DROP TABLE` whose name the DATA CATALOG holds no database
+/// for, and which therefore addresses a table of the ENGINE's own.
+///
+/// Every table Athena's DDL registers lives in the catalog, and so does every table a
+/// client registers through the catalog API — but a `CREATE TABLE` that declares no
+/// location is not a catalog statement here ([`Plan::Engine`]) and defines its table in the
+/// engine database the query's context addresses. A drop naming a database the catalog does
+/// not hold can only be addressing one of those, so it is performed where its create was,
+/// rather than refused by a catalog that was never asked to hold it. A database the catalog
+/// DOES hold is a catalog database: a drop inside it is the catalog's, including its own
+/// table-does-not-exist refusal.
+fn drops_a_table_of_the_engines_own<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    statement: &CatalogStatement,
+) -> bool {
+    let CatalogStatement::DropTable { target, .. } = statement else {
+        return false;
+    };
+    let Ok(catalog_id) = catalog_id_of(engine, &target.catalog, target.at) else {
+        return false;
+    };
+    let Some(state) = glue_state::service_state(engine) else {
+        return false;
+    };
+    let store = state.lock();
+    store.database(&catalog_id, &target.database).is_none()
+}
+
+/// Forget the PARTITION INDEX records of the tables a drop removed.
+///
+/// An index is a resource OF its table, so a table the catalog no longer holds leaves none
+/// behind — the same cascade the catalog's own deletes perform, taken in the same order:
+/// the catalog's guard is still held while these records are written.
+fn forget_partition_indexes<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    tables: &[glue_state::TableEntry],
+) {
+    if tables.is_empty() {
+        return;
+    }
+    if let Some(records) =
+        ::service_com_amazonaws_glue_awsglue::service::partition_indexes::partition_index_store(
+            engine,
+        )
+    {
+        records.lock().forget_tables(tables.iter());
     }
 }
 

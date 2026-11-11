@@ -3,11 +3,12 @@
 //! The statements the DATA CATALOG performs: the Hive and Presto DDL Athena serves by
 //! writing to, or reading from, the AWS Glue Data Catalog.
 //!
-//! Athena registers no tables of its own — `AwsDataCatalog` IS the account's Glue Data
-//! Catalog — so a `CREATE EXTERNAL TABLE` here writes the same catalog entry a client
-//! writes through `AWSGlue.CreateTable`, and every read below answers out of that one
-//! catalog. Nothing is kept beside it: a table a client creates through Glue is a table
-//! these statements see, and a table this DDL defines is one Glue's own reads report.
+//! Athena registers no catalog objects of its own — `AwsDataCatalog` IS the account's
+//! Glue Data Catalog — so a statement here that defines, drops or reports a DATABASE or a
+//! TABLE acts on the same catalog records a client writes and reads through `AWSGlue`, and
+//! every read below answers out of that one catalog. Nothing is kept beside it: a database
+//! or table a client creates through Glue is one these statements see, and one this DDL
+//! defines is one Glue's own reads report and Glue's own deletes remove.
 
 use ::std::collections::HashMap;
 use ::std::time::SystemTime;
@@ -20,8 +21,8 @@ use ::service_com_amazonaws_glue_awsglue::state as glue_state;
 use crate::ops::types::{Datum, Row};
 
 use super::statement::{
-    self, DeclaredColumn, ExternalTable, Projection, Relation, RelationFilter, Schema,
-    StorageFormat, ViewStatement,
+    self, DeclaredColumn, ExternalTable, Projection, Relation, RelationFilter,
+    Schema, StorageFormat, ViewStatement,
 };
 use super::{Failure, StoredResultSet};
 
@@ -208,16 +209,19 @@ pub fn create_database(
 /// the database and every table in it are left exactly as they were. `IF EXISTS` tolerates
 /// an absent database; without it, an absent database is the catalog's own not-found
 /// refusal.
+///
+/// Answers the TABLES the drop removed with the database, whose own per-table records go
+/// with them.
 pub fn drop_database(
     store: &mut glue_state::ComAmazonawsGlueAwsglueState,
     catalog_id: &str,
     target: &Schema,
     if_exists: bool,
     cascade: bool,
-) -> Result<StoredResultSet, Failure> {
+) -> Result<Vec<glue_state::TableEntry>, Failure> {
     let Some(database) = store.database(catalog_id, &target.database) else {
         if if_exists {
-            return Ok(StoredResultSet::default());
+            return Ok(Vec::new());
         }
         // The drop is performed by the Hive DDL engine, which resolves the name while it
         // compiles the statement.
@@ -226,10 +230,56 @@ pub fn drop_database(
     if !database.tables.is_empty() && !cascade {
         return Err(Failure::database_not_empty(&target.database));
     }
-    if let Some(catalog) = store.catalogs.get_mut(catalog_id) {
-        catalog.databases.remove(&glue_state::fold_name(&target.database));
+    // Removing the entry removes the tables it owns with it: they are stored inside it,
+    // which is the cascade the catalog's own delete performs.
+    let removed = store.catalogs.get_mut(catalog_id).and_then(|catalog| {
+        catalog
+            .databases
+            .remove(&glue_state::fold_name(&target.database))
+    });
+    Ok(removed
+        .into_iter()
+        .flat_map(|database| database.tables.into_values())
+        .collect())
+}
+
+/// Drop the table a `DROP TABLE` names, and answer the entry it removed: that entry is the
+/// one the catalog API's own delete removes, so neither reader is left holding a table the
+/// other dropped.
+///
+/// Only a TABLE is dropped: the statement names a table, so an entry of that name that is
+/// a VIEW is not what it addresses, and is answered with the same table-does-not-exist
+/// refusal a name the database holds nothing for gets — the mirror of [`drop_view`], which
+/// answers a table of the name it addresses with its own view-does-not-exist refusal.
+///
+/// The caller decides whether the statement addresses a catalog table at all
+/// (`super::drops_a_table_of_the_engines_own`): a name in a database the catalog does not
+/// hold is no catalog table. Inside a database it does hold, `IF EXISTS` tolerates an
+/// absent table and without it that absence is the engine's own table-does-not-exist
+/// refusal.
+pub fn drop_table(
+    store: &mut glue_state::ComAmazonawsGlueAwsglueState,
+    catalog_id: &str,
+    target: &Relation,
+    if_exists: bool,
+) -> Result<Vec<glue_state::TableEntry>, Failure> {
+    let Some(database) = store.database_mut(catalog_id, &target.database) else {
+        if if_exists {
+            return Ok(Vec::new());
+        }
+        return Err(Failure::schema_not_found(target));
+    };
+    match database.tables.get(&target.table) {
+        Some(entry) if !is_view(entry) => Ok(database
+            .tables
+            .remove(&target.table)
+            .into_iter()
+            .collect()),
+        // An entry that is a view, and a name nothing is stored under, are the same answer:
+        // the statement addresses no table.
+        Some(_) | None if if_exists => Ok(Vec::new()),
+        Some(_) | None => Err(Failure::table_not_found(target)),
     }
-    Ok(StoredResultSet::default())
 }
 
 /// List the databases of one data catalog, as `SHOW DATABASES` and `SHOW SCHEMAS` answer
