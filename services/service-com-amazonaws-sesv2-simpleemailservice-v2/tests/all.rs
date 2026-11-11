@@ -111,6 +111,8 @@ mod email_template_updates;
 mod email_templates;
 #[path = "all/enum_value_set_order.rs"]
 mod enum_value_set_order;
+#[path = "all/export_job_cancellation.rs"]
+mod export_job_cancellation;
 #[path = "all/export_job_creation.rs"]
 mod export_job_creation;
 #[path = "all/export_job_reads.rs"]

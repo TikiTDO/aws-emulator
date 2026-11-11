@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CancelExportJob
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CancelExportJob`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CancelExportJob::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Cancels an export job: the stored job's run stops where it stands and reaches the
+//! terminal `CANCELLED` status, so it never completes and never writes an export file —
+//! which is what every later read of the job reports
+//! ([`crate::state::ExportJobRecord`]). This is the ONLY file to touch for this
+//! operation.
 //!
 //! ## Shape of an operation
 //!
@@ -135,18 +131,53 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CancelExportJob` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CancelExportJobErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CancelExportJob"))
+        // An export job belongs to the account rather than to a Region-scoped
+        // resource, so no request metadata is needed — the same reading this
+        // service's other export-job operations take.
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            // No store at all, which is not a modelled SES state: answer the scaffold's
+            // 501 rather than a modelled error that reads as one.
+            return Err(crate::scaffolded::Scaffolded::not_implemented(
+                "CancelExportJob without the shared emulator state",
+            ));
+        };
+
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        // Whatever progress the stored runs had already made at `now` was due whether or
+        // not anybody called, so a cancellation acts on the run as it stands at `now`:
+        // one whose span had already elapsed has finished, and is no longer cancellable.
+        store.settle(now);
+
+        let Some(job) = store.export_jobs.get_mut(&input.job_id) else {
+            return Err(CancelExportJobErrorModeled::NotFoundException(NotFoundException {
+                message: Some(crate::state::export_job_not_found(&input.job_id)),
+            })
+            .into());
+        };
+
+        // "Call GetExportJob with that ID until JobStatus is COMPLETED, FAILED, or
+        // CANCELLED": those are the statuses a run never leaves, so a job already in one
+        // has no run left to stop and the request is refused with the one input error
+        // this operation models — leaving that job exactly as it stood.
+        if job.status.is_terminal() {
+            let status = job.status;
+            return Err(CancelExportJobErrorModeled::BadRequestException(
+                BadRequestException {
+                    message: Some(crate::state::export_job_not_cancellable(status)),
+                },
+            )
+            .into());
+        }
+
+        // A job still CREATED or PROCESSING is stopped here: its run reaches the
+        // terminal `CANCELLED` status, never completes and writes no export file, which
+        // is what every later read of the job reports.
+        job.cancel();
+
+        // "An HTTP 200 response if the request succeeds": the response carries no
+        // member, so the cancellation is reported by the stored job alone.
+        Ok(CancelExportJobOutput {})
     }
 }
