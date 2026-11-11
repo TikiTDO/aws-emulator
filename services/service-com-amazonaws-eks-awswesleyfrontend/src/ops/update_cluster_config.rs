@@ -767,6 +767,34 @@ fn requested_change(
         }
     }
 
+    // Those three capabilities are EKS Auto Mode's, and Amazon EKS has them enabled
+    // TOGETHER whichever call sets them — so the change is judged on the
+    // configuration the cluster ENDS UP with: the members this request carries
+    // merged onto the ones the cluster already reports
+    // ([`state::AutoModeRequest`], the same reading `CreateCluster` applies).
+    if pending.compute_config.is_some()
+        || pending.storage_config.is_some()
+        || pending.kubernetes_network_config.is_some()
+    {
+        let auto_mode = state::AutoModeRequest::from_reported(
+            pending
+                .compute_config
+                .as_ref()
+                .or(record.compute_config.as_ref()),
+            pending
+                .storage_config
+                .as_ref()
+                .or(record.storage_config.as_ref()),
+            pending
+                .kubernetes_network_config
+                .as_ref()
+                .or(record.kubernetes_network_config.as_ref()),
+        );
+        if let Some(why) = auto_mode.refusal() {
+            return Err(why);
+        }
+    }
+
     // `remoteNetworkConfig`: "You can add, change, or remove this configuration after the
     // cluster is created. To remove the configuration, use the remoteNetworkConfig key
     // with an object containing both subkeys with empty arrays for each" — so the

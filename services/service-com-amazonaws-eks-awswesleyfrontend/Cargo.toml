@@ -60,6 +60,13 @@ service-common = { path = "../common" }
 # whether a body parses as YAML at all. yaml-rust2 is the pure-Rust YAML 1.2
 # implementation the other services that read caller-supplied YAML already use.
 yaml-rust2 = { version = "0.10", default-features = false }
+# `ipnet`: the reading of an IPv4/IPv6 CIDR block and of whether one block contains
+# another — the form of a `publicAccessCidrs` entry
+# (`src/state/cluster_parameters.rs`) and the private range, netmask bounds and
+# VPC overlap of a cluster's service CIDR (`src/state/cluster_validation.rs`), which
+# are the same reading. The version the sibling services that read caller-supplied
+# CIDRs declare it at.
+ipnet = "2"
 # A cluster's `certificateAuthority.data` is "the Base64-encoded certificate data
 # required to communicate with your cluster", so this service issues a REAL
 # self-signed X.509 certificate for every certificate authority it provisions

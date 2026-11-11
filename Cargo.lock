@@ -12289,6 +12289,7 @@ dependencies = [
  "bytes",
  "hex",
  "http",
+ "ipnet",
  "rcgen",
  "serde_json",
  "service-com-amazonaws-iam-awsidentitymanagementv20100508",

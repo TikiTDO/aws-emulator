@@ -235,6 +235,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
 
+        // And the username is Amazon EKS's to specify for every type but `STANDARD`
+        // ([`crate::state::username_refusal`]) — a rule about the ENTRY's type, so it
+        // holds whichever call tries to set one, and the type is not an input here,
+        // so it is the stored one that decides. A blank username names nobody, which
+        // is the create path's blankness rule, and asks EKS to specify it instead.
+        if input
+            .username
+            .as_ref()
+            .is_some_and(|username| !username.trim().is_empty())
+        {
+            if let Some(why) = crate::state::username_refusal(&entry.entry_type) {
+                return Err(UpdateAccessEntryError::from(
+                    UpdateAccessEntryErrorModeled::InvalidParameterException(
+                        InvalidParameterException {
+                            cluster_name: Some(input.cluster_name.clone()),
+                            message: Some(why),
+                            ..Default::default()
+                        },
+                    ),
+                ));
+            }
+        }
+
         // A member the request carries replaces the stored one; a member it omits
         // names no new value, so the stored one stands.
         if let Some(groups) = input.kubernetes_groups.clone() {

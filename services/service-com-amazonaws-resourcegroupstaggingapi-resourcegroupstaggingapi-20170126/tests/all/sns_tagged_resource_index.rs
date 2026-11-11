@@ -129,8 +129,19 @@ async fn sns_ok(router: &MultiServiceRouter, action: &str, params: &[(&str, &str
 }
 
 /// A topic created through Amazon SNS's own API, with the ARN that service minted.
+///
+/// A name ending in `.fifo` names a FIFO topic, and Amazon SNS creates one only for a
+/// request that ASKS for that kind — "the fifo suffix belongs to a FIFO topic and to no
+/// other", so the name and the `FifoTopic` attribute have to agree (SNS refuses the
+/// pair that disagrees with `Invalid parameter: Topic Name`). The attribute is therefore
+/// read off the name rather than passed by every caller.
 async fn topic(router: &MultiServiceRouter, name: &str) -> String {
-    require(&sns_ok(router, "CreateTopic", &[("Name", name)]).await, "TopicArn")
+    let mut params: Vec<(&str, &str)> = vec![("Name", name)];
+    if name.ends_with(".fifo") {
+        params.push(("Attributes.entry.1.key", "FifoTopic"));
+        params.push(("Attributes.entry.1.value", "true"));
+    }
+    require(&sns_ok(router, "CreateTopic", &params).await, "TopicArn")
 }
 
 /// The tag map Amazon SNS's own `ListTagsForResource` reports for one ARN.

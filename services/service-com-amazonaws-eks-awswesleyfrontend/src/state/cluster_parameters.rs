@@ -20,10 +20,10 @@
 //! `clusterName` member such a refusal carries, which is the value the request
 //! supplied.
 
-use std::net::IpAddr;
+use std::str::FromStr;
 use std::time::SystemTime;
 
-use super::{kubernetes_minor_version, ComAmazonawsEksAwswesleyfrontendState, SupportStatus};
+use super::{kubernetes_minor_version, ComAmazonawsEksAwswesleyfrontendState};
 
 /// The cluster-name grammar as Amazon EKS PRINTS it in a refusal: the modelled
 /// `@pattern` of `ClusterName` ([`super::CLUSTER_NAME_PATTERN`]) without the escape
@@ -196,27 +196,13 @@ pub fn invalid_public_access_cidrs_message(invalid: &[String]) -> String {
 ///
 /// `publicAccessCidrs` is "The CIDR blocks that are allowed access to your cluster's
 /// public Kubernetes API server endpoint" (`smithy_query(query="shape",
-/// shape="VpcConfigRequest")`), and a value that is not one denies and allows nothing:
-/// the address is parsed by the standard library rather than by a hand-rolled scan,
-/// and the prefix is bounded by the address family it was parsed as — 32 bits for
-/// IPv4, 128 for IPv6.
+/// shape="VpcConfigRequest")`), and a value that is not one denies and allows nothing.
+/// Reading one is `ipnet`'s job — the same crate the service CIDR's ranges are read
+/// with ([`super::service_ipv4_cidr_refusal`]), so this crate has ONE answer to "is
+/// this a CIDR block": it parses the address of either family and bounds the prefix
+/// by that family's width.
 pub fn is_cidr_block(candidate: &str) -> bool {
-    let Some((address, prefix)) = candidate.split_once('/') else {
-        return false;
-    };
-    let Ok(address) = address.parse::<IpAddr>() else {
-        return false;
-    };
-    // A prefix is written in decimal with no sign and no padding: `08` and `+8` name
-    // no prefix length, which is what rejecting anything `u8` does not parse leaves.
-    let Ok(prefix) = prefix.parse::<u8>() else {
-        return false;
-    };
-    let width = match address {
-        IpAddr::V4(_) => 32,
-        IpAddr::V6(_) => 128,
-    };
-    prefix <= width
+    ::ipnet::IpNet::from_str(candidate).is_ok()
 }
 
 /// The entries of a `publicAccessCidrs` that are not CIDR blocks, in the order the
@@ -293,23 +279,27 @@ pub fn endpoint_access_fully_disabled(public_access: Option<bool>, private_acces
 /// The versions it offers are the rows of the calendar this service publishes through
 /// `DescribeClusterVersions` that are released and still inside standard or extended
 /// support — the rows an UNFILTERED listing of that calendar reports, which is the set
-/// a caller picks a version from. So the catalog a caller reads and the versions a
-/// create accepts cannot disagree: a string that is not a row of it (a three-part
-/// patch version, a minor version that was never published) and a row whose extended
-/// support has ended both name no control plane this service can provision.
+/// a caller picks a version from, and the set
+/// [`ComAmazonawsEksAwswesleyfrontendState::offered_cluster_versions`] walks. So the
+/// catalog a caller reads and the versions a create accepts cannot disagree: a string
+/// that is not a row of it (a three-part patch version, a minor version that was
+/// never published) and a row whose extended support has ended both name no control
+/// plane this service can provision.
 pub fn offers_cluster_version(
     store: &ComAmazonawsEksAwswesleyfrontendState,
     version: &str,
     now: SystemTime,
 ) -> bool {
-    store.released_cluster_versions(now).any(|row| {
-        row.cluster_version == version && row.support_status(now) != SupportStatus::Unsupported
-    })
+    store
+        .offered_cluster_versions(now)
+        .any(|row| row.cluster_version == version)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::state::SupportStatus;
 
     /// One kind of EC2 resource id, as the predicate that names one and its prefix.
     type Kind = (fn(&str) -> bool, &'static str);

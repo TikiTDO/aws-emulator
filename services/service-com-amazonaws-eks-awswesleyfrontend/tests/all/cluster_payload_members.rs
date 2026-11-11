@@ -419,15 +419,28 @@ fn configuration_rows() -> Vec<ConfigurationRow> {
             )],
         },
         ConfigurationRow {
-            case: "the load balancing capability enabled",
+            case: "the three EKS Auto Mode capabilities, which are enabled together",
             cluster: "cfgall-load-balancing",
             body: serde_json::json!({
+                "computeConfig": {
+                    "enabled": true,
+                    "nodePools": ["general-purpose"],
+                    "nodeRoleArn": "arn:aws:iam::000000000000:role/eksNodeRole",
+                },
+                "storageConfig": { "blockStorage": { "enabled": true } },
                 "kubernetesNetworkConfig": { "elasticLoadBalancing": { "enabled": true } },
             }),
-            expected: vec![(
-                "/kubernetesNetworkConfig/elasticLoadBalancing",
-                serde_json::json!({ "enabled": true }),
-            )],
+            expected: vec![
+                (
+                    "/kubernetesNetworkConfig/elasticLoadBalancing",
+                    serde_json::json!({ "enabled": true }),
+                ),
+                (
+                    "/storageConfig/blockStorage",
+                    serde_json::json!({ "enabled": true }),
+                ),
+                ("/computeConfig/enabled", serde_json::json!(true)),
+            ],
         },
         ConfigurationRow {
             case: "two of the five control plane log types exported",

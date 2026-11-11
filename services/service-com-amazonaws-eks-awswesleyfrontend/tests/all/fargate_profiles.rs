@@ -693,8 +693,9 @@ async fn a_profile_name_is_unique_within_its_cluster() {
 }
 
 // ---------------------------------------------------------------------------
-// A Fargate profile is a child of its cluster: the quota is per cluster, and
-// deleting the cluster takes its profiles with it.
+// A Fargate profile is a child of its cluster: the quota is per cluster, the
+// cluster cannot be deleted while a profile is attached to it, and once they are
+// gone a cluster created again under the same name inherits none of them.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -728,19 +729,59 @@ async fn profiles_are_bounded_per_cluster_and_go_with_the_cluster() {
         "the quota is per cluster, so a sibling cluster still accepts a profile, got {answer:?}"
     );
 
-    // Deleting the cluster takes its profiles with it: a cluster created again under
-    // the same name inherits none of them.
-    let deleted = call(
-        &router,
-        REGION,
-        "DELETE",
-        &format!("/clusters/{}", encode_label(cluster)),
-        "",
-    )
-    .await;
+    let delete_cluster = || async {
+        call(
+            &router,
+            REGION,
+            "DELETE",
+            &format!("/clusters/{}", encode_label(cluster)),
+            "",
+        )
+        .await
+    };
+
+    // The cluster keeps every profile attached to it, and those profiles keep the
+    // cluster: "If you have managed node groups or Fargate profiles attached to the
+    // cluster, you must delete them first".
+    let refused = delete_cluster().await;
+    assert_eq!(
+        (refused.status, error_code(&refused).as_str()),
+        (409, "ResourceInUseException"),
+        "a cluster with profiles attached must not delete, got {refused:?} ({})",
+        refused.message()
+    );
+    let still_there = describe_profile(&router, cluster, "fp-0").await;
+    assert_eq!(
+        still_there.status, 200,
+        "a refused delete leaves the cluster and its profiles alone, got {still_there:?}"
+    );
+
+    // Deleted first, the profiles no longer hold the cluster — and a cluster created
+    // again under the same name inherits none of them.
+    for index in 0..MAX_FARGATE_PROFILES_PER_CLUSTER {
+        let removed = call(
+            &router,
+            REGION,
+            "DELETE",
+            &format!(
+                "/clusters/{}/fargate-profiles/{}",
+                encode_label(cluster),
+                encode_label(&format!("fp-{index}"))
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(
+            removed.status, 200,
+            "setup: profile fp-{index} must delete, got {removed:?} ({})",
+            removed.message()
+        );
+    }
+    let deleted = delete_cluster().await;
     assert_eq!(
         deleted.status, 200,
-        "setup: the cluster must delete, got {deleted:?}"
+        "setup: the cluster must delete once nothing is attached, got {deleted:?} ({})",
+        deleted.message()
     );
     create_cluster_in(&router, REGION, cluster).await;
     let read = describe_profile(&router, cluster, "fp-0").await;

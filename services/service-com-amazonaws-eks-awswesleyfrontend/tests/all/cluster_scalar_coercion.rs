@@ -83,7 +83,17 @@ fn rows() -> Vec<Row> {
             case: "a boolean two structures down",
             cluster: "coerce-deep-boolean",
             body: serde_json::json!({
+                // The load balancing capability is one of the three EKS Auto Mode
+                // capabilities Amazon EKS requires to be enabled together, so the
+                // row enables all three — the string-spelled boolean under test is
+                // still the one two structures down.
                 "kubernetesNetworkConfig": { "elasticLoadBalancing": { "enabled": "true" } },
+                "computeConfig": {
+                    "enabled": true,
+                    "nodePools": ["general-purpose"],
+                    "nodeRoleArn": "arn:aws:iam::000000000000:role/eksNodeRole",
+                },
+                "storageConfig": { "blockStorage": { "enabled": true } },
             }),
             expected: vec![(
                 "/kubernetesNetworkConfig/elasticLoadBalancing/enabled",

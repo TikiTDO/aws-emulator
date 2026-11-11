@@ -857,7 +857,8 @@ async fn an_unowned_resource_arn_is_not_found_on_both_tag_operations() {
 
 // ---------------------------------------------------------------------------
 // RULE: `DeleteCluster` removes the cluster and reports it `DELETING`; after that
-// no read finds it. A cluster with `deletionProtection` is refused and kept.
+// no read finds it, and a second delete is a not-found. A cluster with
+// `deletionProtection` is refused and kept.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -930,6 +931,10 @@ async fn delete_removes_the_cluster_and_deletion_protection_refuses() {
             described.status, 404,
             "case {case:?}: a deleted cluster is not found, got {described:?}"
         );
+        // The accepted delete finished the work it carried, so the cluster is absent
+        // rather than being deleted: a second delete is a not-found. (A call that
+        // OVERLAPS one still in flight is the conflict `cluster_admission_rules`
+        // pins.)
         let again = delete(&router, &name).await;
         assert_eq!(
             again.status, 404,

@@ -125,6 +125,18 @@ pub struct ComAmazonawsEksAwswesleyfrontendState {
     /// [`new_update_id`]) so two updates minted in the same nanosecond cannot
     /// collide.
     pub minted_updates: u64,
+    /// The cluster deletions that are IN FLIGHT, by the deleted cluster's
+    /// `(region, name)` key, each with the instant it stops being treated as one.
+    ///
+    /// A cluster whose delete has been accepted is being deleted while that call is
+    /// still releasing what the cluster owned: a `DeleteCluster` that arrives in
+    /// that window is refused as a resource in use rather than answered as a
+    /// cluster that was never there. The call that started it is what clears the
+    /// entry ([`Self::finish_cluster_deletion`]); the instant stored with it is the
+    /// failsafe [`CLUSTER_DELETION_DELAY`] bounds, so a call that never reports
+    /// back leaves nothing behind for ever and this map holds at most the
+    /// deletions of that window.
+    pub cluster_deletions: BTreeMap<(String, String), SystemTime>,
     // An asynchronous update is not a field here — it lives on the cluster it
     // updates ([`ClusterRecord::updates`]).
 }
@@ -146,6 +158,7 @@ impl Default for ComAmazonawsEksAwswesleyfrontendState {
             cluster_versions: seed_cluster_versions(),
             addon_catalog: seed_addon_catalog(),
             minted_updates: 0,
+            cluster_deletions: BTreeMap::new(),
         }
     }
 }
@@ -162,8 +175,28 @@ impl ComAmazonawsEksAwswesleyfrontendState {
             .filter(move |entry| entry.is_released(now))
     }
 
+    /// The calendar rows Amazon EKS OFFERS at `now`: the released rows whose
+    /// extended support has not ended.
+    ///
+    /// "A version whose extended support has ended is no longer one Amazon EKS
+    /// offers", which is why `DescribeClusterVersions` reports one only to a
+    /// caller that asks for it (`includeAll`) — and why a new cluster is not
+    /// created at one. One reading of "offered", so the catalog and
+    /// `CreateCluster` cannot disagree about which versions exist.
+    pub fn offered_cluster_versions(
+        &self,
+        now: SystemTime,
+    ) -> impl Iterator<Item = &ClusterVersionRecord> + '_ {
+        self.released_cluster_versions(now)
+            .filter(move |entry| entry.support_status(now) != SupportStatus::Unsupported)
+    }
+
     /// Materialise every clock-owed status move across the store.
     pub fn materialize_due_transitions(&mut self, now: SystemTime) {
+        // A cluster deletion nothing reported back for is no longer treated as in
+        // flight once its failsafe instant has passed: the name it held is free
+        // again, and that was true at that instant whether or not anybody called.
+        self.cluster_deletions.retain(|_, due| now < *due);
         // An add-on whose removal the clock has finished is no longer an add-on of
         // its cluster. It goes first: the record is gone, so nothing below has to
         // reason about one that is on its way out, and the removal was due at that
@@ -1558,5 +1591,65 @@ impl ComAmazonawsEksAwswesleyfrontendState {
             .retain(|(key_region, key_cluster, _), _| {
                 key_region != region || key_cluster != cluster_name
             });
+    }
+
+    /// Why the compute attached to one cluster keeps it from being deleted, or
+    /// `None` when nothing is attached to it.
+    ///
+    /// "If you have managed node groups or Fargate profiles attached to the
+    /// cluster, you must delete them first" (`DeleteCluster`): the cluster's
+    /// control plane cannot be torn down while workloads it schedules still run,
+    /// so a delete is refused while either child exists and the cluster stays as
+    /// it was. The node groups are reported first, because they are the compute a
+    /// cluster normally carries.
+    ///
+    /// The cluster's OTHER children — add-ons, capabilities, access entries, EKS
+    /// Pod Identity associations, identity provider configurations — do not keep
+    /// it: Amazon EKS deletes those with the cluster, which is what
+    /// `DeleteCluster` already does here.
+    pub fn attached_compute_refusal(&self, region: &str, cluster_name: &str) -> Option<&'static str> {
+        if self.nodegroups_of(region, cluster_name).next().is_some() {
+            return Some(CLUSTER_HAS_NODEGROUPS_ATTACHED);
+        }
+        if self.fargate_profiles_of(region, cluster_name).next().is_some() {
+            return Some(CLUSTER_HAS_FARGATE_PROFILES_ATTACHED);
+        }
+        None
+    }
+
+    /// Record that the deletion of the cluster `key` names is in flight until the
+    /// call that started it reports back, or until `failsafe` at the latest, which
+    /// is what makes a `DeleteCluster` arriving in the meantime find a deletion
+    /// rather than an absent cluster.
+    ///
+    /// Entries whose failsafe instant has already passed at `now` are dropped here
+    /// as well as in [`Self::materialize_due_transitions`] — the same test
+    /// [`Self::cluster_deletion_in_flight`] applies, so a deletion of ANOTHER
+    /// cluster that is still genuinely in flight is left alone — which bounds the
+    /// map at the deletions of the last [`CLUSTER_DELETION_DELAY`] however many
+    /// clusters are deleted.
+    pub fn start_cluster_deletion(
+        &mut self,
+        key: (String, String),
+        now: SystemTime,
+        failsafe: SystemTime,
+    ) {
+        self.cluster_deletions.retain(|_, at| now < *at);
+        self.cluster_deletions.insert(key, failsafe);
+    }
+
+    /// Record that the deletion of the cluster `key` names has FINISHED: everything
+    /// the cluster owned is released, so the cluster is now absent rather than
+    /// being deleted and the next `DeleteCluster` for that name is a not-found.
+    pub fn finish_cluster_deletion(&mut self, key: &(String, String)) {
+        self.cluster_deletions.remove(key);
+    }
+
+    /// Whether the deletion of the cluster `key` names is still in flight at
+    /// `now`.
+    pub fn cluster_deletion_in_flight(&self, key: &(String, String), now: SystemTime) -> bool {
+        self.cluster_deletions
+            .get(key)
+            .is_some_and(|due| now < *due)
     }
 }

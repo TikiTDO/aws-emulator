@@ -128,3 +128,28 @@ Smithy model consulted: services/service-com-amazonaws-eks-awswesleyfrontend/smi
    g. CreateCluster(kubernetesNetworkConfig={'serviceIpv4Cidr': <the VPC's own CIDR>}).
    h. Create a cluster with a nodegroup, then DeleteCluster -> expect 409 ResourceInUseException 'Cluster has nodegroups attached' and the cluster still ACTIVE.
    i. Issue two DeleteCluster calls concurrently for one ACTIVE cluster -> the loser must be 409 ResourceInUseException.
+
+## Resolution note
+
+All ten causes are implemented in CreateCluster, UpdateClusterConfig, CreateAccessEntry,
+UpdateAccessEntry and DeleteCluster, and 11 of this report's 14 behavioural keys pass.
+Three legs of the replay stay open and are NOT closed by this report:
+
+* Cause 2's MESSAGE. The refusal (400 InvalidParameterException, no cluster written) is in
+  place for every partial EKS Auto Mode combination, but the sentence the check compares
+  against is not reported by the replay and is not quoted in this report, so the sentence
+  the service states ("All of computeConfig.enabled,
+  kubernetesNetworkConfig.elasticLoadBalancing.enabled, and storageConfig.blockStorage.enabled
+  must be set to either true or false.") still differs from it. `eks.create-cluster-auto-mode-requires-matching-config`
+  remains failing on that comparison alone and should be re-sourced when a recording of the
+  message is available.
+* `eks.delete-cluster-blocked-by-nodegroup-dependency` now fails EARLIER than the delete this
+  report is about, on `CreateFargateProfile` accepting public subnets — Cause 3 of
+  `issues/things-that-do-not-work/20261104T105252Z-eks-10-net-new-root-causes-unvalidated-pod.md`,
+  which owns that validation.
+* Cause 10's unit, `eks.concurrent-cluster-delete-conflict`. A delete that OVERLAPS an
+  accepted deletion is now refused 409 ResourceInUseException, and one that arrives after
+  that deletion finished is 404 (which two other units of this report require). The replay's
+  two "concurrent" deletes do not overlap in this emulator — the losing call reaches the
+  handler only after the winning one finished its teardown — so that unit still records 404
+  for its loser, and the guard is pinned by `tests/all/cluster_admission_rules.rs` instead.

@@ -972,6 +972,11 @@ mod wisdom_signing_name_routing;
 mod cloudtrail_sdk_target_routing;
 #[path = "all/eks_cluster_inputs_resolve.rs"]
 mod eks_cluster_inputs_resolve;
+// Declared here, beside the other `eks_*` suites: the service CIDR a cluster is created
+// with is judged against the VPC its subnets sit in, which only an engine carrying both
+// EKS and EC2 can show.
+#[path = "all/eks_service_cidr_vpc_overlap.rs"]
+mod eks_service_cidr_vpc_overlap;
 #[path = "all/cloudformation_provisions_ecr_public_repository.rs"]
 mod cloudformation_provisions_ecr_public_repository;
 #[path = "all/cloudformation_provisions_elastic_beanstalk_resources.rs"]

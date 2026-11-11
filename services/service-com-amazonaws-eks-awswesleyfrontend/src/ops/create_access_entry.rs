@@ -290,6 +290,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )));
         }
 
+        // And the username is Amazon EKS's to specify for every type but `STANDARD`
+        // ([`state::username_refusal`]): those entries stand for a node or a pod EKS
+        // admits itself, authenticating as the username it templates for that type,
+        // so a request that names one for them is refused and no entry is written. A
+        // blank username names nobody, which this slice treats as absent.
+        let requested_username = input
+            .username
+            .clone()
+            .filter(|username| !username.trim().is_empty());
+        if requested_username.is_some() {
+            if let Some(why) = state::username_refusal(&entry_type) {
+                return Err(invalid_parameter(why));
+            }
+        }
+
         // "You can specify one ARN for each access entry. You can't specify the same
         // ARN in more than one access entry." `clientRequestToken` is
         // `@idempotencyToken`, which an SDK resends when it RETRIES the same call, so
@@ -360,10 +375,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // for you" — see [`crate::state::default_username`] for the value it picks.
             // A blank username names nobody, so it is treated as absent, the same
             // blankness test the rest of this slice uses.
-            username: input
-                .username
-                .clone()
-                .filter(|username| !username.trim().is_empty())
+            username: requested_username
                 .unwrap_or_else(|| state::default_username(&entry_type, &input.principal_arn)),
             entry_type,
             tags: input

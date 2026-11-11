@@ -213,7 +213,17 @@ async fn create_cluster_passes_only_an_auto_mode_node_role_of_this_account() {
             "name": name,
             "roleArn": passable,
             "resourcesVpcConfig": { "subnetIds": ["subnet-aaaa1111", "subnet-bbbb2222"] },
-            "computeConfig": { "enabled": true, "nodeRoleArn": role_arn },
+            // EKS Auto Mode is one mode made of three capabilities, which Amazon EKS
+            // requires to be enabled together, so the request that carries the node
+            // role enables all three: the role is what this suite is about, and the
+            // rest of the body has to be a configuration a cluster can have.
+            "computeConfig": {
+                "enabled": true,
+                "nodePools": ["general-purpose"],
+                "nodeRoleArn": role_arn,
+            },
+            "storageConfig": { "blockStorage": { "enabled": true } },
+            "kubernetesNetworkConfig": { "elasticLoadBalancing": { "enabled": true } },
         });
         let answer = call(&router, REGION, "POST", "/clusters", &body.to_string()).await;
         assert_row(case, &role_arn, verdict, &answer);

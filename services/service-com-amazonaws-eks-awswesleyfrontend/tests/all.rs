@@ -73,6 +73,8 @@ mod certificate_authority_trust_list;
 mod child_create_resolves_the_cluster_first;
 #[path = "all/child_resource_deletion.rs"]
 mod child_resource_deletion;
+#[path = "all/cluster_admission_rules.rs"]
+mod cluster_admission_rules;
 #[path = "all/cluster_config_update.rs"]
 mod cluster_config_update;
 #[path = "all/cluster_creator_access_entry.rs"]

@@ -15,6 +15,17 @@
 //! `InvalidRequestException` and left in the store: "the cluster cannot be deleted
 //! unless deletion protection is first disabled".
 //!
+//! A cluster that still has managed node groups or Fargate profiles attached is
+//! refused with `ResourceInUseException` and left exactly as it was: "If you have
+//! managed node groups or Fargate profiles attached to the cluster, you must delete
+//! them first" ([`crate::state::ComAmazonawsEksAwswesleyfrontendState::attached_compute_refusal`]).
+//!
+//! The deletion this call accepts is IN FLIGHT until it has released what the
+//! cluster owned, so a `DeleteCluster` that arrives while that work is still
+//! running — the losing side of two racing calls — is refused with
+//! `ResourceInUseException`: the cluster is being deleted, not absent. Once that
+//! work is done the name answers `ResourceNotFoundException` again.
+//!
 //! A capability exists only inside a cluster — its key and its ARN both name one — so the
 //! cluster leaving the store takes its capabilities with it. Without that, a later cluster
 //! created with the same name in the same region would inherit the deleted cluster's
@@ -170,9 +181,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // out to another service.
         let (cluster, owned_group) = {
             let mut guard = store.lock();
-            guard.materialize_due_transitions(SystemTime::now());
+            let now = SystemTime::now();
+            guard.materialize_due_transitions(now);
 
             let Some(existing) = guard.clusters.get(&key) else {
+                // A cluster whose deletion is still RUNNING is not absent: it is
+                // being deleted, and a call that arrives while that work is in
+                // flight — the losing side of two racing ones — is told the
+                // resource is in use. Once the call that started it has released
+                // what the cluster owned, the cluster is absent and this is a
+                // not-found again.
+                if guard.cluster_deletion_in_flight(&key, now) {
+                    return Err(DeleteClusterErrorModeled::ResourceInUseException(
+                        ResourceInUseException {
+                            cluster_name: Some(input.name.clone()),
+                            message: Some(crate::state::cluster_being_deleted(&input.name)),
+                            ..Default::default()
+                        },
+                    )
+                    .into());
+                }
                 return Err(not_found());
             };
             if existing.deletion_protection {
@@ -190,10 +218,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into());
             }
 
+            // And the compute attached to it keeps it: "If you have managed node
+            // groups or Fargate profiles attached to the cluster, you must delete
+            // them first". The cluster is in USE by those children, so it stays
+            // exactly as it was and nothing of it is torn down
+            // ([`crate::state::ComAmazonawsEksAwswesleyfrontendState::attached_compute_refusal`]).
+            if let Some(why) = guard.attached_compute_refusal(&key.0, &key.1) {
+                return Err(DeleteClusterErrorModeled::ResourceInUseException(
+                    ResourceInUseException {
+                        cluster_name: Some(input.name.clone()),
+                        message: Some(why.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .into());
+            }
+
             let Some(mut record) = guard.clusters.remove(&key) else {
                 return Err(not_found());
             };
             guard.arn_index.remove(&record.arn);
+            // The deletion this call accepted is in flight from here until it has
+            // released what the cluster owned, which is what a `DeleteCluster`
+            // arriving in the meantime finds.
+            guard.start_cluster_deletion(
+                key.clone(),
+                now,
+                now + crate::state::CLUSTER_DELETION_DELAY,
+            );
             // An add-on exists only inside its cluster, so the add-ons installed on this
             // one go with it; otherwise a cluster created again under the same name would
             // inherit the add-ons of the cluster that is gone.
@@ -224,10 +276,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         // The cluster has already left this service's state, so the answer does not
-        // depend on what EC2 says about the group.
+        // depend on what EC2 says about the group. Releasing it is the last of the
+        // work this deletion carries, which is why the deletion stops being in
+        // flight only after it: until then another `DeleteCluster` for this cluster
+        // finds a deletion running rather than nothing.
         if let Some(group_id) = owned_group {
             crate::state::release_cluster_security_group(ctx, &key.0, &group_id).await;
         }
+        store.lock().finish_cluster_deletion(&key);
 
         Ok(DeleteClusterOutput {
             cluster: Some(cluster),

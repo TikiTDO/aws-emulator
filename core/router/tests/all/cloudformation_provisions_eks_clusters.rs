@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use serde_json::{json, Value};
+use service_com_amazonaws_eks_awswesleyfrontend::state::DEFAULT_KUBERNETES_VERSION;
 use smithy_server_runtime::MultiServiceRouter;
 
 /// The Region every request here is signed for, and so the Region the stack, the VPC and
@@ -360,7 +361,11 @@ const ROWS: &[Row] = &[
     Row {
         case: "no name declared, so CloudFormation generates one",
         declared_name: None,
-        version: Some("1.31"),
+        // A Kubernetes version Amazon EKS still OFFERS: one whose extended support has
+        // ended is not a version a cluster can be created at, so a row naming a fixed
+        // older version would decay into a refusal as the clock moves. The catalog's
+        // own default is offered for as long as it is the default.
+        version: Some(DEFAULT_KUBERNETES_VERSION),
         subnet_count: 2,
         endpoint_access: None,
         tags: &[("team", "platform")],

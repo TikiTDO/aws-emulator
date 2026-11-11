@@ -523,6 +523,66 @@ pub async fn mint_cluster_security_group(
     Some(group_id)
 }
 
+/// The IPv4 CIDR blocks assigned to `vpc_id`, as EC2 reports them.
+///
+/// The VPC a cluster is created in is EC2's resource, so its address space is
+/// read from EC2 — over the same in-process callback every other reading here
+/// goes through. An empty answer is the SILENCE every reading in this module
+/// treats as grounding no refusal: an emulator with no EC2 mounted, a VPC it does
+/// not hold, or a read it refused says nothing about what the VPC's ranges are,
+/// and a cluster is never refused on nothing.
+///
+/// Both the primary block and the additional associated blocks are reported: a
+/// VPC's address space is every block associated with it
+/// (`Vpc$cidrBlockAssociationSet`), and a service CIDR has to avoid all of them.
+pub async fn resolve_vpc_cidr_blocks(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    vpc_id: &str,
+) -> Vec<String> {
+    let Some(endpoint) = peer_endpoint("ec2", region) else {
+        return Vec::new();
+    };
+    let described = callback_client!(aws_sdk_ec2, ctx, endpoint, region)
+        .describe_vpcs()
+        .vpc_ids(vpc_id)
+        .send()
+        .await;
+    let output = match described {
+        Ok(output) => output,
+        Err(error) => {
+            ::tracing::warn!(
+                %vpc_id,
+                error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
+                "the VPC's CIDR blocks could not be read from EC2"
+            );
+            return Vec::new();
+        }
+    };
+    let mut blocks: Vec<String> = Vec::new();
+    let mut seen: ::std::collections::BTreeSet<String> = ::std::collections::BTreeSet::new();
+    for vpc in output.vpcs() {
+        // Only the IPv4 associations are read: the rule this answers is the IPv4
+        // service CIDR's, and a VPC's IPv6 ranges (`ipv6CidrBlockAssociationSet`)
+        // cannot overlap an IPv4 block.
+        for block in vpc
+            .cidr_block()
+            .into_iter()
+            .map(str::to_string)
+            .chain(
+                vpc.cidr_block_association_set()
+                    .iter()
+                    .filter_map(|association| association.cidr_block().map(str::to_string)),
+            )
+        {
+            if seen.insert(block.clone()) {
+                blocks.push(block);
+            }
+        }
+    }
+    blocks
+}
+
 /// Release the security group a deleted cluster owned.
 ///
 /// A group this emulator cannot delete is reported rather than refused: the

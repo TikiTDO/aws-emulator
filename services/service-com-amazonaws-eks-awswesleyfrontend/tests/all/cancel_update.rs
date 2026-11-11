@@ -92,7 +92,10 @@ enum Mode {
 }
 
 /// `CreateCluster` through the real handler, so the cluster an update hangs off is a
-/// genuine record. An Auto Mode cluster is one whose `computeConfig` enables compute.
+/// genuine record. An Auto Mode cluster is one whose `computeConfig` enables compute —
+/// and EKS Auto Mode is one mode made of three capabilities, so a request that asks for
+/// it enables all three (compute, block storage and load balancing) the way Amazon EKS
+/// requires them to be enabled together.
 async fn create_cluster(router: &MultiServiceRouter, region: &str, name: &str, mode: Mode) {
     let mut body = serde_json::json!({
         "name": name,
@@ -105,6 +108,9 @@ async fn create_cluster(router: &MultiServiceRouter, region: &str, name: &str, m
             "nodePools": ["general-purpose"],
             "nodeRoleArn": "arn:aws:iam::000000000000:role/eksNodeRole",
         });
+        body["storageConfig"] = serde_json::json!({ "blockStorage": { "enabled": true } });
+        body["kubernetesNetworkConfig"] =
+            serde_json::json!({ "elasticLoadBalancing": { "enabled": true } });
     }
     let created = call(router, region, "POST", "/clusters", &body.to_string()).await;
     assert_eq!(

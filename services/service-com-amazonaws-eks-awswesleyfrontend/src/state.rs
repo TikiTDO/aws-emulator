@@ -160,6 +160,11 @@ use crate::ops::types::{
     ScoringStrategy, ScoringStrategyConfig, ScoringStrategyConstraints, ServiceNodePortRange,
     VpcConfigRequest, LOG_TYPE_VALUES,
 };
+// The three request shapes that carry the EKS Auto Mode capabilities, read by
+// [`AutoModeRequest::from_request`] so the one rule about them is stated once.
+use crate::ops::types::{
+    ComputeConfigRequest, KubernetesNetworkConfigRequest, StorageConfigRequest,
+};
 
 /// The `ClusterStatus` members this slice uses. The model's enum
 /// (`smithy_query query="shape" shape="ClusterStatus"`) is
@@ -363,6 +368,19 @@ pub const UPDATE_COMPLETION_DELAY: Duration = Duration::from_millis(500);
 /// errors that go with it), short enough to be worth waiting for. The due
 /// instant is stored on the record; nothing sleeps for it.
 pub const CLUSTER_ACTIVATION_DELAY: Duration = Duration::from_millis(500);
+
+/// The longest a cluster deletion is treated as IN FLIGHT when the call that
+/// started it never reports back.
+///
+/// A deletion is in flight while the call that accepted it is still releasing the
+/// resources the cluster owned — a window another `DeleteCluster` for the same
+/// cluster observes, which is why that other call is told the cluster is in use
+/// rather than absent. The handler clears the deletion when that work is done
+/// ([`ComAmazonawsEksAwswesleyfrontendState::finish_cluster_deletion`]), so this
+/// span bounds only the case where it never got the chance: it is a FAILSAFE, so
+/// no deletion is remembered for ever, and the store holds at most the deletions
+/// of this window. Nothing sleeps for it.
+pub const CLUSTER_DELETION_DELAY: Duration = Duration::from_secs(3);
 
 /// The `CapabilityStatus` members this slice uses. The model's enum
 /// (`smithy_query query="shape" shape="CapabilityStatus"`) is
@@ -4509,6 +4527,7 @@ mod certificate_material;
 mod cluster_creator_access;
 mod cluster_parameters;
 mod cluster_record;
+mod cluster_validation;
 mod control_plane_logs;
 mod derived_identifiers;
 mod eks_anywhere_subscriptions;
@@ -4522,6 +4541,7 @@ pub use certificate_material::*;
 pub use cluster_creator_access::*;
 pub use cluster_parameters::*;
 pub use cluster_record::*;
+pub use cluster_validation::*;
 pub use control_plane_logs::*;
 pub use derived_identifiers::*;
 pub use eks_anywhere_subscriptions::*;

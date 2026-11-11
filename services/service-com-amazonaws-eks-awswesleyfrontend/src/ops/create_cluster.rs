@@ -465,25 +465,82 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
 
+        // EKS Auto Mode is one MODE of the cluster made of three capabilities, so the
+        // three are asked for together or not at all ([`state::AutoModeRequest`]), and
+        // a compute capability that names node pools names the role they run as.
+        let requested_network = input.kubernetes_network_config.as_ref();
+        let auto_mode = state::AutoModeRequest::from_request(
+            input.compute_config.as_ref(),
+            input.storage_config.as_ref(),
+            requested_network,
+        );
+        if let Some(why) = auto_mode.refusal() {
+            return Err(invalid_parameter(&input.name, why));
+        }
+
+        // The block Kubernetes services are assigned addresses from: private, within
+        // the published netmask range, and not named at all for an `ipv6` cluster
+        // ([`state::service_ipv4_cidr_refusal`]). "You can only specify a custom CIDR
+        // block when you create a cluster. You can't change this value after the
+        // cluster is created", so this is the only call that can refuse it. The family
+        // it is judged against is the one the cluster would run: "If you don't specify
+        // a value, `ipv4` is used by default".
+        let ip_family = requested_network
+            .and_then(|network| network.ip_family.clone())
+            .unwrap_or_else(|| IP_FAMILY_IPV4.to_string());
+        if let Some(cidr) = requested_network.and_then(|network| network.service_ipv4_cidr.as_deref())
+        {
+            if let Some(why) = state::service_ipv4_cidr_refusal(&input.name, cidr, &ip_family) {
+                return Err(invalid_parameter(&input.name, why));
+            }
+        }
+
         // "The desired Kubernetes version for your cluster": a version Amazon EKS
         // offers a control plane for, which is a released row of the calendar this
         // service publishes through `DescribeClusterVersions`
         // ([`state::offers_cluster_version`]) — so the catalog a caller reads to pick a
         // version and the versions a create accepts cannot disagree. A create that
         // names no version lands on the default row instead, so there is nothing to
-        // check for it. The lock is taken for this read alone and released before
-        // anything is asked of another service.
-        if let Some(requested_version) = input.version.as_deref() {
-            let offered = {
-                let guard = store.lock();
-                state::offers_cluster_version(&guard, requested_version, now)
-            };
-            if !offered {
-                return Err(invalid_parameter(
-                    &input.name,
-                    state::unsupported_kubernetes_version_message(requested_version),
-                ));
-            }
+        // check for it. The support type is then judged against where that version
+        // sits in the support lifecycle: a version past standard support is only
+        // created for a request that accepts extended support
+        // ([`state::extended_support_refusal`]). The lock is taken for these two reads
+        // alone and released before anything is asked of another service.
+        let version = input
+            .version
+            .clone()
+            .unwrap_or_else(|| DEFAULT_KUBERNETES_VERSION.to_string());
+        let support_type = input
+            .upgrade_policy
+            .as_ref()
+            .and_then(|policy| policy.support_type.clone())
+            .unwrap_or_else(|| DEFAULT_SUPPORT_TYPE.to_string());
+        // ONE walk of the calendar answers both questions: the row is absent for a
+        // version this service does not offer ([`state::offers_cluster_version`] is
+        // the same reading), and present with the support status the second rule is
+        // judged on.
+        let support_status = {
+            let guard = store.lock();
+            let status = guard
+                .offered_cluster_versions(now)
+                .find(|row| row.cluster_version == version)
+                .map(|row| row.support_status(now));
+            // The iterator borrows the guard, so the status is bound here rather than
+            // left as the block's tail expression, where the temporary holding that
+            // borrow would outlive it (`E0597`).
+            drop(guard);
+            status
+        };
+        if input.version.is_some() && support_status.is_none() {
+            return Err(invalid_parameter(
+                &input.name,
+                state::unsupported_kubernetes_version_message(&version),
+            ));
+        }
+        if let Some(why) = support_status
+            .and_then(|status| state::extended_support_refusal(&version, status, &support_type))
+        {
+            return Err(invalid_parameter(&input.name, why));
         }
 
         // Amazon EKS "provisions elastic network interfaces in your VPC subnets", so the
@@ -502,6 +559,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(invalid_parameter(&input.name, why));
         }
 
+        // The last of the service CIDR's rules, the one that needs the NETWORK the
+        // cluster is created in: "Doesn't overlap with any CIDR block assigned to
+        // the VPC that you selected". The VPC is the one those subnets resolved to
+        // and its address space is EC2's to report
+        // ([`state::resolve_vpc_cidr_blocks`]), so this read happens only for a
+        // request that named a block of its own, and a VPC nothing answered for
+        // grounds no refusal.
+        if let (Some(cidr), Some(vpc_id)) = (
+            input
+                .kubernetes_network_config
+                .as_ref()
+                .and_then(|network| network.service_ipv4_cidr.as_deref()),
+            resolved_subnets.vpc_id.as_deref(),
+        ) {
+            let vpc_cidr_blocks = state::resolve_vpc_cidr_blocks(ctx, &region, vpc_id).await;
+            if let Some(why) =
+                state::service_ipv4_cidr_vpc_overlap_refusal(&input.name, cidr, &vpc_cidr_blocks)
+            {
+                return Err(invalid_parameter(&input.name, why));
+            }
+        }
+
         // Everything the record carries is computed from the request, the account and
         // the clock — nothing in it is read out of the store — so it is built BEFORE the
         // store is locked. The refusals the store decides, and the insert, then happen
@@ -513,12 +592,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // `ipFamily` decides which of the two service CIDRs the cluster reports: an
         // `ipv4` cluster gets the requested (or default) IPv4 block, an `ipv6` cluster
-        // gets a server-assigned IPv6 block and no IPv4 one.
+        // gets a server-assigned IPv6 block and no IPv4 one. The family itself was read
+        // off the request above, where the members that depend on it are judged.
         let requested_network = input.kubernetes_network_config.unwrap_or_default();
-        let ip_family = requested_network
-            .ip_family
-            .clone()
-            .unwrap_or_else(|| IP_FAMILY_IPV4.to_string());
         let is_ipv6 = ip_family.eq_ignore_ascii_case(IP_FAMILY_IPV6);
         let kubernetes_network_config = KubernetesNetworkConfigResponse {
             service_ipv4_cidr: if is_ipv6 {
@@ -637,12 +713,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             certificate_authorities_created: 1,
             arn: arn.clone(),
             created_at: now,
-            version: Some(
-                input
-                    .version
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_KUBERNETES_VERSION.to_string()),
-            ),
+            version: Some(version.clone()),
             platform_version: Some(PLATFORM_VERSION.to_string()),
             role_arn: Some(input.role_arn.clone()),
             resources_vpc_config: Some(resources_vpc_config),
@@ -686,12 +757,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 }),
             }),
             upgrade_policy: Some(UpgradePolicyResponse {
-                support_type: Some(
-                    input
-                        .upgrade_policy
-                        .and_then(|policy| policy.support_type)
-                        .unwrap_or_else(|| DEFAULT_SUPPORT_TYPE.to_string()),
-                ),
+                support_type: Some(support_type.clone()),
             }),
             zonal_shift_config: input.zonal_shift_config.map(|config| {
                 ZonalShiftConfigResponse {
@@ -827,6 +893,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // What this cluster's control plane exports to CloudWatch Logs, read off the
             // record while the lock is held; the export itself runs below, with none.
             let log_export = state::ControlPlaneLogExport::of(&record, input.logging.as_ref());
+            // The name now holds a cluster again, so no deletion is in flight for it:
+            // an earlier delete of a cluster of this name concerned the record that is
+            // gone, and the next `DeleteCluster` is about THIS one.
+            guard.cluster_deletions.remove(&key);
             guard.arn_index.insert(arn, key.clone());
             guard.clusters.insert(key.clone(), record);
             (cluster, log_export)
