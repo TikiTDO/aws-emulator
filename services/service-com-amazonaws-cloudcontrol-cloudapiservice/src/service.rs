@@ -40,62 +40,83 @@
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
 
+//! ## This service's edited seam: how a broken constraint is stated
+//!
+//! Two parts of a constraint refusal are this service's rather than the framework's: a
+//! `@pattern` is quoted as the expression the value has to satisfy, without the `^` / `$`
+//! the model writes around it to make the match total, and a constraint a LIST's ELEMENTS
+//! break is stated at the list member, quoting the list the request sent. The wording of
+//! both is [`element_refusals`], over the tree's shared renderer, so it lives in one place;
+//! the second half needs the REQUEST, which `override_refusal` is never handed, so the
+//! operations whose input declares such a list are served through [`StatedPerOperation`].
+
+mod element_refusals;
+
+use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse};
+use aws_smithy_schema_server::ProtocolError;
 use smithy_server_runtime::{
-    http, ErasedOperation, Refusal, Refused, Service, Violation, ViolationKind,
+    http, BoxFuture, ErasedOperation, Operation, OperationContext, OperationRoutingTable, Refusal,
+    Refused, Service,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
-/// The error code Cloud Control API answers an input-constraint violation with, which is
-/// also the code the framework's own refusal carries — restated here because
-/// `override_refusal` replaces the code and the message together.
-const VALIDATION_EXCEPTION: &str = "ValidationException";
+/// One modelled operation, served so that a request refused before its handler runs is
+/// stated the way this service states it — with the list a failed element belongs to in
+/// hand, which only the request carries.
+///
+/// Nothing else is re-implemented. A request this wrapper does not refuse is handed to the
+/// generated [`ErasedOperation::run`], which owns deserialize -> validate -> handle ->
+/// serialize, telemetry and every modelled error. The violations come from the framework's
+/// own machinery ([`element_refusals::stated_from_request`]), so this cannot refuse a
+/// request the framework's own walk would accept, nor accept one it would refuse. The cost
+/// is that a request for a wrapped operation is read twice, once here and once in the
+/// operation's own sequence, because the framework hands no already-built input to an
+/// operation.
+struct StatedPerOperation<O> {
+    operation: O,
+}
 
-/// Render one constraint violation the way this service's front door states it.
-///
-/// Everything but the `@pattern` clause is the framework's own wording, which is why
-/// this reads it from the violation rather than restating it: only the expression a
-/// pattern-constrained member has to satisfy differs, and it is stated WITHOUT the
-/// anchors a model writes around it to demand a whole-string match.
-///
-/// Answers `None` for a violation this service has no wording of its own for, which lets
-/// [`constraint_envelope`] decline the whole refusal and keep the framework's wording
-/// rather than invent one ([`ViolationKind`] is `#[non_exhaustive]`, so a class can be
-/// added upstream).
-fn constraint_clause(violation: &Violation) -> Option<String> {
-    let clause = violation.message();
-    let ViolationKind::Pattern(pattern) = &violation.kind else {
-        return Some(clause);
-    };
-    let stated = ::service_common::validation::unanchored(pattern);
-    // The clause the framework built for this violation, with the expression it quoted
-    // replaced by the one this service states: the subject half (which value is echoed,
-    // and whether it was absent) stays exactly as the walk reported it. The requirement
-    // is the clause's last part, so the LAST occurrence is the one to replace — a caller
-    // who submits the expression itself as a value keeps that echo intact.
-    match clause.rfind(pattern.as_str()) {
-        Some(at) => Some(format!(
-            "{}{stated}{}",
-            &clause[..at],
-            &clause[at + pattern.len()..]
-        )),
-        None => Some(clause),
+impl<O> StatedPerOperation<O> {
+    /// Wrap one operation, already constructed from the shared engine.
+    fn new(operation: O) -> Self {
+        Self { operation }
     }
 }
 
-/// The `ValidationException` message for a refusal: the AWS envelope over one clause per
-/// violation.
-fn constraint_envelope(violations: &[Violation]) -> Option<String> {
-    let clauses: Vec<String> = violations
-        .iter()
-        .map(constraint_clause)
-        .collect::<Option<Vec<_>>>()?;
-    match clauses.len() {
-        0 => None,
-        1 => Some(format!("1 validation error detected: {}", clauses[0])),
-        count => Some(format!(
-            "{count} validation errors detected: {}",
-            clauses.join("; ")
-        )),
+impl<O> ErasedOperation for StatedPerOperation<O>
+where
+    O: Operation + ErasedOperation,
+{
+    fn run<'r>(
+        &'r self,
+        svc: &'r dyn Service,
+        req: &'r RtRequest,
+        ctx: &'r OperationContext<'r>,
+    ) -> BoxFuture<'r, RtResponse> {
+        Box::pin(async move {
+            // The definition is read, used and dropped inside each statement:
+            // `&dyn ErasedServiceDefinition` is not `Sync`, so holding it across the await
+            // below would make this future non-`Send`.
+            let refused = element_refusals::stated_from_request::<O>(
+                svc.definition().protocol(),
+                req,
+            );
+            if let Some((violations, stated)) = refused {
+                return svc.definition().refusal_response(
+                    ProtocolError::Invalid(violations),
+                    Some(stated),
+                    req,
+                );
+            }
+            self.operation.run(svc, req, ctx).await
+        })
+    }
+
+    /// The wrapped operation's modelled auth schemes: wrapping an operation must not change
+    /// which schemes sign it.
+    fn auth_schemes(&self) -> Option<&'static [&'static str]> {
+        self.operation.auth_schemes()
     }
 }
 
@@ -106,6 +127,11 @@ fn constraint_envelope(violations: &[Violation]) -> Option<String> {
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
     entry: crate::ServiceDefinition<Eng>,
+    /// The operations whose refusals this service states from the REQUEST, each wrapped in
+    /// [`StatedPerOperation`] and keyed by the routing key the protocol resolves — the key
+    /// the generated table uses — and built from the SAME shared engine, so a wrapped
+    /// operation reads and writes the one store.
+    stated: OperationRoutingTable,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -113,8 +139,20 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// generated [`ServiceDefinition`], which constructs each operation from it; the
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
+        let mut stated = OperationRoutingTable::new();
+        // The ONE operation whose input declares a list of scalar values — the two criteria
+        // `ResourceRequestStatusFilter` carries. A constraint a list's ELEMENTS break can
+        // arise in no other operation this model declares, so no other request is read
+        // twice; an operation this model grows such a member in is added here as well.
+        stated.add_operation(
+            <crate::ops::list_resource_requests::ListResourceRequests<Eng> as Operation>::NAME,
+            Box::new(StatedPerOperation::new(
+                crate::ops::list_resource_requests::ListResourceRequests::new(Arc::clone(&engine)),
+            )) as Box<dyn ErasedOperation>,
+        );
         Self {
             entry: crate::ServiceDefinition::new(engine),
+            stated,
         }
     }
 }
@@ -137,37 +175,30 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         }
     }
 
-    fn override_operation(
-        &self,
-        req: &aws_smithy_runtime_api::http::Request,
-    ) -> Option<&dyn ErasedOperation> {
-        // Return `Some(op)` to serve a request the model's routing key cannot name
-        // correctly; `None` (the default) lets the generated routing table resolve
-        // it. `req` is the whole request, so a decision that depends on the body —
-        // the `Action` form field on a query protocol, say — is reachable here.
-        let _ = req;
-        None
+    fn override_operation(&self, req: &RtRequest) -> Option<&dyn ErasedOperation> {
+        // NOT a re-route: the key is the one the generated table's own protocol resolves,
+        // and the operation it names is the one served — wrapped in [`StatedPerOperation`] so
+        // a refused request is worded the way this service words it. Every other key, and a
+        // key the model does not name, resolves to `None` here and is served by the
+        // generated table exactly as before.
+        let key = self.entry.protocol().routing_key(req).ok()?;
+        self.stated.get(key)
     }
 
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {
-        // The centralized walk calls this on a framework-level refusal (an absent
-        // required member, or a value outside a declared bound) to let this service
-        // reword it.
-        //
-        // One part of the wording is this service's rather than the framework's: a
-        // `@pattern` is stated as the expression the value has to satisfy, without the
-        // `^` / `$` the model writes around it to make the match total — a client lifts
-        // that expression out of the message to re-validate locally, so it has to be the
-        // one the service advertises. The code stays the `ValidationException` the
-        // framework itself would have answered, because `override_refusal` replaces both.
+        // The centralized walk calls this on a framework-level refusal (an absent required
+        // member, or a value outside a declared bound) to let this service reword it — with
+        // the violations ALONE, no request, so a clause stated at a list member has no list
+        // to quote here. A wrapped operation's refusal is stated before this walk is
+        // reached, with that list in hand; one that gets here anyway is stated by the SAME
+        // module, so the wording cannot differ between the two paths.
         //
         // An authentication refusal keeps the framework's wording: it is not an
         // input-constraint failure.
         match refusal {
-            Refusal::Invalid(violations) => Some(Refused {
-                code: VALIDATION_EXCEPTION.to_string(),
-                message: constraint_envelope(violations)?,
-            }),
+            Refusal::Invalid(violations) => {
+                element_refusals::stated(violations, &HashMap::new())
+            }
             _ => None,
         }
     }

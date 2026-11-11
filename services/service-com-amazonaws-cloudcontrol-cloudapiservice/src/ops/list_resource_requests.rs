@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListResourceRequests
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListResourceRequests`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListResourceRequests::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! This operation REPORTS the resource operation requests this service holds: the records
+//! the mutating operations accepted and `GetResourceRequestStatus` resolves one token to,
+//! newest first, narrowed by the filter criteria the call carries and paged by
+//! `MaxResults`. Which requests that is, in what order, and where a page resumes is
+//! [`crate::state::RequestFilter`] and [`crate::state::RequestPosition`], so one listing
+//! and one status call can never disagree about a request.
 //!
 //! ## Shape of an operation
 //!
@@ -149,18 +146,92 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListResourceRequests` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListResourceRequestsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListResourceRequests"))
+        // A listing of this service's own request records is selected by the request body
+        // alone, so nothing in the request metadata narrows it.
+        let _ = ctx;
+        // This operation REPORTS the requests the store holds and models no failure at
+        // all. A store that is not mounted holds no request, so that is an empty page
+        // rather than some other answer.
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Ok(ListResourceRequestsOutput {
+                resource_request_status_summaries: Some(Vec::new()),
+                next_token: None,
+            });
+        };
+
+        let mut store = state.lock();
+        // What the clock already owes the store, so the status this listing reports for a
+        // request is the same one `GetResourceRequestStatus` reports for it.
+        let native = crate::state::native::NativeResources::for_engine(&*self.engine);
+        store.materialise_due(::std::time::SystemTime::now(), &native);
+
+        // A continuation token carries the position it names, so only the authenticator
+        // inside it tells one this store minted from one a caller wrote — and a token
+        // minted for a resource listing resumes nothing here either. This operation models
+        // no error for a bad request, so the refusal is the service's own validation one,
+        // worded as Cloud Control API words a member it will not read (`Invalid <Member>`);
+        // it is never served as the first page, which would silently re-report requests
+        // the caller has already read.
+        let key = store.page_token_key();
+        let resume_after = match crate::state::requested_page_token(input.next_token.as_deref()) {
+            Some(token) => Some(
+                crate::state::decode_request_page_token(&key, token).ok_or_else(|| {
+                    crate::scaffolded::Scaffolded::validation(crate::state::INVALID_NEXT_TOKEN)
+                })?,
+            ),
+            None => None,
+        };
+
+        // `MaxResults` is "the maximum number of results to be returned with a single
+        // call", bounded by the model at 100, and "the default is 20" for a call that
+        // names none — so the page is bounded either way.
+        let page_size = input
+            .max_results
+            .and_then(|requested| usize::try_from(requested).ok())
+            .unwrap_or(DEFAULT_PAGE_SIZE)
+            .clamp(1, crate::state::MAX_PAGE_SIZE);
+
+        // "The filter criteria to apply to the requests returned": a criterion the call
+        // leaves out names nothing, and so narrows nothing.
+        let criteria = input.resource_request_status_filter.as_ref();
+        let filter = crate::state::RequestFilter {
+            operations: criteria
+                .and_then(|criteria| criteria.operations.as_deref())
+                .unwrap_or_default(),
+            operation_statuses: criteria
+                .and_then(|criteria| criteria.operation_statuses.as_deref())
+                .unwrap_or_default(),
+        };
+
+        // ONE window of the requests: the page this call reports and one request past it,
+        // so the presence of a further request — and the position to resume at — is known
+        // without walking the rest of the store.
+        let mut page = store.list_requests(&filter, resume_after.as_ref(), page_size + 1);
+        // A window that came back full may have more behind it; one that came back short
+        // reached the end of the requests the filter admits, which is what tells a client
+        // to stop.
+        let further = page.len() > page_size;
+        if further {
+            page.truncate(page_size);
+        }
+        // Where the next call resumes: after the last request THIS page reports, so no
+        // request is reported twice and none between the two pages is skipped.
+        let next_token = further
+            .then(|| page.last().map(|record| crate::state::RequestPosition::of(record)))
+            .flatten()
+            .map(|position| crate::state::request_page_token(&key, &position));
+
+        Ok(ListResourceRequestsOutput {
+            resource_request_status_summaries: Some(
+                page.iter()
+                    .map(|record| crate::state::progress_event(record))
+                    .collect(),
+            ),
+            next_token,
+        })
     }
 }
+
+/// The page a call that names no `MaxResults` answers: "The default is 20"
+/// (`ListResourceRequestsInput$MaxResults`).
+const DEFAULT_PAGE_SIZE: usize = 20;

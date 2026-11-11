@@ -29,6 +29,12 @@
 //! resource can live.
 
 pub mod native;
+mod request_listing;
+
+pub use request_listing::{
+    decode_request_page_token, request_page_token, RequestFilter, RequestPosition,
+    INVALID_NEXT_TOKEN,
+};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Bound;

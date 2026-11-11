@@ -21,6 +21,8 @@ mod native_resource_resolution;
 mod primary_identifier;
 #[path = "all/refusal_wording.rs"]
 mod refusal_wording;
+#[path = "all/request_listing.rs"]
+mod request_listing;
 #[path = "all/resource_lifecycle.rs"]
 mod resource_lifecycle;
 #[path = "all/resource_listing.rs"]
