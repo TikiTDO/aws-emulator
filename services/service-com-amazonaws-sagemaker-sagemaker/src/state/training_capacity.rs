@@ -198,13 +198,15 @@ impl ComAmazonawsSagemakerSagemakerState {
     /// How many instances of `instance_type` the account's training jobs are already
     /// using — the utilisation its training quota is measured against.
     ///
-    /// Only a job that is still `InProgress` holds instances: a job the clock has settled
-    /// into a terminal status has released its cluster, so it counts for nothing, exactly
-    /// as a deleted endpoint does for the hosting quota.
+    /// Only a job that has NOT reached a terminal status holds instances — one still
+    /// running, and one whose stop is in flight, because its cluster comes down with the
+    /// `Stopped` the clock owes it: a job the clock has settled into a terminal status has
+    /// released its cluster, so it counts for nothing, exactly as a deleted endpoint does
+    /// for the hosting quota.
     pub fn training_instances_in_use(&self, instance_type: &str) -> i64 {
         self.training_jobs
             .values()
-            .filter(|job| job.status == TRAINING_STATUS_IN_PROGRESS)
+            .filter(|job| !job.is_terminal())
             .filter_map(|job| job.request.resource_config.as_ref())
             .filter_map(|config| training_instance_demand(config).remove(instance_type))
             .sum()
@@ -215,11 +217,12 @@ impl ComAmazonawsSagemakerSagemakerState {
     ///
     /// The entry bounds ONE instance's volume, so what an account is using of it is the
     /// largest volume any of its running jobs was given rather than a sum; a job the clock
-    /// has settled into a terminal status has released its storage and counts for nothing.
+    /// has settled into a terminal status has released its storage and counts for nothing,
+    /// while one whose stop is still in flight holds it until `Stopped` falls due.
     pub fn training_volume_in_use(&self) -> i64 {
         self.training_jobs
             .values()
-            .filter(|job| job.status == TRAINING_STATUS_IN_PROGRESS)
+            .filter(|job| !job.is_terminal())
             .filter_map(|job| job.request.resource_config.as_ref())
             .filter_map(|config| config.volume_size_in_gb)
             .map(i64::from)

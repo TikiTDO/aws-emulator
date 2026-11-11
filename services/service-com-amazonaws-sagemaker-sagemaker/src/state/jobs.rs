@@ -22,14 +22,21 @@ use super::*;
 pub const TRAINING_JOB_ENDS_AFTER: Duration = Duration::from_millis(400);
 
 /// `TrainingJobStatus`'s members this emulator moves a training job through (the modelled
-/// enum also carries `Stopping`, `Stopped` and `Deleting`, which this slice does not reach:
-/// `StopTrainingJob` and `DeleteTrainingJob` are still stubs). Named once here so no handler
-/// compares a bare string literal.
+/// enum also carries `Deleting`, which this slice does not reach: `DeleteTrainingJob` is
+/// still a stub). Named once here so no handler compares a bare string literal.
 pub const TRAINING_STATUS_IN_PROGRESS: &str = "InProgress";
 /// See [`TRAINING_STATUS_IN_PROGRESS`]: the status of a job whose run finished.
 pub const TRAINING_STATUS_COMPLETED: &str = "Completed";
 /// See [`TRAINING_STATUS_IN_PROGRESS`].
 pub const TRAINING_STATUS_FAILED: &str = "Failed";
+/// See [`TRAINING_STATUS_IN_PROGRESS`]: the transient status a job carries from the
+/// `StopTrainingJob` call until the clock owes it [`TRAINING_STATUS_STOPPED`] ("When it
+/// receives a StopTrainingJob request, SageMaker changes the status of the job to
+/// Stopping" — that operation's own doc).
+pub const TRAINING_STATUS_STOPPING: &str = "Stopping";
+/// See [`TRAINING_STATUS_STOPPING`]: the terminal status of a job the caller stopped
+/// ("After SageMaker stops the job, it sets the status to Stopped").
+pub const TRAINING_STATUS_STOPPED: &str = "Stopped";
 
 /// The `SecondaryStatus` an accepted training job carries: the job has been accepted and
 /// no stage of its work has begun.
@@ -41,6 +48,39 @@ pub const TRAINING_SECONDARY_STATUS_COMPLETED: &str = "Completed";
 /// See [`TRAINING_SECONDARY_STATUS_STARTING`]: the member that goes with
 /// [`TRAINING_STATUS_FAILED`].
 pub const TRAINING_SECONDARY_STATUS_FAILED: &str = "Failed";
+/// See [`TRAINING_SECONDARY_STATUS_STARTING`]: the member that goes with
+/// [`TRAINING_STATUS_STOPPING`] (`SecondaryStatus` carries `Stopping` too, spelled the
+/// same way `TrainingJobStatus` spells it).
+pub const TRAINING_SECONDARY_STATUS_STOPPING: &str = "Stopping";
+/// See [`TRAINING_SECONDARY_STATUS_STARTING`]: the member that goes with
+/// [`TRAINING_STATUS_STOPPED`].
+pub const TRAINING_SECONDARY_STATUS_STOPPED: &str = "Stopped";
+
+/// How long after `StopTrainingJob` the clock owes the job's `Stopping` -> `Stopped` move.
+///
+/// Chosen on the same terms as [`TRAINING_JOB_ENDS_AFTER`] and inside the same band this
+/// crate uses for every clock-owed span (see [`PROCESSING_JOB_STOPS_AFTER`] and
+/// [`TUNING_JOB_STOPS_AFTER`]): the 120 seconds the operation's doc mentions is the grace
+/// window SageMaker gives the ALGORITHM to save its artifacts, not a wait the API contract
+/// states for the caller, so the span here is compressed like every other one. It is never
+/// zero, so a caller that describes the job straight after asking it to stop still observes
+/// the transient `Stopping`, and one that waits observes `Stopped`, so a waiter terminates.
+pub const TRAINING_JOB_STOPS_AFTER: Duration = Duration::from_millis(300);
+
+/// Why stopping a training job whose run is already over is refused, naming the job and the
+/// status it had already reached.
+///
+/// A job in a status nothing leaves on its own has no run left to stop. `StopTrainingJob`
+/// models only `ResourceNotFound` and the job IS found, so the refusal is a 400
+/// `ValidationException` carrying this sentence — the form this crate's other stops use
+/// (see [`crate::state::processing_job_not_running`]).
+#[must_use]
+pub fn training_job_not_running(name: &str, status: &str) -> String {
+    format!(
+        "The training job \"{name}\" is {status} and is not running, so there is \
+         nothing to stop."
+    )
+}
 
 /// `FailureReason` of a training job whose run never reported at all — the request that
 /// started it did not get to the end of its own handler, so nothing is known about the work.
@@ -119,42 +159,53 @@ pub struct TrainingJob {
 }
 
 impl TrainingJob {
-    /// Materialise the move out of `InProgress` the clock already owes this job.
+    /// Materialise the move out of a non-terminal status the clock already owes this job.
     ///
     /// This is the one write a reporting operation may make: the transition was due at
     /// `ends_at` whether or not anybody described the job, so the observer makes no
-    /// difference to the result. The terminal status is the one the job's own RUN reported
-    /// ([`Self::run`]) — `Completed` with the artifact it wrote and the metrics it measured,
-    /// or `Failed` with the condition that stopped it.
+    /// difference to the result. For a job left to run the terminal status is the one the
+    /// job's own RUN reported ([`Self::run`]) — `Completed` with the artifact it wrote and
+    /// the metrics it measured, or `Failed` with the condition that stopped it. For a job the
+    /// caller asked to stop it is `Stopped`, with no failure reason beside it: stopping is
+    /// what the caller asked for, not a failure, and whatever the abandoned run reported is
+    /// not revealed as the job's own outcome.
     ///
-    /// A job whose run has NOT reported yet is not settled at all, whatever the clock says:
-    /// the terminal status IS the run's, so there is none to materialise until the run has
-    /// one, and [`Self::record_run`] pushes the due instant out to the moment it reports. So
-    /// no reader can turn a run that is still going into a failure, and a run slower than
-    /// [`TRAINING_JOB_ENDS_AFTER`] still settles into what it actually produced.
+    /// A job still RUNNING whose run has NOT reported yet is not settled at all, whatever the
+    /// clock says: the terminal status IS the run's, so there is none to materialise until
+    /// the run has one, and [`Self::record_run`] pushes the due instant out to the moment it
+    /// reports. So no reader can turn a run that is still going into a failure, and a run
+    /// slower than [`TRAINING_JOB_ENDS_AFTER`] still settles into what it actually produced.
     ///
     /// Answers whether the transition happened on this call, so the caller can record it.
     pub fn settle_status(&mut self, now: SystemTime) -> bool {
-        if self.status != TRAINING_STATUS_IN_PROGRESS || now < self.ends_at {
+        if now < self.ends_at {
             return false;
         }
-        match self.run.clone() {
-            Some(crate::state::TrainingRunOutcome::Completed {
-                model_artifacts,
-                final_metrics,
-            }) => {
-                self.status = TRAINING_STATUS_COMPLETED.to_string();
-                self.secondary_status = Some(TRAINING_SECONDARY_STATUS_COMPLETED.to_string());
-                self.model_artifacts = Some(model_artifacts);
-                self.final_metrics = final_metrics;
+        match self.status.as_str() {
+            TRAINING_STATUS_IN_PROGRESS => match self.run.clone() {
+                Some(crate::state::TrainingRunOutcome::Completed {
+                    model_artifacts,
+                    final_metrics,
+                }) => {
+                    self.status = TRAINING_STATUS_COMPLETED.to_string();
+                    self.secondary_status = Some(TRAINING_SECONDARY_STATUS_COMPLETED.to_string());
+                    self.model_artifacts = Some(model_artifacts);
+                    self.final_metrics = final_metrics;
+                }
+                Some(crate::state::TrainingRunOutcome::Failed { reason }) => {
+                    self.status = TRAINING_STATUS_FAILED.to_string();
+                    self.secondary_status = Some(TRAINING_SECONDARY_STATUS_FAILED.to_string());
+                    self.failure_reason = Some(reason);
+                }
+                // The run has not reported: nothing is owed until it does.
+                None => return false,
+            },
+            TRAINING_STATUS_STOPPING => {
+                self.status = TRAINING_STATUS_STOPPED.to_string();
+                self.secondary_status = Some(TRAINING_SECONDARY_STATUS_STOPPED.to_string());
             }
-            Some(crate::state::TrainingRunOutcome::Failed { reason }) => {
-                self.status = TRAINING_STATUS_FAILED.to_string();
-                self.secondary_status = Some(TRAINING_SECONDARY_STATUS_FAILED.to_string());
-                self.failure_reason = Some(reason);
-            }
-            // The run has not reported: nothing is owed until it does.
-            None => return false,
+            // Already terminal: nothing is owed and nothing moves.
+            _ => return false,
         }
         // The run's work begins once the job is accepted and is over by the instant the
         // clock settles it, which is the span the describe reports.
@@ -170,11 +221,49 @@ impl TrainingJob {
     /// — but it cannot owe it before the work is over, so a run that took longer than that
     /// span pushes the due instant out to the moment it reported. The status the clock then
     /// materialises is always the one the run produced.
+    ///
+    /// A job the caller has already asked to stop keeps the due instant that stop set: the
+    /// terminal status it is waiting for is `Stopped`, which does not depend on what the
+    /// abandoned run reported, so a late report must not push `Stopped` further away.
     pub fn record_run(&mut self, outcome: crate::state::TrainingRunOutcome, at: SystemTime) {
         self.run = Some(outcome);
-        if at > self.ends_at {
+        if self.status == TRAINING_STATUS_IN_PROGRESS && at > self.ends_at {
             self.ends_at = at;
         }
+    }
+
+    /// Whether the job has reached a status nothing leaves on its own, i.e. one of
+    /// `TrainingJobStatus`'s terminal members.
+    ///
+    /// `Deleting` belongs to `DeleteTrainingJob`, which this slice does not reach, so the
+    /// terminal statuses are the three a job here can be in.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            TRAINING_STATUS_COMPLETED | TRAINING_STATUS_FAILED | TRAINING_STATUS_STOPPED
+        )
+    }
+
+    /// Whether a stop the caller already asked for is still in flight, i.e. the job sits in
+    /// the transient `Stopping` status.
+    pub fn is_stopping(&self) -> bool {
+        self.status == TRAINING_STATUS_STOPPING
+    }
+
+    /// Record that the caller asked this job to stop: it moves to the transient `Stopping`
+    /// now, and the clock owes it `Stopped` at [`TRAINING_JOB_STOPS_AFTER`]. The span is
+    /// never zero, so the transient status is observable.
+    ///
+    /// The run the job was doing is abandoned rather than reported: nothing is published
+    /// beside `Stopping` or the `Stopped` that follows it, so no failure reason, artifact or
+    /// metric from a run the caller cut short is revealed as the job's own outcome.
+    pub fn request_stop(&mut self, now: SystemTime) {
+        self.status = TRAINING_STATUS_STOPPING.to_string();
+        self.secondary_status = Some(TRAINING_SECONDARY_STATUS_STOPPING.to_string());
+        self.failure_reason = None;
+        self.training_end_time = None;
+        self.last_modified_time = now;
+        self.ends_at = now + TRAINING_JOB_STOPS_AFTER;
     }
 
     /// "The training time in seconds" (`DescribeTrainingJob$TrainingTimeInSeconds`): the
@@ -240,24 +329,31 @@ impl TrainingJob {
     /// left, built from the instants the record holds rather than from any history kept
     /// beside them.
     ///
-    /// A job still in its first secondary status reports that one entry, open-ended; the
-    /// terminal one carries the reason the job reports, so the history says the same thing
-    /// the job's own `FailureReason` does.
+    /// A job still in its first secondary status reports that one entry, open-ended; the one
+    /// it has moved on to starts where the first ended, ends when the job's own run ended —
+    /// so it stays open-ended while a stop is in flight — and carries the reason the job
+    /// reports, so the history says the same thing the job's own `FailureReason` does.
     pub fn secondary_status_transitions(&self) -> Vec<SecondaryStatusTransition> {
-        let entered_terminal = self.training_end_time;
+        let current = self
+            .secondary_status
+            .as_deref()
+            .unwrap_or(TRAINING_SECONDARY_STATUS_STARTING);
+        // The job left `Starting` when it entered the status it is in now, which is the
+        // instant that move last modified the record — the clock settling the job, or the
+        // stop the caller asked for.
+        let left_starting =
+            (current != TRAINING_SECONDARY_STATUS_STARTING).then_some(self.last_modified_time);
         let mut transitions = vec![SecondaryStatusTransition {
             status: TRAINING_SECONDARY_STATUS_STARTING.to_string(),
             start_time: timestamp(self.creation_time),
-            end_time: entered_terminal.map(timestamp),
+            end_time: left_starting.map(timestamp),
             status_message: None,
         }];
-        // The job left `Starting` only for the terminal status the clock owed it, so the
-        // second entry exists exactly when that transition has been materialised.
-        if let (Some(at), Some(status)) = (entered_terminal, self.secondary_status.as_ref()) {
+        if let Some(at) = left_starting {
             transitions.push(SecondaryStatusTransition {
-                status: status.clone(),
+                status: current.to_string(),
                 start_time: timestamp(at),
-                end_time: Some(timestamp(at)),
+                end_time: self.training_end_time.map(timestamp),
                 status_message: self.failure_reason.clone(),
             });
         }
