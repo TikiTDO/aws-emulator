@@ -41,6 +41,8 @@ mod pipe_lambda_target;
 mod pipe_lifecycle;
 #[path = "all/pipe_lifecycle_conflicts.rs"]
 mod pipe_lifecycle_conflicts;
+#[path = "all/pipe_listing_state_reason.rs"]
+mod pipe_listing_state_reason;
 #[path = "all/pipe_metric_attribution.rs"]
 mod pipe_metric_attribution;
 #[path = "all/pipe_metrics.rs"]

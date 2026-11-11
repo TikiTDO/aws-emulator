@@ -78,9 +78,13 @@ async fn drive(router: &MultiServiceRouter, name: &str, operation: &str) -> Repl
     }
 }
 
-/// The `StateReason` each listed pipe reported, keyed by the pipe's name. `None` for an
-/// entry that omitted the member altogether, which is the omission under test.
-fn listed_reasons(reply: &Reply) -> Vec<(String, Option<String>)> {
+/// The `StateReason` each listed pipe reported, keyed by the pipe's name, in the order the
+/// listing returned them. `None` for an entry that omitted the member altogether, which is
+/// the omission under test.
+///
+/// `pub(crate)` because `tests/all/pipe_listing_state_reason.rs` reads the entries of its
+/// listings the same way, so there is ONE reader of the `Pipes[]` shape.
+pub(crate) fn listed_reasons(reply: &Reply) -> Vec<(String, Option<String>)> {
     reply
         .member("Pipes")
         .as_array()

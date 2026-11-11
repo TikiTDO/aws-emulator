@@ -65,7 +65,10 @@ fn unheld_queue_arn(name: &str) -> String {
 
 /// Every Amazon SQS call a pipe with a queue source and a queue target makes, allowed on
 /// exactly the resource each is made on.
-fn every_call(source: &str, target: &str) -> Value {
+///
+/// `pub(crate)` because `tests/all/pipe_listing_state_reason.rs` brings its healthy pipes up
+/// under the same grants, through this one statement set rather than a copy of it.
+pub(crate) fn every_call(source: &str, target: &str) -> Value {
     json!([
         {
             "Effect": "Allow",
@@ -84,7 +87,10 @@ fn the_target_only(target: &str) -> Value {
 
 /// Delete the queue at `url`, so a pipe's `Source` keeps its well-formed ARN while the
 /// resource that ARN names is gone.
-async fn delete_queue(router: &MultiServiceRouter, case: &str, url: &str) {
+///
+/// `pub(crate)` because `tests/all/pipe_listing_state_reason.rs` takes a source away the same
+/// way, through this one path rather than a copy of it.
+pub(crate) async fn delete_queue(router: &MultiServiceRouter, case: &str, url: &str) {
     let (status, body) = sqs(router, "DeleteQueue", &json!({ "QueueUrl": url })).await;
     assert_eq!(
         status, 200,
@@ -94,7 +100,10 @@ async fn delete_queue(router: &MultiServiceRouter, case: &str, url: &str) {
 
 /// `CreatePipe` for one case: the source and target it names, the role it acts as, and the
 /// `DesiredState` it asks for when it asks for one.
-async fn create_pipe(
+///
+/// `pub(crate)` because `tests/all/pipe_listing_state_reason.rs` creates the pipes it lists
+/// over the SAME request path.
+pub(crate) async fn create_pipe(
     router: &MultiServiceRouter,
     name: &str,
     source_arn: &str,
@@ -117,7 +126,10 @@ async fn create_pipe(
 
 /// `DescribePipe` once the pipe has settled out of whatever move was in flight, or a panic
 /// naming the state it was still passing through when the budget ran out.
-async fn settled(router: &MultiServiceRouter, case: &str, name: &str) -> Reply {
+///
+/// `pub(crate)` because `tests/all/pipe_listing_state_reason.rs` waits for the pipes it lists
+/// to come to rest the same way, reading the crate's own list of transient states.
+pub(crate) async fn settled(router: &MultiServiceRouter, case: &str, name: &str) -> Reply {
     let deadline = Instant::now() + BUDGET;
     loop {
         let last = describe(router, name).await;
@@ -156,7 +168,10 @@ async fn publishes_nothing(router: &MultiServiceRouter, case: &str, name: &str) 
 
 /// Assert the `StateReason` of a failed move names the source and carries `mentions`, within
 /// the bound the member that reports it has.
-fn reason_says(case: &str, reason: &str, source_arn: &str, mentions: &[&str]) {
+///
+/// `pub(crate)` because `tests/all/pipe_listing_state_reason.rs` reads the failure sentence a
+/// LISTING reports the same way: one reading of what that sentence has to say.
+pub(crate) fn reason_says(case: &str, reason: &str, source_arn: &str, mentions: &[&str]) {
     assert!(
         reason.contains(source_arn),
         "case {case:?}: expected the StateReason to name the source {source_arn}, got \
