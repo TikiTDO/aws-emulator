@@ -26,7 +26,8 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use crate::harness::{
-    drain_pages, generated_host_key, member_of, Emulator, ACCOUNT, REGION, ROLE,
+    drain_pages, generated_host_key, listed_tags, member_of, tag_map, Emulator, ACCOUNT, REGION,
+    ROLE,
 };
 
 /// An IAM Identity Center instance ARN satisfying `IdentityCenterInstanceArn`'s
@@ -82,28 +83,6 @@ fn expected(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         .iter()
         .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
         .collect()
-}
-
-/// A `Tags` list on the wire as the key -> value map it denotes.
-///
-/// An absent member reads as the empty map, as the empty list does — a reader reports
-/// the EMPTY list for a resource with no tags.
-fn tag_map(tags: &Value) -> BTreeMap<String, String> {
-    tags.as_array()
-        .map(|list| {
-            list.iter()
-                .map(|tag| {
-                    (
-                        member_of(tag, "Key").as_str().unwrap_or_default().to_string(),
-                        member_of(tag, "Value")
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_string(),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Read one resource back through its own reader and hand back the described structure.
@@ -292,33 +271,6 @@ async fn untag(emulator: &Emulator, case: &str, arn: &str, keys: Value) {
         "case {case:?}: expected UntagResource 200, got {} with body {}",
         answer.status, answer.body
     );
-}
-
-/// The tag set `ListTagsForResource` reports for `arn` in ONE unbounded call, which is
-/// the whole set for every row here (a resource carries at most
-/// `MAX_TAGS_PER_RESOURCE` = 50 tags, far below the page bound), so the answer must
-/// carry no `NextToken`. Paging itself is asserted over [`drain_pages`].
-async fn listed_tags(emulator: &Emulator, case: &str, arn: &str) -> BTreeMap<String, String> {
-    let answer = emulator
-        .call("ListTagsForResource", json!({"Arn": arn}))
-        .await;
-    assert_eq!(
-        answer.status, 200,
-        "case {case:?}: expected ListTagsForResource 200, got {} with body {}",
-        answer.status, answer.body
-    );
-    assert_eq!(
-        answer.get("Arn").as_str(),
-        Some(arn),
-        "case {case:?}: expected the requested Arn echoed, got {}",
-        answer.body
-    );
-    assert!(
-        answer.get("NextToken").is_null(),
-        "case {case:?}: expected one unbounded page with no NextToken, got {}",
-        answer.body
-    );
-    tag_map(answer.get("Tags"))
 }
 
 // ---------------------------------------------------------------------------

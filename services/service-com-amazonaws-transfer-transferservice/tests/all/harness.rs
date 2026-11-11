@@ -8,6 +8,7 @@
 //! `X-Amz-Target: TransferService.<Op>` through [`MultiServiceRouter`] — so what it
 //! asserts is what an SDK sees, not what a handler returns.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -485,6 +486,155 @@ impl Emulator {
             .unwrap_or_else(|| panic!("CreateProfile returned no ProfileId: {}", answer.body))
             .to_string()
     }
+
+    /// Create an AS2 agreement from `request` and return its `AgreementId`, asserting
+    /// the minted identifier has the modelled form.
+    pub(crate) async fn create_agreement(&self, case: &str, request: Value) -> String {
+        let answer = self.call("CreateAgreement", request).await;
+        assert_eq!(
+            answer.status, 200,
+            "case {case:?}: expected CreateAgreement 200, got {} with body {}",
+            answer.status, answer.body
+        );
+        let agreement_id = answer
+            .get("AgreementId")
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!("case {case:?}: expected an AgreementId, got {}", answer.body)
+            })
+            .to_string();
+        assert!(
+            is_modelled_agreement_id(&agreement_id),
+            "case {case:?}: expected an AgreementId matching ^a-([0-9a-f]{{17}})$, got \
+             {agreement_id:?}"
+        );
+        agreement_id
+    }
+
+    /// Read one agreement back through `DescribeAgreement`, answering the whole response
+    /// so a caller can assert either the record or the refusal.
+    pub(crate) async fn describe_agreement(&self, server_id: &str, agreement_id: &str) -> Answer {
+        self.call(
+            "DescribeAgreement",
+            json!({"ServerId": server_id, "AgreementId": agreement_id}),
+        )
+        .await
+    }
+}
+
+/// A `CustomDirectoriesType` under `prefix`: every one of the five `@required` members
+/// the shape declares (`smithy_query(query="shape",shape="CustomDirectoriesType")`).
+///
+/// The one place this crate builds that structure, so every suite that configures an
+/// agreement with custom directories configures it the same way.
+pub(crate) fn custom_directories(prefix: &str) -> Value {
+    json!({
+        "FailedFilesDirectory": format!("{prefix}/failed"),
+        "MdnFilesDirectory": format!("{prefix}/mdn"),
+        "PayloadFilesDirectory": format!("{prefix}/payload"),
+        "StatusFilesDirectory": format!("{prefix}/status"),
+        "TemporaryFilesDirectory": format!("{prefix}/temporary"),
+    })
+}
+
+/// A `Tags` list on the wire as the key -> value map it denotes.
+///
+/// An absent member reads as the empty map, as the empty list does — a reader reports
+/// the EMPTY list for a resource with no tags.
+pub(crate) fn tag_map(tags: &Value) -> BTreeMap<String, String> {
+    tags.as_array()
+        .map(|list| {
+            list.iter()
+                .map(|tag| {
+                    (
+                        member_of(tag, "Key").as_str().unwrap_or_default().to_string(),
+                        member_of(tag, "Value")
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The tag set `ListTagsForResource` reports for `arn` in ONE unbounded call, which is
+/// the whole set for every caller here (a resource carries at most
+/// `MAX_TAGS_PER_RESOURCE` = 50 tags, far below the page bound), so the answer must
+/// carry no `NextToken`. Paging itself is asserted over [`drain_pages`].
+pub(crate) async fn listed_tags(
+    emulator: &Emulator,
+    case: &str,
+    arn: &str,
+) -> BTreeMap<String, String> {
+    let answer = emulator
+        .call("ListTagsForResource", json!({"Arn": arn}))
+        .await;
+    assert_eq!(
+        answer.status, 200,
+        "case {case:?}: expected ListTagsForResource 200, got {} with body {}",
+        answer.status, answer.body
+    );
+    assert_eq!(
+        answer.get("Arn").as_str(),
+        Some(arn),
+        "case {case:?}: expected the requested Arn echoed, got {}",
+        answer.body
+    );
+    assert!(
+        answer.get("NextToken").is_null(),
+        "case {case:?}: expected one unbounded page with no NextToken, got {}",
+        answer.body
+    );
+    tag_map(answer.get("Tags"))
+}
+
+/// Assert `answer` is this service's not-found refusal for the agreement
+/// `agreement_id`, whichever operation of the agreement plane answered it.
+///
+/// The one place this crate states that refusal, so the suites that read an agreement
+/// after a removal, and the ones that address a pair that was never created, cannot
+/// disagree about what it looks like. The status is the one the service answers a
+/// resource reference it cannot resolve with
+/// (`crate::state::RESOURCE_NOT_FOUND_HTTP_STATUS`, whose own documentation records
+/// the recorded wire status the shape's `@httpError` does not describe), so this
+/// expectation follows the service's single decision rather than restating it.
+pub(crate) fn assert_agreement_not_found(
+    case: &str,
+    op: &str,
+    answer: &Answer,
+    agreement_id: &str,
+) {
+    assert_eq!(
+        (answer.status, answer.error_code().as_str()),
+        (400, "ResourceNotFoundException"),
+        "case {case:?}: expected {op} to answer 400 ResourceNotFoundException, got {} with \
+         body {}",
+        answer.status,
+        answer.body
+    );
+    assert_eq!(
+        member_of(&answer.body, "ResourceType").as_str(),
+        Some("Agreement"),
+        "case {case:?}: expected {op} to report the agreement kind, got {}",
+        answer.body
+    );
+    assert_eq!(
+        member_of(&answer.body, "Resource").as_str(),
+        Some(agreement_id),
+        "case {case:?}: expected {op} to report the requested identifier, got {}",
+        answer.body
+    );
+    let message = member_of(&answer.body, "Message")
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !message.is_empty() && !message.contains(agreement_id),
+        "case {case:?}: expected {op} to answer a non-empty Message carrying no \
+         identifier, got {message:?}"
+    );
 }
 
 /// `ServerId` is modelled `len 19..19`, pattern `^s-([0-9a-f]{17})$`.

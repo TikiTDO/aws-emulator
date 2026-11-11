@@ -4126,13 +4126,13 @@ pub const MAX_AGREEMENTS_PER_SERVER: usize = 1_000;
 /// How many agreements the WHOLE store holds before `CreateAgreement` refuses, whatever
 /// server each one is on.
 ///
-/// The per-server bound above cannot bound the store on its own, because an agreement
-/// OUTLIVES the server it references (`DeleteServer` does not take a server's
-/// agreements with it), so a caller that keeps creating servers would keep a fresh
-/// per-server allowance for ever. This is the total bound every other resource map gets
-/// from [`MAX_STORED_SERVERS`]/[`MAX_STORED_PROFILES`]/[`MAX_STORED_CONNECTORS`], stated
-/// here for the one map nothing reclaims: past it a create is refused rather than
-/// growing the store, and `DeleteAgreement` releases one.
+/// The per-server bound above cannot bound the store on its own, because a caller that
+/// keeps creating servers keeps a fresh per-server allowance with each one. This is the
+/// total bound every other resource map gets from
+/// [`MAX_STORED_SERVERS`]/[`MAX_STORED_PROFILES`]/[`MAX_STORED_CONNECTORS`], stated here
+/// for the map addressed by a PAIR: past it a create is refused rather than growing the
+/// store, and `DeleteAgreement` releases one, as does the `DeleteServer` that takes the
+/// server's agreements with it.
 pub const MAX_STORED_AGREEMENTS: usize = MAX_STORED_SERVERS * 10;
 
 /// `Status`'s value for an agreement whose create named none.
@@ -4305,8 +4305,8 @@ impl ComAmazonawsTransferTransferserviceState {
     /// [`MAX_STORED_AGREEMENTS`].
     ///
     /// The TOTAL bound, which [`Self::server_has_agreement_capacity`] cannot stand in
-    /// for: an agreement outlives its server, so a per-server allowance is renewed by
-    /// every new server while nothing reclaims the agreements of the old ones.
+    /// for: a per-server allowance is renewed by every new server, so the per-server
+    /// bound alone leaves the store unbounded.
     pub fn has_agreement_capacity(&self) -> bool {
         self.agreements.len() < MAX_STORED_AGREEMENTS
     }

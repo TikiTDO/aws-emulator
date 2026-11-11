@@ -181,3 +181,7 @@ mod service_stated_refusals;
 // `tag_plane_resource_kinds`: which kind of resource the tag plane reports as missing.
 #[path = "all/tag_plane_resource_kinds.rs"]
 mod tag_plane_resource_kinds;
+// `agreement_removal_propagation`, appended for the same reason: where an agreement the
+// store no longer holds has gone, on every plane that could still answer for it.
+#[path = "all/agreement_removal_propagation.rs"]
+mod agreement_removal_propagation;

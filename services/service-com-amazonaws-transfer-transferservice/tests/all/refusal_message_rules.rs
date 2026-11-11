@@ -31,7 +31,7 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::{member_of, Answer, Emulator, ROLE};
+use crate::harness::{custom_directories, member_of, Answer, Emulator, ROLE};
 
 /// Satisfies `DirectoryId`'s modelled `len 12..12`, pattern `^d-[0-9a-f]{10}$`.
 const DIRECTORY_ID: &str = "d-0123456789";
@@ -95,18 +95,6 @@ fn assert_message(
 /// `As2ConnectorConfig.LocalProfileId` / `PartnerProfileId` satisfy `ProfileId`'s
 /// modelled `len 19..19`, pattern `^p-([0-9a-f]{17})$`.
 const LOCAL_PROFILE: &str = "p-11111111111111111";
-
-/// A `CustomDirectoriesType` under `prefix`: all five of its `@required` members, per
-/// `smithy_query(query="shape",shape="CustomDirectoriesType")`.
-fn custom_directories(prefix: &str) -> Value {
-    json!({
-        "FailedFilesDirectory": format!("{prefix}/failed"),
-        "MdnFilesDirectory": format!("{prefix}/mdn"),
-        "PayloadFilesDirectory": format!("{prefix}/payload"),
-        "StatusFilesDirectory": format!("{prefix}/status"),
-        "TemporaryFilesDirectory": format!("{prefix}/temporary"),
-    })
-}
 
 /// RULE: a request that names NEITHER member of a documented either/or pair is told that
 /// one of the two is needed; one that names BOTH is told the two cannot be sent

@@ -19,7 +19,8 @@
 use serde_json::{json, Value};
 
 use crate::harness::{
-    assert_members, is_modelled_agreement_id, member_of, Emulator, ACCOUNT, REGION, ROLE,
+    assert_members, custom_directories, is_modelled_agreement_id, member_of, Emulator, ACCOUNT,
+    REGION, ROLE,
 };
 
 /// `AgreementStatusType`'s whole modelled value set
@@ -72,18 +73,6 @@ impl Directories {
             }),
         }
     }
-}
-
-/// A `CustomDirectoriesType` under `prefix`: every one of the five `@required` members
-/// the shape declares (`smithy_query(query="shape",shape="CustomDirectoriesType")`).
-fn custom_directories(prefix: &str) -> Value {
-    json!({
-        "FailedFilesDirectory": format!("{prefix}/failed"),
-        "MdnFilesDirectory": format!("{prefix}/mdn"),
-        "PayloadFilesDirectory": format!("{prefix}/payload"),
-        "StatusFilesDirectory": format!("{prefix}/status"),
-        "TemporaryFilesDirectory": format!("{prefix}/temporary"),
-    })
 }
 
 /// One `CreateAgreement` request, as the configuration it is built from. `None` means
@@ -344,42 +333,25 @@ impl Partnership {
 
 /// Create the agreement `case` describes and return its `AgreementId`.
 async fn create_agreement(emulator: &Emulator, partnership: &Partnership, case: &Case) -> String {
-    let answer = emulator
-        .call(
-            "CreateAgreement",
+    emulator
+        .create_agreement(
+            case.name,
             case.request(
                 &partnership.server_id,
                 &partnership.local_profile,
                 &partnership.partner_profile,
             ),
         )
-        .await;
-    assert_eq!(
-        answer.status, 200,
-        "case {:?}: expected CreateAgreement 200, got {} with body {}",
-        case.name, answer.status, answer.body
-    );
-    let agreement_id = answer
-        .get("AgreementId")
-        .as_str()
-        .unwrap_or_else(|| panic!("case {:?}: no AgreementId in {}", case.name, answer.body))
-        .to_string();
-    assert!(
-        is_modelled_agreement_id(&agreement_id),
-        "case {:?}: expected an AgreementId matching ^a-([0-9a-f]{{17}})$, got {agreement_id:?}",
-        case.name
-    );
-    agreement_id
+        .await
 }
 
 /// `DescribeAgreement` for one pair.
-async fn describe(emulator: &Emulator, server_id: &str, agreement_id: &str) -> crate::harness::Answer {
-    emulator
-        .call(
-            "DescribeAgreement",
-            json!({"ServerId": server_id, "AgreementId": agreement_id}),
-        )
-        .await
+async fn describe(
+    emulator: &Emulator,
+    server_id: &str,
+    agreement_id: &str,
+) -> crate::harness::Answer {
+    emulator.describe_agreement(server_id, agreement_id).await
 }
 
 /// RULE: each create mints a modelled `AgreementId` and persists its configuration with

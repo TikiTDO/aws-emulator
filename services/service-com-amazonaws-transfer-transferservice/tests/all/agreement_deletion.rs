@@ -20,7 +20,7 @@
 
 use serde_json::json;
 
-use crate::harness::{is_modelled_agreement_id, member_of, Answer, Emulator, ROLE};
+use crate::harness::{assert_agreement_not_found, member_of, Answer, Emulator, ROLE};
 
 /// An `AgreementId` of the modelled form (`^a-([0-9a-f]{17})$`) that no create minted.
 const NEVER_MINTED: [&str; 3] = [
@@ -38,9 +38,9 @@ async fn create_agreement(
     local_profile: &str,
     partner_profile: &str,
 ) -> String {
-    let answer = emulator
-        .call(
-            "CreateAgreement",
+    emulator
+        .create_agreement(
+            case,
             json!({
                 "ServerId": server_id,
                 "LocalProfileId": local_profile,
@@ -49,66 +49,12 @@ async fn create_agreement(
                 "BaseDirectory": "/amzn-s3-demo-bucket/as2",
             }),
         )
-        .await;
-    assert_eq!(
-        answer.status, 200,
-        "case {case:?}: expected CreateAgreement 200, got {} with body {}",
-        answer.status, answer.body
-    );
-    let agreement_id = answer
-        .get("AgreementId")
-        .as_str()
-        .unwrap_or_else(|| panic!("case {case:?}: expected an AgreementId, got {}", answer.body))
-        .to_string();
-    assert!(
-        is_modelled_agreement_id(&agreement_id),
-        "case {case:?}: expected an AgreementId matching ^a-([0-9a-f]{{17}}), got \
-         {agreement_id:?}"
-    );
-    agreement_id
-}
-
-/// Assert `answer` is this service's not-found refusal for the agreement `agreement_id`.
-fn assert_agreement_not_found(case: &str, op: &str, answer: &Answer, agreement_id: &str) {
-    assert_eq!(
-        (answer.status, answer.error_code().as_str()),
-        (400, "ResourceNotFoundException"),
-        "case {case:?}: expected {op} to answer 400 ResourceNotFoundException, got {} with \
-         body {}",
-        answer.status,
-        answer.body
-    );
-    assert_eq!(
-        member_of(&answer.body, "ResourceType").as_str(),
-        Some("Agreement"),
-        "case {case:?}: expected {op} to report the agreement kind, got {}",
-        answer.body
-    );
-    assert_eq!(
-        member_of(&answer.body, "Resource").as_str(),
-        Some(agreement_id),
-        "case {case:?}: expected {op} to report the requested identifier, got {}",
-        answer.body
-    );
-    let message = member_of(&answer.body, "Message")
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(
-        !message.is_empty() && !message.contains(agreement_id),
-        "case {case:?}: expected {op} to answer a non-empty Message carrying no \
-         identifier, got {message:?}"
-    );
+        .await
 }
 
 /// Describe one agreement, answering the whole response.
 async fn describe(emulator: &Emulator, server_id: &str, agreement_id: &str) -> Answer {
-    emulator
-        .call(
-            "DescribeAgreement",
-            json!({"ServerId": server_id, "AgreementId": agreement_id}),
-        )
-        .await
+    emulator.describe_agreement(server_id, agreement_id).await
 }
 
 /// RULE: the delete removes the agreement it names and only that one, and every reader

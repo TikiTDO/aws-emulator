@@ -26,7 +26,8 @@
 use serde_json::{json, Value};
 
 use crate::harness::{
-    assert_members, is_modelled_agreement_id, member_of, Answer, Emulator, ROLE,
+    assert_members, custom_directories, is_modelled_agreement_id, member_of, Answer, Emulator,
+    ROLE,
 };
 
 /// `AgreementStatusType`'s whole modelled value set
@@ -58,18 +59,6 @@ const BASELINE_CUSTOM_PREFIX: &str = "/amzn-s3-demo-bucket/as2/baseline";
 /// `len 20..2048`, so a row that replaces `AccessRole` replaces it with a different
 /// value from [`ROLE`].
 const OTHER_ROLE: &str = "arn:aws:iam::000000000000:role/transfer-as2-updated";
-
-/// A `CustomDirectoriesType` under `prefix`: every one of the five `@required` members
-/// the shape declares (`smithy_query(query="shape",shape="CustomDirectoriesType")`).
-fn custom_directories(prefix: &str) -> Value {
-    json!({
-        "FailedFilesDirectory": format!("{prefix}/failed"),
-        "MdnFilesDirectory": format!("{prefix}/mdn"),
-        "PayloadFilesDirectory": format!("{prefix}/payload"),
-        "StatusFilesDirectory": format!("{prefix}/status"),
-        "TemporaryFilesDirectory": format!("{prefix}/temporary"),
-    })
-}
 
 /// `base` with every member of `overrides` inserted over it.
 fn with(base: &Value, overrides: Value) -> Value {
@@ -188,25 +177,9 @@ async fn create_agreement(
     case: &str,
     directories: &Value,
 ) -> String {
-    let answer = emulator
-        .call("CreateAgreement", partnership.create_request(directories))
-        .await;
-    assert_eq!(
-        answer.status, 200,
-        "case {case:?}: expected CreateAgreement 200, got {} with body {}",
-        answer.status, answer.body
-    );
-    let agreement_id = answer
-        .get("AgreementId")
-        .as_str()
-        .unwrap_or_else(|| panic!("case {case:?}: no AgreementId in {}", answer.body))
-        .to_string();
-    assert!(
-        is_modelled_agreement_id(&agreement_id),
-        "case {case:?}: expected an AgreementId matching ^a-([0-9a-f]{{17}})$, \
-         got {agreement_id:?}"
-    );
-    agreement_id
+    emulator
+        .create_agreement(case, partnership.create_request(directories))
+        .await
 }
 
 /// `UpdateAgreement` on one pair, carrying `members`.
