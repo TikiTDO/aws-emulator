@@ -329,6 +329,11 @@ pub mod chime_tags;
 /// such a type, and the one an API that acts through a provider's handlers has nothing to
 /// call for — so the registry and that API cannot disagree about one type.
 pub mod cfn_provisioning;
+/// The ONE rendering and delivery of an API Gateway stage's ACCESS LOG — the `$context`
+/// format turned into a record, and the write of that record into the CloudWatch Logs
+/// destination the stage names — for both API Gateway planes, which configure and render it
+/// the same way, so a REST stage and an HTTP api's stage cannot write one format differently.
+pub mod api_gateway_access_logs;
 /// The ONE rule for what a caller-supplied CloudWatch Logs log group NAME may be, for
 /// every service whose API takes one and then writes into the group it names — so two
 /// services asked whether CloudWatch Logs could hold a name cannot answer differently.

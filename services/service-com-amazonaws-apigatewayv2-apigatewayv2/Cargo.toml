@@ -112,6 +112,10 @@ service-com-amazonaws-cognitoidentityprovider-awscognitoidentityproviderservice 
 # against the services that OWN that action and the role it is performed under. DEV-ONLY.
 service-com-amazonaws-eventbridge-awsevents = { workspace = true }
 service-com-amazonaws-sqs-amazonsqs = { workspace = true }
+# CloudWatch Logs, mounted beside this one in the test harness: the access-log record a stage
+# writes lands in a log group that service holds, and `tests/all/http_api_access_logging.rs`
+# reads the delivery back through its own `FilterLogEvents`. DEV-ONLY.
+service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
 
 [lints]
 workspace = true

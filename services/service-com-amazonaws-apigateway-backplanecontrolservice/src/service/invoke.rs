@@ -248,6 +248,9 @@ pub mod execute_api_authorization;
 pub mod lambda_proxy;
 mod onward_endpoint;
 pub mod sigv4_authentication;
+/// What the stage LOGS about a request it served: its access-log record and the execution
+/// log its method settings turn on.
+mod stage_logs;
 /// The X-Ray trace context this stage propagates onto the call its integration makes.
 mod trace_context;
 
@@ -1242,10 +1245,28 @@ pub async fn serve<Eng: Send + Sync + 'static>(
     // the header, so this data plane reports the id in the one spelling the rest of the
     // emulator reports it in.
     let request_id = ::service_common::query_error_envelope::new_request_id();
-    ::service_common::query_error_envelope::with_stated_request_id_header(
+    // MEASURED over the whole invoke, because that is what the access log reports as the
+    // latency of answering this request: the clock starts before anything is resolved and is
+    // read once the response has been computed.
+    let started = ::std::time::Instant::now();
+    let served = ::service_common::query_error_envelope::with_stated_request_id_header(
         serve_resolved(engine, req, ctx, 0, &request_id).await,
         &request_id,
+    );
+    // What the STAGE logs about the request it just answered — its access-log record and the
+    // execution log its method settings turn on — delivered to the destinations the stage
+    // and the account name ([`stage_logs`]). After the response is computed and never
+    // before: a record is about a request that was answered.
+    stage_logs::delivered(
+        engine,
+        req,
+        ctx,
+        &request_id,
+        &served,
+        started.elapsed(),
     )
+    .await;
+    served
 }
 
 /// The response this data plane's own records compute for `req`, before the request id is

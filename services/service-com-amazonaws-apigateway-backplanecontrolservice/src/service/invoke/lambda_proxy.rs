@@ -52,12 +52,17 @@
 //! METHOD's ARN as the `aws:SourceArn` such a grant is narrowed by — which is how a
 //! permission added for one api, stage or path admits a call to it and no other.
 //!
+//! A SIMULATED invocation (`TestInvokeMethod`) is decided by the same grant: it reaches no
+//! deployed stage, and AWS names that fact in the `aws:SourceArn` it is judged against rather
+//! than leaving it out — the method's ARN under the stage AWS reserves for a test invocation
+//! — so a function that admits API Gateway nothing for the method is not invoked from either
+//! side.
+//!
 //! Nothing is refused on evidence this emulator does not have: a `uri` whose function Lambda
-//! does not answer about at all, an emulator with no Lambda mounted, and an invocation that
-//! reached no stage (a simulated one, which has no method ARN) each leave the call to be
-//! made, for the reason [`super::super::resource_policy`]'s own reading gives. A function
-//! whose policy Lambda REPORTS as absent is an answer rather than a silence: it grants
-//! nothing, so the call is not made.
+//! does not answer about at all, and an emulator with no Lambda mounted, each leave the call
+//! to be made, for the reason [`super::super::resource_policy`]'s own reading gives. A
+//! function whose policy Lambda REPORTS as absent is an answer rather than a silence: it
+//! grants nothing, so the call is not made.
 //!
 //! # How an outcome becomes the method response
 //!
@@ -514,22 +519,27 @@ fn bad_gateway() -> IntegratedResponse {
 
 /// Why the function's own resource policy does not admit this invocation, or `None` when it
 /// does — and when nothing about it could be shown, which refuses nothing.
+///
+/// The phrase is the one AWS states in the execution log of a method whose integration's
+/// function admits it nothing ([`INVALID_PERMISSIONS_REASON`]).
 async fn unpermitted(
     client: &::aws_sdk_lambda::Client,
     function: &str,
     call: &MethodRequest,
 ) -> Option<String> {
-    // A call that reached no stage names no method for a grant's `aws:SourceArn` to be
+    // A call that names no method at all leaves a grant's `aws:SourceArn` nothing to be
     // judged against, so there is no decision to take about it.
     let source_arn = call.proxy.source_arn.as_deref()?;
     if invocation_admitted(client, function, source_arn).await {
         return None;
     }
-    Some(format!(
-        "the AWS_PROXY integration's function allows {SERVICE_PRINCIPAL} no \
-         {INVOKE_FUNCTION_ACTION} for this method, so no invocation was made"
-    ))
+    Some(INVALID_PERMISSIONS_REASON.to_string())
 }
+
+/// What API Gateway states in the execution log of a method whose integration's function
+/// grants it no invocation: "Invalid permissions on Lambda function", the sentence it words
+/// that configuration error with before answering the method's own `500`.
+const INVALID_PERMISSIONS_REASON: &str = "Invalid permissions on Lambda function";
 
 /// Whether the resource policy of `function` admits an invocation API Gateway makes for
 /// `source_arn` — the ARN of the resource of this api the grant's `aws:SourceArn` narrows a

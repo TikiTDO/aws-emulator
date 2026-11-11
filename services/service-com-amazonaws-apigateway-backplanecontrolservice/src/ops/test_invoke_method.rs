@@ -148,6 +148,17 @@ const CONTENT_TYPE: &str = "content-type";
 /// `IntegrationResponse$responseTemplates` keys it.
 const ACCEPT: &str = "accept";
 
+/// The STAGE a test invocation's method ARN names, which is the `aws:SourceArn` a grant to
+/// API Gateway for a simulated invocation is narrowed by.
+///
+/// A test invocation reaches no deployed stage, and AWS names that fact in the ARN rather
+/// than leaving it out: the resource a `lambda:InvokeFunction` grant has to cover for the
+/// console's and the CLI's test invoke to be admitted is
+/// `arn:aws:execute-api:{region}:{account}:{api-id}/test-invoke-stage/{verb}/{path}` — which
+/// is why a grant added for `*/{verb}/{path}`, covering every stage, admits a test
+/// invocation as well as a deployed one.
+const TEST_INVOKE_STAGE: &str = "test-invoke-stage";
+
 /// The reported response header the rendered body's media type travels in.
 const CONTENT_TYPE_HEADER: &str = "Content-Type";
 
@@ -513,10 +524,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             inputs,
             // What a PROXY integration's event names a SIMULATED call by: the resource and
             // the verb the caller named, the path it simulated, and every value its
-            // `multiValueHeaders` and query string carry. There is no stage and therefore
-            // no method ARN, so a grant to API Gateway has no `aws:SourceArn` to be judged
-            // against — which refuses nothing, as nothing is refused here on evidence this
-            // operation does not have.
+            // `multiValueHeaders` and query string carry. The method ARN is the one AWS
+            // narrows a grant for a TEST invocation by — the api's own method under
+            // [`TEST_INVOKE_STAGE`] — so the function's resource policy decides a simulated
+            // invocation exactly as it decides a deployed stage's, and a function that
+            // admits API Gateway nothing for this method is not invoked at all.
             ProxyInputs {
                 resource_id: input.resource_id.clone(),
                 http_method: verb.clone(),
@@ -524,7 +536,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 domain_name: String::new(),
                 multi_value_querystring: every_simulated_query_parameter(query),
                 multi_value_header: every_simulated_header(&input),
-                source_arn: None,
+                source_arn: Some(
+                    crate::service::resource_policy::Call {
+                        region: api.arn_region(),
+                        api_id: &input.rest_api_id,
+                        stage: TEST_INVOKE_STAGE,
+                        verb: &verb,
+                        resource_path: &resource_path,
+                        request_path: path.unwrap_or(resource_path.as_str()),
+                        source_vpce: None,
+                        caller: crate::service::resource_policy::Caller::Anonymous,
+                    }
+                    .method_arn(),
+                ),
                 // What the api declares BINARY, which decides whether a base64 body the
                 // function returns is reported as the bytes it names or as the base64
                 // text it is — the same records the data plane reads it from.

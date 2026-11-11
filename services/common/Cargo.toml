@@ -17,6 +17,11 @@ aws-sdk-eventbridge = { version = "1", default-features = false }
 # `api_call_events`: a publication that could not be made is traced rather than failing the
 # call it belongs to, so that path needs the workspace's logging facade.
 tracing = { workspace = true }
+# `api_gateway_access_logs`: the in-process CloudWatch Logs client an API Gateway stage
+# writes its access-log records through, built once here for both API Gateway planes. Only
+# the generated client is needed: the emulator supplies the transport, so the SDK's own
+# HTTPS stack is left out.
+aws-sdk-cloudwatchlogs = { version = "1", default-features = false }
 # `s3_client`: the in-process Amazon S3 client a service DELIVERING an object into a bucket
 # a client named writes through — a logging trail's log files (`trail_log_files`) among
 # them — built once here for every service that writes one. Only the generated client is

@@ -138,6 +138,9 @@
 //! `crate::service`'s own docs state that rule.
 
 mod dispatch;
+/// What the stage LOGS about a request it served: its access-log record, rendered by the
+/// stage's own `$context` format.
+mod access_logs;
 // `pub(crate)` for the three steps BOTH data planes of this service perform, so the rule
 // each states is written once and the two protocols cannot drift apart:
 //
@@ -557,13 +560,38 @@ pub async fn serve<Eng: Send + Sync + 'static>(
     req: &RtRequest,
     ctx: &OperationContext<'_>,
 ) -> RtResponse {
-    match resolved(engine, req) {
+    // Minted HERE, before anything is served, because the id names the request in THREE
+    // places: the header this response reports it in, the `$context.requestId` the
+    // invocation's own event carries, and the stage's access-log record ([`access_logs`]) —
+    // which is what lets a client join the answer it holds to the record of it.
+    let request_id = proxy_event::mint_request_id();
+    // MEASURED over the whole invoke, because that is what the access log reports as the
+    // latency of answering this request.
+    let started = ::std::time::Instant::now();
+    let answered = match resolved(engine, req, &request_id) {
         Err(answered) => *answered,
         Ok((decoration, Answer::Now(response))) => decorated(*response, &decoration),
         Ok((decoration, Answer::Dispatch(dispatch))) => {
             decorated(dispatch::perform(engine, ctx, *dispatch).await, &decoration)
         }
-    }
+    };
+    let served = ::service_common::query_error_envelope::with_stated_request_id_header(
+        answered,
+        &request_id,
+    );
+    // What the STAGE logs about the request it just answered, delivered to the destination
+    // the stage names ([`access_logs`]). After the response is computed and never before: a
+    // record is about a request that was answered.
+    access_logs::delivered(
+        engine,
+        req,
+        ctx,
+        &request_id,
+        &served,
+        started.elapsed(),
+    )
+    .await;
+    served
 }
 
 /// [`serve`] from a seam that carries NO in-process transport, so the route's integration
@@ -576,13 +604,18 @@ pub fn serve_without_transport<Eng: Send + Sync + 'static>(
     engine: &Eng,
     req: &RtRequest,
 ) -> RtResponse {
-    match resolved(engine, req) {
+    let request_id = proxy_event::mint_request_id();
+    let answered = match resolved(engine, req, &request_id) {
         Err(answered) => *answered,
         Ok((decoration, Answer::Now(response))) => decorated(*response, &decoration),
         Ok((decoration, Answer::Dispatch(dispatch))) => {
             decorated(dispatch::unperformable(engine, &dispatch), &decoration)
         }
-    }
+    };
+    // No access-log record is delivered from here: the delivery is a CALL into the
+    // CloudWatch Logs this emulator mounts, and this seam carries no transport to make it
+    // over. The response still names the request it answered.
+    ::service_common::query_error_envelope::with_stated_request_id_header(answered, &request_id)
 }
 
 /// Everything decided from the STORE for one invoke: the api's CORS decoration, and either
@@ -595,6 +628,7 @@ pub fn serve_without_transport<Eng: Send + Sync + 'static>(
 fn resolved<Eng: Send + Sync + 'static>(
     engine: &Eng,
     req: &RtRequest,
+    request_id: &str,
 ) -> Result<(Vec<(&'static str, String)>, Answer), Box<RtResponse>> {
     let addressed = Addressed::of_request(req);
     let Some(state) = crate::state::service_state(engine) else {
@@ -615,7 +649,10 @@ fn resolved<Eng: Send + Sync + 'static>(
     // below, so it is computed once, from the api and the request alone, before the stage
     // and the route are resolved; see [`cors_decoration`].
     let decoration = cors_decoration(resolved.api, req);
-    Ok((decoration, resolve_answer(&resolved, &addressed, req)))
+    Ok((
+        decoration,
+        resolve_answer(&resolved, &addressed, req, request_id),
+    ))
 }
 
 /// What the resolution under the store's guard came to: the answer itself, or the
@@ -636,6 +673,7 @@ fn resolve_answer(
     resolved: &Resolved<'_, '_>,
     addressed: &Addressed<'_>,
     req: &RtRequest,
+    request_id: &str,
 ) -> Answer {
     let api = resolved.api;
     // The stage: the path's first segment when it names one, and otherwise the stage that
@@ -702,6 +740,7 @@ fn resolve_answer(
         route,
         &route_path,
         req,
+        request_id,
         authorizer,
         admitted_jwt,
     )))
@@ -1290,6 +1329,7 @@ fn dispatch(
     route: &Route,
     route_path: &str,
     req: &RtRequest,
+    request_id: &str,
     authorizer: Option<(Authorizer, Vec<String>)>,
     admitted_jwt: Option<jwt::Accepted>,
 ) -> dispatch::Dispatch {
@@ -1328,8 +1368,11 @@ fn dispatch(
             domain_name: endpoint_host(api),
         },
         invocation: proxy_event::Invocation {
+            // The id the whole invoke is reported under, minted by the seam that serves it
+            // so the event's `$context.requestId`, the response's own header and the
+            // stage's access-log record name ONE request.
             account_id: ::engine::emulator_account_id().to_string(),
-            request_id: proxy_event::mint_request_id(),
+            request_id: request_id.to_string(),
             received: SystemTime::now(),
             authorizer_context: None,
             authorizer_principal: None,
