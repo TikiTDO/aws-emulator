@@ -451,12 +451,20 @@ async fn the_admin_lifecycle_round_trips_through_stored_state() {
         id_claims["email"], "alice@example.com",
         "the id token must carry the stored email attribute, got {id_claims}"
     );
-    // The refresh token beside them states nothing: it is an opaque credential,
-    // not a readable token.
+    // The refresh token beside them states nothing: it is a SEALED credential in JWE
+    // compact serialization (RFC 7516 §7.1, five segments), not the three of a readable
+    // JWS.
     let refresh = result["RefreshToken"].as_str().expect("a refresh token");
+    assert_eq!(
+        refresh.split('.').count(),
+        5,
+        "a refresh token is sealed in JWE compact serialization, not a \
+         compact-serialized JWS, got {refresh}"
+    );
     assert!(
-        !refresh.contains('.'),
-        "a refresh token is opaque, not a compact-serialized JWS, got {refresh}"
+        !refresh.contains("alice"),
+        "a refresh token states nothing of its sign-in, found the user's own name in \
+         {refresh}"
     );
 
     // The wrong password is refused.

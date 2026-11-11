@@ -493,10 +493,19 @@ async fn the_identity_token_s_role_claims_follow_the_groups_roles_and_precedence
         let refresh = result["RefreshToken"]
             .as_str()
             .unwrap_or_else(|| panic!("case {case:?}: RefreshToken must be issued, got {result}"));
+        // The refresh token is SEALED: a JWE in compact serialization (RFC 7516 §7.1,
+        // five segments) rather than the three of a JWS whose claim segment its holder
+        // reads, so it carries no claim at all.
+        assert_eq!(
+            refresh.split('.').count(),
+            5,
+            "case {case:?}: the refresh token is sealed in JWE compact serialization, \
+             got {refresh}"
+        );
         assert!(
-            !refresh.contains('.'),
-            "case {case:?}: the refresh token is opaque, so it carries no claim to read at \
-             all, got {refresh}"
+            !refresh.contains(row.username),
+            "case {case:?}: the refresh token carries no claim to read at all, found the \
+             user's own name in {refresh}"
         );
 
         // The claims are read from STORED state, not minted once: a second sign-in renders

@@ -23,6 +23,10 @@
 //! malformed request). A SUCCESS is the control: it keeps its status and names no error
 //! shape.
 //!
+//! A second table then asserts the SAME rule one refusal per OPERATION, over the
+//! operations recorded diverging on the header, so the rule is pinned across the API's
+//! halves rather than only across the error classes.
+//!
 //! Every assertion names its case and reports the value it saw.
 //!
 //! The harness below (the router, the one call, and the pieces of an answer this rule is
@@ -291,6 +295,170 @@ async fn every_refusal_is_a_400_naming_its_error_shape_in_the_errortype_header()
             operation: "GetGroup",
             body: json!({ "UserPoolId": &user_pool_id }),
             class: "InvalidParameterException",
+        },
+    ];
+
+    for Refusal {
+        case,
+        operation,
+        body,
+        class,
+    } in rows
+    {
+        let answered = call(&router, operation, &body).await;
+        assert_eq!(
+            answered.status, REFUSED,
+            "case {case:?}: a refusal of the caller is HTTP {REFUSED}, got {} with {}",
+            answered.status, answered.payload
+        );
+        assert_eq!(
+            error_code(&answered.payload),
+            class,
+            "case {case:?}: expected the body to name {class}, got {}",
+            answered.payload
+        );
+        let expected = format!("{class}:");
+        assert_eq!(
+            answered.errortype.as_deref(),
+            Some(expected.as_str()),
+            "case {case:?}: expected {ERRORTYPE} {expected:?}, got {:?}",
+            answered.errortype
+        );
+    }
+}
+
+/// RULE (the same one, asserted over the SET of operations recorded diverging on it): a
+/// refusal of the caller names its error shape in `x-amzn-errortype`, whichever operation
+/// raised it and whichever class it was raised with.
+///
+/// The rows are one refusal per operation, spanning the API's halves (self-service,
+/// administrative, pool configuration, terms documents, app-client secrets, device
+/// tracking, threat protection), the error CLASSES those refusals are raised with
+/// (`ResourceNotFoundException`, `UsernameExistsException`, `NotAuthorizedException`,
+/// `TermsExistsException`, `InvalidParameterException`) and so the three modelled statuses
+/// this endpoint answers 400 for, and the LOOKUP that refuses (an app client, a user that
+/// already exists, an access token naming no signed-in user, a duplicate terms document,
+/// a domain the pool does not hold).
+#[tokio::test]
+async fn every_operation_names_its_error_shape_in_the_errortype_header() {
+    let router = router();
+    let pool = ok(
+        &router,
+        "CreateUserPool",
+        &json!({ "PoolName": "error-wire-per-operation" }),
+    )
+    .await;
+    let user_pool_id = pool["UserPool"]["Id"]
+        .as_str()
+        .expect("a minted pool id")
+        .to_string();
+    let client = ok(
+        &router,
+        "CreateUserPoolClient",
+        &json!({ "UserPoolId": &user_pool_id, "ClientName": "per-operation" }),
+    )
+    .await;
+    let client_id = client["UserPoolClient"]["ClientId"]
+        .as_str()
+        .expect("a minted client id")
+        .to_string();
+    ok(
+        &router,
+        "AdminCreateUser",
+        &json!({ "UserPoolId": &user_pool_id, "Username": "alice" }),
+    )
+    .await;
+    // One stored terms document, so the duplicate row below is refused for being a
+    // duplicate. `TermsSource` and `Enforcement` carry the one value each of their enums
+    // admits (`smithy_query(query="operation",operation="CreateTerms")`).
+    let terms = json!({
+        "UserPoolId": &user_pool_id,
+        "ClientId": &client_id,
+        "TermsName": "terms-of-use",
+        "TermsSource": "LINK",
+        "Enforcement": "NONE",
+        "Links": { "cognito:default": "https://example.com/terms" },
+    });
+    ok(&router, "CreateTerms", &terms).await;
+
+    /// A `TermsId` of the modelled v4-UUID form that nothing minted.
+    const UNMINTED_TERMS: &str = "11111111-1111-4111-8111-111111111111";
+    /// A `DeviceKey` of the modelled form (`^[\w-]+_[0-9a-f-]+$`) that nothing minted.
+    const UNMINTED_DEVICE: &str = "us-east-1_00000000-0000-4000-8000-000000000000";
+
+    let rows = vec![
+        Refusal {
+            case: "InitiateAuth on an app client nothing minted",
+            operation: "InitiateAuth",
+            body: json!({
+                "ClientId": UNMINTED_CLIENT,
+                "AuthFlow": "USER_PASSWORD_AUTH",
+                "AuthParameters": { "USERNAME": "alice", "PASSWORD": "Passw0rd!2024" },
+            }),
+            class: "ResourceNotFoundException",
+        },
+        Refusal {
+            case: "ConfirmForgotPassword on an app client nothing minted",
+            operation: "ConfirmForgotPassword",
+            body: json!({
+                "ClientId": UNMINTED_CLIENT,
+                "Username": "alice",
+                "ConfirmationCode": "123456",
+                "Password": "Passw0rd!2024",
+            }),
+            class: "ResourceNotFoundException",
+        },
+        Refusal {
+            case: "VerifyUserAttribute on an access token naming no signed-in user",
+            operation: "VerifyUserAttribute",
+            body: json!({
+                "AccessToken": "not.a.token",
+                "AttributeName": "email",
+                "Code": "123456",
+            }),
+            class: "NotAuthorizedException",
+        },
+        Refusal {
+            case: "AdminCreateUser for a user the pool already holds",
+            operation: "AdminCreateUser",
+            body: json!({ "UserPoolId": &user_pool_id, "Username": "alice" }),
+            class: "UsernameExistsException",
+        },
+        Refusal {
+            case: "AddUserPoolClientSecret for an app client nothing minted",
+            operation: "AddUserPoolClientSecret",
+            body: json!({ "UserPoolId": &user_pool_id, "ClientId": UNMINTED_CLIENT }),
+            class: "ResourceNotFoundException",
+        },
+        Refusal {
+            case: "ConfirmDevice on an access token naming no signed-in user",
+            operation: "ConfirmDevice",
+            body: json!({ "AccessToken": "not.a.token", "DeviceKey": UNMINTED_DEVICE }),
+            class: "NotAuthorizedException",
+        },
+        Refusal {
+            case: "CreateTerms for a document the app client already holds",
+            operation: "CreateTerms",
+            body: terms.clone(),
+            class: "TermsExistsException",
+        },
+        Refusal {
+            case: "UpdateTerms for a TermsId the pool does not hold",
+            operation: "UpdateTerms",
+            body: json!({ "UserPoolId": &user_pool_id, "TermsId": UNMINTED_TERMS }),
+            class: "ResourceNotFoundException",
+        },
+        Refusal {
+            case: "DeleteUserPoolDomain for a domain the pool does not hold",
+            operation: "DeleteUserPoolDomain",
+            body: json!({ "UserPoolId": &user_pool_id, "Domain": "no-such-domain" }),
+            class: "InvalidParameterException",
+        },
+        Refusal {
+            case: "SetRiskConfiguration for an app client nothing minted",
+            operation: "SetRiskConfiguration",
+            body: json!({ "UserPoolId": &user_pool_id, "ClientId": UNMINTED_CLIENT }),
+            class: "ResourceNotFoundException",
         },
     ];
 

@@ -350,10 +350,18 @@ async fn an_added_membership_is_persisted_and_shows_up_in_the_issued_tokens() {
         let refresh = result["RefreshToken"]
             .as_str()
             .unwrap_or_else(|| panic!("case {label:?}: RefreshToken must be issued"));
+        // The refresh token is SEALED: a JWE in compact serialization (RFC 7516 §7.1,
+        // five segments) rather than the three of a JWS, so it states no claim.
+        assert_eq!(
+            refresh.split('.').count(),
+            5,
+            "case {label:?}: the refresh token is sealed in JWE compact serialization, \
+             got {refresh}"
+        );
         assert!(
-            !refresh.contains('.'),
+            !refresh.contains(case.username),
             "case {label:?}: the refresh token is an opaque credential that states no \
-             claim, got {refresh}"
+             claim, found the user's own name in {refresh}"
         );
 
         // The membership is STORED, not an artefact of the first sign-in: a

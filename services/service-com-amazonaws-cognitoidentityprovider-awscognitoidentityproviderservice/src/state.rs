@@ -30,6 +30,9 @@ mod identity_providers;
 mod attributes;
 /// The tokens a pool issues, and the key its JWTs are signed with.
 mod tokens;
+/// The form a refresh token travels in: the JWE compact serialization it is vended as,
+/// and the key this service seals one under.
+mod refresh_token_jwe;
 /// What a pool publishes about itself under its token issuer: its OpenID Connect
 /// discovery document and the paths it publishes its documents at.
 mod openid_discovery;
@@ -42,6 +45,7 @@ pub use identity_providers::*;
 pub use openid_discovery::*;
 pub use pool_preconditions::*;
 pub use pool_resources::*;
+pub use refresh_token_jwe::*;
 pub use tokens::*;
 pub use user_pool::*;
 pub use users::*;
@@ -1604,6 +1608,15 @@ pub struct ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceS
     /// Every token this emulator issued, keyed by the token string, so a later
     /// operation can resolve a token back to the stored user.
     pub issued_tokens: HashMap<String, TokenRecord>,
+    /// The key every refresh token this emulator vends is sealed under
+    /// ([`RefreshTokenKey`]), minted by the first `CreateUserPool` of this
+    /// emulator.
+    ///
+    /// It belongs to the SERVICE rather than to any pool — a pool publishes the
+    /// keys its identity and access tokens are signed with and publishes no key a
+    /// refresh token is sealed under — so it is held here beside the tokens it
+    /// seals, once per emulator, and nothing publishes it.
+    pub refresh_token_key: ::std::sync::OnceLock<RefreshTokenKey>,
     /// The passkey registrations in flight, keyed by the challenge value the
     /// credential creation options carried to the caller.
     pub web_authn_registrations: HashMap<String, WebAuthnRegistration>,
@@ -1883,6 +1896,18 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
         self.issued_tokens.get(token)
     }
 
+    /// The key every refresh token this emulator vends is sealed under.
+    ///
+    /// Minted on the blocking pool by the first `CreateUserPool` of this emulator,
+    /// which is the create every sign-in follows, so this resolves to the stored
+    /// key. It is generated HERE only if that never happened — a key is needed
+    /// before a credential can be sealed, and a sign-in refusing for want of one
+    /// would report no token at all.
+    pub fn refresh_token_key(&self) -> &RefreshTokenKey {
+        self.refresh_token_key
+            .get_or_init(RefreshTokenKey::generate)
+    }
+
     /// Record that the refresh token `token` stops authorizing a token refresh at
     /// `invalid_from`, because a refresh with rotation enabled replaced it.
     ///
@@ -1989,10 +2014,11 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
     /// settings. The
     /// access and id tokens are signed with the POOL's key pair, so a verifier
     /// can check them against the key set that pool publishes; the refresh token
-    /// is an OPAQUE credential ([`mint_refresh_token`]) that carries no claims at
-    /// all. `None` when the pool, the client or the user is gone, when the
-    /// signature could not be computed, or when no refresh credential was minted
-    /// — never a token nothing signed.
+    /// is an OPAQUE credential ([`mint_refresh_token`]), sealed under this
+    /// service's own key and vended in JWE compact serialization, that carries no
+    /// claim its holder can read. `None` when the pool, the client or the user is
+    /// gone, when the signature could not be computed, or when no refresh
+    /// credential was minted — never a token nothing signed.
     ///
     /// Tokens the clock has already expired are swept first, and the oldest are
     /// evicted if the store is still at [`MAX_ISSUED_TOKENS`], so repeated
@@ -2006,7 +2032,7 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
         credentials: &::emulator_server::CredentialStore,
         parts: &::http::request::Parts,
     ) -> Option<AuthenticationResultType> {
-        let refresh_token = mint_refresh_token(credentials)?;
+        let refresh_token = mint_refresh_token(credentials, self.refresh_token_key())?;
         self.mint_tokens(
             user_pool_id,
             client_id,
@@ -2036,7 +2062,7 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
         parts: &::http::request::Parts,
     ) -> Option<AuthenticationResultType> {
         let lineage = self.token_lineage(presented_refresh_token);
-        let refresh_token = mint_refresh_token(credentials)?;
+        let refresh_token = mint_refresh_token(credentials, self.refresh_token_key())?;
         self.mint_tokens(
             user_pool_id,
             client_id,

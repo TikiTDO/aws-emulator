@@ -536,23 +536,26 @@ async fn an_issued_token_is_signed_and_verifies_against_its_pools_key_set() {
             "case {case:?}: each token is signed over its own claims, so no two of a \
              sign-in's signatures are equal, got {signatures:?}"
         );
-        // The refresh token beside them is a credential, not a statement: it is
-        // NOT a JWS, so nothing in it is readable by its holder.
+        // The refresh token beside them is a credential, not a statement: it is a
+        // SEALED token in JWE compact serialization (RFC 7516 §7.1, five segments)
+        // rather than the three of a JWS, so nothing in it is readable by its holder.
         let refresh = row.result["RefreshToken"].as_str().unwrap_or_else(|| {
             panic!(
                 "case {case:?}: the sign-in must return RefreshToken, got {}",
                 row.result
             )
         });
-        assert!(
-            !refresh.contains('.'),
-            "case {case:?}: a refresh token is opaque, not a compact-serialized JWS, \
-             got {refresh}"
+        let sealed: Vec<&str> = refresh.split('.').collect();
+        assert_eq!(
+            sealed.len(),
+            5,
+            "case {case:?}: a refresh token is sealed in JWE compact serialization, \
+             not a compact-serialized JWS, got {refresh}"
         );
         assert!(
-            try_decode_base64url(refresh)
+            sealed.iter().skip(1).all(|segment| try_decode_base64url(segment)
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                .is_none(),
+                .is_none()),
             "case {case:?}: a refresh token decodes to no readable document, got {refresh}"
         );
     }

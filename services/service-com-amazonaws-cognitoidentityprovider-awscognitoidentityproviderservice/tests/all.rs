@@ -193,6 +193,8 @@ mod provider_link_source_user_claim;
 mod provisioned_limits;
 #[path = "all/public_user_not_found_message.rs"]
 mod public_user_not_found_message;
+#[path = "all/refresh_token_form.rs"]
+mod refresh_token_form;
 #[path = "all/refusal_reports_the_broken_rule.rs"]
 mod refusal_reports_the_broken_rule;
 #[path = "all/resend_confirmation_code.rs"]

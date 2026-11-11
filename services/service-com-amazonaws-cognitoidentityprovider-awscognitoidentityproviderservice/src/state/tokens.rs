@@ -17,23 +17,25 @@ use super::*;
 /// caller gets the secret, the emulator keeps no credential it would accept as a
 /// request signature, and nothing accumulates per sign-in.
 ///
-/// The minted secret is rendered base64url with [`base64_url`], the codec this
-/// crate already uses for every opaque value it puts on the wire, so the
-/// credential satisfies the modelled `TokenModelType` pattern
-/// `^[A-Za-z0-9-_=.]+$` whatever alphabet the store drew it from, and keeps every
-/// bit of its randomness.
+/// That secret is then SEALED under `key` and handed over in the JWE compact
+/// serialization Amazon Cognito vends a refresh token in
+/// ([`RefreshTokenKey::seal`]): the form is the published JOSE one, five
+/// `.`-separated base64url segments inside the modelled `TokenModelType` pattern
+/// `^[A-Za-z0-9-_=.]+$`, and the credential inside it stays unreadable to its
+/// holder.
 ///
-/// `None` when the store minted no session-token secret, or when the minted
+/// `None` when the store minted no session-token secret, when the minted
 /// credential could not be removed from the store again — a credential the
 /// emulator would still accept as a request signature is not the token a sign-in
 /// promises, so it is refused rather than handed out, and the failed removal is
-/// logged. Either way the sign-in refuses rather than reporting a credential
-/// nothing issued.
-pub fn mint_refresh_token(store: &::emulator_server::CredentialStore) -> Option<String> {
+/// logged — or when the credential could not be sealed. Either way the sign-in
+/// refuses rather than reporting a credential nothing issued.
+pub fn mint_refresh_token(
+    store: &::emulator_server::CredentialStore,
+    key: &RefreshTokenKey,
+) -> Option<String> {
     let minted = store.create(&::emulator_server::aws_credentials::AWS_SESSION);
-    let token = minted
-        .secret(::emulator_server::aws_credentials::SESSION_TOKEN)
-        .map(|secret| base64_url(secret.as_bytes()));
+    let secret = minted.secret(::emulator_server::aws_credentials::SESSION_TOKEN);
     // The refresh token authenticates to this service's own token exchange, not
     // to the emulator's request signing; see above.
     if let Err(error) = store.delete(&minted.id) {
@@ -44,7 +46,7 @@ pub fn mint_refresh_token(store: &::emulator_server::CredentialStore) -> Option<
         );
         return None;
     }
-    token
+    key.seal(secret?.as_bytes())
 }
 
 /// `len` random hex characters, drawn from v4 UUIDs (122 bits of entropy each)

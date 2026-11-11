@@ -338,9 +338,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // checks and every other request, and a shutdown or a timeout can land
         // while they are generated. The same construct every other key-minting
         // operation of this workspace mints through.
-        let signing_keys = ::tokio::task::spawn_blocking(crate::state::PoolSigningKeys::generate)
-            .await
-            .map_err(|_| internal_error())?;
+        //
+        // The key this emulator seals its refresh tokens under
+        // (`crate::state::RefreshTokenKey`) is minted here too, on the FIRST pool
+        // that needs one: it belongs to the service rather than to any pool, and a
+        // sign-in can only follow a create, so sealing a credential later finds the
+        // key already there instead of generating one while it holds the state
+        // guard. Two creates racing for the first one generate two and keep
+        // whichever is stored first; the other is dropped unused.
+        let seal_refresh_tokens_with = state.lock().refresh_token_key.get().is_none();
+        let (signing_keys, refresh_token_key) = ::tokio::task::spawn_blocking(move || {
+            (
+                crate::state::PoolSigningKeys::generate(),
+                seal_refresh_tokens_with.then(crate::state::RefreshTokenKey::generate),
+            )
+        })
+        .await
+        .map_err(|_| internal_error())?;
+        if let Some(key) = refresh_token_key {
+            let _ = state.lock().refresh_token_key.set(key);
+        }
         let mut pool =
             crate::state::new_user_pool(input.pool_name.clone(), &region, now, signing_keys);
         pool.policies = crate::state::effective_policies(input.policies);
