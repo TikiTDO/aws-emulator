@@ -128,12 +128,35 @@ impl Emulator {
         path: &str,
         body: Option<&Value>,
     ) -> http::Response<bytes::Bytes> {
+        self.call_http_at(
+            &format!("amplify.{REGION}.amazonaws.com"),
+            method,
+            path,
+            body,
+        )
+        .await
+    }
+
+    /// The same call ADDRESSED to `host` — the endpoint the client was pointed at, which
+    /// is what a URL or a domain this service announces has to lead back to.
+    ///
+    /// `pub(crate)` for the suite asserting the address an app's hosting is announced at:
+    /// that value follows the endpoint the create was addressed to, so the case has to
+    /// choose it.
+    pub(crate) async fn call_http_at(
+        &self,
+        host: &str,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> http::Response<bytes::Bytes> {
         let payload = body.map_or_else(Vec::new, |value| {
             serde_json::to_vec(value).expect("a request body serializes")
         });
         let request = http::Request::builder()
             .method(method)
-            .uri(format!("https://amplify.{REGION}.amazonaws.com{path}"))
+            .uri(format!("https://{host}{path}"))
+            .header("host", host)
             .header("authorization", SIGNED_FOR_AMPLIFY)
             .header("content-type", "application/json")
             .body(bytes::Bytes::from(payload))
@@ -142,8 +165,24 @@ impl Emulator {
         self.router.dispatch(request).await
     }
 
+    /// One call addressed to `host`, reduced to what a client branches on.
+    pub(crate) async fn call_at(
+        &self,
+        host: &str,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Reply {
+        Self::read(self.call_http_at(host, method, path, body).await)
+    }
+
     pub(crate) async fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Reply {
-        let response = self.call_http(method, path, body).await;
+        Self::read(self.call_http(method, path, body).await)
+    }
+
+    /// One response, reduced to what a client branches on: the status, the error code and
+    /// the parsed body.
+    fn read(response: http::Response<bytes::Bytes>) -> Reply {
         let status = response.status().as_u16();
         let error_code = response
             .headers()

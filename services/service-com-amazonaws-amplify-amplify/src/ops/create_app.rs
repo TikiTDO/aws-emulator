@@ -286,10 +286,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let app = App {
             app_arn: ::emulator_server::emulator_arn("amplify", &region, &format!("apps/{app_id}")),
-            // `defaultDomain` is the hostname Amplify serves the app on; every app
-            // gets `<appId>.amplifyapp.com`, which is why the modelled member is
-            // @required and never empty.
-            default_domain: format!("{app_id}.amplifyapp.com"),
+            // `defaultDomain` is the address the app's hosting is reached at — a client
+            // fetches `https://<branch displayName>.<defaultDomain>/` — so it is the
+            // address THIS emulator answers on, resolved once here and reported by every
+            // later read (`crate::state::hosting_address`). The member is @required and
+            // never empty: an emulator served on no port of its own announces the name
+            // under Amplify's own hosting zone instead.
+            default_domain: crate::state::announced_default_domain(
+                &app_id,
+                ctx.parts(),
+                ctx.endpoint().as_str(),
+            ),
             app_id,
             name: input.name,
             // `tags` is echoed exactly as the request set it: the create response

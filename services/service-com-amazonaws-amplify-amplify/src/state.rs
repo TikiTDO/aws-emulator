@@ -32,6 +32,9 @@ pub mod basic_auth;
 /// The custom HTTP headers an app configures: the document a caller submits, the rules it
 /// declares, and the headers those rules add to a response the hosting edge serves.
 pub mod custom_headers;
+/// The address an app's hosting is announced at, and the host one branch's site answers
+/// on.
+pub mod hosting_address;
 
 pub use basic_auth::{
     ingest_auto_branch_basic_auth, ingest_basic_auth, presented_credentials, BasicAuthCredentials,
@@ -40,6 +43,9 @@ pub use custom_headers::{
     custom_header_rules, custom_header_rules_limit_message, custom_headers_document,
     ingest_custom_headers, matched_headers, CustomHeaderRule, IngestedCustomHeaders,
     MAX_CUSTOM_HEADER_RULES_PER_APP,
+};
+pub use hosting_address::{
+    amplify_zone_default_domain, announced_default_domain, hosted_branch_host, hosted_site_host,
 };
 
 /// One Amplify app as this service persists it: the modelled record it hands back,
@@ -1512,10 +1518,10 @@ impl ComAmazonawsAmplifyAmplifyState {
     pub fn hosts_a_branch(&self, host: &str) -> bool {
         let host = hosted_site_host(host);
         self.apps.values().any(|app| {
-            let domain = app.app.default_domain.to_ascii_lowercase();
+            let domain = &app.app.default_domain;
             app.branches
                 .values()
-                .any(|branch| hosted_branch_host(&branch.branch.display_name, &domain) == host)
+                .any(|branch| hosted_branch_host(&branch.branch.display_name, domain) == host)
         })
     }
 
@@ -1548,7 +1554,7 @@ impl ComAmazonawsAmplifyAmplifyState {
     ) -> Option<HostedVisit> {
         let host = hosted_site_host(host);
         self.apps.values_mut().find_map(|app| {
-            let domain = app.app.default_domain.to_ascii_lowercase();
+            let domain = app.app.default_domain.clone();
             let hosted = app.branches.iter().find_map(|(name, branch)| {
                 (hosted_branch_host(&branch.branch.display_name, &domain) == host)
                     .then(|| name.clone())
@@ -1767,21 +1773,6 @@ fn base36_digits(mut value: u64) -> String {
 /// SigV4 credential scope to read it from. It is the region the emulator's own shared
 /// AWS config names, so an unsigned call and a default-configured client agree.
 pub const DEFAULT_REGION: &str = "us-east-1";
-
-/// The host one branch's site is served at, built from the branch's display name and
-/// the (already lowercased) default domain of its app.
-fn hosted_branch_host(display_name: &str, default_domain: &str) -> String {
-    format!("{}.{default_domain}", display_name.to_ascii_lowercase())
-}
-
-/// The host a request addressed, as a name to compare a branch's default domain
-/// against: no userinfo, no port, no trailing root dot, lowercased — the four ways the
-/// same host is written.
-fn hosted_site_host(host: &str) -> String {
-    ::service_common::data_plane_addressing::host_only(host)
-        .trim_end_matches('.')
-        .to_ascii_lowercase()
-}
 
 /// The document a hosted branch serves for a request that names a directory rather than
 /// a file — the root of the site, or a path ending in the separator.
