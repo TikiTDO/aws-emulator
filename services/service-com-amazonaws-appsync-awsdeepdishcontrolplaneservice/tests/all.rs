@@ -23,6 +23,8 @@ mod api_key_deletes_across_page_sizes;
 mod api_key_deletes_drawn_expirations;
 #[path = "all/api_key_deletes_listing_agreement.rs"]
 mod api_key_deletes_listing_agreement;
+#[path = "all/api_key_deletes_page_cut_independence.rs"]
+mod api_key_deletes_page_cut_independence;
 #[path = "all/api_key_deletes_unmoved_by_other_calls.rs"]
 mod api_key_deletes_unmoved_by_other_calls;
 #[path = "all/api_key_deletion_window.rs"]
