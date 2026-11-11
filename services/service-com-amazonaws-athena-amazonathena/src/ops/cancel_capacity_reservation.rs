@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CancelCapacityReservation
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CancelCapacityReservation`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CancelCapacityReservation::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: cancels the capacity reservation this name addresses, which takes it
+//! through CANCELLING to CANCELLED and keeps it in the account for the documented 45 days,
+//! and refuses a reservation that is not ACTIVE.
 //!
 //! ## Shape of an operation
 //!
@@ -136,20 +130,54 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CancelCapacityReservation` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CancelCapacityReservationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CancelCapacityReservation"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                CancelCapacityReservationErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: Some("Athena state is not reachable on this engine".to_string()),
+                    },
+                )
+                .into(),
+            );
+        };
+        let mut store = state.lock();
+        let now = ::std::time::SystemTime::now();
+        let Some(record) = store
+            .capacity_reservations
+            .reservation_mut(&input.name, now)
+        else {
+            return Err(invalid_request(
+                crate::state::capacity_reservation_not_found(&input.name),
+            ));
+        };
+
+        // Only an allocated reservation can be cancelled: one whose allocation is still in
+        // flight has capacity coming up rather than capacity to release, and one already
+        // cancelled or cancelling has nothing left to cancel.
+        let status = record.status_at(now);
+        if status != crate::state::CAPACITY_RESERVATION_STATUS_ACTIVE {
+            return Err(invalid_request(
+                crate::state::capacity_reservation_wrong_state(status),
+            ));
+        }
+
+        // The cancellation is asked for now and complete when the clock makes it due, so a
+        // read straight after this call reports CANCELLING. The record stays in the
+        // account for the documented retention, where it can still be viewed.
+        record.cancel(now);
+
+        Ok(CancelCapacityReservationOutput {})
     }
+}
+
+/// The operation's own client error (HTTP 400), carrying `message`.
+///
+/// Every refusal above is a bad request rather than an unwritten operation, and
+/// `InvalidRequestException` is the client error this operation models: "Indicates that
+/// something is wrong with the input to the request." Each one is caused by the request
+/// itself, which is the class [`crate::state::ERROR_CODE_INVALID_INPUT`] names.
+fn invalid_request(message: impl Into<String>) -> CancelCapacityReservationError {
+    CancelCapacityReservationError::invalid_request(crate::state::ERROR_CODE_INVALID_INPUT, message)
 }

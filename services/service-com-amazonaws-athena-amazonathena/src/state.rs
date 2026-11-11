@@ -42,6 +42,14 @@
 //! content it was given (or read out of the one object store, for a request that named an
 //! Amazon S3 location) and `ExportNotebook` answers with that same content, so an export
 //! reports what an import persisted rather than anything rebuilt from the reading request.
+//!
+//! CAPACITY RESERVATIONS live in the [`CapacityReservationRegistry`] of
+//! [`ComAmazonawsAthenaAmazonathenaState::capacity_reservations`], and they have a
+//! lifecycle the clock owes as well: a create stores when the requested data processing
+//! units are due to be allocated and every read derives the reservation's status and
+//! allocated amount from that instant ([`CapacityReservationRecord::status_at`]), so a
+//! caller reading one straight back still sees it PENDING and the reservation reaches
+//! ACTIVE whether or not anybody polls it.
 
 /// The SQL engine a query execution runs on, and the result set it produces.
 pub mod query_engine;
@@ -55,6 +63,10 @@ pub mod query_results;
 /// The notebooks a Spark enabled workgroup holds, and the ipynb content of each.
 mod notebooks;
 pub use notebooks::*;
+
+/// The provisioned capacity this account reserved, and each reservation's lifecycle.
+mod capacity_reservations;
+pub use capacity_reservations::*;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, SystemTime};
@@ -251,6 +263,39 @@ pub fn first_duplicate_tag_key(tags: &[Tag]) -> Option<&str> {
         if !seen.insert(key) {
             return Some(key);
         }
+    }
+    None
+}
+
+/// Why `tags` is not a tag list one Athena resource can carry, if it is not.
+///
+/// The three rules `Tag` carries — the documented 50 tags per resource
+/// ([`MAX_TAGS_PER_RESOURCE`]), a key on every tag ([`tag_without_key`]) and keys unique
+/// within the list ([`first_duplicate_tag_key`]) — stated once, so every operation that
+/// takes a `TagList` refuses the same list with the same sentence and the wording of one
+/// create cannot drift from another's.
+pub fn tag_list_error(tags: &[Tag]) -> Option<String> {
+    if tags.len() > MAX_TAGS_PER_RESOURCE {
+        return Some(format!(
+            "Tags carries {} tags, more than the {MAX_TAGS_PER_RESOURCE} tags one \
+             resource can hold.",
+            tags.len()
+        ));
+    }
+    // `Tag$Key` is 1 to 128 characters and a tag with no key names nothing to tag.
+    if tag_without_key(tags) {
+        return Some(
+            "Tags contains a tag with no key; every tag must carry a Tag.Key of 1 to 128 \
+             characters."
+                .to_string(),
+        );
+    }
+    // `Tag$Key`: "Tag keys are case-sensitive and must be unique per resource."
+    if let Some(key) = first_duplicate_tag_key(tags) {
+        return Some(format!(
+            "Tag keys must be unique per resource, and the key '{key}' appears more than \
+             once in Tags."
+        ));
     }
     None
 }
@@ -1689,6 +1734,9 @@ pub struct ComAmazonawsAthenaAmazonathenaState {
     /// `ImportNotebook` writes it and `ExportNotebook` reads it; see
     /// [`NotebookRegistry`].
     pub notebooks: NotebookRegistry,
+    /// Every capacity reservation this account holds. `CreateCapacityReservation` writes
+    /// it and `GetCapacityReservation` reads it; see [`CapacityReservationRegistry`].
+    pub capacity_reservations: CapacityReservationRegistry,
     /// The secret this store's page tokens are authenticated under, so a `NextToken`
     /// this store did not mint names no page. Drawn from the system's randomness when
     /// the store is created and never reported.
@@ -1709,6 +1757,7 @@ impl Default for ComAmazonawsAthenaAmazonathenaState {
             idempotency_tokens: HashMap::new(),
             query_databases: BTreeMap::new(),
             notebooks: NotebookRegistry::default(),
+            capacity_reservations: CapacityReservationRegistry::default(),
             page_token_key: PageTokenKey::new(),
         }
     }

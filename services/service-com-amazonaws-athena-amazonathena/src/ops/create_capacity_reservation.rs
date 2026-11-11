@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateCapacityReservation
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateCapacityReservation`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateCapacityReservation::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: registers a capacity reservation under its name in this service's state,
+//! with no data processing units allocated yet and their allocation already asked for, and
+//! refuses a name the registry already holds. `GetCapacityReservation` answers out of the
+//! same record.
 //!
 //! ## Shape of an operation
 //!
@@ -137,20 +132,73 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateCapacityReservation` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateCapacityReservationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateCapacityReservation"))
+        // Check the request on its own terms FIRST, before any lock is taken: a request
+        // that is going to be refused never walks the registry, and no other Athena
+        // request waits behind the work of measuring it.
+        let tags = input.tags.unwrap_or_default();
+        // The rules a `TagList` carries, stated once for every operation that takes one.
+        if let Some(message) = crate::state::tag_list_error(&tags) {
+            return Err(invalid_request(message));
+        }
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                CreateCapacityReservationErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: Some("Athena state is not reachable on this engine".to_string()),
+                    },
+                )
+                .into(),
+            );
+        };
+        let mut store = state.lock();
+        let now = ::std::time::SystemTime::now();
+        // A write path, so it is also where the removal of a reservation whose cancelled
+        // retention has elapsed is materialised: that removal was owed at this instant
+        // whether or not anybody called.
+        store.capacity_reservations.retire_cancelled(now);
+
+        // Every operation of this slice addresses a reservation by `Name` alone, so a
+        // create under a name the registry already holds would either overwrite a
+        // reservation this call never made or report success for one it did not create.
+        if store
+            .capacity_reservations
+            .reservation(&input.name, now)
+            .is_some()
+        {
+            return Err(invalid_request(
+                crate::state::capacity_reservation_already_exists(&input.name),
+            ));
+        }
+        if store.capacity_reservations.len_at(now) >= crate::state::MAX_CAPACITY_RESERVATIONS {
+            return Err(invalid_request(
+                crate::state::too_many_capacity_reservations(),
+            ));
+        }
+
+        store
+            .capacity_reservations
+            .insert(crate::state::CapacityReservationRecord::created(
+                input.name,
+                input.target_dpus,
+                tags,
+                now,
+            ));
+
+        // The create carries nothing back: the reservation it registered is read through
+        // `GetCapacityReservation`, which answers out of the record just stored.
+        Ok(CreateCapacityReservationOutput {})
     }
+}
+
+/// The operation's own client error (HTTP 400), carrying `message`.
+///
+/// Every refusal above is a bad request rather than an unwritten operation, and
+/// `InvalidRequestException` is the client error this operation models: "Indicates that
+/// something is wrong with the input to the request." Each one is caused by the request
+/// itself, which is the class [`crate::state::ERROR_CODE_INVALID_INPUT`] names.
+fn invalid_request(message: impl Into<String>) -> CreateCapacityReservationError {
+    CreateCapacityReservationError::invalid_request(crate::state::ERROR_CODE_INVALID_INPUT, message)
 }

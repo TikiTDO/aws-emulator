@@ -144,27 +144,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // taken: a request that is going to be refused never walks the registry, and
         // no other Athena request waits behind the work of measuring it.
         let tags = input.tags.unwrap_or_default();
-        if tags.len() > crate::state::MAX_TAGS_PER_RESOURCE {
-            return Err(invalid_request(format!(
-                "Tags carries {} tags, more than the {} tags one resource can hold.",
-                tags.len(),
-                crate::state::MAX_TAGS_PER_RESOURCE
-            )));
-        }
-        // `Tag$Key` is 1 to 128 characters and a tag with no key names nothing to tag.
-        if crate::state::tag_without_key(&tags) {
-            return Err(invalid_request(
-                "Tags contains a tag with no key; every tag must carry a Tag.Key of 1 to \
-                 128 characters."
-                    .to_string(),
-            ));
-        }
-        // `Tag$Key`: "Tag keys are case-sensitive and must be unique per resource."
-        if let Some(key) = crate::state::first_duplicate_tag_key(&tags) {
-            return Err(invalid_request(format!(
-                "Tag keys must be unique per resource, and the key '{key}' appears more \
-                 than once in Tags."
-            )));
+        // The rules a `TagList` carries, stated once for every operation that takes one.
+        if let Some(message) = crate::state::tag_list_error(&tags) {
+            return Err(invalid_request(message));
         }
 
         // Stored as the caller gave it, except for the engine version: that member is

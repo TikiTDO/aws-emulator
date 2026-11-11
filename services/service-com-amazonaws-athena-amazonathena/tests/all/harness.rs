@@ -29,13 +29,19 @@ const AUTHORIZATION: &str = "AWS4-HMAC-SHA256 \
 /// One service mounted on its own engine, reached the way the production router reaches
 /// it.
 pub fn router() -> MultiServiceRouter {
+    engine_and_router().1
+}
+
+/// The same mounting, handing back the ENGINE as well, for an assertion whose reader is
+/// still a scaffold and that therefore has to be made against the store itself.
+pub fn engine_and_router() -> (Arc<engine::InMemoryEngine>, MultiServiceRouter) {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     // Pinned off so a suite does not depend on how the emulator process was started:
     // these tests assert Athena's behaviour, not the emulator's SigV4 check.
     router.set_request_authentication(false);
-    router.register_service(EmulatedService::new(engine));
-    router
+    router.register_service(EmulatedService::new(Arc::clone(&engine)));
+    (engine, router)
 }
 
 /// Invoke one operation and return `(status, body)`.
