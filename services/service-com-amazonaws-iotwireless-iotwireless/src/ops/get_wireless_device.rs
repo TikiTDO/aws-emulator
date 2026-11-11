@@ -180,14 +180,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .ok_or_else(|| {
                 GetWirelessDeviceError::from(
                     GetWirelessDeviceErrorModeled::ResourceNotFoundException(
-                        ResourceNotFoundException {
-                            message: Some(format!(
-                                "No wireless device with {} {}",
-                                input.identifier_type, input.identifier
-                            )),
-                            resource_id: Some(input.identifier.clone()),
-                            resource_type: Some("WirelessDevice".to_string()),
-                        },
+                        crate::state::wireless_device_not_found(&input.identifier),
                     ),
                 )
             })?;
@@ -203,7 +196,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             thing_arn: device.thing_arn.clone(),
             lo_ra_wan: device.lorawan.clone(),
             sidewalk: device.sidewalk.clone(),
-            positioning: device.positioning.clone(),
+            positioning: Some(device.positioning.clone()),
         })
     }
 }

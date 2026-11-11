@@ -185,18 +185,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         }
-        if let Some(positioning) = input.positioning.as_deref() {
-            if !crate::state::POSITIONING_CONFIG_STATUSES.contains(&positioning) {
-                return Err(CreateWirelessDeviceErrorModeled::ValidationException(
-                    ValidationException {
-                        message: Some(format!(
-                            "Positioning must be one of {:?}, got {positioning:?}",
-                            crate::state::POSITIONING_CONFIG_STATUSES
-                        )),
-                    },
-                )
-                .into());
-            }
+        if let Some(rejected) = input
+            .positioning
+            .as_deref()
+            .and_then(crate::state::unmodelled_positioning)
+        {
+            return Err(
+                CreateWirelessDeviceErrorModeled::ValidationException(rejected).into(),
+            );
         }
 
         let region = crate::state::request_region(ctx.parts());
@@ -278,7 +274,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some(dev_eui) = dev_eui.as_deref() {
             if store.dev_eui_index.contains_key(dev_eui) {
                 return Err(CreateWirelessDeviceErrorModeled::ConflictException(
-                    crate::state::duplicate_dev_eui(),
+                    crate::state::duplicate_dev_eui(dev_eui),
                 )
                 .into());
             }
@@ -308,14 +304,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             name: input.name.clone(),
             description: input.description.clone(),
             destination_name: input.destination_name.clone(),
-            lorawan: input.lo_ra_wan.clone(),
+            // The device's radio configuration as the network server provisions it: the
+            // block the create named, with the service's own `FPorts` assignment when it
+            // named none, so every later reader reports the ports the device's
+            // positioning and application frames reach.
+            lorawan: input
+                .lo_ra_wan
+                .as_ref()
+                .map(crate::state::device_lorawan_settings),
             sidewalk: input.sidewalk.as_ref().map(|requested| SidewalkDevice {
                 device_profile_id: requested.device_profile_id.clone(),
                 sidewalk_manufacturing_sn: requested.sidewalk_manufacturing_sn.clone(),
                 positioning: requested.positioning.clone(),
                 ..SidewalkDevice::default()
             }),
-            positioning: input.positioning.clone(),
+            // Every device carries a Device Location integration status, so a create
+            // that named none provisions the device with this service's default rather
+            // than leaving the member out of every later read.
+            positioning: input
+                .positioning
+                .clone()
+                .unwrap_or_else(|| crate::state::DEFAULT_POSITIONING_CONFIG_STATUS.to_string()),
             thing_name: None,
             thing_arn: None,
             fuota_task_id: None,
@@ -348,33 +357,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     }
 }
 
-/// Every `DestinationName` this request names, in the order a refusal should report
-/// them: the device's own destination, the one a Sidewalk positioning configuration
-/// routes fixes to, and the one each LoRaWAN application `FPort` routes frames to.
-///
-/// They are all the same kind of reference to the same resource, so they are all
-/// resolved against the destination store rather than only the top-level member.
+/// Every `DestinationName` this request names, as the shared collector orders them: the
+/// device's own destination, the one a Sidewalk positioning configuration routes fixes
+/// to, and the one each LoRaWAN application `FPort` routes frames to.
 fn referenced_destinations(input: &CreateWirelessDeviceInput) -> Vec<&str> {
-    let mut names = vec![input.destination_name.as_str()];
-    if let Some(name) = input
-        .sidewalk
-        .as_ref()
-        .and_then(|sidewalk| sidewalk.positioning.as_ref())
-        .and_then(|positioning| positioning.destination_name.as_deref())
-    {
-        names.push(name);
-    }
-    let applications = input
-        .lo_ra_wan
-        .as_ref()
-        .and_then(|lorawan| lorawan.f_ports.as_ref())
-        .and_then(|f_ports| f_ports.applications.as_ref());
-    for application in applications.into_iter().flatten() {
-        if let Some(name) = application.destination_name.as_deref() {
-            names.push(name);
-        }
-    }
-    names
+    crate::state::referenced_destination_names(
+        Some(input.destination_name.as_str()),
+        input
+            .sidewalk
+            .as_ref()
+            .and_then(|sidewalk| sidewalk.positioning.as_ref()),
+        input
+            .lo_ra_wan
+            .as_ref()
+            .and_then(|lorawan| lorawan.f_ports.as_ref())
+            .and_then(|f_ports| f_ports.applications.as_deref()),
+    )
 }
 
 /// The create parameters, the token excluded, as one comparable string — what decides

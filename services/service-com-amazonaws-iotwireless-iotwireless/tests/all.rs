@@ -51,6 +51,8 @@ mod service_profile_network_server_settings;
 mod state_roundtrip;
 #[path = "all/wireless_device_provisioning_refusals.rs"]
 mod wireless_device_provisioning_refusals;
+#[path = "all/wireless_device_reported_members.rs"]
+mod wireless_device_reported_members;
 #[path = "all/wireless_gateway_lifecycle.rs"]
 mod wireless_gateway_lifecycle;
 #[path = "all/wireless_gateway_task_definition_lifecycle.rs"]

@@ -307,6 +307,6 @@ fn statistics(device: &crate::state::WirelessDevice) -> WirelessDeviceStatistics
             .then(|| crate::state::FUOTA_DEVICE_STATUS_INITIAL.to_string()),
         multicast_device_status: None,
         mc_group_id: None,
-        positioning: device.positioning.clone(),
+        positioning: Some(device.positioning.clone()),
     }
 }

@@ -33,6 +33,11 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use super::destination_and_wireless_device_lifecycle::{call, error_code, router};
 
+/// AWS's sentence for a wireless device the account does not hold — wholly fixed text,
+/// spelled out here so the suite pins the wording rather than whatever the service
+/// happens to emit.
+const WIRELESS_DEVICE_NOT_FOUND_MESSAGE: &str = "WirelessDevice record not found";
+
 /// `SupportedRfRegion`'s modelled values — the model-generated constant, so the suite
 /// and the service cannot drift apart.
 const RF_REGIONS: &[&str] =
@@ -553,8 +558,9 @@ async fn an_absent_group_or_device_is_not_found() {
             "ResourceNotFoundException",
             "case {case:?}: expected ResourceNotFoundException, got {answered}"
         );
-        // The refusal says WHICH end of the association could not be resolved, and names
-        // the id the request supplied for it.
+        // The refusal says WHICH end of the association could not be resolved: its
+        // `ResourceType`/`ResourceId` name the kind and the id the request supplied for
+        // it, and its message is the one that end's own reader refuses with.
         assert_eq!(
             answered["ResourceType"].as_str(),
             Some(missing),
@@ -570,15 +576,15 @@ async fn an_absent_group_or_device_is_not_found() {
             Some(missing_id),
             "case {case:?}: expected ResourceId {missing_id}, got {answered}"
         );
-        // The whole message is the template for the end that could not be resolved,
-        // filled with the id the request supplied, so a reworded prefix fails too.
+        // The whole message is the sentence the end that could not be resolved is
+        // refused with, so a reworded prefix fails too.
         let expected_message = if missing == "MulticastGroup" {
             format!(
                 "Cannot complete the step because resource is not found, with resource type \
                  MulticastGroup, resource Id {missing_id}"
             )
         } else {
-            format!("No wireless device with WirelessDeviceId {missing_id}")
+            WIRELESS_DEVICE_NOT_FOUND_MESSAGE.to_string()
         };
         assert_eq!(
             answered["Message"].as_str(),

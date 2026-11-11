@@ -15,7 +15,7 @@
 //!   not is refused `ValidationException` and persists nothing, while every create
 //!   whose two versions agree — and every create that constrains neither side — is
 //!   accepted and reads back against that profile;
-//! * a refusal carries the fixed sentence of its error class, so a duplicate `DevEui`
+//! * a refusal carries the sentence of its error class, so a duplicate `DevEui`
 //!   answers one `ConflictException` message whatever the request and the store hold,
 //!   and discloses nothing about the device that holds the identifier.
 //!
@@ -29,10 +29,12 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use super::destination_and_wireless_device_lifecycle::{call, error_code, router};
 
-/// AWS's sentence for a `DevEui` already registered in the account — wholly fixed text,
-/// spelled out here so the suite pins the wording rather than whatever the service
-/// happens to emit.
-const DUPLICATE_DEV_EUI_MESSAGE: &str = "Device with given DevEui already exists";
+/// AWS's sentence for a `DevEui` already registered in the account — fixed text whose
+/// only variable part is the identifier the request itself supplied, spelled out here so
+/// the suite pins the wording rather than whatever the service happens to emit.
+fn duplicate_dev_eui_message(dev_eui: &str) -> String {
+    format!("DevEui {dev_eui}  with same key has been claimed")
+}
 
 /// AWS's sentence for key material the referenced device profile's `MacVersion` cannot
 /// provision. The only variable part is that stored `MacVersion`.
@@ -362,9 +364,9 @@ async fn provisioning_version_must_agree_with_the_referenced_profiles_mac_versio
     }
 }
 
-/// A duplicate `DevEui` is one conflict class, so its refusal carries one fixed
-/// sentence whatever the identifier and the rest of the request hold — and names
-/// neither the identifier nor the device that already holds it.
+/// A duplicate `DevEui` is one conflict class, so its refusal carries one sentence
+/// whatever the rest of the request holds — naming the identifier the request supplied
+/// and nothing about the device that already holds it.
 #[tokio::test]
 async fn a_duplicate_dev_eui_conflict_carries_one_fixed_sentence_for_every_input() {
     let router = router();
@@ -435,16 +437,16 @@ async fn a_duplicate_dev_eui_conflict_carries_one_fixed_sentence_for_every_input
             "ConflictException",
             "case {case:?}: expected ConflictException, got {response}"
         );
+        let expected_message = duplicate_dev_eui_message(dev_eui);
         assert_eq!(
             response["Message"],
-            json!(DUPLICATE_DEV_EUI_MESSAGE),
-            "case {case:?}: expected Message {DUPLICATE_DEV_EUI_MESSAGE:?}, got {response}"
+            json!(expected_message),
+            "case {case:?}: expected Message {expected_message:?}, got {response}"
         );
         let message = response["Message"].as_str().unwrap_or_default().to_string();
         assert!(
-            !message.contains(dev_eui) && !message.contains(&owner),
-            "case {case:?}: the refusal must name neither the identifier nor its owner, got \
-             {message:?}"
+            !message.contains(&owner),
+            "case {case:?}: the refusal must not name the identifier's owner, got {message:?}"
         );
         assert!(
             !response.to_string().contains(&owner),

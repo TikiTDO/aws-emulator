@@ -28,7 +28,7 @@ use smithy_server_runtime::MultiServiceRouter;
 /// The store ceilings the service enforces, so this suite asserts the bound the
 /// implementation declares rather than a number copied by hand.
 use service_com_amazonaws_iotwireless_iotwireless::state::{
-    DEFAULT_REGION, MAX_DESTINATIONS, MAX_WIRELESS_DEVICES,
+    DEFAULT_POSITIONING_CONFIG_STATUS, DEFAULT_REGION, MAX_DESTINATIONS, MAX_WIRELESS_DEVICES,
 };
 
 /// The region the test's SigV4 credential scope names; every minted ARN must carry it.
@@ -608,7 +608,7 @@ async fn a_wireless_device_round_trips_through_get_for_every_device_type() {
         );
 
         // Every member the create supplied must come back byte-identical.
-        for member in ["Type", "Name", "Description", "DestinationName", "Positioning"] {
+        for member in ["Type", "Name", "Description", "DestinationName"] {
             assert_eq!(
                 fetched.get(member).cloned(),
                 requested.get(member).cloned(),
@@ -617,6 +617,19 @@ async fn a_wireless_device_round_trips_through_get_for_every_device_type() {
                 fetched.get(member)
             );
         }
+        // `Positioning` is a status every device carries, so the reader reports the one
+        // the create named, or this service's default when it named none.
+        let expected_positioning = requested
+            .get("Positioning")
+            .cloned()
+            .unwrap_or_else(|| json!(DEFAULT_POSITIONING_CONFIG_STATUS));
+        assert_eq!(
+            fetched["Positioning"],
+            expected_positioning,
+            "case {}: expected Positioning {expected_positioning}, got {:?}",
+            case.label,
+            fetched.get("Positioning")
+        );
         for member in ["LoRaWAN", "Sidewalk"] {
             if let Some(expected) = requested.get(member) {
                 let actual = fetched

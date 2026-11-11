@@ -9,14 +9,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::time::SystemTime;
 
 use crate::ops::types::{
-    ConflictException, ConnectionStatusEventConfiguration,
-    DeviceRegistrationStateEventConfiguration, JoinEventConfiguration, LoRaWANDevice,
+    ApplicationConfig, ConflictException, ConnectionStatusEventConfiguration,
+    DeviceRegistrationStateEventConfiguration, FPorts, JoinEventConfiguration, LoRaWANDevice,
     LoRaWANDeviceProfile, LoRaWANFuotaTask, LoRaWANGateway, LoRaWANGetServiceProfileInfo,
     LoRaWANConnectionStatusEventNotificationConfigurations,
     LoRaWANJoinEventNotificationConfigurations, LoRaWANMulticast, LoRaWANServiceProfile,
-    MessageDeliveryStatusEventConfiguration, ProximityEventConfiguration,
-    ResourceNotFoundException, SidewalkDevice, SidewalkEventNotificationConfigurations, Tag,
-    TraceContent, UpdateWirelessGatewayTaskCreate, ValidationException,
+    MessageDeliveryStatusEventConfiguration, Positioning, ProximityEventConfiguration,
+    ResourceNotFoundException, SidewalkDevice, SidewalkEventNotificationConfigurations,
+    SidewalkPositioning, Tag, TraceContent, UpdateWirelessGatewayTaskCreate, ValidationException,
 };
 
 /// The ARN service namespace (`arn:aws:iotwireless:...`) and the SigV4 signing name
@@ -108,6 +108,14 @@ pub use crate::ops::types::WIRELESS_GATEWAY_ID_TYPE_VALUES as WIRELESS_GATEWAY_I
 /// `PositioningConfigStatus`'s modelled values, as the model-generated
 /// [`crate::ops::types::POSITIONING_CONFIG_STATUS_VALUES`] lists them.
 pub use crate::ops::types::POSITIONING_CONFIG_STATUS_VALUES as POSITIONING_CONFIG_STATUSES;
+
+/// The `PositioningConfigStatus` a wireless device carries when nothing has named one.
+///
+/// `Positioning` is the integration status of the Device Location feature, one of the two
+/// values `PositioningConfigStatus` lists, so every device has one: a device whose create
+/// asked for no integration has the feature not integrated, and every reader reports that
+/// rather than leaving the member out.
+pub const DEFAULT_POSITIONING_CONFIG_STATUS: &str = "Disabled";
 
 /// `DeviceProfileType`'s modelled values, as the model-generated
 /// [`crate::ops::types::DEVICE_PROFILE_TYPE_VALUES`] lists them.
@@ -298,21 +306,23 @@ pub fn device_profile_settings(requested: &LoRaWANDeviceProfile) -> LoRaWANDevic
 }
 
 /// The sentence this service's 409 carries when a create claims a `DevEui` another
-/// device in the account already holds: FIXED text with no variable part, so a client
-/// can tell this conflict from the idempotency-token conflict the same operation raises
-/// with the same error code, and so the refusal discloses nothing about the device that
-/// holds the identifier.
-pub const DUPLICATE_DEV_EUI_MESSAGE: &str = "Device with given DevEui already exists";
+/// device in the account already holds: fixed text whose only variable part is the
+/// identifier the REQUEST supplied, so a client can tell this conflict from the
+/// idempotency-token conflict the same operation raises with the same error code, and so
+/// the refusal discloses nothing about the device that holds the identifier.
+pub fn duplicate_dev_eui_message(dev_eui: &str) -> String {
+    format!("DevEui {dev_eui}  with same key has been claimed")
+}
 
 /// The `ConflictException` body for a `DevEui` already registered in the account.
 ///
 /// One function, so every operation that claims a `DevEui` refuses a duplicate with the
-/// same body: [`DUPLICATE_DEV_EUI_MESSAGE`] and the two optional members the model
-/// merely permits (`ResourceId`, `ResourceType`) left unset, which keeps the owning
-/// device's identity out of a refusal served to a caller that cannot read it.
-pub fn duplicate_dev_eui() -> ConflictException {
+/// same body: [`duplicate_dev_eui_message`] and the two optional members the model merely
+/// permits (`ResourceId`, `ResourceType`) left unset, which keeps the owning device's
+/// identity out of a refusal served to a caller that cannot read it.
+pub fn duplicate_dev_eui(dev_eui: &str) -> ConflictException {
     ConflictException {
-        message: Some(DUPLICATE_DEV_EUI_MESSAGE.to_string()),
+        message: Some(duplicate_dev_eui_message(dev_eui)),
         resource_id: None,
         resource_type: None,
     }
@@ -777,6 +787,129 @@ pub fn event_configuration_not_found(
     }
 }
 
+/// The `ValidationException` body for a `Positioning` value outside the modelled enum,
+/// and `None` for one [`POSITIONING_CONFIG_STATUSES`] lists.
+///
+/// One function, so every operation that takes a Device Location integration status —
+/// the device's create and its update — refuses an unmodelled value with the same body.
+pub fn unmodelled_positioning(positioning: &str) -> Option<ValidationException> {
+    (!POSITIONING_CONFIG_STATUSES.contains(&positioning)).then(|| ValidationException {
+        message: Some(format!(
+            "Positioning must be one of {POSITIONING_CONFIG_STATUSES:?}, got {positioning:?}"
+        )),
+    })
+}
+
+/// Every `DestinationName` a wireless-device request references, in the order a refusal
+/// should report them: the device's own destination, the one a Sidewalk positioning
+/// configuration routes fixes to, and the one each LoRaWAN application `FPort` routes
+/// frames to.
+///
+/// They are all the same kind of reference to the same resource, so one function collects
+/// them for every operation that makes them — the create and the update, whose own input
+/// shapes differ — and each is resolved against the destination store rather than only
+/// the top-level member.
+pub fn referenced_destination_names<'a>(
+    own: Option<&'a str>,
+    sidewalk_positioning: Option<&'a SidewalkPositioning>,
+    applications: Option<&'a [ApplicationConfig]>,
+) -> Vec<&'a str> {
+    let mut names = Vec::new();
+    if let Some(name) = own {
+        names.push(name);
+    }
+    if let Some(name) =
+        sidewalk_positioning.and_then(|positioning| positioning.destination_name.as_deref())
+    {
+        names.push(name);
+    }
+    for application in applications.unwrap_or_default() {
+        if let Some(name) = application.destination_name.as_deref() {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// The `FPort` the service assigns a LoRaWAN device's positioning clock-synchronisation
+/// service when the create named no assignment for it.
+///
+/// Source: the assignment the service answers a `GetWirelessDevice` with for a LoRaWAN
+/// device whose create named no `FPorts` at all — the request carries no port, the
+/// response carries this one, so the value is the service's and not the request's. It is
+/// the same port [`DEFAULT_POSITIONING_STREAM_FPORT`] carries: the clock-synchronisation
+/// and stream services share one port, each frame naming its own application package
+/// inside the payload, while the solver below gets a port of its own. Inside `FPort`'s
+/// published `range min 1 max 223`, like every value these members may take
+/// (`smithy_query(query="shape", shape="FPorts,Positioning,ApplicationConfig")`).
+pub const DEFAULT_POSITIONING_CLOCK_SYNC_FPORT: i32 = 199;
+
+/// The `FPort` the service assigns a LoRaWAN device's GNSS positioning service when the
+/// create named no assignment for it, from the same source and inside the same range.
+pub const DEFAULT_POSITIONING_GNSS_FPORT: i32 = 198;
+
+/// The `FPort` the service assigns a LoRaWAN device's positioning stream service when the
+/// create named no assignment for it, from the same source and inside the same range.
+pub const DEFAULT_POSITIONING_STREAM_FPORT: i32 = 199;
+
+/// The `FPort` of the application entry the service assigns a LoRaWAN device when the
+/// create named no application assignment, from the same source and inside the same
+/// range: the port the positioning payloads the solver below decodes arrive on.
+pub const DEFAULT_APPLICATION_FPORT: i32 = 199;
+
+/// The `ApplicationConfigType` of that application entry: the only value
+/// `ApplicationConfigType` models
+/// ([`crate::ops::types::APPLICATION_CONFIG_TYPE_VALUES`]), the geolocation solver the
+/// positioning payloads are decoded by.
+pub const DEFAULT_APPLICATION_TYPE: &str = "SemtechGeolocation";
+
+/// The `FPorts` assignment the service provisions a LoRaWAN device with when the create
+/// named none of its own.
+///
+/// `FPorts` is the ports the device's application packages use, and the packages a device
+/// runs use ports whether or not the create picked them, so a create that asks for no
+/// assignment is provisioned with the service's: the positioning services' ports and the
+/// geolocation application the positioning payloads are decoded by. A create that names
+/// an `FPorts` block of its own is stored exactly as submitted — the assignment is then
+/// the caller's, and no member is added to it — so this is the whole assignment or none of
+/// it. Two members no assignment of the service's own fills in stay unset either way:
+/// the FUOTA and multicast ports, which the sessions a caller sets up decide, and the
+/// top-level clock-sync port.
+///
+/// The assigned application entry names no `DestinationName`: that member names the
+/// position-data destination whose AWS IoT rule processes the device's position data, and
+/// an assignment the service made for a create that asked for none has no such rule to
+/// name, so the device's own destination carries the frames.
+pub fn default_f_ports() -> FPorts {
+    FPorts {
+        positioning: Some(Positioning {
+            clock_sync: Some(DEFAULT_POSITIONING_CLOCK_SYNC_FPORT),
+            gnss: Some(DEFAULT_POSITIONING_GNSS_FPORT),
+            stream: Some(DEFAULT_POSITIONING_STREAM_FPORT),
+        }),
+        applications: Some(vec![ApplicationConfig {
+            f_port: Some(DEFAULT_APPLICATION_FPORT),
+            r#type: Some(DEFAULT_APPLICATION_TYPE.to_string()),
+            destination_name: None,
+        }]),
+        fuota: None,
+        multicast: None,
+        clock_sync: None,
+    }
+}
+
+/// The LoRaWAN configuration a created device carries: the members the create named,
+/// kept exactly as submitted, and [`default_f_ports`] when it named no `FPorts` at all.
+///
+/// One function, so the stored record — and therefore every reader of it — carries an
+/// assignment whether or not the create spelled one out.
+pub fn device_lorawan_settings(requested: &LoRaWANDevice) -> LoRaWANDevice {
+    LoRaWANDevice {
+        f_ports: Some(requested.f_ports.clone().unwrap_or_else(default_f_ports)),
+        ..requested.clone()
+    }
+}
+
 /// A wireless device registered against a destination.
 #[derive(Debug, Clone)]
 pub struct WirelessDevice {
@@ -789,8 +922,10 @@ pub struct WirelessDevice {
     pub destination_name: String,
     pub lorawan: Option<LoRaWANDevice>,
     pub sidewalk: Option<SidewalkDevice>,
-    /// `PositioningConfigStatus`: `Enabled` | `Disabled`.
-    pub positioning: Option<String>,
+    /// `PositioningConfigStatus`: `Enabled` | `Disabled`. Every device carries one — the
+    /// status its create or a later update named, or
+    /// [`DEFAULT_POSITIONING_CONFIG_STATUS`] — so every reader reports it.
+    pub positioning: String,
     /// Set by `AssociateWirelessDeviceWithThing`, which is still scaffolded, so a
     /// device created today carries none.
     pub thing_name: Option<String>,
@@ -1256,16 +1391,27 @@ pub const DEFAULT_FUOTA_FRAGMENT_INTERVAL_MS: i32 = 1_000;
 /// the device leaves it only once a session reports progress for it.
 pub const FUOTA_DEVICE_STATUS_INITIAL: &str = "Initial";
 
+/// The sentence this service's 404 carries when a wireless device a request addresses is
+/// not one the account holds: fixed text, with no part of it taken from the request, so a
+/// client can match it whichever identifier kind failed to resolve.
+pub const WIRELESS_DEVICE_NOT_FOUND_MESSAGE: &str = "WirelessDevice record not found";
+
+/// The `ResourceType` a wireless device's refusals name.
+pub const WIRELESS_DEVICE_RESOURCE_TYPE: &str = "WirelessDevice";
+
 /// The `ResourceNotFoundException` body for a wireless device the account does not hold,
-/// addressed by its `WirelessDeviceId`.
+/// addressed by `identifier`.
 ///
-/// One function, so every operation that addresses a device by that id refuses a missing
-/// one with the same body as `DeleteWirelessDevice` does.
-pub fn wireless_device_not_found(id: &str) -> ResourceNotFoundException {
+/// The sentence is [`WIRELESS_DEVICE_NOT_FOUND_MESSAGE`], one wholly fixed text, while
+/// the two optional members report the identifier the request addressed the device by and
+/// the kind of resource it addressed. One function, so every operation that addresses a
+/// wireless device — its reader, its update, its delete, and the association operations
+/// that resolve one — refuses a missing one with the same body.
+pub fn wireless_device_not_found(identifier: &str) -> ResourceNotFoundException {
     ResourceNotFoundException {
-        message: Some(format!("No wireless device with WirelessDeviceId {id}")),
-        resource_id: Some(id.to_string()),
-        resource_type: Some("WirelessDevice".to_string()),
+        message: Some(WIRELESS_DEVICE_NOT_FOUND_MESSAGE.to_string()),
+        resource_id: Some(identifier.to_string()),
+        resource_type: Some(WIRELESS_DEVICE_RESOURCE_TYPE.to_string()),
     }
 }
 

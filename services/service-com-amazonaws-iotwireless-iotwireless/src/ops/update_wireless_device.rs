@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateWirelessDevice
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateWirelessDevice`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateWirelessDevice::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: mutates the persisted device record, so the next read of it reports
+//! what this call named. This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -148,20 +141,171 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateWirelessDevice` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateWirelessDeviceErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateWirelessDevice"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            UpdateWirelessDeviceError::from(
+                UpdateWirelessDeviceErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: Some("the iotwireless store is unavailable".to_string()),
+                    },
+                ),
+            )
+        })?;
+
+        if let Some(rejected) = input
+            .positioning
+            .as_deref()
+            .and_then(crate::state::unmodelled_positioning)
+        {
+            return Err(
+                UpdateWirelessDeviceErrorModeled::ValidationException(rejected).into(),
+            );
+        }
+
+        let mut store = state.lock();
+
+        // Nothing is written until every reference this call makes resolves, so a
+        // refused update leaves the device exactly as the last accepted call left it:
+        // the device it addresses, and EVERY destination it re-points — the device's
+        // own, the one a Sidewalk positioning configuration routes fixes to, and the one
+        // each LoRaWAN application `FPort` routes frames to, as the create resolves them.
+        let unresolved_destination = referenced_destinations(&input)
+            .into_iter()
+            .any(|name| !store.destinations.contains_key(name));
+
+        // Re-pointing the device at another device profile is the same cross-check the
+        // create makes: a profile declares the MAC version the devices it provisions run,
+        // and the key material already stored on this device declares the version it is
+        // for, so a profile that cannot provision it is refused before anything is
+        // written. The update models no key material of its own, so the material under
+        // test is the stored one; a profile this account does not hold constrains nothing.
+        let mismatched_mac_version = input
+            .lo_ra_wan
+            .as_ref()
+            .and_then(|lorawan| lorawan.device_profile_id.as_deref())
+            .and_then(|profile_id| store.device_profiles.get(profile_id))
+            .and_then(|profile| {
+                store
+                    .wireless_devices
+                    .get(&input.id)
+                    .and_then(|device| device.lorawan.as_ref())
+                    .and_then(|lorawan| crate::state::mismatched_mac_version(lorawan, profile))
+            });
+
+        // `Id` is this operation's `@httpLabel`, so it ADDRESSES the device to update; an
+        // id the account does not hold is the modelled 404, worded by the one helper
+        // every device-addressing operation refuses through.
+        let Some(device) = store.wireless_devices.get_mut(&input.id) else {
+            return Err(
+                UpdateWirelessDeviceErrorModeled::ResourceNotFoundException(
+                    crate::state::wireless_device_not_found(&input.id),
+                )
+                .into(),
+            );
+        };
+        if unresolved_destination {
+            return Err(
+                UpdateWirelessDeviceErrorModeled::ResourceNotFoundException(
+                    crate::state::destination_not_found(),
+                )
+                .into(),
+            );
+        }
+        if let Some(mac_version) = mismatched_mac_version {
+            return Err(UpdateWirelessDeviceErrorModeled::ValidationException(
+                crate::state::mac_version_mismatch(&mac_version),
+            )
+            .into());
+        }
+
+        // Every member the request CARRIED replaces the stored one, and a member it
+        // omitted leaves the stored value as it was — so renaming a device keeps its
+        // destination, its radio configuration and its positioning status.
+        if let Some(name) = input.name {
+            device.name = Some(name);
+        }
+        if let Some(description) = input.description {
+            device.description = Some(description);
+        }
+        if let Some(destination_name) = input.destination_name {
+            device.destination_name = destination_name;
+        }
+        if let Some(positioning) = input.positioning {
+            device.positioning = positioning;
+        }
+        if let Some(lorawan) = input.lo_ra_wan {
+            let stored = device.lorawan.get_or_insert_with(LoRaWANDevice::default);
+            apply_lorawan_update(stored, lorawan);
+        }
+        if let Some(sidewalk) = input.sidewalk {
+            if let Some(positioning) = sidewalk.positioning {
+                device
+                    .sidewalk
+                    .get_or_insert_with(SidewalkDevice::default)
+                    .positioning = Some(positioning);
+            }
+        }
+
+        Ok(UpdateWirelessDeviceOutput {})
+    }
+}
+
+/// Every `DestinationName` this update re-points the device to, as the shared collector
+/// orders them: the device's own destination, the one a Sidewalk positioning
+/// configuration routes fixes to, and the one each LoRaWAN application `FPort` routes
+/// frames to. The update's input shapes differ from the create's, the references do not.
+fn referenced_destinations(input: &UpdateWirelessDeviceInput) -> Vec<&str> {
+    crate::state::referenced_destination_names(
+        input.destination_name.as_deref(),
+        input
+            .sidewalk
+            .as_ref()
+            .and_then(|sidewalk| sidewalk.positioning.as_ref()),
+        input
+            .lo_ra_wan
+            .as_ref()
+            .and_then(|lorawan| lorawan.f_ports.as_ref())
+            .and_then(|f_ports| f_ports.applications.as_deref()),
+    )
+}
+
+/// Apply the updatable subset of a device's LoRaWAN configuration to the stored block.
+///
+/// `LoRaWANUpdateDevice` is a SUBSET of the stored `LoRaWANDevice`: it carries the two
+/// profile references, the frame counter each ABP session resumes from, and the `FPorts`
+/// members an update may re-assign. Every member it does not model — the `DevEui` that
+/// identifies the device, its key material, and the `FPorts` ports no update may move —
+/// is left exactly as it was stored, so an update cannot silently drop configuration the
+/// create supplied.
+fn apply_lorawan_update(stored: &mut LoRaWANDevice, requested: LoRaWANUpdateDevice) {
+    if let Some(device_profile_id) = requested.device_profile_id {
+        stored.device_profile_id = Some(device_profile_id);
+    }
+    if let Some(service_profile_id) = requested.service_profile_id {
+        stored.service_profile_id = Some(service_profile_id);
+    }
+    if let Some(f_cnt_start) = requested.abp_v1_1.and_then(|abp| abp.f_cnt_start) {
+        stored
+            .abp_v1_1
+            .get_or_insert_with(AbpV1_1::default)
+            .f_cnt_start = Some(f_cnt_start);
+    }
+    if let Some(f_cnt_start) = requested.abp_v1_0_x.and_then(|abp| abp.f_cnt_start) {
+        stored
+            .abp_v1_0_x
+            .get_or_insert_with(AbpV1_0_x::default)
+            .f_cnt_start = Some(f_cnt_start);
+    }
+    if let Some(f_ports) = requested.f_ports {
+        let stored_f_ports = stored.f_ports.get_or_insert_with(FPorts::default);
+        if let Some(positioning) = f_ports.positioning {
+            stored_f_ports.positioning = Some(positioning);
+        }
+        // An `Applications` list is a whole assignment of application frames to ports,
+        // so one the request carries REPLACES the stored list rather than extending it.
+        if let Some(applications) = f_ports.applications {
+            stored_f_ports.applications = Some(applications);
+        }
     }
 }
