@@ -45,6 +45,8 @@ const WITH_DOCUMENT: u16 = 200;
 // ---------------------------------------------------------------------------
 
 async fn create_access_point(emulator: &Emulator, account_id: &str, name: &str) -> Reply {
+    // An access point is created only over a bucket that exists.
+    emulator.provision_bucket(name, "reports");
     let body = format!(
         "<CreateAccessPointRequest xmlns=\"{XMLNS}\"><Bucket>reports</Bucket>\
          </CreateAccessPointRequest>"

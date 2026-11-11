@@ -228,6 +228,7 @@ async fn get_access_point_reports_the_effective_public_access_block_for_every_cr
     let emulator = Emulator::start();
 
     for case in access_point_cases() {
+        emulator.provision_bucket(case.case, case.bucket);
         let created = emulator
             .call(
                 "PUT",
@@ -390,6 +391,8 @@ async fn create_with_block_public_policy(
     name: &str,
     blocks: bool,
 ) -> Reply {
+    // An access point is created only over a bucket that exists.
+    emulator.provision_bucket(name, "reports");
     let body = format!(
         "<CreateAccessPointRequest xmlns=\"{XMLNS}\"><Bucket>reports</Bucket>\
          <PublicAccessBlockConfiguration><BlockPublicAcls>false</BlockPublicAcls>\

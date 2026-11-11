@@ -60,6 +60,8 @@ const GOOD_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[{"Sid":"read",
 /// spelled off so this suite stays about the document rather than about
 /// publicness.
 async fn create(emulator: &Emulator, name: &str, bucket: &str) {
+    // An access point is created only over a bucket that exists.
+    emulator.provision_bucket(name, bucket);
     let body = format!(
         "<CreateAccessPointRequest xmlns=\"{XMLNS}\"><Bucket>{}</Bucket>\
          <PublicAccessBlockConfiguration><BlockPublicAcls>false</BlockPublicAcls>\

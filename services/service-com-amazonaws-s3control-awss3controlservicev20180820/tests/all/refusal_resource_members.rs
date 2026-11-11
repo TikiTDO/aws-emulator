@@ -70,6 +70,8 @@ const POLICY_ROUTES: [(&str, &str); 2] = [
 
 /// Create an access point of `name`, owned by `account`, over `bucket`.
 async fn create(emulator: &Emulator, account: &str, name: &str, bucket: &str) -> Reply {
+    // An access point is created only over a bucket that exists.
+    emulator.provision_bucket(name, bucket);
     let body = format!(
         "<CreateAccessPointRequest xmlns=\"{XMLNS}\"><Bucket>{}</Bucket>\
          </CreateAccessPointRequest>",

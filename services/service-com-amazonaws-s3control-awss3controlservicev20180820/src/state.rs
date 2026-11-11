@@ -1716,7 +1716,20 @@ pub struct AccessGrantRecord {
     /// The tags the create call was given, recorded for the same reason as
     /// [`AccessGrantsLocationRecord::tags`].
     pub tags: Vec<Tag>,
+    /// The grant's usage limit, which `GetAccessGrant` reports back:
+    /// [`ACCESS_GRANT_UNCAPPED_USAGE_LIMIT`] for a grant created without one.
+    ///
+    /// No modelled member of `CreateAccessGrant` asks for a limit
+    /// (`smithy_query(query="operation", operation="CreateAccessGrant")`), so
+    /// every grant this service records is created without one; the field is the
+    /// record's own so the read reports what the record holds rather than a
+    /// number the serializer invents.
+    pub usage_limit: i32,
 }
+
+/// The usage limit of a grant created without one — the only kind this service
+/// records. See [`AccessGrantRecord::usage_limit`].
+pub const ACCESS_GRANT_UNCAPPED_USAGE_LIMIT: i32 = 0;
 
 /// How a grant is keyed: the owning account, the Region, and the grant id — the
 /// triple a grant id is unique within, for the same reason as
@@ -2800,7 +2813,20 @@ fn host_character(character: char) -> bool {
 /// answered [`INVALID_URI_CODE`]. The rest of the rules are the name's own and
 /// are held against the parsed name by [`valid_access_point_name`].
 pub fn addressable_access_point_name(name: &str) -> bool {
-    name.chars().count() <= *ACCESS_POINT_NAME_LEN.end() && name.chars().all(host_character)
+    access_point_name_within_addressable_length(name) && name.chars().all(host_character)
+}
+
+/// Whether `name` is short enough for one path segment to CARRY as an access
+/// point name: at most [`ACCESS_POINT_NAME_LEN`]'s maximum characters.
+///
+/// Half of [`addressable_access_point_name`], named on its own because a segment
+/// LONGER than this is not something the service can read as a name at all —
+/// there is no resource for the path to name — while a segment of a length it can
+/// read names a resource whether or not the name is one it will accept. That is
+/// what decides which of the two a refusal states in its `URI` member (see
+/// `crate::service::envelope`).
+pub fn access_point_name_within_addressable_length(name: &str) -> bool {
+    name.chars().count() <= *ACCESS_POINT_NAME_LEN.end()
 }
 
 /// Whether `name` is a name an access point may be GIVEN, for a path segment
@@ -3289,7 +3315,8 @@ pub fn no_such_access_point<E>(name: &str) -> crate::scaffolded::Scaffolded<E> {
 /// `crate::service::envelope`, which reads the path before any operation is
 /// named, so no access point is looked up, created or deleted. The message is
 /// fixed text and the path the caller sent travels in the `URI` member beside
-/// it.
+/// it — a path this service could not parse resolves to no resource, so there is
+/// nothing to name but the request target.
 ///
 /// The wire `<Code>` a client branches on.
 pub const INVALID_URI_CODE: &str = "InvalidURI";
@@ -3340,6 +3367,38 @@ pub const REQUEST_INVALID_MESSAGE: &str = "Request invalid";
 /// ([`INVALID_URI_CODE`]) — the two rules the name is held to are what the
 /// refusals tell apart.
 pub const INVALID_ACCESS_POINT_NAME_MESSAGE: &str = "Your Amazon S3 AccessPoint name is invalid";
+
+/// `InvalidRequest` (HTTP 400): the create named a bucket the object store does
+/// not hold, so there is no bucket for the access point to be attached to.
+///
+/// An access point is a resource OF a bucket — "Creates an access point and
+/// associates it to a specified bucket" (`CreateAccessPoint`) — so the bucket is
+/// resolved in the store that owns it ([`bucket_regions::bucket_exists`]) before
+/// the access point is recorded, and a create that named no existing bucket
+/// records nothing.
+pub fn access_point_bucket_absent<E>() -> crate::scaffolded::Scaffolded<E> {
+    crate::scaffolded::Scaffolded::service_failure(
+        REQUEST_INVALID_CODE,
+        REQUEST_INVALID_STATUS,
+        ACCESS_POINT_BUCKET_ABSENT_MESSAGE,
+    )
+}
+
+/// The message of [`access_point_bucket_absent`]: fixed text, naming no bucket —
+/// the caller named one bucket and the answer is about that same one.
+pub const ACCESS_POINT_BUCKET_ABSENT_MESSAGE: &str =
+    "Amazon S3 AccessPoint can only be created for existing bucket";
+
+/// The message S3 Control answers a create that named NO bucket at all with,
+/// under [`REQUEST_INVALID_CODE`] and [`REQUEST_INVALID_STATUS`]: fixed text,
+/// naming neither the member, the value nor a limit.
+///
+/// `CreateAccessPointRequest$Bucket` is `@required`, so the absence is found by
+/// the request boundary before the handler runs; the refusal is this service's
+/// own all the same, and is stated by `crate::service::envelope` where that
+/// boundary refusal is restated.
+pub const MISSING_ACCESS_POINT_BUCKET_MESSAGE: &str =
+    "Must specify bucket to create Amazon S3 AccessPoint";
 
 /// The `<Error>` member a refusal names the access point it was asked about in.
 ///

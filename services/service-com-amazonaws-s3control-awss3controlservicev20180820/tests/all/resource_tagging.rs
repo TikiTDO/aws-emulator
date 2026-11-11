@@ -94,6 +94,8 @@ async fn create_instance(emulator: &Emulator) -> String {
 async fn provision(emulator: &Emulator, kind: Kind, id: &str) -> String {
     match kind {
         Kind::AccessPoint => {
+            // An access point is created only over a bucket that exists.
+            emulator.provision_bucket(id, &format!("{id}-bucket"));
             let created = emulator
                 .call(
                     "PUT",

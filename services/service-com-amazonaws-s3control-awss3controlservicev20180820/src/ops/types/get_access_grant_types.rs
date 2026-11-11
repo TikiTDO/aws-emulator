@@ -18,7 +18,14 @@ pub struct GetAccessGrantInput {
     pub access_grant_id: String,
 }
 
-#[smithy_macros::smithy(shape = "com.amazonaws.s3control#GetAccessGrantResult")]
+/// What `GetAccessGrant` reports: the modelled `GetAccessGrantResult`, plus
+/// `UsageLimit`.
+///
+/// Member set, order and requiredness from
+/// `smithy_query(query="operation", operation="GetAccessGrant")`, plus
+/// `UsageLimit`, which is RECORDED BEHAVIOUR rather than modelled — the grant's
+/// own usage limit, reported for every grant a read answers (see
+/// `types::unmodelled_member_wire` for why the shape is hand-written).
 #[derive(Debug, Clone, Default)]
 pub struct GetAccessGrantOutput {
     pub created_at: Option<::aws_smithy_types::DateTime>,
@@ -30,5 +37,59 @@ pub struct GetAccessGrantOutput {
     pub access_grants_location_configuration: Option<AccessGrantsLocationConfiguration>,
     pub grant_scope: Option<String>,
     pub application_arn: Option<String>,
+    pub usage_limit: Option<i32>,
 }
+
+s3c_schema_and_codec!(
+    GetAccessGrantOutput,
+    GET_ACCESS_GRANT_OUTPUT_SCHEMA,
+    "com.amazonaws.s3control#GetAccessGrantResult",
+    "com.amazonaws.s3control",
+    "GetAccessGrantResult",
+    (M_CREATED_AT, created_at, "CreatedAt", 0, opt, date_time),
+    (
+        M_ACCESS_GRANT_ID,
+        access_grant_id,
+        "AccessGrantId",
+        1,
+        opt,
+        string
+    ),
+    (
+        M_ACCESS_GRANT_ARN,
+        access_grant_arn,
+        "AccessGrantArn",
+        2,
+        opt,
+        string
+    ),
+    (M_GRANTEE, grantee, "Grantee", 3, opt, struct_of(Grantee)),
+    (M_PERMISSION, permission, "Permission", 4, opt, string),
+    (
+        M_ACCESS_GRANTS_LOCATION_ID,
+        access_grants_location_id,
+        "AccessGrantsLocationId",
+        5,
+        opt,
+        string
+    ),
+    (
+        M_ACCESS_GRANTS_LOCATION_CONFIGURATION,
+        access_grants_location_configuration,
+        "AccessGrantsLocationConfiguration",
+        6,
+        opt,
+        struct_of(AccessGrantsLocationConfiguration)
+    ),
+    (M_GRANT_SCOPE, grant_scope, "GrantScope", 7, opt, string),
+    (
+        M_APPLICATION_ARN,
+        application_arn,
+        "ApplicationArn",
+        8,
+        opt,
+        string
+    ),
+    (M_USAGE_LIMIT, usage_limit, "UsageLimit", 9, opt, integer),
+);
 

@@ -190,6 +190,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(crate::state::state_unavailable());
         };
 
+        // An access point is a resource OF a bucket — this call "creates an
+        // access point and associates it to a specified bucket" — so the bucket
+        // the request names is RESOLVED in the store that owns it before
+        // anything is recorded here, and a create that names a bucket no such
+        // store holds records nothing. Resolved by NAME alone: a bucket name is
+        // globally unique and the bucket store keys a bucket by that name, which
+        // is why `BucketAccountId` — the account the request states the bucket
+        // belongs to — is not a second key (the same reading as
+        // `crate::state::change_bucket_tags`).
+        //
+        // LOCK ORDER: read with NO guard of this service's store held, which is
+        // the discipline `crate::state::bucket_regions` states.
+        if !crate::state::bucket_regions::bucket_exists(&*self.engine, &input.bucket) {
+            return Err(crate::state::access_point_bucket_absent());
+        }
+
         let key = (input.account_id.clone(), input.name.clone());
         let mut store = state.lock();
         if store.access_points.contains_key(&key) {

@@ -211,8 +211,18 @@ impl Reply {
 
 /// One emulator: a router with this service mounted on a single shared engine,
 /// exactly as `core/router` assembles it.
+///
+/// Only THIS service is mounted — one suite below pins that S3 Control does not
+/// claim Amazon S3's own path space — so the buckets an access point is created
+/// over are recorded in Amazon S3's store through that store's own API
+/// ([`Self::provision_bucket`]), which is the store this service resolves a
+/// bucket in. The sibling [`crate::object_store::ObjectStore`] harness mounts
+/// both services and drives the same prerequisite over the wire.
 pub(crate) struct Emulator {
     pub(crate) router: MultiServiceRouter,
+    /// The one shared engine both stores live in, kept so a suite can record the
+    /// bucket an access point is created over.
+    engine: Arc<engine::InMemoryEngine>,
 }
 
 impl Emulator {
@@ -225,10 +235,22 @@ impl Emulator {
         router.set_request_authentication(false);
         router.register_service(
             service_com_amazonaws_s3control_awss3controlservicev20180820::EmulatedService::new(
-                engine,
+                Arc::clone(&engine),
             ),
         );
-        Self { router }
+        Self { router, engine }
+    }
+
+    /// Make sure Amazon S3's store holds a bucket named `bucket` in [`REGION`].
+    ///
+    /// The prerequisite of every access point created below: an access point is a
+    /// resource OF a bucket, so S3 Control creates one only over a bucket that
+    /// exists. A name the store already holds is left exactly as it is, so a
+    /// suite whose rows share a bucket may ask for it once per row.
+    pub(crate) fn provision_bucket(&self, case: &str, bucket: &str) {
+        let state = ::service_com_amazonaws_s3_amazons3::state::service_state(&*self.engine)
+            .unwrap_or_else(|| panic!("case {case:?}: the object store stands up"));
+        state.lock().create_bucket(bucket, REGION);
     }
 
     pub(crate) async fn call(
@@ -242,6 +264,7 @@ impl Emulator {
     }
 
     async fn create(&self, account_id: &str, case: &CreateCase) -> Reply {
+        self.provision_bucket(case.case, case.bucket);
         self.call(
             "PUT",
             &format!("/v20180820/accesspoint/{}", case.name),
@@ -1096,6 +1119,7 @@ async fn a_request_the_service_cannot_serve_faithfully_is_refused_rather_than_an
 
     // `Scope` is modelled for directory-bucket access points, which this
     // emulator does not have: it answers 501 rather than dropping the member.
+    emulator.provision_bucket("a scoped create", "reports");
     let scoped = emulator
         .call(
             "PUT",
@@ -1213,6 +1237,7 @@ async fn the_number_of_stored_access_points_is_bounded_and_a_delete_releases_the
     let emulator = Emulator::start();
     let quota =
         service_com_amazonaws_s3control_awss3controlservicev20180820::state::ACCESS_POINT_QUOTA;
+    emulator.provision_bucket("the bound", "bulk");
 
     // Fill the store to its bound. The names differ only in their index, which
     // is the point: the key is request-derived, so a caller could otherwise mint

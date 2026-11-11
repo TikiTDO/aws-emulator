@@ -261,6 +261,8 @@ fn assert_denied(case: &str, account: &str, reply: &Reply) {
 /// resource that EXISTS as well as one that does not.
 async fn emulator_holding(name: &str) -> Emulator {
     let emulator = Emulator::start();
+    // An access point is created only over a bucket that exists.
+    emulator.provision_bucket(name, "reports");
     let created = emulator
         .call(
             "PUT",

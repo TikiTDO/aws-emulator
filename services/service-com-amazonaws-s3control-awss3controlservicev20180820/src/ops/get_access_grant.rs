@@ -184,6 +184,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             access_grants_location_configuration: record.location_configuration.clone(),
             grant_scope: Some(record.grant_scope.clone()),
             application_arn: record.application_arn.clone(),
+            // Every grant a read answers reports its usage limit, which is the
+            // one the record carries.
+            usage_limit: Some(record.usage_limit),
         })
     }
 }

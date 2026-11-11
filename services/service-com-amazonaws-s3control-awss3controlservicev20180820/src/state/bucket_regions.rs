@@ -37,6 +37,19 @@ pub fn bucket_region<Eng: Send + Sync + 'static>(engine: &Eng, bucket: &str) -> 
     store.bucket(bucket).map(|held| held.region.clone())
 }
 
+/// Whether the object store holds a bucket named `bucket`.
+///
+/// The referential read behind an association this service only makes over a
+/// bucket that EXISTS: the bucket is the object store's resource, so its
+/// existence is answered where the bucket lives rather than from a name this
+/// service was handed ([`bucket_region`], which resolves a bucket to the Region
+/// it lives in and answers `None` for a bucket the store does not hold).
+///
+/// Takes the bucket's NAME alone, for the same reason [`bucket_region`] does.
+pub fn bucket_exists<Eng: Send + Sync + 'static>(engine: &Eng, bucket: &str) -> bool {
+    bucket_region(engine, bucket).is_some()
+}
+
 /// The Regions to report for the buckets a Multi-Region Access Point create
 /// request associated, in the order the request listed them.
 ///

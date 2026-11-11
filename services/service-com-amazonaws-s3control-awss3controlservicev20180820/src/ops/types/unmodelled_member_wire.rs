@@ -57,6 +57,9 @@ macro_rules! s3c_shape_type {
     (boolean) => {
         ::aws_smithy_schema::ShapeType::Boolean
     };
+    (integer) => {
+        ::aws_smithy_schema::ShapeType::Integer
+    };
     (date_time) => {
         ::aws_smithy_schema::ShapeType::Timestamp
     };
@@ -95,6 +98,9 @@ macro_rules! s3c_write_member {
     ($s:ident, $m:expr, $v:expr, boolean) => {
         $s.write_boolean($m, *$v)?;
     };
+    ($s:ident, $m:expr, $v:expr, integer) => {
+        $s.write_integer($m, *$v)?;
+    };
     ($s:ident, $m:expr, $v:expr, date_time) => {
         $s.write_timestamp($m, $v)?;
     };
@@ -124,6 +130,9 @@ macro_rules! s3c_read_member {
     };
     ($d:ident, $m:expr, boolean) => {
         $d.read_boolean($m)?
+    };
+    ($d:ident, $m:expr, integer) => {
+        $d.read_integer($m)?
     };
     ($d:ident, $m:expr, date_time) => {
         $d.read_timestamp($m)?

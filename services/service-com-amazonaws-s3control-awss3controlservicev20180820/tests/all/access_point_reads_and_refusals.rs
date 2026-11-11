@@ -70,6 +70,11 @@ fn expected_endpoints(region: &str) -> BTreeMap<String, String> {
 /// and no data source is ever attached.
 const REGULAR: &str = "Regular";
 
+/// The path segment every route of this service is bound under, and the one part
+/// of a request path a refusal's `URI` member does NOT carry: that member names
+/// the resource the request addressed, relative to the service root.
+const API_VERSION_PREFIX: &str = "/v20180820/";
+
 /// A name at the longest length the wire can ADDRESS an access point by — the
 /// maximum of `ACCESS_POINT_NAME_LEN` (50), which
 /// `state::addressable_access_point_name` holds a path segment to — so the
@@ -141,6 +146,8 @@ fn created() -> Vec<Created> {
 }
 
 async fn create(emulator: &Emulator, account: &str, case: &Created) -> Reply {
+    // An access point is created only over a bucket that exists.
+    emulator.provision_bucket(case.case, case.bucket);
     emulator
         .call(
             "PUT",
@@ -177,6 +184,7 @@ async fn a_read_reports_the_bucket_owner_the_type_and_the_regional_endpoints() {
         let emulator = Emulator::start();
         let cases = created();
         for case in &cases {
+            emulator.provision_bucket(case.case, case.bucket);
             let created = call_in_region(
                 &emulator.router,
                 region,
@@ -388,6 +396,7 @@ async fn the_two_rules_an_access_point_name_is_held_to_are_refused_apart() {
             "<CreateAccessPointRequest xmlns=\"{XMLNS}\"><Bucket>reports</Bucket>\
              </CreateAccessPointRequest>"
         );
+        emulator.provision_bucket(case, "reports");
         let path = format!("/v20180820/accesspoint/{name}");
         let Some((code, message)) = refusal else {
             let created = emulator.call("PUT", &path, ACCOUNT, &body).await;
@@ -428,11 +437,18 @@ async fn the_two_rules_an_access_point_name_is_held_to_are_refused_apart() {
                 "case {case:?} on {route}: expected the fixed message, got body {}",
                 refused.body
             );
+            // What the `URI` member names is the stage's own: a segment longer
+            // than the wire can carry as a name is not read as a resource name
+            // at all, so the refusal echoes the request target; every other
+            // refusal names the resource it did read, under the service root.
+            let named = match name.chars().count() > longest {
+                true => Some(uri.as_str()),
+                false => uri.strip_prefix(API_VERSION_PREFIX),
+            };
             assert_eq!(
                 refused.text("URI").as_deref(),
-                Some(uri.as_str()),
-                "case {case:?} on {route}: expected the refusal to echo the path the request \
-                 sent, got body {}",
+                named,
+                "case {case:?} on {route}: expected the refusal to name {named:?}, got body {}",
                 refused.body
             );
             assert!(

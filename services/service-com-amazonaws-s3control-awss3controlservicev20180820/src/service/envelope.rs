@@ -148,6 +148,12 @@ const ASYNC_REQUEST_PATH: &str = "/v20180820/async-requests/mrap/";
 /// path of `DescribeMultiRegionAccessPointOperationRequest$RequestTokenARN`.
 const REQUEST_TOKEN_MEMBER: &str = "requestTokenARN";
 
+/// The member a create states the bucket an access point is attached to in
+/// (`CreateAccessPointRequest$Bucket`, which is `@required`, per
+/// `smithy_query(query="operation", operation="CreateAccessPoint")`), spelled as
+/// the request boundary states a member path.
+const ACCESS_POINT_BUCKET_MEMBER: &str = "bucket";
+
 /// The members a request's own ADDRESS is read from, as a refusal names them:
 /// the configuration id its path carries and the account id its header carries
 /// (`PutStorageLensConfigurationRequest$ConfigId` is an `@httpLabel` and
@@ -576,15 +582,30 @@ fn framework_refusal(resp: &RtResponse) -> Option<&str> {
 /// quotation marks are looked for, because the sentence is XML-escaped into the
 /// envelope.
 fn refused_over_member(refusal: &str, member: &str) -> bool {
+    refusal_states(refusal, &format!("at '{member}'"))
+}
+
+/// Whether `refusal` is the boundary refusing the request because `member` was
+/// ABSENT from it, rather than because a value it carried broke a rule.
+///
+/// The boundary states both in one sentence and tells them apart by the value it
+/// echoes: an absent member has no value to echo, so the clause names `null`
+/// where a value that broke a rule names the value itself
+/// (`aws_smithy_schema_server::constraints`). A refusal of a value the member DID
+/// carry is about that value, so it keeps the cause its caller has to fix.
+fn refused_over_absent_member(refusal: &str, member: &str) -> bool {
+    refusal_states(refusal, &format!("Value null at '{member}'"))
+}
+
+/// Whether `refusal`'s own sentence states `clause`.
+///
+/// Both spellings of the quotation marks are looked for, because the sentence is
+/// XML-escaped into the envelope.
+fn refusal_states(refusal: &str, clause: &str) -> bool {
     let Some(message) = element_text(refusal, "Message") else {
         return false;
     };
-    [
-        format!("at '{member}'"),
-        format!("at &apos;{member}&apos;"),
-    ]
-    .iter()
-    .any(|marker| message.contains(marker))
+    message.contains(clause) || message.contains(&clause.replace('\'', "&apos;"))
 }
 
 /// Whether `refusal` is the boundary refusing a value it read out of the
@@ -620,7 +641,8 @@ fn refused_as_unreadable(refusal: &str) -> bool {
 }
 
 /// Whether `path` names an access point by a name the wire cannot address, and
-/// whether it names one an access point may not be given.
+/// whether it names one an access point may not be given — with the value the
+/// refusal's `URI` member carries.
 ///
 /// Read off the PATH and not off a deserialized member: an access point name is
 /// one segment of the request path, so the rules it is held to are answered
@@ -629,17 +651,32 @@ fn refused_as_unreadable(refusal: &str) -> bool {
 /// [`crate::state::addressable_access_point_name`] and
 /// [`crate::state::valid_access_point_name`]). `None` for a path that names no
 /// access point at all.
-fn access_point_name_refusal(path: &str) -> Option<(u16, &'static str, &'static str)> {
+///
+/// The two refusals name what the stage that answered them can name. A segment
+/// LONGER than the wire can carry as a name
+/// ([`crate::state::access_point_name_within_addressable_length`]) is not
+/// something this service can read as a resource name at all, so the refusal
+/// echoes the request target it was handed, verbatim. A segment of a length it
+/// can read names a resource — whether or not the name is one an access point
+/// may be given — so the refusal names that resource under the service root
+/// ([`addressed_resource`]), which is what a caller reads the offending identity
+/// out of.
+fn access_point_name_refusal(path: &str) -> Option<(u16, &'static str, &'static str, &str)> {
     let rest = path.strip_prefix(ACCESS_POINT_PATH)?;
     let name = rest.split('/').next().unwrap_or_default();
     if name.is_empty() {
         return None;
     }
+    let named = match crate::state::access_point_name_within_addressable_length(name) {
+        true => addressed_resource(path),
+        false => path,
+    };
     if !crate::state::addressable_access_point_name(name) {
         return Some((
             crate::state::INVALID_URI_STATUS,
             crate::state::INVALID_URI_CODE,
             crate::state::INVALID_URI_MESSAGE,
+            named,
         ));
     }
     if !crate::state::valid_access_point_name(name) {
@@ -647,9 +684,22 @@ fn access_point_name_refusal(path: &str) -> Option<(u16, &'static str, &'static 
             crate::state::REQUEST_INVALID_STATUS,
             crate::state::REQUEST_INVALID_CODE,
             crate::state::INVALID_ACCESS_POINT_NAME_MESSAGE,
+            named,
         ));
     }
     None
+}
+
+/// Whether `req` CREATES an access point: the one route bound as a `PUT` on an
+/// access point's own path, with nothing under it — `PUT
+/// /v20180820/accesspoint/{Name}`, per `smithy_query(query="operation",
+/// operation="CreateAccessPoint")`. A `PUT` on a SUB-RESOURCE of the same path
+/// (`…/policy`, `…/scope`) is a different operation with its own members.
+fn creates_access_point(req: &RtRequest, path: &str) -> bool {
+    req.method().eq_ignore_ascii_case("PUT")
+        && path
+            .strip_prefix(ACCESS_POINT_PATH)
+            .is_some_and(|name| !name.is_empty() && !name.contains('/'))
 }
 
 /// This service's own answer to a refusal the boundary stated in the
@@ -677,6 +727,25 @@ fn restated(req: &RtRequest, resp: &RtResponse) -> Option<RtResponse> {
             crate::state::NO_SUCH_ASYNC_REQUEST_STATUS,
             crate::state::NO_SUCH_ASYNC_REQUEST_CODE,
             crate::state::NO_SUCH_ASYNC_REQUEST_MESSAGE,
+            &[],
+        ));
+    }
+    // The create of an access point that named no bucket at all: the bucket an
+    // access point is attached to is a `@required` member, so its ABSENCE is
+    // found by the boundary, but the refusal is still this operation's own — it
+    // states what the caller has to add, under the code this service's refusals
+    // carry, rather than in the framework's validation vocabulary, which is
+    // neither this service's wording nor a code a client branches on. A value
+    // the member DID carry and that broke one of its rules is a refusal about
+    // that value, and is left where it is.
+    if creates_access_point(req, path)
+        && refused_over_absent_member(refusal, ACCESS_POINT_BUCKET_MEMBER)
+    {
+        return Some(error_response(
+            Envelope::of(path),
+            crate::state::REQUEST_INVALID_STATUS,
+            crate::state::REQUEST_INVALID_CODE,
+            crate::state::MISSING_ACCESS_POINT_BUCKET_MESSAGE,
             &[],
         ));
     }
@@ -855,13 +924,22 @@ impl ErasedOperation for Dispatch {
             // parse, and one naming a name an access point may not be given is
             // a request it will not carry out. Both are answered here — before
             // an operation is named, and so before anything is read, created or
-            // deleted — and each names the path the caller sent.
-            if let Some((status, code, message)) = access_point_name_refusal(path) {
-                // The `URI` member carries the path the caller sent, which is
-                // what it has to change. A path this service could not parse
-                // names no resource, so the refusal is stated in the service's
-                // own envelope rather than in any resource's.
-                return error_response(Envelope::Wrapped, status, code, message, &[("URI", path)]);
+            // deleted.
+            if let Some((status, code, message, named)) = access_point_name_refusal(path) {
+                // What the `URI` member carries is the stage's own: the resource
+                // the request addressed for a path whose segment this service
+                // could read as a name, and the request target verbatim for one
+                // too long to read as a name at all — see
+                // [`access_point_name_refusal`]. A path this service could not
+                // parse names no resource, so the refusal is stated in the
+                // service's own envelope rather than in any resource's.
+                return error_response(
+                    Envelope::Wrapped,
+                    status,
+                    code,
+                    message,
+                    &[("URI", named)],
+                );
             }
             // The same stage for the bucket space: those routes address an S3 on
             // Outposts bucket, by its ARN or by its name together with the
@@ -1131,11 +1209,28 @@ mod tests {
                 format!("/v20180820/accesspoint/{name}"),
                 format!("/v20180820/accesspoint/{name}/policy"),
             ] {
+                let answered = access_point_name_refusal(&path);
+                let stated = answered.map(|(status, code, message, _)| (status, code, message));
                 assert_eq!(
-                    access_point_name_refusal(&path),
+                    stated,
                     refusal,
                     "case {case:?} ({} characters) at {path:?}: expected {refusal:?}",
                     name.chars().count()
+                );
+                // The `URI` member names what the stage that refused can name:
+                // the resource for a path whose segment this service could read
+                // as a name, and the request target verbatim for a segment too
+                // long to read as a name at all.
+                let expected_uri = match stated {
+                    None => None,
+                    Some(_) if name.chars().count() > longest => Some(path.as_str()),
+                    Some(_) => Some(addressed_resource(&path)),
+                };
+                assert_eq!(
+                    answered.map(|(.., named)| named),
+                    expected_uri,
+                    "case {case:?} at {path:?}: expected the URI member to name \
+                     {expected_uri:?}"
                 );
             }
             assert_eq!(

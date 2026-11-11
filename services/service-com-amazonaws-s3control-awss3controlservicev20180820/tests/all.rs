@@ -11,6 +11,8 @@
 // `tests/all.rs` is a test-target CRATE ROOT, so a bare `mod` resolves to a SIBLING
 // (`tests/state_roundtrip.rs`) — which the layout check refuses. The `#[path]` is what
 // points it into `tests/all/`.
+#[path = "all/access_grant_usage_limit.rs"]
+mod access_grant_usage_limit;
 #[path = "all/access_grants_arns.rs"]
 mod access_grants_arns;
 #[path = "all/access_grants_data_plane.rs"]
@@ -27,6 +29,8 @@ mod access_grants_location_register;
 mod access_grants_location_update;
 #[path = "all/access_grants_refusal_identities.rs"]
 mod access_grants_refusal_identities;
+#[path = "all/access_point_create_referential_integrity.rs"]
+mod access_point_create_referential_integrity;
 #[path = "all/access_point_lifecycle.rs"]
 mod access_point_lifecycle;
 #[path = "all/access_point_policy_delete.rs"]

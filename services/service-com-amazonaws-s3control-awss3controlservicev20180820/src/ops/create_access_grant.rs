@@ -271,6 +271,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             s3_prefix_type: input.s3_prefix_type.clone(),
             created_at: ::aws_smithy_types::DateTime::from(::std::time::SystemTime::now()),
             tags: input.tags.clone().unwrap_or_default(),
+            // Nothing in the request asks for a usage limit, so the grant is
+            // recorded without one.
+            usage_limit: crate::state::ACCESS_GRANT_UNCAPPED_USAGE_LIMIT,
         };
 
         let output = CreateAccessGrantOutput {

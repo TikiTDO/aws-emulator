@@ -126,6 +126,8 @@ fn cases() -> Vec<Case> {
 /// public document is stored rather than refused and this suite stays about the
 /// removal.
 async fn create(emulator: &Emulator, account: &str, case: &Case) -> Reply {
+    // An access point is created only over a bucket that exists.
+    emulator.provision_bucket(case.case, case.bucket);
     let mut xml = format!("<CreateAccessPointRequest xmlns=\"{XMLNS}\">");
     xml.push_str(&format!("<Bucket>{}</Bucket>", xml_escape(case.bucket)));
     if let Some(vpc_id) = case.vpc_id {
