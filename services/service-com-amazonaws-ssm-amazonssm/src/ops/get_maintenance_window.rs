@@ -1,15 +1,24 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetMaintenanceWindow
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetMaintenanceWindow`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetMaintenanceWindow::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports one maintenance window: the record the create of that window persisted
+//! ([`crate::state::maintenance_windows::MaintenanceWindowRecord`]), reached by the
+//! `WindowId` the request names at the Region its endpoint is. An id that names no window
+//! held there is refused through the modelled `DoesNotExistException` rather than reported
+//! as an empty window.
+//!
+//! Everything but one member is projected straight off that record, so what the write
+//! persisted is what this read reports. The exception is `NextExecutionTime` — "the next
+//! time the maintenance window will actually run, taking into account any specified times
+//! for the maintenance window to become active or inactive" — which is COMPUTED from the
+//! stored schedule and the clock
+//! ([`crate::state::maintenance_windows::MaintenanceWindowRecord::next_execution_time`]),
+//! so it moves on as the clock does without this read writing anything. An ABSENT
+//! `NextExecutionTime` says the next instant is not known here, not that the window is
+//! gone: a window that is disabled, whose schedule or activation interval names no further
+//! instant, or whose schedule is written in this service's own cron dialect (the `L`, `W`
+//! and `#` wildcards the shared grammar does not read) reports none.
 //!
 //! ## Shape of an operation
 //!
@@ -174,18 +183,52 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetMaintenanceWindow` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetMaintenanceWindowErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetMaintenanceWindow"))
+        // `WindowId`'s presence, length and pattern are MODELLED constraints the
+        // centralized walk has already refused anything outside of.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            GetMaintenanceWindowErrorModeled::InternalServerError(InternalServerError {
+                message: Some("the maintenance window store is unavailable".to_string()),
+            })
+        })?;
+
+        // A window lives in the Region its endpoint names, which is the signed credential
+        // scope's — so the id is resolved against that Region's records.
+        let region = crate::state::request_region(ctx.parts());
+        let now = ::std::time::SystemTime::now();
+        let store = state.lock();
+        let Some(held) = store.maintenance_window(&region, &input.window_id) else {
+            return Err(GetMaintenanceWindowErrorModeled::DoesNotExistException(
+                DoesNotExistException {
+                    message: Some(
+                        crate::state::maintenance_windows::maintenance_window_not_found_message(
+                            &input.window_id,
+                        ),
+                    ),
+                },
+            )
+            .into());
+        };
+
+        Ok(GetMaintenanceWindowOutput {
+            window_id: Some(held.window_id.clone()),
+            name: Some(held.name.clone()),
+            description: held.description.clone(),
+            // Modelled as plain strings, so each is reported exactly as the write stated
+            // it.
+            start_date: held.start_date.clone(),
+            end_date: held.end_date.clone(),
+            schedule: Some(held.schedule.clone()),
+            schedule_timezone: held.schedule_timezone.clone(),
+            schedule_offset: held.schedule_offset,
+            // Read from the stored schedule rather than stored: the instant the window
+            // next opens at moves as the clock does.
+            next_execution_time: held.next_execution_time(now),
+            duration: Some(held.duration),
+            cutoff: held.cutoff,
+            allow_unassociated_targets: held.allow_unassociated_targets,
+            enabled: held.enabled,
+            created_date: Some(::aws_smithy_types::DateTime::from(held.created_date)),
+            modified_date: Some(::aws_smithy_types::DateTime::from(held.modified_date)),
+        })
     }
 }

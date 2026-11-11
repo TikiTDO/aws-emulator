@@ -55,6 +55,15 @@ hex = { workspace = true }
 # from a second copy of them here (`state::identity_authorization`).
 service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# A maintenance window's `Schedule` is "a cron or rate expression", so the instants it
+# opens at are read by this maintained cron grammar rather than by a hand-written one.
+cron = "0.15"
+# `chrono` is what that parser is written in, and what reads the ISO-8601 Extended instants
+# a window states its activation and its one-time schedule with.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+# A window's schedule is evaluated "in Internet Assigned Numbers Authority (IANA) format"
+# time zone, whose database this crate carries.
+chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

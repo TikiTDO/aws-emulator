@@ -1,15 +1,24 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateMaintenanceWindow
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateMaintenanceWindow`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateMaintenanceWindow::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Mints a maintenance window: "the value you specify for Duration determines the specific
+//! end time for the maintenance window based on the time it begins". The window is
+//! persisted in this service's store
+//! ([`crate::state::maintenance_windows::MaintenanceWindowRecord`]), keyed by the Region
+//! the request was signed for and the id this call minted, so `GetMaintenanceWindow`
+//! reports the window that was created rather than the request that created it.
+//!
+//! The `Schedule` is "a cron or rate expression", so an expression stating none of the
+//! forms this service documents is refused BEFORE anything is written
+//! ([`crate::state::maintenance_windows::schedule_violation`]), as is a
+//! `ScheduleTimezone` naming no IANA zone: either would leave the instants the window
+//! opens at undefined. `StartDate` and `EndDate` are modelled as plain strings and are
+//! held exactly as the request stated them.
+//!
+//! A create carrying an idempotency token a create already ran under reports the window
+//! that one minted rather than minting a second, and is refused with
+//! `IdempotentParameterMismatch` when it supplies different members under that token.
 //!
 //! ## Shape of an operation
 //!
@@ -192,18 +201,110 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateMaintenanceWindow` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateMaintenanceWindowErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateMaintenanceWindow"))
+        // `Name`'s pattern and length, `Schedule`'s length, `Duration`'s 1..24 range,
+        // `Cutoff`'s 0..23 range and `ScheduleOffset`'s 1..6 range are MODELLED
+        // constraints, so the centralized walk has already refused anything outside them:
+        // reaching here means the input satisfies every one of them.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            CreateMaintenanceWindowErrorModeled::InternalServerError(InternalServerError {
+                message: Some("the maintenance window store is unavailable".to_string()),
+            })
+        })?;
+
+        // "The schedule of the maintenance window in the form of a cron or rate
+        // expression": text stating none of the documented forms names no instant at all,
+        // so it is refused here — before anything is written, so a window that could never
+        // open leaves no id and no record behind. The model declares no error for it, so it
+        // is a 400 `ValidationException` rather than one of the three modelled failures.
+        if let Some(why) = crate::state::maintenance_windows::schedule_violation(&input.schedule) {
+            return Err(crate::scaffolded::Scaffolded::validation(why));
+        }
+        if let Some(why) = crate::state::maintenance_windows::schedule_timezone_violation(
+            input.schedule_timezone.as_deref(),
+        ) {
+            return Err(crate::scaffolded::Scaffolded::validation(why));
+        }
+
+        let region = crate::state::request_region(ctx.parts());
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+
+        let mut record = crate::state::maintenance_windows::MaintenanceWindowRecord {
+            // Replaced by the minted id below, once this create is known to be a create.
+            window_id: String::new(),
+            region: region.clone(),
+            name: input.name,
+            description: input.description,
+            // Modelled as plain strings, so each is held exactly as the request stated it
+            // and echoed back that way.
+            start_date: input.start_date,
+            end_date: input.end_date,
+            schedule: input.schedule,
+            schedule_timezone: input.schedule_timezone,
+            schedule_offset: input.schedule_offset,
+            duration: input.duration,
+            // `Cutoff` and `AllowUnassociatedTargets` carry modelled defaults (0 and
+            // false), which the walk has already applied.
+            cutoff: input.cutoff,
+            allow_unassociated_targets: input.allow_unassociated_targets,
+            // A create carries no `Enabled` member at all, so a window it mints is
+            // enabled and only an update can disable it.
+            enabled: crate::state::maintenance_windows::CREATED_ENABLED,
+            client_token: input.client_token,
+            tags: crate::state::to_btree_map(input.tags),
+            created_date: now,
+            // Nothing has updated the window yet, so it was last written when it was
+            // created.
+            modified_date: now,
+        };
+
+        // "User-provided idempotency token": a retry of one create reports the window that
+        // create already minted, and the same token carrying different members is another
+        // call rather than a retry.
+        if let Some(token) = record.client_token.clone() {
+            if let Some(held) = store.maintenance_window_with_client_token(&region, &token) {
+                if held.creation_fingerprint() != record.creation_fingerprint() {
+                    // The modelled shape's `Message` is optional and this service states
+                    // this refusal through its error code alone — the code IS the whole of
+                    // what it says, the way `InvalidResourceId` is in this crate — so no
+                    // sentence is invented for it.
+                    return Err(
+                        CreateMaintenanceWindowErrorModeled::IdempotentParameterMismatch(
+                            IdempotentParameterMismatch { message: None },
+                        )
+                        .into(),
+                    );
+                }
+                return Ok(CreateMaintenanceWindowOutput {
+                    window_id: Some(held.window_id.clone()),
+                });
+            }
+        }
+
+        // The store is BOUNDED: past the emulator's own ceiling a create is refused rather
+        // than admitting another record, through the modelled refusal for exactly that.
+        if !store.can_hold_another_maintenance_window() {
+            return Err(
+                CreateMaintenanceWindowErrorModeled::ResourceLimitExceededException(
+                    ResourceLimitExceededException {
+                        message: Some(
+                            crate::state::maintenance_windows::maintenance_window_ceiling_message(),
+                        ),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // The id is the SERVICE's to choose: no input member carries one.
+        record.window_id = store.next_maintenance_window_id(now);
+        let window_id = record.window_id.clone();
+        store.insert_maintenance_window(record);
+
+        // "The ID of the created maintenance window": the id this call minted, which is
+        // the key the window is now held under.
+        Ok(CreateMaintenanceWindowOutput {
+            window_id: Some(window_id),
+        })
     }
 }

@@ -43,6 +43,8 @@ mod hybrid_activations;
 mod instance_properties;
 #[path = "all/just_in_time_node_access.rs"]
 mod just_in_time_node_access;
+#[path = "all/maintenance_windows.rs"]
+mod maintenance_windows;
 #[path = "all/managed_node_filter_validation.rs"]
 mod managed_node_filter_validation;
 #[path = "all/managed_node_information.rs"]

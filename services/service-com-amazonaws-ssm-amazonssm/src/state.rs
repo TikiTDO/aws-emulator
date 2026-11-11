@@ -120,6 +120,14 @@
 //! ([`ComAmazonawsSsmAmazonssmState::has_access_request_approval_policy`]) — so an account that
 //! created none has no access-request surface and a read invents no request.
 //!
+//! Then the **maintenance windows** ([`maintenance_windows`]), keyed by
+//! `(region, window id)`: `CreateMaintenanceWindow` mints one and
+//! `GetMaintenanceWindow` reports it, so whatever the create persisted is what a later
+//! read reports. What the window will DO is not stored but read from its schedule: the
+//! next execution is the first instant that cron or rate expression names inside the
+//! interval the window is active over
+//! ([`maintenance_windows::MaintenanceWindowRecord::next_execution_time`]).
+//!
 //! Last is the account's **service settings** ([`service_settings`]):
 //! `GetServiceSetting` reports one, `UpdateServiceSetting` overwrites it and
 //! `ResetServiceSetting` restores the value its service team provisioned. The settings an
@@ -198,6 +206,10 @@ pub mod patch_baselines;
 /// persists, the configuration rules it is held to, and how a listing, an update and a
 /// delete address one.
 pub mod resource_data_syncs;
+
+/// The maintenance windows this service holds: the record a create persists, the schedule
+/// grammar it is held to, and the instants that schedule names.
+pub mod maintenance_windows;
 
 /// The account-level settings the Systems Manager service teams provision, which
 /// `GetServiceSetting` reports and `UpdateServiceSetting`/`ResetServiceSetting` modify.
@@ -3251,6 +3263,19 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// within one Region — and can resume a page from the name it stopped at rather than
     /// from an offset. See [`resource_data_syncs`].
     pub resource_data_syncs: BTreeMap<(String, String), resource_data_syncs::ResourceDataSyncRecord>,
+
+    /// Every maintenance window the account created, keyed by `(region, window id)`: a
+    /// window is reached through the endpoint of the Region it was created in and is
+    /// identified there by the id the create minted
+    /// ([`maintenance_windows::mint_window_id`]). A `BTreeMap` so a listing walks a
+    /// stable, total order. See [`maintenance_windows`].
+    pub maintenance_windows:
+        BTreeMap<(String, String), maintenance_windows::MaintenanceWindowRecord>,
+
+    /// How many maintenance window ids this store has minted, which is what the next mint
+    /// is drawn from ([`ComAmazonawsSsmAmazonssmState::next_maintenance_window_id`]) — so
+    /// two windows of one store never carry one id.
+    pub maintenance_window_sequence: u64,
 }
 
 impl Default for ComAmazonawsSsmAmazonssmState {
@@ -3281,6 +3306,8 @@ impl Default for ComAmazonawsSsmAmazonssmState {
             resource_data_syncs: BTreeMap::new(),
             access_requests: BTreeMap::new(),
             access_request_sequence: 0,
+            maintenance_windows: BTreeMap::new(),
+            maintenance_window_sequence: 0,
         }
     }
 }

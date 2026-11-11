@@ -7,7 +7,8 @@
 //! `(ResourceType, ResourceId)` — "Use the ID of the resource", which for `Document` and
 //! `Parameter` is "the name of the resource", for `ManagedInstance` is the `mi-ID_number`
 //! node id (`AddTagsToResourceRequest$ResourceId`) and for an `OpsItem`, a
-//! `CloudConnector` or an `Association` is the id its create minted — and that pair
+//! `CloudConnector`, an `Association` or a `MaintenanceWindow` is the id its create minted
+//! — and that pair
 //! resolves to the ONE record the Region holds for it. Each such record owns its tag
 //! set, so a tag written through `AddTagsToResource` is the tag `ListTagsForResource`
 //! reports and the tag `RemoveTagsFromResource` drops, and a resource's tags live with
@@ -54,6 +55,13 @@ pub const TAGGING_TYPE_AUTOMATION: &str = "Automation";
 /// (`CreateAssociationRequest$Tags`), so the tag set a create wrote is the one the tag
 /// operations read and rewrite.
 pub const TAGGING_TYPE_ASSOCIATION: &str = super::associations::TAGGING_TYPE_ASSOCIATION;
+
+/// The `ResourceTypeForTagging` value whose id is a maintenance window's minted id
+/// (`super::maintenance_windows::TAGGING_TYPE_MAINTENANCE_WINDOW`, from the same enum):
+/// "MaintenanceWindow: mw-012345abcde" (`AddTagsToResourceRequest$ResourceId`), so the
+/// tag set a create wrote is the one the tag operations read and rewrite.
+pub const TAGGING_TYPE_MAINTENANCE_WINDOW: &str =
+    super::maintenance_windows::TAGGING_TYPE_MAINTENANCE_WINDOW;
 
 /// How many tags one resource may carry: "Most resources can have a maximum of 50 tags"
 /// (`AddTagsToResource`'s own doc). The same doc states one exception — "Automations can
@@ -150,6 +158,9 @@ impl ComAmazonawsSsmAmazonssmState {
             TAGGING_TYPE_ASSOCIATION => {
                 self.association(region, resource_id).map(|held| &held.tags)
             }
+            TAGGING_TYPE_MAINTENANCE_WINDOW => self
+                .maintenance_window(region, resource_id)
+                .map(|held| &held.tags),
             _ => None,
         }
     }
@@ -183,6 +194,9 @@ impl ComAmazonawsSsmAmazonssmState {
                 .map(|held| &mut held.tags),
             TAGGING_TYPE_ASSOCIATION => self
                 .association_mut(region, resource_id)
+                .map(|held| &mut held.tags),
+            TAGGING_TYPE_MAINTENANCE_WINDOW => self
+                .maintenance_window_mut(region, resource_id)
                 .map(|held| &mut held.tags),
             _ => None,
         }
