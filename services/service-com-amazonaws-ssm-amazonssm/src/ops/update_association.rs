@@ -1,15 +1,28 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateAssociation
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateAssociation`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateAssociation::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Applies a new configuration to a State Manager association this service already holds:
+//! the association keeps the id it was created under and takes a NEW VERSION
+//! ([`crate::state::associations::AssociationVersionRecord`]) carrying what this call
+//! supplied, which is what `DescribeAssociation` then reports and what
+//! `ListAssociationVersions` reports beside the versions before it.
+//!
+//! The whole configuration comes from the REQUEST: "when you update an association, the
+//! system removes all optional parameters from the request and overwrites the association with
+//! null values for those parameters... In order to keep the association options, you must
+//! specify all optional parameters in the request". So the new version is built from this
+//! call alone rather than from the version before it; the only member carried over is the
+//! document, for a call that names none, since an association always applies one.
+//!
+//! What the call is held to is what the create is held to, through the same readings: the
+//! document and its version are RESOLVED against the store, the parameter values are held to
+//! the parameters that document version declares, the schedule has to be one of the two forms
+//! an expression is written in, and an output location has to name a bucket. Beside those,
+//! `AssociationVersion` is concurrency control -- "you must specify the latest association
+//! version in the service. If you want to ensure that this request succeeds, either specify
+//! $LATEST, or omit this parameter" -- so a call naming any other version is refused rather
+//! than applied over a version it was not written against.
 //!
 //! ## Shape of an operation
 //!
@@ -302,18 +315,203 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateAssociation` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateAssociationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateAssociation"))
+        // `AssociationId`'s presence and pattern, `DocumentVersion`'s and
+        // `AssociationVersion`'s patterns, `MaxErrors`'s and `MaxConcurrency`'s patterns, the
+        // `ComplianceSeverity` and `SyncCompliance` enums, `ScheduleOffset`'s and `Duration`'s
+        // ranges and the list lengths are MODELLED constraints, so the centralized walk has
+        // already refused anything outside them. What is read here is what the model cannot
+        // say: which association, which document, which version, which parameters and which
+        // schedule the request actually resolves to.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            UpdateAssociationErrorModeled::InternalServerError(InternalServerError {
+                message: Some("the association store is unavailable".to_string()),
+            })
+        })?;
+
+        let region = crate::state::request_region(ctx.parts());
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+
+        let does_not_exist = || {
+            UpdateAssociationErrorModeled::AssociationDoesNotExist(AssociationDoesNotExist {
+                message: Some(crate::state::associations::ASSOCIATION_DOES_NOT_EXIST.to_string()),
+            })
+        };
+        // The association this call changes, and the two things about it that decide whether
+        // the call can be applied at all: the document it applies now (what a call naming none
+        // keeps) and the version it holds last (what its concurrency control is measured
+        // against). Read as VALUES, so the store is free for the document resolve below.
+        let (held_document, latest_version, next_version) = {
+            let held = store
+                .association(&region, &input.association_id)
+                .ok_or_else(does_not_exist)?;
+            (
+                held.name.clone(),
+                held.latest_version(),
+                held.next_version(),
+            )
+        };
+        // "You must specify the latest association version in the service. If you want to
+        // ensure that this request succeeds, either specify $LATEST, or omit this parameter":
+        // a call naming any other version was written against a configuration that is no
+        // longer there.
+        if let Some(requested) = non_empty(input.association_version.as_deref()) {
+            let names_the_latest = requested
+                == crate::state::associations::ASSOCIATION_VERSION_LATEST
+                || requested.parse::<u64>().ok() == Some(latest_version);
+            if !names_the_latest {
+                return Err(UpdateAssociationErrorModeled::InvalidAssociationVersion(
+                    InvalidAssociationVersion {
+                        message: Some(
+                            crate::state::associations::INVALID_ASSOCIATION_VERSION.to_string(),
+                        ),
+                    },
+                )
+                .into());
+            }
+        }
+        // "Each association has a limit of 1,000 versions"
+        // (`AssociationVersionLimitExceeded`), measured over the versions the association
+        // already holds.
+        if next_version > crate::state::associations::MAX_ASSOCIATION_VERSIONS {
+            return Err(
+                UpdateAssociationErrorModeled::AssociationVersionLimitExceeded(
+                    AssociationVersionLimitExceeded {
+                        message: Some(
+                            crate::state::associations::association_version_limit_exceeded(),
+                        ),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // "The name of the SSM document that contains the configuration information for the
+        // instance": the document this call names, or the one the association already applies
+        // where it names none. Resolved through the one lookup every document read of this
+        // service uses, so the documents Systems Manager publishes resolve as well as the ones
+        // a caller created.
+        let requested_document = non_empty(input.name.as_deref())
+            .map(str::to_string)
+            .unwrap_or(held_document);
+        let Some(document) =
+            store.resolve_document_for_request(&requested_document, &region, now)
+        else {
+            return Err(
+                UpdateAssociationErrorModeled::InvalidDocument(InvalidDocument {
+                    message: Some(format!("Document {requested_document} doesn't exist")),
+                })
+                .into(),
+            );
+        };
+        // "The document version you want update for the association": each names one of the
+        // versions the document holds, and a number it does not hold names none. A call that
+        // names none applies the document's default version.
+        let requested_version = non_empty(input.document_version.as_deref())
+            .unwrap_or(crate::state::DOCUMENT_VERSION_DEFAULT);
+        let Some(version) = document.select(requested_version) else {
+            return Err(UpdateAssociationErrorModeled::InvalidDocumentVersion(
+                InvalidDocumentVersion {
+                    message: Some(format!(
+                        "Document {} has no version '{requested_version}'",
+                        document.name
+                    )),
+                },
+            )
+            .into());
+        };
+        // "You must specify values for all required parameters in the Amazon Web Services
+        // Systems Manager document (SSM document). You can only supply values to parameters
+        // defined in the SSM document" (`InvalidParameters`) — the one reading of a document's
+        // parameters this service has, which is what the create is held to as well.
+        let parameters: ::std::collections::BTreeMap<String, Vec<String>> = input
+            .parameters
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        if let Some(why) = crate::state::commands::parameter_rejection(
+            &document.name,
+            &version.parsed.parameters,
+            &parameters,
+        ) {
+            return Err(
+                UpdateAssociationErrorModeled::InvalidParameters(InvalidParameters {
+                    message: Some(why),
+                })
+                .into(),
+            );
+        }
+        // The schedule, the output location and the two ways of naming targets, each held to
+        // what the create holds them to.
+        if let Some(expression) = non_empty(input.schedule_expression.as_deref()) {
+            if let Some(why) = crate::state::associations::schedule_rejection(expression) {
+                return Err(UpdateAssociationErrorModeled::InvalidSchedule(InvalidSchedule {
+                    message: Some(why.to_string()),
+                })
+                .into());
+            }
+        }
+        if crate::state::associations::names_no_output_bucket(input.output_location.as_ref()) {
+            return Err(UpdateAssociationErrorModeled::InvalidOutputLocation(
+                InvalidOutputLocation {},
+            )
+            .into());
+        }
+        let targets: Vec<Target> = input.targets.clone().unwrap_or_default();
+        let target_maps = input.target_maps.clone().unwrap_or_default();
+        if !targets.is_empty() && !target_maps.is_empty() {
+            return Err(UpdateAssociationErrorModeled::InvalidTargetMaps(
+                InvalidTargetMaps {
+                    message: Some(
+                        crate::state::associations::TARGETS_AND_TARGET_MAPS.to_string(),
+                    ),
+                },
+            )
+            .into());
+        }
+
+        let applied = crate::state::associations::AssociationVersionRecord {
+            version: next_version,
+            created_at: now,
+            document_version: input.document_version.clone(),
+            parameters,
+            targets,
+            schedule_expression: input.schedule_expression.clone(),
+            output_location: input.output_location.clone(),
+            association_name: input.association_name.clone(),
+            automation_target_parameter_name: input.automation_target_parameter_name.clone(),
+            max_errors: input.max_errors.clone(),
+            max_concurrency: input.max_concurrency.clone(),
+            compliance_severity: input.compliance_severity.clone(),
+            sync_compliance: input.sync_compliance.clone(),
+            apply_only_at_cron_interval: input.apply_only_at_cron_interval,
+            calendar_names: input.calendar_names.clone().unwrap_or_default(),
+            target_locations: input.target_locations.clone().unwrap_or_default(),
+            schedule_offset: input.schedule_offset,
+            duration: input.duration,
+            target_maps,
+            alarm_configuration: input.alarm_configuration.clone(),
+            association_dispatch_assume_role: input.association_dispatch_assume_role.clone(),
+        };
+        let record = store
+            .association_mut(&region, &input.association_id)
+            .ok_or_else(does_not_exist)?;
+        // `AssociationDescription$Name` is "the name of the SSM document", so the name the
+        // document is held under is what the association applies from now on, whichever
+        // spelling named it.
+        record.name = document.name.clone();
+        record.push_version(applied);
+        let description = record.latest_description(now);
+
+        Ok(UpdateAssociationOutput {
+            association_description: description,
+        })
     }
 }
+
+// `non_empty` reads an optional member the request set to nothing the same way as one it
+// omitted: an EMPTY `Name`, `DocumentVersion`, `ScheduleExpression` or `AssociationVersion`
+// names no document, no version and no schedule. The one reading of that lives in
+// `crate::state`.
+use crate::state::non_empty;

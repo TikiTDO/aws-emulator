@@ -375,6 +375,8 @@ mod search_indexing_pipeline_outputs;
 mod section_loop_expansion;
 #[path = "all/service_role_permissions.rs"]
 mod service_role_permissions;
+#[path = "all/ssm_association_resources.rs"]
+mod ssm_association_resources;
 #[path = "all/ssm_typed_parameters.rs"]
 mod ssm_typed_parameters;
 #[path = "all/stack_configuration_and_provider_limits.rs"]

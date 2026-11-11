@@ -896,21 +896,26 @@ pub(super) const PARAMETER_NOT_FOUND: &str = "ParameterNotFound";
 /// removes it.
 ///
 /// Named rather than spelled at each call because the provider REPORTS which of them was
-/// refused ([`parameter_handler_refusal`]), so the name in the report and the name in the
+/// refused ([`handler_refusal`]), so the name in the report and the name in the
 /// `X-Amz-Target` cannot drift apart.
 pub(super) const PUT_PARAMETER: &str = "PutParameter";
 pub(super) const DELETE_PARAMETER: &str = "DeleteParameter";
 
-/// How the `AWS::SSM::Parameter` provider reports a Systems Manager call it was refused.
+/// How a provider of this catalogue reports a call to the service that owns its resource that
+/// that service REFUSED.
 ///
 /// CloudFormation quotes the resource provider's own message in the failed resource's
-/// `ResourceStatusReason` (`super::super::provisioning`), and this type's provider reports the
-/// API OPERATION it asked for beside that service's refusal of it — so the reason says both
-/// which call failed and why, which is what a client diagnosing a failed deployment of a
-/// parameter reads. The two parts are the operation this provider named and the message the
-/// owning service worded; the error CODE is left exactly as that service answered it, since
-/// the class the failure is reported under is decided from the code and never from this text.
-fn parameter_handler_refusal(operation: &str, refusal: Refusal) -> Refusal {
+/// `ResourceStatusReason` (`super::super::provisioning`), and a provider reports the API
+/// OPERATION it asked for beside that service's refusal of it — so the reason says both which
+/// call failed and why, which is what a client diagnosing a failed deployment reads. The two
+/// parts are the operation the provider named and the message the owning service worded; the
+/// error CODE is left exactly as that service answered it, since the class the failure is
+/// reported under is decided from the code and never from this text.
+///
+/// Shared by every arm that reports a refusal this way — the `AWS::SSM::Parameter` provider
+/// here and the `AWS::SSM::Association` provider beside it ([`super::ssm_associations`]) — so
+/// the wording cannot drift between two copies of it.
+pub(super) fn handler_refusal(operation: &str, refusal: Refusal) -> Refusal {
     let message = if refusal.message.is_empty() {
         format!("Error occurred during operation '{operation}'.")
     } else {
@@ -965,7 +970,7 @@ pub(super) async fn put_parameter(
     }
     call_ssm(ctx, region, PUT_PARAMETER, &Value::Object(request))
         .await
-        .map_err(|refusal| parameter_handler_refusal(PUT_PARAMETER, refusal))?;
+        .map_err(|refusal| handler_refusal(PUT_PARAMETER, refusal))?;
     Ok(Created::default())
 }
 
@@ -986,7 +991,7 @@ pub(super) async fn update_parameter(
     request.insert("Overwrite".to_string(), Value::Bool(true));
     call_ssm(ctx, region, PUT_PARAMETER, &Value::Object(request))
         .await
-        .map_err(|refusal| parameter_handler_refusal(PUT_PARAMETER, refusal))?;
+        .map_err(|refusal| handler_refusal(PUT_PARAMETER, refusal))?;
     Ok(Created::default())
 }
 
@@ -1004,7 +1009,7 @@ pub(super) async fn delete_parameter(
         // Judged on the error CODE, never on the message, which carries the request's own
         // parameter name.
         Err(refusal) if refusal.code == PARAMETER_NOT_FOUND => Ok(()),
-        Err(refusal) => Err(parameter_handler_refusal(DELETE_PARAMETER, refusal)),
+        Err(refusal) => Err(handler_refusal(DELETE_PARAMETER, refusal)),
     }
 }
 

@@ -96,6 +96,9 @@ fn identifying_return_value(resource_type: &str) -> Option<&'static str> {
         // The Amazon EKS association, the Batch environments and queues, and a task
         // definition: each one's `Ref` is the ARN its create answered.
         EKS_POD_IDENTITY_ASSOCIATION => "AssociationArn",
+        // A State Manager association, identified by the `AssociationId` Systems Manager
+        // minted — "Ref returns the association ID", the handle every call on one takes.
+        SSM_ASSOCIATION => SSM_ASSOCIATION_ID_ATTRIBUTE,
         BATCH_COMPUTE_ENVIRONMENT => "ComputeEnvironmentArn",
         BATCH_JOB_QUEUE => "JobQueueArn",
         BATCH_SERVICE_ENVIRONMENT => "ServiceEnvironmentArn",

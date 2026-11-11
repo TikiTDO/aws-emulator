@@ -23,11 +23,13 @@
 //! harness builds: CloudFormation makes the calls, Amazon EC2 serves the launch and the reads,
 //! and AWS Systems Manager answers the public parameter the template resolves its AMI from.
 //!
-//! The stack's `AWS::SSM::Association` is DECLARED-ONLY here: no Systems Manager call is made
-//! for a declared resource of that type yet, which is its own issue. It is in the template
-//! because it is what DEPENDS on the instance — through a `Ref` to it — and the rule's second
-//! consequence is about the dependent, so what this suite reads about it is whether the stack
-//! recorded an event for it at all, never that an association exists in Systems Manager.
+//! The stack's `AWS::SSM::Association` is created in AWS Systems Manager itself, like every
+//! other resource here: it is in the template because it is what DEPENDS on the instance —
+//! through a `Ref` to it — and the rule's second consequence is about the dependent, so what
+//! this suite reads about it is whether the stack recorded an event for it at all. Its
+//! parameters are the ones the document it applies requires, which is what Systems Manager
+//! holds any association to; `ssm_association_resources.rs` is the suite that pins what the
+//! association itself then reports.
 
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
@@ -102,6 +104,9 @@ fn template(instance_type: &str, subnet_id: &str) -> String {
                 "Type": "AWS::SSM::Association",
                 "Properties": {
                     "Name": "AWS-RunShellScript",
+                    // The one parameter that document declares without a default, which
+                    // Systems Manager requires of every association applying it.
+                    "Parameters": { "commands": ["echo deployed"] },
                     "Targets": [
                         { "Key": "InstanceIds", "Values": [{ "Ref": INSTANCE }] }
                     ]

@@ -74,6 +74,38 @@ pub const MAX_ASSOCIATIONS_PER_REGION: usize = 2_000;
 /// space and the store could grow without bound.
 pub const MAX_ASSOCIATIONS_TOTAL: usize = 2 * MAX_ASSOCIATIONS_PER_REGION;
 
+/// How many versions ONE association keeps: "You have reached the maximum number versions
+/// allowed for an association. Each association has a limit of 1,000 versions"
+/// (`AssociationVersionLimitExceeded`). An update past it is refused with that error rather
+/// than appending a version.
+pub const MAX_ASSOCIATION_VERSIONS: u64 = 1_000;
+
+/// How this service states that an association can hold no further version.
+/// `AssociationVersionLimitExceeded`'s own documentation is "You have reached the maximum
+/// number versions allowed for an association. Each association has a limit of 1,000
+/// versions." — the limit being [`MAX_ASSOCIATION_VERSIONS`], written the way that sentence
+/// writes it.
+pub fn association_version_limit_exceeded() -> String {
+    format!(
+        "You have reached the maximum number versions allowed for an association. Each \
+         association has a limit of {} versions.",
+        thousands(MAX_ASSOCIATION_VERSIONS)
+    )
+}
+
+/// `count` with a comma every three digits, which is how the sentence above writes the limit.
+fn thousands(count: u64) -> String {
+    let digits = count.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
 /// The `ResourceTypeForTagging` value whose id is an association's minted id (from the
 /// modelled enum, `crate::ops::types::RESOURCE_TYPE_FOR_TAGGING_VALUES`).
 pub const TAGGING_TYPE_ASSOCIATION: &str = "Association";
@@ -489,5 +521,100 @@ impl ComAmazonawsSsmAmazonssmState {
     /// guard ([`MAX_ASSOCIATIONS_TOTAL`]), measured across EVERY Region.
     pub fn can_hold_another_association(&self) -> bool {
         self.associations.len() < MAX_ASSOCIATIONS_TOTAL
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One version record, which is all the version arithmetic below reads.
+    fn version(number: u64) -> AssociationVersionRecord {
+        AssociationVersionRecord {
+            version: number,
+            created_at: SystemTime::UNIX_EPOCH,
+            document_version: None,
+            parameters: BTreeMap::new(),
+            targets: Vec::new(),
+            schedule_expression: None,
+            output_location: None,
+            association_name: None,
+            automation_target_parameter_name: None,
+            max_errors: None,
+            max_concurrency: None,
+            compliance_severity: None,
+            sync_compliance: None,
+            apply_only_at_cron_interval: false,
+            calendar_names: Vec::new(),
+            target_locations: Vec::new(),
+            schedule_offset: None,
+            duration: None,
+            target_maps: Vec::new(),
+            alarm_configuration: None,
+            association_dispatch_assume_role: None,
+        }
+    }
+
+    /// An association holding versions up to `held`.
+    fn record(held: u64) -> AssociationRecord {
+        let mut record = AssociationRecord::new(
+            "00000000-0000-4000-8000-000000000000".to_string(),
+            "us-west-2".to_string(),
+            "AWS-UpdateSSMAgent".to_string(),
+            None,
+            SystemTime::UNIX_EPOCH,
+            version(FIRST_ASSOCIATION_VERSION),
+            BTreeMap::new(),
+        );
+        for number in (FIRST_ASSOCIATION_VERSION + 1)..=held {
+            record.push_version(version(number));
+        }
+        record
+    }
+
+    /// RULE: a create mints version 1 and each update appends the next number, so the number
+    /// an update would take is one past the version in force — which is what the documented
+    /// per-association version limit is measured against.
+    #[test]
+    fn the_next_version_is_one_past_the_version_in_force() {
+        // (case, how many versions the association holds, the next number, whether an update
+        // is still within the limit)
+        let rows: &[(&str, u64, u64, bool)] = &[
+            ("a create alone", 1, 2, true),
+            ("a few updates", 4, 5, true),
+            ("one version short of the limit", 999, 1_000, true),
+            ("the limit reached", MAX_ASSOCIATION_VERSIONS, 1_001, false),
+        ];
+        for (case, held, expected, within) in rows {
+            let record = record(*held);
+            assert_eq!(
+                record.latest_version(),
+                *held,
+                "case {case:?}: expected the version in force to be {held}"
+            );
+            let next = record.next_version();
+            assert_eq!(
+                next, *expected,
+                "case {case:?}: expected the next version to be {expected}, got {next}"
+            );
+            assert_eq!(
+                next <= MAX_ASSOCIATION_VERSIONS,
+                *within,
+                "case {case:?}: expected within-the-limit to be {within} at version {next}"
+            );
+        }
+    }
+
+    /// RULE: the refusal an association past its version limit answers is AWS's own sentence,
+    /// carrying the limit the way that sentence writes it.
+    #[test]
+    fn the_version_limit_refusal_is_aws_own_sentence() {
+        let message = association_version_limit_exceeded();
+        let expected = "You have reached the maximum number versions allowed for an \
+                        association. Each association has a limit of 1,000 versions.";
+        assert_eq!(
+            message, expected,
+            "case \"the version limit\": expected {expected:?}, got {message:?}"
+        );
     }
 }

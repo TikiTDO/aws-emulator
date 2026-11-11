@@ -43,7 +43,7 @@ pub(crate) const AGENT: &str = "AWS-UpdateSSMAgent";
 
 /// A command document Systems Manager publishes that declares one parameter with no
 /// default, so a create has to supply a value for it (same catalogue).
-const SHELL: &str = "AWS-RunShellScript";
+pub(crate) const SHELL: &str = "AWS-RunShellScript";
 
 /// An automation document Systems Manager publishes, to span document type (same
 /// catalogue).
@@ -54,7 +54,7 @@ const AUTOMATION: &str = "AWS-EnableS3BucketEncryption";
 pub(crate) const NODE: &str = "i-0123456789abcdef0";
 
 /// A second node id, of the shorter form the same pattern admits.
-const OTHER_NODE: &str = "i-0abc1234";
+pub(crate) const OTHER_NODE: &str = "i-0abc1234";
 
 /// A router with just this service mounted, and the engine it was mounted on — the handle
 /// a case reads the store through.
@@ -71,7 +71,7 @@ pub(crate) fn service() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
 }
 
 /// Call `operation` signed for `region`, returning `(status, body)`.
-async fn call_in_region(
+pub(crate) async fn call_in_region(
     router: &MultiServiceRouter,
     region: &str,
     operation: &str,
@@ -117,7 +117,7 @@ async fn call_in_region(
 }
 
 /// Call `operation` signed for [`REGION`].
-async fn call(router: &MultiServiceRouter, operation: &str, body: &Value) -> (u16, Value) {
+pub(crate) async fn call(router: &MultiServiceRouter, operation: &str, body: &Value) -> (u16, Value) {
     call_in_region(router, REGION, operation, body).await
 }
 

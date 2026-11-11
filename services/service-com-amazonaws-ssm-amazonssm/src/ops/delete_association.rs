@@ -1,15 +1,23 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteAssociation
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteAssociation`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteAssociation::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Disassociates one SSM document from the nodes an association applies it to: the
+//! association record this service holds ([`crate::state::associations::AssociationRecord`])
+//! is REMOVED, so a later `DescribeAssociation` of the same handle reports that the
+//! association does not exist.
+//!
+//! An association is addressed the way `DescribeAssociation` addresses one: by the
+//! `AssociationId` this service minted, or, for an association a create paired with ONE node
+//! through the deprecated `InstanceId`, by the document name and that node together. "If you
+//! created the association by using the Targets parameter, then you must delete the
+//! association by using the association ID" is what the pairing lookup can and cannot answer:
+//! the nodes an association TARGETS are criteria resolved when it is dispatched rather than an
+//! identity it is held under.
+//!
+//! Removing the association changes no node: "when you disassociate a document from a managed
+//! node, it doesn't change the configuration of the node", and this emulator dispatches
+//! nothing to a node in any case.
 //!
 //! ## Shape of an operation
 //!
@@ -160,18 +168,58 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteAssociation` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteAssociationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteAssociation"))
+        // `AssociationId`'s, `Name`'s and `InstanceId`'s patterns are MODELLED constraints
+        // the centralized walk has already refused anything outside of. What is read here is
+        // which association the request resolves to.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            DeleteAssociationErrorModeled::InternalServerError(InternalServerError {
+                message: Some("the association store is unavailable".to_string()),
+            })
+        })?;
+
+        let region = crate::state::request_region(ctx.parts());
+        let mut store = state.lock();
+
+        let does_not_exist = || {
+            DeleteAssociationErrorModeled::AssociationDoesNotExist(AssociationDoesNotExist {
+                message: Some(crate::state::associations::ASSOCIATION_DOES_NOT_EXIST.to_string()),
+            })
+        };
+        // The two ways an association is addressed, read exactly as `DescribeAssociation`
+        // reads them: an association id names ONE association, and the document name and the
+        // node id of a create that named an `InstanceId` name the one association that pairs
+        // them, so both halves of the pair are needed. A request that identifies no
+        // association either way is a malformed request rather than a miss.
+        let association_id = match (
+            non_empty(input.association_id.as_deref()),
+            non_empty(input.name.as_deref()),
+            non_empty(input.instance_id.as_deref()),
+        ) {
+            (Some(id), _, _) => id.to_string(),
+            (None, Some(name), Some(instance_id)) => store
+                .association_of_node(&region, name, instance_id)
+                .ok_or_else(does_not_exist)?
+                .association_id
+                .clone(),
+            (None, _, _) => {
+                return Err(crate::scaffolded::Scaffolded::validation(
+                    "Either AssociationId or both Name and InstanceId must be specified",
+                ))
+            }
+        };
+        // "The specified association doesn't exist" (`AssociationDoesNotExist`): the removal
+        // itself is what says whether this Region held one, so a delete naming an association
+        // that is not there is refused rather than answered as a removal that removed
+        // nothing.
+        if !store.remove_association(&region, &association_id) {
+            return Err(does_not_exist().into());
+        }
+
+        Ok(DeleteAssociationOutput {})
     }
 }
+
+// `non_empty` reads an optional member the request set to nothing the same way as one it
+// omitted: an EMPTY `AssociationId`, `Name` or `InstanceId` names no association, no document
+// and no node. The one reading of that lives in `crate::state`.
+use crate::state::non_empty;

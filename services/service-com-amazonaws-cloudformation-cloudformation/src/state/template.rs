@@ -2674,6 +2674,11 @@ pub fn replacement_properties(resource_type: &str) -> &'static [&'static str] {
         APPCONFIG_ENVIRONMENT => &["ApplicationId"],
         APPCONFIG_CONFIGURATION_PROFILE => &["ApplicationId", "LocationUri", "Type"],
         APPCONFIG_DEPLOYMENT_STRATEGY => &["ReplicateTo"],
+        // A State Manager association may be paired with ONE node by the deprecated
+        // `InstanceId`, which `CreateAssociation` takes and `UpdateAssociation` does not: the
+        // node an association was created for cannot be changed on it, so a declaration
+        // naming another node asks for a different association.
+        SSM_ASSOCIATION => &["InstanceId"],
         _ => composite_identity_properties(resource_type),
     }
 }
@@ -2903,6 +2908,7 @@ pub const IMPLEMENTED_RESOURCE_TYPES: &[&str] = &[
     SNS_TOPIC,
     SQS_QUEUE,
     "AWS::SecretsManager::Secret",
+    SSM_ASSOCIATION,
     SSM_PARAMETER,
     STEP_FUNCTIONS_ACTIVITY,
     TRANSFER_SERVER,

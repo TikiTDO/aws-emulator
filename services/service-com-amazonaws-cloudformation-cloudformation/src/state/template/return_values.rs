@@ -1351,6 +1351,24 @@ pub(super) fn return_values(
             attributes.insert("Id".to_string(), generated_uuid("rum/appmonitor", name));
             (name.to_string(), attributes)
         }
+        // "Ref returns the association ID"; Fn::GetAtt: AssociationId. Systems Manager ASSIGNS
+        // that id — `CreateAssociation` takes no identifier for the association, only the
+        // document it applies and the targets it applies it to — so a declaration reports an
+        // identifier of that service's own shape (the 8-4-4-4-12 hexadecimal its
+        // `AssociationId` fixes) rather than the document `Name` or CloudFormation's
+        // `<stack>-<logical id>-<unique id>`, neither of which any Systems Manager call on an
+        // association would accept. The stand-in is a function of the STACK and the LOGICAL
+        // ID rather than of the resource's name, because the name a declaration of this type
+        // carries is the document's and two associations of one stack may apply the same
+        // document; `super::provisioning` re-points it at the id the create really answered.
+        SSM_ASSOCIATION => {
+            let id = generated_uuid(
+                resource_type,
+                &format!("{}/{}", scope.stack.stack_id, declared.logical_id),
+            );
+            attributes.insert(SSM_ASSOCIATION_ID_ATTRIBUTE.to_string(), id.clone());
+            (id, attributes)
+        }
         // "Ref returns the alarm name"; Fn::GetAtt: Arn. A CloudWatch alarm's ARN spells
         // its resource with a COLON
         // (`arn:aws:cloudwatch:<region>:<account>:alarm:<alarm name>`), which is why the
@@ -1839,6 +1857,7 @@ pub fn published_attribute_names(resource_type: &str) -> &'static [&'static str]
             "OpenIdConnectIssuerUrl",
         ],
         EKS_POD_IDENTITY_ASSOCIATION => &["AssociationArn", "AssociationId"],
+        SSM_ASSOCIATION => &[SSM_ASSOCIATION_ID_ATTRIBUTE],
         BATCH_COMPUTE_ENVIRONMENT => &["ComputeEnvironmentArn"],
         BATCH_JOB_QUEUE => &["JobQueueArn"],
         BATCH_SERVICE_ENVIRONMENT => &["ServiceEnvironmentArn"],
@@ -2080,6 +2099,13 @@ pub fn identity_is_service_assigned(resource_type: &str) -> bool {
         // and "Ref returns the association ARN" — a template declares the cluster, the
         // namespace, the service account and the role, never the association's own id.
         || resource_type == EKS_POD_IDENTITY_ASSOCIATION
+        // A State Manager association is one more: `CreateAssociation` takes no identifier
+        // for the association — the `Name` a declaration states names the DOCUMENT the
+        // association applies, and Systems Manager would refuse it as an association id —
+        // and answers the `AssociationId` it minted, which is what "Ref returns the
+        // association ID" publishes and what `DescribeAssociation`, `UpdateAssociation` and
+        // `DeleteAssociation` each take.
+        || resource_type == SSM_ASSOCIATION
         // An IAM access key is one more: "Ref returns the AWS::IAM::AccessKey resource's
         // access key ID", `CreateAccessKey` takes no identifier — the declaration states
         // only the user the key belongs to — and that id is what every IAM operation on a
@@ -3340,6 +3366,21 @@ pub const SECRETSMANAGER_SECRET: &str = "AWS::SecretsManager::Secret";
 /// Manager itself, and "Ref returns the name of the parameter", so the parameter a stack
 /// declares is the one `ssm GetParameter` answers with.
 pub const SSM_PARAMETER: &str = "AWS::SSM::Parameter";
+
+/// A State Manager association's resource type. This is a type `super::provisioning` creates
+/// in Systems Manager itself, and "Ref returns the association ID" — the identifier that
+/// service MINTS for the association, which is why [`identity_is_service_assigned`] names the
+/// type: `CreateAssociation` takes no identifier for the association (the `Name` a declaration
+/// states names the DOCUMENT it applies), every call on one takes that id, and the id is the
+/// 8-4-4-4-12 hexadecimal the SSM model's `AssociationId` fixes
+/// (`smithy_query(query="shape", shape="AssociationId")`), which no naming rule here could
+/// compute.
+pub const SSM_ASSOCIATION: &str = "AWS::SSM::Association";
+
+/// The published return value an `AWS::SSM::Association` carries its identifier under
+/// ("Fn::GetAtt … AssociationId: the association ID"), which is also the member Systems
+/// Manager's own `AssociationDescription` reports it as.
+pub const SSM_ASSOCIATION_ID_ATTRIBUTE: &str = "AssociationId";
 
 /// An EventBridge Scheduler schedule group's resource type (that model:
 /// `cloudFormationName: Scheduler`, `arnNamespace: scheduler`). This is a type

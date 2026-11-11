@@ -511,7 +511,7 @@ use super::template::{
     SNS_SUBSCRIPTION,
     SNS_TOPIC, SNS_TOPIC_INLINE_POLICY, SNS_TOPIC_POLICY, SQS_QUEUE, SQS_QUEUE_INLINE_POLICY,
     SQS_QUEUE_POLICY,
-    SSM_PARAMETER, STEP_FUNCTIONS_ACTIVITY,
+    SSM_ASSOCIATION, SSM_PARAMETER, STEP_FUNCTIONS_ACTIVITY,
     TRANSFER_SERVER, WAFV2_IP_SET, WAFV2_REGEX_PATTERN_SET, WAFV2_RULE_GROUP, WAFV2_WEB_ACL,
     WAFV2_WEB_ACL_ASSOCIATION, WAF_REGIONAL_IP_SET, XRAY_SAMPLING_RULE,
 };
@@ -776,6 +776,16 @@ pub(super) enum Provisioner {
     /// its `DesiredState` asked for.
     PipesPipe,
     SsmParameter,
+    /// `AWS::SSM::Association`: a State Manager association of AWS Systems Manager, which
+    /// `CreateAssociation` creates, `UpdateAssociation` changes and `DeleteAssociation`
+    /// removes.
+    ///
+    /// Its identity is the `AssociationId` that service MINTS: the create takes no identifier
+    /// for the association at all — the `Name` a declaration states names the DOCUMENT the
+    /// association applies — and every call on one takes that id, which is why
+    /// `template::identity_is_service_assigned` names the type and the create replaces the
+    /// stand-in the naming rules computed with the id Systems Manager answered.
+    SsmAssociation,
     StepFunctionsActivity,
     SchedulerScheduleGroup,
     SchedulerSchedule,
@@ -973,6 +983,7 @@ pub(super) fn provisioner_for(resource_type: &str) -> Option<Provisioner> {
         EVENTS_RULE => Some(Provisioner::EventsRule),
         PIPES_PIPE => Some(Provisioner::PipesPipe),
         SSM_PARAMETER => Some(Provisioner::SsmParameter),
+        SSM_ASSOCIATION => Some(Provisioner::SsmAssociation),
         STEP_FUNCTIONS_ACTIVITY => Some(Provisioner::StepFunctionsActivity),
         SCHEDULER_SCHEDULE_GROUP => Some(Provisioner::SchedulerScheduleGroup),
         SCHEDULER_SCHEDULE => Some(Provisioner::SchedulerSchedule),
@@ -1273,6 +1284,10 @@ impl Provisioner {
             // tags CloudFormation gives it beside the ones the declaration asks for.
             Self::PipesPipe => event_pipes::create_pipe(ctx, region, resource, propagated).await,
             Self::SsmParameter => put_parameter(ctx, region, resource, propagated).await,
+            // `AWS::SSM::Association` publishes no `Tags` property — Systems Manager tags
+            // documents and managed nodes rather than the associations between them — so the
+            // type is not taggable and no tags are propagated to one.
+            Self::SsmAssociation => create_ssm_association(ctx, region, resource).await,
             Self::StepFunctionsActivity => {
                 create_activity(ctx, region, resource, propagated).await
             }
@@ -1955,6 +1970,13 @@ impl Provisioner {
             Self::SsmParameter => update_parameter(ctx, region, resource, declared)
                 .await
                 .map(Some),
+            // `UpdateAssociation` takes the id Systems Manager minted together with the whole
+            // declaration — the document the association applies included — so a changed
+            // declaration reaches that service as a new version of the same association
+            // rather than replacing it.
+            Self::SsmAssociation => update_ssm_association(ctx, region, resource, declared)
+                .await
+                .map(Some),
             // `UpdateGroup` "updates any of the properties for precedence, IAM role, or
             // description" of a group the pool already holds, so a changed declaration of
             // those reaches Amazon Cognito through it — while the two members that make the
@@ -2430,6 +2452,9 @@ impl Provisioner {
             // record says which bus it is on, so the delete takes the record.
             Self::EventsRule => delete_rule(ctx, region, resource).await,
             Self::SsmParameter => delete_parameter(ctx, region, physical_resource_id).await,
+            Self::SsmAssociation => {
+                delete_ssm_association(ctx, region, physical_resource_id).await
+            }
             Self::StepFunctionsActivity => {
                 delete_activity(ctx, region, physical_resource_id).await
             }
@@ -2839,6 +2864,11 @@ impl Provisioner {
             // only the resource's own record carries.
             Self::EventsRule => describe_rule(ctx, region, resource).await,
             Self::SsmParameter => describe_parameter(ctx, region, physical_resource_id).await,
+            // Systems Manager's own read of the association the stack created, by the id it
+            // minted for it.
+            Self::SsmAssociation => {
+                describe_ssm_association(ctx, region, physical_resource_id).await
+            }
             Self::StepFunctionsActivity => {
                 describe_activity(ctx, region, physical_resource_id).await
             }
@@ -3111,6 +3141,8 @@ mod platform_services;
 mod route53_policies;
 mod compute_fleet;
 mod network_and_delivery;
+mod ssm_associations;
+use ssm_associations::*;
 use compute_fleet::*;
 pub(crate) use network_and_delivery::*;
 use platform_services::*;
