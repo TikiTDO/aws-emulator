@@ -17,6 +17,10 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use serde_json::{json, Value};
+use service_com_amazonaws_organizations_awsorganizationsv20161128::state::{
+    ComAmazonawsOrganizationsAwsorganizationsv20161128State,
+    DEFAULT_FEATURE_SET as ORGANIZATIONS_DEFAULT_FEATURE_SET,
+};
 use service_com_amazonaws_taxsettings_taxsettings::state::{
     ComAmazonawsTaxsettingsTaxsettingsState, ERROR_CODE_GENERAL_CONFLICT, MAX_STORED_REGISTRATIONS,
     STATE_CONFLICT_MESSAGE, STATUS_PENDING, TAX_REGISTRATIONS_PAGE_BOUNDS,
@@ -72,10 +76,20 @@ pub(crate) fn make_validations_due(engine: &Arc<engine::InMemoryEngine>) {
     }
 }
 
-/// Record which account, if any, this service holds as the management account of
-/// the organization the presented account belongs to — the standing an
-/// organization-level write is reserved to. `None` is the world in which this
-/// service is told of no organization at all.
+/// Record which account, if any, manages the organization the presented account
+/// belongs to — the standing an organization-level write is reserved to. `None` is
+/// the world in which that account is in no organization at all.
+///
+/// The fact is written where its owner keeps it: the organization record of the
+/// AWS Organizations control plane on the same engine, which is what a client that
+/// creates an organization writes and what this service reads. Organizations makes
+/// the account that CREATES an organization its management account and reaches any
+/// other arrangement only by invitation (`InviteAccountToOrganization` then
+/// `AcceptHandshake`, both still stubs there), so an organization some OTHER
+/// account manages is arranged through that service's state module — the very
+/// state its own handlers answer from. The management account's other stored
+/// fields are derived from its id, so they follow it rather than being invented
+/// here, and the organization keeps a member record for it.
 ///
 /// The one place a test establishes that world, so every suite that needs it
 /// establishes the same one.
@@ -83,9 +97,38 @@ pub(crate) fn record_management_account(
     engine: &Arc<engine::InMemoryEngine>,
     account_id: Option<&str>,
 ) {
-    let state = engine.state::<ComAmazonawsTaxsettingsTaxsettingsState>();
-    state.lock().organization_management_account_id =
-        account_id.map(std::string::ToString::to_string);
+    let state = engine.state::<ComAmazonawsOrganizationsAwsorganizationsv20161128State>();
+    let mut store = state.lock();
+    let Some(account_id) = account_id else {
+        *store = ComAmazonawsOrganizationsAwsorganizationsv20161128State::default();
+        return;
+    };
+    store.create_organization(ORGANIZATIONS_DEFAULT_FEATURE_SET);
+    let organization = store
+        .organization
+        .as_mut()
+        .expect("the organization the create recorded");
+    let previous = std::mem::replace(&mut organization.master_account_id, account_id.to_string());
+    if previous == account_id {
+        return;
+    }
+    organization.master_account_arn = organization.master_account_arn.replace(&previous, account_id);
+    organization.master_account_email = organization
+        .master_account_email
+        .replace(&previous, account_id);
+    let mut management = store
+        .accounts
+        .remove(&previous)
+        .expect("the member record of the account that created the organization");
+    management.arn = management.arn.replace(&previous, account_id);
+    management.email = management.email.replace(&previous, account_id);
+    management.id = account_id.to_string();
+    store.accounts.insert(account_id.to_string(), management);
+    for children in store.children.values_mut() {
+        for child in children.iter_mut().filter(|child| child.id == previous) {
+            child.id = account_id.to_string();
+        }
+    }
 }
 
 /// What one TaxSettings call answered: the HTTP status, the restJson1 `__type`

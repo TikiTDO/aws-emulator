@@ -63,6 +63,8 @@ mod listing_page_bounds;
 mod missing_resource_errors;
 #[path = "all/non_api_delete_jurisdictions.rs"]
 mod non_api_delete_jurisdictions;
+#[path = "all/organization_management_standing.rs"]
+mod organization_management_standing;
 #[path = "all/pending_trn_conflict.rs"]
 mod pending_trn_conflict;
 #[path = "all/put_tax_exemption_state.rs"]

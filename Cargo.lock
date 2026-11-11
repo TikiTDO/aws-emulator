@@ -19255,6 +19255,7 @@ dependencies = [
  "hex",
  "http",
  "serde_json",
+ "service-com-amazonaws-organizations-awsorganizationsv20161128",
  "sha2 0.10.9",
  "tokio",
  "tracing",

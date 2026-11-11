@@ -21,6 +21,10 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# Which account is the organization's management account is established in AWS
+# Organizations, so the organization-level write this service reserves to that
+# account reads the standing from that control plane's store on the shared engine.
+service-com-amazonaws-organizations-awsorganizationsv20161128 = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

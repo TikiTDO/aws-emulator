@@ -19,6 +19,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use ::aws_smithy_types::base64;
 
+pub mod organization;
 pub mod registration_number;
 
 use crate::ops::types::{
@@ -667,21 +668,11 @@ pub struct ComAmazonawsTaxsettingsTaxsettingsState {
     ///
     /// The election is an organization-level one — whether an organization's
     /// member accounts inherit the management account's tax settings — so only
-    /// the management account of the organization may record it: see
-    /// [`Self::organization_management_account_id`], which the write consults
-    /// before it touches this field.
+    /// the management account of the organization may record it: the standing
+    /// [`organization::caller_is_management_account`] reads from the control
+    /// plane that owns it, which the write consults before it touches this
+    /// field.
     pub tax_inheritance: Option<String>,
-    /// The management account of the AWS Organizations organization the account
-    /// this emulator presents belongs to, when it belongs to one.
-    ///
-    /// `None` by default: an organization is established through AWS
-    /// Organizations, which this emulator models in its own service and whose
-    /// state holds no organization until one is created, so the presented
-    /// account is a standalone account and is nobody's organization management
-    /// account. Set it to an account id to model that account as the management
-    /// account of the organization — the standing
-    /// [`Self::is_organization_management_account`] judges a caller by.
-    pub organization_management_account_id: Option<String>,
     /// The account's supplemental tax registrations, keyed by the `authorityId`
     /// this service minted for each when it was first stored.
     ///
@@ -733,17 +724,6 @@ pub struct ComAmazonawsTaxsettingsTaxsettingsState {
 }
 
 impl ComAmazonawsTaxsettingsTaxsettingsState {
-    /// Whether `account_id` is the management account of the organization the
-    /// presented account belongs to — the standing an organization-level write
-    /// is reserved to.
-    ///
-    /// False while this service is told of no organization
-    /// ([`Self::organization_management_account_id`]), because an account that
-    /// is in no organization is the management account of none.
-    pub fn is_organization_management_account(&self, account_id: &str) -> bool {
-        self.organization_management_account_id.as_deref() == Some(account_id)
-    }
-
     /// Materialise every TRN validation the clock has already made due at `now`.
     ///
     /// Each stored registration carries the instant its validation falls due,

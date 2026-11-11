@@ -14,10 +14,11 @@
 //! observe the write is to read it back.
 //!
 //! Recording it is reserved to the management account of the caller's
-//! organization
-//! ([`crate::state::ComAmazonawsTaxsettingsTaxsettingsState::is_organization_management_account`]):
-//! any other caller is refused with the modelled `ValidationException` before
-//! anything is stored.
+//! organization, which is established in AWS Organizations and read from that
+//! control plane's state on the shared engine
+//! ([`crate::state::organization::caller_is_management_account`]): any other
+//! caller is refused with the modelled `ValidationException` before anything is
+//! stored.
 //!
 //! ## Shape of an operation
 //!
@@ -165,6 +166,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
+        // The election is an organization-level one — whether the
+        // organization's member accounts inherit the management account's tax
+        // settings — so recording it is reserved to the management account of
+        // that organization. Which account that is belongs to the control plane
+        // an organization is established in, so it is READ from there rather
+        // than from anything this service was told: a client that creates an
+        // organization and then records the election reaches this gate
+        // satisfied, and one that is in no organization never does. A caller
+        // without that standing is refused with the modelled
+        // `ValidationException` (400) BEFORE anything is stored, so the election
+        // the account already had is the one the read still reports. The refusal
+        // is about the caller, not a parameter, so it names no field.
+        //
+        // Read before this service's own store is locked: the read takes the
+        // other store's lock, so no request ever holds both.
+        let caller_manages_the_organization =
+            crate::state::organization::caller_is_management_account(&*self.engine);
+
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             PutTaxInheritanceErrorModeled::InternalServerException(
                 crate::state::state_unavailable(),
@@ -172,15 +191,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })?;
         let mut store = state.lock();
 
-        // The election is an organization-level one — whether the
-        // organization's member accounts inherit the management account's tax
-        // settings — so recording it is reserved to the management account of
-        // that organization. A caller without that standing is refused with the
-        // modelled `ValidationException` (400) BEFORE anything is stored, so the
-        // election the account already had is the one the read still reports.
-        // The refusal is about the caller, not a parameter, so it names no field.
-        let caller = ::engine::emulator_account_id();
-        if !store.is_organization_management_account(caller) {
+        if !caller_manages_the_organization {
             // The access record for a state-changing call that changed nothing:
             // which operation ran and how it ended. No request value travels
             // here.
