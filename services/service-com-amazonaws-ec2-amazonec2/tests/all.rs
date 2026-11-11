@@ -1775,6 +1775,12 @@ mod create_transit_gateway_peering_attachment;
 // without cancelling anything. Declared beside `prefix_lists` for the reason the note above
 #[path = "all/spot_instance_request_cancellation.rs"]
 mod spot_instance_request_cancellation;
+// What `CreateLaunchTemplate` accepts as an `ImageId` that names an AWS-published public
+// Systems Manager parameter: every hierarchy the published catalog carries an AMI id under,
+// the value stored as submitted, and the resolution deferred to a launch from the template.
+// Declared at the tail of this file for the reason the note above gives.
+#[path = "all/launch_template_published_ssm_alias.rs"]
+mod launch_template_published_ssm_alias;
 // What `DeleteTrafficMirrorTarget` removes out of the Traffic Mirror target store, what it
 // refuses (an id naming no target, a target a session still mirrors to, a request naming no
 // id) and what it leaves alone. Declared at the tail of this file, which is where every new
