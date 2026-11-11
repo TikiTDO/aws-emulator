@@ -1,0 +1,52 @@
+Issue-Severity: HIGH
+Issue-Corpus: simparity-behavioral-aws-v1
+Issue-Corpus-Kind: behavioral
+Issue-Trace-Ids: apigateway__cognito-identity__cognito-idp.apigw-authorizer-invoke-role-trust-apigateway-positive apigateway__cognito-identity__cognito-idp.apigw-authorizer-invoke-role-missing-invoke-permission-negative apigateway__cognito-identity__cognito-idp.apigw-authorizer-invoke-role-missing-trust-negative
+Issue-Key: apigateway__cognito-identity__cognito-idp.apigw-authorizer-invoke-role-trust-apigateway-positive|_poll_test_invoke#13|AssertionError|raise AssertionError(
+Issue-Key: apigateway__cognito-identity__cognito-idp.apigw-authorizer-invoke-role-missing-invoke-permission-negative|run#19|AssertionError|assert with_perm_result["clientStatus"] == 0, f"control authorizer should succeed, got {with_perm_result}"
+Issue-Key: apigateway__cognito-identity__cognito-idp.apigw-authorizer-invoke-role-missing-trust-negative|run#19|AssertionError|assert good_result["clientStatus"] == 0, f"control authorizer should succeed, got {good_result}"
+Issue-Commit: 768db93f7ee9a823eb9c7336f7c11f317ed4b425
+
+# apigateway__cognito-identity__cognito-idp: TestInvokeAuthorizer ignores Authorizer$authorizerCredentials — an authorizer whose invocation role trusts apigateway and grants lambda:InvokeFunction is refused AUTHORIZER_CONFIGURATION_ERROR 500 (1 cause)
+
+> _Note: this issue was identified against the code base at commit `768db93f7ee9a823eb9c7336f7c11f317ed4b425`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
+
+## Operation
+TestInvokeAuthorizer
+
+## Description
+One net-new behavioral root cause, grounded in 3 failing checks of the simparity-behavioral-aws-v1 replay (apigateway__cognito-identity__cognito-idp 15/23). The other five failures in this service are marked OWNED by open issues and are NOT part of this issue. Related open issue that does NOT carry these replay keys, named for the fixer: 20261108T125359Z-apigateway-cognito-identity-cognito-idp-a-cfn-deployed.md — same configuration member (authorizerCredentials) but the DEPLOYED execute-api stage path; this cause is in the TestInvokeAuthorizer simulation path, which answers 200 with clientStatus 500 rather than serving a stage, so closing that issue does not close this one and this check must be re-replayed on its own.
+
+Cause 1 of 1: an Authorizer configured with authorizerCredentials (an IAM role) and no Lambda resource policy is treated as uninvokable, so TestInvokeAuthorizer reports a configuration error for a correctly-permissioned authorizer and cannot distinguish it from a broken one.
+AWS: Smithy com.amazonaws.apigateway#CreateAuthorizer, member authorizerCredentials — "Specifies the required credentials as an IAM role for API Gateway to invoke the authorizer. To specify an IAM role for API Gateway to assume, use the role's Amazon Resource Name (ARN). To use resource-based permissions on the Lambda function, specify null." The two mechanisms are alternatives: when authorizerCredentials names a role whose trust policy allows sts:AssumeRole for apigateway.amazonaws.com and whose permissions allow lambda:InvokeFunction on the authorizer function, API Gateway assumes that role and invokes the function — no resource-based permission on the function is required. TestInvokeAuthorizer then answers 200 with clientStatus 0 (per TestInvokeAuthorizerResponse$clientStatus, "Value is 0 if the authorizer succeeded"), the function's principalId and its policy document. The AUTHORIZER_CONFIGURATION_ERROR gateway response (500, body {"message":"Internal server error"}) is what AWS reserves for the opposite case: a credentials role that apigateway.amazonaws.com cannot assume, or one without lambda:InvokeFunction on that function.
+Emulator: every such simulation is refused with clientStatus 500 and the log lines "Execution failed due to configuration error: the authorizer's function allows this api's authorizer <authorizerName> no invocation of it, so no invocation was made" and "Answered through this API's AUTHORIZER_CONFIGURATION_ERROR gateway response: the client would have received HTTP 500"; no principalId and no policy are reported, and latency is ~9 ms because the function is never invoked. The fixed text of that configuration-error sentence is emulator-authored; AWS's 500 body is {"message":"Internal server error"} and the only variable part the caller sees is the authorizer name inside the execution log. In the checkout, services/service-com-amazonaws-apigateway-backplanecontrolservice/src/service/invoke/custom_authorizer.rs lines 241-267 gates the invocation solely on lambda_proxy::invocation_admitted (the FUNCTION's resource policy for the apigateway principal), and the Pending record built for the simulation (same file, lines 174-191; built in service/invoke/simulated_authorizer.rs lines 174-191) carries no authorizerCredentials at all — so the role is never consulted on any path.
+Why: the documented alternative to a Lambda resource policy is dead — an authorizer wired the way the console and CloudFormation wire one (AuthorizerCredentials pointing at an apigateway-trusting role) can never be tested or used. Worse, the emulator makes the CORRECT wiring indistinguishable from the broken one: the negative checks in this suite assert exactly this 500 for a role WITHOUT the invoke grant and for a role that does not trust apigateway, and the control leg with the grant produces the same 500, so a caller (or a security test) comparing the two configurations sees one answer and cannot tell a working authorizer from a misconfigured one.
+Fix: the custom-authorizer invocation path in the apigateway crate (service/invoke/custom_authorizer.rs::obtained, and the Pending record its callers build) — carry the authorizer's authorizerCredentials and admit the invocation when that role is assumable by apigateway.amazonaws.com and allows lambda:InvokeFunction on the authorizer function, falling back to the function's resource policy only when authorizerCredentials is null. The AUTHORIZER_CONFIGURATION_ERROR refusal must remain for a role that fails either test.
+Traces: apigateway__cognito-identity__cognito-idp.apigw-authorizer-invoke-role-trust-apigateway-positive, apigateway__cognito-identity__cognito-idp.apigw-authorizer-invoke-role-missing-invoke-permission-negative, apigateway__cognito-identity__cognito-idp.apigw-authorizer-invoke-role-missing-trust-negative (the last two fail on their CONTROL leg — the correctly-permissioned sibling role — not on the negative leg).
+
+## Evidence
+Behavioral replay (simparity-behavioral-aws-v1) against this checkout. All three checks create a python Lambda authorizer (Allow for token "allow-me", Deny otherwise), a REST API, a TOKEN authorizer with identitySource=method.request.header.Authorization and authorizerCredentials set to an IAM role they create, and call TestInvokeAuthorizer.
+
+[mismatch] apigateway__cognito-identity__cognito-idp.apigw-authorizer-invoke-role-trust-apigateway-positive
+  AssertionError: test_invoke_authorizer never reached clientStatus 0 within 45.0s (role propagation?): last={'ResponseMetadata': {'HTTPStatusCode': 200, ...}, 'clientStatus': 500, 'log': "... Starting authorizer: <id> of type TOKEN for the simulated request\n... Execution failed due to configuration error: the authorizer's function allows this api's authorizer authz-trusted no invocation of it, so no invocation was made\n... Answered through this API's AUTHORIZER_CONFIGURATION_ERROR gateway response: the client would have received HTTP 500", 'latency': 9, 'authorization': {}, 'claims': {}}
+  (role: trusts apigateway.amazonaws.com AND allows lambda:InvokeFunction on the authorizer function)
+
+[mismatch] apigateway__cognito-identity__cognito-idp.apigw-authorizer-invoke-role-missing-invoke-permission-negative
+  AssertionError: control authorizer should succeed, got {... 'clientStatus': 500, 'log': "... the authorizer's function allows this api's authorizer authz-with-perm no invocation of it, so no invocation was made ... AUTHORIZER_CONFIGURATION_ERROR ... HTTP 500", 'latency': 9}
+
+[mismatch] apigateway__cognito-identity__cognito-idp.apigw-authorizer-invoke-role-missing-trust-negative
+  AssertionError: control authorizer should succeed, got {... 'clientStatus': 500, 'log': "... the authorizer's function allows this api's authorizer authz-good-trust no invocation of it, so no invocation was made ... AUTHORIZER_CONFIGURATION_ERROR ... HTTP 500", 'latency': 9}
+
+Expected (AWS), for the role that trusts apigateway.amazonaws.com and grants lambda:InvokeFunction on the function: HTTP 200, clientStatus 0, principalId "user", policy = the function's Allow document for Authorization: allow-me (and the Deny document for a non-matching token).
+Actual (emulator): HTTP 200, clientStatus 500, no principalId, no policy, latency ~9 ms — identical to the two broken-role legs the same checks exercise.
+The authorizer name inside the log line is a per-run value; the role names, api id, authorizer id and function name are per-run values.
+
+## Steps to Reproduce
+1. Build and boot the emulator from this checkout.
+2. CreateFunction (python3.x) whose handler returns an Allow policy for event['authorizationToken']=='allow-me' and a Deny policy otherwise. Do NOT call lambda AddPermission for it.
+3. iam CreateRole with AssumeRolePolicyDocument allowing sts:AssumeRole for Service apigateway.amazonaws.com, plus an inline policy allowing lambda:InvokeFunction on that function's ARN.
+4. CreateRestApi; CreateAuthorizer --type TOKEN --authorizer-uri arn:aws:apigateway:<region>:lambda:path/2015-03-31/functions/<fnArn>/invocations --identity-source method.request.header.Authorization --authorizer-credentials <that role ARN>.
+5. apigateway test-invoke-authorizer --rest-api-id <apiId> --authorizer-id <authorizerId> --headers Authorization=allow-me
+   Observed: clientStatus 500, log "Execution failed due to configuration error: the authorizer's function allows this api's authorizer <name> no invocation of it, so no invocation was made", no policy. AWS: clientStatus 0 with the function's Allow policy.
+6. Repeat with a role that does NOT trust apigateway.amazonaws.com, and with one that trusts it but has no lambda:InvokeFunction grant: AWS answers 500 for both, so after the fix the three configurations must give 0/500/500 rather than 500/500/500.
+7. Re-replay the three check ids in trace_ids.
