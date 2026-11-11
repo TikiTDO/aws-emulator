@@ -59,6 +59,16 @@ const LOOK_INTERVAL: Duration = Duration::from_millis(50);
 /// made before the publish is answered, and the handler runs a few hundred milliseconds later).
 const QUIET_WINDOW: Duration = Duration::from_secs(5);
 
+/// How long a row that must RECEIVE something keeps looking for it.
+///
+/// The same budget as the clock-owed work above ([`SETTLE_WAIT`]), because the delivery is the
+/// same kind of work: the publish is answered before the function is invoked, and the handler
+/// then runs in-process alongside every other test of this target. The loop below leaves as
+/// soon as the sink holds what the row expects, so this bound only decides how long a LOADED
+/// machine is given — it is not a window any assertion depends on. A row expecting nothing
+/// keeps the quiet window above, so nothing about an unauthorized delivery is relaxed by it.
+const DELIVERY_WAIT: Duration = Duration::from_secs(25);
+
 /// How long EVERY row waits after the sink first holds what it expects, before the count is
 /// asserted: a delivery that happened twice lands inside it.
 const SETTLE_SLACK: Duration = Duration::from_secs(1);
@@ -459,10 +469,15 @@ async fn a_stack_declared_lambda_subscription_runs_the_function_it_names() {
         // The invocation is asynchronous and the handler's write is owed by the CLOCK, so the
         // sink is POLLED rather than read once. A row that must receive nothing is polled for
         // the whole quiet window, so an empty sink is not a sink read too early; a row that
-        // must receive something is polled once more after its expected count is reached, so a
-        // SECOND delivery of one published message fails the count below rather than being cut
-        // off by the break.
-        let looks = QUIET_WINDOW.as_millis() / LOOK_INTERVAL.as_millis().max(1);
+        // must receive something is polled for [`DELIVERY_WAIT`] and once more after its
+        // expected count is reached, so a SECOND delivery of one published message fails the
+        // count below rather than being cut off by the break.
+        let budget = if row.forwarded > 0 {
+            DELIVERY_WAIT
+        } else {
+            QUIET_WINDOW
+        };
+        let looks = budget.as_millis() / LOOK_INTERVAL.as_millis().max(1);
         let mut forwarded: Vec<Value> = Vec::new();
         for _ in 0..looks {
             forwarded.extend(drain(&router, case, &queue_url).await);

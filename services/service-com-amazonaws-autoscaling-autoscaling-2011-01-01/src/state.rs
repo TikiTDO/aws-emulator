@@ -66,6 +66,18 @@ pub mod iam_instance_profiles;
 /// that puts them on the bus as they fall due.
 pub mod lifecycle_events;
 
+/// The lifecycle hooks of a group: the named collection `PutLifecycleHook` upserts into
+/// and `DescribeLifecycleHooks` projects from, and the rules every writer of it shares.
+pub mod lifecycle_hooks;
+
+pub use lifecycle_hooks::{
+    heartbeat_timeout_violation_message, put_lifecycle_hook, too_many_hooks_message,
+    transition_missing_message, unknown_result_message, unknown_transition_message,
+    LifecycleHookPut, LifecycleHookRefusal, LifecycleHooks, StoredLifecycleHook,
+    DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_LIFECYCLE_ACTION_RESULT, LIFECYCLE_ACTION_RESULTS,
+    MAX_LIFECYCLE_HOOKS_PER_GROUP,
+};
+
 /// The scaling policies of a group — what `PutScalingPolicy` creates and
 /// `DescribePolicies` reports — and the CloudWatch alarms a target-tracking policy is
 /// driven by, which live in the account's own CloudWatch store.
@@ -431,6 +443,10 @@ pub struct StoredGroup {
     pub cooldown_until: Option<SystemTime>,
     /// A capacity change waiting for [`Self::cooldown_until`].
     pub pending_capacity: Option<PendingCapacity>,
+    /// The group's lifecycle hooks, keyed by `LifecycleHookName`: the ONE collection
+    /// every reader and writer of a hook of this group reaches
+    /// ([`lifecycle_hooks`]), so deleting the group takes its hooks with it.
+    pub lifecycle_hooks: LifecycleHooks,
 }
 
 impl StoredGroup {
@@ -2407,8 +2423,43 @@ pub fn max_records_violation_message(max_records: i32) -> String {
     } else {
         format!("Member must have value less than or equal to {MAX_MAX_RECORDS}")
     };
+    constraint_violation_message(max_records, "maxRecords", &constraint)
+}
+
+/// Join the values a refusal names into the comma-separated list a service message
+/// carries, so no refusal shows a caller Rust's own debug formatting.
+///
+/// THE ONE COPY of that join: every refusal of this service that names a set of values
+/// states it through here, whether it states them on their own or bracketed
+/// ([`stated_value_set`]).
+pub fn joined_values(values: impl Iterator<Item = String>) -> String {
+    values.collect::<Vec<String>>().join(", ")
+}
+
+/// The admissible value set a refusal states, in the order the service publishes it:
+/// the values comma-separated inside brackets, which is the shape such a set is stated
+/// in on the wire.
+pub fn stated_value_set<'a>(values: impl Iterator<Item = &'a str>) -> String {
     format!(
-        "1 validation error detected: Value '{max_records}' at 'maxRecords' failed to satisfy \
+        "[{}]",
+        joined_values(values.map(::std::string::ToString::to_string))
+    )
+}
+
+/// The standard sentence this service states for ONE member value outside the bounds it
+/// has to satisfy: the value as the request wrote it, the member as the WIRE names it
+/// (lowerCamel, the spelling the boundary validator uses), and the constraint it missed.
+///
+/// THE ONE COPY of that sentence: every bound this service checks in a handler — because
+/// the model does not express it — is reported through here, so two of them cannot drift
+/// into two different spellings of the same refusal.
+pub fn constraint_violation_message(
+    value: impl ::std::fmt::Display,
+    member: &str,
+    constraint: &str,
+) -> String {
+    format!(
+        "1 validation error detected: Value '{value}' at '{member}' failed to satisfy \
          constraint: {constraint}"
     )
 }

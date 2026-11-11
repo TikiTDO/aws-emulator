@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeLifecycleHooks
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeLifecycleHooks`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeLifecycleHooks::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the lifecycle hooks of ONE Auto Scaling group: exactly the hooks stored for
+//! that group ([`crate::state::lifecycle_hooks`]), so what a hook's writer
+//! (`PutLifecycleHook`, a group created with lifecycle hook specifications) stored is
+//! what this reads back, and a hook `DeleteLifecycleHook` removed is gone.
+//!
+//! Reporting only: it takes the store lock to project the group's collection and
+//! materialises only what the clock already made due, like every other read here.
 //!
 //! ## Shape of an operation
 //!
@@ -140,18 +139,69 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeLifecycleHooks` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeLifecycleHooksErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeLifecycleHooks"))
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                DescribeLifecycleHooksErrorModeled::ResourceContentionFault(
+                    ResourceContentionFault {
+                        message: Some(
+                            "the Auto Scaling store is not mounted on this engine".to_string(),
+                        ),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        let group_name = input.auto_scaling_group_name;
+        // Absent means "every hook of the group": "If you omit this property, all
+        // lifecycle hooks are described." An EMPTY list is the same request — it names
+        // no hook to narrow to.
+        let wanted = input.lifecycle_hook_names.unwrap_or_default();
+
+        let mut state = state.lock();
+        state.materialize_due(&*self.engine, ::std::time::SystemTime::now());
+
+        // A group-scoped READ of this service names the group it could not find, which
+        // is what tells a caller the hooks are missing because the group is.
+        let Some(group) = state.groups.get(&group_name) else {
+            return Err(crate::scaffolded::Scaffolded::validation_error(
+                crate::state::absent_group_message(&group_name),
+            ));
+        };
+
+        let lifecycle_hooks = group
+            .lifecycle_hooks
+            .iter()
+            .filter(|(name, _)| wanted.is_empty() || wanted.contains(name))
+            .map(|(name, stored)| hook_view(&group_name, name, stored))
+            .collect();
+
+        Ok(DescribeLifecycleHooksOutput {
+            lifecycle_hooks: Some(lifecycle_hooks),
+        })
+    }
+}
+
+/// The `LifecycleHook` the service reports for a stored one, under the group that holds
+/// it and the name it is stored under.
+///
+/// `GlobalTimeout` is DERIVED from the hook's own heartbeat timeout rather than stored,
+/// so it cannot disagree with it.
+fn hook_view(
+    group_name: &str,
+    hook_name: &str,
+    stored: &crate::state::StoredLifecycleHook,
+) -> LifecycleHook {
+    LifecycleHook {
+        lifecycle_hook_name: Some(hook_name.to_string()),
+        auto_scaling_group_name: Some(group_name.to_string()),
+        lifecycle_transition: Some(stored.lifecycle_transition.clone()),
+        notification_target_arn: stored.notification_target_arn.clone(),
+        role_arn: stored.role_arn.clone(),
+        notification_metadata: stored.notification_metadata.clone(),
+        heartbeat_timeout: Some(stored.heartbeat_timeout),
+        global_timeout: Some(stored.global_timeout()),
+        default_result: Some(stored.default_result.clone()),
     }
 }

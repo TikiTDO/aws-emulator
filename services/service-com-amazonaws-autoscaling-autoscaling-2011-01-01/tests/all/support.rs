@@ -235,17 +235,32 @@ pub fn seed_subnets(engine: &Arc<engine::InMemoryEngine>, count: usize) -> Vec<S
         .collect()
 }
 
-/// The text of every `<tag>…</tag>` in document order.
+/// The text of every `<tag>…</tag>` in document order, whatever ATTRIBUTES the open tag
+/// carries.
+///
+/// THE ONE COPY in this crate's tests, and attribute-tolerant because the envelope stamps
+/// the document's namespace onto the FIRST element of a list (`<member xmlns="…">`): an
+/// element is matched by its tag NAME plus whatever attributes follow it, never by the
+/// literal `<tag>` text, so the first member of a list is read like every other one.
 pub fn tag_values(xml: &str, tag: &str) -> Vec<String> {
-    let open = format!("<{tag}>");
+    let open = format!("<{tag}");
     let close = format!("</{tag}>");
     let mut out = Vec::new();
     let mut rest = xml;
     while let Some(start) = rest.find(&open) {
         let after = &rest[start + open.len()..];
-        let Some(end) = after.find(&close) else { break };
-        out.push(after[..end].to_string());
-        rest = &after[end + close.len()..];
+        // What follows the NAME decides: `>` closes the open tag and whitespace begins its
+        // attributes, while anything else means the match was a longer tag name that merely
+        // begins with this one — and a self-closing `<tag/>` holds no text to read.
+        if !after.starts_with('>') && !after.starts_with(char::is_whitespace) {
+            rest = after;
+            continue;
+        }
+        let Some(open_end) = after.find('>') else { break };
+        let inner = &after[open_end + 1..];
+        let Some(end) = inner.find(&close) else { break };
+        out.push(inner[..end].to_string());
+        rest = &inner[end + close.len()..];
     }
     out
 }

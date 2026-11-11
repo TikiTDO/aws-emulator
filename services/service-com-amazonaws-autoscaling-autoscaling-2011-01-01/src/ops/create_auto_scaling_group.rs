@@ -481,6 +481,44 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // The lifecycle hooks the request carries. A specification creates ONE hook of
+        // this group, through the same upsert `PutLifecycleHook` writes, so a hook a
+        // group is created with and a hook put onto it afterwards are taken against the
+        // same rules and land in the same collection. Assembled here — before anything
+        // is allocated and before the store is locked — so a specification the service
+        // cannot accept refuses the create whole and leaves no trace of it.
+        let mut lifecycle_hooks = crate::state::LifecycleHooks::new();
+        for specification in input.lifecycle_hook_specification_list.iter().flatten() {
+            let put = crate::state::LifecycleHookPut {
+                lifecycle_transition: Some(specification.lifecycle_transition.clone()),
+                notification_target_arn: specification.notification_target_arn.clone(),
+                role_arn: specification.role_arn.clone(),
+                notification_metadata: specification.notification_metadata.clone(),
+                heartbeat_timeout: specification.heartbeat_timeout,
+                default_result: specification.default_result.clone(),
+            };
+            let hook_name = specification.lifecycle_hook_name.as_str();
+            if let Err(refusal) =
+                crate::state::put_lifecycle_hook(&mut lifecycle_hooks, hook_name, &put)
+            {
+                let message = refusal.message(hook_name);
+                return Err(match refusal {
+                    // The per-group ceiling on hooks is the modelled `LimitExceededFault`;
+                    // every other refusal is about the values a specification carries,
+                    // which this service answers `ValidationError` for.
+                    crate::state::LifecycleHookRefusal::LimitExceeded => {
+                        CreateAutoScalingGroupErrorModeled::LimitExceededFault(
+                            LimitExceededFault {
+                                message: Some(message),
+                            },
+                        )
+                        .into()
+                    }
+                    _ => crate::scaffolded::Scaffolded::validation_error(message),
+                });
+            }
+        }
+
         let region = crate::state::request_region(ctx.parts());
         // The zones the group places instances in. `VPCZoneIdentifier` is "a
         // comma-separated list of subnet IDs for a virtual private cloud (VPC) where
@@ -645,6 +683,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             instances: Vec::new(),
             cooldown_until: None,
             pending_capacity: None,
+            // The hooks the request's own lifecycle hook specifications created, taken
+            // against the same rules as a later `PutLifecycleHook`.
+            lifecycle_hooks,
         };
         state.groups.insert(name.clone(), group);
 

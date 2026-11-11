@@ -202,7 +202,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if !REFRESH_STRATEGY_VALUES.contains(&strategy.as_str()) {
             return Err(crate::scaffolded::Scaffolded::validation_error(format!(
                 "The Strategy value {strategy} is not valid: it must be one of {}",
-                join_values(REFRESH_STRATEGY_VALUES.iter().map(|value| (*value).to_string()))
+                crate::state::joined_values(
+                    REFRESH_STRATEGY_VALUES.iter().map(|value| (*value).to_string())
+                )
             )));
         }
         if let Some(preferences) = input.preferences.as_ref() {
@@ -361,15 +363,9 @@ fn check_preferences(preferences: &RefreshPreferences) -> Result<(), StartInstan
             return Err(crate::scaffolded::Scaffolded::validation_error(format!(
                 "The CheckpointPercentages values {} are not valid: they must be unique and in \
                  ascending order",
-                join_values(checkpoints.iter().map(i32::to_string))
+                crate::state::joined_values(checkpoints.iter().map(i32::to_string))
             )));
         }
     }
     Ok(())
-}
-
-/// Join the values a refusal names into the comma-separated list a service message
-/// carries, so no refusal shows a caller Rust's own debug formatting.
-fn join_values(values: impl Iterator<Item = String>) -> String {
-    values.collect::<Vec<String>>().join(", ")
 }

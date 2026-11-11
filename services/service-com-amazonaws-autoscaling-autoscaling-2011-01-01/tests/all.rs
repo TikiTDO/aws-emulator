@@ -43,6 +43,8 @@ mod launch_template_instance_profiles;
 mod launch_template_specifications;
 #[path = "all/legacy_target_group_detach.rs"]
 mod legacy_target_group_detach;
+#[path = "all/lifecycle_hooks.rs"]
+mod lifecycle_hooks;
 #[path = "all/metric_collection_catalog.rs"]
 mod metric_collection_catalog;
 #[path = "all/reference_data_catalogs.rs"]
