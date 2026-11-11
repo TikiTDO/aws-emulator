@@ -287,6 +287,8 @@ mod invocation_log_group_search;
 mod invocation_outcome_series;
 #[path = "all/invocation_refusal_diagnostics.rs"]
 mod invocation_refusal_diagnostics;
+#[path = "all/invocation_remaining_time_countdown.rs"]
+mod invocation_remaining_time_countdown;
 #[path = "all/invocation_run_capacity.rs"]
 mod invocation_run_capacity;
 #[path = "all/invoke_addressed_function.rs"]
