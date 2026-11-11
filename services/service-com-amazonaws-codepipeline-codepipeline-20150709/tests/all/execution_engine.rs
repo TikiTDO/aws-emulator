@@ -24,7 +24,8 @@
 //! * the pipeline's `executionMode` decides whether a start runs at once, waits, or
 //!   supersedes the execution already waiting, and a start past the pipeline's
 //!   concurrent-execution ceiling is refused;
-//! * only the LATEST execution's failed stage can be retried.
+//! * only the LATEST execution's failed stage can be retried, and a retry addressed at
+//!   an older one is refused as not retryable;
 //!
 //! Every assertion goes through the router, over the wire each service speaks, so
 //! nothing here can pass by reading a handler's internals.
@@ -1377,9 +1378,10 @@ async fn only_the_latest_executions_failed_stage_can_be_retried() {
         ids.push(id);
     }
 
-    // The older execution is not retryable at all.
-    let (status, code) = emulator
-        .error_code(
+    // The older execution is not retryable at all: it has been superseded, so the stage
+    // holds no failed action a retry could re-run.
+    let (status, response) = emulator
+        .cp(
             "RetryStageExecution",
             &json!({
                 "pipelineName": pipeline,
@@ -1389,10 +1391,21 @@ async fn only_the_latest_executions_failed_stage_can_be_retried() {
             }),
         )
         .await;
+    let code = response["__type"].as_str().unwrap_or_default();
     assert_eq!(
-        (status, code.as_str()),
-        (400, "NotLatestPipelineExecutionException"),
-        "retrying an older execution is refused"
+        (status, code),
+        (400, "StageNotRetryableException"),
+        "retrying an older execution is refused, got {response}"
+    );
+    assert_eq!(
+        response["message"].as_str().unwrap_or_default(),
+        format!(
+            "The stage named Source in the {pipeline} pipeline can't be retried now. Either \
+             it contains no failed actions, the execution '{}' is already superseded, or the \
+             pipeline definition has changed since the action(s) failed.",
+            ids[0]
+        ),
+        "the refusal states the three conditions, got {response}"
     );
 
     // The latest one is: with the source object in place, the retried stage succeeds.

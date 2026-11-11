@@ -3629,12 +3629,14 @@ pub fn reported_declaration(declaration: &PipelineDeclaration) -> PipelineDeclar
 /// The message `ConcurrentPipelineExecutionsLimitExceededException` carries, for every
 /// call that would start one execution too many.
 ///
-/// The sentence the service states this condition with, which is what the model
-/// documents the error as: "The pipeline has reached the limit for concurrent pipeline
-/// executions." It carries no variable part — the pipeline is the one the request
-/// named — so it is a constant, stated once here rather than worded per handler.
+/// The model DOCUMENTS the condition ("The pipeline has reached the limit for concurrent
+/// pipeline executions."), while the sentence the service STATES it with is this one: the
+/// limit was exceeded, and the caller is told to come back later, because the condition
+/// clears on its own as the running executions finish. It carries no variable part — the
+/// pipeline is the one the request named — so it is a constant, stated once here rather
+/// than worded per handler.
 pub const CONCURRENT_EXECUTION_LIMIT_MESSAGE: &str =
-    "The pipeline has reached the limit for concurrent pipeline executions.";
+    "The limit for concurrent pipeline executions has been exceeded. Please try again later.";
 
 /// The variables an execution of `declaration` runs with: every variable the
 /// declaration declares takes `overrides`'s value for it when there is one, else its
@@ -4009,13 +4011,45 @@ pub fn pipeline_execution_not_found_message(pipeline_name: &str, execution_id: &
     )
 }
 
-/// The message `StageNotFoundException` carries, for every operation that raises it.
+/// Which of CodePipeline's `StageNotFoundException` sentences a refusal carries.
 ///
-/// Built from the two request members that name the stage: a stage name is only ever
-/// resolved within one pipeline's declaration, so the refusal names the pipeline it was
-/// resolved against and the stage name it did not find there.
-pub fn stage_not_found_message(pipeline_name: &str, stage_name: &str) -> String {
-    format!("Pipeline '{pipeline_name}' does not have a stage with name '{stage_name}'")
+/// The same per-plane rule as [`PipelineNotFoundWording`] and
+/// [`ActionNotFoundWording`]: one modelled error — 400, `StageNotFoundException`,
+/// `errorKind=client` (`smithy_query(query="shape", shape="StageNotFoundException")`) —
+/// stated in the words of the plane the call came in on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageNotFoundWording {
+    /// The pipeline-DECLARATION and execution-CONTROL planes: the calls that address a
+    /// declared stage or a stage of a running execution (`EnableStageTransition`,
+    /// `DisableStageTransition`, `PutActionRevision`, `RetryStageExecution`,
+    /// `RollbackStage`, `OverrideStageCondition`).
+    Definition,
+    /// The APPROVAL plane: `PutApprovalResult`, which states a name it cannot resolve
+    /// the way its two siblings there do — what the enclosing resource does not include,
+    /// and what to do about it ([`pipeline_not_found_message`] for the pipeline,
+    /// [`action_not_found_message`] for the action).
+    Approval,
+}
+
+/// The message `StageNotFoundException` carries, for the plane `wording` names.
+///
+/// A stage name is only ever resolved within one pipeline's declaration, so the variable
+/// parts are the pipeline it was resolved against and the stage name that was not found
+/// there.
+pub fn stage_not_found_message(
+    wording: StageNotFoundWording,
+    pipeline_name: &str,
+    stage_name: &str,
+) -> String {
+    match wording {
+        StageNotFoundWording::Definition => {
+            format!("Pipeline '{pipeline_name}' does not have a stage with name '{stage_name}'")
+        }
+        StageNotFoundWording::Approval => format!(
+            "{pipeline_name} does not include a stage named {stage_name}. Make sure you are \
+             using the correct name for the stage, and then try again."
+        ),
+    }
 }
 
 /// The message `StageNotRetryableException` carries, for every reason a stage cannot be
@@ -4040,20 +4074,76 @@ pub fn stage_not_retryable_message(
     )
 }
 
-/// The message `ActionNotFoundException` carries, for every operation that raises it.
+/// Which of CodePipeline's `ActionNotFoundException` sentences a refusal carries.
 ///
-/// The same rule one level in: an action name is only ever resolved within one stage of
-/// one pipeline, so the refusal names the stage, the pipeline it belongs to and the
-/// action name it did not find there.
+/// The same rule as [`PipelineNotFoundWording`] one level in: every operation that
+/// resolves an action NAME inside a stage raises the one modelled error — 400,
+/// `ActionNotFoundException`, `errorKind=client` (`smithy_query(query="shape",
+/// shape="ActionNotFoundException")`) — and the sentence belongs to the plane of the API
+/// the call came in on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionNotFoundWording {
+    /// The pipeline-DECLARATION plane: the calls that record something against a
+    /// declared action (`PutActionRevision`).
+    Definition,
+    /// The APPROVAL plane: `PutApprovalResult`, whose caller is a person (or their
+    /// client) answering a gate, so the sentence names the stage it looked in and closes
+    /// with what to do about it.
+    Approval,
+}
+
+/// The message `ActionNotFoundException` carries, for the plane `wording` names.
+///
+/// An action name is only ever resolved within one stage of one pipeline, so the
+/// variable parts are the names the request asked for; everything else is the plane's
+/// fixed text.
 pub fn action_not_found_message(
+    wording: ActionNotFoundWording,
     pipeline_name: &str,
     stage_name: &str,
     action_name: &str,
 ) -> String {
+    match wording {
+        ActionNotFoundWording::Definition => format!(
+            "Stage '{stage_name}' of pipeline '{pipeline_name}' does not have an action with \
+             name '{action_name}'"
+        ),
+        ActionNotFoundWording::Approval => format!(
+            "{stage_name} does not include an action named {action_name}. Make sure you are \
+             using the correct name for the action, and then try again."
+        ),
+    }
+}
+
+/// The message `InvalidApprovalTokenException` carries when the token presented is not
+/// the one the approval in force published.
+///
+/// `ApprovalToken` is "used to validate that the approval request corresponding to this
+/// token is still valid", so the condition covers both a token that names no approval at
+/// all and one that named the approval the action published EARLIER (the action moved on,
+/// or was answered, so the token it published is no longer in force) — the service states
+/// them together, in curly quotes, naming the action and the stage the token was checked
+/// against, which are the two names that identify the approval within the pipeline. Only
+/// those three values vary, and all three come from the request.
+pub fn invalid_approval_token_message(token: &str, action_name: &str, stage_name: &str) -> String {
     format!(
-        "Stage '{stage_name}' of pipeline '{pipeline_name}' does not have an action with name \
-         '{action_name}'"
+        "Approval token \u{2018}{token}\u{2019} either does not exist or is not the correct \
+         token for action {action_name} and stage {stage_name}."
     )
+}
+
+/// The message `InvalidApprovalTokenException` carries for the OTHER condition it states:
+/// the action the request addressed is not an approval action, so there is no approval
+/// request for the token to correspond to at all.
+///
+/// `PutApprovalResult` "provides the response to a manual approval request", which only
+/// an action of the `Approval` category has; the refusal states what the PIPELINE does
+/// not include, because the defect is in the declaration the caller addressed rather than
+/// in the token. The two values come from the request, and this sentence is what tells
+/// the two conditions of one error code apart
+/// ([`invalid_approval_token_message`] is the other).
+pub fn not_an_approval_action_message(pipeline_name: &str, action_name: &str) -> String {
+    format!("{pipeline_name} does not include an approval action named {action_name}.")
 }
 
 /// The message `ValidationException` carries for a webhook the third-party webhook

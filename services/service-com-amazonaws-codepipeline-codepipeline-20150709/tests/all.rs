@@ -79,6 +79,8 @@ mod pipeline_not_found_wording;
 mod pipeline_state;
 #[path = "all/probe.rs"]
 mod probe;
+#[path = "all/refusal_statements.rs"]
+mod refusal_statements;
 #[path = "all/resource_tags.rs"]
 mod resource_tags;
 #[path = "all/rollback_stage.rs"]

@@ -31,10 +31,10 @@ use crate::execution_engine::Emulator;
 use crate::pipeline_lifecycle::ROLE_ARN;
 
 /// The sentence the service states this condition with, written out here so a reword
-/// of the handler's wording fails this suite: it is the text the model documents
-/// `ConcurrentPipelineExecutionsLimitExceededException` as, and it carries no variable
-/// part.
-const AT_THE_LIMIT: &str = "The pipeline has reached the limit for concurrent pipeline executions.";
+/// of the handler's wording fails this suite: the limit was exceeded, and the caller is
+/// told to try again later. It carries no variable part.
+const AT_THE_LIMIT: &str =
+    "The limit for concurrent pipeline executions has been exceeded. Please try again later.";
 
 /// Long enough for every step one of these one-action executions is owed to have come
 /// due (`state::execution::ACTION_STEP` is the span each step waits), so a status that

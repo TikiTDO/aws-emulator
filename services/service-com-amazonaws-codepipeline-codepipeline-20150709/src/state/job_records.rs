@@ -100,6 +100,101 @@ pub struct JobRecord {
     /// `None` until a poll hands the job out, and for a job whose action reads and writes
     /// no artifact at all.
     pub artifact_credentials: Option<AWSSessionCredentials>,
+    /// The result a worker reported that carried this job to its terminal status, or
+    /// `None` while no result has terminated it.
+    ///
+    /// Retained because the refusal a LATER result is answered with is decided against
+    /// it: a job "cannot be updated with the same status, but different result or output
+    /// variables", so a report restating the result the job already holds asks for
+    /// nothing the job has not already recorded, while one differing from it is the
+    /// state error that sentence states. See [`ReportedJobResult`].
+    pub reported_result: Option<ReportedJobResult>,
+}
+
+/// The RESULT a job worker reported for a job, kept beside the status that result put
+/// the job in.
+///
+/// `PutJobSuccessResult` and `PutJobFailureResult` each state an outcome plus what the
+/// worker observed producing it — the revision it worked on, the execution details, the
+/// output variables it published, or the failure it hit — and CodePipeline holds a job to
+/// ONE such statement: the same status may not be reported again "with the same status,
+/// but different result or output variables". Deciding that needs the statement the job
+/// already carries, so it is recorded here, flattened to the members the two results are
+/// built from (every one of them from the REQUEST, none invented) so two reports can be
+/// compared member by member.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReportedJobResult {
+    /// `PutJobSuccessResult$continuationToken`, when the result carried one.
+    pub continuation_token: Option<String>,
+    /// `CurrentRevision$revision`, when the result named the revision worked on.
+    pub revision: Option<String>,
+    /// `CurrentRevision$changeIdentifier`.
+    pub change_identifier: Option<String>,
+    /// `CurrentRevision$revisionSummary`.
+    pub revision_summary: Option<String>,
+    /// `CurrentRevision$created`, as the seconds and the subsecond nanoseconds the
+    /// timestamp carries — the instant itself, compared exactly as it was stated.
+    pub revision_created: Option<(i64, u32)>,
+    /// `ExecutionDetails$summary`.
+    pub summary: Option<String>,
+    /// `ExecutionDetails$externalExecutionId`, or `FailureDetails$externalExecutionId`
+    /// for a failure.
+    pub external_execution_id: Option<String>,
+    /// `ExecutionDetails$percentComplete`.
+    pub percent_complete: Option<i32>,
+    /// `FailureDetails$type`, the `FailureType` a failure stated.
+    pub failure_type: Option<String>,
+    /// `FailureDetails$message`.
+    pub failure_message: Option<String>,
+    /// `PutJobSuccessResult$outputVariables`, in name order so one result is one
+    /// statement however the request ordered its map.
+    pub output_variables: BTreeMap<String, String>,
+}
+
+impl ReportedJobResult {
+    /// The statement a `PutJobSuccessResult` made.
+    pub fn success(
+        continuation_token: Option<&str>,
+        current_revision: Option<&CurrentRevision>,
+        execution_details: Option<&ExecutionDetails>,
+        output_variables: Option<&HashMap<String, String>>,
+    ) -> Self {
+        Self {
+            continuation_token: continuation_token.map(str::to_string),
+            revision: current_revision.map(|revision| revision.revision.clone()),
+            change_identifier: current_revision
+                .map(|revision| revision.change_identifier.clone()),
+            revision_summary: current_revision
+                .and_then(|revision| revision.revision_summary.clone()),
+            revision_created: current_revision
+                .and_then(|revision| revision.created)
+                .map(|created| (created.secs(), created.subsec_nanos())),
+            summary: execution_details.and_then(|details| details.summary.clone()),
+            external_execution_id: execution_details
+                .and_then(|details| details.external_execution_id.clone()),
+            percent_complete: execution_details.and_then(|details| details.percent_complete),
+            failure_type: None,
+            failure_message: None,
+            output_variables: output_variables
+                .map(|variables| {
+                    variables
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The statement a `PutJobFailureResult` made.
+    pub fn failure(failure: &FailureDetails) -> Self {
+        Self {
+            failure_type: Some(failure.r#type.clone()),
+            failure_message: Some(failure.message.clone()),
+            external_execution_id: failure.external_execution_id.clone(),
+            ..Self::default()
+        }
+    }
 }
 
 impl JobRecord {
@@ -134,6 +229,7 @@ impl JobRecord {
             queued_at: now,
             last_status_change: now,
             artifact_credentials: None,
+            reported_result: None,
         }
     }
 

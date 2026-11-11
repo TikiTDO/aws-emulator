@@ -22,7 +22,11 @@
 //! # What a job will not take
 //!
 //! * a job no worker has claimed, or one already completed, takes no result
-//!   (`InvalidJobStateException`): there is no worker whose outcome it is;
+//!   (`InvalidJobStateException`): there is no worker whose outcome it is — except a
+//!   report that RESTATES the result the job already holds, which asks for nothing the
+//!   job has not recorded and is accepted as the no-op it is, because what the service
+//!   refuses is a job "updated with the same status, but different result or output
+//!   variables";
 //! * a nonce no dispatch of the job published, and any nonce at all once a worker has
 //!   claimed the job, does not claim it (`InvalidNonceException`), which is what makes
 //!   the claim exclusive — while the job is still waiting, EVERY nonce a poll
@@ -196,10 +200,9 @@ pub fn record_success(
             .map(|(name, value)| name.len() + value.len())
             .sum();
         if size > MAX_OUTPUT_VARIABLES_BYTES {
-            return Err(JobProblem::OutputVariablesTooLarge(format!(
-                "Exceeded the total size limit for all variables in the pipeline: {size} bytes \
-                 reported, at most {MAX_OUTPUT_VARIABLES_BYTES} allowed"
-            )));
+            return Err(JobProblem::OutputVariablesTooLarge(
+                output_variables_too_large_message(variables),
+            ));
         }
         // And one variable on its own: it becomes the replacement text of every
         // placeholder a later action's configuration carries, so its length is bounded at
@@ -217,9 +220,18 @@ pub fn record_success(
     }
 
     state.retire_finished_jobs();
+    let reported = super::ReportedJobResult::success(
+        continuation_token.as_deref(),
+        current_revision.as_ref(),
+        execution_details.as_ref(),
+        output_variables.as_ref(),
+    );
     let (execution_id, stage, action, pipeline_name, stage_name, action_name) = {
         let job = job_mut(state, job_id, super::job_result_not_found_message)?;
         if job.status != JOB_STATUS_IN_PROGRESS {
+            if restates_result(job, JOB_STATUS_SUCCEEDED, &reported) {
+                return Ok(());
+            }
             return Err(JobProblem::InvalidState(invalid_state_message(
                 job_id,
                 &job.status,
@@ -237,6 +249,7 @@ pub fn record_success(
             return Ok(());
         }
         job.status = JOB_STATUS_SUCCEEDED.to_string();
+        job.reported_result = Some(reported);
         job.last_status_change = now;
         (
             job.pipeline_execution_id.clone(),
@@ -321,9 +334,13 @@ pub fn record_failure(
     now: SystemTime,
 ) -> Result<(), JobProblem> {
     state.retire_finished_jobs();
+    let reported = super::ReportedJobResult::failure(failure);
     let (execution_id, stage, action) = {
         let job = job_mut(state, job_id, super::job_result_not_found_message)?;
         if job.status != JOB_STATUS_IN_PROGRESS {
+            if restates_result(job, JOB_STATUS_FAILED, &reported) {
+                return Ok(());
+            }
             return Err(JobProblem::InvalidState(invalid_state_message(
                 job_id,
                 &job.status,
@@ -331,6 +348,7 @@ pub fn record_failure(
             )));
         }
         job.status = JOB_STATUS_FAILED.to_string();
+        job.reported_result = Some(reported);
         job.last_status_change = now;
         (job.pipeline_execution_id.clone(), job.stage, job.action)
     };
@@ -379,6 +397,66 @@ fn job_mut<'a>(
         .flatten()
         .find(|job| job.job_id == job_id)
         .ok_or_else(|| JobProblem::NotFound(not_found(job_id)))
+}
+
+/// Whether `job` already holds exactly the result being reported: it reached `desired`
+/// by a worker reporting THIS statement, so the report restates what the job carries.
+///
+/// The condition CodePipeline refuses is a job "updated with the same status, but
+/// different result or output variables" — so a report that changes nothing about the
+/// job is not that condition: the outcome the worker is telling the service about is
+/// already the recorded one, which is what makes a worker's retry of a report it is
+/// unsure reached the service safe. A report of the same status carrying any other
+/// result, and one of a DIFFERENT status, are both still refused.
+fn restates_result(
+    job: &super::JobRecord,
+    desired: &str,
+    reported: &super::ReportedJobResult,
+) -> bool {
+    job.status == desired && job.reported_result.as_ref() == Some(reported)
+}
+
+/// The most characters a message of this service carries: `Message` — the member every
+/// one of its errors states its message in — is modelled `@length(min: 1, max: 5000)`
+/// (`smithy_query query="shape" shape="Message"`).
+const MAX_MESSAGE_LENGTH: usize = 5_000;
+
+/// What `OutputVariablesSizeExceededException` states: the limit the result went past,
+/// and what each variable of THIS result measured.
+///
+/// The limit and the fixed text are constants; the breakdown names every variable the
+/// request carried with its measured size, so the worker reading the refusal can tell
+/// WHICH of them spent the budget. A variable's size is its name plus its value, which
+/// is what the total is summed from, and the entries are in name order so one request
+/// is stated one way.
+///
+/// The breakdown is one entry per variable the REQUEST carried, and the map it comes
+/// from is modelled with no bound on how many that is, so the statement is held to the
+/// length its member is modelled with ([`MAX_MESSAGE_LENGTH`]): the entries that fit are
+/// named, and a result carrying thousands of variables cannot grow the refusal past the
+/// member that has to carry it.
+fn output_variables_too_large_message(variables: &HashMap<String, String>) -> String {
+    let mut measured: Vec<(&str, usize)> = variables
+        .iter()
+        .map(|(name, value)| (name.as_str(), name.len() + value.len()))
+        .collect();
+    measured.sort_unstable();
+    let mut message = format!(
+        "The total size of all output variables for this action exceeds the limit of \
+         {MAX_OUTPUT_VARIABLES_BYTES} bytes. Output variables (in bytes): ["
+    );
+    for (position, (name, bytes)) in measured.iter().enumerate() {
+        let separator = if position == 0 { "" } else { ", " };
+        let entry = format!("{separator}{name}: {bytes}");
+        // The closing bracket is part of the statement, so it is counted with the entry
+        // that would precede it.
+        if message.len() + entry.len() + 1 > MAX_MESSAGE_LENGTH {
+            break;
+        }
+        message.push_str(&entry);
+    }
+    message.push(']');
+    message
 }
 
 /// Why a job cannot take a result: it is not one a worker holds and has still to

@@ -51,7 +51,7 @@ const PAYLOAD: &[u8] = b"the source bytes";
 const PROVIDER: &str = "TerminalWorker";
 
 /// The refusal status every error these operations model carries.
-const REFUSAL_STATUS: u16 = 400;
+pub(crate) const REFUSAL_STATUS: u16 = 400;
 
 /// A `JobId` matching the modelled pattern that no job was ever issued under.
 const UNISSUED_JOB_ID: &str = "00000000-0000-4000-8000-000000000000";
@@ -60,7 +60,14 @@ const UNISSUED_JOB_ID: &str = "00000000-0000-4000-8000-000000000000";
 const UNMINTED_EXECUTION_ID: &str = "00000000-0000-4000-8000-000000000001";
 
 /// The error body of a refused call: its `__type` and its `message`.
-async fn refusal(emulator: &Emulator, operation: &str, body: &Value) -> (u16, String, String) {
+///
+/// `pub(crate)` with the harness below: the `refusal_statements` suite reads a refusal
+/// the same way rather than growing a second copy.
+pub(crate) async fn refusal(
+    emulator: &Emulator,
+    operation: &str,
+    body: &Value,
+) -> (u16, String, String) {
     let (status, response) = emulator.cp(operation, body).await;
     let code = response["__type"]
         .as_str()
@@ -75,7 +82,13 @@ async fn refusal(emulator: &Emulator, operation: &str, body: &Value) -> (u16, St
 
 /// Create a pipeline whose `Build` stage is a custom action, start an execution of it,
 /// and answer `(execution id, job id, nonce)` for the job that execution queues.
-async fn claimable_job(emulator: &Emulator, pipeline: &str) -> (String, String, String) {
+///
+/// `pub(crate)` with the harness below: the `refusal_statements` suite reports results
+/// for a claimable job through the same setup rather than growing a second copy.
+pub(crate) async fn claimable_job(
+    emulator: &Emulator,
+    pipeline: &str,
+) -> (String, String, String) {
     emulator.bucket(&artifact_bucket(pipeline)).await;
     emulator.bucket(SOURCE_BUCKET).await;
     emulator.put_object(SOURCE_BUCKET, SOURCE_KEY, PAYLOAD).await;
@@ -166,24 +179,32 @@ async fn claimable_job(emulator: &Emulator, pipeline: &str) -> (String, String, 
     (execution, job_id, nonce)
 }
 
-/// The request body that reports `result` for `job_id`.
-fn result_body(result: &str, job_id: &str) -> Value {
+/// The request body that reports `result` for `job_id`, stating `detail` as what the
+/// worker observed — the part of the result two reports of one status can differ in.
+///
+/// `pub(crate)` with the harness below.
+pub(crate) fn result_body(result: &str, job_id: &str, detail: &str) -> Value {
     match result {
         "PutJobFailureResult" => json!({
             "jobId": job_id,
-            "failureDetails": {"type": "JobFailed", "message": "reported"},
+            "failureDetails": {"type": "JobFailed", "message": detail},
         }),
-        _ => json!({"jobId": job_id}),
+        _ => json!({
+            "jobId": job_id,
+            "executionDetails": {"summary": detail},
+        }),
     }
 }
 
 /// RULE: a job the worker carried to a terminal status is still a job this account was
-/// issued, so a later result for it is the state error — with the statement its own
-/// status against the reported one makes true — while an id that was never issued stays
-/// `JobNotFoundException`.
+/// issued, so a later result that would CHANGE it is the state error — with the
+/// statement its own status against the reported one makes true — while an id that was
+/// never issued stays `JobNotFoundException`.
 ///
 /// The rows differ along the status the job already holds, the result being reported for
-/// it, and whether the id was ever issued at all.
+/// it, and whether the id was ever issued at all. Every later report here states a
+/// result the job does not hold; the report that RESTATES the one it does hold is the
+/// `refusal_statements` suite's.
 #[tokio::test]
 async fn a_result_for_a_job_whose_work_ended_is_refused_as_a_state_error() {
     // (case, the result that terminated the job (None: leave it unacknowledged), the
@@ -261,11 +282,17 @@ async fn a_result_for_a_job_whose_work_ended_is_refused_as_a_state_error() {
                     &json!({"jobId": job_id, "nonce": nonce}),
                 )
                 .await;
-            emulator.ok(result, &result_body(result, &job_id)).await;
+            emulator
+                .ok(result, &result_body(result, &job_id, "reported"))
+                .await;
         }
 
-        let (status, code, message) =
-            refusal(&emulator, reported, &result_body(reported, &job_id)).await;
+        let (status, code, message) = refusal(
+            &emulator,
+            reported,
+            &result_body(reported, &job_id, "reported again, differently"),
+        )
+        .await;
         assert_eq!(
             (status, code.as_str()),
             (REFUSAL_STATUS, expected_code),
@@ -281,7 +308,7 @@ async fn a_result_for_a_job_whose_work_ended_is_refused_as_a_state_error() {
         let (status, code, _) = refusal(
             &emulator,
             reported,
-            &result_body(reported, UNISSUED_JOB_ID),
+            &result_body(reported, UNISSUED_JOB_ID, "reported"),
         )
         .await;
         assert_eq!(
@@ -333,7 +360,7 @@ async fn a_stop_of_an_execution_with_nothing_in_progress_is_refused_in_one_state
                 emulator
                     .ok(
                         "PutJobFailureResult",
-                        &result_body("PutJobFailureResult", &job_id),
+                        &result_body("PutJobFailureResult", &job_id, "reported"),
                     )
                     .await;
             }

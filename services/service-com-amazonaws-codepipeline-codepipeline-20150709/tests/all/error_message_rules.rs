@@ -274,7 +274,11 @@ async fn an_unknown_execution_names_the_id_and_the_pipeline_it_was_looked_up_in(
 /// The rows differ in the stage name's alphabet and length and in the operation that
 /// resolves the stage — `DisableStageTransition`, `EnableStageTransition`,
 /// `PutActionRevision` and `PutApprovalResult` each raise `StageNotFoundException` from
-/// the same lookup — and a stage the declaration DOES carry is still accepted.
+/// the same lookup — and a stage the declaration DOES carry is still accepted. Which
+/// SENTENCE the refusal carries belongs to the plane the call came in on: the approval
+/// plane states a name it cannot resolve as what the enclosing resource does not include
+/// (as it states an absent pipeline and an absent action), the declaration plane states
+/// it as the lookup that found nothing.
 #[tokio::test]
 async fn an_unknown_stage_names_the_pipeline_and_the_stage() {
     let emulator = Emulator::new();
@@ -340,9 +344,15 @@ async fn an_unknown_stage_names_the_pipeline_and_the_stage() {
                 "case {stage_case:?} via {operation}: expected the modelled stage refusal, \
                  got {status} {code} {message:?}"
             );
+            let expected = match *operation {
+                "PutApprovalResult" => format!(
+                    "staged does not include a stage named {stage}. Make sure you are using \
+                     the correct name for the stage, and then try again."
+                ),
+                _ => format!("Pipeline 'staged' does not have a stage with name '{stage}'"),
+            };
             assert_eq!(
-                message,
-                format!("Pipeline 'staged' does not have a stage with name '{stage}'"),
+                message, expected,
                 "case {stage_case:?} via {operation}: the message is built from the pipeline \
                  and the stage, got {message:?}"
             );

@@ -205,6 +205,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(PutActionRevisionErrorModeled::StageNotFoundException(
                 StageNotFoundException {
                     message: Some(crate::state::stage_not_found_message(
+                        crate::state::StageNotFoundWording::Definition,
                         &input.pipeline_name,
                         &input.stage_name,
                     )),
@@ -220,6 +221,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(PutActionRevisionErrorModeled::ActionNotFoundException(
                 ActionNotFoundException {
                     message: Some(crate::state::action_not_found_message(
+                        crate::state::ActionNotFoundWording::Definition,
                         &input.pipeline_name,
                         &input.stage_name,
                         &input.action_name,

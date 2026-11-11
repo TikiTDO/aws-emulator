@@ -429,11 +429,18 @@ async fn the_outcome_a_worker_reports_is_the_actions_outcome() {
         }
 
         // Whatever the outcome, the job it was reported for has TERMINATED: the job is
-        // still one this account was issued, so a second result for it is the state
-        // error — never `JobNotFoundException`, which is reserved for an id that was
-        // never issued.
+        // still one this account was issued, so a second result that would CHANGE it is
+        // the state error — never `JobNotFoundException`, which is reserved for an id
+        // that was never issued. (A second result RESTATING the recorded one asks for no
+        // change at all, and is the `refusal_statements` suite's subject.)
         let (status, refusal) = emulator
-            .refusal("PutJobSuccessResult", &json!({"jobId": job_id}))
+            .refusal(
+                "PutJobSuccessResult",
+                &json!({
+                    "jobId": job_id,
+                    "executionDetails": {"summary": "a second, different report"},
+                }),
+            )
             .await;
         assert_eq!(
             (status, refusal.as_str()),

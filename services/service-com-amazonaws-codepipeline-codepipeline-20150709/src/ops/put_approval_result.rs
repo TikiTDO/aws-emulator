@@ -192,6 +192,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(PutApprovalResultErrorModeled::StageNotFoundException(
                 StageNotFoundException {
                     message: Some(crate::state::stage_not_found_message(
+                        crate::state::StageNotFoundWording::Approval,
                         &input.pipeline_name,
                         &input.stage_name,
                     )),
@@ -210,6 +211,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(PutApprovalResultErrorModeled::ActionNotFoundException(
                 ActionNotFoundException {
                     message: Some(crate::state::action_not_found_message(
+                        crate::state::ActionNotFoundWording::Approval,
                         &input.pipeline_name,
                         &input.stage_name,
                         &input.action_name,
@@ -217,6 +219,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 },
             )
             .into());
+        }
+        // The action is declared — but this call "provides the response to a manual
+        // approval request", which only an action of the `Approval` category publishes.
+        // One addressing any other action is answered the same code with the OTHER
+        // statement that code carries: there is no approval request of that name to
+        // respond to, whatever token the caller holds.
+        if !state.pipelines[&input.pipeline_name]
+            .declaration
+            .stages
+            .iter()
+            .filter(|stage| stage.name == input.stage_name)
+            .flat_map(|stage| &stage.actions)
+            .filter(|action| action.name == input.action_name)
+            .any(|action| {
+                action.action_type_id.category == crate::state::driver::CATEGORY_APPROVAL
+            })
+        {
+            return Err(
+                PutApprovalResultErrorModeled::InvalidApprovalTokenException(
+                    InvalidApprovalTokenException {
+                        message: Some(crate::state::not_an_approval_action_message(
+                            &input.pipeline_name,
+                            &input.action_name,
+                        )),
+                    },
+                )
+                .into(),
+            );
         }
 
         // The newest execution whose named action is waiting for THIS approval. An
@@ -295,10 +325,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         Err(
             PutApprovalResultErrorModeled::InvalidApprovalTokenException(
                 InvalidApprovalTokenException {
-                    message: Some(format!(
-                        "The approval token '{}' does not match the token of an approval \
-                         awaiting a response in stage '{}' of pipeline '{}'",
-                        input.token, input.stage_name, input.pipeline_name
+                    message: Some(crate::state::invalid_approval_token_message(
+                        &input.token,
+                        &input.action_name,
+                        &input.stage_name,
                     )),
                 },
             )

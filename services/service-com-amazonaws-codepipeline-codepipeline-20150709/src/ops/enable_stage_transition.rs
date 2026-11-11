@@ -218,6 +218,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 return Err(EnableStageTransitionErrorModeled::StageNotFoundException(
                     StageNotFoundException {
                         message: Some(crate::state::stage_not_found_message(
+                            crate::state::StageNotFoundWording::Definition,
                             &input.pipeline_name,
                             &input.stage_name,
                         )),

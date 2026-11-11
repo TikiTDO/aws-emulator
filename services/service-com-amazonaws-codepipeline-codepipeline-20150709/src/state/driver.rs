@@ -50,7 +50,11 @@ mod image_source;
 pub use image_source::{resolved_ecr_source_revisions, StartedSourceRevision};
 
 /// The `ActionCategory` of an action that waits for a human decision.
-const CATEGORY_APPROVAL: &str = "Approval";
+///
+/// Public to the crate: it is the category `PutApprovalResult` answers an action of, so
+/// the handler that judges whether the addressed action is an approval action at all
+/// reads the same value this engine publishes a token for.
+pub const CATEGORY_APPROVAL: &str = "Approval";
 
 /// The `ActionCategory` values whose S3 provider this engine performs.
 const CATEGORY_SOURCE: &str = "Source";
