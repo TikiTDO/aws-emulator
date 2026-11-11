@@ -317,6 +317,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             is_metrics_enabled: st::effective_is_metrics_enabled(input.is_metrics_enabled),
             member_times,
             members: input.members,
+            // A new collaboration has removed nobody: `DeleteMember` is what records a
+            // removal.
+            removed_members: ::std::collections::HashSet::new(),
         };
 
         let mut store = state.lock();

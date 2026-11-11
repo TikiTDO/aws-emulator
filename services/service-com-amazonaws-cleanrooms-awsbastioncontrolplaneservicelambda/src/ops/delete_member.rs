@@ -1,15 +1,25 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteMember
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteMember`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteMember::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Takes one party out of a collaboration: the party keeps the grant the creator declared
+//! for it, so a member listing still reports it — with `REMOVED` as its status — and it
+//! loses its authorization to the collaboration, so every operation that resolves a
+//! `collaborationIdentifier` for that account refuses afterwards. The membership it had
+//! joined with survives in the `REMOVED` membership status.
+//!
+//! The collaboration's roster is the creator's — it declares the members, and a change
+//! request against it is the creator's to commit — so removing a member is refused for a
+//! caller that is not the collaboration's creator, with the `AccessDeniedException` (403)
+//! this operation models, worded the way every authorization failure of this service is.
+//! The creator itself is the one party no removal can take out (it owns the
+//! collaboration, and what removes the creator is deleting the collaboration), so an
+//! `accountId` naming it is refused on the state of the collaboration, with the
+//! `ConflictException` (409) this operation models — the same way `DeleteMembership`
+//! refuses the creator's own departure — and an `accountId` the collaboration holds no
+//! grant for is the `ResourceNotFoundException` (404) this operation declares.
+//! `@idempotent`, so removing a party that is already removed is the same 204 as removing
+//! it the first time, and changes nothing.
 //!
 //! ## Shape of an operation
 //!
@@ -149,18 +159,77 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteMember` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteMemberErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteMember"))
+        use crate::state as st;
+
+        let Some(state) = st::service_state(&*self.engine) else {
+            return Err(DeleteMemberErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("cleanrooms state is unavailable".to_string()),
+                },
+            )
+            .into());
+        };
+
+        let collaboration_id = input.collaboration_identifier;
+        let account_id = input.account_id;
+        let caller = st::caller_account_id();
+        let mut store = state.lock();
+
+        // The collaboration is resolved exactly as every other operation that takes a
+        // `collaborationIdentifier` resolves it, and its roster is the creator's, so a
+        // collaboration the caller cannot reach and one it did not create are the same
+        // authorization failure — which is also what keeps this operation from saying
+        // whether anything is stored under the identifier.
+        let creator = store
+            .visible_collaboration(&collaboration_id, caller)
+            .map(|record| record.creator_account_id.clone())
+            .filter(|creator| creator == caller);
+        let Some(creator) = creator else {
+            return Err(DeleteMemberErrorModeled::AccessDeniedException(
+                AccessDeniedException {
+                    message: Some(st::authorization_denied_message(
+                        Self::NAME,
+                        &st::collaboration_arn(&st::request_region(ctx.parts()), &collaboration_id),
+                    )),
+                    reason: Some(st::ACCESS_DENIED_REASON_INSUFFICIENT_PERMISSIONS.to_string()),
+                },
+            )
+            .into());
+        };
+
+        // The creator is the one party a removal cannot take out: it owns the
+        // collaboration, so what removes it is deleting the collaboration. The state of
+        // the collaboration is what refuses the call — its creator is recorded ON it, which
+        // is where this reads it from — so it is the `ConflictException` this operation
+        // models, and the sentence is fixed: the collaboration it is about travels in the
+        // exception's `resourceId` / `resourceType`.
+        if account_id == creator {
+            return Err(DeleteMemberErrorModeled::ConflictException(
+                ConflictException {
+                    message: Some(st::CREATOR_MEMBER_REMOVAL_CONFLICT_MESSAGE.to_string()),
+                    resource_id: Some(collaboration_id),
+                    resource_type: Some(st::RESOURCE_TYPE_COLLABORATION.to_string()),
+                    reason: Some(st::CONFLICT_REASON_INVALID_STATE.to_string()),
+                },
+            )
+            .into());
+        }
+
+        // Everything else is the removal itself: the party leaves the collaboration's
+        // roster in REMOVED status (and its membership moves with it), or the
+        // collaboration holds no grant for that account at all, which is the 404 this
+        // operation declares.
+        if !store.remove_member(&collaboration_id, &account_id, st::now()) {
+            return Err(DeleteMemberErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: st::member_not_found_message(&account_id, &collaboration_id),
+                    resource_id: account_id,
+                    resource_type: st::RESOURCE_TYPE_MEMBER.to_string(),
+                },
+            )
+            .into());
+        }
+
+        Ok(DeleteMemberOutput {})
     }
 }

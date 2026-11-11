@@ -55,6 +55,8 @@ mod configured_table_associations;
 mod configured_table_updates;
 #[path = "all/list_members.rs"]
 mod list_members;
+#[path = "all/member_removal.rs"]
+mod member_removal;
 #[path = "all/membership_creation_and_departure.rs"]
 mod membership_creation_and_departure;
 #[path = "all/membership_updates.rs"]

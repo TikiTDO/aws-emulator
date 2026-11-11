@@ -12,7 +12,10 @@
 //!   modelled `Collaboration` shape is NOT stored, because two of its members
 //!   (`memberStatus`, `membershipId`/`membershipArn`) describe the CALLER's relation
 //!   to the collaboration rather than the collaboration itself, so they are derived
-//!   per request by [`CleanRoomsState::collaboration_view`].
+//!   per request by [`CleanRoomsState::collaboration_view`]. Which parties the creator
+//!   has REMOVED is held there too (`removed_members`), because a removal takes a party's
+//!   authorization to the collaboration away without taking its grant out of the
+//!   `members` list — see [`CleanRoomsState::remove_member`].
 //! * the modelled [`Membership`] shape IS stored as-is: every one of its members is
 //!   absolute, so there is nothing to derive.
 //! * the modelled [`AnalysisTemplate`] shape is likewise stored as-is, under the
@@ -118,6 +121,11 @@ pub const DEFAULT_REGION: &str = "us-east-1";
 pub const MEMBER_STATUS_ACTIVE: &str = "ACTIVE";
 /// See [`MEMBER_STATUS_ACTIVE`].
 pub const MEMBER_STATUS_INVITED: &str = "INVITED";
+/// See [`MEMBER_STATUS_ACTIVE`]. The status a party the collaboration's creator has
+/// removed is reported in — `DeleteMember` "removes the specified member from a
+/// collaboration. The removed member is placed in the Removed status and can't interact
+/// with the collaboration".
+pub const MEMBER_STATUS_REMOVED: &str = "REMOVED";
 
 /// The `isMetricsEnabled` a create stores when the request omits it.
 ///
@@ -185,6 +193,10 @@ pub const PROTECTED_QUERY_FAILURE_MESSAGE: &str =
 pub const MEMBERSHIP_STATUS_ACTIVE: &str = "ACTIVE";
 /// See [`MEMBERSHIP_STATUS_ACTIVE`].
 pub const MEMBERSHIP_STATUS_COLLABORATION_DELETED: &str = "COLLABORATION_DELETED";
+/// See [`MEMBERSHIP_STATUS_ACTIVE`]. The status the membership of a party the
+/// collaboration's creator has removed is moved to: the membership survives the removal,
+/// but the account it belongs to is no longer part of the collaboration behind it.
+pub const MEMBERSHIP_STATUS_REMOVED: &str = "REMOVED";
 
 /// `MemberAbility` members the payment defaults below key on (model shape
 /// `MemberAbility`: CAN_QUERY | CAN_RECEIVE_RESULTS | CAN_RUN_JOB |
@@ -339,6 +351,13 @@ pub const RESOURCE_TYPE_ANALYSIS_TEMPLATE: &str = "ANALYSIS_TEMPLATE";
 /// `ResourceType` catalog names no privacy budget template, so it reports the type of
 /// the resource that was not found rather than one of the four that is not it.
 pub const RESOURCE_TYPE_PRIVACY_BUDGET_TEMPLATE: &str = "PRIVACY_BUDGET_TEMPLATE";
+
+/// The resource type a 404 about one party to a collaboration reports, named the same
+/// way as [`RESOURCE_TYPE_ANALYSIS_TEMPLATE`]: `ResourceNotFoundException$resourceType`
+/// is required and the model's `ResourceType` catalog names no member, so the member
+/// reports the type of the resource that was not found rather than one of the four that
+/// is not it.
+pub const RESOURCE_TYPE_MEMBER: &str = "MEMBER";
 
 /// The resource types a tagging refusal reports for the remaining kinds of resource an
 /// ARN can address, named the same way as [`RESOURCE_TYPE_ANALYSIS_TEMPLATE`].
@@ -642,6 +661,17 @@ pub struct CollaborationRecord {
     /// so each party's pair is stamped on its own (see
     /// [`CleanRoomsState::apply_collaboration_change`]).
     pub member_times: HashMap<String, MemberTimes>,
+    /// The parties the creator has removed with `DeleteMember`.
+    ///
+    /// A removal does NOT take the party's grant out of `members`: "the removed member is
+    /// placed in the Removed status", so the collaboration still holds what that account
+    /// was granted and a member listing still reports it — with
+    /// [`MEMBER_STATUS_REMOVED`] as its status. What the removal takes away is the
+    /// account's authorization to the collaboration ("can't interact with the
+    /// collaboration"), which is why this set is consulted by
+    /// [`CleanRoomsState::collaboration_grant`] rather than by
+    /// [`CollaborationRecord::grant_for`].
+    pub removed_members: HashSet<String>,
 }
 
 /// When one party's member record was created and last updated.
@@ -697,6 +727,11 @@ impl CollaborationRecord {
             }
         }
         accounts
+    }
+
+    /// Whether `account_id` is a party this collaboration's creator has removed.
+    pub fn is_removed(&self, account_id: &str) -> bool {
+        self.removed_members.contains(account_id)
     }
 
     /// When `account_id`'s member record was created and last updated.
@@ -850,12 +885,20 @@ impl ComAmazonawsCleanroomsAwsbastioncontrolplaneservicelambdaState {
     /// three. Every operation that takes a `collaborationIdentifier` resolves it here,
     /// so the refusal it reports is the same whichever case holds and no operation
     /// leaks whether the id exists.
+    ///
+    /// A party the creator has REMOVED is the fourth case, and answers the same `None`: a
+    /// removed member "can't interact with the collaboration", so it holds no
+    /// authorization to it even though the collaboration still holds the grant it was
+    /// declared with (which is what a member listing keeps reporting).
     pub fn collaboration_grant(
         &self,
         collaboration_id: &str,
         account_id: &str,
     ) -> Option<(&CollaborationRecord, MemberGrant)> {
         let record = self.collaborations.get(collaboration_id)?;
+        if record.is_removed(account_id) {
+            return None;
+        }
         let grant = record.grant_for(account_id)?;
         Some((record, grant))
     }
@@ -879,10 +922,15 @@ impl ComAmazonawsCleanroomsAwsbastioncontrolplaneservicelambdaState {
         self.memberships.get(id)
     }
 
-    /// The caller's status as a member of `record`: ACTIVE once it holds a membership in
-    /// the collaboration, INVITED while it is part of the collaboration — as the creator
-    /// or as a declared member — without one. `None` when the caller is not part of the
-    /// collaboration at all.
+    /// The caller's status as a member of `record`: REMOVED once the creator has removed
+    /// it, ACTIVE once it holds a membership in the collaboration, INVITED while it is
+    /// part of the collaboration — as the creator or as a declared member — without one.
+    /// `None` when the caller is not part of the collaboration at all.
+    ///
+    /// A removal outranks the membership: `DeleteMember` "removes the specified member
+    /// from a collaboration. The removed member is placed in the Removed status", so a
+    /// party that had joined reports REMOVED rather than the ACTIVE its membership would
+    /// otherwise give it.
     ///
     /// The creator is no exception: `CreateMembership` is the documented way to join a
     /// collaboration, and a collaboration's creator holds no membership until it calls
@@ -898,6 +946,9 @@ impl ComAmazonawsCleanroomsAwsbastioncontrolplaneservicelambdaState {
             || record.members.iter().any(|m| m.account_id == account_id);
         if !part_of_collaboration {
             return None;
+        }
+        if record.is_removed(account_id) {
+            return Some(MEMBER_STATUS_REMOVED);
         }
         Some(if self.membership_of(&record.id, account_id).is_some() {
             MEMBER_STATUS_ACTIVE
@@ -1039,6 +1090,53 @@ impl ComAmazonawsCleanroomsAwsbastioncontrolplaneservicelambdaState {
             .iter()
             .filter_map(|account_id| self.member_summary(record, account_id))
             .collect()
+    }
+
+    /// Remove one party from a collaboration, as `DeleteMember` does.
+    ///
+    /// The party stays a member of the collaboration and keeps the grant it was declared
+    /// with — "the removed member is placed in the Removed status", so a member listing
+    /// still reports it, in [`MEMBER_STATUS_REMOVED`] — and its own `updateTime` moves to
+    /// `at`, because the status that listing reports for it has changed. What it loses is
+    /// its authorization to the collaboration ("can't interact with the collaboration"),
+    /// which [`Self::collaboration_grant`] is what takes away, and the membership it had
+    /// joined with moves to [`MEMBERSHIP_STATUS_REMOVED`]: the membership resource
+    /// survives (it is deleted by `DeleteMembership`, with the sub-resources under it),
+    /// but the account behind it is no longer part of the collaboration.
+    ///
+    /// Answers `false` when the collaboration holds no grant for `account_id`, so a
+    /// caller refuses the call rather than recording a removal of a non-member, and
+    /// `true` once the party is removed — including when it already was, since removing
+    /// it again changes nothing.
+    pub fn remove_member(&mut self, collaboration_id: &str, account_id: &str, at: DateTime) -> bool {
+        let Some(record) = self.collaborations.get_mut(collaboration_id) else {
+            return false;
+        };
+        if record.grant_for(account_id).is_none() {
+            return false;
+        }
+        if !record.removed_members.insert(account_id.to_string()) {
+            // Already removed: the collaboration is in the state this call asks for, so
+            // nothing is restamped.
+            return true;
+        }
+        let times = record.member_times_of(account_id);
+        record.member_times.insert(
+            account_id.to_string(),
+            MemberTimes {
+                create_time: times.create_time,
+                update_time: at,
+            },
+        );
+        let membership_id = self
+            .membership_by_collaboration
+            .get(&(collaboration_id.to_string(), account_id.to_string()))
+            .cloned();
+        if let Some(membership) = membership_id.and_then(|id| self.memberships.get_mut(&id)) {
+            membership.status = MEMBERSHIP_STATUS_REMOVED.to_string();
+            membership.update_time = at;
+        }
+        true
     }
 
     /// The analysis rule of `analysis_rule_type` stored for configured table
@@ -1512,6 +1610,9 @@ impl ComAmazonawsCleanroomsAwsbastioncontrolplaneservicelambdaState {
             });
         }
         record.update_time = at;
+        // A committed change that states a grant for an account makes that account part
+        // of the collaboration again, so a removal recorded for it no longer holds.
+        record.removed_members.remove(&member_spec.account_id);
 
         // The party's OWN timestamps move with the grant this change states: an account
         // the change added holds its member record from now on, and one whose grant the
@@ -1881,6 +1982,28 @@ pub fn membership_not_invited_message(account_id: &str) -> String {
         "Cannot create membership for account: {account_id}. \
          Memberships can only be created for members in {MEMBER_STATUS_INVITED} state"
     )
+}
+
+/// The message `DeleteMember` reports when the account it would remove is the
+/// collaboration's own creator.
+///
+/// Entirely FIXED text, like [`CREATOR_MEMBERSHIP_ACTIVE_CONFLICT_MESSAGE`]: the refusal
+/// states the rule the call broke — the creator owns the collaboration ("DeleteCollaboration
+/// … can only be called by the collaboration owner" is how the collaboration itself goes),
+/// so it is the one party a removal cannot take out — and names no value of the request.
+/// The resource involved travels in the exception's `resourceId` / `resourceType` members,
+/// which is where a client reads it.
+pub const CREATOR_MEMBER_REMOVAL_CONFLICT_MESSAGE: &str =
+    "Cannot delete member for the creator of the collaboration.";
+
+/// The message `DeleteMember` reports when the `accountId` names no party to the
+/// collaboration in the path.
+///
+/// Composed from the request's two identifiers: a member exists WITHIN one collaboration,
+/// so the collaboration is what says the lookup failed in that collaboration's roster
+/// rather than that the account exists nowhere.
+pub fn member_not_found_message(account_id: &str, collaboration_id: &str) -> String {
+    format!("No such member: {account_id} in collaboration {collaboration_id}")
 }
 
 /// The message `DeleteMembership` reports when the membership it addresses is the one the

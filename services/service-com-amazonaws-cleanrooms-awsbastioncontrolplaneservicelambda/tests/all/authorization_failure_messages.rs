@@ -123,6 +123,15 @@ fn collaboration_calls() -> Vec<CollaborationCall> {
             resource_scoped: true,
         },
         CollaborationCall {
+            // The roster of a collaboration is its creator's, so a caller that cannot
+            // reach the collaboration cannot remove a party from it either.
+            operation: "DeleteMember",
+            method: "DELETE",
+            path: |id| format!("/collaborations/{id}/member/{}", account_id()),
+            body: |_| None,
+            resource_scoped: true,
+        },
+        CollaborationCall {
             operation: "GetSchema",
             method: "GET",
             path: |id| format!("/collaborations/{id}/schemas/relation_0"),
