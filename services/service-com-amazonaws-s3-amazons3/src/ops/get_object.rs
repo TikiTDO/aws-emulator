@@ -547,8 +547,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // against the same version ([`crate::state::read_is_not_modified`] carries the rule
         // and the precedence between the two, and the refusals above come first because a
         // precondition that does not hold is answered whatever the cached copy is). Nothing
-        // about the object is reported: the answer is the bare 304 and the validators of the
-        // representation the caller holds.
+        // about the object is reported: the answer is the bare 304, the validators of the
+        // representation the caller holds, and the id of the version they were read off —
+        // the same `VersionId` a served read reports, so the caller learns which version is
+        // unchanged.
         if crate::state::read_is_not_modified(
             &object.etag,
             object.last_modified,
@@ -561,6 +563,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(crate::scaffolded::Scaffolded::not_modified(
                 &object.etag,
                 object.last_modified,
+                object.version_id.as_deref(),
             ));
         }
 

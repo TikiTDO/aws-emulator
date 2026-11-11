@@ -714,7 +714,9 @@ async fn a_restore_this_emulator_cannot_serve_answers_what_is_wrong_with_it() {
             payload: restore_payload(Some(0), TierNamedIn::Request("Standard")),
             status: 400,
             code: "InvalidArgument",
-            message: Some("Days must be at least 1"),
+            // S3's own sentence for a lifetime below one day: fixed text that states the
+            // limit and names neither the value nor the member.
+            message: Some("restoration days should be at least 1"),
         },
         RefusalRow {
             case: "a lifetime of negative days",
@@ -725,7 +727,7 @@ async fn a_restore_this_emulator_cannot_serve_answers_what_is_wrong_with_it() {
             payload: restore_payload(Some(-5), TierNamedIn::Request("Standard")),
             status: 400,
             code: "InvalidArgument",
-            message: Some("Days must be at least 1"),
+            message: Some("restoration days should be at least 1"),
         },
         RefusalRow {
             // The largest `Days` the member can carry: its expiry falls on no date this

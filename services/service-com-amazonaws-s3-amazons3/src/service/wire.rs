@@ -1863,7 +1863,10 @@ const VERSION_ID_RESPONSE_HEADER: &str = "x-amz-version-id";
 /// to answer the bare status instead of an `<Error>` body, the way the errorless 400 is
 /// answered. The two validator headers RFC 9110 requires with it ("MUST generate … ETag,
 /// Last-Modified") come off the version the read resolved, which only the handler sees, so it
-/// records them ([`note_not_modified`]) and they are written here.
+/// records them ([`note_not_modified`]) and they are written here — together with the
+/// `VersionId` that version is addressed by, which the read's output binds to
+/// [`VERSION_ID_RESPONSE_HEADER`] and which therefore names the representation this answer is
+/// about just as it does on the 200.
 pub const NOT_MODIFIED_STATUS: u16 = 304;
 
 /// The header a 304 reports the entity tag of the current representation in.
@@ -1872,36 +1875,59 @@ const ETAG_HEADER: &str = "etag";
 /// format (`GetObjectOutput$LastModified` is bound to it).
 const LAST_MODIFIED_HEADER: &str = "last-modified";
 
+/// What a [`NOT_MODIFIED_STATUS`] answer reports about the representation the caller already
+/// holds: the two validators of it, and the version it is held as.
+#[derive(Debug, Clone)]
+struct NotModifiedRepresentation {
+    /// Its entity tag, as the object reports it.
+    etag: String,
+    /// When it was last modified, in HTTP's own date format.
+    last_modified: String,
+    /// The id of the version the read resolved, or `None` for an object that carries none —
+    /// which is every object of a bucket that mints no version ids.
+    version_id: Option<String>,
+}
+
 ::std::thread_local! {
-    /// The validator pair of the version a read of this thread's request answered NOT
-    /// MODIFIED for, or `None`.
+    /// What the version a read of this thread's request answered NOT MODIFIED for reports,
+    /// or `None`.
     ///
     /// A request-scoped note, held under the same discipline as the delete-marker note: the
     /// handler records it as the last thing it does before refusing, the serializer TAKES it
     /// before anything that can fail, and every request this service deserializes clears
     /// whatever this thread may still hold.
-    static NOT_MODIFIED_VALIDATORS: ::std::cell::RefCell<Option<(String, String)>> =
+    static NOT_MODIFIED_REPRESENTATION: ::std::cell::RefCell<Option<NotModifiedRepresentation>> =
         const { ::std::cell::RefCell::new(None) };
 }
 
-/// Record the validators of the representation a read answers [`NOT_MODIFIED_STATUS`] for:
-/// its entity tag as the object reports it, and its modification instant.
-pub fn note_not_modified(etag: &str, last_modified: ::std::time::SystemTime) {
+/// Record what the representation a read answers [`NOT_MODIFIED_STATUS`] for reports: its
+/// entity tag as the object reports it, its modification instant, and the id of the version
+/// the read resolved (`None` for an object carrying none).
+pub fn note_not_modified(
+    etag: &str,
+    last_modified: ::std::time::SystemTime,
+    version_id: Option<&str>,
+) {
     let rendered = DateTime::from(last_modified)
         .fmt(aws_smithy_types::date_time::Format::HttpDate)
         .unwrap_or_default();
-    NOT_MODIFIED_VALIDATORS.with(|slot| slot.replace(Some((etag.to_string(), rendered))));
+    let representation = NotModifiedRepresentation {
+        etag: etag.to_string(),
+        last_modified: rendered,
+        version_id: version_id.map(str::to_string),
+    };
+    NOT_MODIFIED_REPRESENTATION.with(|slot| slot.replace(Some(representation)));
 }
 
 /// The note for the response now being serialized, TAKEN rather than read.
-fn not_modified_validators() -> Option<(String, String)> {
-    NOT_MODIFIED_VALIDATORS.with(|slot| slot.take())
+fn not_modified_representation() -> Option<NotModifiedRepresentation> {
+    NOT_MODIFIED_REPRESENTATION.with(|slot| slot.take())
 }
 
 /// Drop whatever note this thread may still hold, called at the START of every request this
 /// service deserializes.
-fn forget_any_unanswered_validators() {
-    let _ = not_modified_validators();
+fn forget_any_unanswered_representation() {
+    let _ = not_modified_representation();
 }
 
 /// The header a 405 names the methods the addressed resource DOES allow in: "the origin
@@ -2541,10 +2567,10 @@ impl ServerProtocol for UnwrappedXmlRestXml {
         // And the delete-marker note, under the same discipline (see
         // [`DELETE_MARKER_HEADER`]).
         forget_any_unanswered_delete_marker();
-        // And the two notes a refusal of its own carries: the validators of a not-modified
-        // answer (see [`NOT_MODIFIED_STATUS`]) and the methods a 405 advertises (see
-        // [`ALLOW_HEADER`]).
-        forget_any_unanswered_validators();
+        // And the two notes a refusal of its own carries: what a not-modified answer
+        // reports about the representation the caller holds (see [`NOT_MODIFIED_STATUS`])
+        // and the methods a 405 advertises (see [`ALLOW_HEADER`]).
+        forget_any_unanswered_representation();
         forget_any_unanswered_allowed_methods();
         // The ACCESS POINT this request was addressed THROUGH, when its address reaches one
         // ([`Self::addressed_access_point`]), recorded for the decision taken on the path it
@@ -2784,7 +2810,7 @@ impl ServerProtocol for UnwrappedXmlRestXml {
         // what keeps a note an earlier refusal left from naming this response.
         let _ = addressed_delete_marker();
         // The same for the two notes only a refusal carries.
-        let _ = not_modified_validators();
+        let _ = not_modified_representation();
         let _ = allowed_methods();
         if UNWRAPPED_XML_OUTPUT_OPERATIONS.contains(&operation_name) {
             if let Some(body) =
@@ -2851,21 +2877,31 @@ impl ServerProtocol for UnwrappedXmlRestXml {
         // (see [`DELETE_MARKER_HEADER`]).
         let marker = addressed_delete_marker();
         // The same for the two notes a refusal of its own carries.
-        let validators = not_modified_validators();
+        let representation = not_modified_representation();
         let allowed = allowed_methods();
         // A read whose caller already holds the current representation is answered with the
-        // bare status and the validators of that representation, and NO document: see
-        // [`NOT_MODIFIED_STATUS`].
+        // bare status, the validators of that representation and the version it is held as,
+        // and NO document: see [`NOT_MODIFIED_STATUS`].
         if http_status == NOT_MODIFIED_STATUS {
             let status = StatusCode::try_from(http_status).map_err(|_| {
                 ProtocolError::Malformed(format!("the unusable refusal status {http_status}"))
             })?;
             let mut response = Response::new(status, SdkBody::empty());
-            if let Some((etag, last_modified)) = validators {
-                let _ = response.headers_mut().try_insert(ETAG_HEADER, etag);
+            if let Some(representation) = representation {
                 let _ = response
                     .headers_mut()
-                    .try_insert(LAST_MODIFIED_HEADER, last_modified);
+                    .try_insert(ETAG_HEADER, representation.etag);
+                let _ = response
+                    .headers_mut()
+                    .try_insert(LAST_MODIFIED_HEADER, representation.last_modified);
+                // The version the read evaluated, named the way every other answer about a
+                // version names it, so a caller revalidating a cached copy learns WHICH
+                // version is unchanged and can pin a later read to it.
+                if let Some(version_id) = representation.version_id {
+                    let _ = response
+                        .headers_mut()
+                        .try_insert(VERSION_ID_RESPONSE_HEADER, version_id);
+                }
             }
             return Ok(with_request_correlation(
                 response,

@@ -43,18 +43,24 @@ use super::object_and_tagging_roundtrip::{bucket, get_object, put_object, text};
 /// The bytes every read in this suite is of.
 const BODY: &[u8] = b"conditional-read-payload";
 
-/// `HEAD /<bucket>/<key>` — `HeadObject` with the conditional headers the case carries.
-async fn head_object(
+/// `HEAD /<bucket>/<key><query>` — `HeadObject` with the conditional headers the case
+/// carries.
+///
+/// `pub(crate)`, like [`http_date`] below: the suite that pins which VERSION a 304 names
+/// ([`super::not_modified_version_headers`]) drives its HEADs and builds its dates through
+/// these rather than keeping a second copy.
+pub(crate) async fn head_object(
     router: &MultiServiceRouter,
     bucket: &str,
     key: &str,
+    query: &str,
     headers: &[(&str, &str)],
 ) -> Answer {
-    send_bytes(router, "HEAD", &format!("/{bucket}/{key}"), headers, b"").await
+    send_bytes(router, "HEAD", &format!("/{bucket}/{key}{query}"), headers, b"").await
 }
 
 /// `instant` as the HTTP-date a conditional header carries.
-fn http_date(instant: SystemTime) -> String {
+pub(crate) fn http_date(instant: SystemTime) -> String {
     DateTime::from(instant)
         .fmt(Format::HttpDate)
         .expect("an instant this test built must render as an HTTP date")
@@ -230,7 +236,7 @@ async fn a_conditional_read_is_served_refused_or_answered_not_modified() {
     let etag = written
         .header("etag")
         .expect("a stored object must report its entity tag");
-    let probe = head_object(&router, "conditional-reads", "held.bin", &[]).await;
+    let probe = head_object(&router, "conditional-reads", "held.bin", "", &[]).await;
     let last_modified = instant_of(
         &probe
             .header("last-modified")
@@ -248,7 +254,7 @@ async fn a_conditional_read_is_served_refused_or_answered_not_modified() {
         // Both reads are judged by the same conditions: a HEAD "has the same options as a
         // GET operation on an object", so only the body differs.
         let read = get_object(&router, "conditional-reads", "held.bin", "", &headers).await;
-        let headed = head_object(&router, "conditional-reads", "held.bin", &headers).await;
+        let headed = head_object(&router, "conditional-reads", "held.bin", "", &headers).await;
         let (expected_status, expected_code) = match row.answered {
             Answered::Served => (200, ""),
             Answered::NotModified => (304, ""),

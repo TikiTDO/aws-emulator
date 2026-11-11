@@ -153,6 +153,9 @@ struct RefusedRow {
 /// The sentence S3 refuses a transition chain that moves an object on before its class's
 /// minimum storage duration has run with — built here the way S3 builds it, from the
 /// document.
+///
+/// Its second clause names the EARLIER transition by the rule's filter alone: no repeated
+/// day member, and no "for filter" clause after the storage class.
 fn too_soon(action: (&str, &str), filter: &str, earlier: &str, later: &str) -> String {
     let (action, days) = action;
     let minimum = minimum_storage_duration_days(earlier).unwrap_or_default();

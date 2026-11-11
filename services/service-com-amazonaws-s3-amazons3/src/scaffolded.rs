@@ -1588,13 +1588,19 @@ impl<E> Scaffolded<E> {
     /// current one: HTTP 304 with no document at all
     /// ([`crate::service::wire::NOT_MODIFIED_STATUS`] carries the rule), and the validators
     /// of that representation — the entity tag and the modification instant the read
-    /// resolved — in the two headers RFC 9110 requires a 304 to carry.
+    /// resolved — in the two headers RFC 9110 requires a 304 to carry, beside the id of the
+    /// version that representation is held as (`None` for an object carrying none), which
+    /// the read's output binds to `x-amz-version-id` on this answer as on a served one.
     ///
     /// Not an error class: there is no `<Code>` and no `<Message>`, because S3 sends neither
     /// with a 304. It travels on the refusal channel because that is how a handler whose one
     /// success status is 200 answers any other status.
-    pub fn not_modified(etag: &str, last_modified: ::std::time::SystemTime) -> Self {
-        crate::service::wire::note_not_modified(etag, last_modified);
+    pub fn not_modified(
+        etag: &str,
+        last_modified: ::std::time::SystemTime,
+        version_id: Option<&str>,
+    ) -> Self {
+        crate::service::wire::note_not_modified(etag, last_modified, version_id);
         Self::unmodeled(
             crate::service::object_write::ERRORLESS_REFUSAL_CODE,
             crate::service::wire::NOT_MODIFIED_STATUS,

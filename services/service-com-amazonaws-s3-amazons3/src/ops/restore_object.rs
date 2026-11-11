@@ -435,15 +435,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> RestoreObject<Eng
         // `Days` is a plain integer in the model (`RestoreRequest$Days` carries no `@range`,
         // `smithy_query(query="shape",shape="RestoreRequest")`), so nothing before this
         // handler refuses a lifetime of zero or fewer days — which is not a lifetime, and
-        // is a value that is not valid for the parameter carrying it. The sentence states
-        // the LIMIT the value broke — fixed text but for the limit itself — and the
-        // `<ArgumentName>` / `<ArgumentValue>` pair beside it names the member and echoes what
-        // the request sent, the way every other refused field of this service names itself.
+        // is a value that is not valid for the parameter carrying it. The sentence is S3's
+        // own for this refusal ([`NON_POSITIVE_RESTORE_DAYS_MESSAGE`]): it states the limit
+        // and names neither the rejected value nor the member, and the
+        // `<ArgumentName>` / `<ArgumentValue>` pair beside it is what names the member and
+        // echoes what the request sent, the way every other refused field of this service
+        // names itself.
         if days < MINIMUM_RESTORE_DAYS {
             return Err(crate::scaffolded::Scaffolded::invalid_argument(
                 "Days",
                 Some(&days.to_string()),
-                format!("Days must be at least {MINIMUM_RESTORE_DAYS}"),
+                NON_POSITIVE_RESTORE_DAYS_MESSAGE.to_string(),
             ));
         }
 
@@ -615,6 +617,11 @@ const RETRIEVAL_OPTION_UNSUPPORTED_MESSAGE: &str =
 /// for at least one of them — a request for fewer states no lifetime at all. The member
 /// carries no `@range` in the model, so this handler is what refuses a value below it.
 const MINIMUM_RESTORE_DAYS: i32 = 1;
+
+/// The sentence S3 refuses a lifetime below [`MINIMUM_RESTORE_DAYS`] with: fixed text that
+/// states the limit and names neither the value the request carried nor the member that
+/// carried it.
+const NON_POSITIVE_RESTORE_DAYS_MESSAGE: &str = "restoration days should be at least 1";
 
 /// The retrieval tiers, FASTEST FIRST.
 ///

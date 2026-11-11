@@ -524,6 +524,10 @@ impl std::fmt::Display for LifecycleConfigurationRejection {
                  '{filter}' must be greater than '{days}' in the '{action}' action for \
                  StorageClass '{warmer}' for filter '{filter}'"
             ),
+            // The fixed text is S3's own wording for this refusal, down to the second
+            // clause naming the EARLIER transition by the rule's filter alone — it repeats
+            // neither the day member nor the "for filter" clause after it — and the only
+            // parts taken from the request are the two storage classes and the filter.
             Self::TransitionBeforeMinimumDuration {
                 action: (action, days),
                 filter,

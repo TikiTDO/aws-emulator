@@ -569,6 +569,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(crate::scaffolded::Scaffolded::not_modified(
                 &object.etag,
                 object.last_modified,
+                object.version_id.as_deref(),
             ));
         }
 
