@@ -1337,6 +1337,11 @@ mod s3_access_point_policy_denial;
 // a bucket a stack created carries, which CloudFormation stamps and Amazon S3 reports.
 #[path = "all/cloudformation_stamps_s3_bucket_stack_provenance.rs"]
 mod cloudformation_stamps_s3_bucket_stack_provenance;
+// Declared in the appended tail, which is where every new suite inserts its lines: the
+// outputs of a stack whose deployment COMPLETED — the create and the revision that swaps
+// which role its deployed domain allows — each carrying the value the owning service holds.
+#[path = "all/cloudformation_updated_stack_outputs.rs"]
+mod cloudformation_updated_stack_outputs;
 // CodePipeline execution publishes onto the default event bus, and which rule's SQS target
 // receives it, spans four crates at once (CodePipeline, Amazon S3, EventBridge, Amazon SQS).
 #[path = "all/codepipeline_execution_state_changes_reach_a_queue_target.rs"]

@@ -545,7 +545,11 @@ const CHANGE_SET_POLLS: usize = 40;
 /// preview is computed when the change set is created, so what each poll collects is what the
 /// clock already owed. `Status` is the change set's own creation status and `ExecutionStatus`
 /// is whether it may be executed, so both are read.
-async fn settled_change_set(
+///
+/// `pub(crate)` because a sibling suite applies a revision the same way
+/// ([`crate::cloudformation_updated_stack_outputs`]): one poller, called twice, rather than a
+/// second copy that can drift from this one.
+pub(crate) async fn settled_change_set(
     router: &MultiServiceRouter,
     case: &str,
     stack: &str,
