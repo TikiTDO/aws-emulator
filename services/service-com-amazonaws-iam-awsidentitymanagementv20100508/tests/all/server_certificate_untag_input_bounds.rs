@@ -75,10 +75,22 @@ fn one_unechoed_violation(member: &str, requirement: &str) -> String {
     )
 }
 
+/// The envelope the boundary walk states for ONE broken requirement whose value it KEEPS:
+/// a value reached INSIDE one of the input's collections, which the restating leaves the
+/// framework's own clause for — the value it carried and the model's expression as written
+/// (`src/service/refusal_clauses.rs`'s `pattern_clause`, which restates a member reached at
+/// the top of an operation's input and returns the framework's clause for a nested one).
+fn one_echoed_violation(member: &str, value: &str, requirement: &str) -> String {
+    format!(
+        "1 validation error detected: Value '{value}' at '{member}' failed to satisfy \
+         constraint: {requirement}"
+    )
+}
+
 /// The requirement clause a value outside its member's `@pattern` states, quoting
-/// `expression`: the expression the model declares, without the pair of anchors the model
-/// writes around a whole-value one — the way this service publishes one, for a member of the
-/// input itself and for a value reached inside one of its collections alike
+/// `expression`: the expression the model declares, as written for a value reached inside a
+/// collection, and without the pair of anchors the model writes around a whole-value one for
+/// a member of the input itself
 /// (`src/service/refusal_clauses.rs`, whose rule `tests/all/range_refusal_wording.rs` owns).
 fn outside_the_pattern(expression: &str) -> String {
     format!("Member must satisfy regular expression pattern: {expression}")
@@ -248,14 +260,14 @@ fn key_cases() -> Vec<KeyCase> {
         rows.push(KeyCase {
             case: format!("a key carrying {key:?}, outside the published alphabet"),
             named: vec![key.to_string()],
-            // The restatement is about the MEMBER the model constrained, which the path
-            // names in its last segment, so a key reached inside the list is stated exactly
-            // as a value supplied for a member of the input itself: the member and the
-            // expression, without the anchors and without the value
-            // (`src/service/refusal_clauses.rs`).
-            expected: one_unechoed_violation(
+            // A tag key is a value reached INSIDE the key list, so the restating leaves it
+            // the framework's own clause: the value the request carried, and the model's
+            // expression as written. A member of the input itself is the one stated with
+            // neither (`src/service/refusal_clauses.rs`).
+            expected: one_echoed_violation(
                 "tagKeys.1.member",
-                &outside_the_pattern(r"[\p{L}\p{Z}\p{N}_.:/=+\-@]+"),
+                key,
+                &outside_the_pattern(r"^[\p{L}\p{Z}\p{N}_.:/=+\-@]+$"),
             ),
         });
     }
