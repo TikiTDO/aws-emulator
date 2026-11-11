@@ -335,6 +335,11 @@ fn ring(length: usize) -> (Value, String) {
 /// A flow that routes its input through a condition node, with `conditions` as
 /// the condition node's conditions and `taken` as the condition the one outgoing
 /// conditional connection is taken on.
+///
+/// The ending node takes its value from a DATA connection of its own: a
+/// conditional connection names no target input, so it carries no value into one
+/// (`UnfulfilledNodeInputFlowValidationDetails$input` is documented "An input is
+/// unfulfilled if there are no data connections to it").
 fn conditional(conditions: Value, taken: &str) -> Value {
     json!({
         "nodes": [
@@ -373,6 +378,15 @@ fn conditional(conditions: Value, taken: &str) -> Value {
                 "source": "Check",
                 "target": "FlowOutput",
                 "configuration": { "conditional": { "condition": taken } },
+            },
+            {
+                "name": "InputToOutput",
+                "type": "Data",
+                "source": "FlowInput",
+                "target": "FlowOutput",
+                "configuration": {
+                    "data": { "sourceOutput": "document", "targetInput": "document" },
+                },
             },
         ],
     })
@@ -489,11 +503,16 @@ async fn validate_flow_definition_reports_one_finding_per_defect() {
                     },
                 }],
             }),
-            expected(&[(
-                "UnknownConnectionSource",
-                "Error",
-                "unknownConnectionSource",
-            )]),
+            expected(&[
+                (
+                    "UnknownConnectionSource",
+                    "Error",
+                    "unknownConnectionSource",
+                ),
+                // The connection starts nowhere, so it lands nowhere either: the
+                // ending node is left with no path to it.
+                ("UnreachableNode", "Warning", "unreachableNode"),
+            ]),
         ),
         (
             "a connection ending at an undeclared node",
@@ -509,11 +528,17 @@ async fn validate_flow_definition_reports_one_finding_per_defect() {
                     },
                 }],
             }),
-            expected(&[(
-                "UnknownConnectionTarget",
-                "Error",
-                "unknownConnectionTarget",
-            )]),
+            expected(&[
+                (
+                    "UnknownConnectionTarget",
+                    "Error",
+                    "unknownConnectionTarget",
+                ),
+                // The findings that FOLLOW from the connection landing nowhere:
+                // the ending node's input takes no value and nothing reaches it.
+                ("UnfulfilledNodeInput", "Warning", "unfulfilledNodeInput"),
+                ("UnreachableNode", "Warning", "unreachableNode"),
+            ]),
         ),
         (
             "a connection starting at an output its source node doesn't declare",
@@ -549,11 +574,16 @@ async fn validate_flow_definition_reports_one_finding_per_defect() {
                     },
                 }],
             }),
-            expected(&[(
-                "UnknownConnectionTargetInput",
-                "Error",
-                "unknownConnectionTargetInput",
-            )]),
+            expected(&[
+                (
+                    "UnknownConnectionTargetInput",
+                    "Error",
+                    "unknownConnectionTargetInput",
+                ),
+                // The connection feeds an input the node does not declare, so the
+                // input it DOES declare is fed by nothing.
+                ("UnfulfilledNodeInput", "Warning", "unfulfilledNodeInput"),
+            ]),
         ),
         (
             "a conditional connection taken on a condition its source doesn't declare",
@@ -576,11 +606,16 @@ async fn validate_flow_definition_reports_one_finding_per_defect() {
                     "target": "FlowOutput",
                 }],
             }),
-            expected(&[(
-                "MissingConnectionConfiguration",
-                "Error",
-                "missingConnectionConfiguration",
-            )]),
+            expected(&[
+                (
+                    "MissingConnectionConfiguration",
+                    "Error",
+                    "missingConnectionConfiguration",
+                ),
+                // A connection carrying no data configuration names no target
+                // input, so it feeds none.
+                ("UnfulfilledNodeInput", "Warning", "unfulfilledNodeInput"),
+            ]),
         ),
         (
             "a Data connection carrying a conditional configuration",
@@ -594,11 +629,16 @@ async fn validate_flow_definition_reports_one_finding_per_defect() {
                     "configuration": { "conditional": { "condition": "isYes" } },
                 }],
             }),
-            expected(&[(
-                "MissingConnectionConfiguration",
-                "Error",
-                "missingConnectionConfiguration",
-            )]),
+            expected(&[
+                (
+                    "MissingConnectionConfiguration",
+                    "Error",
+                    "missingConnectionConfiguration",
+                ),
+                // A connection carrying no data configuration names no target
+                // input, so it feeds none.
+                ("UnfulfilledNodeInput", "Warning", "unfulfilledNodeInput"),
+            ]),
         ),
         (
             "a node of a type with an empty configuration, carrying none",
@@ -792,7 +832,12 @@ async fn validate_flow_definition_reports_one_finding_per_defect() {
         (
             "a definition with an ending node only",
             json!({ "nodes": [output_node()] }),
-            expected(&[("MissingStartingNodes", "Error", "missingStartingNodes")]),
+            expected(&[
+                ("MissingStartingNodes", "Error", "missingStartingNodes"),
+                // No connection at all, so the ending node's input is fed by
+                // nothing.
+                ("UnfulfilledNodeInput", "Warning", "unfulfilledNodeInput"),
+            ]),
         ),
         (
             "a definition with a starting node only",
@@ -1196,6 +1241,324 @@ async fn a_refusal_withholds_a_sensitive_or_self_describing_value() {
             !message.contains(row.withheld),
             "case {case}: the refusal must not echo {:?}, got {message:?}",
             row.withheld
+        );
+    }
+}
+
+/// A two-node flow — a starting node carrying one `String` output and an ending
+/// node carrying the input `input` — with one data connection from the starting
+/// node into that input, declared to end at `target`.
+///
+/// Naming `target` the ending node gives a definition with no defect; naming
+/// anything else gives a connection whose target the definition does not declare.
+fn two_node_definition(
+    start: &str,
+    finish: &str,
+    input: &str,
+    connection: &str,
+    target: &str,
+) -> Value {
+    json!({
+        "nodes": [
+            {
+                "name": start,
+                "type": "Input",
+                "configuration": { "input": {} },
+                "outputs": [{ "name": "document", "type": "String" }],
+            },
+            {
+                "name": finish,
+                "type": "Output",
+                "configuration": { "output": {} },
+                "inputs": [{ "name": input, "type": "String", "expression": "$.data" }],
+            },
+        ],
+        "connections": [{
+            "name": connection,
+            "type": "Data",
+            "source": start,
+            "target": target,
+            "configuration": { "data": { "sourceOutput": "document", "targetInput": input } },
+        }],
+    })
+}
+
+/// The whole message an `UnfulfilledNodeInput` finding carries: fixed text, with
+/// the input and node names substituted.
+fn unfulfilled_input_message(input: &str, node: &str) -> String {
+    format!("The input '{input}' in node '{node}' is undefined. Connect a source value to this input.")
+}
+
+/// The whole message an `UnknownConnectionTarget` finding carries: fixed text,
+/// with the connection's two endpoint names substituted.
+fn unknown_target_message(source: &str, target: &str) -> String {
+    format!(
+        "The connection between the nodes '{source}' and '{target}' references an unknown target \
+         node '{target}'. Update the connection to reference a valid node that exists in the \
+         flow, or add the missing node to the flow."
+    )
+}
+
+/// The whole message an `UnknownConnectionSource` finding carries: the same
+/// sentence as [`unknown_target_message`], about the other end of the connection.
+fn unknown_source_message(source: &str, target: &str) -> String {
+    format!(
+        "The connection between the nodes '{source}' and '{target}' references an unknown source \
+         node '{source}'. Update the connection to reference a valid node that exists in the \
+         flow, or add the missing node to the flow."
+    )
+}
+
+/// The whole message an `UnreachableNode` finding carries: fixed text, with the
+/// node name substituted.
+fn unreachable_node_message(node: &str) -> String {
+    format!(
+        "The node '{node}' isn't connected to any other nodes. Attach this node to the flow or \
+         delete it."
+    )
+}
+
+/// `ValidateFlowDefinition` reports EVERY defect of the submitted definition,
+/// each with the fixed message text of its class and the names taken from the
+/// request: a reference that resolves to nothing is one defect, and the defects
+/// that follow from it — an input left with no data connection, a node left with
+/// no path to it — are reported beside it rather than withheld.
+///
+/// The rows differ along what the rule generalises over: which defect classes
+/// co-occur, the node, input and connection NAMES the messages substitute, which
+/// end of a connection fails to resolve, the kind of connection that does or does
+/// not fulfil an input, and the COUNT of findings (none, one, two, three).
+#[tokio::test]
+async fn every_defect_of_a_definition_is_reported_with_the_fixed_text_of_its_class() {
+    let emulator = Emulator::new();
+
+    // An input fed by nothing but a CONDITIONAL connection: that connection names
+    // no target input, so it carries no value into one.
+    let mut conditional_only = conditional(
+        json!([
+            { "name": "isYes", "expression": "answer == \"yes\"" },
+            { "name": "default" },
+        ]),
+        "isYes",
+    );
+    conditional_only["connections"]
+        .as_array_mut()
+        .expect("the connection list")
+        .retain(|connection| connection["name"] != json!("InputToOutput"));
+
+    // A connection whose SOURCE the definition does not declare: the other end of
+    // the same rule.
+    let mut unknown_source = two_node_definition("Start", "Finish", "document", "StartToFinish", "Finish");
+    unknown_source["connections"][0]["source"] = json!("Nowhere");
+
+    let cases: Vec<(&str, Value, Value)> = vec![
+        (
+            "a connection whose target the definition doesn't declare",
+            two_node_definition("Start", "Finish", "document", "StartToFinish", "MissingNode"),
+            json!([
+                {
+                    "type": "UnfulfilledNodeInput",
+                    "severity": "Warning",
+                    "details": { "unfulfilledNodeInput": { "node": "Finish", "input": "document" } },
+                    "message": unfulfilled_input_message("document", "Finish"),
+                },
+                {
+                    "type": "UnknownConnectionTarget",
+                    "severity": "Error",
+                    "details": { "unknownConnectionTarget": { "connection": "StartToFinish" } },
+                    "message": unknown_target_message("Start", "MissingNode"),
+                },
+                {
+                    "type": "UnreachableNode",
+                    "severity": "Warning",
+                    "details": { "unreachableNode": { "node": "Finish" } },
+                    "message": unreachable_node_message("Finish"),
+                },
+            ]),
+        ),
+        (
+            "the same defect under other node, input and connection names",
+            two_node_definition("Alpha", "Omega", "payload", "AlphaToOmegaLink", "Elsewhere"),
+            json!([
+                {
+                    "type": "UnfulfilledNodeInput",
+                    "severity": "Warning",
+                    "details": { "unfulfilledNodeInput": { "node": "Omega", "input": "payload" } },
+                    "message": unfulfilled_input_message("payload", "Omega"),
+                },
+                {
+                    "type": "UnknownConnectionTarget",
+                    "severity": "Error",
+                    "details": { "unknownConnectionTarget": { "connection": "AlphaToOmegaLink" } },
+                    "message": unknown_target_message("Alpha", "Elsewhere"),
+                },
+                {
+                    "type": "UnreachableNode",
+                    "severity": "Warning",
+                    "details": { "unreachableNode": { "node": "Omega" } },
+                    "message": unreachable_node_message("Omega"),
+                },
+            ]),
+        ),
+        (
+            "a connection whose source the definition doesn't declare",
+            unknown_source,
+            json!([
+                {
+                    "type": "UnknownConnectionSource",
+                    "severity": "Error",
+                    "details": { "unknownConnectionSource": { "connection": "StartToFinish" } },
+                    "message": unknown_source_message("Nowhere", "Finish"),
+                },
+                {
+                    "type": "UnreachableNode",
+                    "severity": "Warning",
+                    "details": { "unreachableNode": { "node": "Finish" } },
+                    "message": unreachable_node_message("Finish"),
+                },
+            ]),
+        ),
+        (
+            "an input no data connection names, on an otherwise sound flow",
+            json!({
+                "nodes": [
+                    input_node(),
+                    {
+                        "name": "FlowOutput",
+                        "type": "Output",
+                        "configuration": { "output": {} },
+                        "inputs": [
+                            { "name": "document", "type": "String", "expression": "$.data" },
+                            { "name": "extra", "type": "String", "expression": "$.data" },
+                        ],
+                    },
+                ],
+                "connections": [passthrough_connection()],
+            }),
+            json!([{
+                "type": "UnfulfilledNodeInput",
+                "severity": "Warning",
+                "details": { "unfulfilledNodeInput": { "node": "FlowOutput", "input": "extra" } },
+                "message": unfulfilled_input_message("extra", "FlowOutput"),
+            }]),
+        ),
+        (
+            "an input a conditional connection reaches but feeds no value into",
+            conditional_only,
+            json!([{
+                "type": "UnfulfilledNodeInput",
+                "severity": "Warning",
+                "details": { "unfulfilledNodeInput": { "node": "FlowOutput", "input": "document" } },
+                "message": unfulfilled_input_message("document", "FlowOutput"),
+            }]),
+        ),
+        (
+            "two inputs on two nodes, each fed by nothing",
+            json!({
+                "nodes": [
+                    input_node(),
+                    {
+                        "name": "Middle",
+                        "type": "Collector",
+                        "configuration": { "collector": {} },
+                        "inputs": [
+                            { "name": "first", "type": "String", "expression": "$.data" },
+                            { "name": "second", "type": "String", "expression": "$.data" },
+                        ],
+                        "outputs": [{ "name": "carried", "type": "String" }],
+                    },
+                    {
+                        "name": "FlowOutput",
+                        "type": "Output",
+                        "configuration": { "output": {} },
+                        "inputs": [
+                            { "name": "document", "type": "String", "expression": "$.data" },
+                            { "name": "also", "type": "String", "expression": "$.data" },
+                        ],
+                    },
+                ],
+                "connections": [
+                    {
+                        "name": "InputToMiddle",
+                        "type": "Data",
+                        "source": "FlowInput",
+                        "target": "Middle",
+                        "configuration": {
+                            "data": { "sourceOutput": "document", "targetInput": "first" },
+                        },
+                    },
+                    {
+                        "name": "MiddleToOutput",
+                        "type": "Data",
+                        "source": "Middle",
+                        "target": "FlowOutput",
+                        "configuration": {
+                            "data": { "sourceOutput": "carried", "targetInput": "document" },
+                        },
+                    },
+                ],
+            }),
+            json!([
+                {
+                    "type": "UnfulfilledNodeInput",
+                    "severity": "Warning",
+                    "details": { "unfulfilledNodeInput": { "node": "Middle", "input": "second" } },
+                    "message": unfulfilled_input_message("second", "Middle"),
+                },
+                {
+                    "type": "UnfulfilledNodeInput",
+                    "severity": "Warning",
+                    "details": { "unfulfilledNodeInput": { "node": "FlowOutput", "input": "also" } },
+                    "message": unfulfilled_input_message("also", "FlowOutput"),
+                },
+            ]),
+        ),
+        (
+            "a node no connection attaches to the flow",
+            json!({
+                "nodes": [
+                    input_node(),
+                    output_node(),
+                    {
+                        "name": "Orphan",
+                        "type": "Collector",
+                        "configuration": { "collector": {} },
+                    },
+                ],
+                "connections": [passthrough_connection()],
+            }),
+            json!([{
+                "type": "UnreachableNode",
+                "severity": "Warning",
+                "details": { "unreachableNode": { "node": "Orphan" } },
+                "message": unreachable_node_message("Orphan"),
+            }]),
+        ),
+        // The control: the same definition as the first row with the connection
+        // pointed at the node the definition DOES declare has no defect at all.
+        (
+            "the same definition with the connection's target declared",
+            two_node_definition("Start", "Finish", "document", "StartToFinish", "Finish"),
+            json!([]),
+        ),
+        (
+            "a passthrough definition",
+            passthrough(),
+            json!([]),
+        ),
+    ];
+
+    for (case, definition, want) in cases {
+        let answer = emulator.validate(definition).await;
+        assert_eq!(
+            answer.status, 200,
+            "case {case}: expected ValidateFlowDefinition -> 200, got {answer:?}"
+        );
+        assert_eq!(
+            answer.member(&["validations"]),
+            &want,
+            "case {case}: expected the findings {want:?}, got {:?}",
+            answer.member(&["validations"])
         );
     }
 }

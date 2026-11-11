@@ -21,13 +21,18 @@
 //!   nothing to configure; a condition node carries a default condition; and a
 //!   loop node's body carries exactly one `LoopInput` and one `LoopController`
 //!   node;
+//! * node input fulfilment — every input a node declares is fed by a data
+//!   connection (`UnfulfilledNodeInputFlowValidationDetails$input` is documented
+//!   "An input is unfulfilled if there are no data connections to it");
 //! * graph properties — the flow starts at an `Input` node, ends at an `Output`
 //!   node, has no cycle, feeds each node input from at most one connection, and
 //!   reaches every node it declares.
 //!
-//! The graph properties are only decided once every connection resolves: a
-//! connection naming a node that is not there leaves the graph unknown, so
-//! reachability and cycles are not reported from a guess.
+//! Each check is decided on its own: a connection naming a node the definition
+//! does not declare is ONE defect, and the defects that follow from it — an input
+//! left with no source, a node left with no path to it — are reported beside it
+//! rather than withheld, so one unresolved reference never hides the rest of the
+//! findings for the same definition.
 //!
 //! ## Shape of an operation
 //!
@@ -307,6 +312,7 @@ pub fn validate_definition(definition: &FlowDefinition) -> Vec<FlowValidation> {
     for node in nodes {
         check_node(node, &mut findings);
     }
+    check_unfulfilled_node_inputs(nodes, connections, &mut findings);
 
     if !nodes.iter().any(|node| node.r#type == INPUT_NODE_TYPE) {
         findings.push(finding(
@@ -325,18 +331,16 @@ pub fn validate_definition(definition: &FlowDefinition) -> Vec<FlowValidation> {
         ));
     }
 
-    let mut every_connection_resolves = true;
     for connection in connections {
-        every_connection_resolves &= check_connection(connection, &nodes_by_name, &mut findings);
+        check_connection(connection, &nodes_by_name, &mut findings);
     }
     check_duplicate_connections(connections, &mut findings);
 
-    // A connection naming a node the definition does not declare leaves the graph
-    // unknown: its cycles and its reachable set are not decidable, so they are not
-    // reported until the references resolve.
-    if every_connection_resolves {
-        check_graph(nodes, connections, &mut findings);
-    }
+    // The graph properties are findings of their own, decided from the
+    // connections that DO land: a connection naming a node the definition does
+    // not declare lands nowhere, so the node it should have fed stays unreached
+    // and that is reported too, beside the unresolved reference itself.
+    check_graph(nodes, connections, &mut findings);
 
     findings.truncate(MAX_VALIDATIONS);
     findings
@@ -593,13 +597,34 @@ fn check_loop_node(
     }
 }
 
-/// The findings of one connection, and whether both of its endpoints resolved to
-/// a declared node.
+/// The message a connection endpoint that names no declared node is reported
+/// with: the pair of nodes the connection runs between, which of the two did not
+/// resolve, and what to do about it.
+///
+/// `endpoint` is the end of the connection at fault, as `FlowConnection` names it
+/// (`source` or `target`); everything else in the sentence is fixed for the class,
+/// and the node names come from the submitted connection.
+fn unresolved_endpoint_message(
+    connection: &FlowConnection,
+    endpoint: &str,
+    unresolved: &str,
+) -> String {
+    format!(
+        "The connection between the nodes '{}' and '{}' references an unknown {endpoint} node \
+         '{unresolved}'. Update the connection to reference a valid node that exists in the flow, \
+         or add the missing node to the flow.",
+        connection.source, connection.target
+    )
+}
+
+/// The findings of one connection: whether each of its endpoints names a node the
+/// definition declares, and whether its configuration names an output, an input or
+/// a condition those nodes declare.
 fn check_connection(
     connection: &FlowConnection,
     nodes_by_name: &::std::collections::HashMap<&str, &FlowNode>,
     findings: &mut Vec<FlowValidation>,
-) -> bool {
+) {
     let source = nodes_by_name.get(connection.source.as_str()).copied();
     let target = nodes_by_name.get(connection.target.as_str()).copied();
 
@@ -607,10 +632,7 @@ fn check_connection(
         findings.push(finding(
             "UnknownConnectionSource",
             SEVERITY_ERROR,
-            format!(
-                "Connection {} starts at node {}, which the flow doesn't define.",
-                connection.name, connection.source
-            ),
+            unresolved_endpoint_message(connection, "source", &connection.source),
             FlowValidationDetails::unknownConnectionSource(
                 UnknownConnectionSourceFlowValidationDetails {
                     connection: connection.name.clone(),
@@ -622,10 +644,7 @@ fn check_connection(
         findings.push(finding(
             "UnknownConnectionTarget",
             SEVERITY_ERROR,
-            format!(
-                "Connection {} ends at node {}, which the flow doesn't define.",
-                connection.name, connection.target
-            ),
+            unresolved_endpoint_message(connection, "target", &connection.target),
             FlowValidationDetails::unknownConnectionTarget(
                 UnknownConnectionTargetFlowValidationDetails {
                     connection: connection.name.clone(),
@@ -737,8 +756,58 @@ fn check_connection(
         // declares.
         _ => missing_configuration(findings),
     }
+}
 
-    source.is_some() && target.is_some()
+/// The inputs no data connection feeds: a node input takes its value from the
+/// connection that lands on it, so an input nothing lands on has no value at run
+/// time. `UnfulfilledNodeInputFlowValidationDetails$input` is documented "An
+/// input is unfulfilled if there are no data connections to it", so only a
+/// connection of [`DATA_CONNECTION_TYPE`] naming that input in its configuration
+/// fulfils it — a conditional connection names no input and carries no value into
+/// one.
+///
+/// The finding is a `Warning`: the rest of the flow still runs, with that input
+/// undefined.
+///
+/// The walk is bounded by the model, not by the caller: `FlowDefinition` admits
+/// at most 40 `nodes` with at most 20 `inputs` each and at most 20 `connections`,
+/// and the boundary validator refuses a larger definition before this runs.
+fn check_unfulfilled_node_inputs(
+    nodes: &[FlowNode],
+    connections: &[FlowConnection],
+    findings: &mut Vec<FlowValidation>,
+) {
+    let fed = |node: &FlowNode, input: &FlowNodeInput| {
+        connections.iter().any(|connection| {
+            connection.target == node.name
+                && matches!(
+                    connection.configuration.as_ref(),
+                    Some(FlowConnectionConfiguration::Data(data))
+                        if data.target_input == input.name
+                )
+        })
+    };
+
+    for node in nodes {
+        for input in node.inputs.iter().flatten() {
+            if !fed(node, input) {
+                findings.push(finding(
+                    "UnfulfilledNodeInput",
+                    SEVERITY_WARNING,
+                    format!(
+                        "The input '{}' in node '{}' is undefined. Connect a source value to this input.",
+                        input.name, node.name
+                    ),
+                    FlowValidationDetails::unfulfilledNodeInput(
+                        UnfulfilledNodeInputFlowValidationDetails {
+                            node: node.name.clone(),
+                            input: input.name.clone(),
+                        },
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 /// Two connections that start at the same node, end at the same node and carry
@@ -901,7 +970,8 @@ fn check_graph(
                 "UnreachableNode",
                 SEVERITY_WARNING,
                 format!(
-                    "No path from a starting node of the flow reaches node {}.",
+                    "The node '{}' isn't connected to any other nodes. Attach this node to the \
+                     flow or delete it.",
                     node.name
                 ),
                 FlowValidationDetails::unreachableNode(UnreachableNodeFlowValidationDetails {

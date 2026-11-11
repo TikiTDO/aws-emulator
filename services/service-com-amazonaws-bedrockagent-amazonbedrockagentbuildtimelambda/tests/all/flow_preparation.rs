@@ -380,7 +380,13 @@ fn cases() -> Vec<Case> {
             name: "a connection naming a node the definition does not declare",
             definition: Some(dangling_connection_definition()),
             outcome: "Failed",
-            expected_types: &["UnknownConnectionTarget"],
+            // The unresolved reference is one defect; the defects that follow
+            // from the connection landing nowhere are reported beside it.
+            expected_types: &[
+                "UnfulfilledNodeInput",
+                "UnknownConnectionTarget",
+                "UnreachableNode",
+            ],
         },
         Case {
             name: "a definition carrying a finding that is not fatal",
