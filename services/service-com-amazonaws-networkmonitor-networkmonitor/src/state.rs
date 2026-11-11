@@ -884,14 +884,18 @@ fn echoed_entries(count: usize) -> String {
 }
 
 /// Refuse a tag map that would leave a resource carrying more pairs than
-/// [`MAX_TAGS_PER_RESOURCE`], for every operation that MERGES tags into a
-/// resource the store already holds (`TagResource`).
+/// [`MAX_TAGS_PER_RESOURCE`], for every operation that composes a resource's one
+/// tag map out of MORE THAN ONE map — the pairs the store already holds plus a
+/// request's (`TagResource`), and the two maps one request assigns the same new
+/// resource (`CreateProbe`'s `tags` and `probe.tags`).
 ///
-/// `map_path` is where the request's tag map sat, and `stored` is the map that
-/// resource already carries: the ceiling bounds what the resource WILL carry, so
-/// the count judged is the MERGED set's — the pairs already stored plus each
-/// requested key the resource does not carry yet. A caller that only overwrites
-/// keys the resource already holds adds nothing, so it is never refused.
+/// `map_path` is where the request's tag map sat, and `carried` is the other map
+/// the merge keeps — the pairs the resource already holds, or the half of the
+/// request already accounted for: the ceiling bounds what the resource WILL
+/// carry, so the count judged is the MERGED set's — `carried` plus each
+/// requested key it does not hold yet. A caller that only overwrites keys the
+/// merge already carries adds nothing, so it is never refused. The count is the
+/// union's and therefore the same whichever map is passed as `carried`.
 ///
 /// `Err` carries the clause for the bound, built through the shared renderer
 /// like every other refusal this service authors: the ceiling's value IS the
@@ -900,14 +904,14 @@ fn echoed_entries(count: usize) -> String {
 /// ([`stated_violation`]), and cannot drift from how any other bound is worded.
 pub fn check_tag_count<'a>(
     map_path: &str,
-    stored: &BTreeMap<String, String>,
+    carried: &BTreeMap<String, String>,
     requested: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), String> {
     let added = requested
         .into_iter()
-        .filter(|key| !stored.contains_key(*key))
+        .filter(|key| !carried.contains_key(*key))
         .count();
-    let merged = stored.len() + added;
+    let merged = carried.len() + added;
     if merged > MAX_TAGS_PER_RESOURCE {
         return Err(stated_violation(
             map_path,

@@ -22,7 +22,13 @@
 //! The tags the request assigns the probe (`tags` and `probe.tags`) are a
 //! caller's own, so a key in the namespace AWS reserves for its tags
 //! ([`crate::state::RESERVED_TAG_KEY_PREFIX`]) is refused with the modelled 400
-//! `ValidationException` and mints nothing.
+//! `ValidationException` and mints nothing. Those two maps are UNIONED into the
+//! probe's one tag map, so the per-resource tag maximum
+//! ([`crate::state::MAX_TAGS_PER_RESOURCE`]) is judged on that union rather than
+//! on either half — each is inside the modelled `TagMap` maximum on its own, so
+//! the union is the only count this operation can judge
+//! ([`crate::state::check_tag_count`]) — and a request whose union is past it is
+//! refused with the clause for the bound and mints nothing.
 //!
 //! ## Shape of an operation
 //!
@@ -256,6 +262,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             input.probe.tags.unwrap_or_default().into_iter().collect();
         crate::state::check_tag_keys(
             &crate::state::probe_member_path(&crate::state::member_path("probe"), "tags"),
+            probe_tags.keys().map(String::as_str),
+        )
+        .map_err(validation)?;
+        // The ceiling bounds the map the probe WILL carry, and that map is the
+        // UNION of the two the request sent: each half is inside the modelled
+        // `TagMap` maximum on its own, so the union is the only count this
+        // operation can judge, by the one rule every tag write applies
+        // ([`crate::state::check_tag_count`]). Judged BEFORE a probe id is
+        // minted, so a refused create stores none of the pairs it carried.
+        //
+        // The clause names `tags`, the member documented as the pairs assigned
+        // to the probe: the count that failed is the union's and sits at no
+        // single member, so the rule is stated at the one member every tag-count
+        // refusal this service raises names, and a caller reads one sentence for
+        // the ceiling whichever operation applied it.
+        crate::state::check_tag_count(
+            &crate::state::member_path("tags"),
+            &requested_tags,
             probe_tags.keys().map(String::as_str),
         )
         .map_err(validation)?;

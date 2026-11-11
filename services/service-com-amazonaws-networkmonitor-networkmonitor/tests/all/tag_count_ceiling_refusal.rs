@@ -64,7 +64,12 @@ fn entries(count: usize) -> String {
 }
 
 /// The whole message a refused tag count is stated with.
-fn one_error(count: usize) -> String {
+///
+/// `pub(crate)`, because the ceiling is one rule over every operation that
+/// composes a resource's tag map out of more than one map, so the suite that
+/// pins it for `CreateProbe`'s union (`create_probe_tag_union_ceiling`) reads
+/// the sentence from here rather than keeping a copy that could drift.
+pub(crate) fn one_error(count: usize) -> String {
     format!(
         "{ONE_ERROR}Value '{}' at 'tags' failed to satisfy constraint: {}",
         entries(count),
