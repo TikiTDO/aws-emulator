@@ -602,11 +602,16 @@ async fn a_stack_publishes_the_health_check_id_route53_minted() {
                 "case {case:?}: expected the record set to be conditional on the minted \
                  health check {id:?}, got {listed}"
             );
+            // "Ref returns the record name": the name the declaration states, with the
+            // terminal dot dropped, which is the form CloudFormation reports a DNS record
+            // name in.
+            let expected_ref = record.name.trim_end_matches('.');
             assert_eq!(
                 physical_ids.get(record.logical_id).map(String::as_str),
-                Some(record.name),
+                Some(expected_ref),
                 "case {case:?}: expected the record set's physical id to be the record name \
-                 it declared, got {:?} in {resources}",
+                 it declared without its terminal dot ({expected_ref:?}), got {:?} in \
+                 {resources}",
                 physical_ids.get(record.logical_id)
             );
         }

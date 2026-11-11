@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteCidrCollection
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteCidrCollection`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteCidrCollection::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -69,6 +60,17 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+
+use crate::state::no_such_cidr_collection;
+
+/// The refusal text this operation answers a delete of a collection that still holds a
+/// CIDR block with (`CidrCollectionInUseException`, HTTP 400).
+///
+/// The sentence the model states for this error class, which is about the COLLECTION
+/// rather than about the request: what a caller acts on is emptying the collection
+/// (`ChangeCidrCollection` with `DELETE_IF_EXISTS`) and asking again.
+const CIDR_COLLECTION_IN_USE_MESSAGE: &str =
+    "This CIDR collection is in use, and isn't empty.";
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -141,18 +143,36 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteCidrCollection` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteCidrCollectionErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteCidrCollection"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            // Unreachable under the router, which always mounts this service on
+            // the shared `InMemoryEngine`.
+            DeleteCidrCollectionErrorModeled::InvalidInput(InvalidInput {
+                message: Some("the Route 53 emulator's state store is unavailable".to_string()),
+            })
+        })?;
+
+        let mut store = state.lock();
+
+        let held = store.cidr_collections.get(&input.id).ok_or_else(|| {
+            DeleteCidrCollectionErrorModeled::NoSuchCidrCollectionException(
+                no_such_cidr_collection(),
+            )
+        })?;
+        // "This CIDR collection is in use, and isn't empty": a collection that still
+        // holds a CIDR block is not one this delete takes away, so the blocks come out
+        // first (`ChangeCidrCollection` with `DELETE_IF_EXISTS`) and the collection after.
+        if !held.is_empty() {
+            return Err(
+                DeleteCidrCollectionErrorModeled::CidrCollectionInUseException(
+                    CidrCollectionInUseException {
+                        message: Some(CIDR_COLLECTION_IN_USE_MESSAGE.to_string()),
+                    },
+                )
+                .into(),
+            );
+        }
+        store.cidr_collections.remove(&input.id);
+        Ok(DeleteCidrCollectionOutput {})
     }
 }

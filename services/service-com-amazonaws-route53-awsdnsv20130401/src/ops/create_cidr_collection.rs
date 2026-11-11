@@ -233,6 +233,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             name: input.name,
             caller_reference: input.caller_reference,
             version: FIRST_CIDR_COLLECTION_VERSION,
+            // A created collection holds no CIDR block: `CreateCidrCollection`
+            // takes none, and `ChangeCidrCollection` is what puts one there.
+            locations: ::std::collections::BTreeMap::new(),
         };
         // Insert and read back in ONE step: what the caller is told is read out
         // of the store it was just written to, so a later read of the

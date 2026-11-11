@@ -52,6 +52,7 @@ pub mod monitored_alarm;
 pub mod account_vpcs;
 
 use crate::ops::types::create_cidr_collection_types::CidrCollection;
+use crate::ops::types::list_cidr_blocks_types::CidrBlockSummary;
 use crate::ops::types::create_reusable_delegation_set_types::HostedZoneNotFound;
 use crate::ops::types::delete_vpc_association_authorization_types::VPCAssociationAuthorizationNotFound;
 use crate::ops::types::get_change_types::NoSuchChange;
@@ -59,7 +60,8 @@ use crate::ops::types::shared_types::{
     ChangeInfo, CloudWatchAlarmConfiguration, ConflictingDomainExists, DelegationSet, HealthCheck,
     HealthCheckConfig,
     HealthCheckObservation, HostedZone, HostedZoneConfig, HostedZoneFeatures,
-    InvalidPaginationToken, InvalidTrafficPolicyDocument, KeySigningKey, NoSuchDelegationSet,
+    InvalidPaginationToken, InvalidTrafficPolicyDocument, KeySigningKey, NoSuchCidrCollectionException,
+    NoSuchDelegationSet,
     NoSuchHealthCheck, NoSuchHostedZone, NoSuchTrafficPolicy, NoSuchTrafficPolicyInstance,
     GeoLocationDetails,
     ResourceRecordSet, ResourceTagSet, StatusReport, Tag, TrafficPolicy, TrafficPolicyInstance, VPC,
@@ -394,6 +396,15 @@ pub const MAX_CIDR_COLLECTIONS: usize = 100;
 /// Route 53 sets to 1 when you create a CIDR collection and increments by 1
 /// each time you update settings for the CIDR collection."
 pub const FIRST_CIDR_COLLECTION_VERSION: i64 = 1;
+
+/// The most CIDR blocks one collection may hold.
+///
+/// Route 53's documented quota for a collection ("CIDR blocks per CIDR
+/// collection: 1,000"), which is also the bound the model puts on the blocks one
+/// change may carry (`CidrList`'s `@length(min: 1, max: 1000)`), and
+/// `LimitsExceeded` is the error `ChangeCidrCollection` models for a change past
+/// it.
+pub const MAX_CIDR_BLOCKS_PER_COLLECTION: usize = 1000;
 
 /// The `AccountLimitType` naming the hosted-zone quota (`AccountLimitType` enum).
 pub const ACCOUNT_LIMIT_MAX_HOSTED_ZONES: &str = "MAX_HOSTED_ZONES_BY_OWNER";
@@ -1835,11 +1846,10 @@ pub fn traffic_policy_instance_order_key(
 /// A CIDR collection: the named group of CIDR blocks an IP-based record set
 /// routes a client's address through.
 ///
-/// The blocks themselves are not here yet — `ChangeCidrCollection`, the one
-/// operation that puts a block in a collection, is still a scaffold — so this
-/// record is the collection's IDENTITY: the id Route 53 minted for it, the name
-/// and caller reference the create carried, and the version counter a later
-/// change moves.
+/// The record carries the collection's IDENTITY — the id Route 53 minted for it,
+/// the name and caller reference the create carried, and the version counter a
+/// later change moves — plus the BLOCKS it holds, which
+/// [`crate::ops::change_cidr_collection`] puts there one location at a time.
 #[derive(Debug, Clone)]
 pub struct StoredCidrCollection {
     /// The collection id, which is also this record's key in
@@ -1854,6 +1864,14 @@ pub struct StoredCidrCollection {
     /// This collection's version counter, [`FIRST_CIDR_COLLECTION_VERSION`] from
     /// the create on.
     pub version: i64,
+    /// The CIDR blocks the collection holds, keyed by the LOCATION they are
+    /// associated with: "Name of the location that is associated with the CIDR
+    /// collection" (`CidrCollectionChange$LocationName`).
+    ///
+    /// A `BTreeMap` of `BTreeSet`s, so `ListCidrBlocks` pages over a stable total
+    /// order and a block put twice is held once — a collection associates a
+    /// location with a SET of blocks.
+    pub locations: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl StoredCidrCollection {
@@ -1868,6 +1886,30 @@ impl StoredCidrCollection {
             name: Some(self.name.clone()),
             version: Some(self.version),
         }
+    }
+
+    /// Whether the collection holds no CIDR block at all.
+    ///
+    /// What `DeleteCidrCollection` is held to: `CidrCollectionInUseException` is
+    /// "this CIDR collection is in use, and isn't empty", so a collection that
+    /// still holds a block is not one a delete takes away.
+    pub fn is_empty(&self) -> bool {
+        self.locations.values().all(BTreeSet::is_empty)
+    }
+
+    /// Every block the collection holds, as the `CidrBlockSummary` rows
+    /// `ListCidrBlocks` reports — each block beside the location it belongs to,
+    /// in location order and then block order.
+    pub fn to_cidr_block_summaries(&self) -> Vec<CidrBlockSummary> {
+        self.locations
+            .iter()
+            .flat_map(|(location, blocks)| {
+                blocks.iter().map(move |block| CidrBlockSummary {
+                    cidr_block: Some(block.clone()),
+                    location_name: Some(location.clone()),
+                })
+            })
+            .collect()
     }
 }
 
@@ -3297,6 +3339,18 @@ pub fn invalid_pagination_token(token: &str) -> InvalidPaginationToken {
     InvalidPaginationToken {
         message: Some(format!("Invalid pagination token: {token}")),
     }
+}
+
+/// The modelled `NoSuchCidrCollectionException` (HTTP 404) for a collection id
+/// that names no CIDR collection in this store.
+///
+/// The ONE place this service words that refusal, so every collection-addressed
+/// operation answers a missing collection identically. It carries NO message at
+/// all: the error CODE is the whole of what Route 53 says about a collection it
+/// does not hold, so a client reads the class and the collection id it sent —
+/// which is the one thing the request named.
+pub fn no_such_cidr_collection() -> NoSuchCidrCollectionException {
+    NoSuchCidrCollectionException { message: None }
 }
 
 /// The modelled `NoSuchHostedZone` (HTTP 404) for a zone id that names no zone

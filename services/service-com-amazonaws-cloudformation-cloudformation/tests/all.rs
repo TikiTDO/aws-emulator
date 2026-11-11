@@ -321,6 +321,10 @@ mod resource_scans;
 mod resource_signal_waits;
 #[path = "all/resource_signals.rs"]
 mod resource_signals;
+// Declared in sorted position in this quiet span, rather than in the tail of this file,
+// which is where every concurrently landing suite appends its line.
+#[path = "all/route53_resource_declarations.rs"]
+mod route53_resource_declarations;
 #[path = "all/rollback_trigger_bounds.rs"]
 mod rollback_trigger_bounds;
 #[path = "all/rollback_trigger_types.rs"]

@@ -61,6 +61,9 @@ fn computed_attributes(resource_type: &str) -> BTreeMap<String, String> {
             // The function an `AWS::Lambda::Version` and an `AWS::Lambda::Alias` declare
             // against, whose ARN each of their own ARNs is a qualified form of.
             "FunctionName": "a-function",
+            // The document an `AWS::Route53::TrafficPolicy` declares, whose own `RecordType`
+            // is the `Type` that type publishes.
+            "Document": { "RecordType": "A" },
         }),
         condition: None,
         declaration: Value::Null,

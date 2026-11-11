@@ -249,6 +249,38 @@ pub const REQUIRED_PROPERTIES: &[RequiredProperties] = &[
     },
 ];
 
+/// One group of properties a resource type's schema admits AT MOST ONE of: the `oneOf` that
+/// schema states over them.
+#[derive(Debug, Clone, Copy)]
+pub struct ExclusiveProperties {
+    /// The resource type the group belongs to, as a template declares it.
+    pub resource_type: &'static str,
+    /// The properties that exclude each other, in the order the contract publishes them.
+    pub exclusive: &'static [&'static str],
+}
+
+/// The types this stage knows a MUTUALLY EXCLUSIVE group of properties of.
+///
+/// Source for each row: the resource type's entry in the "AWS resource and property types
+/// reference" of the CloudFormation User Guide, which publishes the exclusion in words
+/// beside the properties it is about, and which the type's registry schema states as a
+/// `oneOf` over them.
+///
+/// The two Amazon Route 53 record types are the rows here: each publishes `HostedZoneId` and
+/// `HostedZoneName` with "Specify either `HostedZoneName` or `HostedZoneId`, but not both" —
+/// a record set is written in ONE zone, named either by the id Route 53 knows it by or by its
+/// DNS name, and a declaration stating both names no one zone to write it in.
+pub const EXCLUSIVE_PROPERTIES: &[ExclusiveProperties] = &[
+    ExclusiveProperties {
+        resource_type: "AWS::Route53::RecordSet",
+        exclusive: &["HostedZoneId", "HostedZoneName"],
+    },
+    ExclusiveProperties {
+        resource_type: "AWS::Route53::RecordSetGroup",
+        exclusive: &["HostedZoneId", "HostedZoneName"],
+    },
+];
+
 /// The name this service reports for the pre-deployment validation that holds a
 /// declaration's properties to what its type's contract requires and admits.
 ///
@@ -302,8 +334,44 @@ const PROPERTIES_SECTION: &str = "Properties";
 /// is not there has no value to hold to a published set.
 pub fn failure(declared: &[StoredResource]) -> Option<PropertyFailure> {
     declared.iter().find_map(|resource| {
-        missing_required_property(resource).or_else(|| inadmissible_value(resource))
+        missing_required_property(resource)
+            .or_else(|| matched_several_subschemas(resource))
+            .or_else(|| inadmissible_value(resource))
     })
+}
+
+/// `Some(failure)` for a resource carrying MORE THAN ONE of a group of properties its type's
+/// schema admits at most one of ([`EXCLUSIVE_PROPERTIES`]); `None` for a type with no row,
+/// and for one carrying at most one member of every group it has.
+///
+/// A `oneOf` is satisfied by exactly one of its subschemas, so a declaration carrying two of
+/// the properties matches two of them — which is what the schema validator reports
+/// ([`matched_subschemas_reason`]), and why the count is the one variable part of that
+/// sentence.
+fn matched_several_subschemas(resource: &StoredResource) -> Option<PropertyFailure> {
+    EXCLUSIVE_PROPERTIES
+        .iter()
+        .filter(|row| row.resource_type == resource.resource_type)
+        .find_map(|row| {
+            let matched = row
+                .exclusive
+                .iter()
+                .filter(|property| resource.properties.get(*property).is_some())
+                .count();
+            (matched > 1).then(|| PropertyFailure {
+                logical_id: resource.logical_id.clone(),
+                resource_type: resource.resource_type.clone(),
+                reason: matched_subschemas_reason(matched),
+                path: properties_path(&resource.logical_id),
+            })
+        })
+}
+
+/// How CloudFormation reports a declaration that satisfies more than one subschema of a
+/// `oneOf` its type's schema states: the schema validator's own sentence, whose one variable
+/// part is HOW MANY of them the document matched.
+pub fn matched_subschemas_reason(matched: usize) -> String {
+    format!("#: #: {matched} subschemas matched instead of one")
 }
 
 /// `Some(failure)` for a resource whose declaration does not carry a property its type's

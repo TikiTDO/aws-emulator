@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListCidrLocations
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListCidrLocations`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListCidrLocations::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -78,6 +69,17 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+
+use crate::state::{no_such_cidr_collection, DEFAULT_PAGE_SIZE};
+
+/// The largest page this listing serves: the default page size every Route 53 listing is
+/// served in, which is past the locations one collection can hold under any faithful
+/// workload — so one page reports them all.
+const MAX_PAGE_SIZE: i32 = DEFAULT_PAGE_SIZE;
+
+/// The refusal text this operation answers a `NextToken` it never minted with
+/// (`InvalidInput`, HTTP 400), as the model words that class.
+const INVALID_TOKEN_MESSAGE: &str = "The input is not valid.";
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -148,18 +150,76 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListCidrLocations` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListCidrLocationsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListCidrLocations"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            // Unreachable under the router, which always mounts this service on
+            // the shared `InMemoryEngine`.
+            ListCidrLocationsErrorModeled::InvalidInput(InvalidInput {
+                message: Some("the Route 53 emulator's state store is unavailable".to_string()),
+            })
+        })?;
+
+        // "An opaque pagination token to indicate where the service is to begin
+        // enumerating results": the token this operation mints is the name of the first
+        // location the previous page left out, so resuming is a lower bound on the order the
+        // collection holds its locations in. A location name admits only `[0-9A-Za-z_\-]`
+        // (`CidrLocationNameDefaultNotAllowed`'s own pattern), so a token carrying anything
+        // else identifies no page at all.
+        let resume_at = match input.next_token.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(token)
+                if token
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || "_-".contains(character)) =>
+            {
+                Some(token.to_string())
+            }
+            Some(_) => {
+                return Err(ListCidrLocationsErrorModeled::InvalidInput(InvalidInput {
+                    message: Some(INVALID_TOKEN_MESSAGE.to_string()),
+                })
+                .into());
+            }
+        };
+        let page_size = input
+            .max_results
+            .unwrap_or(DEFAULT_PAGE_SIZE)
+            .clamp(1, MAX_PAGE_SIZE) as usize;
+
+        // A pure read: nothing below writes to the store.
+        let store = state.lock();
+        let collection = store.cidr_collections.get(&input.collection_id).ok_or_else(|| {
+            ListCidrLocationsErrorModeled::NoSuchCidrCollectionException(no_such_cidr_collection())
+        })?;
+        // The locations are keyed in a `BTreeMap`, so this walk is a stable total order and a
+        // token always resumes at the same place. A location the collection associates no
+        // block with is no location of it.
+        let matching = collection
+            .locations
+            .iter()
+            .filter(|(_, blocks)| !blocks.is_empty())
+            .map(|(location, _)| location)
+            .filter(|location| {
+                resume_at
+                    .as_deref()
+                    .is_none_or(|token| location.as_str() >= token)
+            });
+
+        let mut cidr_locations = Vec::new();
+        let mut next_token = None;
+        for location in matching {
+            if cidr_locations.len() >= page_size {
+                next_token = Some(location.clone());
+                break;
+            }
+            cidr_locations.push(LocationSummary {
+                location_name: Some(location.clone()),
+            });
+        }
+
+        Ok(ListCidrLocationsOutput {
+            cidr_locations: Some(cidr_locations),
+            next_token,
+        })
     }
 }

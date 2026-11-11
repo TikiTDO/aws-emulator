@@ -17,6 +17,8 @@ mod account_limits;
 mod checker_ip_ranges;
 #[path = "all/cidr_collections.rs"]
 mod cidr_collections;
+#[path = "all/cidr_collection_blocks.rs"]
+mod cidr_collection_blocks;
 #[path = "all/delegation_set_deletion.rs"]
 mod delegation_set_deletion;
 #[path = "all/delegation_set_limits.rs"]

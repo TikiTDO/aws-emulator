@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ChangeCidrCollection
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ChangeCidrCollection`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ChangeCidrCollection::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -97,6 +88,47 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::state::{no_such_cidr_collection, MAX_CIDR_BLOCKS_PER_COLLECTION};
+
+/// The `Action` that puts a CIDR block in a location of the collection: "PUT: Create
+/// a CIDR block within the specified collection" (`CidrCollectionChangeAction`).
+const PUT: &str = "PUT";
+
+/// The `Action` that takes one out again: "DELETE_IF_EXISTS: Delete an existing CIDR
+/// block from the collection" — so a block the collection does not hold is already in
+/// the state the change asks for.
+const DELETE_IF_EXISTS: &str = "DELETE_IF_EXISTS";
+
+/// The refusal text this operation answers a `CollectionVersion` that is not the
+/// collection's current one with (`CidrCollectionVersionMismatchException`, HTTP 409).
+///
+/// The sentence the model states for this error class. The version a caller sends is
+/// the one it read, so what it can act on is that the collection moved on since —
+/// never which version it is now, which the read it repeats reports.
+const VERSION_MISMATCH_MESSAGE: &str =
+    "The CIDR collection version you provided, doesn't match the one in the ListCidrCollections \
+     operation.";
+
+/// The refusal text this operation answers a `PUT` of a block the collection already
+/// holds in ANOTHER location with (`CidrBlockInUseException`, HTTP 400).
+const CIDR_BLOCK_IN_USE_MESSAGE: &str = "This CIDR block is already in use.";
+
+/// The refusal text this operation answers a change over a collection ANOTHER request
+/// changed meanwhile with (`ConcurrentModification`, HTTP 400), as the model words it: the
+/// caller's own next attempt reads the version that moved and applies over it.
+const CONCURRENT_MODIFICATION_MESSAGE: &str =
+    "Another user submitted a request to create, update, or delete the object at the same time \
+     that you did. Retry the request.";
+
+/// The refusal text this operation answers a change that would take the collection past
+/// [`MAX_CIDR_BLOCKS_PER_COLLECTION`] with (`LimitsExceeded`, HTTP 400).
+const LIMITS_EXCEEDED_MESSAGE: &str =
+    "This operation can't be completed because the current account has reached the limit on the \
+     resource you are trying to create. To request a higher limit, create a case with the Amazon \
+     Web Services Support Center.";
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -170,18 +202,157 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ChangeCidrCollection` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ChangeCidrCollectionErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            // Unreachable under the router, which always mounts this service on
+            // the shared `InMemoryEngine`.
+            ChangeCidrCollectionErrorModeled::InvalidInput(InvalidInput {
+                message: Some("the Route 53 emulator's state store is unavailable".to_string()),
+            })
+        })?;
+
+        // The collection's own quota bounds the WORK below before any of it is done: a
+        // change can never leave the collection holding more than
+        // [`MAX_CIDR_BLOCKS_PER_COLLECTION`] blocks, so a request carrying more than that
+        // between all its changes is refused here rather than after the result has been
+        // computed — which is what keeps the cost of a refused request proportional to the
+        // quota instead of to the product of the two list bounds the model declares.
+        let requested_blocks: usize = input
+            .changes
+            .iter()
+            .map(|change| change.cidr_list.len())
+            .sum();
+        if requested_blocks > MAX_CIDR_BLOCKS_PER_COLLECTION {
+            return Err(ChangeCidrCollectionErrorModeled::LimitsExceeded(LimitsExceeded {
+                message: Some(LIMITS_EXCEEDED_MESSAGE.to_string()),
+            })
+            .into());
+        }
+
+        // The collection as it stands, read under a BRIEF lock: the result is computed with
+        // the store unlocked, so a change carrying the whole quota does not hold the store
+        // against every other request while it is worked out.
+        let held = {
+            let store = state.lock();
+            store.cidr_collections.get(&input.id).cloned()
+        }
+        .ok_or_else(|| {
+            ChangeCidrCollectionErrorModeled::NoSuchCidrCollectionException(
+                no_such_cidr_collection(),
+            )
+        })?;
+
+        // "We recommend that you use ListCidrCollection to get the current value of
+        // CollectionVersion for the collection that you want to update, and then include
+        // that value with the change request. This prevents Route 53 from overwriting an
+        // intervening update: If the value in the request matches the value of
+        // CollectionVersion in the collection, Route 53 updates the collection" — a
+        // request that states no version is held to nothing and applies as it stands.
+        if input
+            .collection_version
+            .is_some_and(|asked| asked != held.version)
+        {
+            return Err(
+                ChangeCidrCollectionErrorModeled::CidrCollectionVersionMismatchException(
+                    CidrCollectionVersionMismatchException {
+                        message: Some(VERSION_MISMATCH_MESSAGE.to_string()),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // The whole request is applied or none of it is: "a change request can update
+        // multiple locations in a collection at a time, which is helpful if you want to
+        // move one or more CIDR blocks from one location to another in one transaction".
+        // So the result is computed over a COPY of what the collection holds, refused as
+        // a whole where any change cannot be carried out, and only then written back.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ChangeCidrCollection"))
+        // The removals go first, which is what makes a MOVE one transaction: a block the
+        // same request takes out of one location is free for the location it is put in,
+        // whichever order the changes are written in.
+        let mut locations = held.locations.clone();
+        let changes = input.changes;
+        for change in changes.iter().filter(|change| change.action == DELETE_IF_EXISTS) {
+            if let Some(blocks) = locations.get_mut(&change.location_name) {
+                for block in &change.cidr_list {
+                    blocks.remove(block);
+                }
+            }
+        }
+        // Which location each block the collection still holds belongs to, indexed ONCE:
+        // a block belongs to one location, so the index answers that in one lookup per
+        // block rather than by walking every location for every block.
+        let mut location_of: BTreeMap<&str, &str> = BTreeMap::new();
+        for (location, blocks) in &locations {
+            for block in blocks {
+                location_of.insert(block.as_str(), location.as_str());
+            }
+        }
+        let mut put: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for change in changes.iter().filter(|change| change.action == PUT) {
+            // "This CIDR block is already in use": a block belongs to ONE location of the
+            // collection, so putting it in a second one is refused rather than silently
+            // moving it — the move a caller means is the DELETE_IF_EXISTS above beside it.
+            for block in &change.cidr_list {
+                let elsewhere = location_of
+                    .get(block.as_str())
+                    .is_some_and(|held| *held != change.location_name.as_str());
+                if elsewhere {
+                    return Err(ChangeCidrCollectionErrorModeled::CidrBlockInUseException(
+                        CidrBlockInUseException {
+                            message: Some(CIDR_BLOCK_IN_USE_MESSAGE.to_string()),
+                        },
+                    )
+                    .into());
+                }
+            }
+            put.entry(change.location_name.clone())
+                .or_default()
+                .extend(change.cidr_list.iter().cloned());
+        }
+        drop(location_of);
+        for (location, blocks) in put {
+            locations.entry(location).or_default().extend(blocks);
+        }
+
+        // The quota again, now over the RESULT: the check above bounds what one request may
+        // carry, and this one bounds what the collection is left holding.
+        let would_hold: usize = locations.values().map(BTreeSet::len).sum();
+        if would_hold > MAX_CIDR_BLOCKS_PER_COLLECTION {
+            return Err(ChangeCidrCollectionErrorModeled::LimitsExceeded(LimitsExceeded {
+                message: Some(LIMITS_EXCEEDED_MESSAGE.to_string()),
+            })
+            .into());
+        }
+
+        // The write, under the lock again. The collection is re-read because the store was
+        // unlocked while the result was computed: a version that moved meanwhile is another
+        // request having changed the very collection this one computed against, which is
+        // what `ConcurrentModification` ("another user submitted a request to create,
+        // update, or delete the object at the same time that you did") is for — the change
+        // is not applied over it.
+        let mut store = state.lock();
+        let moved_on = store
+            .cidr_collections
+            .get(&input.id)
+            .is_none_or(|collection| collection.version != held.version);
+        if moved_on {
+            return Err(ChangeCidrCollectionErrorModeled::ConcurrentModification(
+                ConcurrentModification {
+                    message: Some(CONCURRENT_MODIFICATION_MESSAGE.to_string()),
+                },
+            )
+            .into());
+        }
+        // "A sequential counter that Route 53 sets to 1 when you create a collection and
+        // increments it by 1 each time you update the collection": the change that is
+        // applied is what moves it.
+        let change = store.submit_change(None);
+        if let Some(collection) = store.cidr_collections.get_mut(&input.id) {
+            collection.locations = locations;
+            collection.version = collection.version.saturating_add(1);
+        }
+        Ok(ChangeCidrCollectionOutput { id: change.id })
     }
 }

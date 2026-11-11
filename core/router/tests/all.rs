@@ -876,6 +876,12 @@ mod route53_health_check_status_metric;
 // quiet span of the sorted list, while the tail of this file and the `c` span are where
 #[path = "all/cloudformation_provisions_route53_hosted_zones.rs"]
 mod cloudformation_provisions_route53_hosted_zones;
+// Declared beside the suite above for the reason its own comment gives: a quiet span of the
+// sorted list, rather than the tail of this file where every landing suite appends.
+#[path = "all/cloudformation_provisions_route53_policies.rs"]
+mod cloudformation_provisions_route53_policies;
+#[path = "all/cloudformation_route53_record_set_contract.rs"]
+mod cloudformation_route53_record_set_contract;
 #[path = "all/s3files_create_file_system_bucket.rs"]
 mod s3files_create_file_system_bucket;
 #[path = "all/scheduler_execution_role.rs"]

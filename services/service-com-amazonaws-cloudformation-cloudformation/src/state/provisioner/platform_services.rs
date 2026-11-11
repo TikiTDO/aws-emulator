@@ -1066,8 +1066,25 @@ pub(super) async fn create_hosted_zone(
     .await?;
     Ok(Created {
         physical_resource_id: Some(id),
-        attributes: BTreeMap::new(),
+        attributes: hosted_zone_name_servers(&answered),
     })
+}
+
+/// The `NameServers` the zone's delegation set reports, as this type's list-valued
+/// `Fn::GetAtt` attribute: "`NameServers` — returns the set of name servers for the specific
+/// hosted zone".
+///
+/// Route 53 ASSIGNS them — `CreateHostedZone` answers "a complex type that describes the name
+/// servers for this hosted zone" — so they are read off that answer rather than computed, and
+/// carried element by element because the attribute map is string-valued
+/// ([`list_attribute_element`]). A zone whose answer reports none carries no such attribute at
+/// all, rather than an empty list standing in for the delegation Route 53 made.
+fn hosted_zone_name_servers(answered: &str) -> BTreeMap<String, String> {
+    xml_elements(answered, "NameServer")
+        .into_iter()
+        .enumerate()
+        .map(|(index, server)| (list_attribute_element("NameServers", index), server))
+        .collect()
 }
 
 /// The tags a Route 53 resource is to carry: the ones its declaration asks for plus the
@@ -1340,24 +1357,47 @@ pub(super) fn route53_member(
 
 /// The `ResourceRecordSet` element one `AWS::Route53::RecordSet` declares.
 pub(super) fn record_set_element(resource: &StoredResource) -> Result<String, Refusal> {
-    refuse_unmapped_properties(resource, &record_set_properties())?;
+    record_set_element_of(&resource.resource_type, &resource.properties)
+}
+
+/// The `ResourceRecordSet` element one DECLARED record set states, whether that declaration
+/// is a resource of its own (`AWS::Route53::RecordSet`) or one entry of a group's
+/// `RecordSets` — the same property document in both places, so the element is rendered
+/// once.
+///
+/// `resource_type` is the type the refusal names, which is the type that DECLARED the
+/// document.
+pub(super) fn record_set_element_of(
+    resource_type: &str,
+    declared: &Value,
+) -> Result<String, Refusal> {
+    let mapped = record_set_properties();
+    if let Value::Object(properties) = declared {
+        if let Some(property) = unmapped_property(properties, &mapped) {
+            return Err(Refusal {
+                code: NOT_IMPLEMENTED.to_string(),
+                message: format!(
+                    "this emulator does not apply the {property} property of {resource_type}"
+                ),
+            });
+        }
+    }
     for required in ["Name", "Type"] {
-        if property(resource, required).is_none() {
+        if declared.get(required).and_then(scalar_text).is_none() {
             return Err(Refusal {
                 code: MISSING_PROPERTY_CODE.to_string(),
                 message: format!(
-                    "Property {required} cannot be empty for resource of type {}",
-                    resource.resource_type
+                    "Property {required} cannot be empty for resource of type {resource_type}"
                 ),
             });
         }
     }
     let mut rendered = String::new();
     for (name, member) in RECORD_SET_MEMBERS {
-        let Some(declared) = resource.properties.get(*name) else {
+        let Some(value) = declared.get(*name) else {
             continue;
         };
-        if let Some(written) = route53_member(name, *member, declared)? {
+        if let Some(written) = route53_member(name, *member, value)? {
             rendered.push_str(&written);
         }
     }
@@ -1490,6 +1530,175 @@ pub(super) async fn delete_record_set(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Amazon Route 53 record set groups: AWS::Route53::RecordSetGroup
+// ---------------------------------------------------------------------------
+
+/// The properties of `AWS::Route53::RecordSetGroup` this arm maps onto a change batch.
+///
+/// Source: AWS's CloudFormation resource reference for the type. `RecordSets` are the record
+/// sets the group holds — each one the same property document an `AWS::Route53::RecordSet`
+/// declares — `HostedZoneId` and `HostedZoneName` say which zone they belong to, and
+/// `Comment` is the `ChangeBatch`'s own, exactly as for a single record set.
+pub(super) const RECORD_SET_GROUP_PROPERTIES: &[&str] =
+    &["Comment", "HostedZoneId", "HostedZoneName", "RecordSets"];
+
+/// The `Change` elements one `AWS::Route53::RecordSetGroup` declares, carrying `action` over
+/// every record set the group holds.
+///
+/// "A complex type that contains one `RecordSet` element for each record set that you want to
+/// create": the group IS those record sets, so a declaration stating none describes no change
+/// to apply and is refused rather than reported as a group created with nothing in it.
+pub(super) fn record_set_group_changes(
+    resource: &StoredResource,
+    action: &str,
+) -> Result<String, Refusal> {
+    refuse_unmapped_properties(resource, RECORD_SET_GROUP_PROPERTIES)?;
+    let declared = resource.properties.get("RecordSets");
+    let Some(Value::Array(record_sets)) = declared else {
+        return Err(match declared {
+            Some(_) => malformed_property("RecordSets"),
+            None => Refusal {
+                code: MISSING_PROPERTY_CODE.to_string(),
+                message: format!(
+                    "Property RecordSets cannot be empty for resource of type {}",
+                    resource.resource_type
+                ),
+            },
+        });
+    };
+    if record_sets.is_empty() {
+        return Err(Refusal {
+            code: MISSING_PROPERTY_CODE.to_string(),
+            message: format!(
+                "Property RecordSets cannot be empty for resource of type {}",
+                resource.resource_type
+            ),
+        });
+    }
+    let mut changes = String::new();
+    for declared in record_sets {
+        let record = record_set_element_of(&resource.resource_type, declared)?;
+        changes.push_str(&format!(
+            "<Change>{}{record}</Change>",
+            xml_leaf("Action", action)
+        ));
+    }
+    Ok(changes)
+}
+
+/// Apply one change batch over every record set an `AWS::Route53::RecordSetGroup` declares,
+/// in the zone the GROUP names.
+///
+/// One batch rather than one call per record set, which is what the type is for: "if you want
+/// to create or update multiple record sets, you can specify them in a single
+/// `ChangeResourceRecordSets` request" — so either every record set the group declares is
+/// applied or none is.
+pub(super) async fn change_record_set_group(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    resource: &StoredResource,
+    action: &str,
+) -> Result<(), Refusal> {
+    let zone = record_set_zone_id(ctx, region, resource).await?;
+    let changes = record_set_group_changes(resource, action)?;
+    let comment = property(resource, "Comment")
+        .map(|comment| xml_leaf("Comment", &comment))
+        .unwrap_or_default();
+    let batch = format!("<ChangeBatch>{comment}<Changes>{changes}</Changes></ChangeBatch>");
+    call_route53(
+        ctx,
+        region,
+        "POST",
+        &format!("/hostedzone/{}/rrset", percent_encoded(&zone)),
+        Some(&route53_request("ChangeResourceRecordSetsRequest", &batch)),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Create every record set an `AWS::Route53::RecordSetGroup` declares, so a DNS query for any
+/// of those names is answered with the values the template declared.
+///
+/// `Ref` on this resource returns the physical id CloudFormation's naming rules computed for
+/// it — the group is not a resource of Route 53's at all, so that service mints no identity
+/// for it and the create answers none. The type publishes no `Tags` property.
+pub(super) async fn create_record_set_group(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    resource: &StoredResource,
+) -> Result<Created, Refusal> {
+    change_record_set_group(ctx, region, resource, RECORD_SET_CREATE).await?;
+    Ok(Created::attributes(BTreeMap::new()))
+}
+
+/// Delete every record set the group created, by the same change batch that created them:
+/// Route 53 removes a record set by its own values, so the delete carries the declarations the
+/// create was made from. A zone the service no longer holds holds none of them either.
+pub(super) async fn delete_record_set_group(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    resource: &StoredResource,
+) -> Result<(), Refusal> {
+    match change_record_set_group(ctx, region, resource, RECORD_SET_DELETE).await {
+        Ok(()) => Ok(()),
+        Err(refusal) if refusal.code == NO_SUCH_HOSTED_ZONE => Ok(()),
+        // Route 53 models no not-found error for a record set and reports a change batch it
+        // cannot apply as one refusal class whatever the problem was, so a batch it will not
+        // apply is checked against what the zone still HOLDS: a group whose record sets are
+        // all gone is already in the state the delete asks for.
+        Err(refusal) => match describe_record_set_group(ctx, region, resource).await {
+            Ok(None) => Ok(()),
+            _ => Err(refusal),
+        },
+    }
+}
+
+/// The group's configuration as Route 53 reports it, for drift detection: the record sets it
+/// declares, read back one by one, and `None` where the zone holds none of them any more —
+/// including where it holds no such ZONE.
+///
+/// Only the record sets' own names and types are compared, which are the members
+/// `ListResourceRecordSets` reports in the same shape the declaration states them in; the
+/// group has no configuration of its own beyond them.
+pub(super) async fn describe_record_set_group(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    resource: &StoredResource,
+) -> Result<Option<Value>, Refusal> {
+    let zone = match record_set_zone_id(ctx, region, resource).await {
+        Ok(zone) => zone,
+        Err(refusal) if refusal.code == NO_SUCH_HOSTED_ZONE => return Ok(None),
+        Err(refusal) => return Err(refusal),
+    };
+    let Some(Value::Array(record_sets)) = resource.properties.get("RecordSets") else {
+        return Ok(None);
+    };
+    let mut reported = Vec::new();
+    for declared in record_sets {
+        let (Some(name), Some(record_type)) = (
+            declared.get("Name").and_then(scalar_text),
+            declared.get("Type").and_then(scalar_text),
+        ) else {
+            continue;
+        };
+        let held = match read_record_set(ctx, region, &zone, &name, &record_type, None).await {
+            Ok(held) => held,
+            Err(refusal) if refusal.code == NO_SUCH_HOSTED_ZONE => return Ok(None),
+            Err(refusal) => return Err(refusal),
+        };
+        if let Some(held) = held {
+            reported.push(held);
+        }
+    }
+    if reported.is_empty() {
+        return Ok(None);
+    }
+    let mut group = Map::new();
+    group.insert("RecordSets".to_string(), Value::Array(reported));
+    Ok(Some(Value::Object(group)))
+}
+
 /// The record set's configuration as Route 53 reports it, for drift detection, and `None`
 /// where the zone no longer holds a record set of that name and type — including where it
 /// holds no such ZONE any more (`NoSuchHostedZone`), since a zone that is gone holds no
@@ -1542,16 +1751,51 @@ pub(super) async fn describe_record_set(
         Err(refusal) if refusal.code == NO_SUCH_HOSTED_ZONE => return Ok(None),
         Err(refusal) => return Err(refusal),
     };
-    let reported = xml_scalar_children(&answered, "ResourceRecordSet");
+    Ok(record_set_as_properties(&answered, &name, &record_type))
+}
+
+/// The record set of `name` and `record_type` the zone `zone` holds, as the properties a
+/// declaration of it states, or `None` where it holds no such record set.
+///
+/// The ONE read of one record set, so a record set declared on its own and one declared as an
+/// entry of a group are read back the same way.
+pub(super) async fn read_record_set(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    zone: &str,
+    name: &str,
+    record_type: &str,
+    set_identifier: Option<&str>,
+) -> Result<Option<Value>, Refusal> {
+    let mut uri = format!(
+        "/hostedzone/{}/rrset?name={}&type={}&maxitems=1",
+        percent_encoded(zone),
+        percent_encoded(name),
+        percent_encoded(record_type)
+    );
+    if let Some(identifier) = set_identifier {
+        uri.push_str(&format!("&identifier={}", percent_encoded(identifier)));
+    }
+    let answered = call_route53(ctx, region, "GET", &uri, None).await?;
+    Ok(record_set_as_properties(&answered, name, record_type))
+}
+
+/// The `ResourceRecordSet` a listing answered, as the properties a declaration of it states,
+/// or `None` where the answer reports no record set of that name and type.
+///
+/// Only the scalar members the answer reports in the same shape the type declares them in are
+/// carried, for the reason [`describe_record_set`] records.
+fn record_set_as_properties(answered: &str, name: &str, record_type: &str) -> Option<Value> {
+    let reported = xml_scalar_children(answered, "ResourceRecordSet");
     let holds_this_record = reported
         .get("Name")
         .and_then(Value::as_str)
-        .is_some_and(|held| fully_qualified(held) == fully_qualified(&name))
-        && reported.get("Type").and_then(Value::as_str) == Some(record_type.as_str());
+        .is_some_and(|held| fully_qualified(held) == fully_qualified(name))
+        && reported.get("Type").and_then(Value::as_str) == Some(record_type);
     if !holds_this_record {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(reported_as_properties(
+    Some(reported_as_properties(
         &Value::Object(reported),
         &[
             ("Name", "Name"),
@@ -1564,7 +1808,7 @@ pub(super) async fn describe_record_set(
             ("MultiValueAnswer", "MultiValueAnswer"),
             ("HealthCheckId", "HealthCheckId"),
         ],
-    )))
+    ))
 }
 
 // ---------------------------------------------------------------------------

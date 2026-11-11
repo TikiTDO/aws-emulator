@@ -3281,6 +3281,13 @@ const SDK_SERVICE_NAMES: &[(&str, &str, SdkDiagnostic)] = &[
     ("es", "OpenSearch", SdkDiagnostic::Attempts),
     ("iam", "Iam", SdkDiagnostic::Attempts),
     ("lambda", "Lambda", SdkDiagnostic::Attempts),
+    // Amazon Route 53's SDK names it by its `sdkId` without the space, exactly as
+    // Application Auto Scaling's does (`smithy_query(query="service_info")`: `sdkId:
+    // "Route 53"`). The shape is the ATTEMPT-counting one, as the recorded
+    // `ResourceStatusReason` of an `AWS::Route53::RecordSet` whose declared zone Route 53
+    // does not hold carries it (`(Service: Route53, Status Code: 404, Request ID: …) (SDK
+    // Attempt Count: …)`).
+    ("route53", "Route53", SdkDiagnostic::Attempts),
     ("s3", "S3", SdkDiagnostic::Attempts),
 ];
 
@@ -3556,7 +3563,10 @@ fn handler_failure_reason(owner: Option<Owner>, refusal: &Refusal, identifier: &
     } else {
         refusal.message.as_str()
     };
-    let class = handler_error_code(&refusal.code);
+    let class = match owner {
+        Some(owner) => owner.handler_error_class(&refusal.code, handler_error_code(&refusal.code)),
+        None => handler_error_code(&refusal.code),
+    };
     let message = match owner {
         // The bucket provider's own wording, which lives beside this algorithm for the
         // reason [`s3_bucket`] records.

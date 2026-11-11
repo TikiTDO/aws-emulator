@@ -465,7 +465,7 @@ pub(super) use super::{
 
 use super::provisioning::{
     call_json_rpc, call_query, call_rest_json, call_rest_json_named, call_rest_xml,
-    percent_encoded, xml_element,
+    percent_encoded, xml_element, xml_elements,
     xml_entry_map, xml_leaf, xml_scalar_children, Created, Readiness, Refusal, Removal,
     AWS_JSON_1_0, AWS_JSON_1_1,
 };
@@ -503,7 +503,8 @@ use super::template::{
     ROUTE53RESOLVER_FIREWALL_RULE_GROUP_ASSOCIATION,
     ROUTE53RESOLVER_RULE,
     ROUTE53RESOLVER_RULE_ASSOCIATION, ROUTE53_HEALTH_CHECK, ROUTE53_HOSTED_ZONE,
-    ROUTE53_RECORD_SET,
+    ROUTE53_CIDR_COLLECTION, ROUTE53_DELEGATION_SET, ROUTE53_TRAFFIC_POLICY,
+    ROUTE53_RECORD_SET, ROUTE53_RECORD_SET_GROUP,
     S3VECTORS_BUCKET_SEGMENT, S3VECTORS_INDEX,
     S3VECTORS_VECTOR_BUCKET, SAGEMAKER_MODEL_PACKAGE_GROUP, SCHEDULER_SCHEDULE,
     SCHEDULER_SCHEDULE_GROUP, SES_CONFIGURATION_SET, SES_RECEIPT_RULE, SES_RECEIPT_RULE_SET,
@@ -514,6 +515,7 @@ use super::template::{
     TRANSFER_SERVER, WAFV2_IP_SET, WAFV2_REGEX_PATTERN_SET, WAFV2_RULE_GROUP, WAFV2_WEB_ACL,
     WAFV2_WEB_ACL_ASSOCIATION, WAF_REGIONAL_IP_SET, XRAY_SAMPLING_RULE,
 };
+pub(super) use super::template::list_attribute_element;
 use super::StoredResource;
 
 /// `AWS::S3::Bucket`: "Ref returns the bucket name", so a resource of this type is a
@@ -802,7 +804,11 @@ pub(super) enum Provisioner {
     Route53ResolverFirewallRuleGroupAssociation,
     Route53HostedZone,
     Route53RecordSet,
+    Route53RecordSetGroup,
     Route53HealthCheck,
+    Route53CidrCollection,
+    Route53DelegationSet,
+    Route53TrafficPolicy,
     ElasticBeanstalkApplication,
     ElasticBeanstalkApplicationVersion,
     ElasticBeanstalkEnvironment,
@@ -990,7 +996,11 @@ pub(super) fn provisioner_for(resource_type: &str) -> Option<Provisioner> {
         }
         ROUTE53_HOSTED_ZONE => Some(Provisioner::Route53HostedZone),
         ROUTE53_RECORD_SET => Some(Provisioner::Route53RecordSet),
+        ROUTE53_RECORD_SET_GROUP => Some(Provisioner::Route53RecordSetGroup),
         ROUTE53_HEALTH_CHECK => Some(Provisioner::Route53HealthCheck),
+        ROUTE53_CIDR_COLLECTION => Some(Provisioner::Route53CidrCollection),
+        ROUTE53_DELEGATION_SET => Some(Provisioner::Route53DelegationSet),
+        ROUTE53_TRAFFIC_POLICY => Some(Provisioner::Route53TrafficPolicy),
         ELASTIC_BEANSTALK_APPLICATION => Some(Provisioner::ElasticBeanstalkApplication),
         ELASTIC_BEANSTALK_APPLICATION_VERSION => {
             Some(Provisioner::ElasticBeanstalkApplicationVersion)
@@ -1319,12 +1329,25 @@ impl Provisioner {
             // hosted zone, not a record set — so the type is not taggable and no tags are
             // propagated to one.
             Self::Route53RecordSet => create_record_set(ctx, region, resource).await,
+            // The same for a GROUP of record sets, which publishes no `Tags` property
+            // either: the group IS the record sets it declares, applied in one change batch.
+            Self::Route53RecordSetGroup => create_record_set_group(ctx, region, resource).await,
             // `AWS::Route53::HealthCheck` publishes `HealthCheckTags`, which the health
             // check carries beside the ones CloudFormation gives it — applied through
             // `ChangeTagsForResource`, since `CreateHealthCheck` takes no tags.
             Self::Route53HealthCheck => {
                 create_health_check(ctx, region, resource, propagated).await
             }
+            // None of the three types below publishes a `Tags` property — Route 53 tags a
+            // hosted zone and a health check, not a CIDR collection, a delegation set or a
+            // traffic policy — so no tags are propagated to one.
+            Self::Route53CidrCollection => {
+                create_cidr_collection(ctx, region, resource, propagated).await
+            }
+            Self::Route53DelegationSet => {
+                create_delegation_set(ctx, region, resource, propagated).await
+            }
+            Self::Route53TrafficPolicy => create_traffic_policy(ctx, region, resource).await,
             // `AWS::ElasticBeanstalk::Application` publishes `ApplicationName`,
             // `Description` and `ResourceLifecycleConfig` and no `Tags`: the type is not
             // taggable, so no tags are propagated to it. The same goes for
@@ -1631,6 +1654,38 @@ impl Provisioner {
             return format!("{INVALID_REQUEST_PROVIDED}{message}");
         }
         message.to_string()
+    }
+
+    /// Which `HandlerErrorCode` class this type's provider puts a refusal carrying `code` in,
+    /// where that is NOT the class the code itself falls in
+    /// ([`super::provisioning::handler_error_code`] computes `classified`).
+    ///
+    /// `NotFound` is the class of a refusal about the resource the handler MANAGES — the one
+    /// it was asked to read, update or delete. A refusal naming a DIFFERENT resource, one the
+    /// declaration merely REFERENCES, says the declaration named something that is not there:
+    /// the request the handler was given is the thing at fault, so its provider reports it as
+    /// `InvalidRequest` and a client reading the class sees a template to fix rather than a
+    /// resource that vanished.
+    ///
+    /// Which of a type's refusals are about a referenced resource is that type's own, so it is
+    /// stated per type here beside the rest of the per-type half of provisioning. A type not
+    /// named below reports the class its code falls in.
+    pub(super) fn handler_error_class(self, code: &str, classified: &'static str) -> &'static str {
+        let references_another_resource = match self {
+            // A record set is written INSIDE a hosted zone its declaration names
+            // (`HostedZoneId`/`HostedZoneName`), and the record set itself is the resource
+            // this handler manages: a zone Route 53 does not hold (`NoSuchHostedZone`) is a
+            // declaration naming a zone that is not there. A GROUP of record sets names its
+            // zone the same way and is in the same position.
+            Self::Route53RecordSet | Self::Route53RecordSetGroup => {
+                code.contains(NO_SUCH_HOSTED_ZONE)
+            }
+            _ => false,
+        };
+        if references_another_resource {
+            return super::provisioning::HANDLER_ERROR_INVALID_REQUEST;
+        }
+        classified
     }
 
     /// Whether the resource this provisioner CREATED has reached the state the owning
@@ -2436,8 +2491,21 @@ impl Provisioner {
             // Route 53 removes a record set by its own values, which only the resource's
             // own record carries — as is the zone its declaration names.
             Self::Route53RecordSet => delete_record_set(ctx, region, resource).await,
+            // The same batch that created the group's record sets, removing them.
+            Self::Route53RecordSetGroup => delete_record_set_group(ctx, region, resource).await,
             Self::Route53HealthCheck => {
                 delete_health_check(ctx, region, physical_resource_id).await
+            }
+            // Each of the three is addressed by the identifier Route 53 minted for it, which
+            // is this resource's physical id.
+            Self::Route53CidrCollection => {
+                delete_cidr_collection(ctx, region, physical_resource_id).await
+            }
+            Self::Route53DelegationSet => {
+                delete_delegation_set(ctx, region, physical_resource_id).await
+            }
+            Self::Route53TrafficPolicy => {
+                delete_traffic_policy(ctx, region, physical_resource_id).await
             }
             Self::ElasticBeanstalkApplication => {
                 delete_eb_application(ctx, region, physical_resource_id).await
@@ -2830,8 +2898,24 @@ impl Provisioner {
             // The read is addressed by the record's own name, type and set identifier in the
             // zone its declaration names, which only the resource's own record carries.
             Self::Route53RecordSet => describe_record_set(ctx, region, resource).await,
+            // Each record set the group declares, read back by its own name and type in the
+            // zone the group names.
+            Self::Route53RecordSetGroup => {
+                describe_record_set_group(ctx, region, resource).await
+            }
             // Read back by the id Route 53 minted, which is this resource's physical id.
             Self::Route53HealthCheck => describe_health_check(ctx, region, resource).await,
+            // Read back by the identifier Route 53 minted for each, which is that
+            // resource's physical id.
+            Self::Route53CidrCollection => {
+                describe_cidr_collection(ctx, region, physical_resource_id).await
+            }
+            Self::Route53DelegationSet => {
+                describe_delegation_set(ctx, region, physical_resource_id).await
+            }
+            Self::Route53TrafficPolicy => {
+                describe_traffic_policy(ctx, region, physical_resource_id).await
+            }
             Self::ElasticBeanstalkApplication => {
                 describe_eb_application(ctx, region, physical_resource_id).await
             }
@@ -3024,11 +3108,13 @@ mod data_and_storage;
 mod iam_identities;
 mod application_services;
 mod platform_services;
+mod route53_policies;
 mod compute_fleet;
 mod network_and_delivery;
 use compute_fleet::*;
 pub(crate) use network_and_delivery::*;
 use platform_services::*;
+use route53_policies::*;
 pub(crate) use application_services::*;
 use config_recording::*;
 use bedrock_guardrails::*;

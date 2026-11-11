@@ -63,6 +63,9 @@ const OTHER_PUBLISHER_ID: &str = "fedcba654321";
 /// at least one item, so a walk longer than this is a cursor that is not advancing.
 const PAGE_LIMIT: usize = 512;
 
+/// The largest page `ListTypes` admits: `MaxResults` is `@range(min: 1, max: 100)`.
+const MAX_RESULTS: usize = 100;
+
 /// A router over the seeded registry, plus the publisher registration the seeded
 /// third-party record was published under — `PublisherIdentity` is "the type of account
 /// used as the identity provider when registering this publisher", which that registration
@@ -797,8 +800,11 @@ async fn a_page_carries_at_most_max_results_and_the_token_resumes_after_it() {
     );
 
     // The modelled `MaxResults` range is 1..100: both published bounds, and sizes between
-    // them that do and do not divide the listing.
-    for max_results in [1usize, 2, 7, whole.len() - 1, whole.len(), 100] {
+    // them that do and do not divide the listing. A listing LONGER than the largest page
+    // the model admits is paged by that bound rather than by its own length, which is what
+    // the `MAX_RESULTS` row below exercises.
+    let whole_page = whole.len().clamp(2, MAX_RESULTS);
+    for max_results in [1usize, 2, 7, whole_page - 1, whole_page, MAX_RESULTS] {
         let max = max_results.to_string();
         let mut walked: Vec<String> = Vec::new();
         let mut token: Option<String> = None;

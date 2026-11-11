@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListCidrCollections
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListCidrCollections`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListCidrCollections::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -74,6 +65,18 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+
+use crate::state::{cidr_collection_arn, DEFAULT_PAGE_SIZE};
+
+/// The largest page this listing serves: the default page size every Route 53 listing is
+/// served in ([`DEFAULT_PAGE_SIZE`]), which is also past the account's own collection
+/// quota ([`crate::state::MAX_CIDR_COLLECTIONS`]) — so one page reports every collection
+/// the account can hold.
+const MAX_PAGE_SIZE: i32 = DEFAULT_PAGE_SIZE;
+
+/// The refusal text this operation answers a `NextToken` it never minted with
+/// (`InvalidInput`, HTTP 400), as the model words that class.
+const INVALID_TOKEN_MESSAGE: &str = "The input is not valid.";
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -143,18 +146,82 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListCidrCollections` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListCidrCollectionsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListCidrCollections"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            // Unreachable under the router, which always mounts this service on
+            // the shared `InMemoryEngine`.
+            ListCidrCollectionsErrorModeled::InvalidInput(InvalidInput {
+                message: Some("the Route 53 emulator's state store is unavailable".to_string()),
+            })
+        })?;
+
+        // "An opaque pagination token to indicate where the service is to begin
+        // enumerating results": the token this operation mints is the id of the first
+        // collection the previous page left out, so resuming is a lower bound on the
+        // order the store holds them in. A token of any other shape identifies no page.
+        let resume_at = match input.next_token.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(token) if collection_id_is_well_formed(token) => Some(token.to_string()),
+            Some(_) => {
+                return Err(ListCidrCollectionsErrorModeled::InvalidInput(InvalidInput {
+                    message: Some(INVALID_TOKEN_MESSAGE.to_string()),
+                })
+                .into());
+            }
+        };
+        let page_size = input
+            .max_results
+            .unwrap_or(DEFAULT_PAGE_SIZE)
+            .clamp(1, MAX_PAGE_SIZE) as usize;
+
+        // A pure read: nothing below writes to the store.
+        let store = state.lock();
+        // Collections are keyed by their id in a `BTreeMap`, so this walk is a stable
+        // total order and a token always resumes at the same place.
+        let matching = store
+            .cidr_collections
+            .values()
+            .filter(|collection| {
+                resume_at
+                    .as_deref()
+                    .is_none_or(|token| collection.id.as_str() >= token)
+            });
+
+        let mut cidr_collections = Vec::new();
+        let mut next_token = None;
+        for collection in matching {
+            if cidr_collections.len() >= page_size {
+                next_token = Some(collection.id.clone());
+                break;
+            }
+            cidr_collections.push(CollectionSummary {
+                arn: Some(cidr_collection_arn(&collection.id)),
+                id: Some(collection.id.clone()),
+                name: Some(collection.name.clone()),
+                version: Some(collection.version),
+            });
+        }
+
+        Ok(ListCidrCollectionsOutput {
+            cidr_collections: Some(cidr_collections),
+            next_token,
+        })
     }
+}
+
+/// Whether `token` has the shape of a collection id, which is the only thing this
+/// operation ever mints a token out of: the `UUID` form the model fixes for one
+/// (`^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$`).
+fn collection_id_is_well_formed(token: &str) -> bool {
+    let groups: Vec<&str> = token.split('-').collect();
+    groups.len() == 5
+        && [8, 4, 4, 4, 12]
+            .iter()
+            .zip(&groups)
+            .all(|(length, group)| {
+                group.len() == *length
+                    && group
+                        .chars()
+                        .all(|character| character.is_ascii_digit() || matches!(character, 'a'..='f'))
+            })
 }

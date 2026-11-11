@@ -696,13 +696,16 @@ async fn a_stack_publishes_the_hosted_zone_id_route53_minted() {
             "case {case:?}: expected the declared record values {:?}, got {records}",
             row.expected_record_data
         );
-        // And the stack reports the record set under the name its declaration states, which
-        // is what this type's `Ref` returns.
+        // And the stack reports the record set under the name its declaration states, with
+        // the terminal dot dropped: "Ref returns the record name", and CloudFormation reports
+        // a DNS record name in the form a client uses it in rather than in the
+        // fully-qualified form Route 53 compares names in.
+        let expected_ref = row.declared_record_name.trim_end_matches('.');
         assert_eq!(
             physical_ids.get(row.record_logical_id).map(String::as_str),
-            Some(row.declared_record_name),
+            Some(expected_ref),
             "case {case:?}: expected the record set's physical id to be the record name it \
-             declared, got {:?} in {resources}",
+             declared without its terminal dot ({expected_ref:?}), got {:?} in {resources}",
             physical_ids.get(row.record_logical_id)
         );
 

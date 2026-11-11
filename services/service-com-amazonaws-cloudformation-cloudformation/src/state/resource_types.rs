@@ -754,11 +754,14 @@ pub const AWS_RESOURCE_TYPES: &[&str] = &[
     // AWS Resource Groups
     "AWS::ResourceGroups::Group",
     // Amazon Route 53 and Route 53 Resolver
+    "AWS::Route53::CidrCollection",
+    "AWS::Route53::DelegationSet",
     "AWS::Route53::HealthCheck",
     "AWS::Route53::HostedZone",
     "AWS::Route53::KeySigningKey",
     "AWS::Route53::RecordSet",
     "AWS::Route53::RecordSetGroup",
+    "AWS::Route53::TrafficPolicy",
     "AWS::Route53Resolver::FirewallDomainList",
     "AWS::Route53Resolver::FirewallRuleGroup",
     "AWS::Route53Resolver::FirewallRuleGroupAssociation",

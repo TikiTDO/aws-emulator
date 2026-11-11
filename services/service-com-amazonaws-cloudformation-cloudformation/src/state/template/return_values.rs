@@ -1454,6 +1454,72 @@ pub(super) fn return_values(
             attributes.insert("HealthCheckId".to_string(), id.clone());
             (id, attributes)
         }
+        // "Ref returns the collection ID"; Fn::GetAtt: Arn, Id. Route 53 ASSIGNS that id —
+        // `CreateCidrCollection` takes the collection's `Name` and answers the UUID it
+        // minted, which is what every call on the collection takes — so a declaration
+        // reports an identifier of that service's own shape (the 8-4-4-4-12 lowercase hex
+        // the model's `UUID` fixes) rather than the name, and the collection's ARN is built
+        // from it the way Route 53 builds one (`cidrcollection/<id>`, with no region, since
+        // Route 53 is a global service). This is also the type `super::provisioning`
+        // creates in Route 53 itself, which reports the id IT minted and the ARN it built
+        // back over these attributes.
+        ROUTE53_CIDR_COLLECTION => {
+            let id = generated_uuid(resource_type, name);
+            attributes.insert(
+                "Arn".to_string(),
+                ::emulator_server::emulator_arn(
+                    ROUTE53_ARN_NAMESPACE,
+                    "",
+                    &format!("cidrcollection/{id}"),
+                ),
+            );
+            attributes.insert("Id".to_string(), id.clone());
+            (id, attributes)
+        }
+        // "Ref returns the delegation set ARN"; Fn::GetAtt: Id (and `NameServers`, a LIST,
+        // which Route 53 assigns and `super::provisioning` reports off its create).
+        // `CreateReusableDelegationSet` takes no identifier — the type declares only the
+        // caller reference and the zone whose name servers the set is made reusable from —
+        // so a declaration reports an identifier of Route 53's own shape rather than
+        // CloudFormation's `<stack>-<logical id>-<unique id>` name, which no operation of
+        // that service would accept as a `ResourceId`, with the set's ARN built from it the
+        // way Route 53 builds one ([`delegation_set_arn`]).
+        ROUTE53_DELEGATION_SET => {
+            let id = format!(
+                "{DELEGATION_SET_ID_PREFIX}{}",
+                derived_digits(
+                    DELEGATION_SET_ID_SALT,
+                    name,
+                    HOSTED_ZONE_ID_DIGITS,
+                    Alphabet::Upper,
+                )
+            );
+            attributes.insert("Id".to_string(), id.clone());
+            (delegation_set_arn(&id), attributes)
+        }
+        // "Ref returns the traffic policy ARN"; Fn::GetAtt: Id, Type, Version. Route 53
+        // ASSIGNS that id — `CreateTrafficPolicy` takes the policy's name and document and
+        // answers the id it minted, and the policy's `Name` is only what it is called — so a
+        // declaration reports an identifier of that service's own shape (the 8-4-4-4-12
+        // lowercase hex a traffic policy id takes, its `TrafficPolicyId` being
+        // `@length(min: 1, max: 36)`) rather than the name, which no operation of that
+        // service would accept as a policy id. The other two published values are not
+        // assigned at all: "for a new traffic policy, the value of `Version` is always 1"
+        // (`TrafficPolicy$Version`), and the `Type` is "the DNS type of the resource record
+        // sets that Amazon Route 53 creates when you use [the] traffic policy", which the
+        // DOCUMENT the declaration carries states ([`declared_record_type`]).
+        ROUTE53_TRAFFIC_POLICY => {
+            let id = generated_uuid(resource_type, name);
+            attributes.insert("Id".to_string(), id.clone());
+            if let Some(record_type) = declared_record_type(properties) {
+                attributes.insert("Type".to_string(), record_type);
+            }
+            attributes.insert(
+                "Version".to_string(),
+                FIRST_TRAFFIC_POLICY_VERSION.to_string(),
+            );
+            (traffic_policy_arn(&id), attributes)
+        }
         // "Ref returns the key ID"; Fn::GetAtt: Arn, KeyId. KMS ASSIGNS that id —
         // `CreateKey` takes no identifier — so a declaration reports an identifier of KMS's
         // own shape (a version-4 UUID) rather than CloudFormation's
@@ -1589,8 +1655,66 @@ pub(super) fn return_values(
                 .unwrap_or_else(|| name.to_string());
             (identity, attributes)
         }
+        // "Ref returns the record name"; the type publishes no `Fn::GetAtt` attribute. The
+        // record name CloudFormation reports is the DNS name WITHOUT its terminal dot: a
+        // zone's own names are fully qualified in Route 53 ("Route 53 treats
+        // `www.example.com` and `www.example.com.` as identical"), while the value this type
+        // hands back is the name in the form a client uses it in — joined into a URL, or
+        // compared with the name the template declared minus the dot. The name the record is
+        // CREATED under is the declaration's own ([`crate::state::provisioner`]), so the
+        // trailing dot is dropped only from the identifier the stack reports.
+        ROUTE53_RECORD_SET => (
+            without_terminal_dot(name).to_string(),
+            attributes,
+        ),
         _ => (name.to_string(), attributes),
     }
+}
+
+/// A DNS name with its terminal dot dropped, which is how CloudFormation reports the name of
+/// a resource whose return value IS a DNS record name.
+///
+/// One dot: the root label is written at most once, so a name that carries none is already in
+/// this form and is answered as it stands.
+pub(super) fn without_terminal_dot(name: &str) -> &str {
+    name.strip_suffix('.').unwrap_or(name)
+}
+
+/// The key ONE ELEMENT of a list-valued `Fn::GetAtt` attribute is carried under in a
+/// resource's attribute map: the attribute's own name and the element's index, in the DOTTED
+/// notation `Fn::GetAtt` addresses a path with ("For attributes that return a list, use
+/// dotted notation").
+///
+/// The attribute map is string-valued, so a LIST attribute — a hosted zone's `NameServers`,
+/// an endpoint's addresses — is carried element by element, and the attribute's own name
+/// resolves to the whole list ([`list_attribute`]). Writing the elements under the path
+/// `Fn::GetAtt` already reads means an index named in a template resolves to that element
+/// with nothing further to do.
+pub fn list_attribute_element(attribute: &str, index: usize) -> String {
+    format!("{attribute}.{index}")
+}
+
+/// Every element of the list-valued attribute `attribute`, in index order, or `None` where
+/// the resource publishes no such list.
+///
+/// The elements are read by INDEX from the first, so the list is the run the owning service
+/// reported ([`list_attribute_element`]) in that service's own order, and a gap ends it
+/// rather than silently reordering what follows.
+pub fn list_attribute(
+    attributes: &BTreeMap<String, String>,
+    attribute: &str,
+) -> Option<Vec<String>> {
+    let mut elements = Vec::new();
+    while let Some(element) = attributes.get(&list_attribute_element(attribute, elements.len())) {
+        elements.push(element.clone());
+    }
+    (!elements.is_empty()).then_some(elements)
+}
+
+/// Whether a resource publishes `attribute` at all: as a value of its own, or as the
+/// list-valued attribute its elements make up.
+pub fn publishes_attribute(attributes: &BTreeMap<String, String>, attribute: &str) -> bool {
+    attributes.contains_key(attribute) || list_attribute(attributes, attribute).is_some()
 }
 
 /// The ARN namespace Amazon Web Services Private CA mints its resources under (that
@@ -1765,6 +1889,9 @@ pub fn published_attribute_names(resource_type: &str) -> &'static [&'static str]
         GUARDDUTY_DETECTOR | GUARDDUTY_IP_SET => &["Id"],
         ROUTE53_HEALTH_CHECK => &["HealthCheckId"],
         ROUTE53_HOSTED_ZONE => &["Id"],
+        ROUTE53_CIDR_COLLECTION => &["Arn", "Id"],
+        ROUTE53_DELEGATION_SET => &["Id"],
+        ROUTE53_TRAFFIC_POLICY => &["Id", "Type", "Version"],
         KMS_KEY => &["Arn", "KeyId"],
         MSK_CLUSTER | MSK_SERVERLESS_CLUSTER => &["Arn"],
         MQ_BROKER => &["Arn"],
@@ -1966,6 +2093,15 @@ pub fn identity_is_service_assigned(resource_type: &str) -> bool {
         // ID", and that id is what `GetHealthCheck` and a record set's own `HealthCheckId`
         // take — the type declares no name a rule could compute it from.
         || resource_type == ROUTE53_HEALTH_CHECK
+        // The three further Amazon Route 53 types are three more, for the reason their own
+        // constants record ([`ROUTE53_CIDR_COLLECTION`] and its siblings): each create
+        // answers an identifier that service minted — a collection's UUID, a reusable
+        // delegation set's `N…` id, a traffic policy's id — and every call on one takes it,
+        // while a template declares a name, a caller reference or a document rather than
+        // any of them.
+        || resource_type == ROUTE53_CIDR_COLLECTION
+        || resource_type == ROUTE53_DELEGATION_SET
+        || resource_type == ROUTE53_TRAFFIC_POLICY
         // An Amazon RDS Proxy target group is one more: a proxy comes up WITH the one
         // target group it has, so a declaration of this type states the proxy and the
         // databases the group routes to, never an identifier — and that type's `Ref`
@@ -2877,6 +3013,14 @@ pub const ROUTE53RESOLVER_FIREWALL_RULE_GROUP_ASSOCIATION: &str =
 pub const ROUTE53_HOSTED_ZONE: &str = "AWS::Route53::HostedZone";
 pub const ROUTE53_RECORD_SET: &str = "AWS::Route53::RecordSet";
 
+/// A GROUP of record sets, which is the same declaration several times over: "a complex type
+/// that contains one `RecordSet` element for each record set that you want to create".
+///
+/// The group is no resource of Route 53's — that service holds record sets, not groups — so
+/// its identifier is the one CloudFormation's naming rules give it, and the record sets it
+/// declares are applied to the zone the GROUP names in one change batch.
+pub const ROUTE53_RECORD_SET_GROUP: &str = "AWS::Route53::RecordSetGroup";
+
 /// A health check of Amazon Route 53's, the third type a stack creates in that service.
 ///
 /// Its identifier is Route 53's own to mint the same way a hosted zone's is: "Ref returns
@@ -2885,6 +3029,96 @@ pub const ROUTE53_RECORD_SET: &str = "AWS::Route53::RecordSet";
 /// operation on the health check takes (`GetHealthCheck$HealthCheckId`,
 /// `UpdateHealthCheck$HealthCheckId` and a record set's own `HealthCheckId`).
 pub const ROUTE53_HEALTH_CHECK: &str = "AWS::Route53::HealthCheck";
+
+/// The three further Amazon Route 53 resource types a stack creates in that service: the
+/// CIDR collection an IP-based record set routes through, the reusable delegation set a
+/// zone can be created on, and the traffic policy a routing configuration is held as.
+///
+/// Each one's identifier is Route 53's OWN to mint, as a hosted zone's and a health
+/// check's are. `CreateCidrCollection` takes the collection's name and answers the UUID it
+/// assigned, and every call on the collection takes that UUID
+/// (`ChangeCidrCollection$Id`, `ListCidrBlocks$CollectionId`, and a record set's own
+/// `CidrRoutingConfig.CollectionId`). `CreateReusableDelegationSet` takes no identifier at
+/// all and answers the `N…` id it assigned, which is what `GetReusableDelegationSet` and a
+/// zone's own `DelegationSetId` take. `CreateTrafficPolicy` takes the policy's name and
+/// document and answers the id and the version it assigned, which is what
+/// `GetTrafficPolicy` and a traffic policy instance's own `TrafficPolicyId` take.
+pub const ROUTE53_CIDR_COLLECTION: &str = "AWS::Route53::CidrCollection";
+pub const ROUTE53_DELEGATION_SET: &str = "AWS::Route53::DelegationSet";
+pub const ROUTE53_TRAFFIC_POLICY: &str = "AWS::Route53::TrafficPolicy";
+
+/// The first character of a reusable delegation set id, and how many follow it.
+///
+/// Route 53 publishes one as `N` followed by uppercase alphanumerics (`N1PA6795SAMPLE` in
+/// `CreateReusableDelegationSet`'s own examples), inside the 32-character bound its
+/// `ResourceId` shape fixes — the same shape a hosted zone id takes under a different first
+/// character. What [`return_values`] computes is a STAND-IN of that shape, replaced by the
+/// id Route 53 minted once `super::provisioning` has created the set.
+pub(super) const DELEGATION_SET_ID_PREFIX: &str = "N";
+
+/// What the digest behind that stand-in is salted with — see [`HOSTED_ZONE_ID_SALT`].
+pub(super) const DELEGATION_SET_ID_SALT: &str = "route53-delegation-set";
+
+/// The `Version` the one traffic policy an `AWS::Route53::TrafficPolicy` creates carries:
+/// "for a new traffic policy, the value of `Version` is always 1" (`TrafficPolicy$Version`).
+/// A further version is a `CreateTrafficPolicyVersion`, which no property of this type asks
+/// for.
+pub const FIRST_TRAFFIC_POLICY_VERSION: u32 = 1;
+
+/// The `RecordType` an `AWS::Route53::TrafficPolicy`'s declared `Document` states, which is
+/// the `Type` that type publishes: "the DNS type of the resource record sets that Amazon
+/// Route 53 creates when you use a traffic policy to create a traffic policy instance"
+/// (`TrafficPolicy$Type`), read OFF the document because the create carries no type at all.
+///
+/// The property is a JSON document, which a template may state as the document itself or as
+/// the text of one, so both forms are read. A declaration carrying neither states no record
+/// type, and the attribute is then absent rather than guessed — the resource's own create is
+/// what refuses such a declaration.
+fn declared_record_type(properties: &Value) -> Option<String> {
+    let declared = properties.get("Document")?;
+    let parsed = match declared {
+        Value::String(text) => ::serde_json::from_str::<Value>(text).ok()?,
+        document => document.clone(),
+    };
+    parsed.get("RecordType").and_then(scalar_text)
+}
+
+/// Route 53's ARN namespace, which is its model's own `awsService.arnNamespace`
+/// (`route53`) — the service segment of a CIDR collection's ARN.
+pub const ROUTE53_ARN_NAMESPACE: &str = "route53";
+
+/// The ARN of the reusable delegation set `id`, which is what that type's `Ref` returns.
+///
+/// Route 53 is a GLOBAL service and its entities belong to no account's namespace in an ARN:
+/// a delegation set's ARN carries neither a Region nor an account id
+/// (`arn:aws:route53:::delegationset/<id>`), the same form a hosted zone's takes
+/// (`arn:aws:route53:::hostedzone/<id>`). The resource path is the entity and the bare id
+/// Route 53 minted.
+pub fn delegation_set_arn(id: &str) -> String {
+    route53_entity_arn("delegationset", id)
+}
+
+/// The ARN of the traffic policy `id`, which is what that type's `Ref` returns — the same
+/// account-less form a delegation set's takes ([`delegation_set_arn`]).
+pub fn traffic_policy_arn(id: &str) -> String {
+    route53_entity_arn("trafficpolicy", id)
+}
+
+/// The ARN of one Route 53 entity, as that service's own resource ARNs are written: no
+/// Region, no account, and the entity and its bare id as the resource path.
+fn route53_entity_arn(entity: &str, id: &str) -> String {
+    format!("arn:{PARTITION}:{ROUTE53_ARN_NAMESPACE}:::{entity}/{id}")
+}
+
+/// The reusable delegation set id an ARN of that form names: its resource path's last
+/// segment, which is the bare `ResourceId` every operation on the set takes.
+///
+/// A value carrying no path at all is already that id, which is what a template stating one
+/// literally writes. The same reading gives a traffic policy's id out of its own ARN, since
+/// both are written the same way.
+pub fn route53_id_in(arn: &str) -> &str {
+    arn.rsplit('/').next().unwrap_or(arn)
+}
 
 /// The first character of a hosted zone id, and how many follow it.
 ///
@@ -3422,7 +3656,7 @@ fn missing_attribute(
                     let published = scope
                         .resources
                         .get(&logical_id)
-                        .map(|resource| resource.attributes.contains_key(&attribute));
+                        .map(|resource| publishes_attribute(&resource.attributes, &attribute));
                     if published == Some(false) {
                         return Some((logical_id, attribute));
                     }

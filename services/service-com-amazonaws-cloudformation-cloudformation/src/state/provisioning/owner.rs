@@ -773,4 +773,15 @@ impl Owner {
             Self::AppConfigResource(_) => message.to_string(),
         }
     }
+
+    /// Which `HandlerErrorCode` class this type's provider puts a refusal carrying `code`
+    /// in — see
+    /// [`Provisioner::handler_error_class`](super::provisioner::Provisioner::handler_error_class).
+    pub(super) fn handler_error_class(self, code: &str, classified: &'static str) -> &'static str {
+        match self {
+            Self::Builtin(provisioner) => provisioner.handler_error_class(code, classified),
+            // Every other provider here reports the class the error code itself falls in.
+            _ => classified,
+        }
+    }
 }
