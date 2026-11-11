@@ -13,14 +13,18 @@
 //!
 //! The logins one call presents name ONE account, and the call links every one of them to
 //! it. So a presented login the pool has already PROVEN for another identity is no login of
-//! this account: where the request NAMES an identity, it has presented a login that is not
-//! that identity's and is refused as the authorization failure that is — before what the
-//! pool holds for that login is reported, so the refusal names no other identity — and
-//! where the identity is resolved from the logins themselves, logins proving different
-//! accounts cannot be linked. An identity an identity PROVIDER's login already proves is
-//! that provider's user, into which a developer user is not joined either; an
-//! unauthenticated (guest) identity and an identity of the same backend's other developer
-//! user identifiers are what the `IdentityId` member links a new one to.
+//! this account: where the request NAMES an identity a login has been linked to, it has
+//! presented a login that is not that identity's and is refused as the authorization failure
+//! that is — before what the pool holds for that login is reported, so the refusal names no
+//! other identity — and where the identity is resolved from the logins themselves, logins
+//! proving different accounts cannot be linked. An identity an identity PROVIDER's login
+//! already proves is that provider's user, into which a developer user is not joined either;
+//! an unauthenticated (guest) identity and an identity of the same backend's other developer
+//! user identifiers are what the `IdentityId` member links a new one to. An identity no login
+//! has ever been linked to is named by its id alone, so nothing a request carries binds the
+//! call to it: a developer user identifier the pool has already registered keeps naming the
+//! identity it is registered under, which is the identity such a call resolves to and
+//! answers, leaving the one it named untouched.
 //!
 //! The token is minted from the stored identity (see [`crate::state::open_id_token`]) and
 //! recorded in `open_id_tokens`, so the service can later say which identity a token it
@@ -306,6 +310,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>
             );
         };
 
+        // `Logins` is modelled REQUIRED and `len 0..10`, so an EMPTY map reaches this
+        // handler: a request that presents no login at all names no user to register or
+        // resolve, which is the missing input parameter it is. That is a different refusal
+        // from a map that DOES name a provider and names one the pool's own developer
+        // provider is not, and it is decided before the pool's configuration is consulted at
+        // all, so the two are never collapsed into one answer.
+        if input.logins.is_empty() {
+            return Err(
+                GetOpenIdTokenForDeveloperIdentityErrorModeled::InvalidParameterException(
+                    InvalidParameterException {
+                        message: Some(crate::state::NO_LOGIN_PROVIDER_MESSAGE.to_string()),
+                    },
+                )
+                .into(),
+            );
+        }
+
         // The developer provider is "the 'domain' by which Cognito will refer to your
         // users; you provided this domain while creating/updating the identity pool", so
         // the developer login this call carries is the `Logins` entry keyed by the POOL's
@@ -338,30 +359,49 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>
 
         // "When you want to associate a new login with an existing authenticated/
         // unauthenticated identity, you can do so by providing the existing IdentityId" —
-        // an identity of THIS pool, since an identity never moves between pools.
+        // an identity of THIS pool, since an identity never moves between pools. Which pool
+        // holds it is settled FIRST ([`crate::state::ScopedIdentityRefusal`]), so an identity
+        // of another pool is one this request may not reach rather than a resource this
+        // service does not hold.
         let mut named_identity_is_idp_proven = false;
+        let mut named_identity_has_been_linked = false;
         if let Some(identity_id) = &input.identity_id {
-            let Some(identity) = store
-                .identities
-                .get(identity_id)
-                .filter(|identity| identity.identity_pool_id == input.identity_pool_id)
-            else {
-                return Err(
-                    GetOpenIdTokenForDeveloperIdentityErrorModeled::ResourceNotFoundException(
-                        ResourceNotFoundException {
-                            message: Some(crate::state::identity_not_found_message(identity_id)),
-                        },
-                    )
-                    .into(),
-                );
-            };
-            // Whether the identity the request names is one an IDENTITY PROVIDER's login
-            // already proves: a provider it is linked to that is not the pool's own
-            // developer provider is a provider whose own user it is.
-            named_identity_is_idp_proven = identity
-                .logins
-                .iter()
-                .any(|provider| *provider != developer_provider);
+            match store.scoped_identity(&input.identity_pool_id, identity_id) {
+                Err(crate::state::ScopedIdentityRefusal::NotStored) => {
+                    return Err(
+                        GetOpenIdTokenForDeveloperIdentityErrorModeled::ResourceNotFoundException(
+                            ResourceNotFoundException {
+                                message: Some(crate::state::identity_not_found_message(
+                                    identity_id,
+                                )),
+                            },
+                        )
+                        .into(),
+                    );
+                }
+                Err(crate::state::ScopedIdentityRefusal::AnotherPool) => {
+                    return Err(
+                        GetOpenIdTokenForDeveloperIdentityErrorModeled::NotAuthorizedException(
+                            NotAuthorizedException {
+                                message: Some(crate::state::forbidden_identity_message(
+                                    identity_id,
+                                )),
+                            },
+                        )
+                        .into(),
+                    );
+                }
+                Ok(identity) => {
+                    // Whether the identity the request names is one an IDENTITY PROVIDER's
+                    // login already proves: a provider it is linked to that is not the
+                    // pool's own developer provider is a provider whose own user it is.
+                    named_identity_is_idp_proven = identity
+                        .logins
+                        .iter()
+                        .any(|provider| *provider != developer_provider);
+                    named_identity_has_been_linked = identity.has_been_linked();
+                }
+            }
         }
 
         let registered_to = store
@@ -372,13 +412,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>
             )
             .cloned();
 
+        // An identity the request names that NO login has ever been linked to — the
+        // UNAUTHENTICATED (guest) identity `GetId` mints for a call presenting none — is
+        // named by its id alone: there is no login of it for a call to present, so nothing
+        // the request carries binds the call to it. A developer user identifier the pool has
+        // already registered therefore keeps naming the identity it is registered under, and
+        // that identity is the one this call is about; the identity the request named takes
+        // no part in it and is left untouched. An identity logins HAVE been linked to is a
+        // federated user's, so it stays the identity the call is about and a presented login
+        // proving another one is the conflict decided below.
+        let ignores_named_identity = input.identity_id.is_some()
+            && !named_identity_has_been_linked
+            && registered_to.is_some()
+            && registered_to != input.identity_id;
+
         // The identity this call is about: the one the request names, else the one the
         // developer user identifier is already registered under (which is what makes the
         // operation idempotent per identifier), else none yet — a new identity.
-        let resolved = input
-            .identity_id
-            .clone()
-            .or_else(|| registered_to.clone());
+        let resolved = if ignores_named_identity {
+            registered_to.clone()
+        } else {
+            input.identity_id.clone().or_else(|| registered_to.clone())
+        };
 
         // Every login the call presents belongs to the ONE account this call is about, and
         // the call links every one of them to it. Two things break that, and the pool's own

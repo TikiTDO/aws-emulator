@@ -313,9 +313,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> UnlinkDeveloperId
             return Err(
                 UnlinkDeveloperIdentityErrorModeled::NotAuthorizedException(
                     NotAuthorizedException {
-                        message: Some(format!(
-                            "Access to Identity '{}' is forbidden.",
-                            input.identity_id
+                        message: Some(crate::state::forbidden_identity_message(
+                            &input.identity_id,
                         )),
                     },
                 )

@@ -565,8 +565,9 @@ async fn a_developer_provider_a_pool_does_not_support_is_refused_with_one_senten
         .to_string();
 
     // The rows differ along WHY the pool does not support the provider the call names: the
-    // pool names none, the call names another developer domain, the call names a public
-    // provider instead, and the call carries no login at all.
+    // pool names none, the call names another developer domain, and the call names a public
+    // provider instead. A call carrying NO login at all names no provider to support, which
+    // is the other missing-input sentence (`developer_identity_resolution`).
     let rows: Vec<(&str, &str, Value)> = vec![
         (
             "a pool that names no developer provider",
@@ -583,7 +584,6 @@ async fn a_developer_provider_a_pool_does_not_support_is_refused_with_one_senten
             with.as_str(),
             json!({ "graph.facebook.com": "a-facebook-access-token" }),
         ),
-        ("no login at all", with.as_str(), json!({})),
     ];
 
     for (case, pool_id, logins) in rows {

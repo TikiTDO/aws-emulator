@@ -272,33 +272,41 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> LookupDeveloperId
         // developer provider therefore holds no developer-identity mapping at all.
         let developer_provider = pool.developer_provider_name.clone();
 
-        // An identity the request names must be one of THIS pool's: an identity belongs
-        // to the pool that minted it and never moves, so a request reaching an identity
-        // of another pool is refused as one the caller may not resolve a developer identity
-        // for — the one fixed sentence every refusal of this operation about an identity it
-        // may not resolve carries — while an identity no pool holds is simply not stored.
+        // An identity the request names must be one of THIS pool's: ownership is settled
+        // before the identity is resolved inside the named pool's scope (the precheck every
+        // pool-scoped operation shares, [`crate::state::ScopedIdentityRefusal`]), so an
+        // identity of another pool is refused as one the caller may not resolve a developer
+        // identity for — the one fixed sentence every refusal of this operation about an
+        // identity it may not resolve carries — while an identity no pool holds is simply not
+        // stored.
         if let Some(identity_id) = &input.identity_id {
-            let Some(identity) = store.identities.get(identity_id) else {
-                return Err(
-                    LookupDeveloperIdentityErrorModeled::ResourceNotFoundException(
-                        ResourceNotFoundException {
-                            message: Some(crate::state::identity_not_found_message(identity_id)),
-                        },
-                    )
-                    .into(),
-                );
-            };
-            if identity.identity_pool_id != input.identity_pool_id {
-                return Err(
-                    LookupDeveloperIdentityErrorModeled::NotAuthorizedException(
-                        NotAuthorizedException {
-                            message: Some(
-                                crate::state::DEVELOPER_IDENTIFIER_FORBIDDEN_MESSAGE.to_string(),
-                            ),
-                        },
-                    )
-                    .into(),
-                );
+            match store.scoped_identity(&input.identity_pool_id, identity_id) {
+                Err(crate::state::ScopedIdentityRefusal::NotStored) => {
+                    return Err(
+                        LookupDeveloperIdentityErrorModeled::ResourceNotFoundException(
+                            ResourceNotFoundException {
+                                message: Some(crate::state::identity_not_found_message(
+                                    identity_id,
+                                )),
+                            },
+                        )
+                        .into(),
+                    );
+                }
+                Err(crate::state::ScopedIdentityRefusal::AnotherPool) => {
+                    return Err(
+                        LookupDeveloperIdentityErrorModeled::NotAuthorizedException(
+                            NotAuthorizedException {
+                                message: Some(
+                                    crate::state::DEVELOPER_IDENTIFIER_FORBIDDEN_MESSAGE
+                                        .to_string(),
+                                ),
+                            },
+                        )
+                        .into(),
+                    );
+                }
+                Ok(_) => {}
             }
         }
 
@@ -336,10 +344,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> LookupDeveloperId
                     return Err(
                         LookupDeveloperIdentityErrorModeled::ResourceConflictException(
                             ResourceConflictException {
-                                message: Some(format!(
-                                    "Developer user identifier '{identifier}' is not registered \
-                                     under identity '{identity_id}'."
-                                )),
+                                message: Some(
+                                    crate::state::MISMATCHED_DEVELOPER_USER_PAIR_MESSAGE
+                                        .to_string(),
+                                ),
                             },
                         )
                         .into(),
@@ -397,10 +405,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> LookupDeveloperId
                     LookupDeveloperIdentityErrorModeled::InvalidParameterException(
                         InvalidParameterException {
                             message: Some(
-                                "Invalid value for parameters IdentityId and \
-                                 DeveloperUserIdentifier: at least one of them must be \
-                                 supplied."
-                                    .to_string(),
+                                crate::state::NO_IDENTITY_OR_DEVELOPER_USER_MESSAGE.to_string(),
                             ),
                         },
                     )

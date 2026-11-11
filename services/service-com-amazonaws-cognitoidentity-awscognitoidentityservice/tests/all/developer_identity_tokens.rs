@@ -14,8 +14,9 @@
 //!   identity: the service's issuer, the pool as audience, the identity as subject, and a
 //!   validity window of the requested `TokenDuration` (the documented 15 minutes when the
 //!   request names none);
-//! * an identifier already registered under ANOTHER identity is refused (400
-//!   `DeveloperUserAlreadyRegisteredException`) and changes nothing;
+//! * an identifier already registered under ANOTHER identity, presented for an identity
+//!   logins have been linked to, is refused (400 `NotAuthorizedException`) and changes
+//!   nothing;
 //! * `Logins` that names no developer provider of the pool is a bad input parameter (400
 //!   `InvalidParameterException`) and changes nothing;
 //! * a pool or an identity this service does not hold is the modelled
@@ -185,8 +186,10 @@ pub(crate) async fn listed_logins(
         .unwrap_or_default()
 }
 
-/// How many identities a pool holds.
-async fn identity_count(emulator: &Emulator, pool_id: &str) -> usize {
+/// How many identities a pool holds. `pub(crate)` for the same reason as
+/// [`pool_with_developer_provider`]: a sibling suite in this test target asks the same
+/// question rather than keeping a second copy of it.
+pub(crate) async fn identity_count(emulator: &Emulator, pool_id: &str) -> usize {
     let listed = emulator
         .ok(
             "ListIdentities",
@@ -459,18 +462,19 @@ async fn a_developer_login_resolves_one_identity_and_mints_a_token_per_call() {
 
 /// RULE: a developer user identifier belongs to ONE identity, and this call links only
 /// logins the pool has proven for no identity — so presenting an identifier already
-/// registered under another identity for the identity the request names is refused 400
-/// `NotAuthorizedException`, naming the login mismatch rather than the identity that holds
-/// it, and changes nothing.
+/// registered under another identity for an identity logins have been linked to is refused
+/// 400 `NotAuthorizedException`, naming the login mismatch rather than the identity that
+/// holds it, and changes nothing.
 #[tokio::test]
 async fn a_developer_identifier_registered_under_another_identity_is_refused() {
     let emulator = Emulator::new();
     let developer_provider = "backend.example.app";
 
-    // The rows differ in how the OTHER identity came to exist: an unauthenticated `GetId`,
-    // a `GetId` carrying a public login, and a second developer user identifier.
+    // The rows differ in how the OTHER identity came to exist: a `GetId` carrying a public
+    // login, and a second developer user identifier. An identity NO login has ever been
+    // linked to is not one of them: nothing binds the call to it, so it is ignored rather
+    // than refused (`developer_identity_resolution`).
     let cases: Vec<(&str, Option<Value>, Option<&str>)> = vec![
-        ("an unauthenticated identity", None, None),
         (
             "an identity minted for a public login",
             Some(json!({"graph.facebook.com": "a-facebook-token"})),
@@ -637,16 +641,14 @@ async fn logins_that_name_no_developer_provider_of_the_pool_are_invalid() {
 }
 
 /// RULE: the call names two resources — the pool and, optionally, the identity — and one
-/// this service does not hold is the modelled `ResourceNotFoundException`.
+/// this service does not hold is the modelled `ResourceNotFoundException`. An identity of
+/// ANOTHER pool is a record this service DOES hold, so it is an ownership refusal instead
+/// (`developer_identity_resolution`).
 #[tokio::test]
 async fn a_pool_or_identity_this_service_does_not_hold_is_not_found() {
     let emulator = Emulator::new();
     let developer_provider = "login.example.app";
     let pool_id = pool_with_developer_provider(&emulator, "found", Some(developer_provider)).await;
-    let other_pool_id =
-        pool_with_developer_provider(&emulator, "elsewhere", Some(developer_provider)).await;
-    // An identity of the OTHER pool: well-formed, stored, and not this pool's.
-    let foreign_identity = emulator.identity(&other_pool_id, None).await;
 
     let cases: Vec<(&str, Value)> = vec![
         (
@@ -664,15 +666,6 @@ async fn a_pool_or_identity_this_service_does_not_hold_is_not_found() {
                 &pool_id,
                 &[(developer_provider, "a-backend-user")],
                 Some(ABSENT_IDENTITY_ID),
-                None,
-            ),
-        ),
-        (
-            "an identity of another pool",
-            token_request(
-                &pool_id,
-                &[(developer_provider, "a-backend-user")],
-                Some(&foreign_identity),
                 None,
             ),
         ),

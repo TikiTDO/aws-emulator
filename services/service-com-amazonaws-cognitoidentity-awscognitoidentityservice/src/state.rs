@@ -945,6 +945,28 @@ pub const NO_PUBLIC_PROVIDER_MESSAGE: &str = "Please provide a valid public prov
 pub const UNSUPPORTED_DEVELOPER_PROVIDER_MESSAGE: &str =
     "This identity pool does not support the specified developer provider.";
 
+/// How AWS words the refusal of a `Logins` map that carries NO entry at all where the
+/// operation takes the map as the whole of who the user is: no login was supplied, which is
+/// a different missing input from a map that does name a provider and names one the pool
+/// does not support ([`UNSUPPORTED_DEVELOPER_PROVIDER_MESSAGE`]). Fixed text, naming
+/// nothing of the request or of the pool.
+pub const NO_LOGIN_PROVIDER_MESSAGE: &str = "Please specify at least one login provider";
+
+/// How AWS words the refusal of a developer-identity lookup that names NEITHER of the two
+/// members it can resolve a mapping from. Both are optional in the model
+/// (`LookupDeveloperIdentityInput`), so which combinations the operation can act on is its
+/// own rule; the sentence names the two members and nothing of the request.
+pub const NO_IDENTITY_OR_DEVELOPER_USER_MESSAGE: &str =
+    "Please specify either an identity id or developer user identifier";
+
+/// How AWS words the refusal of a developer-user-identifier / `IdentityId` PAIR the pool's
+/// mappings do not link — "If you supply both, DeveloperUserIdentifier will be matched
+/// against IdentityID [...] Otherwise, a ResourceConflictException is thrown". Fixed text,
+/// naming neither value, so a caller is told the pair does not match without being told what
+/// either side of it does hold.
+pub const MISMATCHED_DEVELOPER_USER_PAIR_MESSAGE: &str =
+    "The provided user identifier and identity id do not match.";
+
 /// Why a pool does not serve the basic (classic) authentication flow, whose entry point is
 /// `GetOpenIdToken`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1826,6 +1848,19 @@ pub const DISABLED_LOGIN_PROJECTION: &str = "DISABLED";
 pub const UNMATCHED_LOGINS_MESSAGE: &str = "Logins don't match. Please include at least one \
                                             valid login for this identity or identity pool.";
 
+/// Why an identity a POOL-SCOPED request names beside its `IdentityPoolId` is not one that
+/// request may reach
+/// ([`ComAmazonawsCognitoidentityAwscognitoidentityserviceState::scoped_identity`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedIdentityRefusal {
+    /// This service holds no identity of that id at all, so the identity is a resource the
+    /// request named and the service does not have.
+    NotStored,
+    /// It holds one, and that identity belongs to ANOTHER identity pool, so reaching it
+    /// through the pool this request names is not something the caller may do.
+    AnotherPool,
+}
+
 /// Why a call naming an identity is not one its caller has proven it may make
 /// ([`ComAmazonawsCognitoidentityAwscognitoidentityserviceState::refuse_identity_access`]).
 /// Each is answered with the modelled `NotAuthorizedException`.
@@ -2448,6 +2483,31 @@ impl ComAmazonawsCognitoidentityAwscognitoidentityserviceState {
         self.identities_proven_by(identity_pool_id, logins, now)
             .iter()
             .any(|proven| proven == identity_id)
+    }
+
+    /// The identity a POOL-SCOPED request names, or why it is not one that request may
+    /// reach.
+    ///
+    /// An identity belongs to the pool that minted it and never moves between pools, so
+    /// which pool holds it is an OWNERSHIP question that is settled before the identity is
+    /// resolved inside the scope of the pool the request named: an identity of another pool
+    /// is one this request may not reach, while an id no call ever minted is a resource this
+    /// service does not hold. Deciding them in that order is what keeps an identity of
+    /// another pool from being reported as a resource missing from the pool the request
+    /// named. Each operation words the two outcomes as it words its own refusals; the
+    /// identity itself comes back so a caller that goes on to read it needs no second lookup.
+    pub fn scoped_identity(
+        &self,
+        identity_pool_id: &str,
+        identity_id: &str,
+    ) -> Result<&Identity, ScopedIdentityRefusal> {
+        match self.identities.get(identity_id) {
+            None => Err(ScopedIdentityRefusal::NotStored),
+            Some(identity) if identity.identity_pool_id != identity_pool_id => {
+                Err(ScopedIdentityRefusal::AnotherPool)
+            }
+            Some(identity) => Ok(identity),
+        }
     }
 
     /// Why a call naming `identity` is not one its caller has proven it may make, if so.

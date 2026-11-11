@@ -9,7 +9,8 @@
 //!
 //! * an identity this service holds no record of is `Identity '<IdentityId>' not found.`,
 //!   whichever operation addressed it, naming the id the REQUEST carried and nothing of the
-//!   pool it was looked for in;
+//!   pool it was looked for in (an identity of another pool is a record this service DOES
+//!   hold, so it is an ownership refusal instead — `developer_identity_resolution`);
 //! * a developer-identity mapping the caller may not resolve — an identity of another pool,
 //!   an identifier the pool has registered against no identity — is
 //!   `You do not have access to this identity`, one fixed sentence naming neither;
@@ -22,8 +23,7 @@
 //!
 //! Each case asserts the rule over a TABLE spanning the class, its rows differing along
 //! what the rule generalises over: which operation answers the refusal, which `IdentityId`
-//! it was asked about (one no call minted, one of another pool, one whose record was
-//! dropped with its pool), how the mapping is incomplete, and how a tag set crosses the
+//! it was asked about, how the mapping is incomplete, and how a tag set crosses the
 //! ceiling.
 //!
 //! The harness is `identity_pool_flow`'s: one shared engine behind the same
@@ -75,29 +75,10 @@ fn absent_identity_id(number: u8) -> String {
 async fn an_identity_this_service_does_not_hold_is_reported_as_not_found() {
     let emulator = Emulator::new();
     let pool_id = pool(&emulator, "wording-identities").await;
-    // An identity of ANOTHER pool, which the operations below reach through their own pool
-    // and so do not hold either.
-    let other_pool_id = pool(&emulator, "wording-identities-other").await;
-    let other_identity = emulator.identity(&other_pool_id, None).await;
-    // An identity whose POOL was deleted: the record is still reachable by id, so the
-    // refusal is about the identity only where the operation cannot resolve it.
-    let doomed_pool_id = pool(&emulator, "wording-identities-doomed").await;
-    let doomed_identity = emulator.identity(&doomed_pool_id, None).await;
-    emulator
-        .ok(
-            "DeleteIdentityPool",
-            &json!({"IdentityPoolId": &doomed_pool_id}),
-        )
-        .await;
 
     // (case, the identity the request names, the operations that hold no such identity)
     //
-    // An identity no call ever minted is held by none of them. An identity of ANOTHER pool
-    // is a record this service does hold — `DescribeIdentity`, `GetOpenIdToken` and the
-    // vend address an identity by id alone and resolve it — so for those it is not this
-    // condition at all; the developer exchange resolves an identity WITHIN the pool the
-    // request names ("an identity of THIS pool, since an identity never moves between
-    // pools"), so for it the identity is the missing resource.
+    // An identity no call ever minted is held by none of them.
     let identities: Vec<(&str, String, &[&str])> = vec![
         (
             "an id no call ever minted",
@@ -118,16 +99,6 @@ async fn an_identity_this_service_does_not_hold_is_reported_as_not_found() {
                 "GetOpenIdToken",
                 "GetCredentialsForIdentity",
             ],
-        ),
-        (
-            "an identity of another pool",
-            other_identity,
-            &["GetOpenIdTokenForDeveloperIdentity"],
-        ),
-        (
-            "an identity whose pool was deleted",
-            doomed_identity,
-            &["GetOpenIdTokenForDeveloperIdentity"],
         ),
     ];
 

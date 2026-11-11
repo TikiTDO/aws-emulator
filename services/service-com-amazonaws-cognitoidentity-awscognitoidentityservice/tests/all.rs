@@ -35,6 +35,8 @@ mod deleted_pool_and_developer_user_refusals;
 mod describe_identity;
 #[path = "all/developer_credentials_authorization.rs"]
 mod developer_credentials_authorization;
+#[path = "all/developer_identity_resolution.rs"]
+mod developer_identity_resolution;
 #[path = "all/developer_identity_tokens.rs"]
 mod developer_identity_tokens;
 #[path = "all/iam_oidc_federation.rs"]
