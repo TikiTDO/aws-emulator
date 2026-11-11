@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateDomainName
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateDomainName`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateDomainName::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Replaces the settable configuration of the custom domain the path addresses, and
+//! answers the `DomainNameConfig` the update STORED — the body `GetDomainName` reports
+//! next.
 //!
 //! ## Shape of an operation
 //!
@@ -149,18 +143,55 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateDomainName` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateDomainNameErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateDomainName"))
+        // The new configuration comes from the deserialized input and the domain's own
+        // identity is kept, so no request metadata takes part and `ctx` is unused.
+        let _ = ctx;
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(UpdateDomainNameErrorModeled::InternalFailureException(
+                InternalFailureException {
+                    message: Some("the appsync store is unavailable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+
+        // A description outside the modelled `@length` of `Description` is refused here
+        // rather than at the boundary (`skip_validation` on `UpdateDomainNameInput`): the
+        // shape's `@pattern` admits any content, newlines included, so the length is the
+        // only bound a description can break. It is judged before the store is reached, so
+        // a refused update holds no lock and writes nothing — and it is judged before the
+        // domain is resolved, exactly as the create judges it.
+        if let Some(message) = crate::state::description_refusal(input.description.as_deref()) {
+            return Err(UpdateDomainNameErrorModeled::BadRequestException(BadRequestException {
+                message: Some(message),
+                ..Default::default()
+            })
+            .into());
+        }
+
+        let mut guard = state.lock();
+        // A domain name this account does not hold — one nothing created, or one whose
+        // create was refused — has no configuration to update.
+        let Some(domain) = guard.domain_names.get_mut(&input.domain_name) else {
+            return Err(UpdateDomainNameErrorModeled::NotFoundException(NotFoundException {
+                message: Some(crate::state::DOMAIN_NAME_NOT_FOUND_READ_MESSAGE.to_string()),
+            })
+            .into());
+        };
+
+        // The one settable member of the request is the domain's new value, so the update
+        // REPLACES it rather than merging into it: a request that omits `description`
+        // leaves the domain carrying none. Everything else about the domain — the
+        // certificate it is served with, the endpoint and hosted zone AppSync issued it,
+        // its tags and whatever API it is associated with — is not addressed by this
+        // operation's input and is kept.
+        domain.description = input.description;
+
+        // Answer from the record this update STORED, so this body is the one
+        // `GetDomainName` answers with next.
+        Ok(UpdateDomainNameOutput {
+            domain_name_config: Some(domain.to_domain_name_config()),
+        })
     }
 }

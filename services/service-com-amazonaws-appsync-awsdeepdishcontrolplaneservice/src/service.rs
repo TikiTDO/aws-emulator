@@ -41,8 +41,14 @@
 //! do not write it; editing the entry would let this file drift from the model.
 
 use aws_smithy_schema_server::constraints::{Violation, ViolationKind};
-use smithy_server_runtime::{http, ErasedOperation, Refusal, Refused, Service};
+use smithy_server_runtime::{http, ErasedOperation, Operation, Refusal, Refused, Service};
+use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Whether IAM lets a request perform the action it asks for — the decision taken in front
+/// of every operation whose model declares `AccessDeniedException`, and the layer
+/// ([`authorization::Gated`]) that takes it there.
+pub mod authorization;
 
 /// The Event API's DATA plane: the two sockets each `Api` is served on — the HTTP endpoint
 /// a publisher POSTs to and the real-time endpoint a subscriber opens a WebSocket against
@@ -63,6 +69,11 @@ const BAD_REQUEST_CODE: &str = "BadRequestException";
 /// repeated here because [`Refused`] replaces the code and the message TOGETHER: the
 /// refusals below that only adjust the WORDING must keep answering under the code the
 /// caller would otherwise have seen.
+///
+/// It is kept for ONE class of refusal: a value outside an enumerated type's value set,
+/// which the corpus records this service answering under this code
+/// ([`without_rejected_enum_values`]). Every other constraint class answers under the
+/// service's own [`BAD_REQUEST_CODE`].
 const FRAMEWORK_REFUSAL_CODE: &str = "ValidationException";
 
 /// Every member this service's model constrains with `@range`, with the bounds the
@@ -309,6 +320,73 @@ fn resource_arn_refusal(violations: &[Violation]) -> Option<Refused> {
         })
 }
 
+/// The member every operation that carries tags holds them in: a `TagMap`, whose VALUES the
+/// request boundary checks against `TagValue`'s declared expression (its KEYS are checked by
+/// the handlers' own rule, `crate::state::tag_key_refusal`).
+const TAGS_MEMBER: &str = "tags";
+
+/// AppSync's own refusal for a tag whose VALUE carries a character tags may not hold: the
+/// service's `BadRequestException` with the one sentence that states the permitted
+/// characters (`crate::state::INVALID_TAG_VALUE_MESSAGE`).
+///
+/// A tag value is not a member with a form of its own to report: the service states the tag
+/// GRAMMAR, the same way it states the grammar of a tag key — so the clause the framework
+/// would build for the broken expression, and the value it would echo, are both replaced by
+/// that one sentence. Only a `@pattern` violation: a value past the length bound is refused
+/// for its size rather than for its characters, so it keeps the clause the model's own
+/// constraint words.
+///
+/// `None` when no violation is a tag value's expression, which leaves every other refusal
+/// to the wordings the rest of this file states.
+fn tag_value_refusal(violations: &[Violation]) -> Option<Refused> {
+    violations
+        .iter()
+        .find(|violation| {
+            // The path of a map VALUE is the member followed by the entry's key, so the
+            // first segment names the map and a second one is what makes it an entry.
+            let mut segments = violation.path.split('.');
+            segments.next() == Some(TAGS_MEMBER)
+                && segments.next().is_some()
+                && matches!(violation.kind, ViolationKind::Pattern(_))
+        })
+        .map(|_| Refused {
+            code: BAD_REQUEST_CODE.to_string(),
+            message: crate::state::INVALID_TAG_VALUE_MESSAGE.to_string(),
+        })
+}
+
+/// AppSync's own refusal for a member whose value breaks the FORM its target shape
+/// declares — a `@length` bound or a `@pattern` — in the service's modelled
+/// `BadRequestException` (HTTP 400), carrying the framework's own constraint report as the
+/// message.
+///
+/// The framework answers such a refusal under [`FRAMEWORK_REFUSAL_CODE`], a shape no
+/// operation of this service models, so a client's typed-error dispatch
+/// (`except BadRequestException`) never fires and code branching on the error code takes
+/// the wrong branch. The DECISION is the framework's and so is the sentence — it names the
+/// offending member and the expression it broke, which is how the service words it — and
+/// only the CODE is restated, as the one client error these operations declare for a
+/// request that is not well formed.
+///
+/// The last of the wordings this file states, so a member with a sentence of its own
+/// (a tagging `resourceArn`, a `format`) keeps it; `None` when no violation is of either
+/// class, which leaves a class this service does not word to the framework.
+fn declared_form_refusal(violations: &[Violation]) -> Option<Refused> {
+    let breaks_declared_form = violations.iter().any(|violation| {
+        matches!(
+            violation.kind,
+            ViolationKind::MinLength(_) | ViolationKind::MaxLength(_) | ViolationKind::Pattern(_)
+        )
+    });
+    if !breaks_declared_form {
+        return None;
+    }
+    Some(Refused {
+        code: BAD_REQUEST_CODE.to_string(),
+        message: aws_smithy_schema_server::envelope(violations)?,
+    })
+}
+
 /// The `com-amazonaws-appsync-awsdeepdishcontrolplaneservice` emulated service: the generated [`ServiceDefinition`] plus
 /// the behavioral seams this file owns.
 ///
@@ -316,6 +394,13 @@ fn resource_arn_refusal(violations: &[Violation]) -> Option<Refused> {
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
     entry: crate::ServiceDefinition<Eng>,
+    /// One [`authorization::Gated`] per operation whose model declares
+    /// `AccessDeniedException`, keyed by the routing key the model names that operation by
+    /// ([`Operation::NAME`], the same key the generated routing table uses). Built once
+    /// here, never per request; each entry carries the operation's TYPE and a handle on the
+    /// one shared engine, so this is a table of names rather than a second set of
+    /// operations.
+    gated: HashMap<&'static str, Box<dyn ErasedOperation>>,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -324,9 +409,65 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
+            gated: gated_table::<Eng>(&engine),
             entry: crate::ServiceDefinition::new(engine),
         }
     }
+}
+
+/// The [`authorization::Gated`] wrapper for every operation whose model declares
+/// `AccessDeniedException` ([`authorization::GATED_OPERATIONS`]).
+///
+/// Authorization is a property of the request's identity, the action it names and the
+/// resource it addresses rather than of what a handler goes on to do, so it is taken here
+/// for all of them at once — implemented or still scaffolded. A stub answers 501 for a
+/// request whose caller IAM permits and the refusal otherwise, which is the order the real
+/// service evaluates them in; leaving a modelled operation out would serve an unauthorized
+/// caller, the very divergence this removes.
+fn gated_table<Eng: Send + Sync + 'static>(
+    engine: &Arc<Eng>,
+) -> HashMap<&'static str, Box<dyn ErasedOperation>> {
+    let mut wrappers: HashMap<&'static str, Box<dyn ErasedOperation>> = HashMap::new();
+    macro_rules! register {
+        ($($module:ident :: $operation:ident),+ $(,)?) => {
+            $(
+                wrappers.insert(
+                    <crate::ops::$module::$operation<Eng> as Operation>::NAME,
+                    Box::new(authorization::Gated::<
+                        crate::ops::$module::$operation<Eng>,
+                        Eng,
+                    >::new(Arc::clone(engine))) as Box<dyn ErasedOperation>,
+                );
+            )+
+        };
+    }
+    register!(
+        associate_api::AssociateApi,
+        create_domain_name::CreateDomainName,
+        delete_api::DeleteApi,
+        delete_channel_namespace::DeleteChannelNamespace,
+        delete_domain_name::DeleteDomainName,
+        delete_graphql_api::DeleteGraphqlApi,
+        disassociate_api::DisassociateApi,
+        evaluate_code::EvaluateCode,
+        evaluate_mapping_template::EvaluateMappingTemplate,
+        get_api::GetApi,
+        get_api_association::GetApiAssociation,
+        get_channel_namespace::GetChannelNamespace,
+        get_domain_name::GetDomainName,
+        get_graphql_api::GetGraphqlApi,
+        get_graphql_api_environment_variables::GetGraphqlApiEnvironmentVariables,
+        list_domain_names::ListDomainNames,
+        list_tags_for_resource::ListTagsForResource,
+        put_graphql_api_environment_variables::PutGraphqlApiEnvironmentVariables,
+        tag_resource::TagResource,
+        untag_resource::UntagResource,
+        update_api::UpdateApi,
+        update_channel_namespace::UpdateChannelNamespace,
+        update_domain_name::UpdateDomainName,
+        update_graphql_api::UpdateGraphqlApi,
+    );
+    wrappers
 }
 
 impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
@@ -351,12 +492,16 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         &self,
         req: &aws_smithy_runtime_api::http::Request,
     ) -> Option<&dyn ErasedOperation> {
-        // Return `Some(op)` to serve a request the model's routing key cannot name
-        // correctly; `None` (the default) lets the generated routing table resolve
-        // it. `req` is the whole request, so a decision that depends on the body —
-        // the `Action` form field on a query protocol, say — is reachable here.
-        let _ = req;
-        None
+        // NOT a re-route: the key is the one the generated table's own protocol resolves,
+        // and the operation it names is the one served — wrapped in
+        // [`authorization::Gated`] so IAM's decision about the action is taken BEFORE the
+        // handler runs, as AWS takes it. Only the operations whose model declares
+        // `AccessDeniedException` are in that table
+        // ([`authorization::GATED_OPERATIONS`]); every other key resolves to `None` here
+        // exactly as it did before, so the generated table serves it unchanged and the
+        // router's routing-error path is untouched.
+        let key = self.entry.protocol().routing_key(req).ok()?;
+        self.gated.get(key).map(::std::convert::AsRef::as_ref)
     }
 
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {
@@ -377,15 +522,23 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         //   the permitted values WITHOUT echoing the rejected value
         //   (`without_rejected_enum_values`), under the framework's own code — except
         //   for the `format` a report is asked in, which the service refuses by naming
-        //   the member and the rejected value (`format_refusal`).
+        //   the member and the rejected value (`format_refusal`);
+        // * a tag whose VALUE carries a character tags may not hold is its own
+        //   `BadRequestException` stating the tag grammar (`tag_value_refusal`), the way the
+        //   service states the grammar of a tag key;
+        // * a value that breaks the FORM its target shape declares — a `@length` bound or
+        //   a `@pattern` — is its own `BadRequestException` carrying the framework's own
+        //   constraint report (`declared_form_refusal`), because the sentence is right and
+        //   only the code was a shape no operation of this service models.
         //
-        // Every other refusal — a length, a pattern — keeps the framework's wording
-        // and code.
+        // Every other refusal keeps the framework's wording and code.
         match refusal {
             Refusal::Invalid(violations) => resource_arn_refusal(violations)
                 .or_else(|| member_refusal(violations))
                 .or_else(|| format_refusal(violations))
-                .or_else(|| without_rejected_enum_values(violations)),
+                .or_else(|| without_rejected_enum_values(violations))
+                .or_else(|| tag_value_refusal(violations))
+                .or_else(|| declared_form_refusal(violations)),
             // Authentication refusals, and any refusal kind added later, keep the
             // framework's wording.
             _ => None,

@@ -37,6 +37,8 @@ mod api_keys_across_api_families;
 mod association_refusal_messages;
 #[path = "all/channel_namespaces.rs"]
 mod channel_namespaces;
+#[path = "all/constraint_refusal_error_code.rs"]
+mod constraint_refusal_error_code;
 #[path = "all/custom_domain_api_association.rs"]
 mod custom_domain_api_association;
 #[path = "all/data_source_delete.rs"]
@@ -57,6 +59,8 @@ mod disassociation_reference_refusals;
 mod domain_certificate_and_api_gates;
 #[path = "all/domain_name_list.rs"]
 mod domain_name_list;
+#[path = "all/domain_name_update_delete.rs"]
+mod domain_name_update_delete;
 #[path = "all/environment_variables.rs"]
 mod environment_variables;
 #[path = "all/error_contract.rs"]
@@ -91,6 +95,8 @@ mod graphql_api_lifecycle;
 mod graphql_api_update;
 #[path = "all/graphql_types.rs"]
 mod graphql_types;
+#[path = "all/identity_authorization.rs"]
+mod identity_authorization;
 #[path = "all/introspection_schema.rs"]
 mod introspection_schema;
 #[path = "all/list_apis.rs"]

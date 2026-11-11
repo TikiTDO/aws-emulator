@@ -887,12 +887,22 @@ impl ChannelNamespaceRecord {
     }
 }
 
+/// The resource portion of an API's ARN — a GraphQL API's and an Event API's alike, both
+/// of which are addressed under the one `apis/{apiId}` path their operations' URIs spell
+/// (`/v1/apis/{apiId}`, `/v2/apis/{apiId}`).
+///
+/// The one spelling of it, so the ARN a create mints, the ARN a child resource is named
+/// under and the ARN a request is authorized against cannot drift apart.
+pub fn api_resource(api_id: &str) -> String {
+    format!("apis/{api_id}")
+}
+
 /// The resource portion of a channel namespace's ARN: a namespace is a child of its
 /// `Api`, so it is named under that API's own `apis/{apiId}` path, as
 /// `GetChannelNamespace`'s URI (`/v2/apis/{apiId}/channelNamespaces/{name}`) addresses
 /// it.
 pub fn channel_namespace_resource(api_id: &str, name: &str) -> String {
-    format!("apis/{api_id}/channelNamespace/{name}")
+    format!("{}/channelNamespace/{name}", api_resource(api_id))
 }
 
 /// How many channel namespaces one `Api` holds in this emulator, which bounds the
@@ -1186,15 +1196,19 @@ pub fn association_deployment_detail(status: &str) -> &'static str {
     }
 }
 
-/// The text the association operations that MODIFY a custom domain's mapping
-/// (`AssociateApi`, `DisassociateApi`) carry for a domain this account does not hold.
+/// The text `AssociateApi`, `DisassociateApi` and `DeleteDomainName` carry for a domain
+/// this account does not hold.
+///
+/// AppSync states the same condition on two wordings, with and without the sentence's full
+/// stop, and which operation states which is a fact about the service rather than a rule to
+/// derive: these three state it punctuated, and the ones on
+/// [`DOMAIN_NAME_NOT_FOUND_READ_MESSAGE`] state it bare. The two constants exist so neither
+/// wording is rebuilt from the other.
 pub const DOMAIN_NAME_NOT_FOUND_MESSAGE: &str = "Domain name not found.";
 
-/// The text the operations that READ a custom domain (`GetDomainName`,
-/// `GetApiAssociation`) carry for a domain this account does not hold.
-///
-/// AppSync words the same condition without the sentence's full stop on the reads; the
-/// two constants exist so neither wording is rebuilt from the other.
+/// The text `GetDomainName`, `UpdateDomainName` and `GetApiAssociation` carry for a domain
+/// this account does not hold — the bare wording of
+/// [`DOMAIN_NAME_NOT_FOUND_MESSAGE`]'s condition.
 pub const DOMAIN_NAME_NOT_FOUND_READ_MESSAGE: &str = "Domain name not found";
 
 /// The text `BadRequestException` (HTTP 400) carries for a create under a domain name
@@ -2476,6 +2490,17 @@ pub fn invalid_tag_key_message(key: &str) -> String {
          letters, numbers, spaces and the characters + - = . _ : /"
     )
 }
+
+/// AppSync's fixed text for a tag whose VALUE carries a character tags may not hold,
+/// carried by `BadRequestException` (HTTP 400).
+///
+/// The sentence states the permitted characters and nothing of the request, so the rejected
+/// value is not echoed. The set it names is the one `TagValue`'s modelled pattern admits
+/// (`smithy_query(query="shape", shape="TagValue")`: `^[\s\w+-=\.:/@]*$` — letters, digits,
+/// the underscore and whitespace through `\w`/`\s`, and `. : / = + - @`).
+pub const INVALID_TAG_VALUE_MESSAGE: &str =
+    "Tags can only contain letters, numbers, spaces, and the following special characters: \
+     _ . : / = + - @";
 
 /// AppSync's refusal text for a tag write that would leave the resource holding more
 /// than [`TAGS_PER_RESOURCE`] tags: the quota, and the number the resource would end up

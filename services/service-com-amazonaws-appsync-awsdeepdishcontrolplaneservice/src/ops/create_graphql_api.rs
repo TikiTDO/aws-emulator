@@ -257,7 +257,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let record = crate::state::GraphqlApiRecord {
             seq,
-            arn: ::engine::emulator_arn(ARN_SERVICE, &region, &format!("apis/{api_id}")),
+            arn: ::engine::emulator_arn(
+                ARN_SERVICE,
+                &region,
+                &crate::state::api_resource(&api_id),
+            ),
             // The endpoint hostnames are built the same way for either kind of API
             // (`crate::state::api_dns`); a GraphQL API publishes its HTTPS endpoint
             // under the `GRAPHQL` key, which `uris` is derived from.

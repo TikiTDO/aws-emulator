@@ -255,7 +255,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             api_arn: ::engine::emulator_arn(
                 crate::state::ARN_SERVICE,
                 &region,
-                &format!("apis/{api_id}"),
+                &crate::state::api_resource(&api_id),
             ),
             // The DNS records publish the two endpoints this API is SERVED on, one per
             // socket (`crate::state::event_api_dns`): an `Api` publishes its HTTP endpoint
