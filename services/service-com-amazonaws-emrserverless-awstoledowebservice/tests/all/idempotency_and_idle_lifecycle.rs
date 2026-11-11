@@ -21,7 +21,9 @@
 //!    non-terminal `JobRunState` values, so a client that polls or filters for in-flight
 //!    runs observes it in them.
 //! 5. `GetDashboardForJobRun` answers the modelled 200 with an `https` `url`, freshly
-//!    minted per call, and a 404 that states which part of the request was not found.
+//!    minted per call, and refuses what did not resolve in the class that part of the
+//!    request belongs to: the application it is scoped to as a 404 not-found, the job run
+//!    the URL would be minted for as a 400 validation failure.
 //! 6. `autoStopConfiguration` is ENFORCED: an application that has been idle past the
 //!    idle timeout it names stops itself, with no `StopApplication` call.
 
@@ -68,8 +70,12 @@ const NOT_CANCELLABLE: &str = "Job run is not in a cancellable state";
 /// The `ResourceNotFoundException` phrases, one per part of the request that can fail to
 /// resolve.
 const APPLICATION_NOT_FOUND: &str = "Application does not exist";
-const JOB_RUN_NOT_FOUND: &str = "Job Run with given ID doesn't exist";
 const JOB_RUN_ATTEMPT_NOT_FOUND: &str = "Job Run with given attempt doesn't exist";
+
+/// The `ValidationException` sentence an ACCESS-GRANT read — one that mints a URL for a
+/// job run rather than reporting the run — states for a job-run id that resolves to
+/// nothing: the class's fixed text, terminated by a period.
+const JOB_RUN_ID_INVALID: &str = "Job Run with given ID doesn't exist.";
 
 /// The two `CreateApplication` refusals, one per member that can fail.
 const UNSUPPORTED_RELEASE_LABEL: &str =
@@ -748,13 +754,17 @@ async fn get_dashboard_for_job_run_mints_an_https_url_per_call() {
         "every call generates a new url, got {minted:?}"
     );
 
-    // A 404 states WHICH part of the request did not resolve.
-    for (case, application, run, query, expected) in [
+    // A refusal states WHICH part of the request did not resolve, and in which class:
+    // the application a grant is scoped to is a resource that was not found (404), while
+    // the job run the grant is minted FOR is an identifier the request got wrong (400).
+    for (case, application, run, query, status, shape, expected) in [
         (
             "an unknown application",
             "doesnotexist".to_string(),
             job_run_id.clone(),
             "",
+            404,
+            "ResourceNotFoundException",
             APPLICATION_NOT_FOUND,
         ),
         (
@@ -762,26 +772,30 @@ async fn get_dashboard_for_job_run_mints_an_https_url_per_call() {
             application_id.clone(),
             "doesnotexist".to_string(),
             "",
-            JOB_RUN_NOT_FOUND,
+            400,
+            "ValidationException",
+            JOB_RUN_ID_INVALID,
         ),
         (
             "an attempt the run does not have",
             application_id.clone(),
             job_run_id.clone(),
             "?attempt=999",
+            404,
+            "ResourceNotFoundException",
             JOB_RUN_ATTEMPT_NOT_FOUND,
         ),
     ] {
         let answer = get_dashboard(&router, &application, &run, query).await;
         assert_eq!(
-            answer.status, 404,
-            "case {case:?}: expected 404, got {} with {:?}",
+            answer.status, status,
+            "case {case:?}: expected {status}, got {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(
             answer.error_code(),
-            "ResourceNotFoundException",
-            "case {case:?}: expected ResourceNotFoundException, got {:?}",
+            shape,
+            "case {case:?}: expected {shape}, got {:?}",
             answer.body
         );
         assert_eq!(

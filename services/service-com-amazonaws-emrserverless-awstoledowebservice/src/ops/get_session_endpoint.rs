@@ -168,18 +168,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // A report of the stored session's endpoint. The only write it performs on the
         // store is materialising the state changes the clock already owed at this
         // instant; the token it mints is handed to the caller and retained nowhere.
-        let record = store
+        //
+        // The grant is minted FOR the session the request names, and a session id names
+        // ONE session service-wide, so the session reference is resolved as a whole: an
+        // application that holds no such session and an application that does not exist
+        // are both a request naming a session there is no grant to mint for, which this
+        // service refuses as input validation (400) rather than as a missing resource.
+        let session = store
             .settled_mut(&input.application_id, now)
+            .and_then(|record| record.sessions.get(&input.session_id))
             .ok_or_else(|| {
-                GetSessionEndpointErrorModeled::ResourceNotFoundException(
-                    crate::state::application_not_found(),
+                GetSessionEndpointErrorModeled::ValidationException(
+                    crate::state::session_id_invalid(),
                 )
             })?;
-        let session = record.sessions.get(&input.session_id).ok_or_else(|| {
-            GetSessionEndpointErrorModeled::ResourceNotFoundException(
-                crate::state::session_not_found(),
-            )
-        })?;
 
         // "Use the endpoint and token to connect a client to the session": a session in
         // a state it never leaves accepts no client, so it has no endpoint to connect

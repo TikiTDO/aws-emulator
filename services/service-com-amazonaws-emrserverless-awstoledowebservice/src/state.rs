@@ -41,8 +41,8 @@ use crate::ops::types::{
     IdentityCenterConfiguration, IdentityCenterConfigurationInput, ImageConfiguration,
     ImageConfigurationInput, JobRun, JobRunSummary, JobLevelCostAllocationConfiguration,
     ManagedPersistenceMonitoringConfiguration, MonitoringConfiguration,
-    ResourceNotFoundException, Session, SessionSummary, WorkerTypeSpecification,
-    WorkerTypeSpecificationInput,
+    ResourceNotFoundException, Session, SessionSummary, ValidationException,
+    WorkerTypeSpecification, WorkerTypeSpecificationInput,
 };
 
 /// This service's ARN namespace, and the `sigv4Name` the model declares
@@ -1918,6 +1918,46 @@ pub fn job_run_attempt_not_found() -> ResourceNotFoundException {
 pub fn session_not_found() -> ResourceNotFoundException {
     ResourceNotFoundException {
         message: SESSION_NOT_FOUND_MESSAGE.to_string(),
+    }
+}
+
+/// What a `ValidationException` says when an ACCESS-GRANT read — an operation that mints
+/// a URL or an authentication token for a resource inside an application, rather than
+/// reporting that resource — is given a job-run id naming no job run.
+///
+/// An access grant is minted FOR a resource the request names, so a name that resolves
+/// to nothing is a fault in the request rather than a resource that went missing: this
+/// service answers that class as input validation (HTTP 400), with the sentence for the
+/// identifier's resource class as fixed text terminated by a period, and with no part of
+/// the request inside it. Recorded on the job-run dashboard path; the resource REPORTS
+/// (`GetJobRun`, `CancelJobRun`) keep [`JOB_RUN_NOT_FOUND_MESSAGE`] and its 404.
+pub const JOB_RUN_ID_INVALID_MESSAGE: &str = "Job Run with given ID doesn't exist.";
+
+/// The same, for a session id naming no session reachable through the access-grant read
+/// that was called.
+///
+/// A session id names ONE session service-wide (see
+/// [`ComAmazonawsEmrserverlessAwstoledowebserviceState::next_session_seq`]), so the
+/// session reference a grant is asked for is resolved as a whole: whether the
+/// application the route names holds no such session or does not exist at all, what the
+/// request got wrong is the session it asked for a grant on. The sentence states that by
+/// naming the INPUT MEMBER, carrying neither the id submitted for it nor the
+/// application's.
+pub const SESSION_ID_INVALID_MESSAGE: &str = "SessionId is invalid.";
+
+/// The `ValidationException` payload an access-grant read refuses an unresolvable
+/// job-run id with.
+pub fn job_run_id_invalid() -> ValidationException {
+    ValidationException {
+        message: JOB_RUN_ID_INVALID_MESSAGE.to_string(),
+    }
+}
+
+/// The `ValidationException` payload an access-grant read refuses an unresolvable
+/// session reference with.
+pub fn session_id_invalid() -> ValidationException {
+    ValidationException {
+        message: SESSION_ID_INVALID_MESSAGE.to_string(),
     }
 }
 

@@ -20,8 +20,9 @@
 //! 3. A client can connect to a session that has not ended: every non-terminal
 //!    `SessionState` is served, and each terminal one is refused with a 400
 //!    `ValidationException`.
-//! 4. Nothing is reported about a resource that does not exist: an unknown application
-//!    or an unknown session is refused with a 404 `ResourceNotFoundException`.
+//! 4. Nothing is minted for a session that does not resolve: whether the application
+//!    holds no such session or does not exist at all, the request is refused as input
+//!    validation — HTTP 400 `ValidationException` naming the `sessionId` member.
 //! 5. The call is a report — two reads of an unchanged session agree across it.
 
 use serde_json::{json, Value};
@@ -333,9 +334,18 @@ async fn get_session_endpoint_serves_a_session_that_has_not_ended() {
     }
 }
 
-/// Rule 4: nothing is reported about an application or a session that does not exist.
+/// Rule 4: nothing is minted for a session that does not resolve — asserted over the
+/// ways a session reference can fail to name one, since the rule generalises over all of
+/// them: the application is unknown, the application is unknown but the session id is
+/// one that exists elsewhere, the session id is unknown under a known application, and
+/// the session id is well-formed but was never minted.
 #[tokio::test]
 async fn get_session_endpoint_refuses_what_does_not_exist() {
+    /// The sentence the refusal carries. Written out here rather than read from
+    /// `crate::state`, so a wrong sentence in `src/` cannot make this test pass: fixed
+    /// text naming the input member, with no id of the request inside it.
+    const SESSION_ID_INVALID: &str = "SessionId is invalid.";
+
     let router = emulator();
     let (application_id, _) = session_application(&router, "tok-endpoint-missing").await;
     let session_id = started_session(
@@ -362,15 +372,32 @@ async fn get_session_endpoint_refuses_what_does_not_exist() {
     for (case, application, session) in cases {
         let answer = get_session_endpoint(&router, application, session).await;
         assert_eq!(
-            answer.status, 404,
-            "case {case:?}: expected 404, got {} with {:?}",
+            answer.status, 400,
+            "case {case:?}: expected 400, got {} with {:?}",
             answer.status, answer.body
         );
         assert_eq!(
             answer.error_code(),
-            "ResourceNotFoundException",
-            "case {case:?}: expected ResourceNotFoundException, got {:?} with {:?}",
+            "ValidationException",
+            "case {case:?}: expected ValidationException, got {:?} with {:?}",
             answer.error_code(),
+            answer.body
+        );
+        assert_eq!(
+            answer.resolved_error_shape(),
+            Some("ValidationException"),
+            "case {case:?}: expected x-amzn-errortype to resolve to ValidationException, got {:?}",
+            answer.resolved_error_shape()
+        );
+        assert_eq!(
+            answer.at("/message").as_str().unwrap_or_default(),
+            SESSION_ID_INVALID,
+            "case {case:?}: expected the fixed sentence {SESSION_ID_INVALID:?}, got {:?}",
+            answer.body
+        );
+        assert!(
+            !answer.body.to_string().contains(session),
+            "case {case:?}: the submitted session id must not be echoed, got {:?}",
             answer.body
         );
     }

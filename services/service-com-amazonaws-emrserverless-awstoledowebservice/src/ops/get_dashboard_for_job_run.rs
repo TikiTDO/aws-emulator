@@ -167,8 +167,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
             })?;
         let job_run = record.job_runs.get_mut(&input.job_run_id).ok_or_else(|| {
-            GetDashboardForJobRunErrorModeled::ResourceNotFoundException(
-                crate::state::job_run_not_found(),
+            // The grant is minted FOR the job run the request names, so a job-run id
+            // that resolves to nothing is a fault in the request rather than a resource
+            // that went missing: this access-grant path refuses it as input validation
+            // (400), while the job-run REPORTS answer their own 404 not-found class.
+            GetDashboardForJobRunErrorModeled::ValidationException(
+                crate::state::job_run_id_invalid(),
             )
         })?;
 
