@@ -201,19 +201,15 @@ async fn a_role_arn_is_judged_against_the_modelled_pattern() {
 /// `ResourceConfig$KeepAlivePeriodInSeconds` `range {0, 21600}`,
 /// `StoppingCondition$MaxRuntimeInSeconds` `range {min 1}` and
 /// `StoppingCondition$MaxPendingTimeInSeconds` `range {1800, 2419200}`. Each row is a
-/// published bound or one value past it.
+/// published bound or one value past it. An instance count of zero is inside the modelled
+/// range and is refused by a rule of the SERVICE instead — a job runs on at least one
+/// instance — which [`crate::admission_bounds`] pins over that whole class, so it is not a
+/// row here.
 #[tokio::test]
 async fn a_numeric_member_is_judged_against_each_published_bound_of_its_range() {
     // (case, the request member to set, the wire path the envelope names, the value, the
     // bound clause the refusal states — `None` where the range admits the value)
     let rows: Vec<(&str, &str, &str, i64, Option<&str>)> = vec![
-        (
-            "the instance count at its published minimum",
-            "InstanceCount",
-            "resourceConfig.instanceCount",
-            0,
-            None,
-        ),
         (
             "an instance count of one",
             "InstanceCount",
@@ -247,6 +243,13 @@ async fn a_numeric_member_is_judged_against_each_published_bound_of_its_range() 
             "VolumeSizeInGB",
             "resourceConfig.volumeSizeInGB",
             0,
+            None,
+        ),
+        (
+            "a volume size of one",
+            "VolumeSizeInGB",
+            "resourceConfig.volumeSizeInGB",
+            1,
             None,
         ),
         (

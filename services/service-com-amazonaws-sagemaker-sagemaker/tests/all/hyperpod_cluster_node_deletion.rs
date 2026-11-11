@@ -747,8 +747,8 @@ async fn a_slurm_controller_node_cannot_be_deleted() {
 }
 
 /// RULE: a cluster whose deletion has begun takes no node change, so every node operation
-/// against it is refused — naming the cluster and the status it is in — and the nodes it
-/// still holds are untouched.
+/// against it is refused — naming the cluster and that it is being torn down — and the
+/// nodes it still holds are untouched.
 #[tokio::test]
 async fn a_cluster_being_deleted_takes_no_node_change() {
     let emulator = Emulator::new();
@@ -774,7 +774,7 @@ async fn a_cluster_being_deleted_takes_no_node_change() {
         "Deleting",
         "the cluster must be observably Deleting, got {described:?}"
     );
-    let expected_message = format!("Cluster \"{arn}\" cannot be changed while it is in Deleting status.");
+    let expected_message = format!("Cluster {arn} is in a termination state that cannot be modified.");
 
     // Rows: every node operation that CHANGES the cluster's nodes, each naming the cluster
     // by name and by ARN.

@@ -533,7 +533,9 @@ async fn list_trial_components_creation_bounds_include_the_stored_instant() {
 /// components part of ANY trial of that experiment (each exactly once, however many of its
 /// trials hold them), and `SourceArn` the components whose source JOB carries that ARN —
 /// of which a component created through `CreateTrialComponent` has none. The names fold
-/// case the way the stores key them, and a name nothing is filed under selects nothing.
+/// case the way the stores key them, and a STORED entity holding nothing selects nothing.
+/// A name no entity answers to is refused instead (`list_trial_components_entity_filters`
+/// pins that half).
 #[tokio::test]
 async fn list_trial_components_selects_the_components_of_the_named_trial_or_experiment() {
     let emulator = Emulator::new();
@@ -593,11 +595,6 @@ async fn list_trial_components_selects_the_components_of_the_named_trial_or_expe
             vec![],
         ),
         (
-            "trial-that-was-never-created",
-            json!({ "TrialName": "trial-absent" }),
-            vec![],
-        ),
-        (
             "experiment-unions-its-trials-without-repeating-a-component",
             json!({ "ExperimentName": "exp-one", "SortBy": "Name", "SortOrder": "Ascending" }),
             vec!["status-and-times", "parameters-both-union-arms", "bare"],
@@ -611,11 +608,6 @@ async fn list_trial_components_selects_the_components_of_the_named_trial_or_expe
             "experiment-name-folds-case",
             json!({ "ExperimentName": "EXP-TWO" }),
             vec!["artifacts"],
-        ),
-        (
-            "experiment-that-was-never-created",
-            json!({ "ExperimentName": "exp-absent" }),
-            vec![],
         ),
         (
             // No stored component was produced by a job, so none carries a source ARN.
@@ -843,6 +835,17 @@ async fn the_trial_component_page_is_capped_server_side_even_when_the_caller_ask
 async fn list_trial_components_refuses_inputs_outside_the_documented_value_sets() {
     let emulator = Emulator::new();
     let seeded = seed(&emulator).await;
+    // A trial the account really holds, so the stale-token row below is refused for its
+    // TOKEN rather than for naming a trial that does not exist.
+    emulator
+        .ok("CreateExperiment", &json!({ "ExperimentName": "token-exp" }))
+        .await;
+    emulator
+        .ok(
+            "CreateTrial",
+            &json!({ "TrialName": "token-trial", "ExperimentName": "token-exp" }),
+        )
+        .await;
 
     let token_of_a_longer_result_set = {
         let page = emulator
@@ -893,7 +896,7 @@ async fn list_trial_components_refuses_inputs_outside_the_documented_value_sets(
             "next-token-of-another-result-set",
             json!({
                 "NextToken": token_of_a_longer_result_set,
-                "TrialName": "trial-absent",
+                "TrialName": "token-trial",
                 "SortBy": "Name",
                 "SortOrder": "Ascending",
             }),

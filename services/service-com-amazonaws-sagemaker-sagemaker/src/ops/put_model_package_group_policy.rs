@@ -5,8 +5,11 @@
 //! Attaches the resource-based policy a model package group is read and written under:
 //! the document is stored on the group the request names, replacing whatever policy that
 //! group carried, and the group's ARN is answered. A group no record is stored for is
-//! refused (400 `ValidationException`) rather than created, and a document that is not an
-//! IAM policy document is refused with the `ConflictException` this operation models.
+//! refused (400 `ValidationException`) rather than created, and so is a document that is
+//! not an ASCII IAM policy document (see
+//! [`crate::state::resource_policy_violation`]): a broken document is a property of the
+//! REQUEST, which the caller must not retry, where this operation's modelled
+//! `ConflictException` is for a conflict with the group's own state.
 //!
 //! ## Shape of an operation
 //!
@@ -167,12 +170,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         if let Some(violation) = crate::state::resource_policy_violation(&input.resource_policy) {
-            return Err(PutModelPackageGroupPolicyErrorModeled::ConflictException(
-                ConflictException {
-                    message: Some(violation),
-                },
-            )
-            .into());
+            // A document that is not a policy is a request the caller has to CHANGE, not
+            // one to retry, so it is the 400 `ValidationException` class rather than this
+            // operation's modelled `ConflictException` — which states a conflict with the
+            // group's own state. Nothing is stored: the group keeps the policy it carried.
+            return Err(crate::scaffolded::Scaffolded::validation(violation));
         }
 
         // Stored verbatim: `GetModelPackageGroupPolicy` hands back the document this call

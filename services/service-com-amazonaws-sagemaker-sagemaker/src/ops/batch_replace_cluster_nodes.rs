@@ -304,7 +304,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // status rather than reporting hardware that will never come up.
         if !cluster.accepts_node_changes() {
             return Err(crate::scaffolded::Scaffolded::validation(
-                crate::state::cluster_rejects_node_change(&cluster.arn, &cluster.status),
+                crate::state::cluster_rejects_node_change(&cluster.arn),
             ));
         }
 

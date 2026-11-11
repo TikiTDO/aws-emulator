@@ -520,6 +520,23 @@ fn validation_refusal(input: &CreateHyperParameterTuningJobInput) -> Option<Stri
         }
     }
 
+    // The ML compute each training job definition would RUN on: a definition whose
+    // `ResourceConfig` names no instance type with a count greater than zero names no
+    // compute to launch at all. The reading is the `ResourceConfig` SHAPE's own
+    // ([`crate::state::resource_config_refusal`]), so this operation and
+    // `CreateTrainingJob` hold one configuration to the same rule.
+    for definition in input
+        .training_job_definition
+        .iter()
+        .chain(input.training_job_definitions.iter().flatten())
+    {
+        if let Some(config) = definition.resource_config.as_ref() {
+            if let Some(refusal) = crate::state::resource_config_refusal(config) {
+                return Some(refusal);
+            }
+        }
+    }
+
     None
 }
 

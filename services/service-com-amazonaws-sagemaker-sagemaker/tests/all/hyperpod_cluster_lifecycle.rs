@@ -547,7 +547,10 @@ async fn describe_cluster_replays_what_create_cluster_stored() {
                 "RestrictedInstanceGroups": [{
                     "InstanceGroupName": "nova",
                     "InstanceCount": 2,
-                    "InstanceType": "ml.p5.48xlarge",
+                    // A family the account holds capacity for: the accelerated generations
+                    // carry a published quota of zero instances, which
+                    // `admission_bounds` pins as its own rule.
+                    "InstanceType": "ml.g5.48xlarge",
                     "ExecutionRole": EXECUTION_ROLE,
                     "EnvironmentConfig": {
                         "FSxLustreConfig": {

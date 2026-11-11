@@ -6,6 +6,10 @@
 //! tag set, which is what the modelled output documents ("A list of tags associated with
 //! the SageMaker resource").
 //!
+//! A tag key inside the namespace Amazon Web Services keeps for its own tags
+//! ([`crate::state::RESERVED_TAG_KEY_PREFIX`]) is refused with a 400
+//! `ValidationException` and stored nowhere.
+//!
 //! A tag set is a MAP keyed by `TagKey`: "Adds or overwrites one or more tags", "Tag
 //! keys must be unique per resource", so a key the resource already carries takes the
 //! request's value in place rather than being appended a second time. The tags are
@@ -156,6 +160,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     ) -> Result<Self::Output, Self::Error> {
         let state = crate::state::service_state(&*self.engine)
             .ok_or_else(|| crate::scaffolded::Scaffolded::validation(crate::state::NO_STATE))?;
+
+        // The `aws:` key prefix is Amazon Web Services' own namespace, so a key inside it
+        // is not one a caller writes: the request is refused before the store is reached
+        // at all, and the resource's tag set is left exactly as it was. Judged on the
+        // REQUEST, ahead of the resource it names, so the same key is refused the same way
+        // whatever this account holds.
+        if let Some(reserved) =
+            crate::state::first_reserved_tag_key(input.tags.iter().map(|tag| tag.key.as_str()))
+        {
+            return Err(crate::scaffolded::Scaffolded::validation(
+                crate::state::reserved_tag_key_refusal(reserved),
+            ));
+        }
 
         let mut store = state.lock();
         // A tag belongs to a resource, so an ARN this account holds no resource under has

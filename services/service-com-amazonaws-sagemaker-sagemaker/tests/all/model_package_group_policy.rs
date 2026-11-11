@@ -11,14 +11,15 @@
 //! The tests assert RULES over a TABLE of inputs rather than one recorded call:
 //!
 //! * a put stores the document on the group it names and a get hands it back BYTE FOR
-//!   BYTE — over documents that differ in formatting, nesting, statement count, non-ASCII
-//!   content, embedded blobs and length, including the published length bound;
+//!   BYTE — over documents that differ in formatting, nesting, statement count, embedded
+//!   blobs and length, including the published length bound;
 //! * a second put replaces the first document, so the group holds exactly one policy and
 //!   the last writer wins (also under two concurrent puts);
 //! * a delete removes only the policy, leaving the group itself describable, and a later
 //!   read finds none;
-//! * a group no record is stored under is refused, and so is a document that is not a JSON
-//!   object — over every non-object JSON form — with the modelled `ConflictException`,
+//! * a group no record is stored under is refused, and so is a document that is not an
+//!   ASCII IAM policy document — over every non-object JSON form, over a non-ASCII
+//!   document and over an object that is no policy — with a 400 `ValidationException`,
 //!   leaving any document already stored untouched;
 //! * each group's policy is its own, and deleting the GROUP releases its policy.
 
@@ -201,8 +202,8 @@ fn policy_of_length(len: usize) -> String {
 
 /// Documents `PutModelPackageGroupPolicy` accepts, differing along what the rule
 /// generalises over: whitespace and key order (so byte preservation is observable),
-/// statement count and nesting depth, non-ASCII and escaped content, an embedded base64
-/// blob, and length.
+/// statement count and nesting depth, escaped content, an embedded base64 blob, and
+/// length.
 fn accepted_documents() -> Vec<(&'static str, String)> {
     vec![
         (
@@ -226,8 +227,8 @@ fn accepted_documents() -> Vec<(&'static str, String)> {
                 .to_string(),
         ),
         (
-            "non-ascii-and-escapes",
-            r#"{"Version":"2012-10-17","Statement":[{"Sid":"Modèle-日本語-Ωμέγα","Effect":"Allow","Principal":{"AWS":"*"},"Action":"sagemaker:DescribeModelPackage","Resource":"*","Condition":{"StringEquals":{"aws:ResourceTag/équipe":"données\u00e9quipe"}}}]}"#
+            "escaped-content",
+            r#"{"Version":"2012-10-17","Statement":[{"Sid":"Escapes\u0041nd\"Quotes","Effect":"Allow","Principal":{"AWS":"*"},"Action":"sagemaker:DescribeModelPackage","Resource":"*","Condition":{"StringEquals":{"aws:ResourceTag/team":"data\tteam"}}}]}"#
                 .to_string(),
         ),
         (
@@ -240,8 +241,9 @@ fn accepted_documents() -> Vec<(&'static str, String)> {
 }
 
 /// Documents the service refuses as resource policies, spanning every JSON form that is
-/// not an object plus text that is not JSON at all.
-const REFUSED_DOCUMENTS: [(&str, &str); 7] = [
+/// not an object, text that is not JSON at all, a document carrying non-ASCII characters
+/// and objects carrying elements the policy language does not define.
+const REFUSED_DOCUMENTS: [(&str, &str); 12] = [
     ("not-json-at-all", "this is not a policy"),
     ("truncated-object", r#"{"Version":"2012-10-17""#),
     ("json-array", r#"[{"Effect":"Allow"}]"#),
@@ -249,6 +251,23 @@ const REFUSED_DOCUMENTS: [(&str, &str); 7] = [
     ("json-number", "42"),
     ("json-null", "null"),
     ("json-boolean", "true"),
+    (
+        "non-ascii-statement-id",
+        r#"{"Version":"2012-10-17","Statement":[{"Sid":"Modèle-日本語","Effect":"Allow","Principal":{"AWS":"*"},"Action":"sagemaker:DescribeModelPackage","Resource":"*"}]}"#,
+    ),
+    ("object-with-no-statement", r#"{"Version":"2012-10-17"}"#),
+    (
+        "an-element-the-document-does-not-define",
+        r#"{"Version":"2012-10-17","NotAValidPolicyKey":1,"Statement":[]}"#,
+    ),
+    (
+        "an-element-a-statement-does-not-define",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"sagemaker:*","Grant":"*"}]}"#,
+    ),
+    (
+        "a-statement-that-is-not-an-object",
+        r#"{"Version":"2012-10-17","Statement":["allow it"]}"#,
+    ),
 ];
 
 /// RULE: a put stores the document on the group it names and `GetModelPackageGroupPolicy`
@@ -417,11 +436,11 @@ async fn delete_removes_only_the_policy() {
     }
 }
 
-/// RULE: a `ResourcePolicy` that is not a JSON object is refused with the modelled
-/// `ConflictException` (HTTP 400), and the refusal changes nothing: a document already
-/// stored is still the one a reader sees.
+/// RULE: a `ResourcePolicy` that is not an ASCII IAM policy document is refused with a
+/// 400 `ValidationException` — the class for a request the caller has to change — and the
+/// refusal changes nothing: a document already stored is still the one a reader sees.
 #[tokio::test]
-async fn a_document_that_is_not_a_json_object_is_refused() {
+async fn a_document_that_is_not_a_policy_is_refused() {
     let (good_case, good) = accepted_documents().swap_remove(0);
 
     for (case, document) in REFUSED_DOCUMENTS {
@@ -442,9 +461,8 @@ async fn a_document_that_is_not_a_json_object_is_refused() {
         );
         assert_eq!(
             error_code(&body),
-            "ConflictException",
-            "case {case:?}: error code for a document that is not a JSON object, got \
-             {body:?}"
+            "ValidationException",
+            "case {case:?}: error code for a document that is not a policy, got {body:?}"
         );
 
         let read = emulator.stored_policy(case, "policy-refusal").await;

@@ -165,6 +165,18 @@ pub mod cluster_policy;
 pub mod cluster;
 pub use cluster::*;
 
+/// The TRAINING CAPACITY slice: what a `ResourceConfig`'s ML compute has to be for
+/// SageMaker to launch it, and the account quota it is measured against. Re-exported
+/// below, so a handler names them as `crate::state::…` like every other slice.
+pub mod training_capacity;
+pub use training_capacity::*;
+
+/// The RESOURCE POLICY slice: what makes a document a resource policy this service will
+/// attach, and the sentence each condition is refused with. Re-exported below, so a
+/// handler names them as `crate::state::…` like every other slice.
+pub mod resource_policy;
+pub use resource_policy::*;
+
 /// The ARN service namespace (`arnNamespace` in the model's `aws.api#service` trait,
 /// also SageMaker's sigv4 signing name).
 pub const ARN_SERVICE: &str = "sagemaker";
@@ -1114,6 +1126,12 @@ pub const TAGGED_RESOURCE_ENTITY: &str = "Resource";
 /// family's own — this label is what remains for an ARN naming no family of this account.
 pub mod tagged_resource;
 pub use tagged_resource::*;
+
+/// The tag-NAMESPACE slice: which tag keys a caller may write, and the sentence a key
+/// Amazon Web Services keeps for itself is refused with. Re-exported below, so a handler
+/// names them as `crate::state::…` like every other slice.
+pub mod tag_namespace;
+pub use tag_namespace::*;
 
 /// Generates the two tag accessors over the list of stores whose records carry BOTH an
 /// `arn` and a `tags` list, so the reader (`ListTags`) and the writers (`AddTags`,
@@ -2120,31 +2138,6 @@ pub struct InferenceRecommendation {
     pub max_invocations_per_minute: i32,
     /// The model latency measured at that load, in milliseconds.
     pub model_latency_millis: i32,
-}
-
-/// Why SageMaker refuses `policy` as a resource policy for a model group, or `None` when
-/// it accepts it.
-///
-/// A resource policy is an IAM policy document: `PolicyString`'s own documentation calls
-/// it "the resource policy for the model group", and IAM's policy grammar makes a document
-/// a JSON OBJECT (the `Version`/`Statement` elements are its members). The model bounds
-/// only the member's length and leaves its pattern `.*`, so the boundary validator passes
-/// a document that is not JSON at all and the service is what refuses it.
-///
-/// Nothing beyond that structural claim is checked here: which elements a statement
-/// carries is IAM's business, and a document this accepts is stored and handed back
-/// BYTE-FOR-BYTE rather than reformatted, so a caller reads back exactly the text it sent.
-///
-/// The returned text is the refusal's message; the caller renders it as the failure that
-/// operation models for a document it cannot take.
-pub fn resource_policy_violation(policy: &str) -> Option<String> {
-    match ::serde_json::from_str::<::serde_json::Value>(policy) {
-        Ok(::serde_json::Value::Object(_)) => None,
-        Ok(_) => Some(
-            "ResourcePolicy must be a JSON object: an IAM policy document".to_string(),
-        ),
-        Err(error) => Some(format!("ResourcePolicy is not valid JSON: {error}")),
-    }
 }
 
 /// The most notebook instance lifecycle configurations this service's store holds, after

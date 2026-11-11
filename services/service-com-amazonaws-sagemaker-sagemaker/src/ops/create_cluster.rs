@@ -280,6 +280,38 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // The instances the request's groups ask for are weighed against the account's
+        // published per-instance-type cluster quota, counted over the clusters it already
+        // holds: an account has no capacity for the accelerated generations until it is
+        // granted some, so a cluster on one is refused with the modelled
+        // `ResourceLimitExceeded` naming that quota entry.
+        let instance_demand = crate::state::cluster_instance_demand(
+            input.instance_groups.as_deref().unwrap_or_default(),
+            input.restricted_instance_groups.as_deref().unwrap_or_default(),
+        );
+        if let Some(refusal) = store.cluster_quota_exceeded(&instance_demand) {
+            return Err(CreateClusterErrorModeled::ResourceLimitExceeded(
+                ResourceLimitExceeded {
+                    message: Some(refusal),
+                },
+            )
+            .into());
+        }
+        // The nodes of one cluster are bounded too — `CLUSTER_NODE_QUOTA`, the bound
+        // `BatchAddClusterNodes` holds a later addition to — because a created cluster's
+        // groups are brought up to the counts they declare when it reaches `InService`. A
+        // create past it is refused rather than accepted and provisioned short, so what a
+        // reader reports of this cluster's groups is what the cluster actually holds.
+        let requested_nodes: i64 = instance_demand.values().sum();
+        if let Some(refusal) = crate::state::cluster_node_limit_refusal(requested_nodes) {
+            return Err(CreateClusterErrorModeled::ResourceLimitExceeded(
+                ResourceLimitExceeded {
+                    message: Some(refusal),
+                },
+            )
+            .into());
+        }
+
         // The id is 48 random bits, so a collision is vanishingly unlikely — but it is
         // the ARN's identity, so a clash is re-minted rather than assumed away.
         let mut id = crate::state::mint_cluster_id();

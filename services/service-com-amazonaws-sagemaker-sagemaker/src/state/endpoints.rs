@@ -78,15 +78,17 @@ pub fn endpoint_usage_quota_name(instance_type: &str) -> String {
     format!("{instance_type} for endpoint usage")
 }
 
-/// The instance FAMILIES whose published default endpoint-usage quota is zero instances:
-/// the newest accelerated generations (the `p4`/`p5`/`p6` GPU families and the Trainium
-/// ones), which an account has to be granted capacity for before it can host anything on
+/// The instance FAMILIES whose published default per-type instance quota is zero: the
+/// newest accelerated generations (the `p4`/`p5`/`p6` GPU families and the Trainium
+/// ones), which an account has to be granted capacity for before it can run anything on
 /// them.
 ///
 /// Keyed on the FAMILY — the middle segment of an `ml.<family>.<size>` instance type — so
 /// a size AWS adds to one of these families needs no edit here, and so the rule is one
 /// about generations rather than a list of every type. Every other family's default is a
-/// non-zero number of instances ([`DEFAULT_ENDPOINT_USAGE_QUOTA`]).
+/// non-zero number of instances ([`DEFAULT_ENDPOINT_USAGE_QUOTA`] for hosting,
+/// [`crate::state::DEFAULT_CLUSTER_USAGE_QUOTA`] for a HyperPod cluster). Read through
+/// [`has_zero_default_instance_quota`], which both quotas share.
 const ZERO_DEFAULT_HOSTING_FAMILIES: [&str; 11] = [
     "p4d",
     "p4de",
@@ -110,16 +112,29 @@ const ZERO_DEFAULT_HOSTING_FAMILIES: [&str; 11] = [
 /// what stops one request asking for an unbounded number of instances.
 pub const DEFAULT_ENDPOINT_USAGE_QUOTA: i64 = 1_000;
 
+/// Whether AWS publishes a ZERO default quota for the instances of `instance_type`'s
+/// family, so an account has to be granted capacity before it can run any.
+///
+/// Keyed on the FAMILY — the middle segment of an `ml.<family>.<size>` instance type —
+/// stated once here because the same families carry the zero default for EVERY per-type
+/// instance quota this service publishes: the endpoint-usage one
+/// ([`endpoint_usage_quota`]) and the HyperPod cluster-usage one
+/// ([`crate::state::cluster_usage_quota`]).
+#[must_use]
+pub fn has_zero_default_instance_quota(instance_type: &str) -> bool {
+    // `ml.<family>.<size>`: the family is the second segment, and a value that is not in
+    // that form names no family of the zero-default generations.
+    let family = instance_type.split('.').nth(1).unwrap_or_default();
+    ZERO_DEFAULT_HOSTING_FAMILIES.contains(&family)
+}
+
 /// The account's quota, in instances, for hosting `instance_type` behind an endpoint.
 ///
 /// Zero for a family AWS publishes a zero default for ([`ZERO_DEFAULT_HOSTING_FAMILIES`]),
 /// so an endpoint on one is refused until the account is granted capacity;
 /// [`DEFAULT_ENDPOINT_USAGE_QUOTA`] for every other type.
 pub fn endpoint_usage_quota(instance_type: &str) -> i64 {
-    // `ml.<family>.<size>`: the family is the second segment, and a value that is not in
-    // that form names no family of the zero-default generations.
-    let family = instance_type.split('.').nth(1).unwrap_or_default();
-    if ZERO_DEFAULT_HOSTING_FAMILIES.contains(&family) {
+    if has_zero_default_instance_quota(instance_type) {
         return 0;
     }
     DEFAULT_ENDPOINT_USAGE_QUOTA

@@ -3,7 +3,9 @@
 //! @op ListTrialComponents
 //! IMPLEMENTED: reports the account's trial components out of `crate::state` — the
 //! records `CreateTrialComponent` stored — filtered, sorted and paginated as the model
-//! documents, and writes nothing. This is the ONLY file to touch for this operation.
+//! documents, and writes nothing. A `TrialName` or `ExperimentName` filter naming no
+//! stored record is refused with the modelled `ResourceNotFound` rather than answered with
+//! an empty page. This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -167,7 +169,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let state = crate::state::service_state(&*self.engine)
             .ok_or_else(|| crate::scaffolded::Scaffolded::validation(crate::state::NO_STATE))?;
@@ -220,10 +222,40 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let before = input.created_before.map(crate::state::timestamp_key);
 
         let store = state.lock();
+        // A filter that NAMES a resource of this service is resolved before anything is
+        // reported: `TrialName` and `ExperimentName` each name one record of this account,
+        // so a name no record answers to is a request about a resource that does not
+        // exist, refused with the modelled `ResourceNotFound` and the sentence every other
+        // reader of that resource states — never answered with an empty page, which is the
+        // answer for a resource that exists and holds no component. `SourceArn` names no
+        // resource of this service (it is the ARN of the job that produced a component), so
+        // it selects nothing rather than being resolved.
+        let region = crate::state::request_region(ctx);
+        if let Some(trial) = input.trial_name.as_deref() {
+            if store.trial(trial).is_none() {
+                return Err(ListTrialComponentsErrorModeled::ResourceNotFound(
+                    ResourceNotFound {
+                        message: Some(crate::state::trial_does_not_exist(&region, trial)),
+                    },
+                )
+                .into());
+            }
+        }
+        if let Some(experiment) = input.experiment_name.as_deref() {
+            if store.experiment(experiment).is_none() {
+                return Err(ListTrialComponentsErrorModeled::ResourceNotFound(
+                    ResourceNotFound {
+                        message: Some(crate::state::experiment_does_not_exist(&region, experiment)),
+                    },
+                )
+                .into());
+            }
+        }
         // The store keys the entity filter admits, or `None` when the request carried no
-        // entity filter at all and every component in the account is a candidate. The
-        // listing itself names no resource, so a filter naming a trial, an experiment or a
-        // source that holds no component selects nothing rather than being refused.
+        // entity filter at all and every component in the account is a candidate. A filter
+        // naming a trial, an experiment or a source that holds no component selects
+        // nothing: the resource it names was resolved above, so an empty page here reports
+        // a resource that exists and holds nothing.
         let admitted: Option<::std::collections::BTreeSet<String>> = match (
             input.trial_name.as_deref(),
             input.experiment_name.as_deref(),

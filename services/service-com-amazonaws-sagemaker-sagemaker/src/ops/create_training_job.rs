@@ -9,7 +9,11 @@
 //! no object that role can list with the same class, a `TrainingJobName` already in use with
 //! the modelled `ResourceInUse` and a request past the store's bound with the modelled
 //! `ResourceLimitExceeded` — and stores it as `InProgress` together with the instant the
-//! clock owes its terminal status. The accepted request is kept as sent, but for the
+//! clock owes its terminal status. A `ResourceConfig` that names no ML compute to launch
+//! (see [`crate::state::resource_config_refusal`]) is refused with the same
+//! `ValidationException` class, and one asking for capacity past an account quota — the ML
+//! storage volume per instance, or the instances of one type — with the modelled
+//! `ResourceLimitExceeded`. The accepted request is kept as sent, but for the
 //! hyperparameters the service itself does not keep (see
 //! [`crate::state::retained_hyper_parameters`]). This is the ONLY file to touch for this
 //! operation.
@@ -382,6 +386,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .ok_or_else(|| crate::scaffolded::Scaffolded::validation(crate::state::NO_STATE))?;
 
         let region = crate::state::request_region(ctx);
+        // The ML compute the job would RUN on is settled first, before the store is
+        // locked: a `ResourceConfig` that names no instance type with a count greater than
+        // zero (and no heterogeneous cluster of groups that do) names no compute to launch
+        // at all, so the create is refused for it and nothing is persisted. The quotas its
+        // capacity draws on are weighed below, where the account's own utilisation is.
+        if let Some(config) = input.resource_config.as_ref() {
+            if let Some(refusal) = crate::state::resource_config_refusal(config) {
+                return Err(refuse(refusal));
+            }
+        }
         // The job RUNS AS the role the request names, so the role is settled BEFORE
         // anything else about the request is judged and before the store is locked: a role
         // SageMaker cannot assume backs no training run at all, so the create is refused
@@ -511,6 +525,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     },
                 )
                 .into());
+            }
+
+            // The capacity the job asks for is weighed against the account's published
+            // quotas — the ML storage volume one training job instance may be given, and
+            // how many instances of that type the account may run for training jobs,
+            // counted over the jobs it is already running — so a request past either is the
+            // modelled `ResourceLimitExceeded`, the limit failure AWS answers a request for
+            // capacity it will not provision with.
+            if let Some(config) = input.resource_config.as_ref() {
+                if let Some(refusal) = store.training_quota_refusal(config) {
+                    return Err(CreateTrainingJobErrorModeled::ResourceLimitExceeded(
+                        ResourceLimitExceeded {
+                            message: Some(refusal),
+                        },
+                    )
+                    .into());
+                }
             }
 
             // An empty-valued hyperparameter is not kept: the stored map holds only the

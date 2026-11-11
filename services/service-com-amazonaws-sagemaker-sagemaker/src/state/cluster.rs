@@ -294,16 +294,44 @@ pub const CLUSTER_STATUS_FAILED: &str = "Failed";
 pub const CLUSTER_QUOTA: usize = 1_000;
 
 /// How every node operation states that the cluster it was asked to change cannot take
-/// the change: the cluster's ARN and the status it is in.
+/// the change: the cluster's ARN and the fact that it is on its way out.
 ///
 /// Stated once here so `BatchAddClusterNodes`, `BatchDeleteClusterNodes`,
 /// `BatchReplaceClusterNodes` and `AttachClusterNodeVolume` cannot word the one fact
-/// differently, and in the shape `DeleteCluster` words its own conflict in. None of these
-/// operations models an error for it — each models `ResourceNotFound`, which a cluster a
-/// describe still reports is not — so they answer the 400 `ValidationException` the
-/// refusal channel provides.
-pub fn cluster_rejects_node_change(arn: &str, status: &str) -> String {
-    format!("Cluster \"{arn}\" cannot be changed while it is in {status} status.")
+/// differently. The condition is a cluster whose TERMINATION has begun
+/// ([`Cluster::accepts_node_changes`]) — the status itself is not interpolated, because
+/// that is the one status the sentence is about. None of these operations models an error
+/// for it — each models `ResourceNotFound`, which a cluster a describe still reports is
+/// not — so they answer the 400 `ValidationException` the refusal channel provides.
+pub fn cluster_rejects_node_change(arn: &str) -> String {
+    format!("Cluster {arn} is in a termination state that cannot be modified.")
+}
+
+/// Why the `requested` instances a cluster's groups ask for are more than SageMaker
+/// provisions for ONE cluster, or `None` when the cluster fits.
+///
+/// Asked by the CREATE, where the cluster holds no node yet, so the utilisation the
+/// sentence states is zero; a later addition to a cluster that already holds nodes is
+/// weighed against the same bound by `BatchAddClusterNodes`, which states the cluster it
+/// is about.
+///
+/// A created cluster's groups are brought up to the instance counts they declare
+/// ([`Cluster::provision_group_instances`]), and the nodes of one cluster are bounded by
+/// [`CLUSTER_NODE_QUOTA`] — the same bound `BatchAddClusterNodes` holds a later addition
+/// to. So a create asking for more is refused with the modelled `ResourceLimitExceeded`
+/// rather than accepted and silently provisioned short: the counts a reader reports and
+/// the nodes a cluster holds cannot disagree.
+///
+/// The sentence is the one every other bound this emulator owns states (see
+/// [`MODEL_QUOTA`]): the bound, what is already held and what the request asks on top.
+pub fn cluster_node_limit_refusal(requested: i64) -> Option<String> {
+    let limit = i64::try_from(CLUSTER_NODE_QUOTA).unwrap_or(i64::MAX);
+    (requested > limit).then(|| {
+        format!(
+            "The service limit for nodes in a HyperPod cluster is {limit}, with current \
+             utilization of 0 and a request delta of {requested}."
+        )
+    })
 }
 
 /// The node provisioning mode a HyperPod cluster runs in when the create named none.
@@ -608,6 +636,112 @@ pub const SLURM_CONTROLLER_NOT_REPLACEABLE: &str =
 pub const ALL_NODES_FAILED_VALIDATION: &str =
     "All provided nodes failed validation. Please ensure the nodes exist, are not part of \
      the controller group for the Slurm cluster, and are in a removable state.";
+
+/// How many instances of ONE ML instance type an account may run in its HyperPod
+/// clusters, for a type whose published default is not zero.
+///
+/// This emulator models neither Service Quotas nor an account's adjustments, so — as with
+/// [`MODEL_QUOTA`] and the hosting bound [`DEFAULT_ENDPOINT_USAGE_QUOTA`] — this is the
+/// emulator's OWN bound rather than a claim about any account's limit for a particular
+/// type: far above any cluster an emulator serves, and what stops one request asking for
+/// an unbounded number of instances. The accelerated generations
+/// ([`has_zero_default_instance_quota`]) carry AWS's published ZERO default instead, so a
+/// cluster on one is refused until the account is granted capacity.
+pub const DEFAULT_CLUSTER_USAGE_QUOTA: i64 = 1_000;
+
+/// The published name of the quota that bounds how many instances of ONE ML instance type
+/// an account may run in its HyperPod clusters, as a refusal states it.
+///
+/// Service Quotas names the entry `<instance type> for cluster usage` — the same shape as
+/// the endpoint-usage entry [`endpoint_usage_quota_name`] words — so the instance type is
+/// part of the quota's NAME rather than prose around it: a client reads which type it has
+/// no capacity for straight off the message.
+#[must_use]
+pub fn cluster_usage_quota_name(instance_type: &str) -> String {
+    format!("{instance_type} for cluster usage")
+}
+
+/// The account's quota, in instances, for running `instance_type` in a HyperPod cluster.
+#[must_use]
+pub fn cluster_usage_quota(instance_type: &str) -> i64 {
+    if has_zero_default_instance_quota(instance_type) {
+        return 0;
+    }
+    DEFAULT_CLUSTER_USAGE_QUOTA
+}
+
+/// The instance type a group that names none is counted under, so a group's instances are
+/// still measured against a quota entry.
+///
+/// A group may name neither an `InstanceType` nor `InstanceRequirements`
+/// ([`instance_group_types`] answers an empty list for one), and a quota is per type.
+pub const UNNAMED_CLUSTER_INSTANCE_TYPE: &str = "ml.unspecified";
+
+/// How many instances of each ML instance type a cluster's groups ask for: one entry per
+/// type, the counts of every group naming it added up.
+///
+/// A group is counted under the FIRST type it admits, because that is the type its nodes
+/// come up as ([`Cluster::provision_group_instances`]); a restricted group names its type
+/// outright.
+#[must_use]
+pub fn cluster_instance_demand(
+    instance_groups: &[crate::ops::types::ClusterInstanceGroupSpecification],
+    restricted_instance_groups: &[crate::ops::types::ClusterRestrictedInstanceGroupSpecification],
+) -> BTreeMap<String, i64> {
+    let mut demand: BTreeMap<String, i64> = BTreeMap::new();
+    for group in instance_groups {
+        let instance_type = instance_group_types(group)
+            .first()
+            .cloned()
+            .unwrap_or_else(|| UNNAMED_CLUSTER_INSTANCE_TYPE.to_string());
+        *demand.entry(instance_type).or_default() += i64::from(group.instance_count);
+    }
+    for group in restricted_instance_groups {
+        *demand.entry(group.instance_type.clone()).or_default() += i64::from(group.instance_count);
+    }
+    demand
+}
+
+impl ComAmazonawsSagemakerSagemakerState {
+    /// How many instances of `instance_type` the account's HyperPod clusters are already
+    /// using — the utilisation its cluster quota is measured against.
+    ///
+    /// Read off the stored clusters' own groups, so a cluster the clock has released uses
+    /// nothing, exactly as a deleted endpoint does for the hosting quota.
+    pub fn cluster_instances_in_use(&self, instance_type: &str) -> i64 {
+        self.clusters
+            .values()
+            .filter_map(|cluster| {
+                cluster_instance_demand(&cluster.instance_groups, &cluster.restricted_instance_groups)
+                    .remove(instance_type)
+            })
+            .sum()
+    }
+
+    /// Why this account cannot run `demand` on top of what its clusters already hold, or
+    /// `None` when every instance type it names is within quota.
+    ///
+    /// One instance type past its quota is enough to refuse the whole create, and the one
+    /// reported is the first in type order, so the same request is always refused the same
+    /// way. The sentence is [`account_quota_exceeded`]'s, counted in [`INSTANCES_UNIT`] —
+    /// the same reading the hosting quota takes
+    /// ([`ComAmazonawsSagemakerSagemakerState::hosting_quota_exceeded`]).
+    pub fn cluster_quota_exceeded(&self, demand: &BTreeMap<String, i64>) -> Option<String> {
+        demand.iter().find_map(|(instance_type, delta)| {
+            let limit = cluster_usage_quota(instance_type);
+            let in_use = self.cluster_instances_in_use(instance_type);
+            (in_use + delta > limit).then(|| {
+                account_quota_exceeded(
+                    &cluster_usage_quota_name(instance_type),
+                    INSTANCES_UNIT,
+                    limit,
+                    in_use,
+                    *delta,
+                )
+            })
+        })
+    }
+}
 
 /// The instance types an instance group admits: the one its specification names, or the
 /// list its `InstanceRequirements` names.

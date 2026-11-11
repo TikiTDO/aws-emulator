@@ -1856,9 +1856,9 @@ async fn a_model_package_group_policy_reads_back_verbatim() {
     }
 
     // A policy document that is not an IAM policy document (not a JSON object) cannot be
-    // attached, and the stored one stands. The refusal is this operation's own modelled
-    // `ConflictException`, which is the code the landed handler answers for a document it
-    // cannot take.
+    // attached, and the stored one stands. The refusal is the 400 `ValidationException`
+    // class, because a broken document is a property of the REQUEST — this operation's
+    // modelled `ConflictException` states a conflict with the group's own state.
     let (status, parsed) = emulator
         .call(
             "PutModelPackageGroupPolicy",
@@ -1867,8 +1867,8 @@ async fn a_model_package_group_policy_reads_back_verbatim() {
         .await;
     assert_eq!(
         (status, error_code(&parsed).as_str()),
-        (400, "ConflictException"),
-        "case non-JSON policy: expected 400 ConflictException, got {status} {parsed}"
+        (400, "ValidationException"),
+        "case non-JSON policy: expected 400 ValidationException, got {status} {parsed}"
     );
     let read = emulator
         .ok(

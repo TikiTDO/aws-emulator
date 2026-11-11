@@ -307,7 +307,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // status rather than reporting a deletion the teardown was doing anyway.
         if !cluster.accepts_node_changes() {
             return Err(crate::scaffolded::Scaffolded::validation(
-                crate::state::cluster_rejects_node_change(&cluster.arn, &cluster.status),
+                crate::state::cluster_rejects_node_change(&cluster.arn),
             ));
         }
 
