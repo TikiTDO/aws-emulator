@@ -634,6 +634,14 @@ pub const INSTANCE_STATE_REASON_USER_INITIATED_SHUTDOWN: &str = "Client.UserInit
 pub const INSTANCE_STATE_REASON_MESSAGE_USER_INITIATED_SHUTDOWN: &str =
     "Client.UserInitiatedShutdown: User initiated shutdown";
 
+/// The `StateReason$Code` and `$Message` of an instance that is still being launched.
+///
+/// "The reason for the most recent state transition" (`Instance$StateReason`): the most
+/// recent transition of an instance nobody has moved yet is its own launch, which is still
+/// in progress — so the reason is the state it is in, reported for both members, which is
+/// what a launch's answer carries for the instance it just minted.
+pub const INSTANCE_STATE_REASON_PENDING: &str = "pending";
+
 /// `at` as an RFC 3339 / ISO 8601 UTC timestamp.
 pub fn iso8601_utc(at: SystemTime) -> String {
     system_time_to_date_time(at)
@@ -702,16 +710,28 @@ pub struct AvailabilityZoneRecord {
     pub opt_in_status: &'static str,
     /// Any messages about this zone; empty when the zone is serving normally.
     pub messages: Vec<String>,
+    /// `US West (Oregon) 1` — the long name of the zone group this zone belongs to, as
+    /// AWS publishes it for the zone's Region ([`zone_group_long_name`]), or `None` for a
+    /// Region that publishes no display name.
+    pub group_long_name: Option<String>,
+    /// `United States of America` — the country the zone's Region sits in
+    /// ([`region_display`]), or `None` for a Region that publishes no display data.
+    pub geography: Option<String>,
+    /// `Oregon` — the location inside that country the zone's Region names, when it names
+    /// one ([`region_display`]).
+    pub sub_geography: Option<String>,
 }
 
 impl AvailabilityZoneRecord {
     /// This zone as the modelled `AvailabilityZone` shape.
     ///
     /// `ParentZoneName`/`ParentZoneId` are absent because only a Local Zone or a
-    /// Wavelength Zone has a parent zone, and `GroupLongName`, `Geography` and
-    /// `SubGeography` are absent because they are display data AWS publishes per
-    /// zone group that neither the model nor the request yields — reported absent
-    /// rather than invented.
+    /// Wavelength Zone has a parent zone. `GroupLongName`, `Geography` and
+    /// `SubGeography` are the display data AWS publishes for the zone's Region
+    /// ([`super::availability_zone_display`]), reported as the model shapes them — each
+    /// geography as the one-entry LIST the model declares (`AvailabilityZone$Geography`:
+    /// "the geography is returned as a list") — and absent only for a Region that
+    /// publishes none.
     pub fn to_availability_zone(&self) -> AvailabilityZone {
         AvailabilityZone {
             zone_name: Some(self.zone_name.clone()),
@@ -732,9 +752,17 @@ impl AvailabilityZoneRecord {
             ),
             parent_zone_name: None,
             parent_zone_id: None,
-            group_long_name: None,
-            geography: None,
-            sub_geography: None,
+            group_long_name: self.group_long_name.clone(),
+            geography: self.geography.clone().map(|name| {
+                vec![AvailabilityZoneGeography {
+                    name: Some(name),
+                }]
+            }),
+            sub_geography: self.sub_geography.clone().map(|name| {
+                vec![AvailabilityZoneSubGeography {
+                    name: Some(name),
+                }]
+            }),
         }
     }
 
@@ -747,7 +775,13 @@ impl AvailabilityZoneRecord {
     pub fn filter_values(&self, name: &str) -> Option<Vec<&str>> {
         let values = match name {
             "group-name" => vec![self.group_name.as_str()],
-            "group-long-name" => Vec::new(),
+            // The long name a zone DOES carry once its Region publishes one, so the filter
+            // compares against the same value the report carries; a zone of a Region that
+            // publishes none has no long name to compare, so it matches nothing.
+            "group-long-name" => self
+                .group_long_name
+                .as_deref()
+                .map_or_else(Vec::new, |long_name| vec![long_name]),
             "message" => self.messages.iter().map(String::as_str).collect(),
             "opt-in-status" => vec![self.opt_in_status],
             "parent-zone-id" | "parent-zone-name" => Vec::new(),
@@ -772,22 +806,29 @@ impl AvailabilityZoneRecord {
 /// not the request sets `AllAvailabilityZones`.
 pub fn availability_zones_in_region(region: &str) -> Vec<AvailabilityZoneRecord> {
     let prefix = zone_id_prefix(region);
+    let display = region_display(region);
     (0..AVAILABILITY_ZONES_PER_REGION)
         .map(|index| {
             let letter = char::from(b'a' + u8::try_from(index).unwrap_or(0));
+            // The model's `group-name` filter doc gives the zone group of an
+            // Availability Zone as `<region>-zg-1` (its example: `us-east-1-zg-1`).
+            let group_name = format!("{region}-zg-1");
             AvailabilityZoneRecord {
                 zone_name: format!("{region}{letter}"),
                 zone_id: format!("{prefix}-az{}", index + 1),
                 region_name: region.to_string(),
-                // The model's `group-name` filter doc gives the zone group of an
-                // Availability Zone as `<region>-zg-1` (its example: `us-east-1-zg-1`).
-                group_name: format!("{region}-zg-1"),
+                group_long_name: zone_group_long_name(region, &group_name),
+                group_name,
                 // A standard Availability Zone's network border group is the Region.
                 network_border_group: region.to_string(),
                 zone_type: ZONE_TYPE_AVAILABILITY_ZONE,
                 state: ZONE_STATE_AVAILABLE,
                 opt_in_status: OPT_IN_NOT_REQUIRED,
                 messages: Vec::new(),
+                geography: display.map(|display| display.geography.to_string()),
+                sub_geography: display
+                    .and_then(|display| display.sub_geography)
+                    .map(str::to_string),
             }
         })
         .collect()

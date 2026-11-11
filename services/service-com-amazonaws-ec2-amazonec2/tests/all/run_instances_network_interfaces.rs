@@ -399,7 +399,11 @@ async fn the_interfaces_a_launch_names_are_created_and_reported() {
             case: "an eth0 that names no subnet, which lands in the zone's default subnet",
             count: 1,
             fields: interface(1, &[("DeviceIndex", "0")]),
-            // The default subnet of the launch's zone, resolved below from the instance.
+            // The default subnet of the launch's zone, resolved below from the instance. A
+            // default subnet maps public IPv4 addresses on launch
+            // (`Subnet$MapPublicIpOnLaunch`), so an entry that asks for nothing either way
+            // gets one: "if launching into a default subnet, the default value is true"
+            // (`AssociatePublicIpAddress`).
             expected: vec![ExpectedInterface {
                 device_index: "0",
                 subnet_id: String::new(),
@@ -408,7 +412,7 @@ async fn the_interfaces_a_launch_names_are_created_and_reported() {
                 group_ids: Vec::new(),
                 address_count: 1,
                 delete_on_termination: "true",
-                public_address: false,
+                public_address: true,
             }],
         },
         Row {

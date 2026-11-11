@@ -92,6 +92,14 @@ impl ComAmazonawsEc2Amazonec2State {
         // launched root volume beside it reads it — so an instance and its interface can
         // never be placed in two Regions.
         let region = region_of_zone_name(&availability_zone).to_string();
+        // "Indicates whether instances launched in this subnet receive a public IPv4
+        // address" (`Subnet$MapPublicIpOnLaunch`) — which is the attribute "if launching
+        // into a default subnet, the default value is true"
+        // (`InstanceNetworkInterfaceSpecification$AssociatePublicIpAddress`) reads off. A
+        // launch that names no interface at all asks for nothing either way, so the subnet
+        // it is placed in decides, and the address is assigned to the eth0 this mints just
+        // as it is for an interface specification that asked.
+        let maps_public_ip_on_launch = subnet.map_public_ip_on_launch == Some(true);
         if !self.has_network_interface_capacity() {
             return;
         }
@@ -136,12 +144,12 @@ impl ComAmazonawsEc2Amazonec2State {
         // Through the ONE writer seam every interface of this store is written by, so the
         // id, the MAC address, the private DNS names and the `in-use` status an attached
         // interface reports are derived in exactly one place.
-        self.insert_network_interface(NetworkInterfaceSpec {
+        let network_interface_id = self.insert_network_interface(NetworkInterfaceSpec {
             subnet_id,
             vpc_id,
             availability_zone,
             availability_zone_id,
-            region,
+            region: region.clone(),
             // AWS reports an empty description for an interface nothing described.
             description: String::new(),
             interface_type: NETWORK_INTERFACE_TYPE_INTERFACE.to_string(),
@@ -154,6 +162,18 @@ impl ComAmazonawsEc2Amazonec2State {
             // this record here.
             tags: Vec::new(),
         });
+        // The address goes to the interface this created, out of Amazon's own pool, through
+        // the one place such an address is assigned ([`Self::assign_amazon_public_ipv4`]) —
+        // so the instance, its interface's association and `DescribeNetworkInterfaces` all
+        // report the one record.
+        if maps_public_ip_on_launch {
+            if let Some(network_interface_id) = network_interface_id {
+                let assigned = self.assign_amazon_public_ipv4(&network_interface_id, &region);
+                if let Some(instance) = self.instances.get_mut(instance_id) {
+                    instance.public_ip = assigned;
+                }
+            }
+        }
     }
 
     /// Delete every network interface whose attachment is to an instance that has reached

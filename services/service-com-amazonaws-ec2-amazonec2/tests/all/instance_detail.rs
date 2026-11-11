@@ -131,6 +131,8 @@ struct InstanceReport {
     current_instance_boot_mode: Option<String>,
     source_dest_check: Option<String>,
     public_dns_name: Option<String>,
+    /// `ipAddress`: the public IPv4 address the instance holds, if it holds one.
+    public_ip: Option<String>,
     subnet_id: Option<String>,
     vpc_id: Option<String>,
     /// `placement`: the zone, its id, the group name and the tenancy.
@@ -210,6 +212,7 @@ fn reported_instances(case: &str, body: &str) -> Vec<InstanceReport> {
             current_instance_boot_mode: child_text(node, "currentInstanceBootMode"),
             source_dest_check: child_text(node, "sourceDestCheck"),
             public_dns_name: child_text(node, "dnsName"),
+            public_ip: child_text(node, "ipAddress"),
             subnet_id: child_text(node, "subnetId"),
             vpc_id: child_text(node, "vpcId"),
             placement: members(node, "placement"),
@@ -744,11 +747,25 @@ async fn describe_instances_reports_the_fixed_detail_derived_from_state() {
             "case {case:?}: source/destination checking starts enabled, got {:?}",
             reported.source_dest_check
         );
+        // "The public DNS name assigned to the instance" (`Instance$PublicDnsName`)
+        // follows the public IPv4 address it holds: the Amazon public hostname of that
+        // address, and the EMPTY name for an instance holding none. The address itself is
+        // the subnet's doing — "indicates whether instances launched in this subnet receive
+        // a public IPv4 address" (`Subnet$MapPublicIpOnLaunch`) — so this row asserts the
+        // two members agree rather than which of them the launch got.
+        let expected_public_dns_name = match reported.public_ip.as_deref() {
+            Some(public_ip) if !public_ip.is_empty() => format!(
+                "ec2-{}.{REGION}.compute.amazonaws.com",
+                public_ip.replace('.', "-")
+            ),
+            _ => String::new(),
+        };
         assert_eq!(
             reported.public_dns_name.as_deref(),
-            Some(""),
-            "case {case:?}: an instance holding no public address reports an empty public \
-             DNS name, got {:?}",
+            Some(expected_public_dns_name.as_str()),
+            "case {case:?}: the public DNS name must name the public address the instance \
+             holds ({:?}), got {:?}",
+            reported.public_ip,
             reported.public_dns_name
         );
         assert!(

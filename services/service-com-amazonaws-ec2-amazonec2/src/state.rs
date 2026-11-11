@@ -1833,7 +1833,8 @@ use crate::ops::types::{
     AsnAssociation,
     AttachVolumeOutput,
     AttributeValue,
-    AvailabilityZone, AvailabilityZoneMessage, BlockDeviceMapping, BlockPublicAccessStates,
+    AvailabilityZone, AvailabilityZoneGeography, AvailabilityZoneMessage,
+    AvailabilityZoneSubGeography, BlockDeviceMapping, BlockPublicAccessStates,
     BundleTask,
     Byoasn, ByoipCidr, ConnectionNotification,
     DhcpConfiguration, DhcpOptions,
@@ -2454,6 +2455,10 @@ mod local_gateways_and_filter_patterns;
 pub mod outpost_lags;
 mod service_link_virtual_interfaces;
 mod instance_ids_and_instance_types;
+/// The display data AWS publishes for a Region — its long name, its geography and its
+/// sub-geography — as the zones of that Region report it. Re-exported below, so a zone's
+/// projection reaches it as `crate::state::region_display` like any other primitive here.
+mod availability_zone_display;
 mod instances_and_filters;
 mod vpcs_and_security_groups;
 mod store;
@@ -2471,6 +2476,7 @@ pub use store::*;
 pub use vpcs_and_security_groups::*;
 pub use instances_and_filters::*;
 pub use instance_ids_and_instance_types::*;
+pub use availability_zone_display::*;
 pub use local_gateways_and_filter_patterns::*;
 pub use outpost_lags::*;
 pub use service_link_virtual_interfaces::*;

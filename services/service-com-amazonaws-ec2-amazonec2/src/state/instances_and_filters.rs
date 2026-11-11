@@ -2047,12 +2047,24 @@ impl ComAmazonawsEc2Amazonec2State {
             state_transition_reason: Some(
                 instance.state_transition_reason.clone().unwrap_or_default(),
             ),
+            // "The reason for the most recent state transition" (`Instance$StateReason`):
+            // the reason a writer recorded for the transition it started, and — for an
+            // instance nobody has moved, whose latest transition is the launch still
+            // running — the `pending` reason that launch's own answer carries
+            // ([`INSTANCE_STATE_REASON_PENDING`]). An instance the clock has since taken to
+            // `running` has no reason to report at all.
             state_reason: instance
                 .state_reason
                 .as_ref()
                 .map(|(code, message)| StateReason {
                     code: Some(code.clone()),
                     message: Some(message.clone()),
+                })
+                .or_else(|| {
+                    (instance.state == InstanceStateName::Pending).then(|| StateReason {
+                        code: Some(INSTANCE_STATE_REASON_PENDING.to_string()),
+                        message: Some(INSTANCE_STATE_REASON_PENDING.to_string()),
+                    })
                 }),
             // "The private IPv4 address assigned to the instance"
             // (`Instance$PrivateIpAddress`): an address an instance HOLDS, which a
@@ -2097,14 +2109,13 @@ impl ComAmazonawsEc2Amazonec2State {
             // for.
             security_groups: Some(self.instance_security_groups(instance)),
             client_token: instance.client_token.clone(),
-            // "The product codes attached to this instance, IF APPLICABLE"
+            // "The product codes attached to this instance, if applicable"
             // (`Instance$ProductCodes`): the codes of the AMI it was launched from, so an
             // instance report and `ConfirmProductInstance` cannot disagree about one
-            // instance — and absent, rather than an empty set, for an instance launched
-            // from an AMI nobody sells, which has no product code for the member to
-            // apply to.
-            product_codes: Some(self.instance_product_codes(instance))
-                .filter(|codes| !codes.is_empty()),
+            // instance — reported as the EMPTY set for an instance launched from an AMI
+            // nobody sells, which is the member AWS carries for such an instance rather
+            // than no member at all.
+            product_codes: Some(self.instance_product_codes(instance)),
             tags: Some(tag_list(&instance.tags)),
             // "spot - the instance is a Spot Instance" (`Instance$InstanceLifecycle`) is
             // reported only for an instance a Spot Instance request launched; an
@@ -2133,23 +2144,62 @@ impl ComAmazonawsEc2Amazonec2State {
         instance_ids: &[String],
     ) -> Option<ReservationView> {
         let reservation = self.reservations.get(reservation_id)?;
+        let instances: Vec<&InstanceRecord> = instance_ids
+            .iter()
+            .filter_map(|id| self.instances.get(id))
+            .collect();
         Some(ReservationView {
             reservation_id: Some(reservation.reservation_id.clone()),
             owner_id: Some(reservation.owner_id.clone()),
             requester_id: reservation.requester_id.clone(),
-            // `Reservation$Groups` is documented "Not supported", so it names no group —
-            // but AWS reports the member as an EMPTY set rather than leaving it out, so a
-            // client that reads it finds the empty list the documentation promises instead
-            // of nothing at all.
-            groups: Some(Vec::new()),
-            instances: Some(
-                instance_ids
+            // "Describes a launch request for one or more instances, and includes owner,
+            // requester, and SECURITY GROUP INFORMATION THAT APPLIES TO ALL INSTANCES IN
+            // THE LAUNCH REQUEST" (`Reservation`): the groups every instance this
+            // reservation reports holds, read off the one projection of an instance's
+            // groups ([`Self::instance_security_groups`]) rather than a second copy on the
+            // reservation — so the launch's own groups are reported here and a group only
+            // some of the instances hold is not. Each instance's groups are read ONCE, and
+            // a reservation reporting none (every instance of it terminated, its interfaces
+            // gone with them) reports the empty set rather than leaving the member out.
+            groups: Some(Self::groups_common_to(
+                instances
                     .iter()
-                    .filter_map(|id| self.instances.get(id))
+                    .map(|instance| self.instance_security_groups(instance)),
+            )),
+            instances: Some(
+                instances
+                    .iter()
                     .map(|instance| self.instance_view(instance))
                     .collect(),
             ),
         })
+    }
+
+    /// The groups every one of `held` carries, in the order the first of them carries
+    /// them — the groups one launch gave all of its instances.
+    ///
+    /// Each entry of `held` is one instance's groups as
+    /// [`Self::instance_security_groups`] reads them, consumed once, so a reservation pays
+    /// one projection per instance. An EMPTY sequence (a reservation reporting no
+    /// instances) has no common group.
+    fn groups_common_to(
+        held: impl Iterator<Item = Vec<GroupIdentifier>>,
+    ) -> Vec<GroupIdentifier> {
+        let mut common: Option<Vec<GroupIdentifier>> = None;
+        for groups in held {
+            common = Some(match common {
+                None => groups,
+                Some(current) => current
+                    .into_iter()
+                    .filter(|group| {
+                        groups
+                            .iter()
+                            .any(|also_held| also_held.group_id == group.group_id)
+                    })
+                    .collect(),
+            });
+        }
+        common.unwrap_or_default()
     }
 
     /// The modelled `Reservation` for `reservation_id` with every instance it holds.

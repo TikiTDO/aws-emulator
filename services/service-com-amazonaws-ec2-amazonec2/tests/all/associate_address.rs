@@ -480,8 +480,8 @@ async fn an_address_moves_and_the_one_it_displaces_stays_allocated() {
 #[tokio::test]
 async fn a_request_it_cannot_serve_is_refused_and_stores_nothing() {
     let router = emulator();
-    let (free_allocation, _free_ip) = allocate(&router).await;
-    let (held_allocation, _held_ip) = allocate(&router).await;
+    let (free_allocation, free_ip) = allocate(&router).await;
+    let (held_allocation, held_ip) = allocate(&router).await;
     let (holder_instance, _holder_private_ip) = launch(&router).await;
     let (other_instance, other_private_ip) = launch(&router).await;
     let (leaving_instance, _leaving_private_ip) = launch(&router).await;
@@ -720,6 +720,12 @@ async fn a_request_it_cannot_serve_is_refused_and_stores_nothing() {
         ),
     ];
 
+    // The public address the instance every refused row names holds BEFORE any of them:
+    // the one its own launch assigned it out of Amazon's pool, the default subnet it was
+    // launched into mapping one on launch (`Subnet$MapPublicIpOnLaunch`). No refusal may
+    // change it.
+    let before_refusals = instance_public_ip(&router, "before the refusals", &other_instance).await;
+
     for (case, params, expected_status, expected_code) in &rows {
         let (status, body) = associate(&router, params).await;
         assert_eq!(
@@ -756,11 +762,19 @@ async fn a_request_it_cannot_serve_is_refused_and_stores_nothing() {
         Some(holder_instance.clone()),
         "case {case:?}: the held address must still be on its own instance, got {held:?}"
     );
+    // No refused request associated anything: the instance every one of them named holds
+    // exactly the address it held before, which is neither Elastic IP.
     let reported = instance_public_ip(&router, case, &other_instance).await;
     assert_eq!(
-        reported, None,
-        "case {case:?}: the instance every refused request named must report no public \
-         address, got {reported:?}"
+        reported, before_refusals,
+        "case {case:?}: the instance every refused request named must hold the address it \
+         held before them ({before_refusals:?}), got {reported:?}"
+    );
+    assert!(
+        reported.as_deref() != Some(free_ip.as_str())
+            && reported.as_deref() != Some(held_ip.as_str()),
+        "case {case:?}: the instance every refused request named must hold neither Elastic \
+         IP ({free_ip:?} or {held_ip:?}), got {reported:?}"
     );
     assert!(
         !other_private_ip.is_empty(),

@@ -57,6 +57,9 @@ struct Zone {
     id: String,
     region: String,
     group: String,
+    group_long_name: Option<String>,
+    geography: Vec<String>,
+    sub_geography: Vec<String>,
     border_group: String,
     zone_type: String,
     state: String,
@@ -66,35 +69,53 @@ struct Zone {
 }
 
 /// Every zone in an ec2Query `DescribeAvailabilityZones` body, sorted. Each zone is
-/// one `<item>` of the `<availabilityZoneInfo>` list — and the list's first element
-/// carries an `xmlns` attribute, so the opening tag is read up to its `>`.
+/// one `<item>` of the `<availabilityZoneInfo>` list.
+///
+/// Read through the XML DOCUMENT rather than by string surgery, because a zone carries
+/// LISTS of its own (`geographySet`, `subGeographySet`, `messageSet`) whose entries are
+/// `<item>`s too — so a zone's members are its own children and never an inner list's.
 fn zones(case: &str, body: &str) -> Vec<Zone> {
-    let list = element(body, "availabilityZoneInfo").unwrap_or_default();
+    let parsed = super::wire::document(case, body);
+    let Some(list) = parsed
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "availabilityZoneInfo")
+    else {
+        return Vec::new();
+    };
     let mut zones: Vec<Zone> = list
-        .split("<item")
-        .skip(1)
-        .map(|rest| {
-            let after_tag = rest.split_once('>').map(|(_, rest)| rest).unwrap_or(rest);
-            let item = after_tag.split("</item>").next().unwrap_or_default();
+        .children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "item")
+        .map(|item| {
             let member = |name: &str| {
-                element(item, name)
-                    .unwrap_or_else(|| panic!("case {case:?}: no <{name}> in zone {item:?}"))
+                super::wire::child_text(item, name)
+                    .unwrap_or_else(|| panic!("case {case:?}: no <{name}> in a zone of {body}"))
+            };
+            // `AvailabilityZone$Geography` and `$SubGeography` are LISTS on the wire
+            // (`geographySet` / `subGeographySet`), each entry carrying a `name`, so every
+            // entry's name is read rather than only the first.
+            let names_of = |set: &str| {
+                super::wire::set_items(item, set)
+                    .into_iter()
+                    .filter_map(|entry| super::wire::child_text(entry, "name"))
+                    .collect::<Vec<String>>()
             };
             Zone {
                 name: member("zoneName"),
                 id: member("zoneId"),
                 region: member("regionName"),
                 group: member("groupName"),
+                group_long_name: super::wire::child_text(item, "groupLongName"),
+                geography: names_of("geographySet"),
+                sub_geography: names_of("subGeographySet"),
                 border_group: member("networkBorderGroup"),
                 zone_type: member("zoneType"),
                 // `AvailabilityZone$State` is on the wire as `zoneState`.
                 state: member("zoneState"),
                 opt_in_status: member("optInStatus"),
                 elements: item
-                    .split('<')
-                    .filter_map(|fragment| fragment.split('>').next())
-                    .filter(|tag| !tag.is_empty() && !tag.starts_with('/'))
-                    .map(ToString::to_string)
+                    .children()
+                    .filter(roxmltree::Node::is_element)
+                    .map(|node| node.tag_name().name().to_string())
                     .collect(),
             }
         })
@@ -125,28 +146,75 @@ type FilterCase<'a> = (&'a str, &'a [(&'a str, &'a [&'a str])], &'a [&'a str]);
 // ---------------------------------------------------------------------------
 
 /// Each Region answers three Availability Zones of its own, named for the Region and
-/// identified by the Region's zone-id prefix.
+/// identified by the Region's zone-id prefix, each carrying the display data AWS
+/// publishes for that Region.
 ///
 /// The rows differ in the SHAPE of the Region name the zones are derived from: a
 /// plain direction, a compound direction (`northeast`), a `central` Region, and a
 /// three-component Region (`us-gov-west-1`). The expected prefixes are the ones AWS
 /// publishes for these Regions; `us-east-1` -> `use1` is the example in the
-/// operation's own `zone-id` filter doc.
+/// operation's own `zone-id` filter doc. The expected zone-group long names, geographies
+/// and sub-geographies are the display data AWS publishes for each Region
+/// (`US West (Oregon) 1` is the example in the operation's own `group-long-name` filter
+/// doc), and `us-gov-west-1` is a Region whose published display name names no place
+/// below its country, so it carries no sub-geography at all.
 #[tokio::test]
 async fn each_region_reports_its_own_availability_zones() {
     let router = emulator();
-    let cases: [(&str, &str); 8] = [
-        ("us-east-1", "use1"),
-        ("us-west-2", "usw2"),
-        ("eu-west-1", "euw1"),
-        ("eu-central-1", "euc1"),
-        ("ap-northeast-1", "apne1"),
-        ("ap-southeast-2", "apse2"),
-        ("us-gov-west-1", "usgw1"),
-        ("cn-northwest-1", "cnnw1"),
+    let cases: [(&str, &str, &str, &str, Option<&str>); 8] = [
+        (
+            "us-east-1",
+            "use1",
+            "US East (N. Virginia) 1",
+            "United States of America",
+            Some("Virginia"),
+        ),
+        (
+            "us-west-2",
+            "usw2",
+            "US West (Oregon) 1",
+            "United States of America",
+            Some("Oregon"),
+        ),
+        ("eu-west-1", "euw1", "Europe (Ireland) 1", "Ireland", None),
+        (
+            "eu-central-1",
+            "euc1",
+            "Europe (Frankfurt) 1",
+            "Germany",
+            Some("Frankfurt"),
+        ),
+        (
+            "ap-northeast-1",
+            "apne1",
+            "Asia Pacific (Tokyo) 1",
+            "Japan",
+            Some("Tokyo"),
+        ),
+        (
+            "ap-southeast-2",
+            "apse2",
+            "Asia Pacific (Sydney) 1",
+            "Australia",
+            Some("Sydney"),
+        ),
+        (
+            "us-gov-west-1",
+            "usgw1",
+            "AWS GovCloud (US-West) 1",
+            "United States of America",
+            None,
+        ),
+        (
+            "cn-northwest-1",
+            "cnnw1",
+            "China (Ningxia) 1",
+            "China",
+            Some("Ningxia"),
+        ),
     ];
 
-    for (region, prefix) in cases {
+    for (region, prefix, group_long_name, geography, sub_geography) in cases {
         let (status, body) = describe(&router, region, &[]).await;
         assert_eq!(
             status, 200,
@@ -195,9 +263,25 @@ async fn each_region_reports_its_own_availability_zones() {
                 zone.opt_in_status, "opt-in-not-required",
                 "case {region:?}: an Availability Zone is always opt-in-not-required, got {zone:?}"
             );
+            assert_eq!(
+                zone.group_long_name.as_deref(),
+                Some(group_long_name),
+                "case {region:?}: expected the zone group's long name {group_long_name:?}, \
+                 got {zone:?}"
+            );
+            assert_eq!(
+                zone.geography,
+                vec![geography.to_string()],
+                "case {region:?}: expected the geography {geography:?}, got {zone:?}"
+            );
+            assert_eq!(
+                zone.sub_geography,
+                sub_geography.map(ToString::to_string).into_iter().collect::<Vec<String>>(),
+                "case {region:?}: expected the sub-geography {sub_geography:?}, got {zone:?}"
+            );
             // Only a Local Zone or a Wavelength Zone has a parent zone, so these two
             // members must be absent rather than empty or invented.
-            for absent in ["parentZoneName", "parentZoneId", "groupLongName"] {
+            for absent in ["parentZoneName", "parentZoneId"] {
                 assert!(
                     !zone.elements.iter().any(|tag| tag == absent),
                     "case {region:?}: an Availability Zone carries no <{absent}>, got {zone:?}"
@@ -403,10 +487,9 @@ async fn filters_are_anded_and_their_values_ored() {
 #[tokio::test]
 async fn a_filter_on_a_member_an_availability_zone_lacks_matches_nothing() {
     let router = emulator();
-    let cases: [(&str, &[&str]); 5] = [
+    let cases: [(&str, &[&str]); 4] = [
         ("parent-zone-id", &["usw2-az1"]),
         ("parent-zone-name", &["us-west-2a"]),
-        ("group-long-name", &["US West (Oregon) 1"]),
         ("message", &["*"]),
         ("message", &["anything"]),
     ];
@@ -421,18 +504,36 @@ async fn a_filter_on_a_member_an_availability_zone_lacks_matches_nothing() {
         );
     }
 
-    // …and the zone group's short name, which a zone DOES carry, still matches.
+    // …and the zone group's two names, which a zone DOES carry, still match.
+    for (case, name, value) in [
+        ("group-name", "group-name", "us-west-2-zg-1"),
+        ("group-long-name", "group-long-name", "US West (Oregon) 1"),
+        ("a wildcarded group-long-name", "group-long-name", "US West*"),
+    ] {
+        let (status, body) = describe(&router, "us-west-2", &filters(&[(name, &[value])])).await;
+        assert_eq!(status, 200, "case {case:?}: expected 200, got {status} {body}");
+        assert_eq!(
+            zone_names(case, &body),
+            owned(&["us-west-2a", "us-west-2b", "us-west-2c"]),
+            "case {case:?}: expected the Region's zone group to match every zone, got {body}"
+        );
+    }
+
+    // A long name of ANOTHER Region's zone group matches nothing here.
     let (status, body) = describe(
         &router,
         "us-west-2",
-        &filters(&[("group-name", &["us-west-2-zg-1"])]),
+        &filters(&[("group-long-name", &["US East (Ohio) 1"])]),
     )
     .await;
-    assert_eq!(status, 200, "case \"group-name\": expected 200, got {status} {body}");
     assert_eq!(
-        zone_names("group-name", &body),
-        owned(&["us-west-2a", "us-west-2b", "us-west-2c"]),
-        "case \"group-name\": expected the Region's zone group to match every zone, got {body}"
+        status, 200,
+        "case \"another Region's group-long-name\": expected 200, got {status} {body}"
+    );
+    assert_eq!(
+        zone_names("another Region's group-long-name", &body),
+        Vec::<String>::new(),
+        "case \"another Region's group-long-name\": no zone of this Region is in it: {body}"
     );
 }
 

@@ -15,6 +15,14 @@
 // exactly that. The lines above are the file header, which no landing edits.
 #[path = "all/prefix_lists.rs"]
 mod prefix_lists;
+// The MODELLED MEMBERS a successful response carries: the Region display data a zone
+// reports, a volume's snapshot/zone id/operator, a launch's reservation groups and the
+// member set of every instance, a launch template's version counters and operator, and
+// every tag an address carries. Declared beside `prefix_lists` for the reason the note
+// above gives: the sorted neighbourhood and the tail of this file are where every new ec2
+// suite inserts its lines.
+#[path = "all/modeled_response_members.rs"]
+mod modeled_response_members;
 // `RegisterImage`: the AMI a register mints from the request's own description — its members
 // and block device mappings read back through `DescribeImages`, what it refuses, and the state
 // it writes (a snapshot its AMI uses cannot be deleted). Declared beside `prefix_lists` for the

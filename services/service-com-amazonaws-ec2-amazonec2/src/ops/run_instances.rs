@@ -1718,7 +1718,10 @@ struct InterfaceRequest {
     description: String,
     interface_type: String,
     delete_on_termination: bool,
-    associate_public_ip_address: bool,
+    /// What the entry asked for, if it asked at all: an entry that names no
+    /// `AssociatePublicIpAddress` takes the answer of the SUBNET it is placed in, which is
+    /// not known until the account's records are read ([`take_launch_interfaces`]).
+    associate_public_ip_address: Option<bool>,
     addresses: crate::state::RequestedPrivateIps,
     /// Whether the entry asked for an IPv6 address at all — a range this slice does not
     /// model, answered where the launch's own IPv6 members are.
@@ -1918,9 +1921,11 @@ fn read_interface_specifications(
         // "The public IP address can only be assigned to a network interface for eth0, and
         // can only be assigned to a new network interface, not an existing one. You cannot
         // specify more than one network interface in the request"
-        // (`AssociatePublicIpAddress`).
-        let associate_public_ip_address = interface.associate_public_ip_address.unwrap_or(false);
-        if associate_public_ip_address {
+        // (`AssociatePublicIpAddress`). Each refusal is for what the entry ASKED for, so an
+        // entry that asked for nothing is refused for nothing here and takes its subnet's
+        // own answer below.
+        let associate_public_ip_address = interface.associate_public_ip_address;
+        if associate_public_ip_address == Some(true) {
             if existing.is_some() {
                 return Err(Scaffolded::invalid_parameter_combination(
                     "A public IPv4 address can be assigned only to a network interface the \
@@ -2267,6 +2272,29 @@ fn take_launch_interfaces(
                 }
             }
         }
+        // "Indicates whether instances launched in this subnet receive a public IPv4
+        // address" (`Subnet$MapPublicIpOnLaunch`) — the attribute "if launching into a
+        // default subnet, the default value is true" (`AssociatePublicIpAddress`) reads
+        // off: an entry that asked either way is honoured, and one that asked nothing takes
+        // the answer of the subnet it is placed in. The restrictions the same member states
+        // bind the implicit answer as well as the explicit one, because they are facts of
+        // where such an address can go rather than of who asked for it: it "can only be
+        // assigned to a network interface for eth0", "can only be assigned to a new network
+        // interface, not an existing one", and "you cannot specify more than one network
+        // interface in the request" — so a launch naming several interfaces receives none.
+        let associate_public_ip_address = interface
+            .request
+            .associate_public_ip_address
+            .unwrap_or_else(|| {
+                planned.len() == 1
+                    && interface.request.network_interface_id.is_none()
+                    && interface.request.device_index
+                        == crate::state::PRIMARY_NETWORK_INTERFACE_DEVICE_INDEX
+                    && store
+                        .subnets
+                        .get(&interface.subnet_id)
+                        .is_some_and(|subnet| subnet.map_public_ip_on_launch == Some(true))
+            });
         launched.push(LaunchedInterface {
             device_index: interface.request.device_index,
             network_card_index: interface.request.network_card_index,
@@ -2284,7 +2312,7 @@ fn take_launch_interfaces(
             groups,
             private_ip_addresses: addresses,
             delete_on_termination: interface.request.delete_on_termination,
-            associate_public_ip_address: interface.request.associate_public_ip_address,
+            associate_public_ip_address,
             ena_srd_specification: interface.request.ena_srd_specification.clone(),
             ena_queue_count: interface.request.ena_queue_count,
         });
