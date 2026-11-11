@@ -194,6 +194,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // schedule that went with a deleted group is not reported as live.
         store.settle(::std::time::SystemTime::now());
 
+        // The GROUP named by the request is resolved BEFORE the schedule inside it,
+        // exactly as the operations that write a schedule resolve it: a read naming a
+        // group this account does not hold — including one a cascade delete has taken
+        // away — reports THAT group as missing rather than the schedule, which is the
+        // resource the group would have held. A group still in `DELETING` does exist,
+        // so the schedules it has not yet lost are read from it as usual.
+        if !store.group_exists(&group_name) {
+            return Err(GetScheduleErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: crate::state::group_does_not_exist(&group_name),
+                },
+            )
+            .into());
+        }
+
         let Some(record) = store.schedules.get(&(group_name.clone(), input.name.clone())) else {
             return Err(GetScheduleErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {

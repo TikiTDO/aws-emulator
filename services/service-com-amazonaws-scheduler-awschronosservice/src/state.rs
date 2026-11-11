@@ -56,7 +56,7 @@ pub const GROUP_DELETION_DELAY: Duration = Duration::from_millis(500);
 pub const FALLBACK_REGION: &str = "us-east-1";
 
 /// `FlexibleTimeWindowMode` value that asks for a window.
-const FLEXIBLE_TIME_WINDOW_MODE_FLEXIBLE: &str = "FLEXIBLE";
+pub(crate) const FLEXIBLE_TIME_WINDOW_MODE_FLEXIBLE: &str = "FLEXIBLE";
 
 /// The modelled name of the `FlexibleTimeWindow` member a cross-member refusal
 /// is about (`com.amazonaws.scheduler#FlexibleTimeWindow$MaximumWindowInMinutes`).

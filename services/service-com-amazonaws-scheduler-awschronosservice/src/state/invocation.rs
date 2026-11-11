@@ -31,18 +31,17 @@
 //!
 //! ## When this emulator performs an occurrence
 //!
-//! The occurrence's own instant is the schedule's — computed from its expression,
-//! in its zone, and reported to the target as the scheduled time — but the WAIT
-//! until it is compressed onto this emulator's clock
-//! ([`EMULATED_WAIT_PER_STATED_MINUTE`]), the way every other wait this emulator
-//! serves inside one caller's poll loop is. A schedule states its waits in minutes
-//! and up (the shortest `rate` is one minute, an `at(...)` instant is written by a
-//! client minutes ahead), and a wait of that length closes after every client
-//! watching the target has given up, which would make the invocation the schedule
-//! asked for unobservable. What is NOT emulator-chosen is WHICH instants the
-//! expression names, their ORDER, how MANY of them there are, the window that
-//! bounds them, or the scheduled time the target is told — all of those come from
-//! the schedule itself.
+//! AT the occurrence's own instant — the one the expression names, in the schedule's
+//! zone, and the one the target is told as its scheduled time — and never before it.
+//! A time-based service's whole contract is that instant: `FlexibleTimeWindow$Mode`
+//! "determines whether the schedule is invoked within a flexible time window", and
+//! `MaximumWindowInMinutes` is "the maximum time window during which a schedule can
+//! be invoked", so the window extends FORWARD from the occurrence and never back.
+//! With `Mode=OFF` the invocation is made at the occurrence itself; with
+//! `Mode=FLEXIBLE` at an instant inside `[occurrence, occurrence + window]`
+//! ([`window_offset`]). The wait is served at its own length — nothing is compressed
+//! and nothing sleeps for it: the instant is stored and the clock performs what it
+//! has already made due.
 //!
 //! ## What reaches the target
 //!
@@ -53,45 +52,34 @@
 //! machine. The call is made over the in-process callback, so what the target holds
 //! afterwards is what that service's own handlers wrote.
 //!
-//! The retry policy, the dead-letter route a terminally failed invocation takes,
-//! `ActionAfterCompletion` and the remaining target kinds (the ECS task, the
-//! EventBridge bus, the SageMaker pipeline and the universal `aws-sdk` target) are
-//! NOT performed here: an occurrence whose target kind this does not invoke is
-//! recorded as not attempted, and nothing is reported as delivered that was not.
+//! ## When a schedule is done
+//!
+//! A schedule COMPLETES when it has no occurrence left: a one-time `at(...)`
+//! schedule at the occurrence it just ran, a recurring one at the end of the window
+//! `EndDate` closes (its last occurrence being the one closest to that instant).
+//! `ActionAfterCompletion` "specifies the action that EventBridge Scheduler applies
+//! to the schedule after the schedule completes invoking the target", so a schedule
+//! stating `DELETE` is removed from the store then ([`apply_action_after_completion`])
+//! and one stating `NONE` is left where it is.
+//!
+//! The retry policy, the dead-letter route a terminally failed invocation takes, and
+//! the remaining target kinds (the ECS task, the EventBridge bus, the SageMaker
+//! pipeline and the universal `aws-sdk` target) are NOT performed here: an occurrence
+//! whose target kind this does not invoke is recorded as not attempted, and nothing is
+//! reported as delivered that was not.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
-use crate::ops::types::Target;
+use crate::ops::types::{FlexibleTimeWindow, Target};
 
 use super::{
     occurrence::Occurrences, service_state, ComAmazonawsSchedulerAwschronosserviceState,
     ScheduleRecord, FALLBACK_REGION,
 };
 
-/// How much of this emulator's clock one minute of a schedule's own wait takes.
-///
-/// EMULATOR-CHOSEN, and the one place the compression lives. EventBridge Scheduler
-/// states its cadences in minutes at the finest ("rate(value unit) […] minute |
-/// minutes | hour | hours | day | days") and a one-time `at(...)` instant is
-/// written minutes or hours ahead, while an emulated invocation is observed inside
-/// a single caller's poll loop: a wait served at its stated length would close
-/// after every client watching the target had given up, so the schedule's
-/// invocation would be unobservable rather than late. The compression is
-/// PROPORTIONAL and so monotonic — a schedule that waits longer is never invoked
-/// sooner than one that waits less — and it changes only WHEN this emulator
-/// performs an occurrence, never which instants the expression names nor the
-/// scheduled time the target is told.
-pub const EMULATED_WAIT_PER_STATED_MINUTE: Duration = Duration::from_secs(1);
-
-/// The smallest wait this emulator serves before an occurrence, however short the
-/// compressed wait would otherwise be.
-///
-/// Deliberately non-zero: a client that writes a schedule and then looks at the
-/// target still observes the state before the first invocation, and a schedule
-/// whose first occurrence is seconds away is not invoked inside the call that
-/// created it.
-pub const MINIMUM_EMULATED_WAIT: Duration = Duration::from_secs(1);
+/// Seconds in the minute `MaximumWindowInMinutes` states its window in.
+const SECONDS_PER_MINUTE: u64 = 60;
 
 /// How often the clock wakes up to ask what is due.
 ///
@@ -119,6 +107,10 @@ const CLAIM_LAPSES_AFTER: Duration = Duration::from_secs(120);
 /// The `ScheduleState` that invokes nothing: "DISABLED […] specifies whether the
 /// schedule is enabled or disabled".
 const SCHEDULE_STATE_DISABLED: &str = "DISABLED";
+
+/// The `ActionAfterCompletion` that REMOVES a schedule once it has completed:
+/// modelled `NONE | DELETE`, and only this one acts on the store.
+const ACTION_AFTER_COMPLETION_DELETE: &str = "DELETE";
 
 /// The format the scheduled-time context attribute carries, as EventBridge
 /// Scheduler publishes it (`2022-03-10T13:00:00Z`): the occurrence's own instant in
@@ -187,19 +179,20 @@ struct Armed {
     /// no longer states ([`definition_of`]).
     definition: String,
     /// The occurrence's OWN instant, the one the expression names and the target is
-    /// told: it is what the next occurrence is computed from, so the series keeps
-    /// the schedule's cadence however the waits are served.
+    /// told: it is what the next occurrence is computed from, so the series keeps the
+    /// cadence the expression states rather than drifting by however long a delivery
+    /// took.
     nominal: SystemTime,
-    /// When this emulator performs that occurrence, or `None` for a series with no
-    /// occurrence left — a one-time schedule that has been invoked, or a recurring
-    /// one past its `EndDate`.
-    ///
-    /// Such a schedule keeps its entry rather than losing it: the occurrence this
-    /// emulator has already performed is still AHEAD on the schedule's own clock —
-    /// that is what a compressed wait means — so an entry that was dropped would be
-    /// read as a schedule the clock has not seen yet and the one occurrence would
-    /// be performed over and over.
+    /// The instant the invocation for that occurrence is made at: the occurrence
+    /// itself, or an instant inside the flexible window that opens AT it — never
+    /// earlier. `None` for a series with no occurrence left: a one-time schedule that
+    /// has been invoked, or a recurring one whose `EndDate` holds no further
+    /// occurrence.
     due: Option<SystemTime>,
+    /// When the schedule COMPLETED, for a series with no occurrence left, or `None`
+    /// while it still has one (or has run nothing and states no end): what
+    /// [`apply_action_after_completion`] acts on once that instant has passed.
+    completed: Option<SystemTime>,
 }
 
 /// One schedule the clock may invoke: how it is addressed, the series it runs on,
@@ -217,6 +210,11 @@ struct Schedulable {
     /// "The date, before which the schedule can invoke its target" (`EndDate`),
     /// when the schedule states one.
     end: Option<SystemTime>,
+    /// The FLEXIBLE window an occurrence of this schedule may be invoked inside —
+    /// "the maximum time window during which a schedule can be invoked"
+    /// (`FlexibleTimeWindow$MaximumWindowInMinutes`) — or `None` for a schedule whose
+    /// `Mode` asks for none, which is invoked at the occurrence itself.
+    window: Option<Duration>,
 }
 
 impl Schedulable {
@@ -230,15 +228,27 @@ impl Schedulable {
     /// schedules" — so an `at(...)` instant is kept whatever those members state.
     fn next_after(&self, after: SystemTime) -> Option<SystemTime> {
         let one_time = self.occurrences.is_one_time();
-        let from = match self.start {
-            Some(start) if !one_time && start > after => start,
-            _ => after,
-        };
-        let next = self.occurrences.next_after(from)?;
+        // `StartDate` is a FLOOR on the series, not an offset into it: the first
+        // occurrence is the first one the expression names at or after that instant
+        // ("invocations might occur on, or after, the StartDate you specify"), so a
+        // schedule armed ahead of time invokes nothing while the window is shut.
+        let next = match self.start {
+            Some(start) if !one_time && start > after => {
+                self.occurrences.next_at_or_after(start)
+            }
+            _ => self.occurrences.next_after(after),
+        }?;
         match self.end {
             Some(end) if !one_time && next >= end => None,
             _ => Some(next),
         }
+    }
+
+    /// Whether this schedule names at most one occurrence, which is what decides
+    /// whether `StartDate`/`EndDate` bound it at all ("EventBridge Scheduler ignores
+    /// StartDate and EndDate for one-time schedules").
+    fn is_one_time(&self) -> bool {
+        self.occurrences.is_one_time()
     }
 }
 
@@ -336,7 +346,7 @@ impl Invocations {
                 known.insert(
                     schedule.arn.clone(),
                     match schedule.next_after(now) {
-                        Some(nominal) => armed_for(schedule, nominal, now, now),
+                        Some(nominal) => armed_for(schedule, nominal),
                         None => exhausted(schedule, now),
                     },
                 );
@@ -359,12 +369,8 @@ impl Invocations {
             known.insert(
                 schedule.arn.clone(),
                 match schedule.next_after(nominal) {
-                    Some(next) => armed_for(schedule, next, nominal, now),
-                    None => Armed {
-                        definition: schedule.definition.clone(),
-                        nominal,
-                        due: None,
-                    },
+                    Some(next) => armed_for(schedule, next),
+                    None => completed(schedule, nominal),
                 },
             );
             firing.push(Firing {
@@ -375,51 +381,103 @@ impl Invocations {
         self.armed = known;
         firing
     }
+
+    /// Every schedule whose series this clock has run out and whose COMPLETION the
+    /// clock has already made due, by the schedule's own ARN: what
+    /// [`apply_action_after_completion`] applies the stored action to.
+    fn completed_by(&self, now: SystemTime) -> ::std::collections::BTreeSet<String> {
+        self.armed
+            .iter()
+            .filter(|(_, armed)| {
+                armed.due.is_none() && armed.completed.is_some_and(|at| at <= now)
+            })
+            .map(|(arn, _)| arn.clone())
+            .collect()
+    }
 }
 
 /// The clock entry for a schedule whose series names no occurrence at all — a
 /// one-time instant already behind the clock, or a window that holds none.
+///
+/// Such a schedule has invoked nothing, so it has not "completed invoking the
+/// target" at any instant of its own: the only one it completes at is the end of the
+/// window `EndDate` closes, which may still be ahead of the clock.
 fn exhausted(schedule: &Schedulable, now: SystemTime) -> Armed {
     Armed {
         definition: schedule.definition.clone(),
         nominal: now,
         due: None,
+        completed: schedule.end.filter(|_| !schedule.is_one_time()),
     }
 }
 
-/// The clock entry for `nominal`: the occurrence's own instant, and when this
-/// emulator performs it — `now` plus the compressed form of the wait the schedule
-/// states between `from` and that occurrence.
-fn armed_for(
-    schedule: &Schedulable,
-    nominal: SystemTime,
-    from: SystemTime,
-    now: SystemTime,
-) -> Armed {
-    let stated = nominal.duration_since(from).unwrap_or_default();
+/// The clock entry for a schedule that has just run its LAST occurrence.
+///
+/// A one-time schedule completes at the occurrence it ran ("at expressions […]
+/// invoke a target once"); a recurring one at the end of its own window, its last
+/// occurrence being the one closest to that instant, so a schedule whose series ends
+/// before `EndDate` is not complete until that date passes.
+fn completed(schedule: &Schedulable, nominal: SystemTime) -> Armed {
+    let completed = match schedule.end {
+        Some(end) if !schedule.is_one_time() => end,
+        _ => nominal,
+    };
     Armed {
         definition: schedule.definition.clone(),
         nominal,
-        due: Some(after(now, emulated_wait(stated))),
+        due: None,
+        completed: Some(completed),
     }
 }
 
-/// The wait this emulator serves for a schedule that states a wait of `stated`.
-///
-/// Proportional to the stated wait ([`EMULATED_WAIT_PER_STATED_MINUTE`]) and never
-/// shorter than [`MINIMUM_EMULATED_WAIT`], so the order of two waits is the order
-/// of the two it serves and no occurrence is performed the instant it is armed.
-#[must_use]
-pub fn emulated_wait(stated: Duration) -> Duration {
-    /// Seconds in the minute the scale is stated per.
-    const SECONDS_PER_MINUTE: u128 = 60;
+/// The clock entry for `nominal`: the occurrence's own instant, and the instant the
+/// invocation for it is made at ([`invocation_instant`]).
+fn armed_for(schedule: &Schedulable, nominal: SystemTime) -> Armed {
+    Armed {
+        definition: schedule.definition.clone(),
+        nominal,
+        due: Some(invocation_instant(schedule, nominal)),
+        completed: None,
+    }
+}
 
-    let scaled = stated
-        .as_millis()
-        .saturating_mul(EMULATED_WAIT_PER_STATED_MINUTE.as_millis())
-        / SECONDS_PER_MINUTE.saturating_mul(1_000);
-    let scaled = u64::try_from(scaled).unwrap_or(u64::MAX);
-    Duration::from_millis(scaled).max(MINIMUM_EMULATED_WAIT)
+/// WHEN the invocation for the occurrence at `nominal` is made.
+///
+/// At the occurrence itself for a schedule whose `FlexibleTimeWindow` asks for no
+/// window, and inside `[nominal, nominal + MaximumWindowInMinutes]` for one that
+/// does — "the maximum time window during which a schedule can be invoked". The
+/// window opens AT the occurrence and extends forward only, so neither mode is ever
+/// invoked before the instant its expression names.
+fn invocation_instant(schedule: &Schedulable, nominal: SystemTime) -> SystemTime {
+    match schedule.window {
+        Some(window) => after(nominal, window_offset(&schedule.arn, nominal, window)),
+        None => nominal,
+    }
+}
+
+/// How far INTO its flexible window one occurrence of `arn` is invoked.
+///
+/// AWS picks an instant inside the window rather than its edge, and which instant is
+/// the service's to choose; this spreads the occurrences of one store the same way,
+/// from the schedule's own ARN and the occurrence's own instant, so a schedule's
+/// invocation instant is reproducible and two schedules sharing a window do not
+/// crowd onto one instant. The offset never exceeds the window.
+fn window_offset(arn: &str, nominal: SystemTime, window: Duration) -> Duration {
+    use ::std::hash::{Hash, Hasher};
+
+    let span = u64::try_from(window.as_millis()).unwrap_or(u64::MAX);
+    if span == 0 {
+        return Duration::ZERO;
+    }
+    let mut hasher = ::std::collections::hash_map::DefaultHasher::new();
+    arn.hash(&mut hasher);
+    nominal
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .hash(&mut hasher);
+    // The window is inclusive of both edges, so the offset may be the whole span.
+    Duration::from_millis(hasher.finish() % (span + 1))
 }
 
 /// `at` plus `span`, saturating rather than panicking on a clock near the end of
@@ -436,7 +494,7 @@ fn after(at: SystemTime, span: Duration) -> SystemTime {
 /// states.
 fn definition_of(record: &ScheduleRecord) -> String {
     format!(
-        "{}|{}|{:?}|{:?}|{}|{}|{}|{:?}",
+        "{}|{}|{:?}|{:?}|{}|{}|{}|{}|{:?}|{:?}",
         record.schedule_expression,
         record
             .schedule_expression_timezone
@@ -445,6 +503,11 @@ fn definition_of(record: &ScheduleRecord) -> String {
         record.start_date.map(|at| (at.secs(), at.subsec_nanos())),
         record.end_date.map(|at| (at.secs(), at.subsec_nanos())),
         record.state,
+        record.flexible_time_window.mode,
+        record
+            .flexible_time_window
+            .maximum_window_in_minutes
+            .unwrap_or_default(),
         record.target.arn,
         record.target.role_arn,
         record.target.input,
@@ -480,7 +543,53 @@ fn schedulable_record(record: &ScheduleRecord) -> Option<Schedulable> {
         occurrences,
         start: record.start_date.map(wire_instant),
         end: record.end_date.map(wire_instant),
+        window: flexible_window(&record.flexible_time_window),
     })
+}
+
+/// The window an occurrence of this schedule may be invoked inside, or `None` for a
+/// schedule invoked at the occurrence itself.
+///
+/// A window is asked for by `Mode=FLEXIBLE` alone — "determines whether the schedule
+/// is invoked within a flexible time window" — so `MaximumWindowInMinutes` under any
+/// other mode names no window (a pair the write path refuses outright), and the
+/// modelled range (1..1440) keeps the figure positive.
+fn flexible_window(window: &FlexibleTimeWindow) -> Option<Duration> {
+    if window.mode != super::FLEXIBLE_TIME_WINDOW_MODE_FLEXIBLE {
+        return None;
+    }
+    let minutes = u64::try_from(window.maximum_window_in_minutes?).ok()?;
+    Some(Duration::from_secs(minutes.saturating_mul(SECONDS_PER_MINUTE)))
+}
+
+/// Apply each completed schedule's `ActionAfterCompletion` — "the action that
+/// EventBridge Scheduler applies to the schedule after the schedule completes
+/// invoking the target".
+///
+/// `DELETE` removes the record, so the schedule stops resolving exactly as a deleted
+/// one does; `NONE` (and an absent member) leaves it. Only a schedule the clock has
+/// run out of occurrences for, at or past the instant it completed, is acted on
+/// ([`Invocations::completed_by`]).
+fn apply_action_after_completion(
+    store: &mut ComAmazonawsSchedulerAwschronosserviceState,
+    now: SystemTime,
+) {
+    let completed = store.invocations.completed_by(now);
+    if completed.is_empty() {
+        return;
+    }
+    let removed: Vec<(String, String)> = store
+        .schedules
+        .iter()
+        .filter(|(_, record)| {
+            record.action_after_completion.as_deref() == Some(ACTION_AFTER_COMPLETION_DELETE)
+                && completed.contains(&record.arn)
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in removed {
+        store.schedules.remove(&key);
+    }
 }
 
 /// One stored wire timestamp as a clock reading.
@@ -538,6 +647,11 @@ pub fn drive_invocation_clock<Eng: Send + Sync + 'static>(
             for occurrence in firing {
                 invoke(&state, &callback, &occurrence).await;
             }
+            // A schedule's action is applied only AFTER the occurrences of this
+            // tick have been handed to their targets: a schedule completes "after
+            // the schedule completes invoking the target", so its last invocation
+            // is made and only then is the action acted on.
+            apply_action_after_completion(&mut state.lock(), SystemTime::now());
         }
         state.lock().invocations.release(generation);
     });
@@ -786,39 +900,283 @@ pub fn scheduled_time_text(at: SystemTime) -> String {
 mod tests {
     use super::*;
 
+    /// One row of the window table: the case, the expression, the `StartDate` and
+    /// `EndDate` the schedule states as seconds from the epoch, and the occurrences
+    /// the pair leaves it.
+    type WindowRow = (
+        &'static str,
+        &'static str,
+        Option<u64>,
+        Option<u64>,
+        &'static [u64],
+    );
+
     /// A clock reading `seconds` after the epoch.
     fn epoch(seconds: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
     }
 
-    /// The wait this emulator serves is proportional to the one the schedule
-    /// states, never shorter than the floor, and monotonic in it.
+    /// One schedule as the clock reads it, from the members that decide its series:
+    /// the expression, the zone it is read in, the window its instants are bounded
+    /// by, and the flexible window one occurrence may be invoked inside.
+    fn record(
+        expression: &str,
+        timezone: Option<&str>,
+        start: Option<u64>,
+        end: Option<u64>,
+        window_minutes: Option<i32>,
+    ) -> ScheduleRecord {
+        let at = |seconds: u64| ::aws_smithy_types::DateTime::from_secs(seconds as i64);
+        ScheduleRecord {
+            name: "nightly".to_string(),
+            group_name: "default".to_string(),
+            arn: "arn:aws:scheduler:eu-west-2:000000000000:schedule/default/nightly".to_string(),
+            schedule_expression: expression.to_string(),
+            schedule_expression_timezone: timezone.map(ToString::to_string),
+            start_date: start.map(at),
+            end_date: end.map(at),
+            description: None,
+            state: "ENABLED".to_string(),
+            kms_key_arn: None,
+            action_after_completion: None,
+            target: Target::default(),
+            flexible_time_window: FlexibleTimeWindow {
+                mode: match window_minutes {
+                    Some(_) => "FLEXIBLE".to_string(),
+                    None => "OFF".to_string(),
+                },
+                maximum_window_in_minutes: window_minutes,
+            },
+            creation_date: SystemTime::UNIX_EPOCH,
+            last_modification_date: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    /// The first `count` invocations the clock makes for `record` from `now`: each
+    /// occurrence's own instant paired with the instant the invocation for it is
+    /// made at, stepped exactly as [`Invocations::take_due`] steps the series.
+    fn planned(
+        record: &ScheduleRecord,
+        now: SystemTime,
+        count: usize,
+    ) -> Vec<(SystemTime, SystemTime)> {
+        let Some(schedule) = schedulable_record(record) else {
+            return Vec::new();
+        };
+        let mut planned = Vec::new();
+        let mut from = now;
+        for _ in 0..count {
+            let Some(nominal) = schedule.next_after(from) else {
+                break;
+            };
+            planned.push((nominal, invocation_instant(&schedule, nominal)));
+            from = nominal;
+        }
+        planned
+    }
+
+    /// A series runs on the cadence its own expression states, against the server
+    /// clock: the rows differ along the FORM of the expression, the rate value and
+    /// unit, and the zone a cron expression is read in.
     #[test]
-    fn the_served_wait_is_proportional_to_the_stated_one() {
-        // (case, the wait the schedule states in seconds, the wait served in millis)
-        let rows: [(&str, u64, u64); 7] = [
-            ("no wait at all", 0, 1_000),
-            ("under a minute", 30, 1_000),
-            ("one minute, the shortest rate", 60, 1_000),
-            ("four minutes, a one-time schedule written ahead", 240, 4_000),
-            ("fifteen minutes", 900, 15_000),
-            ("one hour", 3_600, 60_000),
-            ("one day", 86_400, 1_440_000),
+    fn a_series_runs_on_the_cadence_its_expression_states() {
+        // 2030-01-01T00:00:30Z: half a minute past a minute boundary, so a cron
+        // expression's own instants are not the reading itself.
+        let now = epoch(1_893_456_030);
+        // (case, expression, zone, the occurrences as seconds from the epoch)
+        let rows: [(&str, &str, Option<&str>, &[u64]); 8] = [
+            (
+                "a rate of one minute",
+                "rate(1 minute)",
+                None,
+                &[1_893_456_090, 1_893_456_150, 1_893_456_210],
+            ),
+            (
+                "a rate of two minutes",
+                "rate(2 minutes)",
+                None,
+                &[1_893_456_150, 1_893_456_270, 1_893_456_390],
+            ),
+            (
+                "a rate of fifteen minutes",
+                "rate(15 minutes)",
+                None,
+                &[1_893_456_930, 1_893_457_830],
+            ),
+            (
+                "a rate of hours",
+                "rate(2 hours)",
+                None,
+                &[1_893_463_230, 1_893_470_430],
+            ),
+            (
+                "a rate of days",
+                "rate(1 day)",
+                None,
+                &[1_893_542_430, 1_893_628_830],
+            ),
+            (
+                "a cron naming every minute",
+                "cron(* * * * ? *)",
+                None,
+                &[1_893_456_060, 1_893_456_120],
+            ),
+            (
+                // 08:00 in UTC+05:30 is 02:30 UTC on that date.
+                "a cron read in an eastern zone",
+                "cron(0 8 * * ? *)",
+                Some("Asia/Kolkata"),
+                &[1_893_456_000 + 2 * 3_600 + 1_800],
+            ),
+            (
+                "a one-time instant names one occurrence",
+                "at(2030-01-01T01:00:00)",
+                None,
+                &[1_893_456_000 + 3_600],
+            ),
         ];
-        let mut previous = Duration::ZERO;
-        for (case, stated, expected) in rows {
-            let served = emulated_wait(Duration::from_secs(stated));
+        for (case, expression, zone, expected) in rows {
+            let planned = planned(&record(expression, zone, None, None, None), now, expected.len());
+            let nominals: Vec<u64> = planned
+                .iter()
+                .map(|(nominal, _)| {
+                    nominal
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                })
+                .collect();
             assert_eq!(
-                served,
-                Duration::from_millis(expected),
-                "case {case:?}: expected {expected}ms, got {served:?}"
+                nominals,
+                expected.to_vec(),
+                "case {case:?}: expected the occurrences at {expected:?}, got {nominals:?}"
             );
-            assert!(
-                served >= previous,
-                "case {case:?}: a longer stated wait must never be served sooner, got \
-                 {served:?} after {previous:?}"
+        }
+    }
+
+    /// No occurrence is invoked BEFORE the instant its expression names, and one of a
+    /// schedule asking for a flexible window is invoked inside that window: the rows
+    /// differ along the mode and along the window's own length, including each
+    /// published bound of `MaximumWindowInMinutes` (1..1440).
+    #[test]
+    fn an_occurrence_is_invoked_inside_the_window_that_opens_at_it() {
+        let now = epoch(1_893_456_030);
+        // (case, the window the schedule asks for in minutes)
+        let rows: [(&str, Option<i32>); 5] = [
+            ("no window at all", None),
+            ("the shortest window", Some(1)),
+            ("a window of five minutes", Some(5)),
+            ("a window of an hour", Some(60)),
+            ("the longest window", Some(1_440)),
+        ];
+        for (case, window_minutes) in rows {
+            let window = Duration::from_secs(
+                u64::try_from(window_minutes.unwrap_or_default()).unwrap_or_default() * 60,
             );
-            previous = served;
+            // Every form of expression is held to the same rule, so each row runs
+            // over all three.
+            for expression in [
+                "rate(1 minute)",
+                "cron(0 8 * * ? *)",
+                "at(2030-01-01T01:00:00)",
+            ] {
+                let record = record(expression, None, None, None, window_minutes);
+                for (nominal, invoked) in planned(&record, now, 3) {
+                    assert!(
+                        invoked >= nominal,
+                        "case {case:?} on {expression:?}: an occurrence at {nominal:?} was \
+                         invoked at {invoked:?}, before the instant it names"
+                    );
+                    let spread = invoked.duration_since(nominal).unwrap_or_default();
+                    assert!(
+                        spread <= window,
+                        "case {case:?} on {expression:?}: an occurrence at {nominal:?} was \
+                         invoked {spread:?} into a window of {window:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `StartDate` is a floor on the series and `EndDate` its ceiling, for a
+    /// recurring schedule; a one-time instant is bounded by neither. The rows differ
+    /// along which boundary the schedule states and along the form of the expression.
+    #[test]
+    fn the_schedules_own_window_bounds_its_occurrences() {
+        let now = epoch(1_893_456_030);
+        // (case, expression, start, end, the occurrences as seconds from the epoch)
+        let rows: [WindowRow; 7] = [
+            (
+                "a rate series opens at its StartDate",
+                "rate(1 minute)",
+                Some(1_893_459_630),
+                None,
+                &[1_893_459_630, 1_893_459_690],
+            ),
+            (
+                "a cron series opens at the first instant at or after its StartDate",
+                "cron(0 8 * * ? *)",
+                // 09:00 UTC, an hour after that day's own occurrence.
+                Some(1_893_488_400),
+                None,
+                // 08:00 UTC the next day, the first the floor admits.
+                &[1_893_571_200],
+            ),
+            (
+                "a StartDate behind the clock bounds nothing",
+                "rate(1 minute)",
+                Some(1_893_452_430),
+                None,
+                &[1_893_456_090, 1_893_456_150],
+            ),
+            (
+                "a recurring series stops before its EndDate",
+                "rate(1 minute)",
+                None,
+                Some(1_893_456_180),
+                &[1_893_456_090, 1_893_456_150],
+            ),
+            (
+                "an EndDate that admits no occurrence at all",
+                "rate(1 minute)",
+                None,
+                Some(1_893_456_040),
+                &[],
+            ),
+            (
+                // "EventBridge Scheduler ignores StartDate and EndDate for one-time
+                // schedules."
+                "a one-time instant ignores a StartDate after it",
+                "at(2030-01-01T01:00:00)",
+                Some(1_893_492_000),
+                None,
+                &[1_893_459_600],
+            ),
+            (
+                "a one-time instant ignores an EndDate before it",
+                "at(2030-01-01T01:00:00)",
+                None,
+                Some(1_893_456_090),
+                &[1_893_459_600],
+            ),
+        ];
+        for (case, expression, start, end, expected) in rows {
+            let record = record(expression, None, start, end, None);
+            let planned = planned(&record, now, expected.len().max(1));
+            let nominals: Vec<u64> = planned
+                .iter()
+                .map(|(nominal, _)| {
+                    nominal
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                })
+                .collect();
+            assert_eq!(
+                nominals,
+                expected.to_vec(),
+                "case {case:?}: expected the occurrences at {expected:?}, got {nominals:?}"
+            );
         }
     }
 

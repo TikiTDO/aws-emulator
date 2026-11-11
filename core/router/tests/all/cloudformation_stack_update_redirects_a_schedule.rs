@@ -24,14 +24,14 @@
 //! reports after an update; this one is about the DATA plane following an update.
 //!
 //! The rows differ along what the re-declaration changes: the target queue and the
-//! input together, the input alone (the instant and the target unchanged), the target
-//! alone (the input unchanged), the redirection run the other way round, and a
-//! re-declaration that disables the schedule, after which neither queue is handed
-//! anything.
+//! input together, the input alone (the target unchanged), the target alone (the
+//! input unchanged), the redirection run the other way round, and a re-declaration
+//! that disables the schedule, after which neither queue is handed anything.
 //!
-//! The WAIT before an occurrence is compressed onto this emulator's clock
-//! (the scheduler crate's `state::invocation`), so an instant a template states
-//! minutes ahead is served inside the span a client's poll loop watches for.
+//! Each occurrence is performed at the instant the declaration's `at(...)`
+//! expression names, so every declaration states a FRESH instant seconds ahead of
+//! the deploy that writes it: a one-time instant that has already been performed
+//! names no further occurrence, however the schedule is re-declared.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -51,25 +51,26 @@ const ACCOUNT_ID: &str = "000000000000";
 /// The group a schedule that names none lands in.
 const DEFAULT_GROUP: &str = "default";
 
-/// How far ahead of the deploy each declaration's one-time instant falls: the span a
-/// client writing such a template leaves itself, and far enough ahead that nothing has
-/// fired by the time the stack reports its terminal status.
-const FIRE_TIME_AHEAD: Duration = Duration::from_secs(120);
+/// How far ahead of the deploy each declaration's one-time instant falls: far enough
+/// ahead that nothing has fired by the time the stack reports its terminal status,
+/// and — since the occurrence is performed at the instant itself — close enough for
+/// one client's poll loop to watch it.
+const FIRE_TIME_AHEAD: Duration = Duration::from_secs(6);
 
 /// Long enough for a stack's own clock-owed span to come due, so a deploy reports its
 /// terminal status.
 const PAST_STACK_SPAN: Duration = Duration::from_millis(900);
 
-/// How long one delivery is waited for. Each declaration's instant is two minutes
-/// ahead, which this emulator serves in two seconds; the rest is room for the clock's
-/// tick and the invocation itself.
+/// How long one delivery is waited for: each declaration's instant is
+/// [`FIRE_TIME_AHEAD`] ahead, and the rest is room for the clock's tick and the
+/// invocation itself.
 const PATIENCE: Duration = Duration::from_secs(20);
 
 /// How long a queue the rule says is handed NOTHING is watched before the claim is
-/// believed: three times the wait this emulator serves for an instant
-/// [`FIRE_TIME_AHEAD`] ahead, so an occurrence it would have performed has come and
-/// gone.
-const QUIET: Duration = Duration::from_secs(6);
+/// believed: longer than the wait before the occurrence an instant
+/// [`FIRE_TIME_AHEAD`] ahead names, so an occurrence this emulator would have
+/// performed has come and gone.
+const QUIET: Duration = Duration::from_secs(10);
 
 /// How long a queue a redirection dropped is watched after the redirected delivery has
 /// already been observed: the same window the row with no delivery to wait for is held to
@@ -131,9 +132,6 @@ struct Declaration {
     input: &'static str,
     /// Its `State`.
     state: &'static str,
-    /// Whether this declaration states a NEW `at(...)` instant, or the one the
-    /// declaration before it stated.
-    fresh_instant: bool,
 }
 
 /// One row: the declaration a stack is created with, and the one it is updated to.
@@ -153,32 +151,28 @@ const ROWS: &[Row] = &[
             queue: Queue::A,
             input: r#"{"marker":"before-redirect"}"#,
             state: "ENABLED",
-            fresh_instant: true,
         },
         after: Declaration {
             queue: Queue::B,
             input: r#"{"marker":"after-redirect"}"#,
             state: "ENABLED",
-            fresh_instant: true,
         },
     },
     Row {
-        case: "only the input is re-declared, on the same instant and the same queue",
-        // The instant this row keeps is still minutes ahead on the schedule's own clock
-        // when the update lands — the wait before it is what this emulator compresses —
-        // so the occurrence it names is performed again, under the declaration that now
-        // states it. What the row pins is that re-declaration, not a count of occurrences.
+        case: "only the input is re-declared, on the same queue",
+        // The instant the re-declaration states is a fresh one: the occurrence the
+        // first declaration named has already been performed, and a one-time instant
+        // names no second occurrence. What the row pins is that the NEXT occurrence
+        // carries the input the declaration now states, on the queue it keeps.
         before: Declaration {
             queue: Queue::A,
             input: "first-body",
             state: "ENABLED",
-            fresh_instant: true,
         },
         after: Declaration {
             queue: Queue::A,
             input: "second-body",
             state: "ENABLED",
-            fresh_instant: false,
         },
     },
     Row {
@@ -187,13 +181,11 @@ const ROWS: &[Row] = &[
             queue: Queue::A,
             input: "one-body-two-queues",
             state: "ENABLED",
-            fresh_instant: true,
         },
         after: Declaration {
             queue: Queue::B,
             input: "one-body-two-queues",
             state: "ENABLED",
-            fresh_instant: true,
         },
     },
     Row {
@@ -202,13 +194,11 @@ const ROWS: &[Row] = &[
             queue: Queue::B,
             input: "from-b",
             state: "ENABLED",
-            fresh_instant: true,
         },
         after: Declaration {
             queue: Queue::A,
             input: "to-a",
             state: "ENABLED",
-            fresh_instant: true,
         },
     },
     Row {
@@ -217,13 +207,11 @@ const ROWS: &[Row] = &[
             queue: Queue::A,
             input: "last-delivery",
             state: "ENABLED",
-            fresh_instant: true,
         },
         after: Declaration {
             queue: Queue::B,
             input: "never-delivered",
             state: "DISABLED",
-            fresh_instant: true,
         },
     },
 ];
@@ -669,13 +657,10 @@ async fn a_stack_update_re_arms_the_schedule_it_re_declares() {
              got {untargeted:?}"
         );
 
-        // The re-declaration: a new instant where the row states one, so the row that
-        // changes only the input leaves the expression exactly as it was.
-        let after_instant = if row.after.fresh_instant {
-            at_expression_body(whole_seconds_ahead(FIRE_TIME_AHEAD))
-        } else {
-            instant.clone()
-        };
+        // The re-declaration states a FRESH instant: the occurrence the declaration
+        // before it named has been performed, and a one-time instant names no
+        // second occurrence.
+        let after_instant = at_expression_body(whole_seconds_ahead(FIRE_TIME_AHEAD));
         let described = deploy(
             &router,
             case,

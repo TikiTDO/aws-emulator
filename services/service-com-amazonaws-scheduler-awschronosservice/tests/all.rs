@@ -15,6 +15,8 @@
 mod flexible_time_window_messages;
 #[path = "all/list_tags_for_resource_bounds.rs"]
 mod list_tags_for_resource_bounds;
+#[path = "all/occurrence_timing.rs"]
+mod occurrence_timing;
 #[path = "all/reserved_schedule_group.rs"]
 mod reserved_schedule_group;
 #[path = "all/resource_tags.rs"]

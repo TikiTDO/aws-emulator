@@ -14,14 +14,15 @@
 //! nothing.
 //!
 //! The rows span the class rather than one recorded case: they differ along the
-//! FORM of the expression (a one-time instant, a rate, two cron expressions), along
+//! FORM of the expression (one-time instants, a rate, a cron expression), along
 //! the schedule's `State`, and along which boundary of the window bounds the series.
 //!
-//! The WAIT before an occurrence is compressed onto this emulator's clock
-//! ([`invocation::EMULATED_WAIT_PER_STATED_MINUTE`]), so a row asserts an
-//! invocation inside a span a test can wait out; what it asserts about the
-//! occurrence itself — how many there are, and the scheduled time the target is
-//! told — comes from the schedule's own expression.
+//! Every instant here is the schedule's OWN: an occurrence is performed at the
+//! instant its expression names and never before it, so a row states an expression
+//! whose occurrence falls seconds — or, for the minute-grained forms, a minute —
+//! ahead and waits that long for it. What the occurrence computation itself names,
+//! over the whole class of expressions, windows and zones, is asserted without a
+//! wait in `src/state/invocation.rs`'s own tests.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -35,28 +36,28 @@ use smithy_server_runtime::MultiServiceRouter;
 use crate::wire_harness::{account_id, call_in, encode_label};
 
 /// The region every request below is signed for.
-const REGION: &str = "eu-west-2";
+pub(crate) const REGION: &str = "eu-west-2";
 
 /// How long a row waits for an invocation it expects. The longest wait a row's
-/// expression states is five minutes, which this emulator serves in five seconds;
-/// the rest is room for the clock's tick and the delivery.
-const PATIENCE: Duration = Duration::from_secs(20);
+/// expression states is one minute (a `rate(1 minute)` series, a `cron` expression's
+/// next minute); the rest is room for the clock's tick and the delivery.
+const PATIENCE: Duration = Duration::from_secs(80);
 
 /// How long a row watches a target it expects NOTHING to reach, and how long a row
-/// watches for a SECOND message after the first: longer than the wait the same
-/// expression takes when it does invoke (five seconds at most, for the rows here),
-/// so an invocation this emulator would have performed has had its chance.
+/// watches for a SECOND message after the first: longer than the wait the row's own
+/// expression states before the occurrence it does perform, so an invocation this
+/// emulator would have performed has had its chance.
 const QUIET_WINDOW: Duration = Duration::from_secs(6);
 
 /// How long one poll of the target queue sleeps between reads.
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The scheduler service principal a schedule's execution role must trust.
 const SCHEDULER_PRINCIPAL: &str = "scheduler.amazonaws.com";
 
 /// The emulator: EventBridge Scheduler, the service its targets live in, and IAM,
 /// on ONE engine — the shape `core/router/src/lib.rs` mounts them in.
-fn emulator() -> MultiServiceRouter {
+pub(crate) fn emulator() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
@@ -77,7 +78,7 @@ fn emulator() -> MultiServiceRouter {
 }
 
 /// One restJson1 call against EventBridge Scheduler, through the shared harness.
-async fn scheduler(
+pub(crate) async fn scheduler(
     router: &MultiServiceRouter,
     method: &str,
     uri: &str,
@@ -87,7 +88,7 @@ async fn scheduler(
 }
 
 /// One awsJson1_0 call against Amazon SQS.
-async fn sqs(router: &MultiServiceRouter, operation: &str, body: &Value) -> (u16, Value) {
+pub(crate) async fn sqs(router: &MultiServiceRouter, operation: &str, body: &Value) -> (u16, Value) {
     let request = http::Request::builder()
         .method("POST")
         .uri("/")
@@ -146,7 +147,11 @@ async fn iam(router: &MultiServiceRouter, action: &str, params: &[(&str, &str)])
 }
 
 /// A queue called `name`: its url and the ARN a schedule names it by.
-async fn given_queue(router: &MultiServiceRouter, case: &str, name: &str) -> (String, String) {
+pub(crate) async fn given_queue(
+    router: &MultiServiceRouter,
+    case: &str,
+    name: &str,
+) -> (String, String) {
     let (status, created) = sqs(router, "CreateQueue", &json!({ "QueueName": name })).await;
     assert_eq!(
         status, 200,
@@ -176,7 +181,7 @@ async fn given_queue(router: &MultiServiceRouter, case: &str, name: &str) -> (St
 /// A role EventBridge Scheduler may assume, carrying the inline policy a schedule's
 /// SQS target needs — the pair AWS documents for an execution role: a trust policy
 /// for the scheduler service principal and `sqs:SendMessage` on the target queue.
-async fn given_execution_role(
+pub(crate) async fn given_execution_role(
     router: &MultiServiceRouter,
     case: &str,
     name: &str,
@@ -237,7 +242,7 @@ async fn given_execution_role(
 
 /// Every message waiting on the queue at `url`, left on it: a row that waits for a
 /// second message must still see the first.
-async fn peek(router: &MultiServiceRouter, url: &str) -> Vec<Value> {
+pub(crate) async fn peek(router: &MultiServiceRouter, url: &str) -> Vec<Value> {
     let (status, received) = sqs(
         router,
         "ReceiveMessage",
@@ -279,7 +284,7 @@ async fn bodies_once(
 
 /// `at` as an `at(...)` expression's body states it: a local date and time with no
 /// offset, which with no `ScheduleExpressionTimezone` is read in UTC.
-fn at_expression_body(at: SystemTime) -> String {
+pub(crate) fn at_expression_body(at: SystemTime) -> String {
     ::chrono::DateTime::<::chrono::Utc>::from(at)
         .format("%Y-%m-%dT%H:%M:%S")
         .to_string()
@@ -287,7 +292,7 @@ fn at_expression_body(at: SystemTime) -> String {
 
 /// A whole number of seconds from now, which is the resolution an `at(...)`
 /// expression states an instant at.
-fn seconds_from_now(seconds: u64) -> SystemTime {
+pub(crate) fn seconds_from_now(seconds: u64) -> SystemTime {
     let now = SystemTime::now();
     let whole = now
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -322,16 +327,16 @@ struct Row {
 
 const ROWS: &[Row] = &[
     Row {
-        case: "a one-time schedule four minutes ahead invokes its target once",
-        expression: || format!("at({})", at_expression_body(seconds_from_now(240))),
+        case: "a one-time schedule four seconds ahead invokes its target once",
+        expression: || format!("at({})", at_expression_body(seconds_from_now(4))),
         state: "ENABLED",
         start_in: None,
         end_in: None,
         expected: Expected::Exactly(1),
     },
     Row {
-        case: "a one-time schedule a minute ahead invokes its target once",
-        expression: || format!("at({})", at_expression_body(seconds_from_now(60))),
+        case: "a one-time schedule eight seconds ahead invokes its target once",
+        expression: || format!("at({})", at_expression_body(seconds_from_now(8))),
         state: "ENABLED",
         start_in: None,
         end_in: None,
@@ -343,7 +348,7 @@ const ROWS: &[Row] = &[
         state: "ENABLED",
         start_in: None,
         end_in: None,
-        expected: Expected::AtLeast(2),
+        expected: Expected::AtLeast(1),
     },
     Row {
         case: "a cron schedule naming every minute invokes its target",
@@ -354,16 +359,8 @@ const ROWS: &[Row] = &[
         expected: Expected::AtLeast(1),
     },
     Row {
-        case: "a cron schedule naming every fifth minute invokes its target",
-        expression: || "cron(0/5 * * * ? *)".to_string(),
-        state: "ENABLED",
-        start_in: None,
-        end_in: None,
-        expected: Expected::AtLeast(1),
-    },
-    Row {
         case: "a DISABLED schedule invokes nothing",
-        expression: || format!("at({})", at_expression_body(seconds_from_now(240))),
+        expression: || format!("at({})", at_expression_body(seconds_from_now(4))),
         state: "DISABLED",
         start_in: None,
         end_in: None,
@@ -486,7 +483,7 @@ async fn a_schedule_invokes_its_target_at_the_occurrences_it_names() {
 }
 
 /// One instant as the seconds-since-the-epoch a restJson1 timestamp member carries.
-fn epoch_seconds(at: SystemTime) -> f64 {
+pub(crate) fn epoch_seconds(at: SystemTime) -> f64 {
     at.duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
@@ -502,7 +499,7 @@ async fn an_invocation_carries_the_schedules_context_attributes() {
     let emulator = emulator();
     let (url, queue_arn) = given_queue(&emulator, case, "context-target").await;
     let role = given_execution_role(&emulator, case, "context-role", &queue_arn).await;
-    let occurrence = seconds_from_now(240);
+    let occurrence = seconds_from_now(4);
     let input = json!({
         "at": "<aws.scheduler.scheduled-time>",
         "execution": "<aws.scheduler.execution-id>",
@@ -579,7 +576,7 @@ async fn a_deleted_schedule_invokes_nothing() {
         "POST",
         "/schedules/deleted",
         Some(json!({
-            "ScheduleExpression": format!("at({})", at_expression_body(seconds_from_now(240))),
+            "ScheduleExpression": format!("at({})", at_expression_body(seconds_from_now(4))),
             "FlexibleTimeWindow": { "Mode": "OFF" },
             "Target": { "Arn": queue_arn, "RoleArn": role, "Input": "{\"marker\":\"gone\"}" },
         })),

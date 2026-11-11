@@ -20,9 +20,10 @@
 //! are the ones that span the forms a `ScheduleExpression` takes; this one is about
 //! an IaC-owned schedule being no different from an API-owned one.
 //!
-//! The WAIT before the occurrence is compressed onto this emulator's clock
-//! (`service::state::invocation`), so the one-time instant the template states
-//! minutes ahead is served inside the span a client's poll loop watches for.
+//! The occurrence is performed at the instant the template's `at(...)` expression
+//! names, so the template states an instant seconds ahead of the deploy — far enough
+//! that nothing has fired by the time the stack reports CREATE_COMPLETE, and close
+//! enough for one client's poll loop to watch it.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -42,10 +43,11 @@ const ACCOUNT_ID: &str = "000000000000";
 /// The group a schedule that names none lands in.
 const DEFAULT_GROUP: &str = "default";
 
-/// How far ahead of the deploy the template's one-time instant falls: the span a
-/// client writing such a template leaves itself, and far enough ahead that nothing
-/// could have fired by the time the stack completes.
-const FIRE_TIME_AHEAD: Duration = Duration::from_secs(240);
+/// How far ahead of the deploy the template's one-time instant falls: far enough
+/// ahead that nothing could have fired by the time the stack completes, and — since
+/// the occurrence is performed at the instant itself — close enough for one client's
+/// poll loop to watch it.
+const FIRE_TIME_AHEAD: Duration = Duration::from_secs(6);
 
 /// The body the schedule hands its target, which is the one assertion the delivery
 /// is judged by: `Target.Input` travels verbatim.
@@ -55,9 +57,8 @@ const MESSAGE_BODY: &str = r#"{"marker":"cfn-deployed-schedule"}"#;
 /// its terminal status and a delete has finished.
 const PAST_STACK_SPAN: Duration = Duration::from_millis(900);
 
-/// How long the delivery is waited for. The template's instant is four minutes
-/// ahead, which this emulator serves in four seconds; the rest is room for the
-/// clock's tick and the invocation.
+/// How long the delivery is waited for: the template's instant is [`FIRE_TIME_AHEAD`]
+/// ahead, and the rest is room for the clock's tick and the invocation.
 const PATIENCE: Duration = Duration::from_secs(20);
 
 /// How long one poll of the target queue sleeps between reads.

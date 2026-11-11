@@ -484,22 +484,21 @@ async fn a_group_whose_deletion_is_under_way_takes_no_write() {
         "expected the refusal to name the group, got {body}"
     );
 
-    // Past the due instant the group and the schedules it held are gone, and the
-    // two refusals stay what each operation reports: an update addressed into the
-    // group names the GROUP, while a read of the schedule names the SCHEDULE the
-    // request named — which is how a client tells a deleted group from a deleted
-    // schedule.
+    // Past the due instant the group and the schedules it held are gone, and every
+    // operation addressed into it reports the GROUP as missing: the group a request
+    // names is resolved before the schedule inside it, so a request into a group that
+    // no longer exists never names the schedule that group would have held.
     tokio::time::sleep(std::time::Duration::from_millis(900)).await;
     for (case, method, expected) in [
         (
             "GetSchedule",
             "GET",
-            "Schedule member does not exist.".to_string(),
+            format!("Schedule group {group} does not exist."),
         ),
         (
             "DeleteSchedule",
             "DELETE",
-            "Schedule member does not exist.".to_string(),
+            format!("Schedule group {group} does not exist."),
         ),
     ] {
         let (status, body) = call(

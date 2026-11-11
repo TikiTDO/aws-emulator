@@ -102,6 +102,30 @@ impl Occurrences {
         }
     }
 
+    /// The first occurrence AT or after `from`, or `None` when this expression names
+    /// no instant from there on.
+    ///
+    /// What a floor on the series asks for: a `rate(...)` series opens AT the floor
+    /// (its expression states an interval and no instant of its own), while an
+    /// `at(...)` instant and a `cron(...)` instant are the expression's own and are
+    /// only admitted from the floor on.
+    #[must_use]
+    pub fn next_at_or_after(&self, from: SystemTime) -> Option<SystemTime> {
+        match self {
+            Self::Once(at) => (*at >= from).then_some(*at),
+            Self::Rate(_) => Some(from),
+            Self::Cron(..) => {
+                // The shared grammar's own iterator is strictly after its argument,
+                // so an instant exactly AT the floor is admitted by probing from the
+                // tick before it.
+                let probe = from
+                    .checked_sub(Duration::from_nanos(1))
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                self.next_after(probe)
+            }
+        }
+    }
+
     /// Whether this expression names at most ONE occurrence, which is what an
     /// `at(...)` expression states: "one-time schedules that invoke a target once".
     #[must_use]

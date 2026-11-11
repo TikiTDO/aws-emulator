@@ -160,6 +160,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // deleted a second time.
         store.settle(::std::time::SystemTime::now());
 
+        // The GROUP named by the request is resolved first, the way every operation
+        // that addresses a schedule inside one resolves it: a request naming a group
+        // this account no longer holds reports THAT group as missing rather than the
+        // schedule, which is the resource the group would have held. A group still in
+        // `DELETING` does exist, so a schedule it has not yet lost is deleted from it
+        // as usual.
+        if !store.group_exists(&group_name) {
+            return Err(DeleteScheduleErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: crate::state::group_does_not_exist(&group_name),
+                },
+            )
+            .into());
+        }
+
         if store
             .schedules
             .remove(&(group_name.clone(), input.name.clone()))
