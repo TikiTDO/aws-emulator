@@ -180,16 +180,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .map_err(CreateDBClusterParameterGroupError::validation)?;
         // The model constrains neither member, so the rules their own documentation states
         // are enforced here: the name rule the API publishes for a cluster parameter group,
-        // and a family that names a DocumentDB engine version that exists (a family of
-        // another engine this front door serves is accepted — see
-        // `validate_parameter_group_family`).
+        // and a family that is one of the engine-version families this front door publishes
+        // — a group "can be applied only to a DB cluster running a database engine and
+        // engine version compatible with that … family", so a family no engine version
+        // belongs to is refused (see `crate::state::validate_parameter_group_family`).
         crate::state::validate_parameter_group_name(
             "DBClusterParameterGroupName",
             &input.db_cluster_parameter_group_name,
         )
         .map_err(CreateDBClusterParameterGroupError::invalid_parameter_value)?;
-        crate::state::validate_parameter_group_family(&input.db_parameter_group_family)
-            .map_err(CreateDBClusterParameterGroupError::invalid_parameter_value)?;
+        // The family is resolved against the static engine-version catalogue here and, for a
+        // family only a CUSTOM engine version of this account names, against the store below
+        // — so the refusal is given once every published engine version has been consulted.
+        let family_is_published =
+            crate::state::validate_parameter_group_family(&input.db_parameter_group_family);
         // Nothing caller-sized reaches the store unchecked: the family string and the
         // description are length-bounded and the tag list is count- and length-bounded
         // (see the "store bounds" paragraph in `src/state.rs`).
@@ -216,6 +220,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(crate::scaffolded::Scaffolded::not_implemented(Self::NAME));
         };
         let mut store = state.lock();
+
+        // A family the catalogue does not publish may still be one of the account's own: a
+        // custom engine version is an engine version this front door publishes, and it names
+        // the family RDS writes for it, so a group of that family is one a DB instance created
+        // on that version can be applied to.
+        if let Err(message) = family_is_published {
+            if !store.publishes_custom_parameter_group_family(
+                &region,
+                &input.db_parameter_group_family,
+            ) {
+                return Err(CreateDBClusterParameterGroupError::invalid_parameter_value(
+                    message,
+                ));
+            }
+        }
 
         // RDS is regional: only the region the request was signed for is in scope.
         let key = (region.clone(), name.clone());

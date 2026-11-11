@@ -199,7 +199,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 RemoveRoleFromDBClusterErrorModeled::InvalidDBClusterStateFault(
                     InvalidDBClusterStateFault {
                         message: Some(
-                            crate::state::MODIFY_DB_CLUSTER_INVALID_STATE_MESSAGE.to_string(),
+                            crate::state::db_cluster_not_available_for_modification_message(
+                                &cluster.status,
+                            ),
                         ),
                     },
                 )

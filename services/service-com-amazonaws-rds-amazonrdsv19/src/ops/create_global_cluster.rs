@@ -198,9 +198,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::request_region(ctx).map_err(CreateGlobalClusterError::validation)?;
         // "This parameter is stored as a lowercase string", so the identifier is folded
         // before it is stored, echoed or looked up — which is also what makes
-        // `DescribeGlobalClusters`'s case-insensitive lookup agree with this write. Its
-        // length and alphabet are the model's own constraints, already refused before this
-        // handler runs.
+        // `DescribeGlobalClusters`'s case-insensitive lookup agree with this write.
+        //
+        // The model's own `@pattern` for this member admits characters an Amazon RDS
+        // identifier does not (`.`, `:`, `_`, a trailing or doubled hyphen), so the rule the
+        // API publishes for an identifier is enforced here, with the one sentence pair this
+        // service family words an identifier refusal with — the same check
+        // `ModifyGlobalCluster` makes on the identifier it renames a global database to, so
+        // a name this create refuses cannot be reached by a rename either.
+        crate::state::check_identifier(
+            "GlobalClusterIdentifier",
+            &input.global_cluster_identifier,
+            crate::state::MAX_GLOBAL_CLUSTER_IDENTIFIER_LEN,
+        )
+        .map_err(CreateGlobalClusterError::invalid_parameter_value)?;
         let identifier = input.global_cluster_identifier.to_ascii_lowercase();
         // `Tags` publishes no bound of its own and every tag is STORED, so the list is
         // bounded before anything is resolved or stored, the same way this service bounds

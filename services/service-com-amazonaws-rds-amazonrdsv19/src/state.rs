@@ -94,19 +94,25 @@ use crate::ops::types::{
 // SHARED with the Amazon DocumentDB and Amazon Neptune models of the same front door —
 // this service serves their SDK clients' traffic too, since all three sign `rds` — so they
 // live once in `service_common::rds_cluster_parameters` and are re-exported here: a handler
-// reads them as `crate::state::<name>`.
+// reads them as `crate::state::<name>`. The family rule is this crate's own
+// (`validate_parameter_group_family` in `state::parameter_groups`), because the families
+// that exist are the ones this front door's engine-version catalogue publishes.
 pub use service_common::rds_cluster_parameters::{
     change_is_pending, change_is_pending_for, default_apply_method, default_apply_method_for,
     minimum_engine_version_in_family, not_a_valid_identifier_message,
-    parameter_has_pending_changes_message, parameter_source_filter,
+    parameter_cannot_be_modified_message, parameter_group_family_not_valid_message,
+    parameter_has_pending_changes_message, parameter_not_found_message, parameter_source_filter,
     published_parameter,
     published_parameters, spec_in_catalog,
-    validate_known_setting, validate_parameter_group_family, validate_parameter_group_name,
+    validate_apply_method,
+    validate_known_setting, validate_parameter_group_name,
     validate_parameter_name, validate_parameter_setting, validate_setting_in_catalog,
     ClusterParameterSpec,
     ParameterSourceFilter, APPLY_METHOD_IMMEDIATE, APPLY_METHOD_PENDING_REBOOT,
     APPLY_TYPE_DYNAMIC, APPLY_TYPE_STATIC, DOCDB_CLUSTER_PARAMETERS,
-    DOCDB_PARAMETER_GROUP_FAMILIES, MAX_PARAMETERS_PER_MODIFY, MAX_PARAMETER_GROUP_NAME_LEN,
+    DOCDB_PARAMETER_GROUP_FAMILIES,
+    IMMEDIATE_APPLY_METHOD_FOR_A_STATIC_PARAMETER_MESSAGE,
+    MAX_PARAMETERS_PER_MODIFY, MAX_PARAMETER_GROUP_NAME_LEN,
     PARAMETER_SOURCE_ENGINE_DEFAULT, PARAMETER_SOURCE_SYSTEM, PARAMETER_SOURCE_USER,
 };
 
@@ -152,6 +158,9 @@ mod option_groups;
 mod parameter_groups;
 mod shard_groups;
 mod snapshots;
+// The Amazon SNS topic an event subscription delivers to, resolved against the service that
+// owns topics.
+mod sns_topics;
 
 pub use associated_roles::*;
 pub use certificates::*;
@@ -163,6 +172,7 @@ pub use option_groups::*;
 pub use parameter_groups::*;
 pub use shard_groups::*;
 pub use snapshots::*;
+pub use sns_topics::*;
 
 pub use blue_green::{
     blue_green_deployment_identifier_of, blue_green_deployment_not_found_message,
@@ -764,6 +774,24 @@ impl ComAmazonawsRdsAmazonrdsv19State {
     /// [`CUSTOM_DB_ENGINE_VERSION_QUOTA_PER_REGION`] however many regions the store holds.
     pub fn custom_db_engine_versions_in(&self, region: &str) -> Vec<&CustomDbEngineVersionRecord> {
         range_in(&self.custom_db_engine_versions, region)
+    }
+
+    /// Whether `family` is the DB parameter group family of a CUSTOM engine version this
+    /// account stored in `region`.
+    ///
+    /// A CEV is an engine version this front door publishes too — `DescribeDBEngineVersions`
+    /// reports it beside the catalogue, carrying the family RDS writes for it — and a DB
+    /// instance created on one takes the default parameter groups of THAT family. So a family
+    /// a stored CEV names is a family that exists, which is the half of
+    /// [`validate_parameter_group_family`]'s rule a pure function over the static catalogue
+    /// cannot see: the create of a parameter group consults this before refusing a family.
+    ///
+    /// An ordered range over the region's own records, so the work is bounded by
+    /// [`CUSTOM_DB_ENGINE_VERSION_QUOTA_PER_REGION`] however many regions the store holds.
+    pub fn publishes_custom_parameter_group_family(&self, region: &str, family: &str) -> bool {
+        self.custom_db_engine_versions_in(region)
+            .into_iter()
+            .any(|cev| cev.parameter_group_family.eq_ignore_ascii_case(family))
     }
 
     /// The custom engine version `(engine, engine_version)` names in `region`, or `None`
@@ -1728,19 +1756,19 @@ pub fn db_cluster_not_found_colon_message(named: &str) -> String {
     format!("DBCluster not found: {named}")
 }
 
-/// The message `ModifyDBCluster` answers an `InvalidDBClusterStateFault` with: the one
-/// FIXED sentence Amazon RDS words for a modification it will not take because the cluster
-/// is not in a state the operation can be performed in — the case a second modification
-/// arriving while the first is still applying lands in.
+/// The message `ModifyDBCluster` answers an `InvalidDBClusterStateFault` with: the sentence
+/// Amazon RDS words for a modification it will not take because the cluster is not in a state
+/// the operation can be performed in — the case a second modification arriving while the
+/// first is still applying lands in, and the one a call that arrives before the cluster has
+/// finished coming up lands in.
 ///
-/// Unlike the not-found wordings above it has NO variable parts: RDS interpolates neither
-/// the cluster identifier the request carried nor the status the cluster is in, and its
-/// retry hint is the part that tells the caller the refusal is transient and the call can
-/// be made again. So it is a constant rather than a `format!` over the request and the
-/// store, and a caller matching on the text to tell a concurrency collision from a
-/// different refusal of the same fault sees exactly what the real service sends.
-pub const MODIFY_DB_CLUSTER_INVALID_STATE_MESSAGE: &str =
-    "This cluster could not be modified. Please try again";
+/// It names the STATUS the cluster is in, which is what tells the caller whether waiting will
+/// clear the refusal, and nothing else: RDS interpolates neither the cluster identifier the
+/// request carried nor the modification it asked for. So the status, read from the stored
+/// record, is the one variable part.
+pub fn db_cluster_not_available_for_modification_message(status: &str) -> String {
+    format!("DB cluster isn't available for modification with status {status}.")
+}
 
 /// The message `PromoteReadReplicaDBCluster` answers an `InvalidDBClusterStateFault` with for
 /// a cluster that is no read replica at all: one created without a replication source, or one
@@ -2292,6 +2320,10 @@ impl GlobalClusterRecord {
     /// endpoint of an Amazon Aurora global database"). It is a function of the stored
     /// identifier and minted host rather than stored text, so it cannot drift from the
     /// record; the label itself is server-assigned, as the DB instance endpoint's is.
+    ///
+    /// A global database AWS assigns one the moment it exists, member or no member: the name
+    /// is the global database's own and the primary it points at is whichever cluster joins
+    /// it, so it is reported from the create onwards.
     pub fn endpoint(&self) -> String {
         format!(
             "{}.global-{}.global.rds.amazonaws.com",
@@ -3535,6 +3567,18 @@ fn identifier_wording(member: &str) -> IdentifierWording {
     }
 }
 
+/// The length bound a GLOBAL CLUSTER identifier is held to, at every member that names one.
+///
+/// A global database has ONE identifier rule, and the member that renames it is where the API
+/// writes that rule down: `ModifyGlobalClusterMessage$NewGlobalClusterIdentifier` states "Must
+/// contain from 1 to 63 letters, numbers, or hyphens. The first character must be a letter.
+/// Can't end with a hyphen or contain two consecutive hyphens." The create's own member
+/// documents only that the value "is stored as a lowercase string", and the model's `@length`
+/// on it (1..255) is wider than the rule the API publishes — exactly as its `@pattern` is
+/// wider than the alphabet an identifier may use — so both members are held to the one
+/// published rule, and an identifier a create refuses cannot be reached by a rename either.
+pub const MAX_GLOBAL_CLUSTER_IDENTIFIER_LEN: usize = 63;
+
 /// Refuse an identifier that breaks the constraints its member documents.
 ///
 /// `DBInstanceIdentifier` and `DBSnapshotIdentifier` share one rule, differing only
@@ -3979,12 +4023,10 @@ pub fn check_subscription_name(name: &str) -> Result<(), String> {
 /// "`SnsTopicArn` — The Amazon Resource Name (ARN) of the SNS topic created for event
 /// notification" takes.
 ///
-/// Only the FORM is checked. Whether a topic of that ARN exists is Amazon SNS's state,
-/// which this service does not hold, so a well-formed ARN is accepted rather than
-/// answered with the modelled `SNSTopicArnNotFoundFault` — this service cannot tell an
-/// existing topic from a missing one, and claiming either would be a fabrication. A value
-/// that is not an SNS topic ARN names no topic whatever SNS holds, which is what the
-/// modelled `SNSInvalidTopicFault` says.
+/// Only the FORM is checked here. Whether a topic of that ARN exists is Amazon SNS's state,
+/// which is asked of that service itself ([`sns_topic_is_absent`], the modelled
+/// `SNSTopicArnNotFoundFault`). A value that is not an SNS topic ARN names no topic whatever
+/// SNS holds, which is what the modelled `SNSInvalidTopicFault` says.
 pub fn check_sns_topic_arn(arn: &str) -> Result<(), String> {
     let malformed = || {
         format!(

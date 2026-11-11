@@ -56,12 +56,18 @@ const INVALID_PARAMETER_VALUE: &str = "InvalidParameterValue";
 /// same published set.
 pub(crate) const DATA_TYPES: [&str; 4] = ["boolean", "float", "integer", "string"];
 
-/// The parameters whose default the ENGINE computes at startup instead of publishing one, and
-/// which therefore report no `ParameterValue` at all: MySQL's `back_log` is autosized from
-/// the permitted connection count ("Default Value: -1 (autosized)"), so there is no published
-/// value for the report to carry. Every other published parameter must report the value its
-/// engine runs with; this is the NAMED exception, not a licence to omit one.
-const AUTOSIZED: [&str; 1] = ["back_log"];
+/// The parameters whose value the engine does not PUBLISH, and which therefore report no
+/// `ParameterValue` at all: MySQL's `back_log` is autosized from the permitted connection
+/// count ("Default Value: -1 (autosized)"), and `basedir` is the installation directory the
+/// managed service owns and reports unset. Every other published parameter must report the
+/// value its engine runs with; these are the NAMED exceptions, not a licence to omit one.
+const AUTOSIZED: [&str; 2] = ["back_log", "basedir"];
+
+/// The parameters the engine bounds by NOTHING it publishes, and which therefore report no
+/// `AllowedValues` at all: `basedir` is a path the managed service owns, so there is no
+/// enumeration and no range for the report to carry. Every other published parameter must
+/// report the values it admits; this is the NAMED exception.
+const UNBOUNDED: [&str; 1] = ["basedir"];
 
 /// One reported `<Parameter>`.
 ///
@@ -244,7 +250,8 @@ async fn every_published_family_reports_its_engines_defaults() {
                 parameter
                     .allowed_values
                     .as_ref()
-                    .is_some_and(|values| !values.is_empty()),
+                    .is_some_and(|values| !values.is_empty())
+                    || UNBOUNDED.contains(&name.as_str()),
                 "case {case:?}: {name} must report the values it admits, got {:?}",
                 parameter.allowed_values
             );

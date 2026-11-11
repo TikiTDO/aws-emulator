@@ -116,3 +116,20 @@ Replay cluster details — expected status 400/404 with an $.ErrorResponse body,
 1. git clone the repo and boot the emulator built from it.
 2. Replay the wire corpus (trace set simparity-wire-aws-v1).
 3. Re-run rds-cluster-parameter-group-mutation-envelopes#task#3 and every step in trace_ids; each sends the invalid request and the replay compares status and $.ErrorResponse against the recording.
+
+## Resolution
+Eight of the nine causes are fixed: each of those requests is now refused with the status, the
+error code and the sentence the recording carries, built from the request and the stored
+record. Cause 2 (ModifyDBClusterParameterGroup naming a parameter the family does not publish)
+is DECLINED for a family whose parameter vocabulary this emulator only SAMPLES — the
+MySQL- and PostgreSQL-compatible families, whose parameters are the open-source engines' own
+system variables, as both published catalogs state in their module headers. Refusing a name
+against a sample rejects parameters AWS accepts (a stack declaring `time_zone` on an
+aurora-mysql cluster group proved it), and completeness there would mean publishing hundreds
+of records per family that nobody has in hand. The rule itself is implemented and enforced for
+every family whose vocabulary IS complete — the service-managed Amazon DocumentDB and Amazon
+Neptune lists this emulator carries — in one place both the modify and the reset read
+(`crate::state::validate_cluster_parameter_name`, gated on
+`crate::state::publishes_a_complete_vocabulary`). So the replay still reports that one cause's
+two keys failing, and it will keep doing so until those families' vocabularies are published
+in full.

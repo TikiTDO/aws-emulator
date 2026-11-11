@@ -246,6 +246,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // carrying one out-of-range value leaves the group exactly as it was.
             crate::state::validate_cluster_parameter_setting(&family, name, value)
                 .map_err(ModifyDBClusterParameterGroupError::invalid_parameter_value)?;
+            // A STATIC parameter cannot be applied immediately — "changes to static
+            // parameters require a reboot or maintenance window before the change can take
+            // effect" — so an `immediate` apply method named for one is a combination this
+            // request cannot have, refused before anything is written
+            // (`crate::state::validate_apply_method`).
+            crate::state::validate_apply_method(
+                crate::state::published_cluster_parameter_at_any_level(&family, name)
+                    .map(|spec| crate::state::published_spec_for_family(&family, spec))
+                    .as_ref(),
+                parameter.apply_method.as_deref(),
+            )
+            .map_err(ModifyDBClusterParameterGroupError::invalid_parameter_combination)?;
             let apply_method = match parameter.apply_method.as_deref() {
                 // The model types `ApplyMethod` as an enum, so a value outside
                 // `immediate | pending-reboot` is already refused at the boundary before
@@ -253,10 +265,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 Some(asked) => asked.to_string(),
                 // With no method asked for, the change gets the one its parameter's apply
                 // type implies: a dynamic parameter is applied immediately, a static one
-                // waits for the reboot (`crate::state::default_apply_method` carries the
-                // documented rule). Defaulting a dynamic change to the reboot would leave
-                // the group pending on a change the engine already applied.
-                None => crate::state::default_apply_method(&family, name).to_string(),
+                // waits for the reboot
+                // (`crate::state::cluster_parameter_default_apply_method` carries the
+                // documented rule, read over the vocabulary a cluster group of this family
+                // carries). Defaulting a dynamic change to the reboot would leave the group
+                // pending on a change the engine already applied.
+                None => crate::state::cluster_parameter_default_apply_method(&family, name)
+                    .to_string(),
             };
             settings.push((
                 name.to_string(),

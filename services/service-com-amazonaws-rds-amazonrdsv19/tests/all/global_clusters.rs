@@ -111,9 +111,13 @@ const GLOBAL_CLUSTER_CASES: &[GlobalClusterCase] = &[
         deletion_protection: true,
     },
     GlobalClusterCase {
-        case: "aurora-postgresql, bare major version, dotted identifier",
-        identifier: "emu.global.pg16",
-        stored_identifier: "emu.global.pg16",
+        case: "aurora-postgresql, bare major version, identifier at its published alphabet",
+        // An Amazon RDS identifier is letters, digits and hyphens: the `.` the model's own
+        // `@pattern` would admit is not one an identifier may carry, and a create naming one
+        // is refused (`crate::state::check_identifier`), so the row that reads a global
+        // cluster back carries a hyphenated identifier.
+        identifier: "emu-global-pg16",
+        stored_identifier: "emu-global-pg16",
         engine: "aurora-postgresql",
         requested_version: Some("16"),
         engine_version: "16.6",

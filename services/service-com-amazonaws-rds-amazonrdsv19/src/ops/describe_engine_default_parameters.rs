@@ -483,6 +483,20 @@ pub(crate) fn family_version(family: &str) -> Option<&str> {
 /// is served, so the version requirement does not apply to these three.
 const VERSIONLESS_FAMILY_ENGINES: [&str; 3] = ["db2-ae", "db2-ce", "db2-se"];
 
+/// Whether `family` is one of the families whose name carries no version
+/// ([`VERSIONLESS_FAMILY_ENGINES`]), compared without case the way every published name of
+/// this service is.
+///
+/// `pub(crate)` because the create that STORES a parameter group resolves a family against
+/// the same two published sources this module reads — the engine-version catalogue's families
+/// and these three — so the report and the create cannot disagree about what a family is
+/// (`crate::state::validate_parameter_group_family`).
+pub(crate) fn versionless_family(family: &str) -> bool {
+    VERSIONLESS_FAMILY_ENGINES
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(family))
+}
+
 /// One parameter of the catalog below, so each table reads as a table.
 ///
 /// Columns, in order: parameter name, apply type, data type, allowed values, default
@@ -539,15 +553,19 @@ const MYSQL_CHARACTER_SETS: &str = "big5,dec8,cp850,hp8,koi8r,latin1,latin2,swe7
 /// instance that does not exist at the time of this call.
 ///
 /// It is not AWS's whole list — RDS publishes hundreds of parameters per family, and that
-/// list moves with every engine release. It does carry the HEAD of that list unbroken: the
-/// parameters AWS publishes ahead of `binlog_stmt_cache_size` in name order, so a caller
-/// reading the first page of this engine's defaults reads the parameters AWS reports there
-/// rather than a sample taken from the middle of the list. The managed engine publishes no
-/// host-level startup variable (the base directory, the bind address, the administrative
-/// interface), so none of those appears in it. Past the head, what a caller can rely on is
-/// that a family this service serves reports its engine's parameters with the metadata
-/// above, each sourced `engine-default`, in parameter-name order, filtered and paginated as
-/// this operation documents.
+/// list moves with every engine release. What it is is a SAMPLE drawn from the head of that
+/// list in name order — the parameters AWS publishes before `binlog_stmt_cache_size`, so a
+/// caller reading the first page of this engine's defaults reads parameters AWS reports there
+/// rather than ones taken from the middle of the list — followed by the widely-set parameters
+/// past it. It is NOT a complete prefix of AWS's list: a name in that range this table does
+/// not carry is a parameter this emulator does not publish, not one the engine lacks. Past the
+/// head, what a caller can rely on is that a family this service serves reports its engine's
+/// parameters with the metadata above, each sourced `engine-default`, in parameter-name order,
+/// filtered and paginated as this operation documents.
+///
+/// A parameter the managed engine PROTECTS is published like any other, with
+/// `is_modifiable` false: `basedir` is one, and a request that tries to set one is refused
+/// (`service_common::rds_cluster_parameters::validate_known_setting`) rather than stored.
 ///
 /// A parameter the engine AUTOSIZES — one whose default it computes at startup rather than
 /// publishing — carries an empty `default_value` and reports no `ParameterValue` at all,
@@ -651,6 +669,23 @@ pub(crate) const MYSQL_PARAMETERS: &[crate::state::ClusterParameterSpec] = &[
         true,
         "",
         "The number of outstanding connection requests the server can have.",
+    ),
+    parameter(
+        "basedir",
+        crate::state::APPLY_TYPE_STATIC,
+        "string",
+        // The engine publishes neither an enumeration nor a range for the installation
+        // directory, and no default for it either: the managed service owns the path and
+        // reports the parameter with its value unset, which is what an empty column here
+        // means (see [`super::super::state::engine_default_parameter_to_wire`]).
+        "",
+        "",
+        // The server's own installation directory is the managed service's, so the engine
+        // does not let a caller modify it — which is why a request that tries is refused
+        // rather than stored.
+        false,
+        "",
+        "The MySQL installation base directory.",
     ),
     parameter(
         "big_tables",

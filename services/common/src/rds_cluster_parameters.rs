@@ -146,7 +146,15 @@ impl ClusterParameterSpec {
     /// [`Self::data_type`] says: a comma-separated enumeration is matched exactly, and a
     /// `<low>-<high>` range ([`Self::range`]) is parsed as the numeric type and
     /// bounds-checked inclusively.
+    ///
+    /// A parameter the engine publishes NO allowed values for admits every value: the empty
+    /// column is how a catalog writes "the engine publishes none" — a parameter whose value is
+    /// a free-form string, an ARN among them, is bounded by nothing the API publishes — and
+    /// the member is reported as absent rather than empty for the same reason.
     pub fn admits(&self, value: &str) -> bool {
+        if self.allowed_values.is_empty() {
+            return true;
+        }
         if self.allowed_values.contains(',') {
             return self
                 .allowed_values
@@ -467,7 +475,10 @@ pub fn validate_setting_in_catalog(
 /// `Err` carries the message to answer with, built from the request — the submitted value,
 /// the values that parameter publishes and the parameter the caller named, in the wording
 /// Amazon RDS answers a value outside a parameter's published domain with — so the caller
-/// can fix the request from the text alone.
+/// can fix the request from the text alone. A parameter the engine PROTECTS is refused
+/// before its value is looked at, because no value of it can be set:
+/// [`parameter_cannot_be_modified_message`] is that refusal, and it names the parameter
+/// alone.
 ///
 /// There are TWO such wordings, and which one a refusal carries is decided by the FORM of
 /// the domain the value fell outside ([`ClusterParameterSpec::publishes_a_range`]): a value
@@ -485,9 +496,7 @@ pub fn validate_known_setting(
         return Ok(());
     };
     if !spec.is_modifiable {
-        return Err(format!(
-            "Invalid value '{value}' for parameter '{name}': the parameter is not modifiable"
-        ));
+        return Err(parameter_cannot_be_modified_message(name));
     }
     if !spec.admits(value) {
         return Err(if spec.publishes_a_range() {
@@ -504,6 +513,51 @@ pub fn validate_known_setting(
     }
     Ok(())
 }
+
+/// How this front door refuses a request that would SET a parameter the engine does not let
+/// a caller modify: it states that the parameter cannot be modified and names it, and says
+/// nothing about the value the request carried or about the group it addressed.
+///
+/// Everything but the name is fixed text, and the name is the one the request carried,
+/// verbatim. The caller answers it with the Query API's `InvalidParameterValue`.
+pub fn parameter_cannot_be_modified_message(name: &str) -> String {
+    format!("The parameter {name} cannot be modified.")
+}
+
+/// Refuse an apply method a parameter cannot take: [`APPLY_METHOD_IMMEDIATE`] for a parameter
+/// whose published apply type is [`APPLY_TYPE_STATIC`].
+///
+/// "Changes to static parameters require a reboot or maintenance window before the change can
+/// take effect" (`ModifyDBClusterParameterGroup`'s own documentation), so there is no way to
+/// apply such a change immediately: the Amazon RDS User Guide states the same rule from the
+/// method's side — the `immediate` apply method can be used with dynamic parameters only — and
+/// a request that asks for it anyway is refused rather than stored under a method the engine
+/// could not honour.
+///
+/// A parameter whose apply type this emulator publishes nothing for cannot be held to the
+/// rule: nothing is known about whether applying it needs a reboot, so the method the caller
+/// asked for stands.
+///
+/// `Err` carries the message to answer with, which the caller answers with the Query API's
+/// `InvalidParameterCombination`: the method and the parameter's apply type are two request
+/// values that cannot hold together.
+pub fn validate_apply_method(
+    spec: Option<&ClusterParameterSpec>,
+    apply_method: Option<&str>,
+) -> Result<(), String> {
+    let immediate = apply_method == Some(APPLY_METHOD_IMMEDIATE);
+    if immediate && spec.is_some_and(|spec| spec.apply_type == APPLY_TYPE_STATIC) {
+        return Err(IMMEDIATE_APPLY_METHOD_FOR_A_STATIC_PARAMETER_MESSAGE.to_string());
+    }
+    Ok(())
+}
+
+/// How this front door refuses a change that asks for a static parameter to be applied
+/// immediately ([`validate_apply_method`]): ONE fixed sentence, which is why it is a constant
+/// — it names neither the parameter nor the group, so the same text answers every such
+/// request.
+pub const IMMEDIATE_APPLY_METHOD_FOR_A_STATIC_PARAMETER_MESSAGE: &str =
+    "cannot use immediate apply method for static parameter";
 
 /// Refuse the name of a parameter a reset names that its family does not publish; see
 /// [`validate_parameter_setting`], whose value half does not apply to a reset.

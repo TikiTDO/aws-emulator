@@ -177,10 +177,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .map_err(ModifyEventSubscriptionError::invalid_parameter_value)?;
         // A value that is not an SNS topic ARN names no topic at all, which is the
         // modelled `SNSInvalidTopicFault` — the same resolution `CreateEventSubscription`
-        // gives the topic it stores. Whether a topic of a well-formed ARN exists is
-        // Amazon SNS's state, which this service does not hold, so the modelled
-        // `SNSTopicArnNotFoundFault` and `SNSNoAuthorizationFault` are not raised rather
-        // than claimed about a topic this service cannot see.
+        // gives the topic it stores. A well-formed ARN that names no topic Amazon SNS holds
+        // is the modelled `SNSTopicArnNotFoundFault`, for the same reason the create answers
+        // it: the topic is the subscription's delivery target, so moving a subscription onto
+        // one that does not exist would leave it unable to deliver. The topic is Amazon
+        // SNS's resource, so the question is put to that service, and the refusal is given
+        // only where it answered.
         if let Some(sns_topic_arn) = &input.sns_topic_arn {
             if let Err(message) = crate::state::check_sns_topic_arn(sns_topic_arn) {
                 return Err(ModifyEventSubscriptionErrorModeled::SNSInvalidTopicFault(
@@ -189,6 +191,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     },
                 )
                 .into());
+            }
+            if crate::state::sns_topic_is_absent(ctx, &region, sns_topic_arn).await {
+                return Err(
+                    ModifyEventSubscriptionErrorModeled::SNSTopicArnNotFoundFault(
+                        SNSTopicArnNotFoundFault {
+                            message: Some(crate::state::sns_topic_not_found_message(
+                                sns_topic_arn,
+                            )),
+                        },
+                    )
+                    .into(),
+                );
             }
         }
         if let Some(source_type) = &input.source_type {

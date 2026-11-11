@@ -481,14 +481,15 @@ struct BoundsCase<'a> {
     admitted: bool,
 }
 
-/// Nothing caller-sized reaches the store unchecked: a create is refused when the family
-/// string or the description is past the free-form bound, or the tag list past AWS's
-/// tagging limits, and the refusal stores nothing.
+/// Nothing caller-sized reaches the store unchecked: a create is refused when the
+/// description is past the free-form bound, or the tag list past AWS's tagging limits, and
+/// the refusal stores nothing.
 #[tokio::test]
 async fn a_create_refuses_caller_sized_values_the_store_will_not_hold() {
     let router = emulator();
-    let longest_family = "a".repeat(MAX_FREE_FORM_LEN);
-    let too_long_family = "a".repeat(MAX_FREE_FORM_LEN + 1);
+    // The family is no longer a caller-sized value: it has to be one of the published
+    // engine-version families, so the free-form bound is driven through `Description`, the
+    // other stored string this create carries.
     let longest_description = "d".repeat(MAX_FREE_FORM_LEN);
     let too_long_description = "d".repeat(MAX_FREE_FORM_LEN + 1);
     let longest_key = "k".repeat(MAX_TAG_KEY_LEN);
@@ -511,15 +512,6 @@ async fn a_create_refuses_caller_sized_values_the_store_will_not_hold() {
     }
 
     let rows = [
-        BoundsCase {
-            family: &longest_family,
-            ..admitted("the longest family string", "bounds-a")
-        },
-        BoundsCase {
-            family: &too_long_family,
-            admitted: false,
-            ..admitted("one character past the family bound", "bounds-b")
-        },
         BoundsCase {
             description: &longest_description,
             ..admitted("the longest description", "bounds-c")

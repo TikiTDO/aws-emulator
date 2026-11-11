@@ -221,6 +221,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         }
+        // A well-formed ARN that names no topic Amazon SNS holds is the modelled
+        // `SNSTopicArnNotFoundFault` ("The SNS topic ARN does not exist"): the topic is the
+        // subscription's delivery target, so a subscription against one that does not exist
+        // could never deliver an event. The topic is Amazon SNS's resource, so the question
+        // is put to THAT service (`crate::state::sns_topic_is_absent`), and the refusal is
+        // given only where it answered.
+        if crate::state::sns_topic_is_absent(ctx, &region, &input.sns_topic_arn).await {
+            return Err(
+                CreateEventSubscriptionErrorModeled::SNSTopicArnNotFoundFault(
+                    SNSTopicArnNotFoundFault {
+                        message: Some(crate::state::sns_topic_not_found_message(
+                            &input.sns_topic_arn,
+                        )),
+                    },
+                )
+                .into(),
+            );
+        }
         let source_type = input.source_type;
         if let Some(source_type) = &source_type {
             crate::state::check_event_subscription_source_type(source_type)

@@ -7,12 +7,10 @@
 //! The rule under test: `ModifyDBCluster` refuses a cluster that is not in a state the
 //! operation can be performed in with `InvalidDBClusterStateFault` (HTTP 400, the
 //! `awsQueryError` code `InvalidDBClusterStateFault` —
-//! `smithy_query(query="operation", operation="ModifyDBCluster")`) carrying ONE fixed
-//! sentence, into which nothing from the request or from the store is interpolated: not the
-//! `DBClusterIdentifier` the request carried and not the status the cluster is in. So a
-//! caller matching on the text to tell a concurrency collision from another refusal of the
-//! same fault sees the same string every time, including the retry hint that says the call
-//! can be made again.
+//! `smithy_query(query="operation", operation="ModifyDBCluster")`) carrying the sentence
+//! that names the STATUS the cluster is in — the one thing that says whether waiting will
+//! clear the refusal — and nothing else from the request or the store: not the
+//! `DBClusterIdentifier` the request carried, and not the settings it asked to change.
 //!
 //! The table spans what the rule generalises over: WHICH status blocks the modification
 //! (one still coming up, one applying another modification, one whose stop is running, one
@@ -26,10 +24,10 @@
 //! assertions read the XML the emulator itself answered with.
 
 use service_com_amazonaws_rds_amazonrdsv19::state::{
-    db_cluster_identifier_max_len, DB_CLUSTER_STATUS_AVAILABLE, DB_CLUSTER_STATUS_CREATING,
-    DB_CLUSTER_STATUS_DELETING, DB_CLUSTER_STATUS_FAILING_OVER, DB_CLUSTER_STATUS_MODIFYING,
-    DB_CLUSTER_STATUS_STOPPED, DB_CLUSTER_STATUS_STOPPING,
-    MIN_FAILOVER_DB_CLUSTER_INSTANCES, MODIFY_DB_CLUSTER_INVALID_STATE_MESSAGE,
+    db_cluster_identifier_max_len, db_cluster_not_available_for_modification_message,
+    DB_CLUSTER_STATUS_AVAILABLE, DB_CLUSTER_STATUS_CREATING, DB_CLUSTER_STATUS_DELETING,
+    DB_CLUSTER_STATUS_FAILING_OVER, DB_CLUSTER_STATUS_MODIFYING, DB_CLUSTER_STATUS_STOPPED,
+    DB_CLUSTER_STATUS_STOPPING, MIN_FAILOVER_DB_CLUSTER_INSTANCES,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -385,10 +383,10 @@ async fn a_modification_of_a_cluster_in_a_blocking_state_is_refused_with_one_fix
             "InvalidDBClusterStateFault",
         );
         let message = text(&refused, "Message");
+        let expected = db_cluster_not_available_for_modification_message(row.blocked.status());
         assert_eq!(
-            message, MODIFY_DB_CLUSTER_INVALID_STATE_MESSAGE,
-            "case {case:?}: expected the one fixed wording \
-             {MODIFY_DB_CLUSTER_INVALID_STATE_MESSAGE:?}, got {message:?}"
+            message, expected,
+            "case {case:?}: expected the wording {expected:?}, got {message:?}"
         );
         let folded = row.identifier.to_ascii_lowercase();
         assert!(
@@ -397,9 +395,8 @@ async fn a_modification_of_a_cluster_in_a_blocking_state_is_refused_with_one_fix
              {message:?}"
         );
         assert!(
-            !message.contains(row.blocked.status()),
-            "case {case:?}: the refusal must not interpolate the cluster status {:?}, got \
-             {message:?}",
+            message.contains(row.blocked.status()),
+            "case {case:?}: the refusal must name the cluster status {:?}, got {message:?}",
             row.blocked.status()
         );
 

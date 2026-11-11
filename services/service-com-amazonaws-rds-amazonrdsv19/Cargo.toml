@@ -102,6 +102,12 @@ hex = { workspace = true }
 # recorded through Amazon S3's own store on the same engine (`src/state/export_objects.rs`),
 # so a bucket this service writes to is a bucket that service holds.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
+# An event subscription's delivery target is an Amazon SNS topic, and a subscription is
+# refused when that topic does not exist, so the topic is resolved against the service that
+# OWNS topics: this is the Amazon SNS client that question goes out over the in-process
+# callback with (`src/state/sns_topics.rs`), exactly as the EC2 client above resolves a
+# subnet. Only the generated client is needed — the emulator supplies the transport.
+aws-sdk-sns = { version = "1", default-features = false }
 # The export writes each table as the Apache Parquet file Amazon RDS exports a snapshot as
 # ("the data is exported in Apache Parquet format", Exporting DB snapshot data to Amazon S3):
 # `parquet` is the Apache implementation of that format, used through its low-level row-group
@@ -153,6 +159,10 @@ service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 # emulator, read back through Secrets Manager's own operations.
 service-com-amazonaws-secretsmanager-secretsmanager = { workspace = true }
 service-com-amazonaws-kms-trentservice = { workspace = true }
+# The event-subscription suite mounts Amazon SNS beside this service on one engine, exactly as
+# the assembled router mounts it, so the topic a subscription delivers to is a real topic of
+# this emulator, created through Amazon SNS's own `CreateTopic`.
+service-com-amazonaws-sns-amazonsimplenotificationservice = { workspace = true }
 
 [lints]
 workspace = true

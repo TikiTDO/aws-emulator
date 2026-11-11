@@ -242,6 +242,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // unpublished name would reject a parameter the engine has.
             crate::state::validate_db_parameter_setting(&family, name, value)
                 .map_err(ModifyDBParameterGroupError::invalid_parameter_value)?;
+            // A STATIC parameter cannot be applied immediately — "changes to static
+            // parameters require a reboot or maintenance window before the change can take
+            // effect" — so an `immediate` apply method named for one is a combination this
+            // request cannot have, refused before anything is written
+            // (`crate::state::validate_apply_method`).
+            crate::state::validate_apply_method(
+                crate::state::published_db_parameter(&family, name)
+                    .map(|spec| crate::state::published_spec_for_family(&family, spec))
+                    .as_ref(),
+                parameter.apply_method.as_deref(),
+            )
+            .map_err(ModifyDBParameterGroupError::invalid_parameter_combination)?;
             let apply_method = match parameter.apply_method.as_deref() {
                 // The model types `ApplyMethod` as an enum, so a value outside
                 // `immediate | pending-reboot` is already refused at the boundary before

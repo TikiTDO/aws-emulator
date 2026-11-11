@@ -28,7 +28,8 @@
 
 use service_com_amazonaws_rds_amazonrdsv19::state::{
     published_db_parameters, ClusterParameterSpec, APPLY_METHOD_IMMEDIATE,
-    APPLY_METHOD_PENDING_REBOOT, APPLY_TYPE_DYNAMIC, MAX_PARAMETERS_PER_GROUP,
+    APPLY_METHOD_PENDING_REBOOT, APPLY_TYPE_DYNAMIC,
+    IMMEDIATE_APPLY_METHOD_FOR_A_STATIC_PARAMETER_MESSAGE, MAX_PARAMETERS_PER_GROUP,
     MAX_PARAMETERS_PER_MODIFY, MAX_RECORDS_RANGE, PARAMETER_SOURCE_ENGINE_DEFAULT,
     PARAMETER_SOURCE_SYSTEM, PARAMETER_SOURCE_USER,
 };
@@ -624,9 +625,11 @@ async fn a_family_with_no_published_catalog_carries_any_parameter() {
 // The apply method a change gets
 // ---------------------------------------------------------------------------
 
-/// `ApplyMethod` is recorded as the request asked for it; where the request asks for none,
-/// the change gets the method its parameter's published apply type implies — a dynamic
-/// parameter is applied immediately, and a static one waits for the reboot.
+/// `ApplyMethod` is recorded as the request asked for it, where the parameter can take the
+/// method asked for; where the request asks for none, the change gets the method its
+/// parameter's published apply type implies — a dynamic parameter is applied immediately, and
+/// a static one waits for the reboot. A STATIC parameter cannot be applied immediately at all,
+/// so that one combination is refused instead of stored.
 #[tokio::test]
 async fn an_absent_apply_method_follows_the_parameters_apply_type() {
     let router = emulator();
@@ -659,6 +662,24 @@ async fn an_absent_apply_method_follows_the_parameters_apply_type() {
             (None, implied),
         ] {
             let case = format!("{} ({apply_type}) asked for {asked:?}", spec.name);
+            // The one combination a parameter cannot take: a change to a STATIC parameter
+            // needs a reboot before it can take effect, so asking for it to be applied
+            // immediately is refused rather than stored under a method the engine could not
+            // honour.
+            if asked == Some(APPLY_METHOD_IMMEDIATE) && apply_type != APPLY_TYPE_DYNAMIC {
+                let answered = expect_error(
+                    &case,
+                    modify(&router, &group, &[(spec.name, value, asked)]).await,
+                    400,
+                    "InvalidParameterCombination",
+                );
+                let message = text(&answered, "Message");
+                assert_eq!(
+                    message, IMMEDIATE_APPLY_METHOD_FOR_A_STATIC_PARAMETER_MESSAGE,
+                    "case {case:?}: expected the published refusal wording, got {message:?}"
+                );
+                continue;
+            }
             expect_ok(
                 &case,
                 modify(&router, &group, &[(spec.name, value, asked)]).await,

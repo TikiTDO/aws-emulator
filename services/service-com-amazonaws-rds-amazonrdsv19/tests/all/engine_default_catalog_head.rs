@@ -61,6 +61,7 @@ const HEAD: [&str; PAGE] = [
     "automatic_sp_privileges",
     "avoid_temporal_upgrade",
     "back_log",
+    "basedir",
     "big_tables",
     "binlog_cache_size",
     "binlog_checksum",
@@ -72,12 +73,11 @@ const HEAD: [&str; PAGE] = [
     "binlog_max_flush_queue_time",
     "binlog_order_commits",
     "binlog_row_image",
-    "binlog_rows_query_log_events",
 ];
 
 /// The parameter that follows [`HEAD`], so the page after the first page's `Marker` is
 /// asserted to continue the one ordered sequence.
-const AFTER_HEAD: &str = "binlog_stmt_cache_size";
+const AFTER_HEAD: &str = "binlog_rows_query_log_events";
 
 /// The parameters of the first page the engine introduced INSIDE the releases these families
 /// run, each with the release that introduced it: the only rows of the page that report a
@@ -91,13 +91,13 @@ const INTRODUCED_IN: [(&str, &str); 3] = [
 ];
 
 /// One named row of the published record table: the parameter, its apply type, data type,
-/// published domain, default value (`None` where the engine autosizes it and publishes none)
-/// and whether a caller may modify it.
+/// published domain (`None` where the engine bounds the value by nothing and publishes none),
+/// default value (`None` where the engine publishes none) and whether a caller may modify it.
 type Declared = (
     &'static str,
     &'static str,
     &'static str,
-    &'static str,
+    Option<&'static str>,
     Option<&'static str>,
     bool,
 );
@@ -111,7 +111,7 @@ const DECLARED: [Declared; 7] = [
         "allow-suspicious-udfs",
         APPLY_TYPE_STATIC,
         "boolean",
-        "0,1",
+        Some("0,1"),
         Some("0"),
         false,
     ),
@@ -119,7 +119,7 @@ const DECLARED: [Declared; 7] = [
         "auto_increment_increment",
         APPLY_TYPE_DYNAMIC,
         "integer",
-        "1-65535",
+        Some("1-65535"),
         Some("1"),
         true,
     ),
@@ -127,15 +127,25 @@ const DECLARED: [Declared; 7] = [
         "back_log",
         APPLY_TYPE_STATIC,
         "integer",
-        "1-65535",
+        Some("1-65535"),
         None,
         true,
+    ),
+    (
+        // The installation directory the managed engine owns: it publishes neither a domain
+        // nor a value for it, and does not let a caller modify it.
+        "basedir",
+        APPLY_TYPE_STATIC,
+        "string",
+        None,
+        None,
+        false,
     ),
     (
         "binlog_checksum",
         APPLY_TYPE_DYNAMIC,
         "string",
-        "NONE,CRC32",
+        Some("NONE,CRC32"),
         Some("CRC32"),
         true,
     ),
@@ -143,7 +153,7 @@ const DECLARED: [Declared; 7] = [
         "binlog_format",
         APPLY_TYPE_DYNAMIC,
         "string",
-        "ROW,STATEMENT,MIXED",
+        Some("ROW,STATEMENT,MIXED"),
         Some("MIXED"),
         true,
     ),
@@ -151,16 +161,8 @@ const DECLARED: [Declared; 7] = [
         "binlog_row_image",
         APPLY_TYPE_DYNAMIC,
         "string",
-        "full,minimal,noblob",
+        Some("full,minimal,noblob"),
         Some("full"),
-        true,
-    ),
-    (
-        "binlog_rows_query_log_events",
-        APPLY_TYPE_DYNAMIC,
-        "boolean",
-        "0,1",
-        Some("0"),
         true,
     ),
 ];
@@ -277,7 +279,7 @@ async fn each_published_parameter_reports_its_own_declared_record() {
             let expected = (
                 Some(apply_type),
                 Some(data_type),
-                Some(allowed_values),
+                allowed_values,
                 value,
                 Some(if is_modifiable { "true" } else { "false" }),
             );

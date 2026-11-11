@@ -228,7 +228,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     "each entry of Parameters must carry a ParameterName",
                 ));
             };
-            crate::state::validate_parameter_name(&family, name)
+            // A reset names a parameter the group could carry, which is one its family
+            // publishes at either level — the same resolution the modify's name check reads
+            // (`crate::state::validate_cluster_parameter_name`), so the two operations cannot
+            // disagree about which parameters a group has. A name the family publishes none of
+            // names no parameter to put back to its default.
+            crate::state::validate_cluster_parameter_name(&family, name)
                 .map_err(ResetDBClusterParameterGroupError::invalid_parameter_value)?;
             to_clear.push(name.to_string());
         }

@@ -432,6 +432,14 @@ async fn the_cluster_parameter_group_lifecycle_is_computed_from_persisted_state(
 /// engines' catalogs derives its values the same way rather than growing a second copy of
 /// the derivation.
 pub(crate) fn admitted_and_refused(spec: &ClusterParameterSpec) -> (Vec<String>, Vec<String>) {
+    if spec.allowed_values.is_empty() {
+        // A parameter the engine publishes NO domain for is bounded by nothing — a role ARN
+        // is one such value — so every value is admitted and none is refused.
+        return (
+            vec!["a-value-no-published-domain-bounds".to_string()],
+            Vec::new(),
+        );
+    }
     if spec.allowed_values.contains(',') {
         let admitted: Vec<String> = spec
             .allowed_values
@@ -558,12 +566,15 @@ async fn a_parameter_value_outside_the_published_set_is_refused() {
 
 /// A parameter the family's published catalog does not carry at EITHER level is still
 /// accepted and read back from state, because refusing a value there would invent a
-/// constraint — it simply carries none of the metadata only a published parameter has.
+/// constraint — it simply carries none of the metadata only a published parameter has. A
+/// family whose vocabulary this emulator publishes in FULL is the one case where an
+/// unpublished name is refused instead; `requests_aws_refuses` beside this suite spans that
+/// rule.
 #[tokio::test]
-async fn a_family_with_no_published_catalog_carries_any_parameter() {
+async fn a_parameter_the_family_publishes_carries_its_metadata() {
     let router = emulator();
     // (case, family, the family's catalog publishes this parameter, parameter, value)
-    let rows: [(&str, &str, bool, &str, &str); 3] = [
+    let rows: [(&str, &str, bool, &str, &str); 4] = [
         ("a docdb family", "docdb4.0", true, "tls", "enabled"),
         (
             "a parameter no catalog of an aurora family carries",
@@ -578,6 +589,14 @@ async fn a_family_with_no_published_catalog_carries_any_parameter() {
             true,
             "neptune_query_timeout",
             "120000",
+        ),
+        (
+            // A family this emulator publishes no vocabulary for, at either level.
+            "a family with no published vocabulary",
+            "db2-se",
+            false,
+            "a_parameter_no_catalog_publishes",
+            "1",
         ),
     ];
 
@@ -701,15 +720,15 @@ async fn a_create_refuses_a_name_or_a_family_the_service_does_not_admit() {
 
 /// A change the engine cannot apply without a reboot leaves the group pending, and a
 /// pending group cannot be reset; a change applied immediately leaves nothing pending, so
-/// the reset goes through and the value is gone from state afterwards.
+/// the reset goes through and the value is gone from state afterwards. Asking for a STATIC
+/// parameter to be applied immediately is refused instead, so there is no such row.
 #[tokio::test]
 async fn a_change_waiting_on_a_reboot_blocks_a_reset() {
     // (case, parameter, value, apply method, resettable)
-    let rows: [(&str, &str, &str, Option<&str>, bool); 6] = [
+    let rows: [(&str, &str, &str, Option<&str>, bool); 5] = [
         // `tls` is static: "changes to static parameters require a reboot", so the change
         // is pending whatever the caller asks for.
         ("a static parameter, pending-reboot", "tls", "disabled", Some("pending-reboot"), false),
-        ("a static parameter, immediate", "tls", "disabled", Some("immediate"), false),
         // `profiler` is dynamic: "changes to dynamic parameters are applied immediately".
         ("a dynamic parameter, immediate", "profiler", "enabled", Some("immediate"), true),
         (
@@ -1016,9 +1035,10 @@ async fn a_group_carries_at_most_the_capped_number_of_parameters() {
     };
 
     let router = emulator();
-    // A family this emulator publishes no catalog for: every parameter name is admitted,
-    // which is the unbounded path the cap exists for.
-    let group = create_group(&router, "the group cap", "capped-cpg", "aurora-mysql8.0").await;
+    // A family this emulator publishes no parameter vocabulary for — neither cluster-level
+    // nor the engine's own — so every parameter name is admitted, which is the unbounded
+    // path the cap exists for.
+    let group = create_group(&router, "the group cap", "capped-cpg", "db2-se").await;
 
     // Fill the group to the cap, 20 parameters at a time (the per-request bound).
     let mut stored = 0usize;
@@ -1104,9 +1124,9 @@ async fn a_group_carries_at_most_the_capped_number_of_parameters() {
     );
 }
 
-/// Nothing caller-sized reaches the store unchecked: a create is refused when the family
-/// string is past the free-form bound, or the tag list past AWS's tagging limits, and the
-/// refusal stores nothing.
+/// Nothing caller-sized reaches the store unchecked: a create is refused when the
+/// description is past the free-form bound, or the tag list past AWS's tagging limits, and
+/// the refusal stores nothing.
 #[tokio::test]
 async fn a_create_refuses_caller_sized_values_the_store_will_not_hold() {
     use service_com_amazonaws_rds_amazonrdsv19::state::{
@@ -1114,25 +1134,30 @@ async fn a_create_refuses_caller_sized_values_the_store_will_not_hold() {
     };
 
     let router = emulator();
-    let longest_family = "a".repeat(MAX_FREE_FORM_LEN);
-    let too_long_family = "a".repeat(MAX_FREE_FORM_LEN + 1);
+    // The family is no longer a caller-sized value: it has to be one of the published
+    // engine-version families (`a_create_refuses_a_name_or_a_family_the_service_does_not_admit`
+    // spans that rule), so the free-form bound is driven through `Description`, the other
+    // stored string this create carries.
+    let longest_description = "a".repeat(MAX_FREE_FORM_LEN);
+    let too_long_description = "a".repeat(MAX_FREE_FORM_LEN + 1);
     let longest_key = "k".repeat(MAX_TAG_KEY_LEN);
     let too_long_key = "k".repeat(MAX_TAG_KEY_LEN + 1);
     let longest_value = "v".repeat(MAX_TAG_VALUE_LEN);
     let too_long_value = "v".repeat(MAX_TAG_VALUE_LEN + 1);
+    let description = "a group under test";
 
-    // (case, name, family, tag key, tag value, tag count, admitted)
+    // (case, name, description, tag key, tag value, tag count, admitted)
     let rows: [(&str, &str, &str, &str, &str, usize, bool); 7] = [
-        ("the longest family string", "bounds-a", &longest_family, "k", "v", 1, true),
-        ("one character past it", "bounds-b", &too_long_family, "k", "v", 1, false),
-        ("the longest tag key", "bounds-c", DOCDB_FAMILY, &longest_key, "v", 1, true),
-        ("one character past it", "bounds-d", DOCDB_FAMILY, &too_long_key, "v", 1, false),
-        ("the longest tag value", "bounds-e", DOCDB_FAMILY, "k", &longest_value, 1, true),
-        ("one character past it", "bounds-f", DOCDB_FAMILY, "k", &too_long_value, 1, false),
+        ("the longest description", "bounds-a", &longest_description, "k", "v", 1, true),
+        ("one character past it", "bounds-b", &too_long_description, "k", "v", 1, false),
+        ("the longest tag key", "bounds-c", description, &longest_key, "v", 1, true),
+        ("one character past it", "bounds-d", description, &too_long_key, "v", 1, false),
+        ("the longest tag value", "bounds-e", description, "k", &longest_value, 1, true),
+        ("one character past it", "bounds-f", description, "k", &too_long_value, 1, false),
         (
             "one tag past the tagging limit",
             "bounds-g",
-            DOCDB_FAMILY,
+            description,
             "k",
             "v",
             MAX_TAGS_PER_RESOURCE + 1,
@@ -1140,7 +1165,7 @@ async fn a_create_refuses_caller_sized_values_the_store_will_not_hold() {
         ),
     ];
 
-    for (case, name, family, key, value, tag_count, admitted) in rows {
+    for (case, name, description, key, value, tag_count, admitted) in rows {
         // The tag list, as the awsQuery form encodes a list of structures: each entry's
         // members carry the entry's 1-based index.
         let mut indexed: Vec<(String, String)> = Vec::new();
@@ -1150,8 +1175,8 @@ async fn a_create_refuses_caller_sized_values_the_store_will_not_hold() {
         }
         let mut call_params: Vec<(&str, &str)> = vec![
             ("DBClusterParameterGroupName", name),
-            ("DBParameterGroupFamily", family),
-            ("Description", "a group under test"),
+            ("DBParameterGroupFamily", DOCDB_FAMILY),
+            ("Description", description),
         ];
         for (key, value) in &indexed {
             call_params.push((key.as_str(), value.as_str()));

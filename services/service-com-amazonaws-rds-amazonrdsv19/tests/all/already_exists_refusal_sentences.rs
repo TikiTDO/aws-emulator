@@ -54,10 +54,12 @@ const OTHER_REGION: &str = "eu-central-1";
 /// member="DBSecurityGroupName")`).
 const MAX_DB_SECURITY_GROUP_NAME_LEN: usize = 255;
 
-/// The longest `GlobalClusterIdentifier` the member admits: `length 1..255` on the modelled
-/// `GlobalClusterIdentifier` shape, whose pattern `^[A-Za-z][0-9A-Za-z-:._]*$` the rows
-/// below also satisfy (`smithy_query(query="shape", shape="GlobalClusterIdentifier")`).
-const MAX_GLOBAL_CLUSTER_IDENTIFIER_LEN: usize = 255;
+/// The longest `GlobalClusterIdentifier` a global database may carry: the "1 to 63 letters,
+/// numbers, or hyphens" the API publishes for the identifier of a global database
+/// (`smithy_query(query="doc", shape="ModifyGlobalClusterMessage",
+/// member="NewGlobalClusterIdentifier")`, the member that writes that rule down), which is
+/// narrower than the `length 1..255` the modelled shape carries.
+const MAX_GLOBAL_CLUSTER_IDENTIFIER_LEN: usize = 63;
 
 /// The FIXED sentence a `DBInstanceAlreadyExistsFault` carries, whichever operation
 /// answered it.
@@ -308,9 +310,13 @@ async fn a_duplicate_global_cluster_identifier_is_named_inside_the_sentence() {
         ),
         (
             NamedConflict::same(
-                "an identifier carrying the punctuation the member admits",
+                // An Amazon RDS identifier is letters, digits and hyphens; the `.`, `_` and
+                // `:` the model's own `@pattern` would admit are refused by the rule the API
+                // publishes for an identifier, so the longest punctuation an identifier can
+                // carry is the hyphen.
+                "an identifier carrying the punctuation an identifier admits",
                 REGION,
-                "emu.dup_gc-2026:a",
+                "emu-dup-gc-2026-a",
             ),
             "aurora-postgresql",
         ),

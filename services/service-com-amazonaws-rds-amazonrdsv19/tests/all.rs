@@ -279,6 +279,8 @@ mod reboot_db_shard_group;
 mod refusal_class_by_cause;
 #[path = "all/refusal_wording_and_input_guards.rs"]
 mod refusal_wording_and_input_guards;
+#[path = "all/requests_aws_refuses.rs"]
+mod requests_aws_refuses;
 #[path = "all/resource_member_projection.rs"]
 mod resource_member_projection;
 #[path = "all/resource_tags.rs"]

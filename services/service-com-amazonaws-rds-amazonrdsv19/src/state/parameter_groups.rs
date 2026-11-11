@@ -15,14 +15,13 @@ pub const DEFAULT_PARAMETER_GROUP_PREFIX: &str = "default.";
 /// Whether `name` names one of the parameter groups Amazon RDS provides itself.
 ///
 /// It is the NAME that decides this, and only the name: RDS provides such a group for every
-/// engine-version family, and the family half is not resolved against the engine-version
-/// catalogue because that catalogue is a SAMPLE of the families this front door serves —
-/// `CreateDBParameterGroup` admits a family it publishes no row for (see
-/// [`super::validate_parameter_group_family`]), so refusing `default.<that family>` here
-/// would deny a group RDS does provide. A group of this form is therefore never answered as
-/// missing, and never changed either: it is RDS's, not the account's, so a request that
-/// would change one is refused ([`CANNOT_MODIFY_DEFAULT_PARAMETER_GROUP_MESSAGE`]). The name
-/// is compared without case, the way a group name is stored.
+/// engine-version family, and what follows the prefix is not resolved against the
+/// engine-version catalogue here, because the answer this predicate guards is "is this group
+/// the account's to change or RDS's own" — a `default.`-prefixed name is RDS's whichever
+/// family it names. A group of this form is therefore never answered as missing, and never
+/// changed either: it is RDS's, not the account's, so a request that would change one is
+/// refused ([`CANNOT_MODIFY_DEFAULT_PARAMETER_GROUP_MESSAGE`]). The name is compared without
+/// case, the way a group name is stored.
 pub fn is_default_parameter_group_name(name: &str) -> bool {
     name.to_ascii_lowercase()
         .starts_with(DEFAULT_PARAMETER_GROUP_PREFIX)
@@ -78,6 +77,48 @@ pub fn db_parameter_group_not_found_message(named: &str) -> String {
 /// ([`db_parameter_group_not_found_message`]), while the copy reports only that the source
 /// is not a group that exists.
 pub const PARAMETER_GROUP_DOES_NOT_EXIST_MESSAGE: &str = "Parameter group does not exist";
+
+/// Refuse a `DBParameterGroupFamily` that is not a parameter group family at all.
+///
+/// A family is one engine's major-version line, and a group "can be associated with one and
+/// only one DB cluster parameter group family, and can be applied only to a DB cluster
+/// running a database engine and engine version compatible with that … family"
+/// (`CreateDBClusterParameterGroupMessage$DBParameterGroupFamily`). So the families that
+/// exist are exactly the ones an engine version carries, which is what this front door's
+/// engine-version catalogue publishes
+/// ([`crate::ops::describe_db_engine_versions::published_parameter_group_families`], the same
+/// list the default parameter groups of the account are derived from) — for every engine it
+/// serves, the Amazon RDS, Amazon DocumentDB and Amazon Neptune ones alike — beside the
+/// VERSIONLESS families the member's own documented value list names, whose family is the
+/// engine's bare name (`crate::ops::describe_engine_default_parameters::versionless_family`).
+/// A value outside both names a family no engine version of this front door belongs to, so no
+/// group of it could ever be applied to a cluster or an instance, and it is refused instead of
+/// stored.
+///
+/// This resolves the STATIC catalogue, which is every engine version except the account's own:
+/// a CUSTOM engine version is an engine version this front door publishes too, and it names
+/// the family RDS writes for it, so a create consults the stored CEVs
+/// ([`ComAmazonawsRdsAmazonrdsv19State::publishes_custom_parameter_group_family`]) before
+/// refusing on this answer.
+///
+/// The comparison is case-INSENSITIVE, as every other name this service resolves against a
+/// published list is: AWS publishes each family lowercase, so a differently-cased value still
+/// names the one family it can only have meant.
+///
+/// The refusal is
+/// [`service_common::rds_cluster_parameters::parameter_group_family_not_valid_message`].
+pub fn validate_parameter_group_family(value: &str) -> Result<(), String> {
+    if crate::ops::describe_engine_default_parameters::versionless_family(value) {
+        return Ok(());
+    }
+    let published = crate::ops::describe_db_engine_versions::published_parameter_group_families()
+        .into_iter()
+        .any(|family| family.eq_ignore_ascii_case(value));
+    if published {
+        return Ok(());
+    }
+    Err(parameter_group_family_not_valid_message(value))
+}
 
 impl ComAmazonawsRdsAmazonrdsv19State {
     /// Whether the DB CLUSTER parameter group `named` is one a request may associate a
@@ -172,7 +213,9 @@ impl DbClusterParameterGroupRecord {
         let Some(setting) = self.parameters.get(name) else {
             return false;
         };
-        change_is_pending(&self.family, name, &setting.apply_method)
+        let spec = published_cluster_parameter_at_any_level(&self.family, name)
+            .map(|spec| published_spec_for_family(&self.family, spec));
+        change_is_pending_for(spec.as_ref(), &setting.apply_method)
     }
 
     /// The names of the parameter changes this group is still waiting on a reboot for, in
@@ -389,11 +432,12 @@ pub fn validate_db_parameter_setting(
 /// This is the catalog `DescribeEngineDefaultClusterParameters` reports for the family and
 /// the one a GROUP of that family reports its parameters' metadata from, so what a value is
 /// validated against and what a describe publishes as that parameter's `AllowedValues` can
-/// never disagree. It is a SAMPLE of the engine's published list rather than the whole of it,
-/// which is why [`validate_cluster_parameter_setting`] checks the value of a parameter the
-/// catalog carries and admits any name it does not.
+/// never disagree.
 ///
-/// The instance-level counterpart is [`published_db_parameters`].
+/// It is the family's CLUSTER-level list, which is half of what a cluster parameter group of
+/// that family carries: the group also carries the engine's own parameters, the ones a DB
+/// parameter group of the same engine publishes ([`published_db_parameters`]), which is why
+/// [`published_cluster_parameter_at_any_level`] resolves a name against both.
 pub fn published_cluster_parameters(family: &str) -> Option<&'static [ClusterParameterSpec]> {
     crate::ops::describe_engine_default_cluster_parameters::cluster_parameter_catalog(family)
 }
@@ -413,9 +457,10 @@ pub fn published_cluster_parameters(family: &str) -> Option<&'static [ClusterPar
 /// with no apply type, data type, allowed values, description or modifiability.
 ///
 /// A parameter the family publishes at NEITHER level is described by nothing, which is what
-/// a group reports for it: this emulator's catalogs are samples of AWS's published lists, so
-/// a name outside them is carried (`validate_cluster_parameter_setting` admits it) without
-/// invented metadata.
+/// a group reports for it: this emulator's catalogs are samples of AWS's published lists
+/// wherever the ENGINE's own variables are the vocabulary, so a name outside them is carried
+/// (see [`validate_cluster_parameter_name`] for the one case it is not) without invented
+/// metadata.
 pub fn published_cluster_parameter_at_any_level(
     family: &str,
     name: &str,
@@ -424,17 +469,61 @@ pub fn published_cluster_parameter_at_any_level(
         .or_else(|| published_db_parameter(family, name))
 }
 
-/// Refuse a setting a DB CLUSTER parameter group of `family` cannot carry: a parameter the
-/// family publishes that the engine does not let a caller modify, or a value outside the ones
-/// that parameter admits — the `AllowedValues` its own published catalog entry carries,
-/// whichever engine's family it is.
+/// Whether the vocabulary this emulator publishes for `family` is the WHOLE of what a group of
+/// that family carries, rather than a SAMPLE of it. Stated once here, and the only thing that
+/// decides whether an unpublished name can be refused ([`validate_cluster_parameter_name`]).
 ///
-/// Two catalogs answer for a family and both are consulted, because each is the whole of what
-/// it publishes: the shared one of [`validate_parameter_setting`], which IS its families'
-/// complete parameter list and so refuses a name outside it, and the family's own published
-/// cluster catalog ([`published_cluster_parameters`]), a sample in which an unpublished name
-/// is admitted and a published one's value is checked ([`validate_known_setting`] carries
-/// that rule).
+/// It is complete where the SERVICE defines the vocabulary and this emulator carries that
+/// definition: Amazon DocumentDB publishes a closed, service-managed cluster parameter list
+/// per family, which is the shared catalog
+/// [`service_common::rds_cluster_parameters::published_parameters`] — whose own documentation
+/// states it IS its families' complete list — and Amazon Neptune publishes its own such list,
+/// which is this crate's Neptune cluster catalog.
+///
+/// It is a SAMPLE for every family whose parameters are the open-source ENGINE's own system
+/// variables: the MySQL- and PostgreSQL-compatible families carry hundreds of them per
+/// release, and both catalogs here say so in their own module headers — the cluster tables are
+/// "not AWS's whole list" and the DB-parameter tables are drawn from the head of it. A name
+/// outside a sample is therefore no evidence that the engine lacks the parameter, so nothing is
+/// refused for it.
+pub fn publishes_a_complete_vocabulary(family: &str) -> bool {
+    published_parameters(family).is_some()
+        || crate::ops::describe_engine_default_parameters::family_engine(family)
+            .is_some_and(|engine| engine == NEPTUNE_ENGINE)
+}
+
+/// Refuse the NAME of a parameter a DB CLUSTER parameter group of `family` cannot carry: one
+/// the family publishes no record for at either level, where that family's published
+/// vocabulary is the whole of it.
+///
+/// A group carries only parameters its family publishes, so a name the family publishes
+/// nothing for ([`published_cluster_parameter_at_any_level`], both levels of it) names no
+/// parameter of the group and is refused with
+/// [`service_common::rds_cluster_parameters::parameter_not_found_message`] — whether the
+/// request would SET it (where the value rule follows, see
+/// [`validate_cluster_parameter_setting`]) or RESET it, since there is no such parameter to put
+/// back to its default either. The two operations read this one resolution, so they cannot
+/// disagree about which parameters a group has.
+///
+/// The refusal is given only for a family whose vocabulary is COMPLETE
+/// ([`publishes_a_complete_vocabulary`]): against a sample of AWS's published list it would
+/// reject parameters the engine really has.
+pub fn validate_cluster_parameter_name(family: &str, name: &str) -> Result<(), String> {
+    if published_cluster_parameter_at_any_level(family, name).is_some()
+        || !publishes_a_complete_vocabulary(family)
+    {
+        return Ok(());
+    }
+    Err(parameter_not_found_message(name))
+}
+
+/// Refuse a setting a DB CLUSTER parameter group of `family` cannot carry: a parameter the
+/// family does not publish at all, one the engine does not let a caller modify, or a value
+/// outside the ones that parameter admits — the `AllowedValues` its own published catalog
+/// entry carries, whichever engine's family it is.
+///
+/// The name half is [`validate_cluster_parameter_name`], which the reset of a group reads
+/// too, so the two operations cannot disagree about which parameters a group has.
 ///
 /// `Err` carries the message to answer with, built from the request and from that parameter's
 /// catalog entry; the instance-level rule is [`validate_db_parameter_setting`].
@@ -444,6 +533,7 @@ pub fn validate_cluster_parameter_setting(
     value: &str,
 ) -> Result<(), String> {
     validate_parameter_setting(family, name, value)?;
+    validate_cluster_parameter_name(family, name)?;
     // ONE resolution answers both halves: the record a group REPORTS for a parameter
     // ([`published_cluster_parameter_at_any_level`]) is the record the value it carries is
     // held to, so a group can never store a value the `AllowedValues` it publishes for that
@@ -453,6 +543,18 @@ pub fn validate_cluster_parameter_setting(
         name,
         value,
     )
+}
+
+/// The apply method a change to a CLUSTER parameter gets when the caller asks for none: the
+/// one the parameter's own apply type implies, as its family publishes it at either level
+/// ([`published_cluster_parameter_at_any_level`]); the instance-level sibling is
+/// [`db_parameter_default_apply_method`], and
+/// [`service_common::rds_cluster_parameters::default_apply_method`] carries the documented
+/// rule.
+pub fn cluster_parameter_default_apply_method(family: &str, name: &str) -> &'static str {
+    let spec = published_cluster_parameter_at_any_level(family, name)
+        .map(|spec| published_spec_for_family(family, spec));
+    default_apply_method_for(spec.as_ref())
 }
 
 /// The apply method a change to a DB (instance) parameter gets when the caller asks for
@@ -479,10 +581,11 @@ pub fn db_parameter_default_apply_method(family: &str, name: &str) -> &'static s
 /// version, since "the earliest engine version to which the parameter can apply" is a fact
 /// about the engine's release history and not something this front door can derive.
 ///
-/// `ParameterValue` is reported only where the catalog publishes a default. A parameter the
-/// engine AUTOSIZES at startup publishes none, and reporting an empty string for it would say
-/// the engine runs that parameter at the empty value, which is not something the engine ever
-/// published.
+/// `ParameterValue` and `AllowedValues` are reported only where the catalog publishes one. A
+/// parameter the engine AUTOSIZES at startup publishes no default, and one the engine
+/// publishes neither an enumeration nor a range for has no allowed values; reporting an empty
+/// string for either would say the engine runs that parameter at the empty value, or admits
+/// only it, which is not something the engine ever published.
 pub fn engine_default_parameter_to_wire(family: &str, spec: &ClusterParameterSpec) -> Parameter {
     let spec = published_spec_for_family(family, spec);
     Parameter {
@@ -492,7 +595,7 @@ pub fn engine_default_parameter_to_wire(family: &str, spec: &ClusterParameterSpe
         source: Some(PARAMETER_SOURCE_ENGINE_DEFAULT.to_string()),
         apply_type: Some(spec.apply_type.to_string()),
         data_type: Some(spec.data_type.to_string()),
-        allowed_values: Some(spec.allowed_values.to_string()),
+        allowed_values: published_column(spec.allowed_values),
         is_modifiable: Some(spec.is_modifiable),
         minimum_engine_version: (!spec.minimum_engine_version.is_empty())
             .then(|| spec.minimum_engine_version.to_string()),
@@ -510,7 +613,14 @@ pub fn engine_default_parameter_to_wire(family: &str, spec: &ClusterParameterSpe
 /// reported empty, since an empty `ParameterValue` would say the engine runs the parameter at
 /// the empty value.
 fn published_default(default_value: &str) -> Option<String> {
-    (!default_value.is_empty()).then(|| default_value.to_string())
+    published_column(default_value)
+}
+
+/// One column of a catalog entry as the matching `Parameter` member reports it: the value
+/// where the catalog publishes one, and NOTHING where the column is empty, which is how the
+/// catalogs write "the engine publishes none" (see [`published_default`]).
+fn published_column(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// A CLUSTER parameter the family `family` publishes, as the modelled `Parameter`: what

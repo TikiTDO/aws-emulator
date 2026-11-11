@@ -136,10 +136,9 @@ pub fn default_db_parameter_groups(region: &str) -> Vec<DbParameterGroupRecord> 
 /// What follows the prefix has to BE a family — an engine this front door serves followed by
 /// that engine's version ([`crate::ops::describe_engine_default_parameters::family_engine`]
 /// carries that reading) — but it need not be a family the engine-version catalogue
-/// publishes a row for: that catalogue is a SAMPLE of the families this front door serves —
-/// `CreateDBParameterGroup` admits a family it publishes no row for
-/// ([`super::validate_parameter_group_family`]) — so reporting `default.<that family>` as
-/// missing would deny a group RDS does provide. A value that names no family at all names no
+/// publishes a row for: that catalogue is this emulator's published sample of the engine
+/// versions AWS serves, so reporting `default.<a family it lists no version of>` as missing
+/// would deny a group RDS does provide. A value that names no family at all names no
 /// group either.
 pub fn default_db_parameter_group(region: &str, named: &str) -> Option<DbParameterGroupRecord> {
     let folded = named.to_ascii_lowercase();

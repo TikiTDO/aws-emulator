@@ -202,7 +202,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 crate::state::check_identifier(
                     "NewGlobalClusterIdentifier",
                     named,
-                    MAX_GLOBAL_CLUSTER_IDENTIFIER_LEN,
+                    crate::state::MAX_GLOBAL_CLUSTER_IDENTIFIER_LEN,
                 )
                 .map_err(ModifyGlobalClusterError::invalid_parameter_value)?;
                 Some(named.to_ascii_lowercase())
@@ -376,10 +376,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })
     }
 }
-
-/// `NewGlobalClusterIdentifier`'s own length bound: "Must contain from 1 to 63 letters,
-/// numbers, or hyphens."
-const MAX_GLOBAL_CLUSTER_IDENTIFIER_LEN: usize = 63;
 
 /// Whether two engine versions belong to the same MAJOR version, which is what decides
 /// whether `AllowMajorVersionUpgrade` has to be enabled for the upgrade.

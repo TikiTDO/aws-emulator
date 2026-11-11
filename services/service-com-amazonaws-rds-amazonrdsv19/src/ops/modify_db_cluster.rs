@@ -10,10 +10,10 @@
 //! while the cluster is in this state" (`InvalidDBClusterStateFault`) is what a request
 //! that arrives while the cluster is not `available` is answered with — which is what
 //! serialises two concurrent calls on one cluster: the first is accepted and leaves the
-//! cluster `modifying`, the second sees that state and is refused. That refusal carries
-//! the one fixed message this operation words it with
-//! ([`crate::state::MODIFY_DB_CLUSTER_INVALID_STATE_MESSAGE`]), into which neither the
-//! identifier nor the status is interpolated.
+//! cluster `modifying`, the second sees that state and is refused. That refusal names the
+//! status the cluster is in
+//! ([`crate::state::db_cluster_not_available_for_modification_message`]), which is what says
+//! whether waiting will clear it; the identifier is not interpolated.
 //!
 //! ## Shape of an operation
 //!
@@ -538,16 +538,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // be performed in. The status the clock has yet to settle is real, which is what
         // makes two concurrent calls serialise — see this file's module docs.
         //
-        // The wording is this operation's one fixed sentence
-        // ([`crate::state::MODIFY_DB_CLUSTER_INVALID_STATE_MESSAGE`]) whatever status the
-        // cluster is actually in: RDS interpolates neither the identifier the request
-        // carried nor the status into it, so nothing from the request or the store is
-        // substituted here either.
+        // The refusal names the STATUS the cluster is in
+        // ([`crate::state::db_cluster_not_available_for_modification_message`]), read from
+        // the stored record; the identifier the request carried is not interpolated.
         if status != crate::state::DB_CLUSTER_STATUS_AVAILABLE {
             return Err(ModifyDBClusterErrorModeled::InvalidDBClusterStateFault(
                 InvalidDBClusterStateFault {
                     message: Some(
-                        crate::state::MODIFY_DB_CLUSTER_INVALID_STATE_MESSAGE.to_string(),
+                        crate::state::db_cluster_not_available_for_modification_message(&status),
                     ),
                 },
             )
