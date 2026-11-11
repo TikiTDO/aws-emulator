@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeAutomationExecutions
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeAutomationExecutions`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeAutomationExecutions::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the automation executions the Region this request was signed for holds — every
+//! one `StartAutomationExecution` persisted (`crate::state::automation`), active or
+//! terminated — narrowed to those meeting every filter the request carries
+//! (`crate::state::automation::report`) and served a page at a time. Each is projected
+//! through [`crate::state::automation::AutomationExecutionRecord::to_automation_execution_metadata`],
+//! so this report and `GetAutomationExecution` agree about the one stored execution.
 //!
 //! ## Shape of an operation
 //!
@@ -151,18 +149,136 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeAutomationExecutions` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeAutomationExecutionsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeAutomationExecutions"))
+        use crate::state::automation::report::{
+            automation_execution_filter_value_rejection, automation_execution_page_size,
+            is_automation_execution_filter_key,
+        };
+        use crate::state::automation::AutomationExecutionRecord;
+        use crate::state::{
+            invalid_filter_key_message, is_activation_id, request_region, INVALID_NEXT_TOKEN,
+        };
+
+        // `MaxResults`'s range, the filter list's length and each filter's
+        // `AutomationExecutionFilterKey` and value lengths are MODELLED constraints, so the
+        // centralized walk has already refused anything outside them. What is read here is
+        // which of this Region's executions the request's criteria select.
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(DescribeAutomationExecutionsErrorModeled::InternalServerError(
+                InternalServerError {
+                    message: Some("the automation execution store is unavailable".to_string()),
+                },
+            )
+            .into());
+        };
+
+        let filters = input.filters.as_deref().unwrap_or_default();
+        for filter in filters {
+            // A filter has to name one of the keys the model declares: a key outside that
+            // set names no property of an automation execution, so the filter cannot be
+            // served. The modelled enum is refused before this handler runs, so this is a
+            // backstop.
+            if !is_automation_execution_filter_key(&filter.key) {
+                return Err(crate::scaffolded::Scaffolded::invalid_filter_key(
+                    invalid_filter_key_message(
+                        &filter.key,
+                        crate::ops::types::AUTOMATION_EXECUTION_FILTER_KEY_VALUES,
+                    ),
+                ));
+            }
+            // A value outside what the key may carry is not a value of the property that
+            // key filters, so the filter cannot be served: "The filter value isn't valid.
+            // Verify the value and try again" (`InvalidFilterValue`).
+            if let Some(why) = filter
+                .values
+                .iter()
+                .find_map(|value| automation_execution_filter_value_rejection(&filter.key, value))
+            {
+                return Err(DescribeAutomationExecutionsErrorModeled::InvalidFilterValue(
+                    InvalidFilterValue { message: Some(why) },
+                )
+                .into());
+            }
+        }
+
+        let page_size = automation_execution_page_size(input.max_results)
+            .map_err(crate::scaffolded::Scaffolded::validation)?;
+
+        // The token this report hands out is the id of the execution the next page starts
+        // at, so a token that is not shaped like one of this store's minted ids was not
+        // issued here.
+        let resume_from = match input.next_token.as_deref() {
+            None | Some("") => None,
+            Some(token) if is_activation_id(token) => Some(token.to_string()),
+            Some(_) => {
+                return Err(DescribeAutomationExecutionsErrorModeled::InvalidNextToken(
+                    InvalidNextToken {
+                        message: Some(INVALID_NEXT_TOKEN.to_string()),
+                    },
+                )
+                .into())
+            }
+        };
+
+        // Systems Manager is regional: an automation runs at the endpoint its start was
+        // sent to, which is the Region this request was signed for.
+        let region = request_region(ctx.parts());
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        // The one write this report makes: everything the clock already owed at `now` — an
+        // execution's pickup and the steps of its walk that have come due — was owed
+        // whether or not anybody called, so it is materialised before anything is read.
+        store.materialize_due(now);
+
+        // "Provides details about all active and terminated Automation executions": every
+        // execution this Region holds is reported, narrowed to the ones that meet EVERY
+        // filter the request carries.
+        let matching: Vec<&AutomationExecutionRecord> = store
+            .automation_executions_in_order(&region)
+            .into_iter()
+            .filter(|execution| {
+                filters
+                    .iter()
+                    .all(|filter| execution.matches_filter(&filter.key, &filter.values))
+            })
+            .collect();
+
+        let start = match resume_from.as_deref() {
+            None => 0,
+            Some(token) => {
+                let Some(at) = matching
+                    .iter()
+                    .position(|execution| execution.execution_id == token)
+                else {
+                    // The token is shaped like one of this store's ids but names no
+                    // execution this result holds, so it is not a page of this result to
+                    // resume.
+                    return Err(DescribeAutomationExecutionsErrorModeled::InvalidNextToken(
+                        InvalidNextToken {
+                            message: Some(INVALID_NEXT_TOKEN.to_string()),
+                        },
+                    )
+                    .into());
+                };
+                at
+            }
+        };
+        // `start` is a position in `matching`, so the page is a suffix of it; `get` keeps
+        // that in-bounds without indexing on a value the request steers.
+        let page: &[&AutomationExecutionRecord] = matching.get(start..).unwrap_or_default();
+        let automation_execution_metadata_list = page
+            .iter()
+            .take(page_size)
+            .map(|execution| execution.to_automation_execution_metadata())
+            .collect();
+        // An execution is still waiting past this page: hand the caller the id it resumes
+        // at, so the next request continues where this one stopped.
+        let next_token = page
+            .get(page_size)
+            .map(|execution| execution.execution_id.clone());
+
+        Ok(DescribeAutomationExecutionsOutput {
+            automation_execution_metadata_list: Some(automation_execution_metadata_list),
+            next_token,
+        })
     }
 }

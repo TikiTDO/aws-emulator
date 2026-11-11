@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/association_dispatch_options.rs"]
 mod association_dispatch_options;
+#[path = "all/automation_execution_reports.rs"]
+mod automation_execution_reports;
 #[path = "all/automation_executions.rs"]
 mod automation_executions;
 #[path = "all/automation_step_executions.rs"]

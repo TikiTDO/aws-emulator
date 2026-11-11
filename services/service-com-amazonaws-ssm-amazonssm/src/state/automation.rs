@@ -77,6 +77,10 @@ use super::ComAmazonawsSsmAmazonssmState;
 /// decisions they carry.
 pub mod runbook;
 
+/// The report of the executions a Region holds: which of them a request's filters select,
+/// and the metadata each is reported as.
+pub mod report;
+
 /// The `AutomationExecutionStatus` an execution is minted with: nothing has picked it up
 /// yet. From the modelled enum (`crate::ops::types::AUTOMATION_EXECUTION_STATUS_VALUES`).
 pub const STATUS_PENDING: &str = "Pending";
@@ -250,11 +254,7 @@ pub fn is_step_execution_filter_key(key: &str) -> bool {
 /// filters `ParentStepDetails$Iteration`. A name, an id and an action constrain nothing
 /// here: a value no step carries selects no step rather than refusing the read.
 pub fn step_execution_filter_value_rejection(key: &str, value: &str) -> Option<String> {
-    let takes = |what: String| {
-        Some(format!(
-            "The following filter value is not valid: {value}. The {key} filter key takes {what}."
-        ))
-    };
+    let takes = |what: String| Some(invalid_filter_value_message(key, value, &what));
     match key {
         STEP_FILTER_KEY_START_TIME_BEFORE | STEP_FILTER_KEY_START_TIME_AFTER
             if super::commands::parse_filter_instant(value).is_none() =>
@@ -274,6 +274,16 @@ pub fn step_execution_filter_value_rejection(key: &str, value: &str) -> Option<S
         }
         _ => None,
     }
+}
+
+/// How this slice words the refusal of a filter value its key cannot carry: the value that
+/// was sent, the key it was sent for, and what that key does take.
+///
+/// One wording for every filter of the Automation slice, so the two reports that take
+/// filters — the executions a Region holds and the steps of one of them — cannot word the
+/// same refusal differently.
+pub fn invalid_filter_value_message(key: &str, value: &str, takes: &str) -> String {
+    format!("The following filter value is not valid: {value}. The {key} filter key takes {takes}.")
 }
 
 /// What one entry into a step did to the walk.
@@ -868,6 +878,17 @@ impl AutomationExecutionRecord {
         }
     }
 
+    /// The step the walk is RUNNING, which is what "the step that is currently running"
+    /// (`AutomationExecution$CurrentStepName`) names: the step the walk stands at, once it
+    /// has started and before it has ended. `None` for an execution nothing has picked up
+    /// yet, one whose walk has left its last step, and one that runs children rather than
+    /// steps of its own.
+    pub fn running_step(&self) -> Option<&StepExecutionRecord> {
+        self.current
+            .and_then(|index| self.steps.get(index))
+            .filter(|step| !is_terminal(&step.status) && step.started_at.is_some())
+    }
+
     /// The values a step's `{{ … }}` references resolve to: this execution's parameters,
     /// and the system variables Automation defines for every execution.
     ///
@@ -903,10 +924,7 @@ impl AutomationExecutionRecord {
     /// from the start as it was received, resolved by the start, or written by the walk. A
     /// member nothing has produced is left unset rather than invented.
     pub fn to_automation_execution(&self) -> AutomationExecution {
-        let running = self
-            .current
-            .and_then(|index| self.steps.get(index))
-            .filter(|step| !is_terminal(&step.status) && step.started_at.is_some());
+        let running = self.running_step();
         AutomationExecution {
             automation_execution_id: Some(self.execution_id.clone()),
             document_name: Some(self.document_name.clone()),
