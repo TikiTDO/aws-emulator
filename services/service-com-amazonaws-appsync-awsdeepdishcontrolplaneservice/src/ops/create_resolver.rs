@@ -201,6 +201,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // A mapping template outside the modelled `@length` of `MappingTemplate` is
+        // refused here rather than at the boundary (`skip_validation` on
+        // `CreateResolverInput`): the shape's `@pattern` admits any content, newlines
+        // included, so the length is the only bound a template can break.
+        if let Some(message) = crate::state::mapping_templates_refusal(
+            input.request_mapping_template.as_deref(),
+            input.response_mapping_template.as_deref(),
+        ) {
+            return Err(CreateResolverErrorModeled::BadRequestException(BadRequestException {
+                message: Some(message),
+                ..Default::default()
+            })
+            .into());
+        }
+
         // "A UNIT resolver is the default resolver type" (`Resolver$kind`), so a
         // request that names no kind asks for one, and the resolver is stored — and
         // judged below — as the kind it is.

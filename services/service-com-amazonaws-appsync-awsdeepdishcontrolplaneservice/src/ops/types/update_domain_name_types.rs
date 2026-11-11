@@ -11,7 +11,16 @@ use super::*;
 
 smithy_macros::smithy_model!("smithy-model/com-amazonaws-appsync-awsdeepdishcontrolplaneservice.json");
 
-#[smithy_macros::smithy(shape = "com.amazonaws.appsync#UpdateDomainNameRequest")]
+// `skip_validation = ["description"]`: `Description`'s `@pattern` is `^.*$`, which admits
+// every value a string can hold for the reason given on `CreateResolverInput`
+// (`create_resolver_types`) — so a description carrying a newline is one AppSync accepts,
+// and the boundary's anchored match must not refuse it. This operation is still a
+// scaffold; the handler that implements it enforces the shape's `@length` through
+// `crate::state::description_refusal`, as `CreateDomainName` does.
+#[smithy_macros::smithy(
+    shape = "com.amazonaws.appsync#UpdateDomainNameRequest",
+    skip_validation = ["description"]
+)]
 #[derive(Debug, Clone, Default)]
 pub struct UpdateDomainNameInput {
     pub domain_name: String,

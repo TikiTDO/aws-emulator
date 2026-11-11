@@ -38,6 +38,11 @@ mod schema_merge;
 mod resolvers;
 pub use resolvers::*;
 
+/// The members whose modelled `@pattern` admits any text at all — mapping templates and
+/// descriptions — and the `@length` that is the only bound left on them.
+mod free_text;
+pub use free_text::*;
+
 use crate::ops::types::{
     AdditionalAuthenticationProvider, Api, ApiAssociation, ApiCache, ApiKey, AppSyncRuntime,
     AuthMode, ChannelNamespace, DataSource, DomainNameConfig, DynamodbDataSourceConfig,

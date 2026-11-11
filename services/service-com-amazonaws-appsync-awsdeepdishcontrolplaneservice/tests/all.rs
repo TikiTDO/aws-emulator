@@ -73,6 +73,8 @@ mod event_api_data_plane;
 mod event_api_delete;
 #[path = "all/event_api_update.rs"]
 mod event_api_update;
+#[path = "all/free_text_members.rs"]
+mod free_text_members;
 #[path = "all/function_delete.rs"]
 mod function_delete;
 #[path = "all/function_list.rs"]

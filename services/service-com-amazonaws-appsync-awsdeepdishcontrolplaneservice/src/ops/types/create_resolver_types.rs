@@ -11,7 +11,20 @@ use super::*;
 
 smithy_macros::smithy_model!("smithy-model/com-amazonaws-appsync-awsdeepdishcontrolplaneservice.json");
 
-#[smithy_macros::smithy(shape = "com.amazonaws.appsync#CreateResolverRequest")]
+// `skip_validation` names both mapping templates: `MappingTemplate`'s `@pattern` is
+// `^.*$`, which admits every value a string can hold — `.` is any character, `^` and `$`
+// are evaluated per LINE and the expression is searched for rather than anchored to the
+// whole value — so no content a caller sends can break it, and a multi-line Apache
+// Velocity template (the normal form: `#if`/`#foreach`/`#end` and pretty-printed JSON sit
+// on their own lines) is a value AppSync accepts. The boundary walk instead matches a
+// `@pattern` as a whole-string anchored match with `.` stopping at a line terminator, so
+// it refused every such template before this handler ran. The shape's `@length` is the
+// bound that remains, and `crate::state::mapping_templates_refusal` is where this
+// operation enforces it.
+#[smithy_macros::smithy(
+    shape = "com.amazonaws.appsync#CreateResolverRequest",
+    skip_validation = ["requestMappingTemplate", "responseMappingTemplate"]
+)]
 #[derive(Debug, Clone, Default)]
 pub struct CreateResolverInput {
     pub api_id: String,

@@ -188,6 +188,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // A mapping template outside the modelled `@length` of `MappingTemplate` is
+        // refused here rather than at the boundary (`skip_validation` on
+        // `UpdateFunctionInput`): the shape's `@pattern` admits any content, newlines
+        // included, so the length is the only bound a template can break. The refusal
+        // comes before the stored record is touched, so it leaves the function as it was.
+        if let Some(message) = crate::state::mapping_templates_refusal(
+            input.request_mapping_template.as_deref(),
+            input.response_mapping_template.as_deref(),
+        ) {
+            return Err(UpdateFunctionErrorModeled::BadRequestException(BadRequestException {
+                message: Some(message),
+                ..Default::default()
+            })
+            .into());
+        }
+
         let mut guard = state.lock();
 
         // The resource this call addresses is resolved first: `apiId` and `functionId`

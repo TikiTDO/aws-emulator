@@ -11,7 +11,16 @@ use super::*;
 
 smithy_macros::smithy_model!("smithy-model/com-amazonaws-appsync-awsdeepdishcontrolplaneservice.json");
 
-#[smithy_macros::smithy(shape = "com.amazonaws.appsync#UpdateResolverRequest")]
+// `skip_validation` names both mapping templates, for the reason given on
+// `CreateResolverInput` (`create_resolver_types`): `MappingTemplate`'s `@pattern` `^.*$`
+// admits every value, newlines included, so a multi-line Velocity template is one
+// AppSync accepts and the boundary's anchored match must not refuse it. This operation
+// is still a scaffold; the handler that implements it enforces the shape's `@length`
+// through `crate::state::mapping_templates_refusal`, as its siblings do.
+#[smithy_macros::smithy(
+    shape = "com.amazonaws.appsync#UpdateResolverRequest",
+    skip_validation = ["requestMappingTemplate", "responseMappingTemplate"]
+)]
 #[derive(Debug, Clone, Default)]
 pub struct UpdateResolverInput {
     pub api_id: String,

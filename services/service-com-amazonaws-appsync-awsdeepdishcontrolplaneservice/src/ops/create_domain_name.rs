@@ -154,6 +154,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
+        // A description outside the modelled `@length` of `Description` is refused here
+        // rather than at the boundary (`skip_validation` on `CreateDomainNameInput`):
+        // the shape's `@pattern` admits any content, newlines included, so the length is
+        // the only bound a description can break. It is judged before the store is
+        // reached, so a refused create holds no lock and writes nothing.
+        if let Some(message) = crate::state::description_refusal(input.description.as_deref()) {
+            return Err(CreateDomainNameErrorModeled::BadRequestException(BadRequestException {
+                message: Some(message),
+                ..Default::default()
+            })
+            .into());
+        }
+
         let region = crate::state::request_region(ctx);
         let mut guard = state.lock();
 
