@@ -429,6 +429,10 @@ fn prepare(
     // the `open` flags — installed before any import of `os`, because that is where `os`
     // takes them from ([`super::host_posix::install_data_surface`]).
     super::host_posix::install_data_surface(vm)?;
+    // The codec registry, AFTER the two installations above: whatever it imports then sees
+    // the same patched `io` and the same complete `os` every later import sees, so it can
+    // hold neither an unpatched way of opening a host file nor a half-built `os`.
+    install_codec_registry(vm)?;
     install_environment(vm, request.environment)?;
     refuse_guest_threads(vm)?;
     clamp_guest_sleep(vm, bounds)?;
@@ -491,6 +495,27 @@ fn install_environment(vm: &VirtualMachine, variables: &BTreeMap<String, String>
         environ.set_item(&*key, held, vm)?;
     }
     Ok(())
+}
+
+/// Put the standard library's CODEC REGISTRY on its feet, the way a Python interpreter's own
+/// start-up does, before any guest code runs.
+///
+/// Every text encoding a program names by its name — `bytes.decode("cp437")`,
+/// `str.encode("cp1252")`, `codecs.lookup(..)` — is resolved through the search function the
+/// standard library's `encodings` package registers while it is being imported, and the
+/// interpreter resolves only a handful of encodings on its own without it. The engine crate
+/// performs that import at start-up only under its own `encodings` feature, which this crate
+/// does not take (it takes `compiler` alone, see this crate's `Cargo.toml`, so the rest of
+/// that crate's start-up surface stays out of the build), so the import is performed here
+/// instead: without it a module of the standard library that names one of the other encodings
+/// — the archive reader decoding an entry's name is one — raises where it reads cleanly on a
+/// managed runtime, and whether it raised would depend on whether the handler happened to
+/// import `encodings` itself.
+///
+/// The package is the FROZEN standard library's own ([`interpreter`]), so no host path is read
+/// to import it and nothing of the host becomes reachable through it.
+fn install_codec_registry(vm: &VirtualMachine) -> PyResult<()> {
+    vm.import("encodings", 0).map(|_| ())
 }
 
 /// Take away every way of opening a HOST file: the TYPE that opens one, and each of the three
@@ -1194,6 +1219,12 @@ pub struct Bounds {
     /// What this PROCESS held resident at that same instant, which is what the process
     /// ceiling measures this run's own growth against. Taken there too, for the same reason.
     resident_at_start: AtomicU64,
+    /// Whether those baselines have been taken yet ([`Self::measure_memory_from_here`]),
+    /// which is the instant from which a memory reading says something about THIS RUN — and
+    /// so the instant from which the host's own watch judges one ([`Self::watch`]). It is
+    /// taken before any of the run's own code is read, the module-level code of the
+    /// deployment package included, so no stretch of guest work falls outside the watch.
+    measured: AtomicBool,
     /// Which bound was breached, once one was. Latched: the answer to a run that spent its
     /// budget is that stop, whatever the guest does afterwards.
     stopped: Mutex<Option<Stop>>,
@@ -1228,6 +1259,7 @@ impl Bounds {
             response_bytes: budget.response_bytes,
             faulted_at_start: AtomicU64::new(faulted_bytes()),
             resident_at_start: AtomicU64::new(resident_bytes()),
+            measured: AtomicBool::new(false),
             stopped: Mutex::new(None),
             breached: AtomicBool::new(false),
             spending: AtomicBool::new(false),
@@ -1248,6 +1280,9 @@ impl Bounds {
             .store(faulted_bytes(), Ordering::Relaxed);
         self.resident_at_start
             .store(resident_bytes(), Ordering::Relaxed);
+        // Last, so the host's own watch ([`Self::watch`]) never judges a run against a
+        // baseline that is still the one taken when these bounds were built.
+        self.measured.store(true, Ordering::SeqCst);
     }
 
     /// Begin the INVOKE phase: the handler's deadline runs from HERE, so what the deadline
@@ -1286,11 +1321,14 @@ impl Bounds {
     ///
     /// The run's OWN ceiling stays with the hook ([`Self::step`]): it is this THREAD's faulted
     /// pages, which only the run's own thread can read. The process's resident size is a
-    /// reading any thread can take, so once the run's own code is what is allocating it is
+    /// reading any thread can take, so from the instant the run's own code can allocate it is
     /// taken here as well — a bound sampled only between traced events is one a single native
-    /// allocation would step over. Before that, while this emulator is building the
-    /// interpreter the run will happen in, the memory in flight is the host's own doing and
-    /// stopping a run for it would answer a caller that allocated none of it.
+    /// allocation would step over, and the module-level code of the deployment package, which
+    /// runs in the INIT phase, allocates as freely as the handler does. That instant is when
+    /// the baselines were taken ([`Self::measure_memory_from_here`]), which the host does
+    /// before it reads a line of the run's own code: before it, while this emulator is
+    /// building the interpreter the run will happen in, the memory in flight is the host's own
+    /// doing and stopping a run for it would answer a caller that allocated none of it.
     ///
     /// The deadline judged is the one of the PHASE the run is in: a run still initializing
     /// its execution environment is judged against the span that initialization is allowed
@@ -1305,7 +1343,7 @@ impl Bounds {
             self.breach(Stop::Deadline);
             return;
         }
-        if self.spending.load(Ordering::Relaxed) && self.past_process_ceiling() {
+        if self.measured.load(Ordering::SeqCst) && self.past_process_ceiling() {
             self.breach(Stop::Memory);
         }
     }
@@ -2180,7 +2218,55 @@ mod tests {
         );
     }
 
-    /// The native modules a run can reach are WITHIN the allow-list — read from inside a    /// run, which is where it matters — and no host-reaching one is among them.
+    /// A standard-library module that WORKS, not only one that imports: the archive writer
+    /// builds a package in memory and the archive reader reads it back, which is what a
+    /// handler doing ordinary file work does.
+    ///
+    /// The reader decodes an entry's name with the codec the ZIP format names for a name not
+    /// flagged UTF-8, so this row also pins that a text codec is reachable BY NAME from code
+    /// that imported nothing of the codec machinery itself
+    /// ([`super::install_codec_registry`]).
+    #[test]
+    fn the_standard_librarys_archive_machinery_round_trips_inside_a_run() {
+        let source = "import io\n\
+                      import zipfile\n\
+                      def handler(event, context):\n    \
+                          buffer = io.BytesIO()\n    \
+                          with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as built:\n        \
+                              built.writestr('rows.txt', 'id,total\\n1,42\\n')\n    \
+                          package = buffer.getvalue()\n    \
+                          with zipfile.ZipFile(io.BytesIO(package)) as read:\n        \
+                              names = sorted(read.namelist())\n        \
+                              held = read.read('rows.txt').decode('utf-8')\n    \
+                          return {'names': names, 'held': held,\n            \
+                                  'single_byte': b'\\x82'.decode('cp437')}\n";
+        // Importing the archive machinery (`zipfile`, and `shutil` behind it) is more work
+        // than the small budget above allows, and is work a real invocation's own budget
+        // covers ([`crate::state::execution`]), so this row is given a run's own.
+        let mut whole = budget();
+        whole.steps = 20_000_000;
+        let finished = ran_with(
+            source,
+            "lambda_function.handler",
+            None,
+            &BTreeMap::new(),
+            whole,
+        );
+        let answered = returned(&finished, "the archive round trip");
+        assert_eq!(
+            answered,
+            ::serde_json::json!({
+                "names": ["rows.txt"],
+                "held": "id,total\n1,42\n",
+                "single_byte": "é",
+            }),
+            "case zipfile: expected the package to be read back as it was built, got \
+             {answered}"
+        );
+    }
+
+    /// The native modules a run can reach are WITHIN the allow-list — read from inside a
+    /// run, which is where it matters — and no host-reaching one is among them.
     #[test]
     fn the_registered_native_modules_are_within_the_allow_list() {
         let source = "import sys\n\

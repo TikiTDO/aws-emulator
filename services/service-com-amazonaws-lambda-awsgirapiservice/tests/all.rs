@@ -265,6 +265,8 @@ mod handler_sdk_idempotency_token;
 mod handler_sdk_service_inventory;
 #[path = "all/handler_secret_sdk.rs"]
 mod handler_secret_sdk;
+#[path = "all/handler_workbook_pipeline.rs"]
+mod handler_workbook_pipeline;
 #[path = "all/inline_archive_request_quota.rs"]
 mod inline_archive_request_quota;
 #[path = "all/invocation_concurrency.rs"]

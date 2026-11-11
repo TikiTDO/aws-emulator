@@ -200,6 +200,16 @@ impl Answer {
             .collect()
     }
 
+    /// One response header, for a value the wire carries in the headers rather than in the
+    /// body — `X-Amz-Function-Error` is one, which is where `Invoke` reports that the
+    /// handler itself faulted.
+    pub(crate) fn header(&self, name: &str) -> Option<String> {
+        self.headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    }
+
     /// The wire error code (`__type`, or the `x-amzn-errortype` header).
     pub(crate) fn error_code(&self) -> String {
         self.string("__type")
