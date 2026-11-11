@@ -17334,6 +17334,7 @@ dependencies = [
  "service-com-amazonaws-lambda-awsgirapiservice",
  "service-com-amazonaws-secretsmanager-secretsmanager",
  "service-com-amazonaws-sfn-awsstepfunctions",
+ "service-com-amazonaws-sns-amazonsimplenotificationservice",
  "service-com-amazonaws-sqs-amazonsqs",
  "service-common",
  "sha2 0.10.9",

@@ -163,7 +163,11 @@ async fn elb_ok(router: &MultiServiceRouter, fields: &[(String, String)]) -> Str
 /// The RAW text inside the first element named `tag` of `xml`, or `None` when it carries
 /// none. Raw, so a container element is split into its members before any entity in a
 /// member's own character data is read.
-fn element(xml: &str, tag: &str) -> Option<String> {
+///
+/// `pub(crate)` for the same reason [`encode`] is: a sibling suite that reads an owning
+/// service's awsQuery answer scrapes it the same way rather than carrying a second copy
+/// ([`crate::sns_tagged_resource_index`]).
+pub(crate) fn element(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
     let start = xml.find(&open)? + open.len();
@@ -173,8 +177,9 @@ fn element(xml: &str, tag: &str) -> Option<String> {
 
 /// The character data of the first element named `tag`, with the five predefined XML
 /// entities read back: the serializer writes `'` as `&apos;`, so a message quoting an
-/// identifier crosses the wire escaped and is the same sentence once read.
-fn text(xml: &str, tag: &str) -> Option<String> {
+/// identifier crosses the wire escaped and is the same sentence once read. `pub(crate)` as
+/// [`element`] is.
+pub(crate) fn text(xml: &str, tag: &str) -> Option<String> {
     element(xml, tag).map(|raw| {
         raw.replace("&apos;", "'")
             .replace("&quot;", "\"")
@@ -185,7 +190,8 @@ fn text(xml: &str, tag: &str) -> Option<String> {
 }
 
 /// The character data of the first element named `tag`, or a panic naming the body.
-fn require(xml: &str, tag: &str) -> String {
+/// `pub(crate)` as [`element`] is.
+pub(crate) fn require(xml: &str, tag: &str) -> String {
     text(xml, tag).unwrap_or_else(|| panic!("no <{tag}> in {xml}"))
 }
 

@@ -18,6 +18,15 @@
 //! value any caller sent (`vendor/smithy-schema-server/src/constraints.rs`). AWS states
 //! the collection itself there: a map as `{<key>=<value>, …}`, a list as `[<element>, …]`.
 //!
+//! A constraint declared on a map's VALUE SHAPE is the other half: it is checked on each
+//! ENTRY, so the framework reports it at the entry (`<map member>.<key>`) with the one
+//! constraint that failed, where AWS reports it at the MAP MEMBER — quoting the value that
+//! member held and listing the value shape's WHOLE declared constraint set, so one offending
+//! map is ONE validation error however many of its entries, or of one value's constraints,
+//! were broken. A service whose recordings show that states it
+//! ([`StatedClause::grouping_map_values`]); one that does not keeps the framework's
+//! per-entry clause.
+//!
 //! # Why a wrapper
 //!
 //! [`Service::override_refusal`](smithy_server_runtime::Service::override_refusal) is
@@ -59,17 +68,28 @@
 //! walk's own rendering: a value that is not a map (a list, whose order the built value does
 //! keep), a member below the top level of the body, a body this cannot read, a member whose
 //! entry count differs from the one the walk counted, and an order the service's own rule
-//! declines to state.
+//! declines to state. A clause stated at a map MEMBER is bounded the same way: it quotes the
+//! map up to the ceiling the shared walk quotes one clause to
+//! ([`crate::validation::quoted_echo`]).
+//!
+//! The request is read AT MOST ONCE PER MEMBER per refusal ([`SubmittedMaps`]), the negative
+//! answer included, so the parses one refusal performs are bounded by the number of members
+//! the operation's input declares — a constant of the model — rather than by the violation
+//! count a request chooses.
+
+use std::collections::{HashMap, HashSet};
 
 use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse};
+use aws_smithy_schema_server::constraints::ViolationKind;
 use smithy_server_runtime::{
     BoxFuture, ErasedOperation, Operation, OperationContext, OperationRoutingTable, Refused,
     Service, Violation,
 };
 
-use crate::validation::{refusing_violations_with_mapped_echoes, rendered_map};
+use crate::validation::{quoted_echo, refusing_violations_with_mapped_echoes, rendered_map};
 use crate::validation_message::{
-    envelope_over, map_entry_count, quoting_the_submitted_collection,
+    element_constraint_set, envelope_over, map_entry_count, map_value_set_requirement,
+    quoting_the_submitted_collection, requirement,
 };
 
 /// The order a service states a map's entries in inside a clause, over the entries as the
@@ -92,6 +112,13 @@ pub fn in_submitted_order(entries: &[(String, String)]) -> Option<Vec<(&str, &st
             .collect(),
     )
 }
+
+/// How a service renders a `@pattern` expression inside a requirement sentence it states:
+/// the expression as the MODEL writes it (`str::to_string`), or without the whole-value
+/// anchors a model adds to express the match AWS's own pattern makes implicitly
+/// ([`crate::validation::unanchored`]) for a service whose recordings drop them. The CHECK
+/// always ran the model's expression as written; this is the rendering alone.
+pub type PatternRendering = fn(&str) -> String;
 
 /// How a service answers a response one of its layers rendered — the seam a service whose
 /// wire form differs from the one a renderer wrote states that difference at (the member an
@@ -117,6 +144,10 @@ pub struct StatedClause {
     pub entry_order: MapEntryOrder,
     /// How this service answers a rendered response ([`AnsweredAs`]).
     pub answered_as: AnsweredAs,
+    /// How this service renders a `@pattern` inside the constraint set it states at a MAP
+    /// member for a constraint that map's VALUES broke, or `None` where it keeps the
+    /// framework's per-entry clause instead ([`StatedClause::grouping_map_values`]).
+    pub map_value_patterns: Option<PatternRendering>,
 }
 
 impl StatedClause {
@@ -128,6 +159,24 @@ impl StatedClause {
             refusal_code,
             entry_order: in_submitted_order,
             answered_as: as_rendered,
+            map_value_patterns: None,
+        }
+    }
+
+    /// The same clause, stating a constraint broken by one of a MAP's values at the map
+    /// MEMBER — the whole map as the value, the value shape's complete declared constraint
+    /// set as the requirement — with a `@pattern` in that set rendered as `pattern` renders
+    /// one.
+    ///
+    /// For a service whose recordings show that clause. The grouping, the set (read off the
+    /// operation's input schema, so it is the MODEL's constraints and not the one that
+    /// happened to fail) and every sentence in it stay here; what a service chooses is
+    /// whether it states that clause at all and how the expression is quoted.
+    #[must_use]
+    pub fn grouping_map_values(self, pattern: PatternRendering) -> Self {
+        Self {
+            map_value_patterns: Some(pattern),
+            ..self
         }
     }
 
@@ -296,36 +345,67 @@ impl StatedClauseTable {
 }
 
 /// The refusal `req` earns from `Op`'s own constraints when at least one of its clauses is
-/// about a COLLECTION whose submitted value could be stated, or `None` — which is every
-/// other request, including one refused only by clauses this changes nothing about, so the
-/// framework's own channel answers it exactly as before.
+/// about a COLLECTION whose submitted value could be stated, or about a MAP's VALUE for a
+/// service that states those ([`StatedClause::grouping_map_values`]) — or `None`, which is
+/// every other request, including one refused only by clauses this changes nothing about, so
+/// the framework's own channel answers it exactly as before.
 pub fn quoting_refusal<Op: Operation>(
     svc: &dyn Service,
     req: &RtRequest,
     stated: &StatedClause,
 ) -> Option<RtResponse> {
     let refusing = refusing_violations_with_mapped_echoes::<Op>(svc.definition().protocol(), req).0;
-    let mut quoted_a_collection = false;
-    let violations: Vec<Violation> = refusing
-        .into_iter()
-        .map(|(violation, echo)| {
-            let quoted = quoting_the_submitted_collection(violation.clone(), echo);
-            let stated = as_stated(&violation, quoted, req, stated.entry_order);
-            if stated.value == violation.value {
-                return violation;
+    let mut restated_a_clause = false;
+    // The request's own maps, read at most once per member whatever the clause count.
+    let mut submitted = SubmittedMaps::of(req);
+    // The MAP members already stated. Every value of one map has to satisfy the same set, so
+    // the clause is the same sentence however many entries of that map broke it and
+    // whichever of the set's constraints each broke: stating it once is what makes one
+    // offending map ONE validation error.
+    let mut grouped_maps: HashSet<String> = HashSet::new();
+    let mut clauses: Vec<String> = Vec::new();
+    let mut violations: Vec<Violation> = Vec::new();
+    for (violation, echo) in refusing {
+        if let Some(pattern) = stated.map_value_patterns {
+            // A further violation under a map whose clause is ALREADY stated needs no second
+            // clause. Every one of them is one of that map's VALUES: the shared walk reports
+            // a map's KEY as a path segment and never as a constrained leaf
+            // (`vendor/smithy-schema-server/src/constraints.rs`), so nothing else is
+            // reported below a map member.
+            if entry_of(&violation.path).is_some_and(|(member, _)| grouped_maps.contains(member))
+            {
+                violations.push(violation);
+                continue;
             }
-            quoted_a_collection = true;
-            stated
-        })
-        .collect();
-    if !quoted_a_collection {
+            if let Some((member, clause)) =
+                map_value_clause::<Op>(&violation, &mut submitted, pattern)
+            {
+                restated_a_clause = true;
+                violations.push(violation);
+                if grouped_maps.insert(member) {
+                    clauses.push(clause);
+                }
+                continue;
+            }
+        }
+        let quoted = quoting_the_submitted_collection(violation.clone(), echo);
+        let restated = as_stated(&violation, quoted, &mut submitted, stated.entry_order);
+        let violation = if restated.value == violation.value {
+            violation
+        } else {
+            restated_a_clause = true;
+            restated
+        };
+        clauses.push(violation.message());
+        violations.push(violation);
+    }
+    if !restated_a_clause {
         return None;
     }
-    // Every clause is the framework's own sentence over the violation as stated, and the
-    // envelope over them is the framework's own too, so the ONE difference from the refusal
-    // that channel would have rendered is the collection a clause about a collection
-    // quotes.
-    let clauses: Vec<String> = violations.iter().map(Violation::message).collect();
+    // Every other clause is the framework's own sentence over the violation as stated, and
+    // the envelope over them is the framework's own too, so the only differences from the
+    // refusal that channel would have rendered are the collection a clause about a
+    // collection quotes and the member a clause about a map's values is stated at.
     let message = envelope_over(&clauses)?;
     Some(svc.definition().refusal_response(
         ::aws_smithy_schema_server::ProtocolError::Invalid(violations),
@@ -335,6 +415,77 @@ pub fn quoting_refusal<Op: Operation>(
         }),
         req,
     ))
+}
+
+/// The MAP member `violation` belongs to and the clause stated at it, or `None` when
+/// `violation` is not a map VALUE's.
+///
+/// A map entry's value is reported by the framework at `<map member>.<key>`, so the member
+/// is that path's first segment and the key is everything after it (a key may itself carry a
+/// `.`). THREE facts have to hold together before a clause is stated, and each is read
+/// rather than assumed:
+///
+/// * the operation's input declares that member with a constraint set for its
+///   collection's elements/values ([`element_constraint_set`], which reads the element
+///   constraints codegen attaches to a collection member and nothing else, so no scalar and
+///   no structure member can match);
+/// * the REQUEST carried that member as an object of strings, in which
+/// * `<key>` is one of the keys.
+///
+/// So a nested structure member whose own name happens to collide with a key keeps the
+/// framework's clause, and a LIST — whose element path is `<list>.<position>.member` and
+/// whose body is an array — never reaches here.
+///
+/// The value half is the whole map the request carried, in the order that service states
+/// entries in, exactly as a clause about that same member's own `@length` quotes it
+/// ([`as_stated`]): a clause quotes the value held at the member it names.
+fn map_value_clause<Op: Operation>(
+    violation: &Violation,
+    submitted: &mut SubmittedMaps<'_>,
+    pattern: PatternRendering,
+) -> Option<(String, String)> {
+    let (member, key) = entry_of(&violation.path)?;
+    let declared = element_constraint_set(&[Op::INPUT_SCHEMA], member)?;
+    let entries = submitted.of_member(member)?;
+    if !entries.iter().any(|(held, _)| held == key) {
+        return None;
+    }
+    let pairs: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    let requirements: Vec<String> = declared
+        .into_iter()
+        .map(|kind| stated_requirement(kind, pattern))
+        .collect();
+    Some((
+        member.to_string(),
+        format!(
+            "Value '{}' at '{member}' failed to satisfy constraint: {}",
+            quoted_echo(&rendered_map(&pairs)),
+            map_value_set_requirement(&requirements),
+        ),
+    ))
+}
+
+/// The member and the entry KEY a path of the form `<member>.<key>` names, or `None` for a
+/// path with no step at all. The key is everything after the FIRST step, because a map key
+/// may itself carry a `.`.
+fn entry_of(path: &str) -> Option<(&str, &str)> {
+    path.split_once('.')
+}
+
+/// One constraint of a collection's element/value shape as a clause states it: the
+/// framework's own words for the class ([`requirement`]), with a `@pattern` rendered as the
+/// service renders one — so a requirement nested into a map clause reads exactly like one a
+/// reported member gets.
+fn stated_requirement(kind: ViolationKind, pattern: PatternRendering) -> String {
+    match kind {
+        ViolationKind::Pattern(expression) => {
+            requirement(ViolationKind::Pattern(pattern(&expression)))
+        }
+        other => requirement(other),
+    }
 }
 
 /// `quoted` — the shared rendering of the collection `violation` is about — with a MAP's
@@ -347,7 +498,7 @@ pub fn quoting_refusal<Op: Operation>(
 fn as_stated(
     violation: &Violation,
     quoted: Violation,
-    req: &RtRequest,
+    submitted: &mut SubmittedMaps<'_>,
     order: MapEntryOrder,
 ) -> Violation {
     let (Some(summary), Some(rendered)) = (violation.value.as_deref(), quoted.value.as_deref())
@@ -360,14 +511,13 @@ fn as_stated(
     if violation.path.contains('.') {
         return quoted;
     }
-    let Some(submitted) = submitted_map_entries(req.body().bytes().unwrap_or_default(), &violation.path)
-    else {
+    let Some(held) = submitted.of_member(&violation.path) else {
         return quoted;
     };
-    if submitted.len() != entries {
+    if held.len() != entries {
         return quoted;
     }
-    let Some(ordered) = order(&submitted) else {
+    let Some(ordered) = order(held) else {
         return quoted;
     };
     let restated = rendered_map(&ordered);
@@ -377,6 +527,45 @@ fn as_stated(
     Violation {
         value: Some(restated),
         ..quoted
+    }
+}
+
+/// The maps the REQUEST carried, each read at most ONCE however many clauses ask for it.
+///
+/// Why it exists: a clause is restated per VIOLATION, and the walk can report one violation
+/// per element of a collection, so reading the body inside that loop would re-parse the whole
+/// body once per clause — work one request chooses twice over, in its body's length and in
+/// its violation count. Here the answer for a member is remembered the first time it is asked
+/// for, the NEGATIVE answer included (a member the body does not carry, or carries as
+/// something other than an object of strings, is never re-read), so the parses one refusal
+/// performs are bounded by the number of MEMBERS the operation's input declares — a constant
+/// of the model — rather than by anything the request chooses.
+struct SubmittedMaps<'r> {
+    /// The buffered request body, already read and deserialized once by the shared walk
+    /// before this layer looks at it.
+    body: &'r [u8],
+    /// What the body holds at each member asked for so far, `None` for a member this layer
+    /// found no map of strings at.
+    read: HashMap<String, Option<Vec<(String, String)>>>,
+}
+
+impl<'r> SubmittedMaps<'r> {
+    /// Read `req`'s body lazily: nothing is parsed until a clause asks for a member.
+    fn of(req: &'r RtRequest) -> Self {
+        Self {
+            body: req.body().bytes().unwrap_or_default(),
+            read: HashMap::new(),
+        }
+    }
+
+    /// The entries `member` carried, in the order the request wrote them, or `None` when the
+    /// body carries no map of strings there ([`submitted_map_entries`]).
+    fn of_member(&mut self, member: &str) -> Option<&[(String, String)]> {
+        if !self.read.contains_key(member) {
+            let read = submitted_map_entries(self.body, member);
+            self.read.insert(member.to_string(), read);
+        }
+        self.read.get(member)?.as_deref()
     }
 }
 

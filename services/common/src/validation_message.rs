@@ -1609,6 +1609,31 @@ pub fn element_set_requirement(requirements: &[String]) -> String {
     format!("{ELEMENT_SET_OPEN}{}]", requirements.join(", "))
 }
 
+/// What a clause opens the VALUE shape's constraint set with, when the set is stated at the
+/// MAP member whose values it is about — the map counterpart of [`ELEMENT_SET_OPEN`], and
+/// the sibling of the `Map keys must satisfy constraint: …` [`map_key_refusal`] states.
+const MAP_VALUE_SET_OPEN: &str = "Map value must satisfy constraint: [";
+
+/// The requirement a clause states at a MAP member for a constraint its VALUES broke: the
+/// value shape's whole declared set, nested inside
+/// `Map value must satisfy constraint: [ … ]`.
+///
+/// The wrapper lives here for the same reason [`element_set_requirement`]'s does: the
+/// grouping needs the REQUEST (the map a clause quotes is the value that member held, which
+/// no violation carries), so it is made per service, while the sentence around it is one
+/// text and cannot be allowed to drift per crate. `requirements` are the value shape's
+/// requirement sentences — [`requirement`] over the constraints
+/// [`element_constraint_set`] reads off the model — in the order the clause states them.
+///
+/// THE HOME for this sentence, under the same rule as [`element_set_requirement`]:
+/// `sagemaker-sagemaker`, `aiops-aiops` and `pipes-pipes` each carry their own inlined copy,
+/// written before this module had one, and are to be MIGRATED onto this one rather than
+/// copied again.
+#[must_use]
+pub fn map_value_set_requirement(requirements: &[String]) -> String {
+    format!("{MAP_VALUE_SET_OPEN}{}]", requirements.join(", "))
+}
+
 /// The ONE body behind both grouped entry points: the framework's envelope over the
 /// framework's clauses, with a violation at a list ELEMENT stated at the collection member
 /// carrying the element shape's whole set, and the value half dropped from a clause that

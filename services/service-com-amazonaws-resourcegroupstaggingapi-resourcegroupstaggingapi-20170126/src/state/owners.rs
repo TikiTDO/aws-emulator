@@ -51,6 +51,7 @@ use service_com_amazonaws_kms_trentservice as owner_kms;
 use service_com_amazonaws_lambda_awsgirapiservice as owner_lambda;
 use service_com_amazonaws_secretsmanager_secretsmanager as owner_secretsmanager;
 use service_com_amazonaws_sfn_awsstepfunctions as owner_sfn;
+use service_com_amazonaws_sns_amazonsimplenotificationservice as owner_sns;
 use service_com_amazonaws_sqs_amazonsqs as owner_sqs;
 
 use super::ParsedArn;
@@ -240,6 +241,7 @@ pub fn visit<Eng: Send + Sync + 'static>(
         "kms" => kms(engine, arn, change),
         "lambda" => lambda(engine, arn, change),
         "secretsmanager" => secretsmanager(engine, arn, change),
+        "sns" => sns(engine, arn, change),
         "states" => states(engine, arn, change),
         _ => Resolution::Unowned,
     }
@@ -399,6 +401,14 @@ pub fn tagged_resources<Eng: Send + Sync + 'static>(
             record(secret.arn.clone(), option_tag_pairs!(secret.tags));
         }
     }
+    if let Some(state) = owner_sns::state::service_state(engine) {
+        // A topic is a REGIONAL resource of that service — it belongs to the Region its
+        // create addressed, which is the Region its ARN carries — so the topics this
+        // projection reports are the ones of the serving Region.
+        for topic in state.lock().topics_in_region(region) {
+            record(topic.arn.clone(), pairs(&topic.tags));
+        }
+    }
     if let Some(state) = owner_sfn::state::service_state(engine) {
         let mut state = state.lock();
         // Like the secrets above, a state machine whose started deletion has
@@ -506,6 +516,55 @@ fn sqs<Eng: Send + Sync + 'static>(
     Resolution::Present {
         tags: Some(queue.tags.clone()),
     }
+}
+
+/// Amazon SNS: a topic, whose tags are the topic's own — "an SNS tag is held by a
+/// topic", so a topic's tag set is the one this API reads and writes, and a topic
+/// created or deleted through SNS appears in and disappears from this API's
+/// answers with nothing to keep in step.
+///
+/// A topic ARN carries the Region the topic lives in and is the key that service
+/// holds its topics under, so it is resolved by that key rather than scanned for.
+/// An SNS ARN that names something ELSE — a subscription (`<topic>:<uuid>`), a
+/// platform endpoint — is told apart by that service's OWN reader
+/// ([`owner_sns::state::topic_name_from_arn`], the test its tag operations apply)
+/// and left [`Resolution::Unowned`], the answer every value no linked owner
+/// addresses gets, so this crate's own store stays its tag home.
+fn sns<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    arn: &ParsedArn,
+    change: Option<&Change<'_>>,
+) -> Resolution {
+    let Some(state) = owner_sns::state::service_state(engine) else {
+        return Resolution::Unowned;
+    };
+    if owner_sns::state::topic_name_from_arn(&arn.arn).is_none() {
+        return Resolution::Unowned;
+    }
+    let mut state = state.lock();
+    let Some(topic) = state.topics.get_mut(&arn.arn) else {
+        // SNS's own `ResourceNotFoundException`, as the WIRE carries it:
+        // `smithy_query(query="operation",operation="TagResource")` on the SNS
+        // model reports that error's `awsQueryError` code `ResourceNotFound`
+        // with HTTP 404, and `RESOURCE_DOES_NOT_EXIST` is that service's own
+        // wording of the reason, which its tag operations answer with.
+        return absent_with_status(
+            404,
+            "ResourceNotFound",
+            owner_sns::state::RESOURCE_DOES_NOT_EXIST.to_string(),
+        );
+    };
+    let mut held = pairs(&topic.tags);
+    if let Some(change) = change {
+        if let Err(would_hold) = change.apply(&mut held) {
+            return Resolution::TooManyTags(would_hold);
+        }
+        // A topic's tag record carries nothing but the key and the value, so the
+        // map the change left is the map that service now holds — no per-record
+        // field to preserve, which is what `option_tag_list!` edits in place for.
+        topic.tags = held.clone().into_iter().collect();
+    }
+    Resolution::Present { tags: Some(held) }
 }
 
 /// Amazon ECS: clusters, capacity providers, task definitions, services, tasks

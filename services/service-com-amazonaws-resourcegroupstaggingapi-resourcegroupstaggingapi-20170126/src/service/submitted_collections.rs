@@ -4,19 +4,28 @@
 //! through the layer that states them.
 //!
 //! The rule, the wrapper and every guard around it are the tree's shared ones
-//! (`service_common::submitted_collections`, the one home for the half of a constraint
+//! (`service_common::submitted_collections`, the one home for the halves of a constraint
 //! refusal the framework's walk cannot state — the COLLECTION a clause about a collection
 //! member is about: a `@length` on a map or a list is checked ON THE MEMBER, so the only
 //! rendering the framework has for the rejected value is a summary of its size, where AWS
-//! states the collection itself).
+//! states the collection itself; and the MAP MEMBER a constraint broken by one of that map's
+//! VALUES is reported at, carrying the value shape's whole declared constraint set, where
+//! the framework reports the offending entry and the one constraint that failed).
 //!
 //! This file supplies only the facts that are this service's own: the error code its
-//! constraint refusals carry, and the order it states a map's entries in — the order the
-//! REQUEST wrote them, which the built input (a `HashMap`) does not keep.
+//! constraint refusals carry, the order it states a map's entries in — the order the REQUEST
+//! wrote them, which the built input (a `HashMap`) does not keep — and that it states a
+//! constraint its map VALUES broke at the map member, with a `@pattern` quoted as the
+//! expression a value has to satisfy rather than as the whole-value expression the model
+//! writes (`service_common::validation::unanchored`). `TagResources`' `Tags` is the one map
+//! member this model declares, and `TagValue`'s set is the three constraints AWS enumerates
+//! for it (`smithy_query(query="shape",shape="TagValue")`: `@length 0..256`,
+//! `@pattern ^[\s\S]*$`).
 
 use std::sync::Arc;
 
 use service_common::submitted_collections::{StatedClause, StatedClauseTable};
+use service_common::validation::unanchored;
 use smithy_server_runtime::OperationRoutingTable;
 
 /// The error code a constraint refusal carries, which is the one the framework's own
@@ -37,12 +46,15 @@ macro_rules! serve {
 }
 
 /// The same modelled operations the generated table holds, each served so that a constraint
-/// clause about a collection member states the collection the request carried, and built
-/// from the SAME shared engine, so a wrapped operation reads and writes the one store.
+/// clause about a collection member states the collection the request carried and one about
+/// a map's values is stated at that map, and built from the SAME shared engine, so a wrapped
+/// operation reads and writes the one store.
 pub(super) fn quoting_submitted_collections<Eng: Send + Sync + 'static>(
     engine: &Arc<Eng>,
 ) -> OperationRoutingTable {
-    let mut table = StatedClauseTable::new(StatedClause::under(VALIDATION_EXCEPTION));
+    let mut table = StatedClauseTable::new(
+        StatedClause::under(VALIDATION_EXCEPTION).grouping_map_values(unanchored),
+    );
     serve!(
         table,
         engine,

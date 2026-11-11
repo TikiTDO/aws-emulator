@@ -499,6 +499,20 @@ pub fn out_of_range_message(member: &str, min: i32, max: i32) -> String {
     format!("{member} is not in the valid range of {min} and {max}")
 }
 
+/// The `InvalidParameterException` message for a request that sets a member the
+/// documentation admits only alongside another one: it names the member that has
+/// to be specified, and the value it has to carry.
+///
+/// Stated by the member that was MISSING rather than by the one the caller did
+/// send — a caller is told what to add, not what to drop — so the text is the same
+/// for every dependent member of the same enabling one. `member` is spelled as
+/// the API spells it (`GetResources`' `ExcludeCompliantResources`: "You can use
+/// this parameter only if the `IncludeComplianceDetails` parameter is also set to
+/// true").
+pub fn must_also_specify_message(member: &str) -> String {
+    format!("You must specify the {member} parameter and set it to true.")
+}
+
 /// The page size `GetTagKeys` and `GetTagValues` serve.
 ///
 /// Neither operation exposes a page-size member, so the page size is the

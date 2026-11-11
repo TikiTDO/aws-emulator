@@ -40,6 +40,7 @@ service-com-amazonaws-kms-trentservice = { workspace = true }
 service-com-amazonaws-lambda-awsgirapiservice = { workspace = true }
 service-com-amazonaws-secretsmanager-secretsmanager = { workspace = true }
 service-com-amazonaws-sfn-awsstepfunctions = { workspace = true }
+service-com-amazonaws-sns-amazonsimplenotificationservice = { workspace = true }
 # The shared constraint-refusal renderings: the collecting walk that reports what
 # the request held at the member a clause is about, and the restoring of a clause
 # stated at a COLLECTION from it. See `src/service/submitted_collections.rs`.

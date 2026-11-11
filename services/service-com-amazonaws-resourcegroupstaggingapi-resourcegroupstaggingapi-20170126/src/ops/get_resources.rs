@@ -295,12 +295,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let include_compliance_details = input.include_compliance_details.unwrap_or(false);
         let exclude_compliant_resources = input.exclude_compliant_resources.unwrap_or(false);
         // "You can use this parameter only if the IncludeComplianceDetails
-        // parameter is also set to true."
+        // parameter is also set to true." The refusal names the member that has
+        // to be ADDED, not the one the caller sent.
         if exclude_compliant_resources && !include_compliance_details {
-            return Err(invalid(
-                "ExcludeCompliantResources can be specified only when IncludeComplianceDetails is true"
-                    .to_string(),
-            ));
+            return Err(invalid(crate::state::must_also_specify_message(
+                "IncludeComplianceDetails",
+            )));
         }
         // Reporting a resource's compliance, or selecting only the NONCOMPLIANT
         // ones, needs an effective tag policy to judge resources against, and

@@ -45,3 +45,9 @@ mod elb_tagged_resource_index;
 
 #[path = "all/lambda_tagged_resource_index.rs"]
 mod lambda_tagged_resource_index;
+
+#[path = "all/map_value_constraint_clauses.rs"]
+mod map_value_constraint_clauses;
+
+#[path = "all/sns_tagged_resource_index.rs"]
+mod sns_tagged_resource_index;

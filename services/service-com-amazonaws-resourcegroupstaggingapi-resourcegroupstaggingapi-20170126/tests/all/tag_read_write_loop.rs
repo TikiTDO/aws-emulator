@@ -155,11 +155,13 @@ fn page_tags(body: &serde_json::Value, arn: &str) -> BTreeMap<String, String> {
 const ARN_FORMS: &[(&str, &str, Option<&str>)] = &[
     // Bare resource id, no region, no account (the issue's first row).
     ("arn:aws:s3:::bucket-a", "s3", Some("s3:bucket")),
-    // Bare resource id with region and account.
+    // Bare resource id with region and account, under a service the table of
+    // implicit resource types does not name — so its type key is the bare service
+    // token, which is both its filters.
     (
-        "arn:aws:sns:us-east-1:123456789012:topic-a",
-        "sns",
-        Some("sns:topic"),
+        "arn:aws:codecommit:us-east-1:123456789012:repo-a",
+        "codecommit",
+        Some("codecommit"),
     ),
     // `resource-type/resource-id`.
     (
@@ -330,7 +332,7 @@ async fn tag_filters_and_across_keys_and_or_within_one_filters_values() {
     let router = emulator();
     // Three resources whose tag sets differ in value, in key set, and in count.
     let alpha = "arn:aws:s3:::alpha";
-    let beta = "arn:aws:sns:us-east-1:123456789012:beta";
+    let beta = "arn:aws:codecommit:us-east-1:123456789012:beta";
     let gamma = "arn:aws:ec2:us-east-1:123456789012:instance/gamma";
     tag(&router, &[alpha], &[("Env", "prod"), ("Team", "core")]).await;
     tag(&router, &[beta], &[("Env", "dev"), ("Team", "core")]).await;
@@ -390,7 +392,7 @@ async fn tag_filters_and_across_keys_and_or_within_one_filters_values() {
 async fn tag_resources_upserts_and_untag_resources_removes_only_the_named_keys() {
     let router = emulator();
     let arn = "arn:aws:s3:::bucket-a";
-    let other = "arn:aws:sns:us-east-1:123456789012:topic-a";
+    let other = "arn:aws:codecommit:us-east-1:123456789012:repo-a";
     tag(&router, &[arn, other], &[("Env", "prod"), ("Team", "core")]).await;
 
     // Rows differ in what the second write does to the stored map: overwrite one
@@ -515,7 +517,7 @@ async fn tag_resources_upserts_and_untag_resources_removes_only_the_named_keys()
 async fn get_tag_keys_and_values_are_projections_of_the_store() {
     let router = emulator();
     let alpha = "arn:aws:s3:::alpha";
-    let beta = "arn:aws:sns:us-east-1:123456789012:beta";
+    let beta = "arn:aws:codecommit:us-east-1:123456789012:beta";
     tag(&router, &[alpha], &[("Env", "prod"), ("Team", "core")]).await;
     tag(&router, &[beta], &[("Env", "dev"), ("Zone", "a")]).await;
 
