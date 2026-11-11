@@ -493,4 +493,8 @@ mod usage_plan_quota_enforcement;
 // nobody, the `401` of an expired token, and the `403` of an authorizer that denies the call.
 #[path = "all/stage_cognito_token_refusal_class.rs"]
 mod stage_cognito_token_refusal_class;
+// Appended for the reason the note above gives: what SIMULATING one stored `Authorizer`
+// reports — the decision its execution produced, and the status a client would have received.
+#[path = "all/test_invoke_authorizer.rs"]
+mod test_invoke_authorizer;
 

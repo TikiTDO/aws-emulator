@@ -125,13 +125,14 @@
 #[allow(unused_imports)]
 use super::types::*;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::service::invoke::{
     matched_path_parameters, performed_integration, refusal_rendering, sent_query_parameters,
     with_stage_variables, MethodRequest, JSON_CONTENT_TYPE,
 };
 use crate::service::invoke::lambda_proxy::ProxyInputs;
+use crate::service::invoke::simulated_request;
 use crate::service::mapping_template::TemplateInputs;
 
 /// The request this operation's execution log is a log of. A simulated invocation never
@@ -139,6 +140,11 @@ use crate::service::mapping_template::TemplateInputs;
 /// execution it reports instead of minting an identifier nothing else can be correlated
 /// with.
 const TEST_INVOKE_REQUEST_ID: &str = "test-invoke-request";
+
+// `pub(crate)` on the two items below, and nothing else about this operation, because
+// `TestInvokeAuthorizer` simulates a request to the SAME api and reports it in the same
+// execution log: one spelling of the stage a test invocation belongs to and one formatter
+// for the log, so the two simulations cannot name the stage or lay out a log differently.
 
 /// The simulated request header that selects the integration REQUEST template, as
 /// `Integration$requestTemplates` keys it.
@@ -157,7 +163,7 @@ const ACCEPT: &str = "accept";
 /// `arn:aws:execute-api:{region}:{account}:{api-id}/test-invoke-stage/{verb}/{path}` — which
 /// is why a grant added for `*/{verb}/{path}`, covering every stage, admits a test
 /// invocation as well as a deployed one.
-const TEST_INVOKE_STAGE: &str = "test-invoke-stage";
+pub(crate) const TEST_INVOKE_STAGE: &str = "test-invoke-stage";
 
 /// The reported response header the rendered body's media type travels in.
 const CONTENT_TYPE_HEADER: &str = "Content-Type";
@@ -169,7 +175,7 @@ const CONTENT_TYPE_HEADER: &str = "Content-Type";
 /// performed in process out of stored records, with no backend call to wait on, so there is
 /// no later instant for a line to be stamped with.
 #[derive(Debug)]
-struct ExecutionLog {
+pub(crate) struct ExecutionLog {
     /// The instant the simulation started, rendered as this service renders a timestamp.
     stamp: String,
     /// The log, first line first.
@@ -179,7 +185,7 @@ struct ExecutionLog {
 impl ExecutionLog {
     /// The log of an execution that started at `stamp`, opened with the two lines every
     /// execution log opens with: what it is a log of, and that the execution started.
-    fn started_at(stamp: String) -> Self {
+    pub(crate) fn started_at(stamp: String) -> Self {
         let mut log = Self {
             stamp,
             lines: vec![format!("Execution log for request {TEST_INVOKE_REQUEST_ID}")],
@@ -191,122 +197,20 @@ impl ExecutionLog {
     }
 
     /// Append one step of the execution.
-    fn line(&mut self, text: String) {
+    pub(crate) fn line(&mut self, text: String) {
         self.lines.push(format!("{} : {text}", self.stamp));
     }
 
     /// The log as the operation reports it: one line per step, newline separated.
-    fn rendered(&self) -> String {
+    pub(crate) fn rendered(&self) -> String {
         self.lines.join("\n")
     }
 }
 
-/// The value the simulated request carries for `name`, looked up case-insensitively (a
-/// header name is case-insensitive on the wire, and these are supplied as map keys) across
-/// both members a caller may carry it in: `headers` first, then the FIRST value of the
-/// `multiValueHeaders` entry, which is the value a single-valued read of a multi-valued
-/// header sees.
-fn simulated_header<'i>(input: &'i TestInvokeMethodInput, name: &str) -> Option<&'i str> {
-    let single = input.headers.iter().flatten().find_map(|(key, value)| {
-        key.eq_ignore_ascii_case(name)
-            .then_some(value.as_str())
-    });
-    single.or_else(|| {
-        input
-            .multi_value_headers
-            .iter()
-            .flatten()
-            .find_map(|(key, values)| {
-                key.eq_ignore_ascii_case(name)
-                    .then(|| values.first().map(String::as_str))
-                    .flatten()
-            })
-    })
-}
-
-/// The names of the headers the simulated request carries, in name order.
-///
-/// The NAMES, not the values: a simulated header is where an authorization token or an API
-/// key would travel, and an execution log is not where a caller's credential belongs.
-fn header_names(input: &TestInvokeMethodInput) -> Vec<String> {
-    let mut names: BTreeSet<&str> = input
-        .headers
-        .iter()
-        .flatten()
-        .map(|(key, _)| key.as_str())
-        .collect();
-    names.extend(
-        input
-            .multi_value_headers
-            .iter()
-            .flatten()
-            .map(|(key, _)| key.as_str()),
-    );
-    names.into_iter().map(str::to_owned).collect()
-}
-
-/// The headers a simulated request carries, by name: both members a caller may carry one
-/// in, as [`simulated_header`] reads them — `headers`, then the FIRST value of a
-/// `multiValueHeaders` entry, which is the value a single-valued read of a multi-valued
-/// header sees. A name in both keeps the single-valued one.
-///
-/// Read for the same reason the template-selecting header is: a header the caller simulated
-/// must be the one the template renders against, whichever member carried it.
-fn simulated_headers(input: &TestInvokeMethodInput) -> BTreeMap<String, String> {
-    let mut carried: BTreeMap<String, String> = BTreeMap::new();
-    for (name, values) in input.multi_value_headers.iter().flatten() {
-        if let Some(first) = values.first() {
-            carried.insert(name.clone(), first.clone());
-        }
-    }
-    for (name, value) in input.headers.iter().flatten() {
-        carried.insert(name.clone(), value.clone());
-    }
-    carried
-}
-
-/// EVERY value a simulated request carries under each header name: the `multiValueHeaders`
-/// entries the caller supplied, and the single-valued `headers` for a name only that member
-/// carries.
-///
-/// The multi-valued view of [`simulated_headers`], which is what a PROXY integration's event
-/// carries beside the single-valued one.
-fn every_simulated_header(input: &TestInvokeMethodInput) -> BTreeMap<String, Vec<String>> {
-    let mut carried: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (name, values) in input.multi_value_headers.iter().flatten() {
-        carried.insert(name.clone(), values.clone());
-    }
-    for (name, value) in input.headers.iter().flatten() {
-        carried.entry(name.clone()).or_insert_with(|| vec![value.clone()]);
-    }
-    carried
-}
-
-/// EVERY value the simulated query string carries under each name, read by the one reader
-/// this service reads a query string with.
-fn every_simulated_query_parameter(query: Option<&str>) -> BTreeMap<String, Vec<String>> {
-    let mut carried: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (name, value) in sent_query_parameters(query.unwrap_or_default()) {
-        carried.insert(name, vec![value]);
-    }
-    carried
-}
-
-/// The path and the query string of `pathWithQueryString` — "The URI path, including query
-/// string, of the simulated invocation request" — split at the first `?`. Each half is
-/// absent when the member carries none of it.
-fn split_query(path_with_query: Option<&str>) -> (Option<&str>, Option<&str>) {
-    let Some(value) = path_with_query.filter(|value| !value.is_empty()) else {
-        return (None, None);
-    };
-    match value.split_once('?') {
-        Some((path, query)) => (
-            (!path.is_empty()).then_some(path),
-            (!query.is_empty()).then_some(query),
-        ),
-        None => (Some(value), None),
-    }
-}
+// How the members a simulated request carries are read — its headers, its path, its query
+// string and the names of the maps a caller supplies — is
+// `crate::service::invoke::simulated_request`, the one reader both `TestInvoke*` operations
+// share.
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -430,8 +334,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .fmt(::aws_smithy_types::date_time::Format::DateTime)
                 .unwrap_or_default(),
         );
+        // What the simulated request carries, read by the one reader of a simulated
+        // request's members ([`simulated_request`]).
+        let headers = simulated_request::SimulatedHeaders::of(
+            input.headers.as_ref(),
+            input.multi_value_headers.as_ref(),
+        );
+        let content_type = headers.value(CONTENT_TYPE);
+        let accepted = headers.value(ACCEPT);
         log.line(format!("HTTP Method: {verb}, Resource Path: {resource_path}"));
-        let (path, query) = split_query(input.path_with_query_string.as_deref());
+        let (path, query) = simulated_request::split_query(input.path_with_query_string.as_deref());
         if let Some(path) = path {
             log.line(format!("Method request path: {path}"));
         }
@@ -440,7 +352,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
         log.line(format!(
             "Method request headers: [{}]",
-            header_names(&input).join(", ")
+            headers.names().join(", ")
         ));
         // The body's SIZE, not the body: it is the caller's own text, and reporting its
         // length says what the integration was handed without copying a payload into a log.
@@ -448,14 +360,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             "Method request body before transformations: {} byte(s)",
             input.body.as_deref().unwrap_or_default().len()
         ));
-        let stage_variables: Vec<&str> = input
-            .stage_variables
-            .iter()
-            .flatten()
-            .map(|(name, _)| name.as_str())
-            .collect::<BTreeSet<&str>>()
-            .into_iter()
-            .collect();
+        let stage_variables = simulated_request::map_names(input.stage_variables.as_ref());
         if !stage_variables.is_empty() {
             log.line(format!(
                 "Stage variables: [{}]",
@@ -506,7 +411,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ),
             path: matched_path_parameters(&resource_path, path.unwrap_or("")),
             querystring: sent_query_parameters(query.unwrap_or_default()),
-            header: simulated_headers(&input),
+            header: headers.single_valued(),
             stage_variables: simulated_variables.clone(),
             context: BTreeMap::from([
                 ("apiId".to_string(), input.rest_api_id.clone()),
@@ -519,8 +424,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ]),
         };
         let call = MethodRequest::simulated(
-            simulated_header(&input, CONTENT_TYPE),
-            simulated_header(&input, ACCEPT),
+            content_type.as_deref(),
+            accepted.as_deref(),
             inputs,
             // What a PROXY integration's event names a SIMULATED call by: the resource and
             // the verb the caller named, the path it simulated, and every value its
@@ -534,8 +439,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 http_method: verb.clone(),
                 request_path: path.unwrap_or(resource_path.as_str()).to_string(),
                 domain_name: String::new(),
-                multi_value_querystring: every_simulated_query_parameter(query),
-                multi_value_header: every_simulated_header(&input),
+                multi_value_querystring: simulated_request::every_query_parameter(query),
+                multi_value_header: headers.every_value(),
                 source_arn: Some(
                     crate::service::resource_policy::Call {
                         region: api.arn_region(),

@@ -245,9 +245,17 @@ pub mod aws_integration;
 pub mod cognito_user_pools;
 mod custom_authorizer;
 pub mod execute_api_authorization;
+/// What an authorizer's `identitySource` declaration extracts from a request, read the one
+/// way by this data plane and by a SIMULATED request ([`simulated_authorizer`]).
+mod identity_source;
 pub mod lambda_proxy;
 mod onward_endpoint;
 pub mod sigv4_authentication;
+/// What one `Authorizer` makes of a SIMULATED request, which is what
+/// `TestInvokeAuthorizer` reports. `pub(crate)` because that operation is its one caller.
+pub(crate) mod simulated_authorizer;
+/// What a SIMULATED request carries, read the one way for both `TestInvoke*` operations.
+pub(crate) mod simulated_request;
 /// What the stage LOGS about a request it served: its access-log record and the execution
 /// log its method settings turn on.
 mod stage_logs;
@@ -2346,46 +2354,31 @@ fn authorization_refusal<Eng: Send + Sync + 'static>(
     };
     // The value the authorizer EXTRACTS from the request, which is what it then evaluates:
     // the first identity source that names a part of the request, in the order the authorizer
-    // declares them, with every one of them keying the result the stage holds.
-    let mut presented: Option<String> = None;
-    let mut identity_values: Vec<String> = Vec::new();
-    for source in authorizer
-        .identity_source
-        .as_deref()
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|source| !source.is_empty())
-    {
-        // Each identity source the authorizer declares must be PRESENT, or the authorizer
-        // is not called at all. The two request-bound forms are read here; a source bound
-        // to something else (a stage variable, say) is not one this emulator can resolve,
-        // and is left to the refusal below rather than treated as satisfied.
-        if let Some(header) = source.strip_prefix(METHOD_REQUEST_HEADER_PREFIX) {
-            let Some(value) = req
-                .headers()
+    // declares them, with every one of them keying the result the stage holds. The
+    // declaration is read by the one reader of it ([`identity_source`]), so a request to this
+    // stage and a SIMULATED request are asked about the same sources.
+    let presented = match identity_source::presented(
+        authorizer.identity_source.as_deref(),
+        |header| {
+            req.headers()
                 .get(header.to_ascii_lowercase())
-                .filter(|value| !value.is_empty())
-            else {
-                return Authorized::Refused(UNAUTHORIZED);
-            };
-            identity_values.push(value.to_string());
-            presented.get_or_insert_with(|| value.to_string());
-            continue;
-        }
-        if let Some(parameter) = source.strip_prefix(METHOD_REQUEST_QUERY_PREFIX) {
-            let carried = query_of(req.uri()).split('&').find_map(|pair| {
+                .map(str::to_string)
+        },
+        |parameter| {
+            query_of(req.uri()).split('&').find_map(|pair| {
                 pair.split_once('=')
                     .filter(|(key, value)| *key == parameter && !value.is_empty())
                     .map(|(_, value)| value.to_string())
-            });
-            let Some(value) = carried else {
-                return Authorized::Refused(UNAUTHORIZED);
-            };
-            identity_values.push(value.clone());
-            presented.get_or_insert(value);
-        }
-    }
+            })
+        },
+    ) {
+        Ok(presented) => presented,
+        // Each identity source the authorizer declares must be PRESENT, or the authorizer is
+        // not called at all: a request carrying none of them authorized nobody.
+        Err(_absent) => return Authorized::Refused(UNAUTHORIZED),
+    };
+    let identity_values = presented.values;
+    let presented = presented.first;
     if authorization_type == AUTHORIZATION_COGNITO_USER_POOLS
         && authorizer.r#type == crate::ops::create_authorizer::AUTHORIZER_TYPE_COGNITO_USER_POOLS
     {

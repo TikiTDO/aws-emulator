@@ -1,15 +1,54 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op TestInvokeAuthorizer
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `TestInvokeAuthorizer`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: simulates the execution of one stored `Authorizer` of an api against the
+//! request the caller describes — the headers it carries, the path and query string it
+//! addresses, the body it sends and the stage variables it would be served under — and
+//! reports the DECISION that execution produced: the status a client would have received
+//! (`0` when the authorizer authorized the call), the principal the authorizer named, the
+//! policy document it returned, the values it published, the claims of an identity token it
+//! accepted, the execution log of the simulation and the latency it took. A `restApiId` or
+//! an `authorizerId` no record of this account carries is `NotFoundException`.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`TestInvokeAuthorizer::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! ## What a simulated authorizer execution is
+//!
+//! The authorizer is EXECUTED, by the same steps a request to a deployed stage executes it
+//! by — the identity source read off the request, a `COGNITO_USER_POOLS` authorizer's
+//! presented token verified against the user pools it names, a `TOKEN` or `REQUEST`
+//! authorizer's Lambda function INVOKED with the event its own type documents, and the policy
+//! it returned applied to the method the request addresses. All of that is
+//! [`crate::service::invoke::simulated_authorizer`], the module the data plane shares every
+//! one of those steps with, so a simulated execution and a request to a deployed stage cannot
+//! answer one stored authorizer differently.
+//!
+//! The reported `clientStatus` is "the HTTP status code that the client would have received.
+//! Value is 0 if the authorizer succeeded", so it is the status of the GATEWAY RESPONSE the
+//! refused request would have been answered through — including a developer's customization
+//! of that response type, read through the one renderer of a refusal
+//! ([`crate::service::invoke::refusal_rendering`]) — and `0` for a call the authorizer
+//! authorized.
+//!
+//! What the authorizer RETURNED is reported whichever way it decided: a developer testing an
+//! authorizer that denies the call is testing the very document that denied it, so the
+//! principal, the policy and the published values are reported beside the `403`-class status
+//! as well as beside the `0`.
+//!
+//! ## Which method the simulation addresses
+//!
+//! This operation models no `httpMethod` and no `resourceId`: its only request-bound members
+//! are the headers, `pathWithQueryString`, the body, the stage variables and the additional
+//! context. So the ARN the authorizer is handed, and the ARN its returned policy is judged
+//! against, is the api's own method ARN under the stage AWS reserves for a test invocation
+//! ([`super::test_invoke_method::TEST_INVOKE_STAGE`]) — naming the [`SIMULATED_VERB`] of the
+//! path the caller described, which is the request `pathWithQueryString` alone can describe.
+//!
+//! ## What it does not change
+//!
+//! Nothing. The authorizer's result is not HELD: a simulation reaches no stage, so there is
+//! no stage whose `authorizerResultTtlInSeconds` could keep it and no later request to any
+//! stage is answered differently for this call having been made. The authorizer's own
+//! function is invoked, which is what this operation is for — "simulate the execution of an
+//! Authorizer" — and that invocation is the only thing a simulation causes.
 //!
 //! ## Shape of an operation
 //!
@@ -98,6 +137,33 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+use std::collections::{BTreeMap, HashMap};
+
+use crate::service::invoke::lambda_proxy::ProxyInputs;
+use crate::service::invoke::{simulated_authorizer, simulated_request, MethodRequest};
+use crate::service::mapping_template::TemplateInputs;
+
+use super::test_invoke_method::{ExecutionLog, TEST_INVOKE_STAGE};
+
+/// The verb the ARN of a simulated authorizer execution names.
+///
+/// This operation models no HTTP method and no resource of the api, so there is no method of
+/// it for the simulation to address: what the authorizer is handed, and what its returned
+/// policy is judged against, is the path the caller described under the test-invoke stage,
+/// READ — the one request `pathWithQueryString` by itself describes, and the verb AWS's own
+/// method ARN for a test invocation of an authorizer carries.
+const SIMULATED_VERB: &str = "GET";
+
+/// The path a simulated request that names none addresses: the api's root resource.
+const ROOT_PATH: &str = "/";
+
+/// The simulated request header that declares the media type of the body, as
+/// `Integration$requestTemplates` keys one.
+const CONTENT_TYPE: &str = "content-type";
+
+/// The simulated request header that declares the media types the caller accepts.
+const ACCEPT: &str = "accept";
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -169,18 +235,224 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `TestInvokeAuthorizer` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(TestInvokeAuthorizerErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("TestInvokeAuthorizer"))
+        // `latency` is "the execution latency, in ms, of the test authorizer request", so it
+        // is MEASURED over the simulation rather than stated: the clock is started before the
+        // records are read and read once the decision is in hand.
+        let started = ::std::time::Instant::now();
+        // WHAT is simulated, read under ONE read of the store and taken off it as OWNED
+        // records: the api (what a refusal's status is rendered from) and the authorizer the
+        // request names. The store is released with that read, because asking a Lambda
+        // authorizer means CALLING another service in process and no lock of this service's
+        // is held while another service answers.
+        let (api, authorizer) = {
+            let state = crate::state::service_state(&*self.engine)
+                .ok_or_else(crate::state::state_unavailable)?;
+            let store = state.lock();
+            let api = store
+                .rest_apis
+                .get(&input.rest_api_id)
+                .ok_or_else(|| not_found(&crate::state::no_such_rest_api(&input.rest_api_id)))?;
+            let authorizer = api
+                .authorizers
+                .get(&input.authorizer_id)
+                .ok_or_else(|| not_found(crate::state::NO_SUCH_AUTHORIZER))?;
+            (api.clone(), authorizer.clone())
+        };
+
+        // What the simulated request carries, read by the one reader of a simulated
+        // request's members ([`simulated_request`]), which is what the sibling simulation
+        // reads its own request through.
+        let headers = simulated_request::SimulatedHeaders::of(
+            input.headers.as_ref(),
+            input.multi_value_headers.as_ref(),
+        );
+        let (path, query) =
+            simulated_request::split_query(input.path_with_query_string.as_deref());
+        let request_path = path.unwrap_or(ROOT_PATH);
+        // The ARN of the method this simulation addresses; see the module docs for why it is
+        // the test-invoke stage's and why the verb is [`SIMULATED_VERB`]. Built by the one
+        // builder of a method ARN, so the ARN an authorizer is handed here has the form every
+        // other reader of this service builds.
+        let method_arn = crate::service::resource_policy::Call {
+            region: api.arn_region(),
+            api_id: &input.rest_api_id,
+            stage: TEST_INVOKE_STAGE,
+            verb: SIMULATED_VERB,
+            resource_path: request_path,
+            request_path,
+            source_vpce: None,
+            caller: crate::service::resource_policy::Caller::Anonymous,
+        }
+        .method_arn();
+
+        let mut log = ExecutionLog::started_at(
+            crate::state::now()
+                .fmt(::aws_smithy_types::date_time::Format::DateTime)
+                .unwrap_or_default(),
+        );
+        log.line(format!(
+            "Authorizer: {id}, type: {kind}, identity source: {source}",
+            id = authorizer.id,
+            kind = authorizer.r#type,
+            source = authorizer.identity_source.as_deref().unwrap_or("none"),
+        ));
+        log.line(format!("Method request path: {request_path}"));
+        if let Some(query) = query {
+            log.line(format!("Method request query string: {query}"));
+        }
+        log.line(format!(
+            "Method request headers: [{}]",
+            headers.names().join(", ")
+        ));
+        // The body's SIZE, not the body: it is the caller's own text, and reporting its
+        // length says what the simulation carried without copying a payload into a log.
+        log.line(format!(
+            "Method request body before transformations: {} byte(s)",
+            input.body.as_deref().unwrap_or_default().len()
+        ));
+        let stage_variables = simulated_request::map_names(input.stage_variables.as_ref());
+        if !stage_variables.is_empty() {
+            log.line(format!("Stage variables: [{}]", stage_variables.join(", ")));
+        }
+        // `additionalContext` is "a key-value map of additional context variables" the caller
+        // simulates the request with. The event an authorizer is handed is built by the one
+        // builder this data plane hands an authorizer or a proxy integration, whose members
+        // are read off the method request itself, so these variables name no member of it:
+        // the log reports which ones the simulation carried, and nothing is invented under a
+        // member AWS does not document them in.
+        let additional_context = simulated_request::map_names(input.additional_context.as_ref());
+        if !additional_context.is_empty() {
+            log.line(format!(
+                "Additional context: [{}]",
+                additional_context.join(", ")
+            ));
+        }
+
+        // What the simulated request IS, in the two views the shared machinery reads it
+        // through: the members a mapping expression names (which is what an
+        // `identitySource` is read from) and the members a `REQUEST` authorizer's event
+        // describes the call by.
+        let simulated_variables: BTreeMap<String, String> = input
+            .stage_variables
+            .iter()
+            .flatten()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        let inputs = TemplateInputs {
+            payload: Some(
+                input
+                    .body
+                    .as_deref()
+                    .unwrap_or_default()
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            // A simulation addresses no resource of the api, so there is no resource
+            // template for a path parameter to be bound against.
+            path: BTreeMap::new(),
+            querystring: crate::service::invoke::sent_query_parameters(query.unwrap_or_default()),
+            header: headers.single_valued(),
+            stage_variables: simulated_variables,
+            context: BTreeMap::from([
+                ("apiId".to_string(), input.rest_api_id.clone()),
+                ("stage".to_string(), TEST_INVOKE_STAGE.to_string()),
+                ("httpMethod".to_string(), SIMULATED_VERB.to_string()),
+                ("resourcePath".to_string(), request_path.to_string()),
+                ("path".to_string(), request_path.to_string()),
+            ]),
+        };
+        let call = MethodRequest::simulated(
+            headers.value(CONTENT_TYPE).as_deref(),
+            headers.value(ACCEPT).as_deref(),
+            inputs,
+            ProxyInputs {
+                // A simulation addresses no resource, so the event names none.
+                resource_id: String::new(),
+                http_method: SIMULATED_VERB.to_string(),
+                request_path: request_path.to_string(),
+                domain_name: String::new(),
+                multi_value_querystring: simulated_request::every_query_parameter(query),
+                multi_value_header: headers.every_value(),
+                // The `aws:SourceArn` a grant for an AUTHORIZER's function is narrowed by is
+                // the AUTHORIZER's own ARN rather than a method's, which is what the
+                // simulation judges the invocation by
+                // ([`crate::service::invoke::simulated_authorizer`]); this names the method
+                // the simulated request addresses, for the event that reports it.
+                source_arn: Some(method_arn.clone()),
+                binary_media_types: api.binary_media_types.clone(),
+                // A simulation reached no stage, so there is no stage whose tracing setting
+                // could decide a sampling decision the caller did not take.
+                tracing_enabled: false,
+            },
+        );
+
+        let simulation = simulated_authorizer::simulated(
+            ctx,
+            &*self.engine,
+            &api,
+            &authorizer,
+            &call,
+            &method_arn,
+        )
+        .await;
+        for step in &simulation.steps {
+            log.line(step.clone());
+        }
+        // "The HTTP status code that the client would have received. Value is 0 if the
+        // authorizer succeeded": the status of the gateway response a refused request would
+        // have been answered through, rendered from THIS api's own records so a developer's
+        // customization of that response type is what the report carries.
+        let client_status = match simulation.refusal {
+            None => {
+                log.line("Successfully completed execution".to_string());
+                0
+            }
+            Some(refusal) => {
+                let response_type = refusal.response_type();
+                let (status, _body) =
+                    crate::service::invoke::refusal_rendering(Some(&api), refusal);
+                log.line(format!(
+                    "Answered through this API's {response_type} gateway response: the client \
+                     would have received HTTP {status}"
+                ));
+                i32::from(status)
+            }
+        };
+
+        Ok(TestInvokeAuthorizerOutput {
+            client_status,
+            log: Some(log.rendered()),
+            latency: i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX),
+            principal_id: simulation.principal_id,
+            policy: simulation.policy,
+            // "The authorization response": the values the authorizer PUBLISHED beside its
+            // policy — the `context` map a mapping template reads as
+            // `$context.authorizer.{key}` — in the multi-valued shape the member is modelled
+            // as. An authorizer that published none reports none.
+            authorization: Some(
+                simulation
+                    .context
+                    .into_iter()
+                    .map(|(key, value)| (key, vec![value]))
+                    .collect::<HashMap<String, Vec<String>>>(),
+            ),
+            // The claims of an identity token a user-pool authorizer accepted; empty for
+            // every authorizer that evaluates no such token.
+            claims: Some(
+                simulation
+                    .claims
+                    .into_iter()
+                    .collect::<HashMap<String, String>>(),
+            ),
+        })
     }
+}
+
+/// The modelled 404 this operation answers for an identifier no record of this account
+/// carries, worded as every other reader of the same records words it.
+fn not_found(message: &str) -> TestInvokeAuthorizerError {
+    TestInvokeAuthorizerErrorModeled::NotFoundException(NotFoundException {
+        message: Some(message.to_string()),
+    })
+    .into()
 }
