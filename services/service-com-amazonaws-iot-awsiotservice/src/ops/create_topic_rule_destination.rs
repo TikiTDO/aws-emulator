@@ -1,16 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateTopicRuleDestination
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateTopicRuleDestination`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateTopicRuleDestination::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
-//!
+//! Creates a topic rule destination: the endpoint a rule's `http` action is allowed to
+//! deliver to once it has been confirmed. The destination is recorded `IN_PROGRESS` and
+//! the confirmation challenge carrying its token is sent to the configured
+//! `confirmationUrl`; see `crate::state::topic_rule_destinations` for the state machine
+//! the four single-destination operations share.
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -111,6 +106,34 @@ impl From<CreateTopicRuleDestinationErrorModeled> for CreateTopicRuleDestination
     }
 }
 
+/// Record this state-changing call for attribution: the operation, the identity the
+/// request PRESENTED (the SigV4 access key id, a public identifier and never a secret),
+/// the request target, the confirmation URL the call named and how the call ended.
+///
+/// A create is what makes an endpoint confirmable at all, and what makes this service send
+/// a request to the URL it names, so the record is also the local trace of which URL was
+/// challenged. Every request-derived field goes through [`crate::state::audit_field`],
+/// which bounds it and strips the control characters that would otherwise forge a second
+/// record; the subscriber supplies the timestamp.
+fn audit(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    confirmation_url: &str,
+    outcome: &'static str,
+) {
+    let parts = ctx.parts();
+    ::tracing::info!(
+        target: "emulator::audit",
+        service = ctx.identity().signing_name(),
+        operation = "CreateTopicRuleDestination",
+        access_key_id = %crate::state::audit_field(&::engine::extract_akid(&parts.headers)),
+        request_target =
+            %crate::state::audit_field(&format!("{} {}", parts.method, parts.uri.path())),
+        confirmation_url = %crate::state::audit_field(confirmation_url),
+        outcome,
+        "state-changing operation"
+    );
+}
+
 /// The `CreateTopicRuleDestination` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -147,18 +170,158 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateTopicRuleDestination` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateTopicRuleDestinationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            CreateTopicRuleDestinationErrorModeled::InternalException(InternalException {
+                message: Some("the IoT emulator has no state store attached".to_string()),
+            })
+        })?;
+
+        // `TopicRuleDestinationConfiguration` is a structure of one member per destination
+        // KIND, of which a create names the one it is creating. Only the HTTP URL kind is
+        // served here: a VPC or InfluxDB destination has its own semantics (an elastic
+        // network interface in a caller's VPC, a time-series database endpoint) and its own
+        // issue, so one is refused with the modelled `InvalidRequestException` rather than
+        // recorded as a destination nothing stands behind.
+        let configuration = &input.destination_configuration;
+        let Some(http_url) = configuration.http_url_configuration.as_ref() else {
+            return Err(invalid_request(unsupported_destination_kind(configuration)));
+        };
+        let confirmation_url = http_url.confirmation_url.trim().to_string();
+        // `HttpUrlDestinationConfiguration$confirmationUrl` is `@required` with `length
+        // 0..2000`, so the empty string, a bare word and a cleartext URL all satisfy the
+        // model. The address this service will send a confirmation challenge to is decided
+        // by the destination policy instead, BEFORE anything is recorded and before any
+        // request is built: a value outside it is refused rather than stored as a
+        // destination that could never leave `IN_PROGRESS`.
+        if let Some(reason) =
+            crate::state::topic_rule_destinations::unchallengeable_confirmation_url(
+                &confirmation_url,
+            )
+        {
+            return Err(invalid_request(format!(
+                "confirmationUrl {confirmation_url} is not a URL this destination's \
+                 confirmation request can be sent to: {reason}"
+            )));
+        }
+
+        let region = crate::state::request_region(ctx.parts());
+        let now = ::std::time::SystemTime::now();
+
+        // Everything the create writes is written under the guard, and what it recorded is
+        // read back out of it: the challenge below is sent with the guard released. The URL
+        // the record is about is kept for the audit record, which is written once the
+        // challenge has been started.
+        let challenged_url = confirmation_url.clone();
+        let (created, arn) = {
+            let mut store = state.lock();
+            crate::state::settle_destinations(&mut store.topic_rule_destinations, now);
+
+            // The destination's identity is the URL it confirms — AWS confirms ownership of
+            // ONE endpoint — so a second create for a URL this account already holds a
+            // destination for is refused rather than minting a second ARN for the same
+            // endpoint. `ResourceAlreadyExistsException` ("The resource already exists",
+            // HTTP 409) is the modelled error for exactly this, and it names the resource
+            // and the ARN that already exist.
+            if let Some(existing) = store
+                .topic_rule_destinations
+                .values()
+                .find(|destination| destination.confirmation_url == confirmation_url)
+            {
+                return Err(
+                    CreateTopicRuleDestinationErrorModeled::ResourceAlreadyExistsException(
+                        ResourceAlreadyExistsException {
+                            message: Some(format!(
+                                "Topic rule destination with given confirmationUrl already \
+                                 exists (confirmationUrl={confirmation_url})"
+                            )),
+                            resource_id: Some(existing.arn.clone()),
+                            resource_arn: Some(existing.arn.clone()),
+                        },
+                    )
+                    .into(),
+                );
+            }
+
+            // The store is one a CALLER grows, a destination at a time.
+            // `CreateTopicRuleDestination` models no `LimitExceededException`, so the
+            // refusal past the ceiling is the modelled `InvalidRequestException` (HTTP 400)
+            // naming the limit, never a 200 that records nothing.
+            if store.topic_rule_destinations.len() >= crate::state::MAX_TOPIC_RULE_DESTINATIONS {
+                return Err(invalid_request(format!(
+                    "the maximum of {} topic rule destinations is already reached",
+                    crate::state::MAX_TOPIC_RULE_DESTINATIONS
+                )));
+            }
+
+            let destination = crate::state::RegisteredTopicRuleDestination::new(
+                crate::state::topic_rule_destination_arn(&region, &crate::state::fresh_uuid()),
+                confirmation_url,
+                crate::state::fresh_uuid(),
+                now,
+            );
+            let created = destination.view();
+            let arn = destination.arn.clone();
+            store
+                .topic_rule_destinations
+                .insert(arn.clone(), destination);
+            (created, arn)
+        };
+
+        // The challenge is sent off the response path: "The destination must be confirmed
+        // prior to use", and what confirms it is the token the endpoint hands back — so
+        // this call answers the created destination while the challenge is still in flight,
+        // exactly as AWS answers it.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateTopicRuleDestination"))
+        // It is sent over the emulator this request is being served by and nothing else
+        // (`crate::state::topic_rule_destinations::InProcessTransport`): the configured URL
+        // is matched against the services this emulator serves ITSELF, so no socket is
+        // opened, no host name is resolved and no address off this process is reachable.
+        crate::state::start_confirmation_challenge(
+            ::std::sync::Arc::clone(&self.engine),
+            crate::state::topic_rule_destinations::InProcessTransport::of(ctx.callback()),
+            ctx.endpoint().as_str().to_string(),
+            arn,
+        );
+
+        // What the call DID: a destination now exists for that URL, and a request to it has
+        // been started.
+        audit(ctx, &challenged_url, "created");
+
+        Ok(CreateTopicRuleDestinationOutput {
+            topic_rule_destination: Some(created),
+        })
+    }
+}
+
+/// Refuse a request this operation models no more specific error for, with
+/// `InvalidRequestException` ("The request is not valid", HTTP 400).
+fn invalid_request(message: String) -> CreateTopicRuleDestinationError {
+    CreateTopicRuleDestinationErrorModeled::InvalidRequestException(InvalidRequestException {
+        message: Some(message),
+    })
+    .into()
+}
+
+/// How a create naming a destination kind this emulator does not serve is refused: the
+/// kind it named, or the fact that it named none at all.
+///
+/// `TopicRuleDestinationConfiguration` declares every kind as an optional member, so a
+/// create that sets none satisfies the model and is a request with nothing to create.
+fn unsupported_destination_kind(configuration: &TopicRuleDestinationConfiguration) -> String {
+    let named = if configuration.vpc_configuration.is_some() {
+        Some("vpcConfiguration")
+    } else if configuration.influx_db_configuration.is_some() {
+        Some("influxDBConfiguration")
+    } else {
+        None
+    };
+    match named {
+        Some(kind) => format!(
+            "destinationConfiguration.{kind} is not a topic rule destination kind this \
+             emulator creates; use httpUrlConfiguration"
+        ),
+        None => "destinationConfiguration names no destination to create; set \
+                 httpUrlConfiguration"
+            .to_string(),
     }
 }

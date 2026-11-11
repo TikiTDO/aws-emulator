@@ -1,16 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetTopicRuleDestination
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetTopicRuleDestination`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetTopicRuleDestination::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
-//!
+//! Reports one topic rule destination from this account's destinations store
+//! (`crate::state::ComAmazonawsIotAwsiotserviceState::topic_rule_destinations`), keyed by
+//! the ARN the request addresses it with — including the status the confirmation challenge
+//! and the clock have left it in.
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -141,18 +135,37 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetTopicRuleDestination` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetTopicRuleDestinationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetTopicRuleDestination"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            GetTopicRuleDestinationErrorModeled::InternalException(InternalException {
+                message: Some("the IoT emulator has no state store attached".to_string()),
+            })
+        })?;
+
+        let mut store = state.lock();
+        // A status the clock already owes is materialised before the read, so what this
+        // reports is the destination's current status and not the one it held when the
+        // confirming call returned. Nothing else is written: this is a reporting operation.
+        crate::state::settle_destinations(
+            &mut store.topic_rule_destinations,
+            ::std::time::SystemTime::now(),
+        );
+
+        // `GetTopicRuleDestination` models no not-found error (its errors are
+        // `InternalException`, `InvalidRequestException`, `ServiceUnavailableException` and
+        // `UnauthorizedException`), so an ARN this account holds no destination under is
+        // refused as the modelled `InvalidRequestException` (HTTP 400) in the sentence the
+        // whole family states a miss with.
+        let destination = store.topic_rule_destinations.get(&input.arn).ok_or_else(|| {
+            GetTopicRuleDestinationErrorModeled::InvalidRequestException(InvalidRequestException {
+                message: Some(crate::state::missing_topic_rule_destination_message(
+                    &input.arn,
+                )),
+            })
+        })?;
+
+        Ok(GetTopicRuleDestinationOutput {
+            topic_rule_destination: Some(destination.view()),
+        })
     }
 }

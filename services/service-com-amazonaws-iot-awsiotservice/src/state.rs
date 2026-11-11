@@ -46,6 +46,11 @@
 //! hands back, so `GetTopicRule` after `CreateTopicRule` returns the created rule
 //! member-for-member.
 //!
+//! It also holds the account's TOPIC RULE DESTINATIONS, keyed by ARN: the endpoints a
+//! rule's `http` action is allowed to deliver to, each with the confirmation challenge
+//! this service sent to it and the status that challenge left it in (see
+//! [`topic_rule_destinations`]).
+//!
 //! It also holds the account's CUSTOM AUTHORIZERS, keyed by `authorizerName` for the
 //! same reason: the name is the authorizer's identity and the `@httpLabel` of
 //! `/authorizer/{authorizerName}`. One record carries everything a reader hands back,
@@ -770,6 +775,20 @@ pub struct ComAmazonawsIotAwsiotserviceState {
     /// A caller grows this store, so it is bounded: [`MAX_TOPIC_RULES`] is the
     /// ceiling `CreateTopicRule` refuses past.
     pub topic_rules: BTreeMap<String, RegisteredTopicRule>,
+    /// Every topic rule destination that exists, keyed by its ARN.
+    ///
+    /// The ARN is the destination's identity — the model binds it as the `@httpLabel` of
+    /// `/destinations/{arn+}` on every single-destination operation and as the
+    /// `@required` member of the update — so a `BTreeMap` keyed by it is the destinations
+    /// store itself. `BTreeMap` (not `HashMap`) because `ListTopicRuleDestinations` is
+    /// `@paginated` and a page boundary is only meaningful over a stable order.
+    ///
+    /// A rule's `http` action is allowed to deliver to its endpoint URL only while a
+    /// destination of this store admits it, which is what the store is FOR; see
+    /// [`topic_rule_destinations`]. A caller grows it, so it is bounded:
+    /// [`MAX_TOPIC_RULE_DESTINATIONS`] is the ceiling `CreateTopicRuleDestination`
+    /// refuses past.
+    pub topic_rule_destinations: BTreeMap<String, RegisteredTopicRuleDestination>,
     /// Every custom authorizer that exists, keyed by `authorizerName`.
     ///
     /// The name is the authorizer's identity — the model binds it as the
@@ -2735,6 +2754,20 @@ pub mod rule_expression;
 pub mod rule_sql;
 pub mod rules_engine;
 pub use rules_engine::{dispatch_published_message, SERVICE_PRINCIPAL};
+
+// What a TOPIC RULE DESTINATION is — the record one holds, the confirm/enable state
+// machine its four operations share, and the confirmation challenge this service sends to
+// the URL one names — lives in `state/topic_rule_destinations.rs`, beside the rules engine
+// whose `http` action it is the gate for. Its names are re-exported here so a handler
+// reaches them as `crate::state::<name>`.
+pub mod topic_rule_destinations;
+pub use topic_rule_destinations::{
+    http_action_is_allowed, invalid_status_transition_message,
+    missing_topic_rule_destination_message, settle_destinations, start_confirmation_challenge,
+    topic_rule_destination_arn, RegisteredTopicRuleDestination, DESTINATION_DELETING,
+    DESTINATION_DISABLED, DESTINATION_ENABLED, DESTINATION_ERROR, DESTINATION_IN_PROGRESS,
+    INVALID_CONFIRMATION_TOKEN_MESSAGE, MAX_TOPIC_RULE_DESTINATIONS,
+};
 
 // What a BULK THING PROVISIONING task does — the thing each line of its input file
 // provisions under its provisioning template, and what a reader of the task reports about

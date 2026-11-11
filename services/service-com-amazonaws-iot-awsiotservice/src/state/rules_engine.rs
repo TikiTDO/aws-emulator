@@ -26,14 +26,25 @@
 //! The action performed today is `kinesis`, "write data to an Amazon Kinesis stream", over
 //! the emulator's own in-process transport
 //! ([`::service_common::kinesis_client`] — no socket, and no part of the action is a
-//! destination). Every other member of `Action` is a target service with its own semantics (a
+//! destination), and `http`, "send data to an HTTPS endpoint", whose endpoint is a TOPIC RULE
+//! DESTINATION: the message is POSTed to the action's `url` only while a destination that
+//! admits that URL is `ENABLED` ([`super::topic_rule_destinations::http_action_is_allowed`]),
+//! and nothing is sent otherwise — "the destination must be confirmed prior to use"
+//! (`CreateTopicRuleDestination`), which is the gate the whole confirm/enable lifecycle
+//! exists for. Every other member of `Action` is a target service with its own semantics (a
 //! DynamoDB column per message attribute, a rendered S3 object key, a Lambda invocation) and
 //! its own open issue; an action this engine does not perform is left alone rather than
 //! approximated.
+//!
+//! Every call an action makes goes over the emulator's own IN-PROCESS transport — the
+//! Kinesis client's and the `http` action's alike — so a stream name or a URL a caller
+//! configured reaches only what this emulator serves itself: no socket is opened and no name
+//! is resolved.
 
 use super::rule_action_role::{role_bars_action, IamState};
 use super::rule_sql::{selected_message, Selected};
-use crate::ops::types::{Action, KinesisAction};
+use super::topic_rule_destinations::{http_action_is_allowed, http_action_unperformable};
+use crate::ops::types::{Action, HttpAction, KinesisAction};
 
 /// The service principal the rules engine acts as: the one an action's role must trust.
 pub const SERVICE_PRINCIPAL: &str = "iot.amazonaws.com";
@@ -144,7 +155,7 @@ pub async fn dispatch_published_message<Eng: ::std::marker::Send + ::std::marker
             }
             performed += 1;
             performable
-                .perform(ctx, &region, iam.as_ref(), &rule_name, &message)
+                .perform(ctx, &state, &region, iam.as_ref(), &rule_name, &message)
                 .await;
         }
     }
@@ -155,6 +166,9 @@ enum Performed<'a> {
     /// `Action$kinesis`: one [`KINESIS_PUT_RECORD_ACTION`] of the selected message onto the
     /// stream the action names, under its partition key.
     Kinesis(&'a KinesisAction),
+    /// `Action$http`: one POST of the selected message to the endpoint URL the action names,
+    /// made only while a topic rule destination admits that URL.
+    Http(&'a HttpAction),
 }
 
 impl<'a> Performed<'a> {
@@ -163,13 +177,18 @@ impl<'a> Performed<'a> {
     /// sets the one it performs; the members this engine leaves alone are named in the module
     /// documentation.
     fn of(action: &'a Action) -> Option<Self> {
-        action.kinesis.as_ref().map(Performed::Kinesis)
+        action
+            .kinesis
+            .as_ref()
+            .map(Performed::Kinesis)
+            .or_else(|| action.http.as_ref().map(Performed::Http))
     }
 
     /// Perform the action for one selected message, or drop it with nothing written.
     async fn perform(
         self,
         ctx: &smithy_server_runtime::OperationContext<'_>,
+        state: &::engine::ServiceState<super::ComAmazonawsIotAwsiotserviceState>,
         region: &str,
         iam: Option<&::engine::ServiceState<IamState>>,
         rule_name: &str,
@@ -179,7 +198,77 @@ impl<'a> Performed<'a> {
             Self::Kinesis(action) => {
                 put_record(ctx, region, iam, rule_name, action, message).await
             }
+            Self::Http(action) => post_to_endpoint(ctx, state, rule_name, action, message).await,
         }
+    }
+}
+
+/// POST one selected message to the endpoint an `http` action names, if a topic rule
+/// destination admits that URL.
+///
+/// The GATE is the whole point of a topic rule destination: "the destination must be
+/// confirmed prior to use" (`CreateTopicRuleDestination`), and traffic is allowed only while
+/// a destination that admits the action's URL is `ENABLED`
+/// ([`super::topic_rule_destinations::http_action_is_allowed`]) — so an action whose endpoint
+/// has not been confirmed and enabled delivers NOTHING, which is the only observable that
+/// guarantee has. The verdict is read under the store's guard and the guard is released
+/// before the POST: no lock is held across an await.
+///
+/// Nothing is delivered either for an action this engine does not perform at all
+/// ([`super::topic_rule_destinations::http_action_unperformable`]), and an endpoint that
+/// refuses the request or is not there is a message dropped — which AWS does not surface to
+/// the publisher either.
+///
+/// The request is made over the emulator this publish is being served by and nothing else
+/// ([`super::topic_rule_destinations::InProcessTransport`]): the action's URL is matched
+/// against the services this emulator serves ITSELF, so no socket is opened, no host name is
+/// resolved and no address off this process is reachable.
+async fn post_to_endpoint(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    state: &::engine::ServiceState<super::ComAmazonawsIotAwsiotserviceState>,
+    rule_name: &str,
+    action: &HttpAction,
+    message: &[u8],
+) {
+    if let Some(reason) = http_action_unperformable(action) {
+        ::tracing::debug!(
+            rule = %rule_name,
+            reason,
+            "an http rule action is not one this emulator's rules engine performs, so \
+             nothing was delivered to its endpoint"
+        );
+        return;
+    }
+    let allowed = {
+        let mut store = state.lock();
+        // A destination the clock has already carried out of `IN_PROGRESS` is read at the
+        // status it rests at, which is the status the gate is about.
+        super::settle_destinations(
+            &mut store.topic_rule_destinations,
+            ::std::time::SystemTime::now(),
+        );
+        http_action_is_allowed(&store.topic_rule_destinations, action)
+    };
+    if !allowed {
+        ::tracing::debug!(
+            rule = %rule_name,
+            "an http rule action's endpoint has no enabled topic rule destination, so \
+             nothing was delivered to it"
+        );
+        return;
+    }
+    let delivered = super::topic_rule_destinations::deliver_to_endpoint(
+        &super::topic_rule_destinations::InProcessTransport::of(ctx.callback()),
+        action,
+        message,
+    )
+    .await;
+    if let Err(reason) = delivered {
+        ::tracing::warn!(
+            rule = %rule_name,
+            reason = %reason,
+            "an http rule action's message was not delivered to its endpoint"
+        );
     }
 }
 

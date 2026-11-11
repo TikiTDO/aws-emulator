@@ -1,16 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateTopicRuleDestination
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateTopicRuleDestination`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateTopicRuleDestination::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
-//!
+//! Moves one topic rule destination to the status the request names: `IN_PROGRESS` asks
+//! for a fresh confirmation challenge, and `ENABLED` / `DISABLED` decide whether a
+//! confirmed destination takes traffic. See `crate::state::topic_rule_destinations` for
+//! the state machine the four single-destination operations share.
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -116,6 +110,36 @@ impl From<UpdateTopicRuleDestinationErrorModeled> for UpdateTopicRuleDestination
     }
 }
 
+/// Record this state-changing call for attribution: the operation, the identity the
+/// request PRESENTED (the SigV4 access key id, a public identifier and never a secret),
+/// the request target, the destination and status the call named and how the call ended.
+///
+/// An update is the only call that lets traffic reach a destination, or stops it, or
+/// supersedes the token that confirms one, so without a record nothing says which call did
+/// it. Every request-derived field goes through [`crate::state::audit_field`], which bounds
+/// it and strips the control characters that would otherwise forge a second record; the
+/// subscriber supplies the timestamp.
+fn audit(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    arn: &str,
+    status: &str,
+    outcome: &'static str,
+) {
+    let parts = ctx.parts();
+    ::tracing::info!(
+        target: "emulator::audit",
+        service = ctx.identity().signing_name(),
+        operation = "UpdateTopicRuleDestination",
+        access_key_id = %crate::state::audit_field(&::engine::extract_akid(&parts.headers)),
+        request_target =
+            %crate::state::audit_field(&format!("{} {}", parts.method, parts.uri.path())),
+        topic_rule_destination = %crate::state::audit_field(arn),
+        requested_status = %crate::state::audit_field(status),
+        outcome,
+        "state-changing operation"
+    );
+}
+
 /// The `UpdateTopicRuleDestination` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -152,18 +176,106 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateTopicRuleDestination` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateTopicRuleDestinationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateTopicRuleDestination"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            UpdateTopicRuleDestinationErrorModeled::InternalException(InternalException {
+                message: Some("the IoT emulator has no state store attached".to_string()),
+            })
+        })?;
+        let now = ::std::time::SystemTime::now();
+
+        // The write happens under the guard; the challenge a requested `IN_PROGRESS` owes is
+        // sent with the guard released.
+        let challenge_owed = {
+            let mut store = state.lock();
+            crate::state::settle_destinations(&mut store.topic_rule_destinations, now);
+
+            // This operation models no not-found error, so an ARN this account holds no
+            // destination under is refused as the modelled `InvalidRequestException` (HTTP
+            // 400) in the sentence the whole family states a miss with.
+            let destination = store
+                .topic_rule_destinations
+                .get_mut(&input.arn)
+                .ok_or_else(|| {
+                    invalid_request(crate::state::missing_topic_rule_destination_message(
+                        &input.arn,
+                    ))
+                })?;
+            let current = destination.status.clone();
+
+            match input.status.as_str() {
+                // "Calling UpdateTopicRuleDestination causes a new confirmation challenge to
+                // be sent to your confirmation endpoint" — the one status a destination can
+                // be moved to from any other, which is how an owner asks for the token
+                // again. The superseded token stops confirming anything.
+                crate::state::DESTINATION_IN_PROGRESS => {
+                    destination.challenge_again(crate::state::fresh_uuid(), now);
+                    true
+                }
+                // `ENABLED` is "Confirmation was completed, and traffic to this destination
+                // is allowed", and `DISABLED` is the same with traffic not allowed: both are
+                // statuses only a CONFIRMED destination holds, and the model states each as
+                // reachable from the other. A destination whose confirmation has not
+                // completed cannot be moved to either — enabling an unconfirmed endpoint is
+                // exactly what the confirmation exists to prevent — so it is refused,
+                // naming the status it holds and the one that was asked for.
+                status @ (crate::state::DESTINATION_ENABLED | crate::state::DESTINATION_DISABLED) => {
+                    if !destination.is_confirmed() {
+                        return Err(invalid_request(
+                            crate::state::invalid_status_transition_message(&current, status),
+                        ));
+                    }
+                    destination.set_status(status, now);
+                    false
+                }
+                // `ERROR` and `DELETING` are statuses the SERVICE puts a destination in —
+                // one for a confirmation it could not complete, one for a removal under way
+                // — so a request for either is not a status change a caller can ask for.
+                status => {
+                    return Err(invalid_request(
+                        crate::state::invalid_status_transition_message(&current, status),
+                    ))
+                }
+            }
+        };
+
+        if challenge_owed {
+            // Over the emulator this request is being served by and nothing else: the
+            // destination's configured URL is matched against the services this emulator
+            // serves ITSELF, so no socket is opened and no host name is resolved (see
+            // `crate::state::topic_rule_destinations::InProcessTransport`).
+            crate::state::start_confirmation_challenge(
+                ::std::sync::Arc::clone(&self.engine),
+                crate::state::topic_rule_destinations::InProcessTransport::of(ctx.callback()),
+                ctx.endpoint().as_str().to_string(),
+                input.arn.clone(),
+            );
+        }
+
+        // What the call DID: the status it moved the destination to, and whether that also
+        // started a fresh challenge.
+        audit(
+            ctx,
+            &input.arn,
+            &input.status,
+            if challenge_owed {
+                "challenged-again"
+            } else {
+                "status-changed"
+            },
+        );
+
+        // `UpdateTopicRuleDestination` models no output members at all, so a successful
+        // update is an empty 200 and what it wrote is read back through
+        // `GetTopicRuleDestination`.
+        Ok(UpdateTopicRuleDestinationOutput {})
     }
+}
+
+/// Refuse a request this operation models no more specific error for, with
+/// `InvalidRequestException` ("The request is not valid", HTTP 400).
+fn invalid_request(message: String) -> UpdateTopicRuleDestinationError {
+    UpdateTopicRuleDestinationErrorModeled::InvalidRequestException(InvalidRequestException {
+        message: Some(message),
+    })
+    .into()
 }

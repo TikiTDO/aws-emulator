@@ -1,16 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ConfirmTopicRuleDestination
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ConfirmTopicRuleDestination`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ConfirmTopicRuleDestination::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
-//!
+//! Accepts the token one destination's confirmation challenge carried, which completes
+//! that destination's confirmation; see `crate::state::topic_rule_destinations` for the
+//! state machine the four single-destination operations share.
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -108,6 +101,33 @@ impl From<ConfirmTopicRuleDestinationErrorModeled> for ConfirmTopicRuleDestinati
     }
 }
 
+/// Record this state-changing call for attribution: the operation, the identity the
+/// request PRESENTED (the SigV4 access key id, a public identifier and never a secret),
+/// the request target, the destination the token resolved to and how the call ended.
+///
+/// A confirmation is what makes an endpoint enableable, so without a record nothing says
+/// which call completed it. The TOKEN itself is never recorded: it is the only thing that
+/// confirms the destination, so it is treated as a secret. Every request-derived field goes
+/// through [`crate::state::audit_field`], which bounds it and strips the control characters
+/// that would otherwise forge a second record; the subscriber supplies the timestamp.
+fn audit(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    arn: &str,
+    outcome: &'static str,
+) {
+    let parts = ctx.parts();
+    ::tracing::info!(
+        target: "emulator::audit",
+        service = ctx.identity().signing_name(),
+        operation = "ConfirmTopicRuleDestination",
+        access_key_id = %crate::state::audit_field(&::engine::extract_akid(&parts.headers)),
+        request_target = %crate::state::audit_field(&format!("{} {}", parts.method, "/confirmdestination")),
+        topic_rule_destination = %crate::state::audit_field(arn),
+        outcome,
+        "state-changing operation"
+    );
+}
+
 /// The `ConfirmTopicRuleDestination` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -144,18 +164,68 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ConfirmTopicRuleDestination` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ConfirmTopicRuleDestinationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ConfirmTopicRuleDestination"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            ConfirmTopicRuleDestinationErrorModeled::InternalException(InternalException {
+                message: Some("the IoT emulator has no state store attached".to_string()),
+            })
+        })?;
+        let now = ::std::time::SystemTime::now();
+
+        let mut store = state.lock();
+        crate::state::settle_destinations(&mut store.topic_rule_destinations, now);
+
+        // The token IS the request: "The message includes a token which you pass back when
+        // calling ConfirmTopicRuleDestination to confirm that you own or have access to the
+        // endpoint", so the destination this call is about is the one whose outstanding
+        // challenge carries it. A token no outstanding challenge carries — one never issued,
+        // or one a later challenge superseded — confirms nothing, and this operation models
+        // no not-found error, so it is refused as the modelled `InvalidRequestException`
+        // (HTTP 400).
+        let destination = crate::state::topic_rule_destinations::destination_of_token(
+            &mut store.topic_rule_destinations,
+            &input.confirmation_token,
+        )
+        .ok_or_else(|| {
+            ConfirmTopicRuleDestinationErrorModeled::InvalidRequestException(
+                InvalidRequestException {
+                    message: Some(crate::state::INVALID_CONFIRMATION_TOKEN_MESSAGE.to_string()),
+                },
+            )
+        })?;
+
+        // A destination being removed is not one a confirmation can complete:
+        // `ConflictingResourceUpdateException` (HTTP 409) is the modelled error for an
+        // update that conflicts with one already under way.
+        if destination.status == crate::state::DESTINATION_DELETING {
+            return Err(
+                ConfirmTopicRuleDestinationErrorModeled::ConflictingResourceUpdateException(
+                    ConflictingResourceUpdateException {
+                        message: Some(format!(
+                            "Topic rule destination {} is being deleted",
+                            destination.arn
+                        )),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // Recording the confirmation does not itself move the status: the destination
+        // "leaves IN_PROGRESS" asynchronously and rests at `DISABLED`, so what is written
+        // here is when that move is due and every later reader materialises it. A
+        // destination already confirmed is left as it stands, so passing one token twice
+        // changes nothing.
+        destination.record_confirmation(now);
+        let arn = destination.arn.clone();
+        drop(store);
+
+        // What the call DID: this destination's confirmation is complete, which is what
+        // lets a later update enable it.
+        audit(ctx, &arn, "confirmed");
+
+        // `ConfirmTopicRuleDestination` models no output members at all, so a confirmation
+        // is an empty 200 and what it recorded is read back through
+        // `GetTopicRuleDestination`.
+        Ok(ConfirmTopicRuleDestinationOutput {})
     }
 }
