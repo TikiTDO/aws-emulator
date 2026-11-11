@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeClusterDbRevisions
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeClusterDbRevisions`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeClusterDbRevisions::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the database revision each cluster of the account RUNS, read off the
+//! cluster records this service holds: one `ClusterDbRevision` per cluster — the
+//! cluster's own identifier, the revision its record carries
+//! (`Cluster$ClusterRevisionNumber`), when this service put it on that revision,
+//! and the revisions it can be updated to. A `ClusterIdentifier` that names no
+//! cluster is refused with `ClusterNotFoundFault`; naming none reports every
+//! cluster, a page at a time.
 //!
 //! ## Shape of an operation
 //!
@@ -98,11 +97,18 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-redshift-redshiftservic
 // here — hence the `DescribeClusterDbRevisionsError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.redshift#DescribeClusterDbRevisions")]
+// `DependentServiceUnavailableFault` is widened in: the model does not list it for
+// this operation, but the service declares the shape, and it is the only modelled
+// way to say "the control-plane store could not be reached".
+#[smithy_macros::operation_error(
+    "com.amazonaws.redshift#DescribeClusterDbRevisions",
+    extra_errors = ["DependentServiceUnavailableFault"]
+)]
 #[derive(Debug)]
 pub enum DescribeClusterDbRevisionsErrorModeled {
     ClusterNotFoundFault(ClusterNotFoundFault),
     InvalidClusterStateFault(InvalidClusterStateFault),
+    DependentServiceUnavailableFault(DependentServiceUnavailableFault),
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
@@ -154,20 +160,83 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeClusterDbRevisions` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeClusterDbRevisionsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeClusterDbRevisions"))
+        use crate::state as st;
+
+        let Some(state) = st::service_state(&*self.engine) else {
+            return Err(
+                DescribeClusterDbRevisionsErrorModeled::DependentServiceUnavailableFault(
+                    DependentServiceUnavailableFault {
+                        message: Some(st::STORE_UNAVAILABLE.to_string()),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // "Constraints: You can specify either the ClusterIdentifier parameter,
+        // or the marker parameter, but not both."
+        if input.cluster_identifier.is_some() && input.marker.is_some() {
+            return Err(crate::scaffolded::Scaffolded::invalid_parameter_combination(
+                "You can specify either the ClusterIdentifier parameter or the Marker parameter, but not both.",
+            ));
+        }
+
+        // A pure report: the revision a cluster runs is a fact of its own stored
+        // record, so nothing here changes what a later caller sees.
+        let store = state.lock();
+
+        // Refuse before doing any work: an identifier that names no cluster is
+        // answered without walking the store. "This parameter is case
+        // sensitive", so the name is resolved exactly as the request spelled it.
+        if let Some(wanted) = input.cluster_identifier.as_deref() {
+            if store.cluster(wanted).is_none() {
+                return Err(
+                    DescribeClusterDbRevisionsErrorModeled::ClusterNotFoundFault(
+                        ClusterNotFoundFault {
+                            message: Some(st::cluster_not_found_message(
+                                st::ClusterNotFoundWording::IdentifierThenNotFound,
+                                wanted,
+                            )),
+                        },
+                    )
+                    .into(),
+                );
+            }
+        }
+
+        // Select by REFERENCE, then build only the page: the work done under the
+        // state lock is proportional to the page, not to the whole store. "All
+        // clusters defined for an account are returned by default."
+        let matched: Vec<&Cluster> = store
+            .clusters
+            .iter()
+            .map(|stored| &stored.cluster)
+            .filter(|cluster| {
+                input
+                    .cluster_identifier
+                    .as_deref()
+                    .is_none_or(|wanted| cluster.cluster_identifier.as_deref() == Some(wanted))
+            })
+            .collect();
+
+        let (start, end, next_marker) =
+            match st::page_bounds(input.marker.as_deref(), input.max_records, matched.len()) {
+                Ok(page) => page,
+                Err(message) => {
+                    return Err(crate::scaffolded::Scaffolded::invalid_parameter_value(message))
+                }
+            };
+
+        Ok(DescribeClusterDbRevisionsOutput {
+            cluster_db_revisions: Some(
+                matched[start..end]
+                    .iter()
+                    .map(|cluster| st::cluster_db_revision(cluster))
+                    .collect(),
+            ),
+            marker: next_marker,
+        })
     }
 }

@@ -652,17 +652,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CreateCluster<Eng
             .availability_zone
             .clone()
             .unwrap_or_else(|| st::default_availability_zone(&identifier, &region));
+        // The VPC the cluster is in is the one the subnet group it is launched
+        // into placed it in: read off that group's stored record, which
+        // `CreateClusterSubnetGroup` resolved against the service that owns
+        // subnets. Nothing is derived from the group's NAME — such an id names
+        // no VPC the account has — so a cluster no group places in a VPC
+        // reports none.
         let vpc_id = subnet_group
             .as_ref()
-            .and_then(|group| group.vpc_id.clone())
-            .unwrap_or_else(|| {
-                st::derived_vpc_id(
-                    subnet_group
-                        .as_ref()
-                        .and_then(|group| group.cluster_subnet_group_name.as_deref())
-                        .unwrap_or(st::DEFAULT_CLUSTER_SUBNET_GROUP),
-                )
-            });
+            .and_then(|group| group.vpc_id.clone());
         // The endpoint the cluster will serve on once it is up. A cluster
         // reported `creating` publishes NONE — its address and port appear only
         // when it becomes available — so the record below carries no endpoint
@@ -672,7 +670,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CreateCluster<Eng
             &identifier,
             &region,
             input.port.unwrap_or(st::DEFAULT_PORT),
-            &vpc_id,
+            vpc_id.as_deref(),
             &availability_zone,
         );
         let mut cluster = Cluster {
@@ -728,7 +726,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CreateCluster<Eng
             cluster_subnet_group_name: subnet_group
                 .as_ref()
                 .and_then(|group| group.cluster_subnet_group_name.clone()),
-            vpc_id: Some(vpc_id.clone()),
+            vpc_id,
             // The admin password the request carries is applied while the
             // cluster comes up, so it is the one change this create reports as
             // pending — as the MASK, never the password.

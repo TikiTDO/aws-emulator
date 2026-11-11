@@ -226,7 +226,7 @@ fn seed_ds2(emulator: &Emulator, cluster_identifier: &str) -> String {
             cluster_identifier,
             REGION,
             state::DEFAULT_PORT,
-            "vpc-seeded",
+            Some("vpc-seeded"),
             &format!("{REGION}a"),
         ),
         // A seeded cluster names no admin user, so its database holds none.

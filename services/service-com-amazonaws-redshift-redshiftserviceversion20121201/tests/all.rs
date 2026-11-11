@@ -25,6 +25,8 @@ mod batch_modify_cluster_snapshots;
 mod cluster_audit_logging;
 #[path = "all/cluster_credentials.rs"]
 mod cluster_credentials;
+#[path = "all/cluster_db_revisions.rs"]
+mod cluster_db_revisions;
 #[path = "all/cluster_endpoint_publication.rs"]
 mod cluster_endpoint_publication;
 #[path = "all/cluster_iam_roles.rs"]
@@ -51,6 +53,8 @@ mod cluster_subnet_group_network;
 mod cluster_transition_convergence;
 #[path = "all/cluster_versions.rs"]
 mod cluster_versions;
+#[path = "all/cluster_vpc_identity.rs"]
+mod cluster_vpc_identity;
 #[path = "all/configuration_refusal_wording.rs"]
 mod configuration_refusal_wording;
 #[path = "all/copy_cluster_snapshot.rs"]

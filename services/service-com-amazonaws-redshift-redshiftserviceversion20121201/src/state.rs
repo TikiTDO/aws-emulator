@@ -47,7 +47,7 @@ use crate::ops::types::{
     AccountAttribute, AccountWithRestoreAccess, AquaConfiguration, Association,
     AttributeValueTarget,
     AuthenticationProfile, AuthorizeEndpointAccessOutput, AvailabilityZone, CertificateAssociation,
-    Cluster, ClusterAssociatedToSchedule, ClusterIamRole,
+    Cluster, ClusterAssociatedToSchedule, ClusterDbRevision, ClusterIamRole,
     ClusterNode, ClusterParameterGroup, ClusterParameterGroupStatus, ClusterParameterStatus,
     ClusterSubnetGroup, ClusterVersion, CreateEndpointAccessOutput, CreateIntegrationOutput,
     CreateSnapshotScheduleOutput, CreateUsageLimitOutput, Endpoint,

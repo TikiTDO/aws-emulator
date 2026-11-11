@@ -877,17 +877,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> RestoreFromCluste
             .availability_zone
             .clone()
             .unwrap_or_else(|| st::default_availability_zone(&identifier, &region));
+        // The VPC the restored cluster is in is the one the subnet group it is
+        // restored into placed it in: read off that group's stored record,
+        // which `CreateClusterSubnetGroup` resolved against the service that
+        // owns subnets. Nothing is derived from the group's NAME — such an id
+        // names no VPC the account has — so a cluster no group places in a VPC
+        // reports none.
         let vpc_id = subnet_group
             .as_ref()
-            .and_then(|group| group.vpc_id.clone())
-            .unwrap_or_else(|| {
-                st::derived_vpc_id(
-                    subnet_group
-                        .as_ref()
-                        .and_then(|group| group.cluster_subnet_group_name.as_deref())
-                        .unwrap_or(st::DEFAULT_CLUSTER_SUBNET_GROUP),
-                )
-            });
+            .and_then(|group| group.vpc_id.clone());
         // The endpoint the restored cluster will serve on once it is up, at its
         // OWN hostname rather than the source's and, by default, on "the same
         // port as the original cluster". A cluster still being restored
@@ -897,7 +895,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> RestoreFromCluste
             &identifier,
             &region,
             input.port.or(snapshot.port).unwrap_or(st::DEFAULT_PORT),
-            &vpc_id,
+            vpc_id.as_deref(),
             &availability_zone,
         );
 
@@ -960,7 +958,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> RestoreFromCluste
             cluster_subnet_group_name: subnet_group
                 .as_ref()
                 .and_then(|group| group.cluster_subnet_group_name.clone()),
-            vpc_id: Some(vpc_id.clone()),
+            vpc_id,
             // "Default: A random, system-chosen Availability Zone" — the
             // emulator's choice, derived from the new identifier so it is stable
             // across reads.

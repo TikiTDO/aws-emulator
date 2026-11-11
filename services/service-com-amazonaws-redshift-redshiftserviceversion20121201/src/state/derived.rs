@@ -164,21 +164,24 @@ pub fn master_password_secret_arn(cluster_identifier: &str, region: &str) -> Str
 /// it in — so it is DECIDED when the cluster is allocated and
 /// [`StoredCluster::endpoint`] holds it from then on, whether or not the cluster
 /// is serving yet (see [`StoredCluster::publish_endpoint`]).
+///
+/// `vpc_id` is the VPC the cluster's subnet group placed it in, as that group's
+/// stored record reports it — `None` where no subnet group placed the cluster in
+/// a VPC at all. An interface endpoint lives IN a VPC, so a cluster in none is
+/// reached at its address alone and reports no `VpcEndpoints`
+/// (`smithy_query(query="doc", shape="Endpoint", member="VpcEndpoints")`).
 pub fn cluster_endpoint(
     cluster_identifier: &str,
     region: &str,
     port: i32,
-    vpc_id: &str,
+    vpc_id: Option<&str>,
     availability_zone: &str,
 ) -> Endpoint {
     Endpoint {
         address: Some(endpoint_address(cluster_identifier, region)),
         port: Some(port),
-        vpc_endpoints: Some(cluster_vpc_endpoints(
-            cluster_identifier,
-            vpc_id,
-            availability_zone,
-        )),
+        vpc_endpoints: vpc_id
+            .map(|vpc_id| cluster_vpc_endpoints(cluster_identifier, vpc_id, availability_zone)),
     }
 }
 
@@ -425,19 +428,6 @@ pub fn default_maintenance_window(cluster_identifier: &str) -> String {
     // 0..=22, so the window's end hour is always a valid same-day hour.
     let hour = (usize::from(seed) / days.len()) % 23;
     format!("{day}:{hour:02}:30-{day}:{:02}:00", hour + 1)
-}
-
-/// The VPC a cluster launched into a subnet group reports.
-///
-/// Every provisioned cluster lives in a VPC (see
-/// [`DEFAULT_CLUSTER_SUBNET_GROUP`]), and the VPC it is in is the one its subnet
-/// group's subnets belong to, so the id is derived from the subnet group name
-/// alone: two clusters in the same subnet group report the same VPC.
-pub fn derived_vpc_id(cluster_subnet_group_name: &str) -> String {
-    format!(
-        "vpc-{}",
-        short_digest(&format!("vpc/{cluster_subnet_group_name}"), 17)
-    )
 }
 
 /// The cluster subnet group a cluster joins when the request names none.

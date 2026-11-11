@@ -21,31 +21,33 @@ pub fn populate_derived_members(
 ) {
     let identifier = cluster.cluster_identifier.clone().unwrap_or_default();
 
-    // Where the cluster is: every provisioned cluster is in a VPC, through the
-    // subnet group it joined or the account's default one. Both members are set
-    // from the stored subnet group record by the operation that launched the
-    // cluster; what is filled in here is what that record did not carry.
-    let subnet_group = cluster
+    // Where the cluster is: a cluster launched into a subnet group is in the VPC
+    // that group's subnets belong to, and that group's record carries which VPC
+    // that is — resolved against the service that OWNS subnets when the group
+    // was created ([`subnet_group_record`]). So the operation that launched the
+    // cluster sets `VpcId` off that record and nothing is derived here: an id
+    // this service invented would name no VPC the account has. A cluster no
+    // subnet group placed in a VPC reports none ("The identifier of the VPC the
+    // cluster is in, IF the cluster is in a VPC").
+    cluster
         .cluster_subnet_group_name
-        .get_or_insert_with(|| DEFAULT_CLUSTER_SUBNET_GROUP.to_string())
-        .clone();
-    let vpc_id = cluster
-        .vpc_id
-        .get_or_insert_with(|| derived_vpc_id(&subnet_group))
-        .clone();
+        .get_or_insert_with(|| DEFAULT_CLUSTER_SUBNET_GROUP.to_string());
 
     // "This parameter is returned only if the cluster is in a VPC": a cluster
-    // that named no security group is in its VPC's default one, so the list is
-    // never empty.
-    if cluster
-        .vpc_security_groups
-        .as_ref()
-        .is_none_or(|groups| groups.is_empty())
-    {
-        cluster.vpc_security_groups = Some(vec![VpcSecurityGroupMembership {
-            vpc_security_group_id: Some(default_vpc_security_group_id(&vpc_id)),
-            status: Some(SECURITY_GROUP_STATUS_ACTIVE.to_string()),
-        }]);
+    // in one that named no security group is in that VPC's default group, so
+    // the list is never empty — and a cluster in no VPC reports no VPC security
+    // group at all.
+    if let Some(vpc_id) = cluster.vpc_id.clone() {
+        if cluster
+            .vpc_security_groups
+            .as_ref()
+            .is_none_or(|groups| groups.is_empty())
+        {
+            cluster.vpc_security_groups = Some(vec![VpcSecurityGroupMembership {
+                vpc_security_group_id: Some(default_vpc_security_group_id(&vpc_id)),
+                status: Some(SECURITY_GROUP_STATUS_ACTIVE.to_string()),
+            }]);
+        }
     }
 
     // An encrypted cluster always reports the key its data is encrypted under.
@@ -557,6 +559,38 @@ pub fn snapshot_of(
     };
     apply_manual_retention(&mut snapshot, manual_retention_period, created_at);
     snapshot
+}
+
+/// The database revision a cluster RUNS, as `DescribeClusterDbRevisions`
+/// reports it.
+///
+/// Every value is read off the cluster's own stored record, so what this reports
+/// and what a `DescribeClusters` reports for the same cluster cannot disagree:
+///
+/// * `ClusterIdentifier` is "the unique identifier of the cluster" the record
+///   carries;
+/// * `CurrentDatabaseRevision` is "a string representing the current cluster
+///   version" (`smithy_query(query="shape", shape="ClusterDbRevision")`), which
+///   is the revision the cluster's `ClusterRevisionNumber` already reports (see
+///   [`cluster_revision_number`]) rather than a second number for the same
+///   thing;
+/// * `DatabaseRevisionReleaseDate` is "the date on which the database revision
+///   was released". This service releases a cluster's database revision to it
+///   when it provisions the cluster — the revision is minted per cluster and
+///   engine version — so the instant is the cluster's own `ClusterCreateTime`,
+///   taken off the record rather than chosen here;
+/// * `RevisionTargets` is "a list of `RevisionTarget` objects, where each object
+///   describes the database revision that a cluster can be updated to": this
+///   service publishes no revision of a cluster's database later than the one
+///   the cluster runs, so a provisioned cluster is on its latest revision and
+///   the list is EMPTY rather than offering an update nothing could apply.
+pub fn cluster_db_revision(cluster: &Cluster) -> ClusterDbRevision {
+    ClusterDbRevision {
+        cluster_identifier: cluster.cluster_identifier.clone(),
+        current_database_revision: cluster.cluster_revision_number.clone(),
+        database_revision_release_date: cluster.cluster_create_time,
+        revision_targets: Some(Vec::new()),
+    }
 }
 
 /// Resolve the `ClusterType` / `NumberOfNodes` pair a request asks for, or say
