@@ -49,7 +49,7 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::ecs_wire::{list, ok, string, AWSVPC_START, SIGNED_REGION};
-use crate::load_balancer_target_groups::{create_target_group, elb_call};
+use crate::load_balancer_target_groups::{all_texts, create_target_group, elb_call};
 use crate::task_lifecycle::container;
 
 /// The `source` and `detail-type` Amazon ECS publishes a task state change under, spelled
@@ -276,27 +276,6 @@ async fn set_target_group_attribute(
         status, 200,
         "case {case:?}: ModifyTargetGroupAttributes must succeed, got {status} with {body}"
     );
-}
-
-/// The text of every `<tag>` element of `xml`, in document order.
-///
-/// The responses are the framework's own awsQuery serializer output — elements, text and an
-/// `xmlns` attribute on the response root and on each `<member>` — so a leaf element is read
-/// by its own tag and nothing here has to understand the list wrapper.
-fn all_texts(xml: &str, tag: &str) -> Vec<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let mut found = Vec::new();
-    let mut cursor = 0usize;
-    while let Some(at) = xml[cursor..].find(&open) {
-        let start = cursor + at + open.len();
-        let Some(end) = xml[start..].find(&close) else {
-            break;
-        };
-        found.push(xml[start..start + end].to_string());
-        cursor = start + end + close.len();
-    }
-    found
 }
 
 /// `(target id, state)` for every registration the group reports, in the order reported.

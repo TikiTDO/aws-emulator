@@ -153,6 +153,8 @@ mod service_deployment_lifecycle_hooks;
 mod service_deployment_stops;
 #[path = "all/service_derived_members.rs"]
 mod service_derived_members;
+#[path = "all/service_desired_count_convergence.rs"]
+mod service_desired_count_convergence;
 #[path = "all/service_lifecycle.rs"]
 mod service_lifecycle;
 #[path = "all/service_listing.rs"]

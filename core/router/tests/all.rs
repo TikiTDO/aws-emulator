@@ -1397,3 +1397,10 @@ mod cloudformation_provisions_braket_spending_limits;
 // queue — S3, SNS and SQS at once.
 #[path = "all/s3_object_events_fan_out_through_sns.rs"]
 mod s3_object_events_fan_out_through_sns;
+// Declared in the appended tail, which is where every new suite inserts its lines: the
+// RECORDED load-balanced Fargate service coming up spans ECS, Elastic Load Balancing v2 and
+// the account's Amazon EC2 records at once (the subnet its interface is created in and the
+// route its image pull takes), so no single service crate's test target can ask it; the table
+// over the counts the rule generalises over is the owning ECS crate's own suite.
+#[path = "all/ecs_fargate_service_converges_to_its_desired_count.rs"]
+mod ecs_fargate_service_converges_to_its_desired_count;

@@ -106,6 +106,34 @@ pub(crate) fn first_text(xml: &str, tag: &str) -> Option<String> {
     Some(xml[start..end].to_string())
 }
 
+/// The text of EVERY element named `tag` in an awsQuery answer, in document order.
+///
+/// The repeated-element counterpart of [`first_text`], for a sibling suite reading one leaf
+/// of each member of a LIST (every `Id`, every `State`, every `Port` of a
+/// `DescribeTargetHealth` answer). The responses are the framework's own awsQuery serializer
+/// output — elements, text, and an `xmlns` attribute on the response root and on each
+/// `<member>` — so a leaf element is read by its own tag and nothing here has to understand
+/// the list wrapper.
+///
+/// `pub(crate)` for the reason [`first_text`] is: it lives beside the ELBv2 call it reads the
+/// answer of, so the suites of this binary share ONE reader instead of each keeping its own,
+/// which is how two of them would come to disagree about what they are asserting.
+pub(crate) fn all_texts(xml: &str, tag: &str) -> Vec<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut found = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(at) = xml[cursor..].find(&open) {
+        let start = cursor + at + open.len();
+        let Some(end) = xml[start..].find(&close) else {
+            break;
+        };
+        found.push(xml[start..start + end].to_string());
+        cursor = start + end + close.len();
+    }
+    found
+}
+
 /// One ELBv2 awsQuery call through the shared router, returning the status and the body.
 ///
 /// `pub(crate)`: shared with the sibling suites that drive the Elastic Load Balancing v2
