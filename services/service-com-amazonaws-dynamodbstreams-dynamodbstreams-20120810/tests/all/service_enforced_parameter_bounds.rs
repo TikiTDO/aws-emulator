@@ -433,8 +433,16 @@ async fn get_shard_iterator_refuses_an_at_timestamp_in_the_future() {
     ];
 
     for (case, offset, expected) in cases {
-        let now = epoch_secs(SystemTime::now());
-        let timestamp = i64::try_from(now).unwrap_or(i64::MAX) + offset;
+        // A row at or before the current second is measured from the instant the records
+        // above were laid out from, so a slow run cannot carry the start point past a
+        // record the row requires to be delivered; a row AHEAD of now is measured from the
+        // current second, so it is still ahead of the handler's own reading of the clock.
+        let from = if offset < 0 {
+            i64::try_from(epoch_secs(base)).unwrap_or(i64::MAX) + 3_600
+        } else {
+            i64::try_from(epoch_secs(SystemTime::now())).unwrap_or(i64::MAX)
+        };
+        let timestamp = from + offset;
         let (status, body) = call(
             &router,
             "GetShardIterator",

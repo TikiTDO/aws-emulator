@@ -131,7 +131,11 @@ pub(crate) async fn logs_answer(
 }
 
 /// The names of the log groups whose name starts with `prefix`.
-async fn groups(router: &MultiServiceRouter, case: &str, prefix: &str) -> Vec<String> {
+///
+/// `pub(crate)` for the reason [`emulator`] is: the sibling suite that walks HOW the logs
+/// grant reaches the execution role ([`crate::invocation_log_delivery_grant_carrier`]) reads
+/// the delivery back through these same three readers rather than a second copy of them.
+pub(crate) async fn groups(router: &MultiServiceRouter, case: &str, prefix: &str) -> Vec<String> {
     let answered = logs(
         router,
         case,
@@ -151,7 +155,9 @@ async fn groups(router: &MultiServiceRouter, case: &str, prefix: &str) -> Vec<St
 }
 
 /// The names of the streams the group `group` holds.
-async fn streams(router: &MultiServiceRouter, case: &str, group: &str) -> Vec<String> {
+///
+/// `pub(crate)` for the reason [`groups`] is.
+pub(crate) async fn streams(router: &MultiServiceRouter, case: &str, group: &str) -> Vec<String> {
     let answered = logs(
         router,
         case,
@@ -171,7 +177,9 @@ async fn streams(router: &MultiServiceRouter, case: &str, group: &str) -> Vec<St
 }
 
 /// The events of one stream, as `(timestamp, message)` pairs in the order they were written.
-async fn events(
+///
+/// `pub(crate)` for the reason [`groups`] is.
+pub(crate) async fn events(
     router: &MultiServiceRouter,
     case: &str,
     group: &str,
@@ -206,7 +214,9 @@ async fn events(
 
 /// The whole log of one stream as its text, each line closed by its break — which is the form
 /// the invocation itself reports its log tail in.
-async fn delivered(
+///
+/// `pub(crate)` for the reason [`groups`] is.
+pub(crate) async fn delivered(
     router: &MultiServiceRouter,
     case: &str,
     group: &str,

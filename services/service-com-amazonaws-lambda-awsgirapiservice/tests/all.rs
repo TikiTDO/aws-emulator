@@ -271,6 +271,8 @@ mod invocation_count_series;
 mod invocation_init_phase;
 #[path = "all/invocation_log_delivery.rs"]
 mod invocation_log_delivery;
+#[path = "all/invocation_log_delivery_grant_carrier.rs"]
+mod invocation_log_delivery_grant_carrier;
 #[path = "all/invocation_log_group_search.rs"]
 mod invocation_log_group_search;
 #[path = "all/invocation_refusal_diagnostics.rs"]

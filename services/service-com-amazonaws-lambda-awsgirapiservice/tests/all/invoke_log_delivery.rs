@@ -76,7 +76,11 @@ fn rows() -> Vec<Row> {
 
 /// The messages of the events `FilterLogEvents` selects in `group` with `filter_pattern`, in
 /// the order it reports them.
-async fn filtered(
+///
+/// `pub(crate)` because the sibling suite that walks HOW the logs grant reaches the execution
+/// role ([`crate::invocation_log_delivery_grant_carrier`]) polls the delivery with the SAME
+/// reader a client polls with, rather than a second copy of it.
+pub(crate) async fn filtered(
     router: &smithy_server_runtime::MultiServiceRouter,
     case: &str,
     group: &str,
