@@ -103,11 +103,20 @@ pub fn engine_assume_refusal<Eng: Send + Sync + 'static>(
 /// Bounded by [`STATE_REASON_LENGTH_MAX`], so the sentence is always a legal value of the
 /// member that carries it however long the role ARN the request named is.
 pub fn assume_failure_reason(role_arn: &str) -> String {
-    let reason = format!(
+    within_the_reason_bound(format!(
         "Pipes cannot assume the execution role {role_arn}: its trust policy does not let \
          {SERVICE_PRINCIPAL} perform {}.",
         ::service_common::iam_trust_policy::ASSUME_ROLE_ACTION
-    );
+    ))
+}
+
+/// `reason` cut to [`STATE_REASON_LENGTH_MAX`], so a sentence built from the values a
+/// request named is always a legal value of the member that carries it however long those
+/// values are.
+///
+/// Every sentence a pipe reports as its `StateReason` goes through here, so no write of that
+/// member has a bound of its own.
+pub fn within_the_reason_bound(reason: String) -> String {
     match reason.char_indices().nth(STATE_REASON_LENGTH_MAX) {
         None => reason,
         Some((cut, _)) => reason[..cut].to_string(),

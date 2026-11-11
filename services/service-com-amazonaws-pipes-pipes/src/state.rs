@@ -14,7 +14,12 @@
 //! and [`metrics`], the CloudWatch series the running pipe publishes about its executions —
 //! the only signal that distinguishes a pipe whose stage was refused from a pipe that
 //! never ran.
+//!
+//! [`bring_up`] is the lifecycle's own reading of those: what a pipe could not poll its
+//! source without, which is where a creation, a start or a reconfiguration that cannot be
+//! completed settles.
 
+pub mod bring_up;
 pub mod data_plane;
 pub mod execution_role;
 pub mod metrics;

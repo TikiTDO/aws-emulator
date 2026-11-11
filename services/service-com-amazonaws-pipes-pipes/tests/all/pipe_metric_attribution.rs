@@ -20,8 +20,8 @@
 //! The rows differ along what the rule generalises over — which stage of the row's own pipe
 //! fails (none, the target, the enrichment, the source) and how its role bars that stage
 //! (a grant that omits the action, an explicit deny, a grant naming only the other
-//! queue) — so every counter of the set is moved by at least one pipe of the table and
-//! quiet for at least one other.
+//! queue, a grant narrowed once the pipe is running) — so every counter of the set is moved
+//! by at least one pipe of the table and quiet for at least one other.
 
 use std::time::{Duration, Instant};
 
@@ -38,6 +38,7 @@ use crate::pipe_data_plane::{
 use crate::pipe_lifecycle::{call, REGION};
 use crate::pipe_metrics::{
     datapoints, emulator, given_role_stating, listed_dimension_sets, series, wait_for_sum,
+    withdraw_from_role,
 };
 
 /// How long a wait for something a pipe has to do — a delivery, or a counter moving — is
@@ -67,6 +68,9 @@ struct Row {
     policy: fn(&str, &str) -> Value,
     /// Whether this pipe carries an enrichment between its source and its target.
     enrichment: bool,
+    /// What this pipe's role is left allowing once the pipe is RUNNING, for a row whose
+    /// stage must fail on a call the role allowed while the pipe was being brought up.
+    withdrawn_to: Option<&'static [&'static str]>,
     /// Whether this pipe's target ends up holding the record.
     delivered: bool,
     /// The counters of THIS pipe expected to read at least 1. Every other counter of this
@@ -130,6 +134,7 @@ async fn each_pipes_counters_account_for_its_own_executions_only() {
             case: "attribution-every-stage-allowed",
             policy: exact_sqs_grant,
             enrichment: false,
+            withdrawn_to: None,
             delivered: true,
             moved: &[EVENT_COUNT_METRIC],
         },
@@ -148,6 +153,7 @@ async fn each_pipes_counters_account_for_its_own_executions_only() {
                 ])
             },
             enrichment: false,
+            withdrawn_to: None,
             delivered: false,
             moved: &[
                 EVENT_COUNT_METRIC,
@@ -164,6 +170,7 @@ async fn each_pipes_counters_account_for_its_own_executions_only() {
                 ])
             },
             enrichment: false,
+            withdrawn_to: None,
             delivered: false,
             moved: &[
                 EVENT_COUNT_METRIC,
@@ -178,6 +185,7 @@ async fn each_pipes_counters_account_for_its_own_executions_only() {
             case: "attribution-enrichment-invoke-not-stated",
             policy: exact_sqs_grant,
             enrichment: true,
+            withdrawn_to: None,
             delivered: false,
             moved: &[
                 EVENT_COUNT_METRIC,
@@ -188,14 +196,19 @@ async fn each_pipes_counters_account_for_its_own_executions_only() {
         Row {
             // The source poll is the first call the pipe makes, so a role that may not
             // make it takes no record at all: the execution failed before a stage of its
-            // own, and this pipe's event counter stays at 0 while its twins' rise.
-            case: "attribution-source-receive-not-stated",
-            policy: |_source, target| {
+            // own, and this pipe's event counter stays at 0 while its twins' rise. The
+            // call is withdrawn from the role once the pipe is RUNNING, because a pipe
+            // whose role may not take its source's records when it is brought up is never
+            // brought up (`tests/all/pipe_bring_up.rs`) and publishes nothing at all.
+            case: "attribution-source-receive-withdrawn-while-running",
+            policy: |source, target| {
                 json!([
+                    { "Effect": "Allow", "Action": "sqs:*", "Resource": source },
                     { "Effect": "Allow", "Action": "sqs:SendMessage", "Resource": target },
                 ])
             },
             enrichment: false,
+            withdrawn_to: Some(&["sqs:SendMessage"]),
             delivered: false,
             moved: &[EXECUTION_FAILED_METRIC],
         },
@@ -246,6 +259,26 @@ async fn each_pipes_counters_account_for_its_own_executions_only() {
             "case {:?}: CreatePipe answered {} {}",
             row.case, created.status, created.body
         );
+        // A row whose stage must fail on a call its role allowed while the pipe was being
+        // brought up waits for the pipe to be RUNNING and then narrows the role, so the
+        // refusal reaches a pipe that is already running rather than its creation.
+        if let Some(allowed) = row.withdrawn_to {
+            let reported = crate::pipe_execution_role::wait_for_state(
+                &router,
+                row.case,
+                service_com_amazonaws_pipes_pipes::state::pipe_state::RUNNING,
+                BUDGET,
+            )
+            .await;
+            assert_eq!(
+                reported,
+                service_com_amazonaws_pipes_pipes::state::pipe_state::RUNNING,
+                "case {:?}: expected the pipe RUNNING before its role is narrowed, it \
+                 reports {reported}",
+                row.case
+            );
+            withdraw_from_role(&router, row.case, &format!("{}-role", row.case), allowed).await;
+        }
         let marker = format!("{}-probe", row.case);
         send(&router, &source_url, std::slice::from_ref(&marker)).await;
         prepared.push(Prepared {

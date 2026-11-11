@@ -8,8 +8,9 @@
 //! cannot have, and a configuration the resources it names cannot hold (a batch size past
 //! what the target takes per delivery, a FIFO queue target with no message group id, a
 //! filter that is not an event pattern), are `ValidationException` (400). An update that
-//! leaves the pipe on a `RoleArn` this service cannot assume
-//! ([`crate::state::execution_role`]) cannot be completed: the pipe settles in
+//! leaves the pipe unable to poll its source ([`crate::state::bring_up`]: a `RoleArn` this
+//! service cannot assume or that may not take the source's records, or a source that does
+//! not exist) cannot be completed: the pipe settles in
 //! `UPDATE_FAILED` carrying the `StateReason` that says so, and runs nothing. This is the
 //! ONLY file to touch for this operation.
 //!
@@ -228,12 +229,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         };
 
-        // Whether this service can assume the role this update stores, decided against
-        // the account's own IAM records BEFORE the pipes store is locked. A role whose
-        // trust policy withholds the assume is one no stage of the pipe could act as, so
-        // the reconfiguration this call starts cannot be completed.
-        let unassumable =
-            crate::state::execution_role::engine_assume_refusal(&*self.engine, &input.role_arn);
+        // Whether the pipe this update leaves behind could still poll its source: the role
+        // the update stores against the source the pipe reads from, which `UpdatePipe`
+        // carries no member for and so cannot change. The source is read off the record
+        // first and the decision taken with NO store lock held, because the owner of the
+        // source is asked about it; a name the store holds no pipe for is answered 404
+        // below, and a role or source the records show nothing about leaves the update to
+        // complete.
+        let configured_source = {
+            let mut state = store.lock();
+            state.settle_due_transitions();
+            state
+                .pipes
+                .get(&input.name)
+                .map(|pipe| pipe.source.clone())
+        };
+        let unservable = match configured_source {
+            None => None,
+            Some(source) => {
+                crate::state::bring_up::refusal(ctx, &*self.engine, &source, &input.role_arn)
+                    .await
+            }
+        };
 
         let mut state = store.lock();
         state.settle_due_transitions();
@@ -347,10 +364,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let settled = pipe.desired_state.clone();
         // The move the clock owes: `UPDATING` now, then the state the pipe is meant to
         // be in. Never zero, so a caller acting straight after this call still sees
-        // `UPDATING`. An update that left the pipe on a role this service cannot assume
-        // settles in `UPDATE_FAILED` instead, carrying the reason: the call was accepted,
+        // `UPDATING`. An update that left the pipe unable to poll its source settles in
+        // `UPDATE_FAILED` instead, carrying the reason: the call was accepted,
         // so the failure is a state the pipe rests in rather than an answer to it.
-        match &unassumable {
+        match &unservable {
             None => pipe.begin_transition(crate::state::pipe_state::UPDATING, &settled),
             Some(reason) => pipe.begin_failed_transition(
                 crate::state::pipe_state::UPDATING,
@@ -372,7 +389,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // none — an update that stopped it needs no call, because the poller ends itself
         // as soon as the pipe is no longer RUNNING.
         let runnable =
-            settled == crate::state::requested_state::RUNNING && unassumable.is_none();
+            settled == crate::state::requested_state::RUNNING && unservable.is_none();
         drop(state);
         if runnable {
             crate::state::data_plane::drive_pipe(ctx, &self.engine, &input.name);

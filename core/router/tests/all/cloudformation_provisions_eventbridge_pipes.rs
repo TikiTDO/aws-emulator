@@ -337,6 +337,23 @@ const ROWS: &[Row] = &[
                 "            Principal:",
                 "              Service: pipes.amazonaws.com",
                 "            Action: sts:AssumeRole",
+                // The pipe is created only if its role may take the source's records, so
+                // this role carries the same grant the JSON rows' role does
+                // ([`pipes_identity_policy`]) \u2014 a pipe whose role cannot read its source
+                // fails its creation and rolls the stack back, which is what the second
+                // test below asserts.
+                "      Policies:",
+                "        - PolicyName: move-records",
+                "          PolicyDocument:",
+                "            Version: '2012-10-17'",
+                "            Statement:",
+                "              - Effect: Allow",
+                "                Action:",
+                "                  - sqs:ReceiveMessage",
+                "                  - sqs:DeleteMessage",
+                "                  - sqs:GetQueueAttributes",
+                "                  - sqs:SendMessage",
+                "                Resource: '*'",
                 "  ThePipe:",
                 "    Type: AWS::Pipes::Pipe",
                 "    Properties:",

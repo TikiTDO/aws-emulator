@@ -11,9 +11,10 @@
 //! with the `BadRequestException` (400) the tagging layer answers a broken tag rule with,
 //! so a pipe cannot be created carrying a tag `TagResource` would refuse. A pipe the caller
 //! asked to RUN also gets its data-plane poller ([`crate::state::data_plane`]), which is
-//! what makes the pipe move records with no further client action — unless this service
-//! cannot assume the pipe's `RoleArn` at all ([`crate::state::execution_role`]), in which
-//! case the creation this call accepted cannot be completed and the pipe settles in
+//! what makes the pipe move records with no further client action — unless the pipe cannot
+//! be brought up at all ([`crate::state::bring_up`]: a role this service cannot assume or
+//! that may not take the source's records, or a source that does not exist), in which case
+//! the creation this call accepted cannot be completed and the pipe settles in
 //! `CREATE_FAILED` carrying the `StateReason` that says so. This is the ONLY file
 //! to touch for this operation.
 //!
@@ -276,12 +277,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let region = crate::state::request_region(ctx.parts());
-        // Whether this service can assume the role the pipe is to act as, decided against
-        // the account's own IAM records BEFORE the pipes store is locked. A role whose
-        // trust policy withholds the assume is one no stage of the pipe could ever act
-        // as, so the creation this call starts cannot be completed.
-        let unassumable =
-            crate::state::execution_role::engine_assume_refusal(&*self.engine, &input.role_arn);
+        // Whether the pipe this call creates could poll its source at all — the role it is
+        // to act as, and the source itself — decided against the account's own records
+        // BEFORE the pipes store is locked, so nothing waits on it behind that lock. A pipe
+        // that could not is one whose creation cannot be completed.
+        let unservable = crate::state::bring_up::refusal(
+            ctx,
+            &*self.engine,
+            &input.source,
+            &input.role_arn,
+        )
+        .await;
         let mut state = store.lock();
         state.settle_due_transitions();
 
@@ -317,12 +323,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // A pipe AWS has just accepted is reported `CREATING` and reaches the state the
         // caller asked for a moment later; the record stores that due instant rather than
-        // sleeping for it. A pipe this service cannot assume the role of reaches
-        // `CREATE_FAILED` instead, at the same span and carrying the reason — the creation
-        // was accepted, so the failure is a state the pipe settles in rather than an
-        // answer to this call.
+        // sleeping for it. A pipe that could not be brought up reaches `CREATE_FAILED`
+        // instead, at the same span and carrying the reason — the creation was accepted, so
+        // the failure is a state the pipe settles in rather than an answer to this call.
         let now = ::std::time::SystemTime::now();
-        let pending = match &unassumable {
+        let pending = match &unservable {
             None => crate::state::pending_transition(&desired_state),
             Some(reason) => crate::state::failed_transition(
                 crate::state::pipe_state::CREATE_FAILED,
@@ -370,13 +375,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let name = record.name.clone();
         let runnable = record.desired_state == crate::state::requested_state::RUNNING
-            && unassumable.is_none();
+            && unservable.is_none();
         state.pipes.insert(name.clone(), record);
         // The data plane of a pipe the caller asked to RUN: the lock is released first,
         // and the poller waits out the `CREATING` span before it consumes anything, so
         // nothing a caller is told by this response depends on it.
         drop(state);
         if runnable {
+            // Only a pipe that was brought up has a data plane: one that settles in
+            // `CREATE_FAILED` polls nothing and publishes nothing.
             crate::state::data_plane::drive_pipe(ctx, &self.engine, &name);
         }
         Ok(output)

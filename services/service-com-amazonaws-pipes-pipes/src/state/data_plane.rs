@@ -869,7 +869,7 @@ async fn move_one_batch(
     // consumed, so the source moves on from it rather than offering it again.
     let batch = admitted(&run.filters, batch);
     if batch.is_empty() {
-        finish_batch(
+        let advance = finish_batch(
             callback,
             clients,
             cursors,
@@ -879,7 +879,7 @@ async fn move_one_batch(
             &Finished::WholeBatch,
         )
         .await;
-        return Batch::Moved { events: taken };
+        return moved_or_standing_still(advance, run, taken, checked_out);
     }
 
     // What the TARGET stage delivers: the enrichment's answer when the pipe has one,
@@ -997,8 +997,41 @@ async fn move_one_batch(
         // batch's length and the report's.
         Finished::Records(processed.iter().map(String::as_str).collect())
     };
-    finish_batch(callback, clients, cursors, record, run, &polled, &finished).await;
-    Batch::Moved { events: taken }
+    let advance = finish_batch(callback, clients, cursors, record, run, &polled, &finished).await;
+    moved_or_standing_still(advance, run, taken, checked_out)
+}
+
+/// The pass's outcome for a batch whose events were all delivered, from what finishing it
+/// left its source at.
+///
+/// A finish that moved the source on is the moved batch it looks like. One that left a
+/// shard's position where it stood is NOT: the same records are the next thing that shard
+/// hands over, so the pass made no progress and is reported as the kind of failure it was —
+/// which is what makes the poller pace its next pass instead of re-reading, re-enriching and
+/// re-delivering the same records at full rate.
+fn moved_or_standing_still(
+    advance: SourceAdvance,
+    run: &RunningPipe,
+    taken: usize,
+    checked_out: Option<Instant>,
+) -> Batch {
+    match advance {
+        SourceAdvance::MovedOn => Batch::Moved { events: taken },
+        SourceAdvance::HeadUnprocessed => Batch::NotProcessed {
+            events: taken,
+            detail: format!(
+                "the target {} processed no record at the head of the batch, so the position \
+                 of its source stands where it stood",
+                run.target_arn
+            ),
+        },
+        SourceAdvance::PositionUnavailable(detail) => Batch::Failed {
+            stage: Stage::Source,
+            events: taken,
+            detail,
+            checked_out,
+        },
+    }
 }
 
 /// What ONE event contributes to the target stage: the payload the target receives for it,
@@ -1052,6 +1085,31 @@ impl Finished<'_> {
     }
 }
 
+/// What finishing a batch left its SOURCE at, so the pass that moved it knows whether it
+/// made PROGRESS.
+///
+/// Only a stream source can be left standing still: a shard has ONE position, so a batch
+/// whose head record the target did not process — or whose next position could not be taken
+/// up — moves that position not at all, and the very same records are the next thing the
+/// shard hands over. A queue's records are a CHECKOUT instead: the ones a finish did not
+/// delete are invisible until their visibility timeout lapses, so a queue is never left
+/// offering them again straight away.
+///
+/// The distinction is what paces the poller: a pass that moved no position must not be
+/// reported as a moved batch, or the poller re-reads, re-enriches and re-delivers the same
+/// records with no backoff at all.
+enum SourceAdvance {
+    /// The source moved on: a queue's finished records were deleted, or the shard is read on
+    /// from after them.
+    MovedOn,
+    /// A shard's position stands where it stood because the target processed no record at
+    /// the HEAD of the batch.
+    HeadUnprocessed,
+    /// A shard's position stands where it stood because the position after the records the
+    /// target processed could not be taken up, and why.
+    PositionUnavailable(String),
+}
+
 /// Finish a batch with its SOURCE, now that the events derived from it have been delivered
 /// and the target has reported which records of it it processed: a queue's records are
 /// deleted, and a stream's read position moves past them.
@@ -1062,10 +1120,11 @@ impl Finished<'_> {
 /// process, because a shard has ONE position and the records it can be read past are the run
 /// at the HEAD of the batch that were processed.
 ///
-/// Nothing here can fail the batch. A delete the role may not make, or that fails, only means
+/// Nothing here fails the batch. A delete the role may not make, or that fails, only means
 /// the record reappears and is delivered again, which is the at-least-once the service
 /// promises; and a position this poller cannot take up is one it keeps, so the same records
-/// are read again.
+/// are read again. What it DOES answer is whether the source moved on at all
+/// ([`SourceAdvance`]), which is what the caller paces the next pass from.
 async fn finish_batch(
     callback: &smithy_server_runtime::EmbeddedEmulator,
     clients: &mut Clients,
@@ -1074,11 +1133,11 @@ async fn finish_batch(
     run: &RunningPipe,
     polled: &Polled,
     finished: &Finished<'_>,
-) {
+) -> SourceAdvance {
     match polled {
         Polled::Messages { messages, .. } => {
             let Source::Queue { url } = &run.source else {
-                return;
+                return SourceAdvance::MovedOn;
             };
             if let Some(detail) = record.refusal(DELETE_MESSAGE_ACTION, &run.source_arn) {
                 ::tracing::warn!(
@@ -1086,7 +1145,7 @@ async fn finish_batch(
                     detail = %detail,
                     "a delivered pipe source record could not be deleted"
                 );
-                return;
+                return SourceAdvance::MovedOn;
             }
             for message in messages {
                 // A record the target reported it did not process is left on the queue,
@@ -1113,6 +1172,9 @@ async fn finish_batch(
                     );
                 }
             }
+            // The records this finish did not delete are checked out of the queue, so the
+            // queue is not offering them again until that checkout lapses.
+            SourceAdvance::MovedOn
         }
         Polled::Records(batch) => {
             let processed = match finished {
@@ -1121,30 +1183,36 @@ async fn finish_batch(
                 // so it is taken off the walk rather than read from its start again.
                 Finished::WholeBatch => {
                     cursors.advance(&batch.shard, batch.next_iterator.clone());
-                    return;
+                    return SourceAdvance::MovedOn;
                 }
                 Finished::Records(processed) => processed,
             };
             // The last record of the run at the HEAD of the batch that was processed: the
             // first record the target did not process is where the shard must be read on
             // from. A batch whose very first record was not processed moves the position not
-            // at all, so the whole of it is read again.
+            // at all, so the whole of it is read again — and the pass made no progress.
             let batch_identifiers = stream_identifiers(&batch.records);
             let Some(through) = checkpointed_through(&batch_identifiers, processed) else {
-                return;
+                return SourceAdvance::HeadUnprocessed;
             };
             match shard_iterator_after(callback, clients, record, run, &batch.shard, through).await
             {
-                Ok(iterator) => cursors.advance(&batch.shard, iterator),
+                Ok(iterator) => {
+                    cursors.advance(&batch.shard, iterator);
+                    SourceAdvance::MovedOn
+                }
                 // The position this poller holds is kept, so the batch is read again in
                 // full: at-least-once, which is what a stream source promises.
-                Err(detail) => ::tracing::warn!(
-                    stream = %run.source_arn,
-                    shard = %batch.shard,
-                    detail = %detail,
-                    "a pipe could not take up the position after the records its target \
-                     processed; it reads the batch again"
-                ),
+                Err(detail) => {
+                    ::tracing::warn!(
+                        stream = %run.source_arn,
+                        shard = %batch.shard,
+                        detail = %detail,
+                        "a pipe could not take up the position after the records its target \
+                         processed; it reads the batch again"
+                    );
+                    SourceAdvance::PositionUnavailable(detail)
+                }
             }
         }
     }
@@ -2847,6 +2915,81 @@ fn resolve_target(
             "its Target names a {vendor} resource, and only an Amazon SQS queue or a Lambda \
              function target is delivered to by this emulator"
         )),
+    }
+}
+
+/// The IAM action of the call that TAKES THE RECORDS from a source of the kind `source`
+/// names — the one call the source stage cannot poll that source without — or `None` for a
+/// source this data plane takes no records from at all.
+///
+/// The source stage makes other calls beside it (it reads a queue's attributes, it lists a
+/// stream's shards), and each is authorized where it is made ([`LiveRecord::refusal`]); this
+/// is the single call whose refusal means the pipe could never poll, which is what the
+/// lifecycle asks about before it reports a pipe up ([`super::bring_up`]).
+pub(super) fn source_record_action(source: &str) -> Option<&'static str> {
+    let parsed = ::service_common::arn::parse(source)?;
+    match parsed.vendor {
+        SQS_NAMESPACE => Some(RECEIVE_MESSAGE_ACTION),
+        DYNAMODB_NAMESPACE if parsed.resource.contains(STREAM_SEGMENT) => Some(GET_RECORDS_ACTION),
+        _ => None,
+    }
+}
+
+/// Whether the service that OWNS the source `source` names answers that it holds no such
+/// resource.
+///
+/// The resource is asked for through that service's own read — the queue's attributes, the
+/// stream's description — so a source is reported absent only where the component that owns
+/// it says so. `false` for everything this emulator cannot show: a source whose kind no
+/// owner here is asked (only an Amazon SQS queue and a DynamoDB stream are), a source of
+/// another account, a service that answered something else, and one that did not answer.
+pub(super) async fn source_is_absent(
+    callback: &smithy_server_runtime::EmbeddedEmulator,
+    source: &str,
+) -> bool {
+    let Some(parsed) = ::service_common::arn::parse(source) else {
+        return false;
+    };
+    // A resource of another account is not this emulator's to hold, so its absence here
+    // shows nothing about it.
+    if !parsed.account.is_empty() && parsed.account != ::engine::emulator_account_id() {
+        return false;
+    }
+    let mut clients = Clients::default();
+    match parsed.vendor {
+        SQS_NAMESPACE => {
+            let name = parsed.resource;
+            if name.contains('/') || name.contains(':') {
+                return false;
+            }
+            let url = queue_url(parsed.region, parsed.account, name);
+            let answered = clients
+                .sqs(callback, parsed.region)
+                .get_queue_attributes()
+                .queue_url(url)
+                .attribute_names(::aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+                .send()
+                .await;
+            answered.err().is_some_and(|error| {
+                error
+                    .as_service_error()
+                    .is_some_and(::aws_sdk_sqs::operation::get_queue_attributes::GetQueueAttributesError::is_queue_does_not_exist)
+            })
+        }
+        DYNAMODB_NAMESPACE if parsed.resource.contains(STREAM_SEGMENT) => {
+            let answered = clients
+                .dynamodbstreams(callback, parsed.region)
+                .describe_stream()
+                .stream_arn(source)
+                .send()
+                .await;
+            answered.err().is_some_and(|error| {
+                error
+                    .as_service_error()
+                    .is_some_and(::aws_sdk_dynamodbstreams::operation::describe_stream::DescribeStreamError::is_resource_not_found_exception)
+            })
+        }
+        _ => false,
     }
 }
 

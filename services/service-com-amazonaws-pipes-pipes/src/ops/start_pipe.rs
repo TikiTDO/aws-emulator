@@ -4,10 +4,11 @@
 //! IMPLEMENTED: moves the stored pipe's `DesiredState` to `RUNNING` and its
 //! `CurrentState` through `STARTING`, and starts the data-plane poller that a RUNNING
 //! pipe is. A start that lands while a move is already in flight is
-//! `ConflictException` (409); an unknown name is `NotFoundException` (404). A pipe whose
-//! stored `RoleArn` this service cannot assume ([`crate::state::execution_role`]) cannot be
-//! started: it settles in `START_FAILED` carrying the `StateReason` that says so, and runs
-//! nothing. This is the ONLY file to touch for this operation.
+//! `ConflictException` (409); an unknown name is `NotFoundException` (404). A pipe that
+//! cannot be brought up ([`crate::state::bring_up`]: a stored `RoleArn` this service cannot
+//! assume or that may not take the source's records, or a source that does not exist)
+//! cannot be started: it settles in `START_FAILED` carrying the `StateReason` that says so,
+//! and runs nothing. This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -163,18 +164,44 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
         })?;
 
+        // What the pipe would run as, read off the record under the store's lock and
+        // released again before anything else is asked: the source it reads from and the
+        // role it holds. An unknown name is the 404 the model declares, and a pipe whose
+        // last call left it mid-transition is not startable — the move in flight has to
+        // land first, so a second move is refused with the conflict error the model
+        // declares rather than interleaved with it.
+        let (source, role_arn) = {
+            let mut state = store.lock();
+            state.settle_due_transitions();
+            let pipe = state.pipes.get(&input.name).ok_or_else(|| {
+                StartPipeErrorModeled::NotFoundException(crate::state::pipe_not_found(&input.name))
+            })?;
+            if pipe.transient_state().is_some() {
+                return Err(StartPipeErrorModeled::ConflictException(
+                    crate::state::pipe_conflict(&pipe.name),
+                )
+                .into());
+            }
+            (pipe.source.clone(), pipe.role_arn.clone())
+        };
+
+        // Whether the pipe could poll that source under that role: a start asks the pipe to
+        // run, and a pipe that could not take its source's records is a start that cannot
+        // be completed. Decided with NO store lock held, because the owner of the source is
+        // asked about it and no request waits on that behind this lock.
+        let unservable =
+            crate::state::bring_up::refusal(ctx, &*self.engine, &source, &role_arn).await;
+
+        // The start itself, decided and written in ONE critical section, so of two
+        // simultaneous starts on a resting pipe the first one through is the only one
+        // accepted: the other arrives while the pipe is STARTING and is refused.
         let mut state = store.lock();
         state.settle_due_transitions();
-
         let pipe = state.pipes.get_mut(&input.name).ok_or_else(|| {
             StartPipeErrorModeled::NotFoundException(crate::state::pipe_not_found(&input.name))
         })?;
-
-        // A pipe whose last call left it mid-transition is not startable: the move in
-        // flight has to land first, so a second move is refused with the conflict error
-        // the model declares rather than interleaved with it. Of two simultaneous starts
-        // on a resting pipe the first one through this gate is therefore the only one
-        // accepted — the other arrives while the pipe is STARTING and is refused.
+        // The pipe may have been moved while the owner of its source was asked, and a move
+        // in flight is still what refuses this one.
         if pipe.transient_state().is_some() {
             return Err(StartPipeErrorModeled::ConflictException(
                 crate::state::pipe_conflict(&pipe.name),
@@ -183,13 +210,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         pipe.desired_state = crate::state::requested_state::RUNNING.to_string();
-        // Whether this service can assume the role the pipe HOLDS: a start asks the pipe to
-        // run under it, and a role no stage could act as is a start that cannot be
-        // completed. The IAM store of the same engine is read for the length of this one
-        // decision and no call leaves the process while either guard is held.
-        let unassumable =
-            crate::state::execution_role::engine_assume_refusal(&*self.engine, &pipe.role_arn);
-        match &unassumable {
+        match &unservable {
             None => pipe.begin_transition(
                 crate::state::pipe_state::STARTING,
                 crate::state::pipe_state::RUNNING,
@@ -214,7 +235,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // accumulated while it was stopped: the poller is started here, outside the
         // lock, and does nothing until the pipe's `STARTING` span has lapsed.
         drop(state);
-        if unassumable.is_none() {
+        if unservable.is_none() {
             crate::state::data_plane::drive_pipe(ctx, &self.engine, &input.name);
         }
         Ok(output)

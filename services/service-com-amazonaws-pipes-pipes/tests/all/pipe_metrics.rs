@@ -20,7 +20,11 @@
 //! not hold at all, which shows nothing and lets the call through).
 //!
 //! A role whose TRUST document withholds the assume is not a row here: such a pipe never
-//! reaches `RUNNING` at all, which is `tests/all/pipe_unassumable_role.rs`.
+//! reaches `RUNNING` at all, which is `tests/all/pipe_unassumable_role.rs`. Neither is a
+//! role that may not take the SOURCE's records when the pipe is brought up: such a pipe is
+//! never brought up either (`tests/all/pipe_bring_up.rs`), so the row about the source stage
+//! failing withdraws that call from the role once the pipe is RUNNING — a live role being
+//! revoked, which is the only way a running pipe's source poll is refused.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -197,6 +201,43 @@ async fn given_role(
     given_role_stating(router, name, principal, identity_policy(allowed, denied)).await
 }
 
+/// The name of the one inline policy [`given_role_stating`] writes, so a later write of it
+/// REPLACES what the role may do.
+pub(crate) const ROLE_POLICY_NAME: &str = "pipe-stages";
+
+/// Leave the role `name` allowing `allowed` and nothing else: the permissions of a LIVE
+/// role being narrowed, which is how a pipe that was brought up loses a call it could make
+/// when it came up.
+///
+/// `pub(crate)` because `tests/all/pipe_metric_attribution.rs` narrows a running pipe's role
+/// the same way, through this one path.
+pub(crate) async fn withdraw_from_role(
+    router: &MultiServiceRouter,
+    case: &str,
+    name: &str,
+    allowed: &[&str],
+) {
+    let document = json!({
+        "Version": "2012-10-17",
+        "Statement": identity_policy(allowed, None),
+    })
+    .to_string();
+    let (status, written) = iam(
+        router,
+        "PutRolePolicy",
+        &[
+            ("RoleName", name),
+            ("PolicyName", ROLE_POLICY_NAME),
+            ("PolicyDocument", &document),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "case {case:?}: PutRolePolicy answered {status}: {written}"
+    );
+}
+
 /// A role called `name` trusting `principal` and carrying `statements` as its one inline
 /// policy; answered with the ARN IAM persisted.
 ///
@@ -228,7 +269,7 @@ pub(crate) async fn given_role_stating(
         "PutRolePolicy",
         &[
             ("RoleName", name),
-            ("PolicyName", "pipe-stages"),
+            ("PolicyName", ROLE_POLICY_NAME),
             ("PolicyDocument", &document),
         ],
     )
@@ -349,6 +390,9 @@ struct Row {
     allowed: &'static [&'static str],
     /// The action it explicitly denies, when the row has one.
     denied: Option<&'static str>,
+    /// What the role is left allowing once the pipe is RUNNING, for a row whose stage must
+    /// fail on a call the role allowed while the pipe was being brought up.
+    withdrawn_to: Option<&'static [&'static str]>,
     /// Whether the pipe carries an enrichment between its source and its target.
     enrichment: bool,
     /// Whether the target ends up holding the record.
@@ -371,6 +415,7 @@ async fn a_running_pipe_publishes_its_counters_and_fails_the_stage_its_role_bars
             trust: Some(SERVICE_PRINCIPAL),
             allowed: &["sqs:*"],
             denied: None,
+            withdrawn_to: None,
             enrichment: false,
             delivered: true,
             moved: &[EVENT_COUNT_METRIC],
@@ -382,6 +427,7 @@ async fn a_running_pipe_publishes_its_counters_and_fails_the_stage_its_role_bars
             trust: None,
             allowed: &[],
             denied: None,
+            withdrawn_to: None,
             enrichment: false,
             delivered: true,
             moved: &[EVENT_COUNT_METRIC],
@@ -391,6 +437,7 @@ async fn a_running_pipe_publishes_its_counters_and_fails_the_stage_its_role_bars
             trust: Some(SERVICE_PRINCIPAL),
             allowed: &["sqs:ReceiveMessage", "sqs:DeleteMessage"],
             denied: None,
+            withdrawn_to: None,
             enrichment: false,
             delivered: false,
             moved: &[
@@ -404,6 +451,7 @@ async fn a_running_pipe_publishes_its_counters_and_fails_the_stage_its_role_bars
             trust: Some(SERVICE_PRINCIPAL),
             allowed: &["sqs:*"],
             denied: Some("sqs:SendMessage"),
+            withdrawn_to: None,
             enrichment: false,
             delivered: false,
             moved: &[
@@ -415,10 +463,14 @@ async fn a_running_pipe_publishes_its_counters_and_fails_the_stage_its_role_bars
         Row {
             // The source poll is the first call a pipe makes, so a role that may not make
             // it takes no record at all: the execution failed before any stage of its own.
-            case: "source-receive-not-stated",
+            // The role is narrowed to the delivery once the pipe is RUNNING, because a pipe
+            // whose role may not take its source's records when it is brought up is never
+            // brought up (`tests/all/pipe_bring_up.rs`) and would publish nothing.
+            case: "source-receive-withdrawn-while-running",
             trust: Some(SERVICE_PRINCIPAL),
-            allowed: &["sqs:SendMessage"],
+            allowed: &["sqs:*"],
             denied: None,
+            withdrawn_to: Some(&["sqs:SendMessage"]),
             enrichment: false,
             delivered: false,
             moved: &[EXECUTION_FAILED_METRIC],
@@ -428,6 +480,7 @@ async fn a_running_pipe_publishes_its_counters_and_fails_the_stage_its_role_bars
             trust: Some(SERVICE_PRINCIPAL),
             allowed: &["sqs:*"],
             denied: None,
+            withdrawn_to: None,
             enrichment: true,
             delivered: false,
             moved: &[
@@ -441,6 +494,7 @@ async fn a_running_pipe_publishes_its_counters_and_fails_the_stage_its_role_bars
             trust: Some(SERVICE_PRINCIPAL),
             allowed: &["sqs:*", "states:StartSyncExecution"],
             denied: None,
+            withdrawn_to: None,
             enrichment: true,
             delivered: true,
             moved: &[EVENT_COUNT_METRIC],
@@ -494,6 +548,32 @@ async fn a_running_pipe_publishes_its_counters_and_fails_the_stage_its_role_bars
             "case {:?}: CreatePipe answered {} {}",
             row.case, created.status, created.body
         );
+        // A row whose stage must fail on a call its role allowed while the pipe was being
+        // brought up waits for the pipe to be RUNNING and then narrows the role, so the
+        // refusal reaches a pipe that is already running rather than its creation.
+        if let Some(allowed) = row.withdrawn_to {
+            let reported = crate::pipe_execution_role::wait_for_state(
+                &router,
+                row.case,
+                service_com_amazonaws_pipes_pipes::state::pipe_state::RUNNING,
+                BUDGET,
+            )
+            .await;
+            assert_eq!(
+                reported,
+                service_com_amazonaws_pipes_pipes::state::pipe_state::RUNNING,
+                "case {:?}: expected the pipe RUNNING before its role is narrowed, it \
+                 reports {reported}",
+                row.case
+            );
+            withdraw_from_role(
+                &router,
+                row.case,
+                &format!("{}-role", row.case),
+                allowed,
+            )
+            .await;
+        }
         send(&router, &source_url, &[format!("{}-record", row.case)]).await;
 
         // What a client sees at the target: the record, or nothing at all.

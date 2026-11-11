@@ -15,6 +15,8 @@
 mod front_door_refusals;
 #[path = "all/pipe_body_paths.rs"]
 mod pipe_body_paths;
+#[path = "all/pipe_bring_up.rs"]
+mod pipe_bring_up;
 #[path = "all/pipe_configuration_rules.rs"]
 mod pipe_configuration_rules;
 #[path = "all/pipe_data_plane.rs"]
