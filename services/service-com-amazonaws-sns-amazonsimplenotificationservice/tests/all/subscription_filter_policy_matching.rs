@@ -21,7 +21,9 @@
 //! (string, number, list), and whether the message satisfies the policy at all.
 
 use serde_json::json;
-use service_com_amazonaws_sns_amazonsimplenotificationservice::state::filter_policy::MAX_FILTER_MATCH_COMPARISONS;
+use service_com_amazonaws_sns_amazonsimplenotificationservice::state::filter_policy::{
+    MAX_FILTER_MATCH_COMPARISONS, MAX_FILTER_POLICY_COMBINATIONS,
+};
 use service_com_amazonaws_sns_amazonsimplenotificationservice::state::MAX_ATTRIBUTE_BYTES_PER_RECORD;
 
 use crate::sqs_subscription_delivery::{
@@ -692,13 +694,15 @@ async fn the_matching_one_request_spends_is_bounded() {
     subscribe_with(&emulator, &topic, &twin_arn, &[]).await;
 
     // Far more condition-versus-value comparisons than the request's matching budget
-    // allows: the policy lists thousands of conditions (as many as one subscription record
-    // may hold) and the published attribute holds hundreds of values, so the product is
-    // past the budget. The one condition the message WOULD satisfy is the LAST, and the
+    // allows: the policy lists as many conditions as SNS's own filter-policy constraint
+    // admits and the published attribute holds hundreds of values, so the product is past
+    // the budget. The one condition the message WOULD satisfy is the LAST, and the
     // value satisfying it is the FIRST of the attribute's values — so a matcher that ran
     // out of budget withholds, while one that applied the whole policy would deliver.
     let wanted = "wanted";
-    let mut conditions: Vec<String> = (0..4_000).map(|index| format!(r#""v-{index}""#)).collect();
+    let mut conditions: Vec<String> = (0..MAX_FILTER_POLICY_COMBINATIONS - 1)
+        .map(|index| format!(r#""v-{index}""#))
+        .collect();
     conditions.push(format!(r#""{wanted}""#));
     let exhausting = format!(r#"{{"kind":[{}]}}"#, conditions.join(","));
     assert!(
@@ -729,7 +733,7 @@ async fn the_matching_one_request_spends_is_bounded() {
     // The product the matcher would have to walk to reach the last condition — the
     // conditions listed times the values one property contributes — is past the budget,
     // which is what this case rests on.
-    const { assert!(4_000 * 256 > MAX_FILTER_MATCH_COMPARISONS) };
+    const { assert!(MAX_FILTER_POLICY_COMBINATIONS * 256 > MAX_FILTER_MATCH_COMPARISONS) };
     sns(
         &emulator,
         "Publish",

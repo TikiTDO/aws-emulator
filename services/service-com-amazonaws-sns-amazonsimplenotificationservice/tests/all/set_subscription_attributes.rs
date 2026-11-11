@@ -122,8 +122,10 @@ async fn given_topic(sns: &Sns, name: &str, attribute: &str) -> String {
         "CreateTopic",
         &[
             ("Name", fifo_name.as_str()),
-            ("Attributes.entry.1.key", "ArchivePolicy"),
-            ("Attributes.entry.1.value", ARCHIVE_POLICY),
+            ("Attributes.entry.1.key", "FifoTopic"),
+            ("Attributes.entry.1.value", "true"),
+            ("Attributes.entry.2.key", "ArchivePolicy"),
+            ("Attributes.entry.2.value", ARCHIVE_POLICY),
         ],
     )
     .await
@@ -392,8 +394,28 @@ async fn setting_a_documented_subscription_attribute_persists_and_round_trips() 
 
         // A request carrying no value clears the attribute, so the subscription reports
         // what it reported before it was ever set — the documented default of a flag,
-        // and no entry at all for a policy.
+        // and no entry at all for a policy. The one exception is an attribute the
+        // subscription's PROTOCOL requires: a Firehose subscription with no
+        // `SubscriptionRoleArn` is one SNS has no identity to deliver as, so the clear
+        // is refused and the attribute stays.
+        let required_by_the_protocol = *name == "SubscriptionRoleArn";
         let cleared = set(&sns, &arn, name, None).await;
+        if required_by_the_protocol {
+            assert_eq!(
+                cleared.status, 400,
+                "case {case:?}: clearing the {name} its protocol requires expected 400, \
+                 got {} / {}",
+                cleared.status, cleared.body
+            );
+            let after = read(&sns, case, &arn).await;
+            assert_eq!(
+                attribute_map(&after).get(*name).cloned(),
+                Some((*value).to_string()),
+                "case {case:?}: a refused clear must leave {name} as it was, got {:?}",
+                attribute_map(&after)
+            );
+            continue;
+        }
         assert_eq!(
             cleared.status, 200,
             "case {case:?}: clearing {name} expected 200, got {} / {}",
@@ -860,19 +882,24 @@ async fn subscribe_holds_its_attributes_to_the_same_rules() {
         let topic = sns
             .topic(&format!("subscribe-attribute-rules-{index:02}"))
             .await;
-        let answer = sns
-            .call(
-                "Subscribe",
-                &[
-                    ("TopicArn", &topic),
-                    ("Protocol", protocol),
-                    ("Endpoint", endpoint_for(protocol)),
-                    ("ReturnSubscriptionArn", "true"),
-                    ("Attributes.entry.1.key", name),
-                    ("Attributes.entry.1.value", value),
-                ],
-            )
-            .await;
+        let mut params: Vec<(&str, &str)> = vec![
+            ("TopicArn", &topic),
+            ("Protocol", protocol),
+            ("Endpoint", endpoint_for(protocol)),
+            ("ReturnSubscriptionArn", "true"),
+            ("Attributes.entry.1.key", name),
+            ("Attributes.entry.1.value", value),
+        ];
+        // The role a Firehose subscription is required to carry, where the row does not
+        // write it itself, so these rows turn on the attribute under test alone.
+        if *protocol == "firehose" && *name != "SubscriptionRoleArn" {
+            params.push(("Attributes.entry.2.key", "SubscriptionRoleArn"));
+            params.push((
+                "Attributes.entry.2.value",
+                "arn:aws:iam::000000000000:role/sns-firehose",
+            ));
+        }
+        let answer = sns.call("Subscribe", &params).await;
         if *accepted {
             assert_eq!(
                 answer.status, 200,

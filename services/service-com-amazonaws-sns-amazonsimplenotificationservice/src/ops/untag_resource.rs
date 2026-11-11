@@ -108,6 +108,10 @@ pub enum UntagResourceErrorModeled {
 /// The input member a refusal of this operation names.
 const RESOURCE_ARN_MEMBER: &str = "ResourceArn";
 
+/// The input member the keys to remove arrive in, which a refusal about one of them
+/// names.
+const TAG_KEYS_MEMBER: &str = "TagKeys";
+
 /// This operation's error channel, as the generated `impl Operation` names it
 /// (`crate::ops::untag_resource::UntagResourceError`). Wrapping the modeled enum is what
 /// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
@@ -166,6 +170,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some(message) =
             state::tagged_topic_arn_refusal(RESOURCE_ARN_MEMBER, &input.resource_arn, &region)
         {
+            return Err(UntagResourceErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(message),
+                },
+            )
+            .into());
+        }
+
+        // A key in the namespace Amazon Web Services keeps for its own tags is not a
+        // caller's to REMOVE either: the rule is the one every write of a topic's tag
+        // set shares, and it is asked before the store is consulted.
+        if let Some(message) = state::reserved_tag_key_refusal(
+            TAG_KEYS_MEMBER,
+            input.tag_keys.iter().map(String::as_str),
+            state::tag_key_origin(ctx),
+        ) {
             return Err(UntagResourceErrorModeled::InvalidParameterException(
                 InvalidParameterException {
                     message: Some(message),

@@ -436,11 +436,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     message_structure: entry.message_structure.as_deref(),
                     message_group_id: entry.message_group_id.as_deref(),
                     message_deduplication_id: entry.message_deduplication_id.as_deref(),
+                    message_attributes: entry.message_attributes.as_ref(),
                 };
                 let judgement = match state::message_refusal(request) {
                     Some(reason) => Err(reason),
                     None => state::topic_message_refusal(&topic, request),
                 };
+                // A message ATTRIBUTE SNS will not take is answered with the error the
+                // service names for that condition — the same one a single `Publish` of
+                // that entry answers.
+                if let Some(refusal) = state::message_attributes_refusal(request) {
+                    return Err(match refusal {
+                        state::message_attributes::MessageAttributeRefusal::ParameterValue(
+                            message,
+                        ) => PublishBatchErrorModeled::InvalidParameterValueException(
+                            InvalidParameterValueException {
+                                message: Some(message),
+                            },
+                        )
+                        .into(),
+                        state::message_attributes::MessageAttributeRefusal::InvalidParameter(
+                            message,
+                        ) => invalid_parameter(message),
+                    });
+                }
                 match judgement {
                     Ok(deduplication_id) => deduplication_ids.push(deduplication_id),
                     Err(reason) => return Err(invalid_parameter(reason)),

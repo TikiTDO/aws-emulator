@@ -233,9 +233,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SetSubscriptionAt
 
         // And each attribute accepts only the values SNS documents for it.
         if let Some(value) = requested.as_deref() {
-            if let Some(message) =
-                state::subscription_attribute_refusal(&input.attribute_name, value)
-            {
+            if let Some(message) = state::subscription_attribute_refusal(
+                &input.attribute_name,
+                value,
+                state::AttributeMember::Named,
+            ) {
                 return Err(invalid_parameter(message));
             }
         }
@@ -251,10 +253,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SetSubscriptionAt
         let mut store = store.lock();
 
         // An attribute the TOPIC gives nothing to govern is refused — a replay of a topic
-        // that archives nothing — under the rule every write of a subscription attribute
-        // shares. A subscription that is not here at all falls through to the
-        // `NotFound` below.
-        if requested.is_some() {
+        // that archives nothing, a dead-letter queue of the other kind — under the rule
+        // every write of a subscription attribute shares. A subscription that is not
+        // here at all falls through to the `NotFound` below.
+        if let Some(value) = requested.as_deref() {
             let topic_arn = store
                 .subscriptions
                 .get(&input.subscription_arn)
@@ -262,7 +264,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SetSubscriptionAt
             if let Some(topic_arn) = topic_arn {
                 if let Some(message) = state::subscription_attribute_topic_refusal(
                     &input.attribute_name,
+                    value,
                     store.topics.get(&topic_arn),
+                    state::AttributeMember::Named,
                 ) {
                     return Err(invalid_parameter(message));
                 }
@@ -320,6 +324,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SetSubscriptionAt
             }
         }
         if let Some(message) = state::filter_policy_pair_refusal(&would_hold) {
+            return Err(invalid_parameter(message));
+        }
+        // And an attribute the subscription's PROTOCOL requires has to still be there
+        // afterwards: a write that would take it away leaves a subscription SNS has no
+        // way to deliver over, under the rule every write of a subscription attribute
+        // shares.
+        if let Some(message) = state::subscription_required_attribute_refusal(
+            &subscription.protocol,
+            &would_hold,
+            state::AttributeMember::Named,
+        ) {
             return Err(invalid_parameter(message));
         }
 

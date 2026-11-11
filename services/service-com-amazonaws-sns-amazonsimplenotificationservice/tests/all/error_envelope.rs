@@ -372,11 +372,7 @@ struct MessageCase<'a> {
 async fn an_error_message_states_the_services_sentence_and_not_the_callers_value() {
     let sns = Sns::new();
     let topic = sns.topic("sentence-topic").await;
-    let fifo = sns
-        .call("CreateTopic", &[("Name", "sentence.fifo")])
-        .await
-        .element("TopicArn")
-        .expect("the FIFO topic ARN");
+    let fifo = sns.topic("sentence.fifo").await;
     let absent = "arn:aws:sns:us-east-1:000000000000:gone-topic";
     let long_name = "n".repeat(257);
 

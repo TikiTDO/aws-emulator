@@ -198,15 +198,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 INVALID_ACCOUNT_ID_REFUSAL.to_string(),
             ));
         }
-        if let Some(bad) = input
+        if input
             .action_name
             .iter()
-            .find(|action| action.is_empty() || action.contains(':'))
+            .any(|action| !state::is_action_name(action))
         {
-            return Err(invalid_parameter(format!(
-                "Invalid parameter: ActionName Reason: an action name is an Amazon SNS action, \
-                 unqualified: {bad}"
-            )));
+            // "Valid values: Any Amazon SNS action name" (`ActionName` doc): an action
+            // that is none of this service's lies outside the scope a policy of it can
+            // grant, so the statement is never written. The value the caller sent is not
+            // part of SNS's own sentence for this condition.
+            return Err(invalid_parameter(
+                state::ACTION_OUT_OF_SCOPE_REFUSAL.to_string(),
+            ));
         }
 
         // Authorization, before the store is consulted: AWS decides whether the caller may
@@ -259,16 +262,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &input.topic_arn,
         );
         // "A unique identifier for the new policy statement" (`Label` doc): the label
-        // IS the statement's `Sid`, so the grant a label names is ONE statement. A
-        // repeated label therefore replaces that statement where it stands rather than
-        // adding a second one under the same identifier — the call is idempotent in
-        // its label, which is what lets a caller re-apply a grant it already made.
-        // Pinned by the recorded sns-topic-access-policy-permission-management
-        // fixture, whose second AddPermission of one label is answered 200.
-        match policy.position_of(&input.label) {
-            Some(position) => policy.statement[position] = statement,
-            None => policy.statement.push(statement),
+        // IS the statement's `Sid`, so a label the policy already carries a statement
+        // for names a grant that has already been made — the call asks to ADD a
+        // statement, not to replace one, so it is refused and the policy is left
+        // exactly as it was. Recorded evidence: a second `AddPermission` of one label
+        // answers 400 `InvalidParameter` with
+        // [`state::STATEMENT_ALREADY_EXISTS_REFUSAL`].
+        if policy.position_of(&input.label).is_some() {
+            return Err(invalid_parameter(
+                state::STATEMENT_ALREADY_EXISTS_REFUSAL.to_string(),
+            ));
         }
+        policy.statement.push(statement);
         let document = policy.to_json();
         if let Some(refusal) = state::attribute_write_refusal(
             state::TOPIC_RECORD,

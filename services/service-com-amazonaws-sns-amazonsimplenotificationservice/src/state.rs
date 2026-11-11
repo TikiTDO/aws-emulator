@@ -19,9 +19,15 @@ pub mod filter_policy;
 /// addresses: the caller's identity-based policies read together with the topic's own
 /// access policy.
 pub mod authorization;
+/// The rules one MESSAGE ATTRIBUTE of a published message is held to, shared by every
+/// operation that publishes one.
+pub mod message_attributes;
 /// The address-matching condition of a filter policy (`cidr`), which
 /// [`filter_policy`] reads beside the conditions that compare values.
 pub mod message_filter;
+/// The rules ONE attribute of a topic is held to, shared by the operations that write
+/// one.
+pub mod topic_attributes;
 /// The documented bounds of the retry policy a delivery policy document carries, held
 /// against every write of one.
 pub mod retry_policy_bounds;
@@ -601,6 +607,76 @@ pub fn default_topic_policy(arn: &str, owner: &str) -> TopicPolicyDocument {
     }
 }
 
+/// Every action name Amazon SNS defines, which is the SERVICE SCOPE a policy statement
+/// this service writes may name: "Valid values: Any Amazon SNS action name, for example
+/// `Publish`" (`AddPermissionInput$ActionName` doc). The list is the operations this
+/// service's model binds, as
+/// `smithy_query(query="list_operations")` reports them.
+pub const ACTION_NAMES: &[&str] = &[
+    "AddPermission",
+    "CheckIfPhoneNumberIsOptedOut",
+    "ConfirmSubscription",
+    "CreatePlatformApplication",
+    "CreatePlatformEndpoint",
+    "CreateSMSSandboxPhoneNumber",
+    "CreateTopic",
+    "DeleteEndpoint",
+    "DeletePlatformApplication",
+    "DeleteSMSSandboxPhoneNumber",
+    "DeleteTopic",
+    "GetDataProtectionPolicy",
+    "GetEndpointAttributes",
+    "GetPlatformApplicationAttributes",
+    "GetSMSAttributes",
+    "GetSMSSandboxAccountStatus",
+    "GetSubscriptionAttributes",
+    "GetTopicAttributes",
+    "ListEndpointsByPlatformApplication",
+    "ListOriginationNumbers",
+    "ListPhoneNumbersOptedOut",
+    "ListPlatformApplications",
+    "ListSMSSandboxPhoneNumbers",
+    "ListSubscriptions",
+    "ListSubscriptionsByTopic",
+    "ListTagsForResource",
+    "ListTopics",
+    "OptInPhoneNumber",
+    "Publish",
+    "PublishBatch",
+    "PutDataProtectionPolicy",
+    "RemovePermission",
+    "SetEndpointAttributes",
+    "SetPlatformApplicationAttributes",
+    "SetSMSAttributes",
+    "SetSubscriptionAttributes",
+    "SetTopicAttributes",
+    "Subscribe",
+    "TagResource",
+    "Unsubscribe",
+    "UntagResource",
+    "VerifySMSSandboxPhoneNumber",
+];
+
+/// The sentence SNS refuses a policy statement naming an action that is not one of its
+/// own with: the statement's action lies outside the service the policy governs, and
+/// which value it was is not what the sentence carries. Recorded evidence:
+/// `AddPermission` with an `ActionName` that is no Amazon SNS action answers `400
+/// InvalidParameter` with exactly this.
+pub const ACTION_OUT_OF_SCOPE_REFUSAL: &str =
+    "Invalid parameter: Policy statement action out of service scope!";
+
+/// The sentence SNS refuses a grant under a `Label` the topic's policy already carries a
+/// statement for with: a label identifies ONE statement, so the grant it names is either
+/// added or already there. Recorded evidence: a second `AddPermission` of one label
+/// answers `400 InvalidParameter` with exactly this.
+pub const STATEMENT_ALREADY_EXISTS_REFUSAL: &str = "Invalid parameter: Statement already exists";
+
+/// Whether `name` is an action Amazon SNS defines ([`ACTION_NAMES`]) — the question a
+/// policy statement's action is judged by, whichever call carried it.
+pub fn is_action_name(name: &str) -> bool {
+    ACTION_NAMES.contains(&name)
+}
+
 /// The statement `AddPermission` adds: an `Allow` of `SNS:<action>` for each named
 /// action, to the root principal of each named account, on this topic alone.
 ///
@@ -947,16 +1023,95 @@ impl ConfiguredDeliveryPolicy {
     }
 }
 
+/// The bounds a retry policy's members are documented at (the Amazon SNS Developer
+/// Guide, "Amazon SNS message delivery retries": a delay target is a number of seconds
+/// up to an hour, a retry count is at most 100, and the backoff function is one of the
+/// four published curves).
+pub const MIN_DELAY_SECONDS: i64 = 1;
+pub const MAX_DELAY_SECONDS: i64 = 3_600;
+pub const MAX_RETRIES: i64 = 100;
+pub const BACKOFF_FUNCTIONS: &[&str] = &["arithmetic", "exponential", "geometric", "linear"];
+
+impl ConfiguredRetryPolicy {
+    /// Why the retry policy's members constrain EACH OTHER in a way this one breaks, or
+    /// `None` when they hold together.
+    ///
+    /// A member's own documented bounds are judged in
+    /// [`retry_policy_bounds`] — one catalog of bounds for both documents a retry policy
+    /// is written in — and what is left here is what no single member decides: a minimum
+    /// delay longer than the maximum names no delay at all, the three retry phases are
+    /// PART of the retry count so together they cannot come to more than it, and the
+    /// backoff curve is one of the published functions. `path` is the document's own path
+    /// to the retry policy, which the reason names so a caller can find the member to
+    /// fix.
+    pub fn bounds_reason(&self, path: &str) -> Option<String> {
+        if let (Some(min), Some(max)) = (self.min_delay_target, self.max_delay_target) {
+            if min > max {
+                return Some(format!(
+                    "{path}minDelayTarget must be less than or equal to {path}maxDelayTarget"
+                ));
+            }
+        }
+        let phases = self.num_no_delay_retries.unwrap_or(0)
+            + self.num_min_delay_retries.unwrap_or(0)
+            + self.num_max_delay_retries.unwrap_or(0);
+        if let Some(retries) = self.num_retries {
+            if phases > retries {
+                return Some(format!(
+                    "{path}numNoDelayRetries, {path}numMinDelayRetries and \
+                     {path}numMaxDelayRetries together must be less than or equal to \
+                     {path}numRetries"
+                ));
+            }
+        }
+        self.backoff_function
+            .as_deref()
+            .filter(|function| !BACKOFF_FUNCTIONS.contains(function))
+            .map(|_| {
+                format!(
+                    "{path}backoffFunction must be one of {}",
+                    BACKOFF_FUNCTIONS.join(", ")
+                )
+            })
+    }
+}
+
+/// The path a TOPIC's delivery policy document gives its retry policy's members.
+pub const TOPIC_RETRY_POLICY_PATH: &str = "http.defaultHealthyRetryPolicy.";
+
+/// The path a SUBSCRIPTION's delivery policy document gives its retry policy's members.
+pub const SUBSCRIPTION_RETRY_POLICY_PATH: &str = "healthyRetryPolicy.";
+
 /// Why `value` is not a delivery policy document this emulator can lay over the system
 /// defaults, or `None` when it is one.
 ///
 /// It is the SAME parse [`effective_delivery_policy`] performs, so the write path
 /// refuses exactly what the read could not honour: a document whose members are of the
 /// wrong type would otherwise be stored and then be left out of the effective policy.
+///
+/// The retry policy's own members are bounded in [`retry_policy_bounds`] and the rules
+/// its members hold EACH OTHER to in [`ConfiguredRetryPolicy::bounds_reason`], both of
+/// which the write path asks after this one.
 pub fn delivery_policy_refusal(value: &str) -> Option<String> {
+    match serde_json::from_str::<ConfiguredDeliveryPolicy>(value) {
+        Ok(_) => None,
+        Err(error) => Some(format!(
+            "the value must be a delivery policy document: {error}"
+        )),
+    }
+}
+
+/// Why the retry policy a TOPIC's delivery policy document carries breaks a rule its
+/// members hold EACH OTHER to, or `None` when they hold together (and for a value that
+/// is no such document at all, which [`delivery_policy_refusal`] answers).
+pub fn delivery_policy_member_agreement_reason(value: &str) -> Option<String> {
     serde_json::from_str::<ConfiguredDeliveryPolicy>(value)
-        .err()
-        .map(|error| format!("the value must be a delivery policy document: {error}"))
+        .ok()?
+        .http
+        .as_ref()?
+        .default_healthy_retry_policy
+        .as_ref()?
+        .bounds_reason(TOPIC_RETRY_POLICY_PATH)
 }
 
 /// The effective delivery policy of a topic: the system defaults with the topic's own
@@ -1057,11 +1212,19 @@ impl ConfiguredSubscriptionDeliveryPolicy {
 /// when it is one.
 ///
 /// The same parse [`normalized_subscription_delivery_policy`] performs, so the write
-/// refuses exactly what the read could not honour.
+/// refuses exactly what the read could not honour, and the same documented bounds on the
+/// retry policy a TOPIC's document is held to ([`delivery_policy_refusal`]): one retry
+/// policy, one rule, whichever document carried it.
 pub fn subscription_delivery_policy_refusal(value: &str) -> Option<String> {
-    serde_json::from_str::<ConfiguredSubscriptionDeliveryPolicy>(value)
-        .err()
-        .map(|error| format!("the value must be a delivery policy document: {error}"))
+    match serde_json::from_str::<ConfiguredSubscriptionDeliveryPolicy>(value) {
+        Ok(configured) => configured
+            .healthy_retry_policy
+            .as_ref()
+            .and_then(|retry| retry.bounds_reason(SUBSCRIPTION_RETRY_POLICY_PATH)),
+        Err(error) => Some(format!(
+            "the value must be a delivery policy document: {error}"
+        )),
+    }
 }
 
 /// The document a subscription's `DeliveryPolicy` is STORED and reported as: what the
@@ -1440,7 +1603,7 @@ pub const DELIVERY_POLICY_PROTOCOLS: &[&str] = &["http", "https"];
 
 /// The members of `value` when it is a JSON OBJECT, else `None` — the form every policy
 /// document a subscription attribute carries has.
-fn json_object(value: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+pub fn json_object(value: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
     match serde_json::from_str::<serde_json::Value>(value) {
         Ok(serde_json::Value::Object(members)) => Some(members),
         _ => None,
@@ -1526,13 +1689,31 @@ pub const POLICY_DOCUMENT_ATTRIBUTES: &[&str] = &[
     REPLAY_POLICY_ATTRIBUTE,
 ];
 
+/// The suffix of every attribute naming the IAM role SNS writes a delivery's status
+/// record as (`HTTPSuccessFeedbackRoleArn`, `SQSFailureFeedbackRoleArn`, …).
+pub const FEEDBACK_ROLE_ARN_SUFFIX: &str = "FeedbackRoleArn";
+
+/// Whether the topic attribute `name` NAMES ANOTHER RESOURCE rather than carrying a
+/// value of its own: the encryption key a topic is encrypted under, and the IAM roles
+/// its delivery-status logging is written as.
+///
+/// Such an attribute is removed by writing an EMPTY value to it, the way a policy
+/// document is: the empty value names no resource, so it asks for a topic that is not
+/// encrypted — or that logs no delivery status — rather than for one holding a key id or
+/// a role ARN that is the empty string.
+pub fn names_a_resource(name: &str) -> bool {
+    name == KMS_MASTER_KEY_ID_ATTRIBUTE || name.ends_with(FEEDBACK_ROLE_ARN_SUFFIX)
+}
+
 /// Whether writing `value` to the attribute `name` REMOVES it rather than setting it.
 ///
-/// An attribute whose value is a policy document is deleted by writing an EMPTY value to
-/// it — the way AWS documents removing one ("To delete a filter policy, set the
-/// `FilterPolicy` attribute to an empty value", SNS Developer Guide) — so an empty value
-/// asks for a record that holds no such policy rather than naming a document that failed
-/// to parse. The record then reports what it reports for a policy it was never given.
+/// An attribute whose value is a policy document — or which NAMES ANOTHER RESOURCE
+/// ([`names_a_resource`]) — is deleted by writing an EMPTY value to it: the way AWS
+/// documents removing one ("To delete a filter policy, set the `FilterPolicy` attribute
+/// to an empty value", SNS Developer Guide), and the way a topic's encryption is turned
+/// off again. An empty value asks for a record that holds no such policy or resource
+/// rather than naming a document that failed to parse or a resource called "". The
+/// record then reports what it reports for a value it was never given.
 ///
 /// A policy whose document AWS REQUIRES a member of is the exception
 /// ([`POLICY_ATTRIBUTES_WITH_A_REQUIRED_MEMBER`]): the empty value carries no such
@@ -1540,11 +1721,11 @@ pub const POLICY_DOCUMENT_ATTRIBUTES: &[&str] = &[
 /// ([`missing_required_value_refusal`]) rather than read as an instruction to remove the
 /// policy — two different intents a caller would otherwise have no way to tell apart.
 ///
-/// Shared by every operation that writes an attribute of either record kind, so a policy
+/// Shared by every operation that writes an attribute of either record kind, so a value
 /// is removed the same way whichever call carried the write.
 pub fn clears_attribute(name: &str, value: &str) -> bool {
     value.is_empty()
-        && POLICY_DOCUMENT_ATTRIBUTES.contains(&name)
+        && (POLICY_DOCUMENT_ATTRIBUTES.contains(&name) || names_a_resource(name))
         && !POLICY_ATTRIBUTES_WITH_A_REQUIRED_MEMBER.contains(&name)
 }
 
@@ -1586,20 +1767,50 @@ fn filter_policy_scope_refusal(value: &str) -> String {
 pub const REDRIVE_POLICY_NOT_A_QUEUE_REFUSAL: &str =
     "Invalid parameter: RedrivePolicy: deadLetterTargetArn must be a SQS queue";
 
+/// How a refusal names the member a subscription attribute arrived in.
+///
+/// The two write paths carry an attribute in different members, and SNS's refusal names
+/// the member it read: the `Attributes` MAP of `Subscribe` is named, and then the entry
+/// of it that was refused; `SetSubscriptionAttributes` was given the attribute by name,
+/// so its refusal names that attribute alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttributeMember {
+    /// The `Attributes` map of `Subscribe`.
+    Map,
+    /// The `AttributeName`/`AttributeValue` pair of `SetSubscriptionAttributes`.
+    Named,
+}
+
+impl AttributeMember {
+    /// The sentence a refusal of the attribute `name` for `reason` opens with under this
+    /// member.
+    pub fn refusal(self, name: &str, reason: &str) -> String {
+        match self {
+            Self::Map => format!("Invalid parameter: {ATTRIBUTES_MEMBER} Reason: {name}: {reason}"),
+            Self::Named => format!("Invalid parameter: {name}: {reason}"),
+        }
+    }
+}
+
 /// The message a write of the subscription attribute `name` to `value` is refused
 /// with, or `None` when the value is one the attribute accepts — including every
 /// `name` SNS documents no constraint on the value of.
 ///
 /// The message is the whole sentence SNS states for that condition, not a clause a
 /// caller wraps: the same condition reads the same whichever operation carried the
-/// write. It never echoes a policy document back, and names the value only where the
-/// sentence SNS states itself names it.
+/// write, bar the member that operation read the attribute from ([`AttributeMember`]).
+/// It never echoes a policy document back, and names the value only where the sentence
+/// SNS states itself names it.
 ///
 /// This is ARGUMENT validation — it judges the value alone — so it runs before any
 /// record is looked up, and it is SHARED by every operation that writes a subscription
 /// attribute: a value `Subscribe` accepts cannot be one `SetSubscriptionAttributes`
 /// refuses.
-pub fn subscription_attribute_refusal(name: &str, value: &str) -> Option<String> {
+pub fn subscription_attribute_refusal(
+    name: &str,
+    value: &str,
+    member: AttributeMember,
+) -> Option<String> {
     // The clause form the attributes SNS states no fixed sentence for keep: the
     // attribute and the constraint its value failed.
     let attribute_reason = |reason: String| format!("Invalid parameter: Attributes Reason: {reason}");
@@ -1620,19 +1831,39 @@ pub fn subscription_attribute_refusal(name: &str, value: &str) -> Option<String>
             // attribute, the parse and where in the document it stopped — never the
             // document the caller sent.
             Err(error) => Some(filter_policy_parse_refusal(value, &error)),
-            Ok(serde_json::Value::Object(_)) => None,
+            // The document parses and is an object, so what is left to judge is its
+            // GRAMMAR and its size, which the matching's own reading of a policy states.
+            // The reader's own sentence stands as it is; a LIMIT on the policy as a
+            // whole is framed under the member the document arrived in.
+            Ok(serde_json::Value::Object(_)) => {
+                filter_policy::document_fault(value).map(|fault| match fault {
+                    filter_policy::DocumentFault::Grammar(reason) => {
+                        AttributeMember::Named.refusal(name, &reason)
+                    }
+                    filter_policy::DocumentFault::Limit(reason) => member.refusal(name, &reason),
+                })
+            }
             Ok(_) => Some(attribute_reason(format!(
                 "{name} - the value must be a filter policy document: a JSON object of \
                  the message properties to match"
             ))),
         },
         // The SAME parse the stored, normalized document is computed with, so a
-        // document the read path could not honour is never stored — and then the
-        // document's numbers against their documented bounds, so a retry budget SNS
-        // would never run under is refused rather than stored.
-        DELIVERY_POLICY_ATTRIBUTE => subscription_delivery_policy_refusal(value)
-            .map(|reason| attribute_reason(format!("{name} - {reason}")))
-            .or_else(|| retry_policy_bounds::subscription_delivery_policy_bounds_refusal(value)),
+        // document the read path could not honour is never stored — then each retry
+        // member against its own documented bound, and last the rules those members
+        // hold EACH OTHER to.
+        DELIVERY_POLICY_ATTRIBUTE => {
+            match serde_json::from_str::<ConfiguredSubscriptionDeliveryPolicy>(value) {
+                Err(error) => Some(attribute_reason(format!(
+                    "{name} - the value must be a delivery policy document: {error}"
+                ))),
+                Ok(_) => retry_policy_bounds::subscription_delivery_policy_bounds_refusal(value)
+                    .or_else(|| {
+                        subscription_delivery_policy_refusal(value)
+                            .map(|reason| attribute_reason(format!("{name} - {reason}")))
+                    }),
+            }
+        }
         REDRIVE_POLICY_ATTRIBUTE => match json_object(value) {
             // A value that is not a policy document at all carries no dead-letter
             // target either, which is the member the document is refused for.
@@ -1723,20 +1954,122 @@ pub const REPLAY_WITHOUT_ARCHIVE_REFUSAL: &str =
     "Invalid parameter: Attributes Reason: ReplayPolicy: Topic ArchivePolicy attribute \
      is missing";
 
+/// The delivery protocols a FIFO topic can be subscribed over.
+///
+/// "The following attributes apply only to FIFO topics" (`SubscribeInput$Attributes`
+/// doc) names the FIFO-only settings; the protocols are the other half of the same
+/// division — a FIFO topic delivers in order to the endpoint kinds Amazon SNS publishes
+/// FIFO delivery for (Amazon SQS, Lambda, Amazon Data Firehose and HTTP/S), and the
+/// endpoint kinds that carry no ordering at all (an email address, a phone number, a
+/// mobile push endpoint) are not among them.
+pub const FIFO_TOPIC_PROTOCOLS: &[&str] = &["sqs", "lambda", "firehose", "http", "https"];
+
+/// The suffix the name of a FIFO Amazon SQS queue carries, as a FIFO topic's name does.
+pub const FIFO_QUEUE_SUFFIX: &str = FIFO_SUFFIX;
+
+/// Whether `arn` names a FIFO Amazon SQS queue.
+pub fn is_fifo_queue_arn(arn: &str) -> bool {
+    arn_resource(arn, "sqs").is_some_and(|queue| queue.ends_with(FIFO_QUEUE_SUFFIX))
+}
+
+/// The WHOLE `InvalidParameter` message SNS refuses a subscription with when its
+/// protocol and endpoint do not fit the TOPIC's kind, or `None` when they do.
+///
+/// A subscription SNS cannot deliver over is one it does not create: a FIFO topic
+/// delivers in order, so it is subscribed over the protocols that carry ordering
+/// ([`FIFO_TOPIC_PROTOCOLS`]) alone, and a FIFO queue — which only accepts an ordered
+/// message — is an endpoint of a FIFO topic alone. Shared by every operation that
+/// creates or re-applies a subscription, so the topology one call admits is the topology
+/// every call admits.
+pub fn subscription_topology_refusal(
+    topic: &TopicRecord,
+    protocol: &str,
+    endpoint: Option<&str>,
+) -> Option<String> {
+    if topic.is_fifo && !FIFO_TOPIC_PROTOCOLS.contains(&protocol) {
+        // SNS states the protocol itself rather than the member it arrived in: the
+        // protocol is not one a FIFO topic has a delivery for at all.
+        return Some(format!("Invalid parameter: Invalid protocol type: {protocol}"));
+    }
+    let fifo_endpoint = endpoint.is_some_and(is_fifo_queue_arn);
+    (fifo_endpoint && !topic.is_fifo).then(|| {
+        // SNS states this one UNDER its own parameter clause, which is how the recorded
+        // response reads: `Invalid parameter: ` followed by the whole sentence, itself
+        // naming the member and the reason.
+        "Invalid parameter: Invalid parameter: Endpoint Reason: FIFO SQS Queues can not \
+         be subscribed to standard SNS topics"
+            .to_string()
+    })
+}
+
+/// The WHOLE `InvalidParameter` message SNS refuses a subscription with when an
+/// attribute its protocol REQUIRES is missing from the map the write would leave, or
+/// `None` when every such attribute is there.
+///
+/// "Specifying a valid ARN for this attribute is required for Firehose delivery stream
+/// subscriptions" (`SubscribeInput$Attributes`, of `SubscriptionRoleArn`): a Firehose
+/// subscription with no role is one SNS has no identity to deliver as, so it is never
+/// created.
+pub fn subscription_required_attribute_refusal(
+    protocol: &str,
+    attributes: &HashMap<String, String>,
+    member: AttributeMember,
+) -> Option<String> {
+    (SUBSCRIPTION_ROLE_ARN_PROTOCOLS.contains(&protocol)
+        && !attributes.contains_key(SUBSCRIPTION_ROLE_ARN_ATTRIBUTE))
+    .then(|| {
+        // The attribute the subscription cannot be created without, and the protocol
+        // that requires it, under the member the attributes arrived in.
+        let reason =
+            format!("{SUBSCRIPTION_ROLE_ARN_ATTRIBUTE} is required for the {protocol} protocol");
+        match member {
+            AttributeMember::Map => {
+                format!("Invalid parameter: {ATTRIBUTES_MEMBER} Reason: {reason}")
+            }
+            AttributeMember::Named => format!("Invalid parameter: {reason}"),
+        }
+    })
+}
+
 /// The WHOLE `InvalidParameter` message SNS refuses a subscription attribute with when
 /// the TOPIC the subscription belongs to gives it nothing to govern, or `None` when the
 /// topic accepts it.
 ///
 /// A `ReplayPolicy` names a window of the topic's message archive to redeliver from
 /// (`SubscribeInput$Attributes` doc), so it can only be set where that archive exists: a
-/// topic with no archive policy archives nothing. Shared by every operation that writes a
-/// subscription attribute, so the rule does not depend on which call carried the write.
+/// topic with no archive policy archives nothing. A `RedrivePolicy` names the queue the
+/// subscription's undeliverable messages are held in, and a queue takes a message only
+/// of its OWN kind — so the dead-letter queue of a subscription is a FIFO queue exactly
+/// when its topic is a FIFO topic. Shared by every operation that writes a subscription
+/// attribute, so the rule does not depend on which call carried the write.
 pub fn subscription_attribute_topic_refusal(
     name: &str,
+    value: &str,
     topic: Option<&TopicRecord>,
+    member: AttributeMember,
 ) -> Option<String> {
-    (name == REPLAY_POLICY_ATTRIBUTE && topic.is_none_or(|topic| !topic.is_archiving()))
-        .then(|| REPLAY_WITHOUT_ARCHIVE_REFUSAL.to_string())
+    if name == REPLAY_POLICY_ATTRIBUTE && topic.is_none_or(|topic| !topic.is_archiving()) {
+        return Some(REPLAY_WITHOUT_ARCHIVE_REFUSAL.to_string());
+    }
+    if name != REDRIVE_POLICY_ATTRIBUTE {
+        return None;
+    }
+    let topic = topic?;
+    let target = json_object(value)
+        .and_then(|members| {
+            members
+                .get(DEAD_LETTER_TARGET_ARN)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    (is_fifo_queue_arn(&target) != topic.is_fifo).then(|| {
+        let kind = if topic.is_fifo { "FIFO" } else { "standard" };
+        member.refusal(
+            REDRIVE_POLICY_ATTRIBUTE,
+            &format!("{DEAD_LETTER_TARGET_ARN} must be a {kind} SQS queue"),
+        )
+    })
 }
 
 /// The form a subscription attribute is STORED in: what the caller wrote, in the shape
@@ -2102,6 +2435,20 @@ pub struct MessageRequest<'a> {
     pub message_structure: Option<&'a str>,
     pub message_group_id: Option<&'a str>,
     pub message_deduplication_id: Option<&'a str>,
+    /// The attributes published WITH the message, which carry rules of their own and
+    /// count toward the size the message is measured at ([`message_size`]).
+    pub message_attributes: Option<&'a HashMap<String, MessageAttributeValue>>,
+}
+
+/// The SIZE SNS measures one message at: "All parts of the message attribute, including
+/// name, type, and value, are included in the message size restriction"
+/// (`MessageAttributeValue` doc), beside the body's own bytes — and nothing else of the
+/// request, so the `Subject` an email endpoint is sent is not part of it.
+pub fn message_size(request: MessageRequest<'_>) -> usize {
+    request.message.len()
+        + request
+            .message_attributes
+            .map_or(0, message_attribute_bytes)
 }
 
 /// Why SNS refuses this message on its own members alone, or `None` when every
@@ -2154,6 +2501,23 @@ pub fn message_refusal(request: MessageRequest<'_>) -> Option<String> {
     None
 }
 
+/// The refusal a published message's ATTRIBUTES answer, or `None` when every one of them
+/// is one SNS accepts.
+///
+/// Held apart from [`message_refusal`] because SNS answers a message attribute it will
+/// not take with its own modelled errors
+/// ([`message_attributes::MessageAttributeRefusal`]) rather than always with
+/// `InvalidParameterException`, so each publishing operation lifts this refusal into the
+/// error it names. The rules themselves are shared
+/// ([`message_attributes::message_attributes_refusal`]).
+pub fn message_attributes_refusal(
+    request: MessageRequest<'_>,
+) -> Option<message_attributes::MessageAttributeRefusal> {
+    request
+        .message_attributes
+        .and_then(message_attributes::message_attributes_refusal)
+}
+
 /// The ceiling, in bytes, on what `topic` accepts: [`DEFAULT_MAXIMUM_MESSAGE_SIZE`],
 /// which the topic's [`MAXIMUM_MESSAGE_SIZE_ATTRIBUTE`] may only LOWER.
 ///
@@ -2182,7 +2546,7 @@ pub fn topic_message_refusal(
     request: MessageRequest<'_>,
 ) -> Result<Option<String>, String> {
     let ceiling = max_message_size(topic);
-    if request.message.len() > ceiling {
+    if message_size(request) > ceiling {
         return Err(MESSAGE_TOO_LONG_REFUSAL.to_string());
     }
 
@@ -4206,6 +4570,84 @@ pub fn tag_map_refusal(tags: &HashMap<String, String>) -> Option<TagRefusal> {
     })
 }
 
+/// The key prefix Amazon Web Services keeps for the tags IT puts on a resource, which a
+/// caller's own tag key may therefore not begin with.
+pub const RESERVED_TAG_KEY_PREFIX: &str = "aws:";
+
+/// Whether `key` lies in the namespace [`RESERVED_TAG_KEY_PREFIX`] reserves.
+///
+/// Compared without regard to case, and by BYTES rather than characters, so a key whose
+/// first bytes are a multi-byte character is simply not reserved instead of splitting a
+/// character boundary.
+pub fn is_reserved_tag_key(key: &str) -> bool {
+    key.get(..RESERVED_TAG_KEY_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(RESERVED_TAG_KEY_PREFIX))
+}
+
+/// Who named the tag keys one request carries, which is what decides whether a key in the
+/// namespace [`RESERVED_TAG_KEY_PREFIX`] reserves may be stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagKeyOrigin {
+    /// A request a CLIENT made: the `aws:` namespace is reserved for Amazon Web Services
+    /// use, so a key in it is refused.
+    Caller,
+    /// A request another emulated service made in-process while provisioning a resource
+    /// on a caller's behalf — the path the tags AWS applies from inside itself arrive on
+    /// (the stack provenance a provisioning service records on every resource it
+    /// creates). A key in the reserved namespace travels on it.
+    Service,
+}
+
+/// Where the tag keys this request names came from.
+///
+/// Told apart by where the request CAME FROM and by nothing in it: the framework stamps a
+/// request a handler sent through its in-process callback with that chain's depth
+/// ([`::smithy_server_runtime::CallbackRecursionDepth`]), and a request that arrived from
+/// a client carries none. The stamp is a typed request extension of this process, so
+/// nothing a client can send sets it.
+pub fn tag_key_origin(ctx: &::smithy_server_runtime::OperationContext<'_>) -> TagKeyOrigin {
+    let stamped = ctx
+        .parts()
+        .extensions
+        .get::<::smithy_server_runtime::CallbackRecursionDepth>()
+        .is_some_and(|depth| depth.0 > 0);
+    if stamped {
+        TagKeyOrigin::Service
+    } else {
+        TagKeyOrigin::Caller
+    }
+}
+
+/// The sentence a tag key under the reserved prefix is refused with, or `None` when every
+/// key of `keys` is one a request of this `origin` may write.
+///
+/// `aws:`-prefixed keys are the namespace Amazon Web Services writes its own (system and
+/// stack) tags in, so a CALLER cannot create, update or delete one: a client request
+/// naming such a key is refused rather than applied beside the service's own, while the
+/// in-process provisioning path that records them keeps writing them. Shared by every
+/// operation that writes a topic's tag set — the two that add tags and the one that
+/// removes them — so the reserved namespace is the same whichever call carried the
+/// write. The sentence states the condition and names the member the keys arrived in,
+/// and nothing of the request: the caller named the keys it sent.
+pub fn reserved_tag_key_refusal<'a, I>(
+    member: &str,
+    keys: I,
+    origin: TagKeyOrigin,
+) -> Option<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    if origin == TagKeyOrigin::Service {
+        return None;
+    }
+    keys.into_iter().any(is_reserved_tag_key).then(|| {
+        format!(
+            "Invalid parameter: {member} Reason: Caller is an end user and not allowed \
+             to mutate system tags"
+        )
+    })
+}
+
 /// The sentence SNS states for a topic no account of this emulator holds.
 ///
 /// Fixed, and the SAME for every operation that looks a topic up: SNS names the
@@ -4390,6 +4832,23 @@ pub fn topic_name_is_valid(name: &str) -> bool {
         && base
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Whether `name` is a name a topic may be CREATED under, given whether the create asks
+/// for a FIFO topic.
+///
+/// The name rule and the topic's KIND constrain each other: "For a FIFO
+/// (first-in-first-out) topic, the name must end with the .fifo suffix"
+/// (`CreateTopicInput$Name` doc), and the suffix is the one place a topic name carries a
+/// period at all — so a `.fifo` name names a FIFO topic and nothing else, and a create
+/// that does not ask for one is asking for a name no standard topic may hold. The two
+/// readings of the rule are therefore one: the suffix is present exactly when
+/// `FifoTopic` is asked for.
+///
+/// [`topic_name_is_valid`] stays the question an ARN's resource part is judged by, where
+/// both kinds of name are a topic's; this is the question a CREATE is judged by.
+pub fn create_topic_name_is_valid(name: &str, fifo_requested: bool) -> bool {
+    topic_name_is_valid(name) && name.ends_with(FIFO_SUFFIX) == fifo_requested
 }
 
 /// The topic name an SNS topic ARN names, or `None` when `arn` is not one

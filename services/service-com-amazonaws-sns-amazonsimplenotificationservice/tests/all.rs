@@ -198,3 +198,6 @@ mod topics_subscriptions_publish;
 
 #[path = "all/unsubscribe_stops_delivery.rs"]
 mod unsubscribe_stops_delivery;
+
+#[path = "all/validation_rules.rs"]
+mod validation_rules;

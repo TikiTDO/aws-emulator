@@ -38,13 +38,22 @@ fn expected_message(token: &str, line: usize, column: usize) -> String {
 }
 
 /// Subscribe an SQS endpoint to `topic` with the attributes given, answering the call.
-async fn subscribe_with(sns: &Sns, topic: &str, attributes: &[(&str, &str)]) -> Answer {
+///
+/// `endpoint` is the queue's name: one topic holds at most one subscription per
+/// (protocol, endpoint) pair, so a row that asks for a configuration of its own
+/// subscribes a queue of its own.
+async fn subscribe_queue(
+    sns: &Sns,
+    topic: &str,
+    endpoint: &str,
+    attributes: &[(&str, &str)],
+) -> Answer {
     let mut params: Vec<(String, String)> = vec![
         ("TopicArn".to_string(), topic.to_string()),
         ("Protocol".to_string(), "sqs".to_string()),
         (
             "Endpoint".to_string(),
-            "arn:aws:sqs:us-east-1:000000000000:filter-policy-queue".to_string(),
+            format!("arn:aws:sqs:us-east-1:000000000000:{endpoint}"),
         ),
         ("ReturnSubscriptionArn".to_string(), "true".to_string()),
     ];
@@ -63,6 +72,11 @@ async fn subscribe_with(sns: &Sns, topic: &str, attributes: &[(&str, &str)]) -> 
         .map(|(name, value)| (name.as_str(), value.as_str()))
         .collect();
     sns.call("Subscribe", &borrowed).await
+}
+
+/// [`subscribe_queue`] on the suite's own queue, for the rows that need no second one.
+async fn subscribe_with(sns: &Sns, topic: &str, attributes: &[(&str, &str)]) -> Answer {
+    subscribe_queue(sns, topic, "filter-policy-queue", attributes).await
 }
 
 /// The message of a refused answer, with the case named when it is not a refusal at all.

@@ -627,11 +627,11 @@ async fn a_raw_delivery_carries_the_number_a_number_attribute_names() {
         );
     }
 
-    // A `Number` attribute whose value is not a number is one the SUBSCRIBED QUEUE will
-    // not take — its own `SendMessage` refuses a `Number` it cannot read — so the
-    // notification does not reach it, and the attempt is recorded rather than retried as
-    // a delivery that happened.
-    sns(
+    // A `Number` attribute whose value is not a number is one SNS does not accept at
+    // all: "Number – Numbers are positive or negative integers or floating-point
+    // numbers" (`MessageAttributeValue$DataType` doc), so the publish is refused rather
+    // than fanned out to a queue whose own `SendMessage` would refuse it in turn.
+    let (status, body) = sns_call(
         &emulator,
         "Publish",
         &[
@@ -643,10 +643,14 @@ async fn a_raw_delivery_carries_the_number_a_number_attribute_names() {
         ],
     )
     .await;
+    assert_eq!(
+        status, 400,
+        "case \"a number that is not a number\": expected HTTP 400, got {status} / {body}"
+    );
     let delivered = drain(&emulator, &url).await;
     assert!(
         delivered.is_empty(),
-        "case \"a number that is not a number\": the queue takes no such attribute, so \
-         nothing is delivered, got {delivered:?}"
+        "case \"a number that is not a number\": a refused publish delivers nothing, got \
+         {delivered:?}"
     );
 }

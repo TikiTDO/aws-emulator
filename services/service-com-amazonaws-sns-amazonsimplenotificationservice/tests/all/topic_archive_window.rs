@@ -118,8 +118,10 @@ async fn an_archiving_topic_reports_where_its_replayable_window_starts() {
                 "CreateTopic",
                 &[
                     ("Name", &name),
-                    ("Attributes.entry.1.key", "ArchivePolicy"),
-                    ("Attributes.entry.1.value", &archive_policy(days)),
+                    ("Attributes.entry.1.key", "FifoTopic"),
+                    ("Attributes.entry.1.value", "true"),
+                    ("Attributes.entry.2.key", "ArchivePolicy"),
+                    ("Attributes.entry.2.value", &archive_policy(days)),
                 ],
             )
             .await;
@@ -208,8 +210,10 @@ async fn a_replay_policy_needs_a_topic_that_archives_its_messages() {
                 "CreateTopic",
                 &[
                     ("Name", "replay-archiving.fifo"),
-                    ("Attributes.entry.1.key", "ArchivePolicy"),
-                    ("Attributes.entry.1.value", &archive_policy("1")),
+                    ("Attributes.entry.1.key", "FifoTopic"),
+                    ("Attributes.entry.1.value", "true"),
+                    ("Attributes.entry.2.key", "ArchivePolicy"),
+                    ("Attributes.entry.2.value", &archive_policy("1")),
                 ],
             )
             .await;

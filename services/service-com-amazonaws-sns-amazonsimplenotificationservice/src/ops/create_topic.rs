@@ -100,11 +100,6 @@ use std::collections::HashMap;
 /// The attribute that asks for a FIFO topic.
 const FIFO_TOPIC_ATTRIBUTE: &str = state::FIFO_TOPIC_ATTRIBUTE;
 
-/// The suffix a FIFO topic's name carries — shared with the ARN reader in
-/// [`crate::state`], which uses the same rule to tell a topic ARN from another SNS
-/// ARN.
-const FIFO_SUFFIX: &str = state::FIFO_SUFFIX;
-
 /// "Can't add more than 50 tags to a topic" (`TagLimitExceededException` doc) — shared
 /// with `TagResource`, which holds a topic's tag map to the same count.
 const MAX_TAGS_PER_TOPIC: usize = state::MAX_TAGS_PER_TOPIC;
@@ -117,6 +112,12 @@ const MAX_TAGS_PER_TOPIC: usize = state::MAX_TAGS_PER_TOPIC;
 /// topic" — the `CreateTopic` doc).
 const TOPIC_ALREADY_EXISTS_REFUSAL: &str =
     "Invalid parameter: Attributes Reason: Topic already exists with different attributes";
+
+/// The sentence SNS refuses a re-create that asks for a topic the account already
+/// holds under different TAGS with: a reused name is idempotent only where the request
+/// asks for what the topic already carries, and the tags are part of what it asks for.
+const TOPIC_ALREADY_EXISTS_WITH_TAGS_REFUSAL: &str =
+    "Invalid parameter: Tags Reason: Topic already exists with different tags";
 
 /// The refusal for a topic record whose attribute or tag map would cross the
 /// per-record byte ceiling, or `None` when it fits.
@@ -226,14 +227,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        if !state::topic_name_is_valid(&input.name) {
-            return Err(CreateTopicErrorModeled::InvalidParameterException(
-                InvalidParameterException {
-                    message: Some(state::INVALID_TOPIC_NAME.to_string()),
-                },
-            )
-            .into());
-        }
+        let invalid_parameter = |message: String| -> Self::Error {
+            CreateTopicErrorModeled::InvalidParameterException(InvalidParameterException {
+                message: Some(message),
+            })
+            .into()
+        };
 
         let attributes = input.attributes.unwrap_or_default();
         // SNS defines a closed set of topic attribute names and refuses any other; the
@@ -243,22 +242,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some(unknown) =
             state::unknown_attribute_name(&attributes, state::is_topic_attribute)
         {
-            return Err(CreateTopicErrorModeled::InvalidParameterException(
-                InvalidParameterException {
-                    message: Some(state::unknown_attribute_refusal(
-                        state::ATTRIBUTES_MEMBER,
-                        unknown,
-                    )),
-                },
-            )
-            .into());
+            return Err(invalid_parameter(state::unknown_attribute_refusal(
+                state::ATTRIBUTES_MEMBER,
+                unknown,
+            )));
         }
-        // A policy-valued attribute is REMOVED by an empty value, so a create that
-        // carries one empty makes a topic that holds none of it.
+        // A policy-valued attribute (or one naming another resource) is REMOVED by an
+        // empty value, so a create that carries one empty makes a topic that holds none
+        // of it.
         let attributes: HashMap<String, String> = attributes
             .into_iter()
             .filter(|(name, value)| !state::clears_attribute(name, value))
             .collect();
+        // A topic's KIND is what the create asks for, and the name rule and the kind
+        // constrain each other: the `.fifo` suffix belongs to a FIFO topic and to no
+        // other, whichever of the two the caller got wrong.
+        let fifo_requested = attributes
+            .get(FIFO_TOPIC_ATTRIBUTE)
+            .is_some_and(|value| state::flag_attribute_enabled(value));
+        if !state::create_topic_name_is_valid(&input.name, fifo_requested) {
+            return Err(invalid_parameter(state::INVALID_TOPIC_NAME.to_string()));
+        }
         // The document's one documented bound, held through the shared rule in
         // `state`, so the bound a create is judged against is the published one
         // ("Maximum length of 30,720") and not this handler's own idea of it.
@@ -267,12 +271,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .as_deref()
             .and_then(state::data_protection_policy_refusal)
         {
-            return Err(CreateTopicErrorModeled::InvalidParameterException(
-                InvalidParameterException {
-                    message: Some(message),
-                },
-            )
-            .into());
+            return Err(invalid_parameter(message));
         }
         // A delivery policy this create carries is held to the SAME published bounds a
         // write of one through `SetTopicAttributes` is: the document's retry members are
@@ -284,25 +283,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 state::retry_policy_bounds::topic_delivery_policy_bounds_refusal(value)
             })
         {
-            return Err(CreateTopicErrorModeled::InvalidParameterException(
-                InvalidParameterException {
-                    message: Some(message),
-                },
-            )
-            .into());
+            return Err(invalid_parameter(message));
         }
-        let fifo_requested = attributes
-            .get(FIFO_TOPIC_ATTRIBUTE)
-            .is_some_and(|value| state::flag_attribute_enabled(value));
-        let is_fifo = fifo_requested || input.name.ends_with(FIFO_SUFFIX);
-        if is_fifo && !input.name.ends_with(FIFO_SUFFIX) {
-            return Err(CreateTopicErrorModeled::InvalidParameterException(
-                InvalidParameterException {
-                    message: Some(state::INVALID_TOPIC_NAME.to_string()),
-                },
-            )
-            .into());
-        }
+        let is_fifo = fifo_requested;
 
         let tags = input.tags.unwrap_or_default();
         if tags.len() > MAX_TAGS_PER_TOPIC {
@@ -312,6 +295,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 },
             )
             .into());
+        }
+        let requested_tags: HashMap<String, String> = tags
+            .iter()
+            .map(|tag| (tag.key.clone(), tag.value.clone()))
+            .collect();
+        // The reserved tag namespace is the same here as on `TagResource`: a create
+        // cannot put a tag there either.
+        if let Some(message) = state::reserved_tag_key_refusal(
+            "Tags",
+            requested_tags.keys().map(String::as_str),
+            state::tag_key_origin(ctx),
+        ) {
+            return Err(invalid_parameter(message));
         }
 
         let Some(store) = crate::state::service_state(&*self.engine) else {
@@ -327,11 +323,47 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let arn = state::topic_arn(&region, &input.name);
 
         let mut store = store.lock();
+        // Every attribute the create carries is held to its own documented domain, and
+        // to the topic it would leave — the SAME rule `SetTopicAttributes` holds a write
+        // to, so an attribute value one call accepts is one the other accepts too.
+        let protocols: Vec<String> = store
+            .subscriptions_of(&arn)
+            .into_iter()
+            .map(|sub| sub.protocol.clone())
+            .collect();
+        let subject = state::topic_attributes::TopicSubject {
+            is_fifo,
+            subscription_protocols: &protocols,
+        };
+        let mut names: Vec<&String> = attributes.keys().collect();
+        names.sort();
+        for name in names {
+            if let Some(refusal) = state::topic_attributes::topic_attribute_refusal(
+                name,
+                &attributes[name],
+                subject,
+            ) {
+                return Err(match refusal {
+                    state::topic_attributes::TopicAttributeRefusal::InvalidParameter(message) => {
+                        invalid_parameter(message)
+                    }
+                    state::topic_attributes::TopicAttributeRefusal::Unauthorized(message) => {
+                        CreateTopicErrorModeled::AuthorizationErrorException(
+                            AuthorizationErrorException {
+                                message: Some(message),
+                            },
+                        )
+                        .into()
+                    }
+                });
+            }
+        }
         // CreateTopic is idempotent: "if the requester already owns a topic with the
         // specified name, that topic's ARN is returned without creating a new topic"
         // (CreateTopic doc). Idempotent means the request asks for what the topic
-        // already is: a re-create that asks for a DIFFERENT value of an attribute the
-        // topic holds is not idempotent, and is refused rather than silently ignored.
+        // already is: a re-create that asks for a DIFFERENT value of an attribute or a
+        // tag the topic holds is not idempotent, and is refused rather than silently
+        // applied over what the topic already carries.
         if let Some(existing) = store.topics.get(&arn) {
             if attributes.iter().any(|(name, requested)| {
                 existing
@@ -339,12 +371,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .get(name)
                     .is_some_and(|held| held != requested)
             }) {
-                return Err(CreateTopicErrorModeled::InvalidParameterException(
-                    InvalidParameterException {
-                        message: Some(TOPIC_ALREADY_EXISTS_REFUSAL.to_string()),
-                    },
-                )
-                .into());
+                return Err(invalid_parameter(TOPIC_ALREADY_EXISTS_REFUSAL.to_string()));
+            }
+            // The tags compared are the ones a CALLER asks for: a key in the reserved
+            // `aws:` namespace is the service's own record about the resource (the stack
+            // a provisioning service created it from, say) rather than part of the
+            // configuration this request asks the topic to have, so it does not make a
+            // re-create non-idempotent.
+            if requested_tags
+                .iter()
+                .filter(|(key, _)| !state::is_reserved_tag_key(key))
+                .any(|(key, requested)| existing.tags.get(key) != Some(requested))
+            {
+                return Err(invalid_parameter(TOPIC_ALREADY_EXISTS_WITH_TAGS_REFUSAL.to_string()));
             }
             // What the re-create carries beyond the conflict check is APPLIED to the
             // topic that already exists — an attribute it does not hold yet, a tag, a
@@ -357,8 +396,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 merged_attributes.insert(name.clone(), value.clone());
             }
             let mut merged_tags = existing.tags.clone();
-            for tag in &tags {
-                merged_tags.insert(tag.key.clone(), tag.value.clone());
+            for (key, value) in &requested_tags {
+                merged_tags.insert(key.clone(), value.clone());
             }
             if merged_tags.len() > MAX_TAGS_PER_TOPIC {
                 return Err(CreateTopicErrorModeled::TagLimitExceededException(
@@ -396,10 +435,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             if is_fifo {
                 stored_attributes.insert(FIFO_TOPIC_ATTRIBUTE.to_string(), "true".to_string());
             }
-            let stored_tags: HashMap<String, String> = tags
-                .into_iter()
-                .map(|tag| (tag.key, tag.value))
-                .collect();
+            let stored_tags: HashMap<String, String> = requested_tags;
             if let Some(refusal) = oversized(&stored_attributes, &stored_tags) {
                 return Err(refusal);
             }

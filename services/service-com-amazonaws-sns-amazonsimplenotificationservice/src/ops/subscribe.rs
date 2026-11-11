@@ -468,10 +468,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> Subscribe<Eng> {
         };
         let mut store = store.lock();
 
-        if !store.topics.contains_key(&input.topic_arn) {
+        let Some(topic) = store.topics.get(&input.topic_arn).cloned() else {
             return Err(SubscribeErrorModeled::NotFoundException(NotFoundException {
                 message: Some(state::TOPIC_DOES_NOT_EXIST.to_string()),
             })
+            .into());
+        };
+
+        // A subscription SNS could never deliver over is one it does not create: the
+        // protocol and the endpoint have to fit the KIND of topic they are subscribed
+        // to, under the rule every call that creates a subscription shares.
+        if let Some(message) = state::subscription_topology_refusal(
+            &topic,
+            &protocol,
+            input.endpoint.as_deref(),
+        ) {
+            return Err(SubscribeErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(message),
+                },
+            )
             .into());
         }
 
@@ -547,7 +563,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> Subscribe<Eng> {
         // VALUE names the member whose constraint it failed; the protocol-scope
         // refusal is SNS's own whole sentence, so it is not framed again here.
         for (name, value) in &attributes {
-            let refusal = state::subscription_attribute_refusal(name, value).or_else(|| {
+            let refusal = state::subscription_attribute_refusal(
+                name,
+                value,
+                state::AttributeMember::Map,
+            )
+            .or_else(|| {
                 state::subscription_attribute_protocol_refusal(name, value, &protocol)
             });
             if let Some(message) = refusal {
@@ -559,23 +580,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> Subscribe<Eng> {
                 .into());
             }
         }
-        // And the filter policy and its scope are judged against EACH OTHER, which
-        // neither per-attribute rule above can do on its own.
-        if let Some(message) = state::filter_policy_pair_refusal(&attributes) {
-            return Err(SubscribeErrorModeled::InvalidParameterException(
-                InvalidParameterException {
-                    message: Some(message),
-                },
-            )
-            .into());
-        }
+        // And the filter policy and its scope are judged against EACH OTHER on the map
+        // the write would leave, below, which neither per-attribute rule above can do on
+        // its own.
         // An attribute the TOPIC gives nothing to govern is refused too — a replay of a
-        // topic that archives nothing — under the rule every write of a subscription
-        // attribute shares.
-        for name in attributes.keys() {
+        // topic that archives nothing, a dead-letter queue of the other kind — under the
+        // rule every write of a subscription attribute shares.
+        for (name, value) in &attributes {
             if let Some(message) = state::subscription_attribute_topic_refusal(
                 name,
-                store.topics.get(&input.topic_arn),
+                value,
+                Some(&topic),
+                state::AttributeMember::Map,
             ) {
                 return Err(SubscribeErrorModeled::InvalidParameterException(
                     InvalidParameterException {
@@ -584,6 +600,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> Subscribe<Eng> {
                 )
                 .into());
             }
+        }
+        // And an attribute the PROTOCOL requires has to be there at all: a subscription
+        // missing it is one SNS has no way to deliver over.
+        if let Some(message) = state::subscription_required_attribute_refusal(
+            &protocol,
+            &attributes,
+            state::AttributeMember::Map,
+        ) {
+            return Err(SubscribeErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(message),
+                },
+            )
+            .into());
         }
         // What SNS holds is the MEANING of each value, in the form it reports back, so a
         // subscription reads the same whichever call carried the attribute.
@@ -594,6 +624,36 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> Subscribe<Eng> {
                 (name, stored)
             })
             .collect();
+        // The map the write WOULD leave the subscription holding, which is what the rules
+        // that judge attributes AGAINST EACH OTHER are applied to: a re-subscribe carries
+        // only the attributes the caller is changing, so the pair a scope and a policy
+        // make is the pair the record ends up with.
+        let held = existing
+            .as_ref()
+            .and_then(|(arn, _)| store.subscriptions.get(arn))
+            .map(|held| held.attributes.clone())
+            .unwrap_or_default();
+        let mut would_hold = held.clone();
+        for (name, value) in &attributes {
+            would_hold.insert(name.clone(), value.clone());
+        }
+        for name in &cleared {
+            would_hold.remove(name);
+        }
+        // The filter policy and its scope are judged against EACH OTHER, which neither
+        // per-attribute rule above can do on its own.
+        if let Some(message) = state::filter_policy_pair_refusal(&would_hold) {
+            return Err(SubscribeErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(message),
+                },
+            )
+            .into());
+        }
+        // Subscribe is idempotent in the endpoint, and idempotent means the request asks
+        // for what the subscription already IS — which the `existing` branch below is
+        // where this service decides, on the attributes the request carries against the
+        // ones the subscription holds.
         // Whether THIS call asks for a message replay: a replay is started by the write of
         // a `ReplayPolicy`, so a re-subscribe that carries none does not replay the
         // archive again to a subscription that already holds one.

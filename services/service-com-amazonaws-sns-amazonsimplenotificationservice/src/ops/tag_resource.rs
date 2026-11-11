@@ -114,6 +114,9 @@ pub enum TagResourceErrorModeled {
 /// The input member a refusal of this operation names.
 const RESOURCE_ARN_MEMBER: &str = "ResourceArn";
 
+/// The input member the tags themselves arrive in, which a refusal of one of them names.
+const TAGS_MEMBER: &str = "Tags";
+
 /// This operation's error channel, as the generated `impl Operation` names it
 /// (`crate::ops::tag_resource::TagResourceError`). Wrapping the modeled enum is what
 /// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
@@ -198,6 +201,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
+
+        // A caller's own tag may not be written in the namespace Amazon Web Services
+        // keeps for its own tags, under the rule every write of a topic's tags shares.
+        if let Some(message) = state::reserved_tag_key_refusal(
+            TAGS_MEMBER,
+            input.tags.iter().map(|tag| tag.key.as_str()),
+            state::tag_key_origin(ctx),
+        ) {
+            return Err(TagResourceErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(message),
+                },
+            )
+            .into());
+        }
 
         // The map the write WOULD leave the topic holding: "a new tag with a key
         // identical to that of an existing tag overwrites the existing tag", so a key

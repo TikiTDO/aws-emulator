@@ -23,13 +23,16 @@ use super::topics_subscriptions_publish::{attribute_map, Sns};
 /// A filter policy, as the `FilterPolicy` attribute carries one.
 const FILTER_POLICY: &str = r#"{"kind":["alert"]}"#;
 
-/// A dead-letter queue, as the `RedrivePolicy` attribute names one.
-const REDRIVE_POLICY: &str = r#"{"deadLetterTargetArn":"arn:aws:sqs:us-east-1:000000000000:dlq"}"#;
+/// A dead-letter queue, as the `RedrivePolicy` attribute names one. Every subscription
+/// in this suite is of a FIFO topic, and a queue takes a message only of its own kind, so
+/// the dead-letter target is a FIFO queue.
+const REDRIVE_POLICY: &str =
+    r#"{"deadLetterTargetArn":"arn:aws:sqs:us-east-1:000000000000:dlq.fifo"}"#;
 
 /// A second dead-letter queue, so a refused write can be shown to leave the FIRST policy
 /// in place rather than to have stored anything of its own.
 const OTHER_REDRIVE_POLICY: &str =
-    r#"{"deadLetterTargetArn":"arn:aws:sqs:us-east-1:000000000000:dlq-two"}"#;
+    r#"{"deadLetterTargetArn":"arn:aws:sqs:us-east-1:000000000000:dlq-two.fifo"}"#;
 
 /// A delivery policy, in the shape a SUBSCRIPTION's `DeliveryPolicy` carries.
 const DELIVERY_POLICY: &str = r#"{"healthyRetryPolicy":{"numRetries":7}}"#;
@@ -117,8 +120,10 @@ async fn archiving_topic(sns: &Sns, name: &str) -> String {
             "CreateTopic",
             &[
                 ("Name", &format!("{name}.fifo")),
-                ("Attributes.entry.1.key", "ArchivePolicy"),
-                ("Attributes.entry.1.value", ARCHIVE_POLICY),
+                ("Attributes.entry.1.key", "FifoTopic"),
+                ("Attributes.entry.1.value", "true"),
+                ("Attributes.entry.2.key", "ArchivePolicy"),
+                ("Attributes.entry.2.value", ARCHIVE_POLICY),
             ],
         )
         .await;

@@ -124,18 +124,25 @@ impl Sns {
 
     /// Subscribe `endpoint` over `protocol`, asking for the ARN in every case, and
     /// answer the subscription ARN the call reports.
+    ///
+    /// A Firehose subscription carries the role SNS delivers as — "specifying a valid
+    /// ARN for this attribute is required for Firehose delivery stream subscriptions"
+    /// (`SubscribeInput$Attributes` doc, of `SubscriptionRoleArn`).
     async fn subscribe(&self, topic: &str, protocol: &str, endpoint: &str) -> String {
-        let answer = self
-            .call(
-                "Subscribe",
-                &[
-                    ("TopicArn", topic),
-                    ("Protocol", protocol),
-                    ("Endpoint", endpoint),
-                    ("ReturnSubscriptionArn", "true"),
-                ],
-            )
-            .await;
+        let mut params: Vec<(&str, &str)> = vec![
+            ("TopicArn", topic),
+            ("Protocol", protocol),
+            ("Endpoint", endpoint),
+            ("ReturnSubscriptionArn", "true"),
+        ];
+        if protocol == "firehose" {
+            params.push(("Attributes.entry.1.key", "SubscriptionRoleArn"));
+            params.push((
+                "Attributes.entry.1.value",
+                "arn:aws:iam::000000000000:role/sns-firehose",
+            ));
+        }
+        let answer = self.call("Subscribe", &params).await;
         assert_eq!(
             answer.status, 200,
             "Subscribe {protocol} {endpoint}: expected 200, got {} / {}",
@@ -355,17 +362,22 @@ async fn subscribe_refuses_an_endpoint_that_is_not_in_the_protocols_form() {
     for (protocol, endpoint, accepted) in &cases {
         let case = format!("{protocol} -> {endpoint:?}");
         let before = sns.state().lock().subscriptions.len();
-        let answer = sns
-            .call(
-                "Subscribe",
-                &[
-                    ("TopicArn", &topic),
-                    ("Protocol", protocol),
-                    ("Endpoint", endpoint),
-                    ("ReturnSubscriptionArn", "true"),
-                ],
-            )
-            .await;
+        let mut params: Vec<(&str, &str)> = vec![
+            ("TopicArn", &topic),
+            ("Protocol", protocol),
+            ("Endpoint", endpoint),
+            ("ReturnSubscriptionArn", "true"),
+        ];
+        // The role a Firehose subscription is required to carry, so these rows fail (or
+        // pass) on the ENDPOINT alone.
+        if *protocol == "firehose" {
+            params.push(("Attributes.entry.1.key", "SubscriptionRoleArn"));
+            params.push((
+                "Attributes.entry.1.value",
+                "arn:aws:iam::000000000000:role/sns-firehose",
+            ));
+        }
+        let answer = sns.call("Subscribe", &params).await;
         let after = sns.state().lock().subscriptions.len();
         if *accepted {
             assert_eq!(

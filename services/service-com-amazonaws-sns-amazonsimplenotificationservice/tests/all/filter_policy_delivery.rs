@@ -173,10 +173,15 @@ async fn an_address_condition_delivers_exactly_the_addresses_inside_its_network(
             delivered: false,
         },
         Row {
-            case: "a block that names no network",
+            // A block whose mask is wider than its family admits names no network, so a
+            // policy carrying one is refused when it is written rather than stored to
+            // match nothing — the write path's own rule
+            // (`crate::state::filter_policy`'s `cidr` argument check), covered by
+            // `validation_rules`.
+            case: "a value that is not an address, under a block that is one",
             scope: None,
-            policy: json!({"source": [{"cidr": "10.0.0.0/33"}]}),
-            value: "10.0.0.7",
+            policy: json!({"source": [{"cidr": "10.0.0.0/24"}]}),
+            value: "10.0.0",
             delivered: false,
         },
         Row {

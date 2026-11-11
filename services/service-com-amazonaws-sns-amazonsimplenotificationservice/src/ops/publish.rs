@@ -350,9 +350,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             message_structure: input.message_structure.as_deref(),
             message_group_id: input.message_group_id.as_deref(),
             message_deduplication_id: input.message_deduplication_id.as_deref(),
+            message_attributes: input.message_attributes.as_ref(),
         };
         if let Some(reason) = state::message_refusal(request) {
             return Err(invalid_parameter(reason));
+        }
+        // A message ATTRIBUTE SNS will not take is answered with the error the service
+        // names for that condition: a name, type or value fault is a parameter VALUE
+        // fault, and a character an attribute value may not carry is a parameter fault.
+        if let Some(refusal) = state::message_attributes_refusal(request) {
+            return Err(match refusal {
+                state::message_attributes::MessageAttributeRefusal::ParameterValue(message) => {
+                    PublishErrorModeled::InvalidParameterValueException(
+                        InvalidParameterValueException {
+                            message: Some(message),
+                        },
+                    )
+                    .into()
+                }
+                state::message_attributes::MessageAttributeRefusal::InvalidParameter(message) => {
+                    invalid_parameter(message)
+                }
+            });
         }
 
         let Some(store) = crate::state::service_state(&*self.engine) else {
@@ -400,6 +419,7 @@ fn publish_into_store(
         message_structure: input.message_structure.as_deref(),
         message_group_id: input.message_group_id.as_deref(),
         message_deduplication_id: input.message_deduplication_id.as_deref(),
+        message_attributes: input.message_attributes.as_ref(),
     };
     let message_deduplication_id = match state::topic_message_refusal(&topic, request) {
         Ok(deduplication_id) => deduplication_id,

@@ -67,8 +67,8 @@ async fn reported(sns: &Sns, case: &str, arn: &str, name: &str) -> Option<String
 /// with, and what the setting must read for it (`None` when it must report none).
 type ProjectionCase<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)], Option<&'a str>);
 
-/// A FIFO topic reports the deduplication setting that governs it, whichever way it was
-/// made FIFO and whether or not its owner has set one.
+/// A FIFO topic reports the deduplication setting that governs it, whether or not its
+/// owner has set one.
 #[tokio::test]
 async fn a_fifo_topic_reports_its_content_based_deduplication_setting() {
     let sns = Sns::new();
@@ -82,9 +82,9 @@ async fn a_fifo_topic_reports_its_content_based_deduplication_setting() {
             Some("false"),
         ),
         (
-            "a FIFO topic asked for by the name suffix alone",
-            "dedup-by-suffix.fifo",
-            &[],
+            "a FIFO topic asked for with the setting left unset",
+            "dedup-unset.fifo",
+            &[("FifoTopic", "true")],
             Some("false"),
         ),
         (

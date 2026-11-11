@@ -78,89 +78,6 @@ use crate::state;
 /// `FifoTopic` is refused here the way an undocumented name is.
 const CREATE_ONLY_ATTRIBUTES: &[&str] = &[state::FIFO_TOPIC_ATTRIBUTE];
 
-/// The tracing modes SNS defines: "By default TracingConfig is set to PassThrough …
-/// If set to Active" (`SetTopicAttributesInput$AttributeName` doc).
-const TRACING_CONFIG_VALUES: &[&str] = &["PassThrough", "Active"];
-
-/// The signature versions SNS defines: "The signature version corresponds to the
-/// hashing algorithm used while creating the signature … By default SignatureVersion
-/// is set to 1" (`SetTopicAttributesInput$AttributeName` doc); SNS publishes 1 (SHA1)
-/// and 2 (SHA256).
-const SIGNATURE_VERSION_VALUES: &[&str] = &["1", "2"];
-
-/// The bounds of a delivery-status sample rate: "the sample rate percentage (0-100)"
-/// (`SetTopicAttributesInput$AttributeName` doc).
-const MIN_SAMPLE_RATE: u64 = 0;
-const MAX_SAMPLE_RATE: u64 = 100;
-
-/// The suffix of every delivery-status sample-rate attribute
-/// (`HTTPSuccessFeedbackSampleRate`, `SQSSuccessFeedbackSampleRate`, …).
-const SAMPLE_RATE_SUFFIX: &str = "SampleRate";
-
-/// The message the named attribute refuses `value` with, or `None` when it accepts it.
-///
-/// The documented constraints of the attributes this emulator gives a meaning to
-/// (`SetTopicAttributesInput$AttributeName` doc): `Policy` is an access policy
-/// document, `DeliveryPolicy` a delivery policy document, `MaximumMessageSize` a byte
-/// count SNS bounds, `TracingConfig` and `SignatureVersion` closed value sets, and
-/// every `…SampleRate` a percentage. An attribute whose value SNS documents no
-/// constraint for (a role ARN, a display name, an encryption key id) is stored as the
-/// caller wrote it.
-///
-/// Each message is the whole sentence SNS states for that condition — the attribute as
-/// the service names it, and the value and the bounds only where that sentence carries
-/// them — rather than a diagnostic a caller wraps.
-fn attribute_value_refusal(name: &str, value: &str) -> Option<String> {
-    match name {
-        // SNS reports a `Policy` it cannot read as a policy document by naming the
-        // attribute and the parse that failed, not the document the caller sent.
-        state::POLICY_ATTRIBUTE => serde_json::from_str::<state::TopicPolicyDocument>(value)
-            .err()
-            .map(|_| format!("Invalid parameter: {name} Error: null")),
-        state::DELIVERY_POLICY_ATTRIBUTE => {
-            // A delivery policy is a JSON DOCUMENT whose members the effective policy
-            // is computed from, so the value is refused unless THAT read can honour it:
-            // a bare scalar names no member, and a member of the wrong type would be
-            // stored only to be left out of the effective policy.
-            state::delivery_policy_refusal(value)
-                .map(|reason| format!("Invalid parameter: AttributeValue Reason: {name} - {reason}"))
-                // …and the numbers IN that document carry their own documented bounds,
-                // so a retry budget SNS would never deliver under is refused rather
-                // than stored. The sentence is the service's own whole one, naming the
-                // member and the bound it crossed.
-                .or_else(|| {
-                    state::retry_policy_bounds::topic_delivery_policy_bounds_refusal(value)
-                })
-        }
-        state::MAXIMUM_MESSAGE_SIZE_ATTRIBUTE => match value.parse::<u64>() {
-            Ok(size)
-                if (state::MIN_MAXIMUM_MESSAGE_SIZE..=state::MAX_MAXIMUM_MESSAGE_SIZE)
-                    .contains(&size) =>
-            {
-                None
-            }
-            _ => Some(format!(
-                "Invalid parameter: {name}: {value} is not an integer between {} and {} bytes",
-                state::MIN_MAXIMUM_MESSAGE_SIZE,
-                state::MAX_MAXIMUM_MESSAGE_SIZE
-            )),
-        },
-        "TracingConfig" => (!TRACING_CONFIG_VALUES.contains(&value))
-            .then(|| format!("Invalid parameter: Invalid tracing config value: {value}")),
-        "SignatureVersion" => (!SIGNATURE_VERSION_VALUES.contains(&value)).then(|| {
-            format!("Invalid parameter: {name}: Invalid value '[{value}]'. Must be 1 or 2.")
-        }),
-        name if name.ends_with(SAMPLE_RATE_SUFFIX) => match value.parse::<u64>() {
-            Ok(rate) if (MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&rate) => None,
-            _ => Some(format!(
-                "Invalid parameter: {name}: {value} value provided is not an integer \
-                 between {MIN_SAMPLE_RATE}-{MAX_SAMPLE_RATE}"
-            )),
-        },
-        _ => None,
-    }
-}
-
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -281,11 +198,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let requested = input
             .attribute_value
             .filter(|value| !state::clears_attribute(&input.attribute_name, value));
-        if let Some(value) = requested.as_deref() {
-            if let Some(message) = attribute_value_refusal(&input.attribute_name, value) {
-                return Err(invalid_parameter(message));
-            }
-        }
 
         // Authorization, before the store is consulted: AWS decides whether the caller may
         // perform the action on the topic ahead of the service resolving it, so a refused
@@ -313,6 +225,45 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
         let mut store = store.lock();
+
+        let Some(topic) = store.topics.get(&input.topic_arn).cloned() else {
+            return Err(SetTopicAttributesErrorModeled::NotFoundException(
+                NotFoundException {
+                    message: Some(state::TOPIC_DOES_NOT_EXIST.to_string()),
+                },
+            )
+            .into());
+        };
+        // The value is judged against the attribute's own domain AND against the topic
+        // the write lands on — its kind, and the subscriptions a message of the size it
+        // would allow has to be deliverable to — under the rule every write of a topic
+        // attribute shares.
+        if let Some(value) = requested.as_deref() {
+            let protocols: Vec<String> = store
+                .subscriptions_of(&input.topic_arn)
+                .into_iter()
+                .map(|sub| sub.protocol.clone())
+                .collect();
+            if let Some(refusal) = state::topic_attributes::topic_attribute_refusal(
+                &input.attribute_name,
+                value,
+                state::topic_attributes::TopicSubject::of(&topic, &protocols),
+            ) {
+                return Err(match refusal {
+                    state::topic_attributes::TopicAttributeRefusal::InvalidParameter(message) => {
+                        invalid_parameter(message)
+                    }
+                    state::topic_attributes::TopicAttributeRefusal::Unauthorized(message) => {
+                        SetTopicAttributesErrorModeled::AuthorizationErrorException(
+                            AuthorizationErrorException {
+                                message: Some(message),
+                            },
+                        )
+                        .into()
+                    }
+                });
+            }
+        }
 
         let Some(topic) = store.topics.get_mut(&input.topic_arn) else {
             return Err(SetTopicAttributesErrorModeled::NotFoundException(

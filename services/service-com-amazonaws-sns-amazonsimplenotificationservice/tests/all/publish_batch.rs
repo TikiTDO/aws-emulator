@@ -600,8 +600,10 @@ async fn publish_batch_to_a_fifo_topic_sequences_its_entries_in_request_order() 
             "CreateTopic",
             &[
                 ("Name", "batch-hashed.fifo"),
-                ("Attributes.entry.1.key", "ContentBasedDeduplication"),
+                ("Attributes.entry.1.key", "FifoTopic"),
                 ("Attributes.entry.1.value", "true"),
+                ("Attributes.entry.2.key", "ContentBasedDeduplication"),
+                ("Attributes.entry.2.value", "true"),
             ],
         )
         .await

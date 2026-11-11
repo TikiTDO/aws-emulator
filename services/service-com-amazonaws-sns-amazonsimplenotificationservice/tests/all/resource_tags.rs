@@ -74,6 +74,12 @@ fn reported_tags(answer: &Answer) -> Option<Vec<(String, String)>> {
 /// spelling of a list of structures (`Tags.member.<n>.Key` / `.Value`).
 async fn topic_with_tags(sns: &Sns, case: &str, name: &str, tags: &[(String, String)]) -> String {
     let mut params: Vec<(String, String)> = vec![("Name".to_string(), name.to_string())];
+    // The `.fifo` suffix belongs to a FIFO topic and to no other, so a name carrying it
+    // is created as the kind it names.
+    if name.ends_with(".fifo") {
+        params.push(("Attributes.entry.1.key".to_string(), "FifoTopic".to_string()));
+        params.push(("Attributes.entry.1.value".to_string(), "true".to_string()));
+    }
     for (at, (key, value)) in tags.iter().enumerate() {
         params.push((format!("Tags.member.{}.Key", at + 1), key.clone()));
         params.push((format!("Tags.member.{}.Value", at + 1), value.clone()));
@@ -170,14 +176,13 @@ async fn list_tags_for_resource_reports_the_tag_set_the_topic_holds() {
             written: pairs(&[("owner", "")]),
         },
         TagCase {
-            // The prefix the issue's recording carries on a CloudFormation-injected
-            // tag: a key in that namespace is a character string like any other, so it
-            // is reported with the rest.
-            case: "keys in the aws: reserved namespace",
+            // A key that merely CONTAINS the reserved prefix is not in the namespace it
+            // reserves, so it is a key like any other and is reported with the rest.
+            case: "a key that merely contains the reserved prefix",
             name: "tags-reserved".to_string(),
             written: pairs(&[
-                ("aws:cloudformation:stack-name", "probe-stack"),
-                ("aws:cloudformation:logical-id", "ProbeTopic"),
+                ("cost:aws:share", "probe-stack"),
+                ("team-aws:owner", "ProbeTopic"),
             ]),
         },
         TagCase {
@@ -245,27 +250,20 @@ async fn list_tags_for_resource_reports_the_tag_set_the_topic_holds() {
     );
 }
 
-/// The tags a re-create applies are what a later read reports: the write path and the
+/// The tags a create applies are what a later read reports: the write path and the
 /// read path share one record, so a tag is not remembered by the request that set it.
 ///
 /// `CreateTopic` is idempotent ("if the requester already owns a topic with the
 /// specified name, that topic's ARN is returned without creating a new topic"), and
-/// what the re-create carries beyond the name is applied to the topic that already
-/// exists — so the rows below are successive writes to ONE topic, each followed by the
-/// read that must reflect every write so far.
+/// idempotent means the request asks for what the topic already is — so a re-create
+/// carrying the tags the topic holds answers its ARN, one carrying any other tag set is
+/// refused, and `TagResource` is what changes the set afterwards.
 #[tokio::test]
-async fn tags_written_by_a_re_create_read_back_through_the_tag_list() {
+async fn tags_written_by_a_create_read_back_through_the_tag_list() {
     let sns = Sns::new();
-    let case = "a topic re-created with more tags";
-    let mut written = pairs(&[("team", "platform")]);
+    let case = "a topic created with tags";
+    let written = pairs(&[("team", "platform")]);
     let arn = topic_with_tags(&sns, case, "tags-recreated", &written).await;
-
-    let steps: Vec<Vec<(String, String)>> = vec![
-        pairs(&[("cost-centre", "4711")]),
-        pairs(&[("team", "payments")]),
-        pairs(&[("stage", "prod"), ("owner", "")]),
-        Vec::new(),
-    ];
 
     let reported = read_tags(&sns, case, &arn).await;
     let expected = held(&written);
@@ -274,20 +272,86 @@ async fn tags_written_by_a_re_create_read_back_through_the_tag_list() {
         "case {case:?}: after the create, expected {expected:?}, got {reported:?}"
     );
 
-    for step in &steps {
-        let again = topic_with_tags(&sns, case, "tags-recreated", step).await;
-        assert_eq!(
-            again, arn,
-            "case {case:?}: the re-create must answer the same ARN, got {again:?}"
-        );
-        written.extend(step.iter().cloned());
-        let expected = held(&written);
+    // (case, the tags the re-create carries, whether it is answered)
+    let steps: Vec<ReCreateCase> = vec![
+        ("no tags at all", Vec::new(), true),
+        ("the tags the topic holds", pairs(&[("team", "platform")]), true),
+        ("a tag the topic does not hold", pairs(&[("cost-centre", "4711")]), false),
+        (
+            "another value for a tag it holds",
+            pairs(&[("team", "payments")]),
+            false,
+        ),
+    ];
+
+    for (step, tags, answered) in &steps {
+        let again = sns
+            .call("CreateTopic", &create_params(&tags_params("tags-recreated", tags)))
+            .await;
+        if *answered {
+            assert_eq!(
+                again.status, 200,
+                "case {step:?}: an idempotent re-create expected 200, got {} / {}",
+                again.status, again.body
+            );
+            assert_eq!(
+                again.element("TopicArn").as_deref(),
+                Some(arn.as_str()),
+                "case {step:?}: the re-create must answer the same ARN, got {}",
+                again.body
+            );
+        } else {
+            assert_eq!(
+                again.status, 400,
+                "case {step:?}: a re-create asking for other tags expected 400, got {} / {}",
+                again.status, again.body
+            );
+            assert_eq!(
+                again.code(),
+                "InvalidParameter",
+                "case {step:?}: expected the InvalidParameter code, got {}",
+                again.body
+            );
+        }
+        // The tag set the topic holds is the one the create applied, either way.
         let reported = read_tags(&sns, case, &arn).await;
         assert_eq!(
             reported, expected,
-            "case {case:?}: after writing {step:?}, expected {expected:?}, got {reported:?}"
+            "case {step:?}: the stored tags must stay {expected:?}, got {reported:?}"
         );
     }
+
+    // And `TagResource` is what adds one afterwards.
+    tag(&sns, case, &arn, &pairs(&[("cost-centre", "4711")])).await;
+    let reported = read_tags(&sns, case, &arn).await;
+    assert_eq!(
+        reported,
+        held(&pairs(&[("team", "platform"), ("cost-centre", "4711")])),
+        "the tag write must add the key the re-create could not, got {reported:?}"
+    );
+}
+
+/// One re-create row: the case, the tags the request carries, and whether SNS answers it
+/// rather than refusing it as a request for a topic the account already holds under
+/// other tags.
+type ReCreateCase = (&'static str, Vec<(String, String)>, bool);
+
+/// The awsQuery form parameters a `CreateTopic` carrying `tags` on `name` is made of.
+fn tags_params(name: &str, tags: &[(String, String)]) -> Vec<(String, String)> {
+    let mut params: Vec<(String, String)> = vec![("Name".to_string(), name.to_string())];
+    for (at, (key, value)) in tags.iter().enumerate() {
+        params.push((format!("Tags.member.{}.Key", at + 1), key.clone()));
+        params.push((format!("Tags.member.{}.Value", at + 1), value.clone()));
+    }
+    params
+}
+
+/// Borrow an owned parameter list for one call.
+fn create_params(params: &[(String, String)]) -> Vec<(&str, &str)> {
+    params
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect()
 }
 
 /// One row of the refusal table: the case, the ARN read, and the status and awsQuery
@@ -512,11 +576,8 @@ async fn tag_resource_and_untag_resource_change_the_set_the_tag_read_reports() {
             write: TagWrite::Add(pairs(&[("stage", "prod")])),
         },
         WriteCase {
-            case: "keys in the aws: reserved namespace and non-ascii content",
-            write: TagWrite::Add(pairs(&[
-                ("aws:cloudformation:logical-id", "ProbeTopic"),
-                ("équipe", "plâtform"),
-            ])),
+            case: "non-ascii content in the key and the value",
+            write: TagWrite::Add(pairs(&[("équipe", "plâtform")])),
         },
         WriteCase {
             case: "one key removed",
@@ -540,10 +601,7 @@ async fn tag_resource_and_untag_resource_change_the_set_the_tag_read_reports() {
         },
         WriteCase {
             case: "every remaining key removed",
-            write: TagWrite::Remove(vec![
-                "team".to_string(),
-                "aws:cloudformation:logical-id".to_string(),
-            ]),
+            write: TagWrite::Remove(vec!["team".to_string()]),
         },
         WriteCase {
             case: "a tag added again after the topic was emptied",

@@ -51,9 +51,31 @@ pub(crate) async fn subscribe(
         ("Endpoint", endpoint),
         ("ReturnSubscriptionArn", "true"),
     ];
-    // The awsQuery form of an attribute map: one numbered `entry` per attribute.
-    let keys = ["Attributes.entry.1.key", "Attributes.entry.2.key"];
-    let values = ["Attributes.entry.1.value", "Attributes.entry.2.value"];
+    // The awsQuery form of an attribute map: one numbered `entry` per attribute. A
+    // Firehose subscription carries the role SNS delivers as unless the caller named one
+    // itself — "specifying a valid ARN for this attribute is required for Firehose
+    // delivery stream subscriptions" (`SubscribeInput$Attributes` doc).
+    let keys = [
+        "Attributes.entry.1.key",
+        "Attributes.entry.2.key",
+        "Attributes.entry.3.key",
+    ];
+    let values = [
+        "Attributes.entry.1.value",
+        "Attributes.entry.2.value",
+        "Attributes.entry.3.value",
+    ];
+    let mut attributes: Vec<(&str, &str)> = attributes.to_vec();
+    if protocol == "firehose"
+        && !attributes
+            .iter()
+            .any(|(name, _)| *name == "SubscriptionRoleArn")
+    {
+        attributes.push((
+            "SubscriptionRoleArn",
+            "arn:aws:iam::000000000000:role/sns-firehose",
+        ));
+    }
     for (index, (name, value)) in attributes.iter().enumerate() {
         params.push((keys[index], name));
         params.push((values[index], value));

@@ -120,8 +120,17 @@ impl Sns {
     }
 
     /// A topic created in `us-east-1`, with its ARN.
+    ///
+    /// A name ending in `.fifo` names a FIFO topic and nothing else — the suffix is the
+    /// one place a topic name carries a period — so the create asks for the kind the
+    /// name belongs to.
     pub(crate) async fn topic(&self, name: &str) -> String {
-        let answer = self.call("CreateTopic", &[("Name", name)]).await;
+        let mut params: Vec<(&str, &str)> = vec![("Name", name)];
+        if name.ends_with(".fifo") {
+            params.push(("Attributes.entry.1.key", "FifoTopic"));
+            params.push(("Attributes.entry.1.value", "true"));
+        }
+        let answer = self.call("CreateTopic", &params).await;
         assert_eq!(
             answer.status, 200,
             "CreateTopic {name}: expected 200, got {} / {}",
@@ -193,29 +202,39 @@ pub(crate) fn percent_encode(value: &str) -> String {
 
 /// The topic-name rule SNS documents on `CreateTopicInput$Name`: 1 to 256 characters
 /// of ASCII letters, numbers, underscores and hyphens, with `.fifo` the one allowed
-/// suffix. Rows cover both published bounds and one character past the upper one.
+/// suffix — and that suffix belongs to a FIFO topic and to no other, so the name and
+/// the `FifoTopic` attribute have to agree. Rows cover both published bounds, one
+/// character past the upper one, and both ways the name and the kind can disagree.
 #[tokio::test]
 async fn create_topic_enforces_the_documented_topic_name_rule() {
     let sns = Sns::new();
     let max_len = "a".repeat(256);
     let too_long = "a".repeat(257);
     let fifo_at_max = format!("{}.fifo", "b".repeat(251));
-    let cases: &[(&str, &str, bool)] = &[
-        ("single character", "a", true),
-        ("letters digits underscore hyphen", "Bootstrap_Topic-9", true),
-        ("at the 256 character bound", &max_len, true),
-        ("fifo suffix", "orders.fifo", true),
-        ("fifo suffix at the 256 character bound", &fifo_at_max, true),
-        ("one past the 256 character bound", &too_long, false),
-        ("empty", "", false),
-        ("embedded space", "two words", false),
-        ("punctuation", "orders!", false),
-        ("a dot that is not the fifo suffix", "orders.v2", false),
-        ("non-ascii", "orders-ü", false),
+    // (case, name, FifoTopic asked for, accepted)
+    let cases: &[(&str, &str, bool, bool)] = &[
+        ("single character", "a", false, true),
+        ("letters digits underscore hyphen", "Bootstrap_Topic-9", false, true),
+        ("at the 256 character bound", &max_len, false, true),
+        ("fifo suffix", "orders.fifo", true, true),
+        ("fifo suffix at the 256 character bound", &fifo_at_max, true, true),
+        ("one past the 256 character bound", &too_long, false, false),
+        ("empty", "", false, false),
+        ("embedded space", "two words", false, false),
+        ("punctuation", "orders!", false, false),
+        ("a dot that is not the fifo suffix", "orders.v2", false, false),
+        ("non-ascii", "orders-ü", false, false),
+        ("the fifo suffix without the fifo kind", "unordered.fifo", false, false),
+        ("the fifo kind without the fifo suffix", "ordered", true, false),
     ];
 
-    for (case, name, accepted) in cases {
-        let answer = sns.call("CreateTopic", &[("Name", name)]).await;
+    for (case, name, fifo, accepted) in cases {
+        let mut params: Vec<(&str, &str)> = vec![("Name", name)];
+        if *fifo {
+            params.push(("Attributes.entry.1.key", "FifoTopic"));
+            params.push(("Attributes.entry.1.value", "true"));
+        }
+        let answer = sns.call("CreateTopic", &params).await;
         if *accepted {
             assert_eq!(
                 answer.status, 200,
@@ -287,8 +306,8 @@ async fn create_topic_is_idempotent_and_its_arn_carries_the_requests_region() {
 }
 
 /// A re-create asking for what the topic already is stays idempotent; one asking for a
-/// DIFFERENT value of an attribute the topic holds is refused, and tags a re-create
-/// carries are added rather than dropped.
+/// DIFFERENT value of an attribute or a tag the topic holds — a tag it does not hold at
+/// all included — is refused.
 #[tokio::test]
 async fn create_topic_refuses_a_re_create_that_conflicts_with_the_stored_topic() {
     let sns = Sns::new();
@@ -317,7 +336,8 @@ async fn create_topic_refuses_a_re_create_that_conflicts_with_the_stored_topic()
     let cases: &[(&str, Option<&'static str>, Option<&'static str>, u16)] = &[
         ("no attributes at all", None, None, 200),
         ("the same attribute value", Some("Alpha"), None, 200),
-        ("a new tag only", None, Some("b"), 200),
+        ("the same attribute and the same tag", Some("Alpha"), Some("a"), 200),
+        ("a different tag value", None, Some("b"), 400),
         ("a different attribute value", Some("Beta"), None, 400),
     ];
     for (case, attribute, tag, status) in cases {
@@ -390,8 +410,8 @@ async fn create_topic_refuses_a_re_create_that_conflicts_with_the_stored_topic()
             .get(&arn)
             .and_then(|topic| topic.tags.get("team"))
             .map(String::as_str),
-        Some("b"),
-        "a tag a re-create carries must be added to the topic that already exists"
+        Some("a"),
+        "a refused re-create must leave the tag the topic was created with"
     );
 }
 
@@ -531,16 +551,21 @@ async fn subscribe_reports_an_unconfirmed_subscription_as_pending() {
 
     for (protocol, endpoint, needs_confirmation) in cases {
         let topic = sns.topic(&format!("topic-{}", protocol.replace('-', ""))).await;
-        let answer = sns
-            .call(
-                "Subscribe",
-                &[
-                    ("TopicArn", &topic),
-                    ("Protocol", protocol),
-                    ("Endpoint", endpoint),
-                ],
-            )
-            .await;
+        let mut params: Vec<(&str, &str)> = vec![
+            ("TopicArn", &topic),
+            ("Protocol", protocol),
+            ("Endpoint", endpoint),
+        ];
+        // "Specifying a valid ARN for this attribute is required for Firehose delivery
+        // stream subscriptions" (`SubscribeInput$Attributes` doc).
+        if *protocol == "firehose" {
+            params.push(("Attributes.entry.1.key", "SubscriptionRoleArn"));
+            params.push((
+                "Attributes.entry.1.value",
+                "arn:aws:iam::000000000000:role/sns-firehose",
+            ));
+        }
+        let answer = sns.call("Subscribe", &params).await;
         assert_eq!(
             answer.status, 200,
             "case {protocol:?}: expected 200, got {} / {}",
@@ -561,17 +586,20 @@ async fn subscribe_reports_an_unconfirmed_subscription_as_pending() {
 
         // With ReturnSubscriptionArn the ARN is reported either way — and it is the
         // SAME subscription, because Subscribe is idempotent in the endpoint.
-        let again = sns
-            .call(
-                "Subscribe",
-                &[
-                    ("TopicArn", &topic),
-                    ("Protocol", protocol),
-                    ("Endpoint", endpoint),
-                    ("ReturnSubscriptionArn", "true"),
-                ],
-            )
-            .await;
+        let mut repeat: Vec<(&str, &str)> = vec![
+            ("TopicArn", &topic),
+            ("Protocol", protocol),
+            ("Endpoint", endpoint),
+            ("ReturnSubscriptionArn", "true"),
+        ];
+        if *protocol == "firehose" {
+            repeat.push(("Attributes.entry.1.key", "SubscriptionRoleArn"));
+            repeat.push((
+                "Attributes.entry.1.value",
+                "arn:aws:iam::000000000000:role/sns-firehose",
+            ));
+        }
+        let again = sns.call("Subscribe", &repeat).await;
         let arn = again.element("SubscriptionArn").unwrap_or_default();
         assert!(
             arn.starts_with(&format!("{topic}:")),
@@ -1156,8 +1184,10 @@ async fn publish_to_a_fifo_topic_sequences_messages_and_requires_its_parameters(
             "CreateTopic",
             &[
                 ("Name", "hashed.fifo"),
-                ("Attributes.entry.1.key", "ContentBasedDeduplication"),
+                ("Attributes.entry.1.key", "FifoTopic"),
                 ("Attributes.entry.1.value", "true"),
+                ("Attributes.entry.2.key", "ContentBasedDeduplication"),
+                ("Attributes.entry.2.value", "true"),
             ],
         )
         .await
@@ -1880,8 +1910,10 @@ async fn publish_enforces_the_documented_ordering_id_rule() {
             "CreateTopic",
             &[
                 ("Name", "ordering-ids.fifo"),
-                ("Attributes.entry.1.key", "ContentBasedDeduplication"),
+                ("Attributes.entry.1.key", "FifoTopic"),
                 ("Attributes.entry.1.value", "true"),
+                ("Attributes.entry.2.key", "ContentBasedDeduplication"),
+                ("Attributes.entry.2.value", "true"),
             ],
         )
         .await
@@ -1985,7 +2017,7 @@ async fn publish_enforces_the_documented_ordering_id_rule() {
 async fn the_attribute_maps_are_a_closed_set_and_bounded_in_bytes() {
     let sns = Sns::new();
     let topic = sns.topic("bounded-attributes").await;
-    let under = "v".repeat(1_024);
+    let under = "v".repeat(100);
     let over = "v".repeat(MAX_ATTRIBUTE_BYTES_PER_RECORD + 1);
     let long_policy = "p".repeat(MAX_DATA_PROTECTION_POLICY_LEN + 1);
 
@@ -2044,25 +2076,48 @@ async fn the_attribute_maps_are_a_closed_set_and_bounded_in_bytes() {
         over_policy.status, over_policy.body
     );
 
-    // (case, attribute name, value, accepted) — the subscription store, same rule.
-    let subscription_cases: &[(&str, &str, &str, bool)] = &[
-        ("a documented name", "RawMessageDelivery", "true", true),
-        ("another documented name", "FilterPolicyScope", "MessageBody", true),
-        ("a name SNS does not define", "NotAnAttribute", "x", false),
-        ("a value past the per-record ceiling", "FilterPolicy", over.as_str(), false),
+    // (case, attribute name, value, accepted) — the subscription store, same rule. Each
+    // row subscribes its OWN endpoint: one topic holds at most one subscription per
+    // (protocol, endpoint) pair, and a re-subscribe asking for a different
+    // configuration of that pair is refused rather than applied.
+    let subscription_cases: &[(&str, &str, &str, &str, bool)] = &[
+        (
+            "a documented name",
+            "arn:aws:sqs:us-east-1:000000000000:q-raw",
+            "RawMessageDelivery",
+            "true",
+            true,
+        ),
+        (
+            "another documented name",
+            "arn:aws:sqs:us-east-1:000000000000:q-scope",
+            "FilterPolicyScope",
+            "MessageBody",
+            true,
+        ),
+        (
+            "a name SNS does not define",
+            "arn:aws:sqs:us-east-1:000000000000:q-unknown",
+            "NotAnAttribute",
+            "x",
+            false,
+        ),
+        (
+            "a value past the per-record ceiling",
+            "arn:aws:sqs:us-east-1:000000000000:q-over",
+            "FilterPolicy",
+            over.as_str(),
+            false,
+        ),
     ];
-    for (index, (case, name, value, accepted)) in subscription_cases.iter().enumerate() {
-        // Each row subscribes its OWN queue: a re-subscribe of one endpoint is
-        // idempotent only in the attributes the subscription already holds, so a row
-        // must not ask another row's subscription for a different value.
-        let endpoint = format!("arn:aws:sqs:us-east-1:000000000000:closed-set-{index:02}");
+    for (case, endpoint, name, value, accepted) in subscription_cases {
         let answer = sns
             .call(
                 "Subscribe",
                 &[
                     ("TopicArn", &topic),
                     ("Protocol", "sqs"),
-                    ("Endpoint", &endpoint),
+                    ("Endpoint", endpoint),
                     ("Attributes.entry.1.key", name),
                     ("Attributes.entry.1.value", value),
                 ],
@@ -2134,8 +2189,10 @@ async fn the_maximum_message_size_attribute_can_only_lower_the_ceiling() {
         ("default ceiling, one past the bound", None, 262_145, false),
         ("raised ceiling is not honoured", Some("1048576"), 300_000, false),
         ("raised ceiling still accepts the default", Some("1048576"), 262_144, true),
-        ("lowered ceiling, at the bound", Some("10"), 10, true),
-        ("lowered ceiling, one past the bound", Some("10"), 11, false),
+        // The documented floor of the attribute's range, which is also the smallest
+        // ceiling a topic can be given.
+        ("lowered ceiling, at the bound", Some("1024"), 1_024, true),
+        ("lowered ceiling, one past the bound", Some("1024"), 1_025, false),
     ];
 
     for (index, (case, configured, size, accepted)) in cases.iter().enumerate() {

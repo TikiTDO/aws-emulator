@@ -666,60 +666,38 @@ async fn add_permission_grants_and_remove_permission_revokes_a_labelled_statemen
             "case {case:?}: the grant must be on this topic alone, got {added}"
         );
 
-        // A label identifies ONE statement, so the same label again replaces that
-        // statement where it stands rather than adding a second one under it.
-        let again = sns.call("AddPermission", &params).await;
-        assert_eq!(
-            again.status, 200,
-            "case {case:?}: a repeated label expected 200, got {} / {}",
-            again.status, again.body
-        );
-        let repeated = attribute_map(&read(&sns, case, &arn).await);
-        let repeated = json_of(case, "Policy", &repeated["Policy"]);
-        assert_eq!(
-            repeated, policy,
-            "case {case:?}: a repeated grant must leave the policy as it was, got {repeated}"
-        );
-
-        // The same label with a DIFFERENT grant names that same statement, so the
-        // statement carries the grant last applied under the label — and only one.
+        // A label identifies ONE statement, so a label the policy already carries one
+        // for names a grant that has already been made: the call is refused and the
+        // policy is left exactly as it was — with the same value for the same label and
+        // with a different one alike.
         let changed: Vec<(&str, &str)> = vec![
             ("TopicArn", &arn),
             ("Label", label),
             ("AWSAccountId.member.1", "999988887777"),
             ("ActionName.member.1", "Subscribe"),
         ];
-        let answer = sns.call("AddPermission", &changed).await;
-        assert_eq!(
-            answer.status, 200,
-            "case {case:?}: re-granting under one label expected 200, got {} / {}",
-            answer.status, answer.body
-        );
-        let replaced = attribute_map(&read(&sns, case, &arn).await);
-        let replaced = json_of(case, "Policy", &replaced["Policy"]);
-        assert_eq!(
-            replaced["Statement"].as_array().map(Vec::len),
-            Some(2),
-            "case {case:?}: one label must name one statement, got {replaced}"
-        );
-        let regranted = replaced["Statement"]
-            .as_array()
-            .and_then(|statements| {
-                statements
-                    .iter()
-                    .find(|statement| statement["Sid"] == serde_json::json!(label))
-            })
-            .unwrap_or_else(|| panic!("case {case:?}: no statement labelled {label}: {replaced}"));
-        assert_eq!(
-            regranted.pointer("/Principal/AWS"),
-            Some(&serde_json::json!("arn:aws:iam::999988887777:root")),
-            "case {case:?}: the statement must carry the grant last applied, got {regranted}"
-        );
-        assert_eq!(
-            regranted.get("Action"),
-            Some(&serde_json::json!("SNS:Subscribe")),
-            "case {case:?}: the statement must carry the action last applied, got {regranted}"
-        );
+        for (repeat, request) in [("the same grant", &params), ("a different grant", &changed)] {
+            let again = sns.call("AddPermission", request).await;
+            assert_eq!(
+                again.status, 400,
+                "case {case:?}: a repeated label ({repeat}) expected 400, got {} / {}",
+                again.status, again.body
+            );
+            assert_eq!(
+                again.code(),
+                "InvalidParameter",
+                "case {case:?}: a repeated label ({repeat}) expected the InvalidParameter \
+                 code, got {}",
+                again.body
+            );
+            let repeated = attribute_map(&read(&sns, case, &arn).await);
+            let repeated = json_of(case, "Policy", &repeated["Policy"]);
+            assert_eq!(
+                repeated, policy,
+                "case {case:?}: a refused grant ({repeat}) must leave the policy as it \
+                 was, got {repeated}"
+            );
+        }
 
         // And RemovePermission takes exactly that statement back out.
         let removed = sns

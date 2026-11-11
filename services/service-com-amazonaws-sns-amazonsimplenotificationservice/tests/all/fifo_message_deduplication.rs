@@ -52,14 +52,18 @@ fn derived_token(body: &str) -> String {
 /// ARN.
 async fn fifo_topic(sns: &Sns, name: &str, attributes: &[(&str, &str)]) -> String {
     let fifo_name = format!("{name}.fifo");
-    let mut params: Vec<(String, String)> = vec![("Name".to_string(), fifo_name)];
+    let mut params: Vec<(String, String)> = vec![
+        ("Name".to_string(), fifo_name),
+        ("Attributes.entry.1.key".to_string(), "FifoTopic".to_string()),
+        ("Attributes.entry.1.value".to_string(), "true".to_string()),
+    ];
     for (index, (key, value)) in attributes.iter().enumerate() {
         params.push((
-            format!("Attributes.entry.{}.key", index + 1),
+            format!("Attributes.entry.{}.key", index + 2),
             (*key).to_string(),
         ));
         params.push((
-            format!("Attributes.entry.{}.value", index + 1),
+            format!("Attributes.entry.{}.value", index + 2),
             (*value).to_string(),
         ));
     }
