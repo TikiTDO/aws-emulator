@@ -30,12 +30,16 @@ mod identity_providers;
 mod attributes;
 /// The tokens a pool issues, and the key its JWTs are signed with.
 mod tokens;
+/// What a pool publishes about itself under its token issuer: its OpenID Connect
+/// discovery document and the paths it publishes its documents at.
+mod openid_discovery;
 /// What a pool says about a token another service was presented: the server-side
 /// validation an integrated identity pool asks for.
 mod presented_tokens;
 pub use attributes::*;
 pub use presented_tokens::*;
 pub use identity_providers::*;
+pub use openid_discovery::*;
 pub use pool_preconditions::*;
 pub use pool_resources::*;
 pub use tokens::*;
@@ -44,9 +48,6 @@ pub use users::*;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use ::ring::signature::KeyPair;
-use ::sha2::Digest;
 
 use crate::ops::types::{
     AccountRecoverySettingType, AccountTakeoverRiskConfigurationType, AcrLevelConfigType,
@@ -442,11 +443,10 @@ pub const ACCESS_TOKEN_REVOKED_MESSAGE: &str = "Access Token has been revoked";
 /// the response does, or one whose challenge the stored user no longer owes.
 ///
 /// It reports that the session resolves no challenge THIS request can answer and names
-/// nothing of the request, so the refusal is the same whichever of those it was — and it
-/// is told apart from the replay of a spent session
-/// ([`SESSION_ALREADY_USED_MESSAGE`]), from a closed validity window
-/// ([`SESSION_EXPIRED_MESSAGE`]) and from a value this emulator never handed out
-/// ([`INVALID_AUTH_STATE_MESSAGE`]).
+/// nothing of the request, so the refusal is the same whichever of those it was — a value
+/// this emulator never handed out among them — and it is told apart from the replay of a
+/// spent session ([`SESSION_ALREADY_USED_MESSAGE`]) and from a closed validity window
+/// ([`SESSION_EXPIRED_MESSAGE`]).
 pub const SESSION_NOT_FOR_THIS_REQUEST_MESSAGE: &str = "Invalid session for the user.";
 
 /// The message a challenge response owes a `Session` this emulator handed out
@@ -457,10 +457,10 @@ pub const SESSION_NOT_FOR_THIS_REQUEST_MESSAGE: &str = "Invalid session for the 
 /// this service's model): answering its challenge is what spends it, so the
 /// state it maintained is gone and the same session cannot carry a second
 /// sign-in. The refusal says exactly that, which is a different answer from the
-/// one a value this service never handed out gets
-/// ([`INVALID_AUTH_STATE_MESSAGE`]) and from the one a session whose validity
-/// window closed gets ([`SESSION_EXPIRED_MESSAGE`]). It names no value from the
-/// request, so every such refusal carries this one sentence.
+/// one a session that resolves no outstanding challenge gets
+/// ([`SESSION_NOT_FOR_THIS_REQUEST_MESSAGE`]) and from the one a session whose
+/// validity window closed gets ([`SESSION_EXPIRED_MESSAGE`]). It names no value
+/// from the request, so every such refusal carries this one sentence.
 pub const SESSION_ALREADY_USED_MESSAGE: &str =
     "Invalid session for the user, session can only be used once.";
 
@@ -470,18 +470,18 @@ pub const SESSION_ALREADY_USED_MESSAGE: &str =
 /// resumes a challenge that is no longer outstanding.
 pub const SESSION_EXPIRED_MESSAGE: &str = "Invalid session for the user, session is expired.";
 
-/// The message a challenge response owes a `Session` that resolves to no stored
-/// challenge of this emulator at all.
+/// The message a challenge response owes a `ChallengeName` that is not the
+/// challenge its own stored session is waiting on.
 ///
-/// `(Admin)RespondToAuthChallenge` declares `CodeMismatchException` — "thrown if
-/// the provided code doesn't match what the server was expecting"
-/// (`smithy_query(query="operation",operation="AdminRespondToAuthChallenge")`) —
-/// and a response carries the state of its sign-in in the `Session` beside the
-/// code, so a value that names no outstanding challenge is a mismatch of that
-/// state rather than a statement about any user. The sentence reports the pair
-/// the response presented without saying which half of it was not accepted, and
-/// names neither value, so every such refusal carries this one sentence.
-pub const INVALID_AUTH_STATE_MESSAGE: &str = "Invalid code/session provided";
+/// `ChallengeName` is "the name of the challenge that you are responding to"
+/// (`smithy_query(query="operation",operation="AdminRespondToAuthChallenge")`),
+/// so a response that names another challenge answers none: the state it carries
+/// — the session beside the challenge it claims to answer — is not the state the
+/// server is holding, which is what `CodeMismatchException` reports ("thrown if
+/// the provided code doesn't match what the server was expecting"). The sentence
+/// names neither the challenge the response gave nor the one the session awaits,
+/// so every such refusal carries this one sentence.
+pub const INVALID_CHALLENGE_STATE_MESSAGE: &str = "Invalid code or auth state for the user.";
 
 /// `UserPoolTierType` defaults to `ESSENTIALS` (`CreateUserPool.UserPoolTier`).
 const DEFAULT_USER_POOL_TIER: &str = ESSENTIALS_USER_POOL_TIER;
@@ -751,16 +751,24 @@ pub enum PasswordPolicyWording {
     /// policy refuses.
     AdminCreatesUser,
     /// The wording the paths where the user itself supplies the password answer
-    /// — a sign-up, a forgotten-password confirmation, a new password given in
-    /// answer to a challenge.
+    /// — a sign-up, a forgotten-password confirmation, a self-service password
+    /// change.
     UserSuppliesPassword,
+    /// The wording the operations that answer an outstanding authentication
+    /// challenge answer: a `NEW_PASSWORD_REQUIRED` response carries the chosen
+    /// password in `ChallengeResponses`, and a policy the password misses is
+    /// reported there in the same sentence the password-setting APIs use, not in
+    /// the self-service one.
+    AnswersChallenge,
 }
 
 impl PasswordPolicyWording {
     /// The prefix this wording carries ahead of the requirement's clause.
     fn prefix(self) -> &'static str {
         match self {
-            Self::AdminSetsPassword => "Password does not conform to policy: ",
+            Self::AdminSetsPassword | Self::AnswersChallenge => {
+                "Password does not conform to policy: "
+            }
             Self::AdminCreatesUser => "Password did not conform with password policy: ",
             Self::UserSuppliesPassword => "Password did not conform with policy: ",
         }
@@ -2100,12 +2108,12 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
         now: SystemTime,
         parts: &::http::request::Parts,
     ) -> Option<ClientAuthenticationResultType> {
-        let (issuer, signing_key, access_ttl) = {
+        let (issuer, signing_keys, access_ttl) = {
             let pool = self.user_pools.get(user_pool_id)?;
             let client = pool.clients.get(client_id)?;
             (
                 pool.issuer(&served_endpoint(parts, &pool.region)),
-                pool.signing_key.clone(),
+                pool.signing_keys.clone(),
                 client.access_token_ttl(),
             )
         };
@@ -2131,7 +2139,7 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
             "exp": exp,
             "jti": jti.clone(),
         });
-        let access_token = signed_jws(&claims, &signing_key)?;
+        let access_token = signed_jws(&claims, signing_keys.for_use(SigningKeyUse::AccessToken))?;
 
         self.issued_tokens
             .retain(|_, record| record.expires_at > now);
@@ -2216,7 +2224,7 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
             email,
             groups,
             role_claims,
-            signing_key,
+            signing_keys,
             access_ttl,
             id_ttl,
             refresh_ttl,
@@ -2231,7 +2239,7 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
                 email: user.attributes.get("email").cloned(),
                 groups: pool.user_group_names(user),
                 role_claims: pool.user_group_role_claims(user),
-                signing_key: pool.signing_key.clone(),
+                signing_keys: pool.signing_keys.clone(),
                 access_ttl: client.access_token_ttl(),
                 id_ttl: client.id_token_ttl(),
                 refresh_ttl: client.refresh_token_ttl(),
@@ -2334,8 +2342,12 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
             }
         }
 
-        let access_token = signed_jws(&access_claims, &signing_key)?;
-        let id_token = signed_jws(&id_claims, &signing_key)?;
+        // Each token is signed with the pool key of ITS OWN kind, so the access
+        // token and the identity token of one sign-in name different keys of the
+        // pool's published key set.
+        let access_token =
+            signed_jws(&access_claims, signing_keys.for_use(SigningKeyUse::AccessToken))?;
+        let id_token = signed_jws(&id_claims, signing_keys.for_use(SigningKeyUse::IdToken))?;
 
         let minted = 2 + usize::from(refresh_token.is_some());
         self.issued_tokens
@@ -2700,7 +2712,8 @@ pub struct AuthSession {
     /// A spent session stays stored until the clock expires it, which is what
     /// tells a session a caller is replaying apart from a value this emulator
     /// never handed out: the two owe different refusals
-    /// ([`SESSION_ALREADY_USED_MESSAGE`] and [`INVALID_AUTH_STATE_MESSAGE`]).
+    /// ([`SESSION_ALREADY_USED_MESSAGE`] and
+    /// [`SESSION_NOT_FOR_THIS_REQUEST_MESSAGE`]).
     pub spent: bool,
 }
 
@@ -3668,8 +3681,19 @@ pub fn undetermined_attribute_type_message(attribute_name: &str) -> String {
 }
 
 /// A new user pool with `name` in `region`, with every configuration default
-/// filled in. The caller stores it under [`UserPool::id`].
-pub fn new_user_pool(name: String, region: &str, now: SystemTime) -> UserPool {
+/// filled in and `signing_keys` as the key pairs its tokens are signed with. The
+/// caller stores it under [`UserPool::id`].
+///
+/// The keys are passed IN rather than minted here: generating them is
+/// milliseconds of CPU per key ([`PoolSigningKeys::generate`]), so the caller
+/// runs that on the blocking pool and only after the store's own bound has
+/// admitted the pool.
+pub fn new_user_pool(
+    name: String,
+    region: &str,
+    now: SystemTime,
+    signing_keys: PoolSigningKeys,
+) -> UserPool {
     let region = sanitize_region(region);
     let id = new_pool_id(&region);
     let arn = ::engine::emulator_arn(SIGNING_NAME, &region, &format!("userpool/{id}"));
@@ -3719,10 +3743,11 @@ pub fn new_user_pool(name: String, region: &str, now: SystemTime) -> UserPool {
         managed_login_branding: BTreeMap::new(),
         ui_customizations: BTreeMap::new(),
         user_import_jobs: BTreeMap::new(),
-        // A pool's token-signing key exists from the moment the pool does, as
-        // on AWS, so its key set is publishable before anything signs in. One
-        // scalar multiplication, so creating a pool waits on nothing.
-        signing_key: PoolSigningKey::generate(),
+        // A pool's token-signing keys exist from the moment the pool does, as on
+        // AWS, so its key set is publishable before anything signs in: one key
+        // pair per token type, minted by the caller before the pool is built and
+        // never again.
+        signing_keys,
         device_group_key: new_device_group_key(),
         risk_configuration: None,
     }

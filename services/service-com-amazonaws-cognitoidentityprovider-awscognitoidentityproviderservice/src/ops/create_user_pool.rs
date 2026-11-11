@@ -323,7 +323,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 crate::state::custom_attribute_quota_message(),
             ));
         }
-        let mut pool = crate::state::new_user_pool(input.pool_name.clone(), &region, now);
+        // This emulator holds its pools in memory, so the store is bounded — and
+        // the bound is taken BEFORE the pool's key pairs are minted, so a caller
+        // already at the limit buys no key generation at all. The same bound is
+        // taken again under the guard that inserts the pool, which is what
+        // decides it.
+        if state.lock().user_pools.len() >= crate::state::MAX_USER_POOLS {
+            return Err(pool_limit_exceeded());
+        }
+        // Minting a pool's key pairs is milliseconds of CPU per key
+        // (`crate::state::PoolSigningKeys`), so it runs on the blocking pool with
+        // no state guard held: `spawn_blocking(..).await` is a real await point,
+        // so the keys of one create cannot starve the worker that serves health
+        // checks and every other request, and a shutdown or a timeout can land
+        // while they are generated. The same construct every other key-minting
+        // operation of this workspace mints through.
+        let signing_keys = ::tokio::task::spawn_blocking(crate::state::PoolSigningKeys::generate)
+            .await
+            .map_err(|_| internal_error())?;
+        let mut pool =
+            crate::state::new_user_pool(input.pool_name.clone(), &region, now, signing_keys);
         pool.policies = crate::state::effective_policies(input.policies);
         pool.schema = crate::state::effective_schema(input.schema);
         pool.admin_create_user_config =
@@ -415,12 +434,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let mut guard = state.lock();
-        // This emulator holds its pools in memory, so the store is bounded.
+        // This emulator holds its pools in memory, so the store is bounded. The
+        // count is read again here, under the guard that inserts the pool, which
+        // is what decides whether the pool is admitted.
         if guard.user_pools.len() >= crate::state::MAX_USER_POOLS {
-            return Err(limit_exceeded(format!(
-                "This emulator holds at most {} user pools; delete one before creating another.",
-                crate::state::MAX_USER_POOLS
-            )));
+            return Err(pool_limit_exceeded());
         }
         // A minted id must name exactly one pool, so an id already in use is
         // re-minted rather than overwriting the pool that holds it.
@@ -484,6 +502,15 @@ fn limit_exceeded(message: String) -> CreateUserPoolError {
         message: Some(message),
     })
     .into()
+}
+
+/// The refusal for a store that already holds every user pool it may hold, the
+/// one sentence both readings of that bound answer with.
+fn pool_limit_exceeded() -> CreateUserPoolError {
+    limit_exceeded(format!(
+        "This emulator holds at most {} user pools; delete one before creating another.",
+        crate::state::MAX_USER_POOLS
+    ))
 }
 
 /// The modelled server error for an engine this service cannot reach.

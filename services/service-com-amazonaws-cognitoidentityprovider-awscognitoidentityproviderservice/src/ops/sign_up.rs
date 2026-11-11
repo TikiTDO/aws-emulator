@@ -368,8 +368,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SignUp<Eng> {
             .clients
             .get(&input.client_id)
             .ok_or_else(|| client_not_found(&input.client_id))?;
-        if !client.accepts_secret_hash(&input.username, input.secret_hash.as_deref()) {
-            return Err(unverified_secret_hash(&input.client_id));
+        if let Some(defect) =
+            client.secret_hash_defect(&input.username, input.secret_hash.as_deref())
+        {
+            return Err(secret_hash_refused(defect, &input.client_id));
         }
 
         // A pool whose `AdminCreateUserConfig` reserves user creation to
@@ -627,11 +629,11 @@ fn client_not_found(client_id: &str) -> SignUpError {
 }
 
 /// This operation's `NotAuthorizedException` for a request whose `SecretHash` is not the
-/// one the app client's stored secret expects — including a request that carries none.
-fn unverified_secret_hash(client_id: &str) -> SignUpError {
-    not_authorized(&format!(
-        "Unable to verify secret hash for client {client_id}."
-    ))
+/// one the app client's stored secret requires — including a request that carries none,
+/// which is a different fact about the request and a different sentence
+/// ([`crate::state::SecretHashDefect`]).
+fn secret_hash_refused(defect: crate::state::SecretHashDefect, client_id: &str) -> SignUpError {
+    not_authorized(&defect.message(client_id))
 }
 
 /// This operation's `NotAuthorizedException`, carrying `message`.

@@ -234,11 +234,12 @@ async fn sign_in(router: &MultiServiceRouter, client_id: &str, username: &str) -
 // ---------------------------------------------------------------------------
 
 /// The one sentence a challenge response answers a `Session` that names no
-/// outstanding challenge with.
-const INVALID_AUTH_STATE_MESSAGE: &str = "Invalid code/session provided";
+/// outstanding challenge with: it is no session of this request, which is the
+/// same fact as a session started for another pool or app client.
+const SESSION_NOT_FOR_THIS_REQUEST_MESSAGE: &str = "Invalid session for the user.";
 
 #[tokio::test]
-async fn every_session_that_names_no_outstanding_challenge_is_one_code_mismatch() {
+async fn every_session_that_names_no_outstanding_challenge_is_one_invalid_session() {
     let router = router();
     let user_pool_id = pool(&router, "session-pool", json!({})).await;
     let client_id = client(
@@ -285,8 +286,8 @@ async fn every_session_that_names_no_outstanding_challenge_is_one_code_mismatch(
                 &case,
                 operation,
                 &Value::Object(body),
-                "CodeMismatchException",
-                INVALID_AUTH_STATE_MESSAGE,
+                "NotAuthorizedException",
+                SESSION_NOT_FOR_THIS_REQUEST_MESSAGE,
             )
             .await;
             // The sentence reports the pair, so it quotes neither half of it.

@@ -308,9 +308,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> ForgotPassword<En
             .ok_or_else(|| client_not_found(&input.client_id))?;
         // "If your app client has a client secret and you don't provide a SECRET_HASH
         // parameter, this API returns NotAuthorizedException" (this operation's own
-        // doc), and the same answer is owed to a hash another secret produced.
-        if !client.accepts_secret_hash(&input.username, input.secret_hash.as_deref()) {
-            return Err(unverified_secret_hash(&input.client_id));
+        // doc), and the same error class is owed to a hash another secret produced —
+        // each with its own sentence.
+        if let Some(defect) =
+            client.secret_hash_defect(&input.username, input.secret_hash.as_deref())
+        {
+            return Err(secret_hash_refused(defect, &input.client_id));
         }
         let hides_user_existence = client.hides_user_existence();
 
@@ -433,11 +436,14 @@ fn client_not_found(client_id: &str) -> ForgotPasswordError {
 }
 
 /// This operation's `NotAuthorizedException` for a request whose `SecretHash` is not the
-/// one the app client's stored secret expects — including a request that carries none.
-fn unverified_secret_hash(client_id: &str) -> ForgotPasswordError {
-    not_authorized(&format!(
-        "Unable to verify secret hash for client {client_id}."
-    ))
+/// one the app client's stored secret requires — including a request that carries none,
+/// which is a different fact about the request and a different sentence
+/// ([`crate::state::SecretHashDefect`]).
+fn secret_hash_refused(
+    defect: crate::state::SecretHashDefect,
+    client_id: &str,
+) -> ForgotPasswordError {
+    not_authorized(&defect.message(client_id))
 }
 
 /// This operation's `UserNotFoundException`. The user is resolved from the `Username`

@@ -282,12 +282,14 @@ fn rebuilt(token: &str, claims: &Value) -> String {
 }
 
 /// `claims` as a token the POOL ITSELF signs: the key `pool_id` names in the user-pool service's
-/// own store, under the `alg` and `kid` of the JWK that pool publishes.
+/// own store for the token type under test, under the `alg` and `kid` of the JWK that pool
+/// publishes for it.
 ///
 /// This is how a row presents a token no sign-in produces — one whose `exp` has passed, whose
 /// `nbf` has not arrived, or that names no issuer — without writing a signature by hand: the
 /// bytes are signed by the same key `AdminInitiateAuth` signs with, so the only thing under test
-/// is the claim the row changed.
+/// is the claim the row changed. The rows present an IDENTITY token, which a pool signs with its
+/// own key for that type, so that is the key of the two the pool publishes this signs with.
 fn signed_by_pool(engine: &Arc<engine::InMemoryEngine>, pool_id: &str, claims: &Value) -> String {
     let pools = cognito_idp::state::service_state(&**engine)
         .expect("the user pool service's state lives in the shared engine");
@@ -295,7 +297,9 @@ fn signed_by_pool(engine: &Arc<engine::InMemoryEngine>, pool_id: &str, claims: &
     let pool = held
         .pool(pool_id)
         .unwrap_or_else(|| panic!("the pool {pool_id:?} created above must be held"));
-    let key = pool.signing_key();
+    let key = pool
+        .signing_keys()
+        .for_use(cognito_idp::state::SigningKeyUse::IdToken);
     let algorithm = key
         .to_jwk()
         .get("alg")

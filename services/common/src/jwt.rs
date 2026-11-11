@@ -396,12 +396,16 @@ fn read_form(presented: &str) -> Result<(CompactJws, bool), FormDefect> {
 /// indicating which key was used to secure the JWS" (RFC 7515 §4.1.4).
 const KEY_ID_HEADER: &str = "kid";
 
-/// The `alg` a COMPACT token's signature is checked under by [`verify`]: ECDSA using
-/// P-256 and SHA-256, whose signature is the 64-byte `R || S` form (RFC 7518 §3.1/§3.4).
-/// It is the algorithm the issuers this emulator serves sign with, and the one its
-/// published keys advertise; a token naming any other algorithm is reported as one that
-/// check cannot make rather than as one that failed to check out.
-const VERIFIABLE_ALGORITHM: &str = "ES256";
+/// The `alg` a token's signature is checked under by [`verify`]: the one the token's
+/// own header names (RFC 7515 §5.2 step 8), which has to be one of
+/// [`VERIFIABLE_SIGNATURE_ALGORITHMS`]. A token naming any other algorithm is reported as
+/// one that check cannot make rather than as one that failed to check out.
+fn verifiable_algorithm(algorithm: &str) -> Option<&'static str> {
+    VERIFIABLE_SIGNATURE_ALGORITHMS
+        .iter()
+        .find(|name| algorithm.eq_ignore_ascii_case(name))
+        .copied()
+}
 
 /// The JOSE header parameter naming a key's family (RFC 7517 §4.1).
 const KEY_TYPE: &str = "kty";
@@ -501,9 +505,9 @@ pub fn verify(
     key_set: &::serde_json::Value,
 ) -> Result<CompactJws, SignatureDefect> {
     let token = read(presented).map_err(SignatureDefect::Form)?;
-    if !token.algorithm.eq_ignore_ascii_case(VERIFIABLE_ALGORITHM) {
+    let Some(algorithm) = verifiable_algorithm(&token.algorithm) else {
         return Err(SignatureDefect::UnsupportedAlgorithm(token.algorithm.clone()));
-    }
+    };
     // `read` already established that the value is three `.`-separated segments; they are
     // re-split here because the SIGNATURE is computed over the encoded ones, which the
     // decoded header and claim set no longer carry.
@@ -532,13 +536,14 @@ pub fn verify(
     if candidates.is_empty() {
         return Err(SignatureDefect::UnknownKey);
     }
-    // A signature segment that is not base64url, or not the 64-byte `R || S` form, is no
-    // signature of any key: the algorithm below accepts only that encoding.
+    // A signature segment that is not base64url, or not the encoding the token's
+    // algorithm puts in that segment, is no signature of any key: each algorithm
+    // below accepts only its own encoding.
     let signature = decode_base64url(signature).ok_or(SignatureDefect::Invalid)?;
     let signing_input = format!("{header}.{claims}");
     let mut refused = None;
     for key in candidates {
-        match checks_out(key, signing_input.as_bytes(), &signature) {
+        match checks_out(algorithm, key, signing_input.as_bytes(), &signature) {
             Ok(()) => return Ok(token),
             // A key this module cannot check a signature under leaves the question
             // UNDECIDED, so a key that could be checked and did not match wins: that is
@@ -554,17 +559,18 @@ pub fn verify(
 }
 
 /// Whether `key` — one entry of a published key set — signed `signing_input` with
-/// `signature`, under the one algorithm [`verify`] checks.
+/// `signature`, under the algorithm the token named.
 ///
 /// `Err(SignatureDefect::UnsupportedKey)` for a key that check cannot be made under,
 /// which says nothing about the token; `Err(SignatureDefect::Invalid)` for a key it can,
 /// that did not sign these bytes.
 fn checks_out(
+    algorithm: &str,
     key: &::serde_json::Value,
     signing_input: &[u8],
     signature: &[u8],
 ) -> Result<(), SignatureDefect> {
-    jwk_signature_checks_out(VERIFIABLE_ALGORITHM, key, signing_input, signature)
+    jwk_signature_checks_out(algorithm, key, signing_input, signature)
 }
 
 /// Every JWS `alg` a signature can be checked under here, as RFC 7518 §3.1 registers the
@@ -1286,10 +1292,17 @@ mod tests {
                 Some(SignatureDefect::Form(FormDefect::Unsecured)),
             ),
             (
-                "a token naming an algorithm this verifier does not check",
+                "a token naming an algorithm this verifier checks, against a key of another \
+                 family",
                 token(r#"{"alg":"RS256","kid":"key-1"}"#, claims),
                 key_set.clone(),
-                Some(SignatureDefect::UnsupportedAlgorithm("RS256".to_string())),
+                Some(SignatureDefect::UnsupportedKey),
+            ),
+            (
+                "a token naming an algorithm no key set publishes",
+                token(r#"{"alg":"HS256","kid":"key-1"}"#, claims),
+                key_set.clone(),
+                Some(SignatureDefect::UnsupportedAlgorithm("HS256".to_string())),
             ),
             (
                 "a key published on another curve",

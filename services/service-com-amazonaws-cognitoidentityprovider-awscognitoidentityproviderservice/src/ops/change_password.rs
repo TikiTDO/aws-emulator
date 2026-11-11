@@ -208,7 +208,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // parameter is required of exactly the users that hold a password, and it
             // is the STORED password it is checked against.
             match (user.password.as_deref(), input.previous_password.as_deref()) {
-                (Some(_), None) => return Err(missing_parameter("PreviousPassword")),
+                (Some(_), None) => return Err(missing_parameter(PREVIOUS_PASSWORD_PARAMETER)),
                 (stored, Some(presented)) if stored != Some(presented) => {
                     return Err(incorrect_credentials());
                 }
@@ -309,6 +309,16 @@ fn token_rejected(rejection: crate::state::TokenRejection) -> ChangePasswordErro
 fn incorrect_credentials() -> ChangePasswordError {
     not_authorized("Incorrect username or password.")
 }
+
+/// The name this operation's refusal gives the previous password a request has to
+/// carry.
+///
+/// Amazon Cognito names that parameter `OldPassword` when it reports it missing,
+/// which is not the wire member it travels in (`PreviousPassword`,
+/// `smithy_query(query="operation",operation="ChangePassword")`): the refusal
+/// names the parameter the API itself names, so a client matching on the message
+/// recognises the error class.
+const PREVIOUS_PASSWORD_PARAMETER: &str = "OldPassword";
 
 /// The refusal for a parameter this request required and did not carry.
 fn missing_parameter(parameter: &str) -> ChangePasswordError {

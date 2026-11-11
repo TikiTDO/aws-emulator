@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! The tokens this service issues, as a verifier sees them: the access and id
-//! tokens are three NON-EMPTY base64url segments whose third one is an ES256
+//! tokens are three NON-EMPTY base64url segments whose third one is an RS256
 //! signature that checks out against the PUBLIC key the issuing pool's key set
 //! publishes, and whose claims come from stored state. The refresh token beside
 //! them is an opaque credential and is checked to be exactly that.
@@ -15,18 +15,18 @@
 //! authorizer, a JOSE library): read `alg` and `kid` from the header, find that
 //! key in the pool's JWKS, and check the signature over
 //! `base64url(header) '.' base64url(claims)` with the algorithm the key set
-//! advertises (ES256 — ECDSA on P-256 with SHA-256, RFC 7518 §3.4). Nothing
-//! here touches a private key — the verification path uses only the `x`/`y`
-//! curve coordinates the key set publishes — so a token that passes is one a
-//! third party could have verified. The rows span the signed tokens of a
-//! sign-in, users with and without groups and an email, two pools, a table of
-//! tamperings each of which must FAIL to verify, and the key set as served over
-//! the wire at the pool's `/.well-known/jwks.json`.
+//! advertises (RS256 — RSASSA-PKCS1-v1_5 with SHA-256, RFC 7518 §3.3). Nothing
+//! here touches a private key — the verification path uses only the `n`/`e`
+//! components the key set publishes — so a token that passes is one a third
+//! party could have verified. The rows span the signed tokens of a sign-in,
+//! users with and without groups and an email, two pools, a table of tamperings
+//! each of which must FAIL to verify, and the key set as served over the wire at
+//! the pool's `/.well-known/jwks.json`.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
-use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
+use ring::signature::{RsaPublicKeyComponents, RSA_PKCS1_2048_8192_SHA256};
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -158,10 +158,10 @@ enum Rejected {
 /// Verify `token` exactly as a third-party consumer does, using ONLY the public
 /// parameters in `jwks`, and return its claims.
 ///
-/// The steps are the ones RFC 7515 §5.2 and RFC 7518 §3.4 define: split the
+/// The steps are the ones RFC 7515 §5.2 and RFC 7518 §3.3 define: split the
 /// compact serialization, read `alg`/`kid` from the header, find that key in
-/// the set, rebuild the public key from its `crv`/`x`/`y` (RFC 7518 §6.2.1),
-/// and check ECDSA-P-256-SHA-256 over the two encoded segments.
+/// the set, rebuild the public key from its `n`/`e` (RFC 7518 §6.3.1), and
+/// check RSASSA-PKCS1-v1_5 over SHA-256 against the two encoded segments.
 fn verify_against_jwks(token: &str, jwks: &Value) -> Result<Value, Rejected> {
     let segments: Vec<&str> = token.split('.').collect();
     if segments.len() != 3 || segments.iter().any(|segment| segment.is_empty()) {
@@ -173,7 +173,7 @@ fn verify_against_jwks(token: &str, jwks: &Value) -> Result<Value, Rejected> {
         .ok_or_else(|| Rejected::Malformed("the header is not base64url".to_string()))?;
     let header: Value = serde_json::from_slice(&header_bytes)
         .map_err(|error| Rejected::Malformed(format!("the header is not JSON: {error}")))?;
-    if header["alg"] != "ES256" {
+    if header["alg"] != "RS256" {
         return Err(Rejected::UnusableHeader(format!(
             "unsupported alg in {header}"
         )));
@@ -187,40 +187,38 @@ fn verify_against_jwks(token: &str, jwks: &Value) -> Result<Value, Rejected> {
         .iter()
         .find(|jwk| jwk["kid"] == kid)
         .ok_or_else(|| Rejected::UnknownKey(kid.to_string()))?;
-    assert_eq!(key["kty"], "EC", "the published JWK must be EC, got {key}");
-    assert_eq!(key["crv"], "P-256", "the published JWK must be on P-256");
-    assert_eq!(key["alg"], "ES256", "the published JWK must be ES256");
+    assert_eq!(key["kty"], "RSA", "the published JWK must be RSA, got {key}");
+    assert_eq!(key["alg"], "RS256", "the published JWK must be RS256");
     assert_eq!(key["use"], "sig", "the published JWK must be for signing");
-    // RFC 7518 §6.2.1.2: each coordinate is the full-width octet string of the
-    // field element, so both are exactly 32 bytes on P-256.
-    let coordinate = |member: &str| -> Vec<u8> {
+    // RFC 7518 §6.3.1: an RSA public key travels as its modulus and its public
+    // exponent, each the unsigned big-endian octet string of the value.
+    let component = |member: &str| -> Vec<u8> {
         let bytes = decode_base64url(
             key[member]
                 .as_str()
                 .unwrap_or_else(|| panic!("the JWK carries {member}, got {key}")),
         );
-        assert_eq!(
-            bytes.len(),
-            32,
-            "the JWK's {member} must be a 32-byte P-256 coordinate, got {} bytes",
-            bytes.len()
+        assert!(
+            !bytes.is_empty(),
+            "the JWK's {member} must carry the component's octets, got none"
         );
         bytes
     };
-    // SEC 1 §2.3.3: the uncompressed point a verifier reads the JWK's two
-    // coordinates into is `0x04 || X || Y`.
-    let mut point = vec![0x04_u8];
-    point.extend_from_slice(&coordinate("x"));
-    point.extend_from_slice(&coordinate("y"));
-    let public = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, point);
-    // A signature segment that is not base64url, or not the 64-byte R||S form
-    // RFC 7518 §3.4 defines, is no signature of this key: the token is refused
-    // the same way one carrying wrong bytes is (the `FIXED` algorithm accepts
-    // only that encoding).
+    let public = RsaPublicKeyComponents {
+        n: component("n"),
+        e: component("e"),
+    };
+    // A signature segment that is not base64url, or not the modulus-width
+    // PKCS#1 block RFC 7518 §3.3 defines, is no signature of this key: the
+    // token is refused the same way one carrying wrong bytes is.
     let signature_bytes = try_decode_base64url(segments[2]).ok_or(Rejected::BadSignature)?;
     let signing_input = format!("{}.{}", segments[0], segments[1]);
     public
-        .verify(signing_input.as_bytes(), &signature_bytes)
+        .verify(
+            &RSA_PKCS1_2048_8192_SHA256,
+            signing_input.as_bytes(),
+            &signature_bytes,
+        )
         .map_err(|_| Rejected::BadSignature)?;
     let claim_bytes = try_decode_base64url(segments[1])
         .ok_or_else(|| Rejected::Malformed("the claims are not base64url".to_string()))?;
@@ -402,24 +400,27 @@ async fn an_issued_token_is_signed_and_verifies_against_its_pools_key_set() {
         let keys = jwks["keys"].as_array().expect("a keys list");
         assert_eq!(
             keys.len(),
-            1,
-            "case {case:?}: the pool publishes the key it signs with, got {jwks}"
+            TOKEN_MEMBERS.len(),
+            "case {case:?}: the pool publishes the key of each token type it signs, got {jwks}"
         );
-        assert!(
-            keys[0]["x"].as_str().is_some_and(|x| x.len() == 43)
-                && keys[0]["y"].as_str().is_some_and(|y| y.len() == 43),
-            "case {case:?}: a P-256 JWK publishes both 32-byte coordinates \
-             (43 base64url characters each), got {}",
-            keys[0]
-        );
-        assert!(
-            keys[0].get("d").is_none(),
-            "case {case:?}: a published JWK carries no private parameter, got {}",
-            keys[0]
-        );
+        for key in keys {
+            assert!(
+                key["n"].as_str().is_some_and(|n| !n.is_empty())
+                    && key["e"].as_str().is_some_and(|e| !e.is_empty()),
+                "case {case:?}: an RSA JWK publishes its modulus and exponent, got {key}"
+            );
+            assert!(
+                ["d", "p", "q", "dp", "dq", "qi"]
+                    .iter()
+                    .all(|private| key.get(*private).is_none()),
+                "case {case:?}: a published JWK carries no private parameter, got {key}"
+            );
+        }
+        let published: Vec<&Value> = keys.iter().collect();
 
         let mut signatures: Vec<String> = Vec::new();
         let mut jtis: Vec<String> = Vec::new();
+        let mut signing_kids: Vec<String> = Vec::new();
         for (member, token_use) in TOKEN_MEMBERS {
             let token = row.result[member].as_str().unwrap_or_else(|| {
                 panic!(
@@ -457,17 +458,30 @@ async fn an_issued_token_is_signed_and_verifies_against_its_pools_key_set() {
                     panic!("case {case:?} / {member}: the header must be JSON ({error})")
                 });
             assert_eq!(
-                header["alg"], "ES256",
-                "case {case:?} / {member}: expected alg ES256, got {header}"
+                header["alg"], "RS256",
+                "case {case:?} / {member}: expected alg RS256, got {header}"
             );
             assert_eq!(
                 header["typ"], "JWT",
                 "case {case:?} / {member}: expected typ JWT, got {header}"
             );
-            assert_eq!(
-                header["kid"], keys[0]["kid"],
-                "case {case:?} / {member}: the header must name the published key, got {header}"
+            let signing_kid = header["kid"]
+                .as_str()
+                .unwrap_or_else(|| {
+                    panic!("case {case:?} / {member}: the header must name a key, got {header}")
+                })
+                .to_string();
+            assert!(
+                published.iter().any(|key| key["kid"] == signing_kid),
+                "case {case:?} / {member}: the header must name a key the pool publishes, \
+                 got {header} against {jwks}"
             );
+            assert!(
+                !signing_kids.contains(&signing_kid),
+                "case {case:?} / {member}: each token type is signed by its own key, \
+                 {signing_kid} repeated"
+            );
+            signing_kids.push(signing_kid);
 
             let claims = verify_against_jwks(token, &jwks).unwrap_or_else(|rejected| {
                 panic!(
@@ -670,7 +684,7 @@ async fn a_tampered_token_does_not_verify() {
             "the header naming a key the pool does not publish",
             format!(
                 "{}.{}.{}",
-                segment(&json!({ "alg": "ES256", "kid": "not-this-pools-key", "typ": "JWT" })),
+                segment(&json!({ "alg": "RS256", "kid": "not-this-pools-key", "typ": "JWT" })),
                 segments[1],
                 segments[2]
             ),
@@ -828,8 +842,11 @@ async fn a_pool_serves_its_key_set_at_its_well_known_path() {
             false,
         ),
         (
-            "another well-known document of this pool",
-            format!("/{}/.well-known/openid-configuration", row.user_pool_id),
+            "a well-known document this pool publishes none of",
+            format!(
+                "/{}/.well-known/oauth-authorization-server",
+                row.user_pool_id
+            ),
             false,
         ),
     ];

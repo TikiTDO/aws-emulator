@@ -602,7 +602,10 @@ async fn a_resend_is_refused_for_a_request_it_cannot_serve() {
             Subject::SecretHashMissing,
             400,
             "NotAuthorizedException",
-            format!("Unable to verify secret hash for client {confidential_client}."),
+            format!(
+                "Client {confidential_client} is configured with secret but SECRET_HASH was \
+                 not received"
+            ),
         ),
         (
             "the SecretHash that client's secret expects",

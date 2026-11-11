@@ -38,9 +38,11 @@
 //!   but named no modeled operation. The default returns `None`, so the entry
 //!   renders the protocol-correct default (query -> 400 InvalidAction, awsJson ->
 //!   404, …). Return `Some(resp)` to answer in your own envelope if desired. This
-//!   service answers two such requests itself: a GET of a pool's
+//!   service answers three such requests itself: a GET of a pool's
 //!   `/<UserPoolId>/.well-known/jwks.json`, the public key set its tokens are
-//!   verified against, and a GET of a level's
+//!   verified against, a GET of its
+//!   `/<UserPoolId>/.well-known/openid-configuration`, the OpenID Connect
+//!   discovery document naming its endpoints, and a GET of a level's
 //!   `/<UserPoolId>/<ClientId>/assets/login_logo.png`, the classic hosted UI logo
 //!   image `SetUICustomization` stored — neither of which the Smithy model
 //!   describes.
@@ -826,16 +828,17 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
             // still needs one of the two routing keys above.
             || (parts.method == http::Method::GET
                 && hosted_logo_route(&parts.uri.to_string()).is_some())
-            // A pool's key set is fetched by whatever verifier holds a token
-            // this service minted, which follows the token's `iss` claim to
-            // `<iss>/.well-known/jwks.json` — anonymously, with no credential
-            // scope and no `X-Amz-Target`, and at the endpoint the issuer names,
-            // which is the endpoint the token's holder reached this service on.
-            // A GET of exactly that path is therefore claimed here too, so the
-            // key set resolves wherever the issuer announced it rather than only
-            // at this service's published AWS host.
+            // A pool's well-known documents are fetched by whatever verifier or
+            // relying party holds a token this service minted, or bootstraps
+            // from the pool's discovery document, which follows the token's
+            // `iss` claim to `<iss>/.well-known/...` — anonymously, with no
+            // credential scope and no `X-Amz-Target`, and at the endpoint the
+            // issuer names, which is the endpoint the token's holder reached
+            // this service on. A GET of exactly those paths is therefore claimed
+            // here too, so each document resolves wherever the issuer announced
+            // it rather than only at this service's published AWS host.
             || (parts.method == http::Method::GET
-                && jwks_route_pool_id(&parts.uri.to_string()).is_some())
+                && well_known_route(&parts.uri.to_string()).is_some())
             // The CSV upload target of a user import job
             // (`UserImportJobType.PreSignedUrl`) is written by whatever client
             // holds the locator this service handed out, with no credential
@@ -914,19 +917,23 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         req: &aws_smithy_runtime_api::http::Request,
     ) -> Option<aws_smithy_runtime_api::http::Response> {
         // The router calls this when a request reached this service but named no
-        // modeled operation. A user-pool endpoint serves TWO routes this
-        // service's Smithy model does not describe. The first is the pool's JSON
-        // Web Key Set at `/<UserPoolId>/.well-known/jwks.json`, which every
-        // verifier of a Cognito token fetches to check the token's signature,
-        // under the algorithm the key set itself names (Amazon
-        // Cognito Developer Guide, "Verifying a JSON web token"). It carries
-        // only PUBLIC key parameters and AWS serves it unauthenticated, which
-        // is what this seam gives: the router consults it before it
-        // authenticates anything, so an anonymous GET reaches the document the
-        // same way it does on AWS. The second is the classic hosted UI logo
-        // image of one level of a pool, which `UICustomizationType.ImageUrl`
-        // locates for an anonymous browser to fetch. Every other unrouted
-        // request keeps the framework's protocol-correct refusal.
+        // modeled operation. A user-pool endpoint serves routes this service's
+        // Smithy model does not describe. The first two are the WELL-KNOWN
+        // documents a pool publishes under its token issuer: its JSON Web Key
+        // Set at `/<UserPoolId>/.well-known/jwks.json`, which every verifier of
+        // a Cognito token fetches to check the token's signature under the
+        // algorithm the key set itself names, and its OpenID Connect discovery
+        // document at `/<UserPoolId>/.well-known/openid-configuration`, which
+        // every relying party reads the pool's endpoints, its signing algorithm
+        // and the location of that key set from (Amazon Cognito Developer Guide,
+        // "Verifying a JSON web token"). Both carry only PUBLIC values and AWS
+        // serves them unauthenticated, which is what this seam gives: the router
+        // consults it before it authenticates anything, so an anonymous GET
+        // reaches each document the same way it does on AWS. The third is the
+        // classic hosted UI logo image of one level of a pool, which
+        // `UICustomizationType.ImageUrl` locates for an anonymous browser to
+        // fetch. Every other unrouted request keeps the framework's
+        // protocol-correct refusal.
         // The CSV upload target of a user import job is written with PUT, so it
         // is answered before the GET routes below: the locator this service
         // published describes an upload, and the job records the file that
@@ -979,23 +986,38 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
             response.headers_mut().insert("content-type", media_type);
             return Some(response);
         }
-        let user_pool_id = jwks_route_pool_id(req.uri())?.to_string();
-        let document = {
+        let (user_pool_id, document) = well_known_route(req.uri())?;
+        let rendered = {
             let guard = state.lock();
-            // A path naming no stored pool is not this route: it falls through
-            // to the framework's refusal rather than answering an empty key
-            // set. Rendering the stored key is a pure read — no key is
-            // generated here, and nothing is written.
-            guard.pool(&user_pool_id)?.jwks()
+            // A path naming no stored pool IS this route — the pool id has the
+            // form this service mints one in, so the request addressed a pool of
+            // this emulator — and the endpoint answers for the pool that does
+            // not exist rather than letting the request fall through to the
+            // router's "no service claimed this request" refusal. Rendering a
+            // stored document is a pure read: no key is generated here, and
+            // nothing is written.
+            let Some(pool) = guard.pool(user_pool_id) else {
+                let refusal = ::serde_json::json!({
+                    "message": crate::state::user_pool_not_found_message(user_pool_id),
+                });
+                return json_response(404, &refusal.to_string());
+            };
+            match document {
+                WellKnownDocument::KeySet => pool.jwks(),
+                // The discovery document names its issuer and every endpoint
+                // under it, so it is rendered for the endpoint THIS request
+                // reached — the same endpoint the `iss` claim of a token served
+                // here names.
+                WellKnownDocument::OpenIdConfiguration => {
+                    pool.openid_configuration(&crate::state::served_endpoint_of(
+                        req.uri(),
+                        req.headers().get("host"),
+                        &pool.region,
+                    ))
+                }
+            }
         };
-        let mut response = aws_smithy_runtime_api::http::Response::new(
-            aws_smithy_runtime_api::http::StatusCode::try_from(200).ok()?,
-            ::aws_smithy_types::body::SdkBody::from(document.to_string()),
-        );
-        response
-            .headers_mut()
-            .insert("content-type", "application/json");
-        Some(response)
+        json_response(200, &rendered.to_string())
     }
 
     fn override_protocol(&self) -> Option<&dyn smithy_server_runtime::ServerHttpProtocol> {
@@ -1022,16 +1044,65 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     }
 }
 
-/// The `UserPoolId` whose key set `uri` addresses, for a request path of the
-/// form `/<UserPoolId>/.well-known/jwks.json`, and `None` for every other path.
+/// A JSON document answered on one of this endpoint's non-modelled routes:
+/// `status` with `body` and the media type the body is in.
 ///
-/// This is the only non-modelled route a user-pool endpoint serves; the pool id
-/// is the path segment before it, exactly as the `iss` claim of a token this
-/// service issued states it (`<endpoint>/<UserPoolId>`).
-fn jwks_route_pool_id(uri: &str) -> Option<&str> {
+/// `None` only for a status that is not a valid HTTP status code, which the two
+/// callers' literals are not.
+fn json_response(status: u16, body: &str) -> Option<aws_smithy_runtime_api::http::Response> {
+    let mut response = aws_smithy_runtime_api::http::Response::new(
+        aws_smithy_runtime_api::http::StatusCode::try_from(status).ok()?,
+        ::aws_smithy_types::body::SdkBody::from(body.to_string()),
+    );
+    response
+        .headers_mut()
+        .insert("content-type", "application/json");
+    Some(response)
+}
+
+/// The `UserPoolId` and the document a request path of the form
+/// `/<UserPoolId>/.well-known/<document>` addresses, and `None` for every other
+/// path.
+///
+/// These are the well-known documents a user-pool endpoint publishes under a
+/// pool's token issuer, which is `<endpoint>/<UserPoolId>` — exactly as the `iss`
+/// claim of a token this service issued states it. The paths come from
+/// [`crate::state`], the same constants the pool's own published locators are
+/// built from, so a document this service announces and the route that serves it
+/// cannot drift. The pool id has to have the FORM this service mints one in, so a
+/// path of the same shape addressed to another mounted service is not claimed
+/// here.
+fn well_known_route(uri: &str) -> Option<(&str, WellKnownDocument)> {
     let path = uri.split(['?', '#']).next().unwrap_or(uri);
     let (user_pool_id, tail) = path.strip_prefix('/')?.split_once('/')?;
-    (!user_pool_id.is_empty() && tail == ".well-known/jwks.json").then_some(user_pool_id)
+    if !is_user_pool_id_shaped(user_pool_id) {
+        return None;
+    }
+    let document = WellKnownDocument::at_path(tail)?;
+    Some((user_pool_id, document))
+}
+
+/// Which well-known document of a pool a request addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WellKnownDocument {
+    /// The pool's JSON Web Key Set, which every verifier of a token this pool
+    /// minted fetches to check the token's signature.
+    KeySet,
+    /// The pool's OpenID Connect discovery document, which every relying party
+    /// reads the pool's endpoints and signing algorithm from.
+    OpenIdConfiguration,
+}
+
+impl WellKnownDocument {
+    /// The document published at `tail` — the path under a pool's issuer — or
+    /// `None` when the pool publishes none there.
+    fn at_path(tail: &str) -> Option<Self> {
+        match tail {
+            crate::state::JWKS_DOCUMENT_PATH => Some(Self::KeySet),
+            crate::state::OPENID_CONFIGURATION_DOCUMENT_PATH => Some(Self::OpenIdConfiguration),
+            _ => None,
+        }
+    }
 }
 
 /// The pool and the level whose hosted UI logo image `uri` addresses, for a
@@ -1186,8 +1257,8 @@ mod tests {
     //! `wrap_operations!` list is the WHOLE surface.
 
     use super::{
-        hosted_logo_route, jwks_route_pool_id, logo_media_type, routes_to_signing_name,
-        unsigned_target_names_shape, EmulatedService, ErasedServiceDefinition,
+        hosted_logo_route, logo_media_type, routes_to_signing_name, unsigned_target_names_shape,
+        well_known_route, EmulatedService, ErasedServiceDefinition, WellKnownDocument,
     };
     use std::sync::Arc;
 
@@ -1349,42 +1420,83 @@ mod tests {
         }
     }
 
-    /// [`jwks_route_pool_id`] over the paths that reach this service: the key-set
-    /// route, and the paths that are not it.
+    /// [`well_known_route`] over the paths that reach this service: each
+    /// well-known document a pool publishes, and the paths that are neither.
     #[test]
-    fn only_a_pools_well_known_key_set_path_names_a_pool() {
-        // (case, path, expected)
-        let rows: &[(&str, &str, Option<&str>)] = &[
-            (
-                "a pool's key set",
-                "/us-east-1_abc123def/.well-known/jwks.json",
-                Some("us-east-1_abc123def"),
-            ),
-            (
-                "a pool's key set with a query string",
-                "/us-west-2_0a9b8c7d6/.well-known/jwks.json?cachebust=1",
-                Some("us-west-2_0a9b8c7d6"),
-            ),
-            ("the root path, where every modelled call goes", "/", None),
-            (
-                "another well-known document",
-                "/us-east-1_abc123def/.well-known/openid-configuration",
-                None,
-            ),
-            ("a key set with no pool id", "//.well-known/jwks.json", None),
-            (
-                "a deeper path under a pool",
-                "/us-east-1_abc123def/oauth2/token",
-                None,
-            ),
-            ("a path with no leading slash", "jwks.json", None),
+    fn only_a_pools_well_known_document_paths_name_a_pool_and_a_document() {
+        /// One row: a path that reaches this service, and the pool and the
+        /// document it addresses, if any.
+        struct Row {
+            case: &'static str,
+            path: &'static str,
+            expected: Option<(&'static str, WellKnownDocument)>,
+        }
+
+        let rows = [
+            Row {
+                case: "a pool's key set",
+                path: "/us-east-1_abc123def/.well-known/jwks.json",
+                expected: Some(("us-east-1_abc123def", WellKnownDocument::KeySet)),
+            },
+            Row {
+                case: "a pool's key set with a query string",
+                path: "/us-west-2_0a9b8c7d6/.well-known/jwks.json?cachebust=1",
+                expected: Some(("us-west-2_0a9b8c7d6", WellKnownDocument::KeySet)),
+            },
+            Row {
+                case: "a pool's discovery document",
+                path: "/us-east-1_abc123def/.well-known/openid-configuration",
+                expected: Some((
+                    "us-east-1_abc123def",
+                    WellKnownDocument::OpenIdConfiguration,
+                )),
+            },
+            Row {
+                case: "a pool's discovery document with a query string",
+                path: "/us-west-2_0a9b8c7d6/.well-known/openid-configuration?v=1",
+                expected: Some((
+                    "us-west-2_0a9b8c7d6",
+                    WellKnownDocument::OpenIdConfiguration,
+                )),
+            },
+            Row {
+                case: "the root path, where every modelled call goes",
+                path: "/",
+                expected: None,
+            },
+            Row {
+                case: "a well-known document no pool publishes",
+                path: "/us-east-1_abc123def/.well-known/oauth-authorization-server",
+                expected: None,
+            },
+            Row {
+                case: "a key set with no pool id",
+                path: "//.well-known/jwks.json",
+                expected: None,
+            },
+            Row {
+                case: "a first segment that is no pool id",
+                path: "/my-bucket/.well-known/jwks.json",
+                expected: None,
+            },
+            Row {
+                case: "a deeper path under a pool",
+                path: "/us-east-1_abc123def/oauth2/token",
+                expected: None,
+            },
+            Row {
+                case: "a path with no leading slash",
+                path: "jwks.json",
+                expected: None,
+            },
         ];
 
-        for (case, path, expected) in rows {
-            let actual = jwks_route_pool_id(path);
+        for row in rows {
+            let actual = well_known_route(row.path);
             assert_eq!(
-                actual, *expected,
-                "case {case:?} ({path}): expected {expected:?}, got {actual:?}"
+                actual, row.expected,
+                "case {:?} ({}): expected {:?}, got {actual:?}",
+                row.case, row.path, row.expected
             );
         }
     }

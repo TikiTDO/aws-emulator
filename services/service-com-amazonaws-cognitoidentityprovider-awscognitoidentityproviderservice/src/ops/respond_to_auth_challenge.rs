@@ -375,6 +375,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> RespondToAuthChal
                 .ok_or_else(|| client_not_found(&input.client_id))?
                 .id
                 .clone();
+            // An app client that holds a secret is a CONFIDENTIAL client, and its
+            // secret is what authenticates a caller acting as it: "you must
+            // provide a SECRET_HASH parameter in all challenge responses to an app
+            // client that has a client secret" (`ChallengeResponses` in this
+            // service's model). The hash authenticates the username plus the
+            // client id, and the username a challenge response names is its own
+            // `USERNAME` entry, which every challenge requires. Checked before the
+            // session is resumed, so a caller that does not hold the secret moves
+            // no stored state and is told nothing about the challenge.
+            if let Some(defect) = guard
+                .pool(&user_pool_id)
+                .and_then(|pool| pool.clients.get(&input.client_id))
+                .ok_or_else(|| client_not_found(&input.client_id))?
+                .secret_hash_defect(
+                    responses.get(USERNAME).map_or("", String::as_str),
+                    responses.get(SECRET_HASH).map(String::as_str),
+                )
+            {
+                return Err(not_authorized(&defect.message(&input.client_id)));
+            }
 
             // The STORED session says which challenge is outstanding and for whom. A token
             // this emulator never handed out, or one started for another app client,
@@ -409,19 +429,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> RespondToAuthChal
                         },
                     );
                 }
-                crate::state::SessionLookup::Unknown => return Err(invalid_auth_state()),
+                // A `Session` value this emulator never handed out resolves no
+                // outstanding challenge, so it is no session OF THIS REQUEST and is
+                // answered as one: a value that names nothing and one that names another
+                // request's session are the same fact about this request.
+                crate::state::SessionLookup::Unknown => return Err(invalid_session()),
             };
             if session.user_pool_id != user_pool_id || session.client_id != input.client_id {
                 return Err(invalid_session());
             }
             // `ChallengeName` is "the name of the challenge that you are responding to", so
-            // it has to name the challenge this session is waiting on.
+            // it has to name the challenge this session is waiting on; one that names
+            // another answers no challenge, and the state the response carries is not the
+            // state the server holds.
             if input.challenge_name != session.challenge_name {
-                return Err(invalid_parameter(format!(
-                    "Invalid challenge name provided, this session is waiting for a response \
-                     to {}",
-                    session.challenge_name
-                )));
+                return Err(invalid_challenge_state());
             }
             if session.challenge_name != EMAIL_OTP {
                 // No other challenge this emulator starts carries state a response to it
@@ -530,6 +552,14 @@ const EMAIL_OTP_CODE: &str = "EMAIL_OTP_CODE";
 /// The `ChallengeResponses` entry naming the user a response is for.
 const USERNAME: &str = "USERNAME";
 
+/// The `ChallengeResponses` entry a response to a CONFIDENTIAL app client
+/// authenticates itself with: "a keyed-hash message authentication code (HMAC)
+/// calculated using the secret key of a user pool client and username plus the
+/// client ID in the message" (`SecretHashType` in this service's model), which
+/// the challenge-response operations carry in the response map rather than in an
+/// input member of their own.
+const SECRET_HASH: &str = "SECRET_HASH";
+
 /// What a gating trigger's failure is for THIS operation: the modelled error each outcome
 /// amounts to, carrying the message the invocation built.
 ///
@@ -586,21 +616,21 @@ fn code_mismatch() -> RespondToAuthChallengeError {
     .into()
 }
 
+/// This operation's `CodeMismatchException` for a `ChallengeName` that is not the
+/// challenge the stored session is waiting on
+/// ([`crate::state::INVALID_CHALLENGE_STATE_MESSAGE`]).
+fn invalid_challenge_state() -> RespondToAuthChallengeError {
+    RespondToAuthChallengeErrorModeled::CodeMismatchException(CodeMismatchException {
+        message: Some(crate::state::INVALID_CHALLENGE_STATE_MESSAGE.to_string()),
+    })
+    .into()
+}
+
 /// This operation's `ExpiredCodeException`: "this exception is thrown if a code has
 /// expired" (this service's model).
 fn expired_code() -> RespondToAuthChallengeError {
     RespondToAuthChallengeErrorModeled::ExpiredCodeException(ExpiredCodeException {
         message: Some(crate::state::EXPIRED_CODE_MESSAGE.to_string()),
-    })
-    .into()
-}
-
-/// This operation's `CodeMismatchException` for a `Session` that resolves to no stored
-/// challenge of this emulator: the state a response carries beside its code is not one
-/// the server was expecting.
-fn invalid_auth_state() -> RespondToAuthChallengeError {
-    RespondToAuthChallengeErrorModeled::CodeMismatchException(CodeMismatchException {
-        message: Some(crate::state::INVALID_AUTH_STATE_MESSAGE.to_string()),
     })
     .into()
 }

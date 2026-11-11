@@ -333,11 +333,11 @@ async fn a_new_password_response_completes_the_sign_in_and_is_read_back() {
             expected_attributes: &[],
         },
         Answered {
-            case: "the response names no user",
+            case: "a password of other characters, named for the user it answers for",
             required_email: false,
             case_sensitive: None,
             username: "bob",
-            responded_username: None,
+            responded_username: Some("bob"),
             new_password: "An0ther-Passw0rd",
             attributes: &[],
             expected_attributes: &[],
@@ -648,15 +648,14 @@ async fn a_response_that_does_not_satisfy_the_challenge_is_refused_and_writes_no
             ..CORRECT
         },
         Refused {
-            // A `Session` that resolves to no stored challenge is a mismatch of
-            // the auth state a response carries beside its code, which
-            // `(Admin)RespondToAuthChallenge` declares `CodeMismatchException`
-            // for — a different class from the one a session this emulator DID
-            // hand out gets.
+            // A `Session` that resolves to no stored challenge resolves no
+            // challenge THIS request can answer, which is the same fact about
+            // the request as a session started elsewhere — and a different one
+            // from the replay of a session this emulator DID hand out.
             case: "a Session this emulator never handed out",
             session: SessionSource::Unknown,
             status: 400,
-            code: "CodeMismatchException",
+            code: "NotAuthorizedException",
             ..CORRECT
         },
         Refused {
@@ -674,8 +673,21 @@ async fn a_response_that_does_not_satisfy_the_challenge_is_refused_and_writes_no
             ..CORRECT
         },
         Refused {
+            // `ChallengeName` names the challenge being answered, so one that is
+            // not the challenge the session is waiting on answers none: the state
+            // the response carries is not the state the server holds, which is
+            // what `CodeMismatchException` reports.
             case: "a challenge name the session is not waiting for",
             challenge_name: "SMS_MFA",
+            status: 400,
+            code: "CodeMismatchException",
+            ..CORRECT
+        },
+        Refused {
+            // "All challenges require USERNAME" (`ChallengeResponses` in this
+            // service's model), so a response that names no user answers none.
+            case: "no USERNAME in the challenge responses",
+            responded_username: None,
             status: 400,
             code: "InvalidParameterException",
             ..CORRECT

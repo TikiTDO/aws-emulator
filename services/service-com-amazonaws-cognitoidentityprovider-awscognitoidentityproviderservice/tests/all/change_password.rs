@@ -484,7 +484,11 @@ const PREVIOUS_PASSWORD_CASES: &[RefusedCase] = &[
         previous: None,
         proposed: "Passw0rd!2025",
         code: "InvalidParameterException",
-        message: "Missing required parameter PreviousPassword",
+        // Amazon Cognito names the parameter `OldPassword` in this refusal,
+        // which is not the wire member it travels in
+        // (`smithy_query(query="operation",operation="ChangePassword")`:
+        // `PreviousPassword`).
+        message: "Missing required parameter OldPassword",
     },
 ];
 

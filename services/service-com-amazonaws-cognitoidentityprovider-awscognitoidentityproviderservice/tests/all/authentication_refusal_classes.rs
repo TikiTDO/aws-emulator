@@ -110,12 +110,9 @@ const UNAUTHORIZED_REFRESH_TOKEN: &str = "Invalid Refresh Token.";
 const SESSION_ALREADY_USED: &str = "Invalid session for the user, session can only be used once.";
 
 /// The sentence a challenge response answers a stored session that does not belong to the
-/// request it arrived on — one started for another pool or app client — with.
+/// request it arrived on — one started for another pool or app client, or a value that
+/// names no stored session at all — with.
 const SESSION_NOT_FOR_THIS_REQUEST: &str = "Invalid session for the user.";
-
-/// The sentence a challenge response answers a `Session` that names no outstanding
-/// challenge with.
-const INVALID_AUTH_STATE: &str = "Invalid code/session provided";
 
 /// The sentence `AdminLinkProviderForUser` answers a `SourceUser` naming the pool's own
 /// native provider with.
@@ -988,8 +985,8 @@ async fn a_challenge_session_answers_once_and_an_unknown_one_is_a_code_mismatch(
         json!({ "USERNAME": username, "NEW_PASSWORD": "Ch0senPassw0rd!" })
     }
 
-    // A session this emulator never handed out, asked of BOTH respond operations: the
-    // state a response carries beside its code is not one the server was expecting.
+    // A session this emulator never handed out, asked of BOTH respond operations: it
+    // resolves no outstanding challenge, so it is no session of this request.
     for (case, operation, body) in [
         (
             "an unknown Session, administratively",
@@ -1016,8 +1013,8 @@ async fn a_challenge_session_answers_once_and_an_unknown_one_is_a_code_mismatch(
         let (status, payload) = call(&router, operation, &body).await;
         assert_eq!(
             (status, error_code(&payload), error_message(&payload)),
-            (400, "CodeMismatchException", INVALID_AUTH_STATE),
-            "case {case:?}: expected the code-mismatch class, got {status} with {payload}"
+            (400, "NotAuthorizedException", SESSION_NOT_FOR_THIS_REQUEST),
+            "case {case:?}: expected the invalid-session class, got {status} with {payload}"
         );
     }
 

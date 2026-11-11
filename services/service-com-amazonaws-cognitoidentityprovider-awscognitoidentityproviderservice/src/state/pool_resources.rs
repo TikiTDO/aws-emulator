@@ -554,8 +554,8 @@ impl UserPoolClient {
         self.prevent_user_existence_errors == "ENABLED"
     }
 
-    /// Whether `presented` is the `SecretHash` a request for `username` has to
-    /// carry to be accepted by this app client.
+    /// What is wrong with the `SecretHash` `presented` for `username`, or `None`
+    /// when this app client accepts it.
     ///
     /// `SecretHash` is "a keyed-hash message authentication code (HMAC)
     /// calculated using the secret key of a user pool client and username plus
@@ -568,28 +568,34 @@ impl UserPoolClient {
     /// HOLDS a secret accepts only the tag THAT secret produces over
     /// [`secret_hash_message`]: a request that carries none, or one computed
     /// from another secret, another username or another client, proves nothing
-    /// about holding the secret.
+    /// about holding the secret — and those are two different facts about the
+    /// request, each with its own sentence ([`SecretHashDefect`]).
     ///
     /// The check is `ring`'s own tag verification, so a rejected hash tells a
     /// caller nothing about how much of the expected one it got right.
     /// A client that holds SEVERAL secrets accepts the tag ANY of them produces:
     /// each one is an active credential of the app client, which is what lets a
     /// caller move from one to the next without an outage.
-    pub fn accepts_secret_hash(&self, username: &str, presented: Option<&str>) -> bool {
+    pub fn secret_hash_defect(
+        &self,
+        username: &str,
+        presented: Option<&str>,
+    ) -> Option<SecretHashDefect> {
         if self.client_secrets.is_empty() {
-            return true;
+            return None;
         }
         let Some(presented) = presented else {
-            return false;
+            return Some(SecretHashDefect::NotReceived);
         };
         let Ok(tag) = ::aws_smithy_types::base64::decode(presented) else {
-            return false;
+            return Some(SecretHashDefect::Unverified);
         };
         let message = secret_hash_message(username, &self.client_id);
-        self.client_secrets.iter().any(|secret| {
+        let verified = self.client_secrets.iter().any(|secret| {
             let key = ::ring::hmac::Key::new(::ring::hmac::HMAC_SHA256, secret.value.as_bytes());
             ::ring::hmac::verify(&key, message.as_bytes(), &tag).is_ok()
-        })
+        });
+        (!verified).then_some(SecretHashDefect::Unverified)
     }
 
     /// Whether `presented` is the `ClientSecret` this app client requires a request
@@ -757,6 +763,38 @@ impl UserPoolClient {
             ),
             auth_session_validity: Some(self.auth_session_validity),
             refresh_token_rotation: self.refresh_token_rotation.clone(),
+        }
+    }
+}
+
+/// Why a `SecretHash` a request presented is not the one its app client requires
+/// ([`UserPoolClient::secret_hash_defect`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretHashDefect {
+    /// The app client holds a secret and the request presented no hash at all.
+    NotReceived,
+    /// A hash was presented and the client's secret does not produce it over
+    /// this username and app client.
+    Unverified,
+}
+
+impl SecretHashDefect {
+    /// The sentence Amazon Cognito refuses this defect with, for a request
+    /// naming `client_id`.
+    ///
+    /// Both are reported as `NotAuthorizedException`, and both name the app
+    /// client the request named and nothing else: no username, no secret and no
+    /// part of the hash that was presented. The two sentences are the same
+    /// wherever the gate runs — the operations that carry the hash in a
+    /// `SecretHash` member and those that carry it in a parameter map alike —
+    /// so one request's refusal is never worded two ways.
+    #[must_use]
+    pub fn message(self, client_id: &str) -> String {
+        match self {
+            Self::NotReceived => format!(
+                "Client {client_id} is configured with secret but SECRET_HASH was not received"
+            ),
+            Self::Unverified => format!("Unable to verify secret hash for client {client_id}"),
         }
     }
 }

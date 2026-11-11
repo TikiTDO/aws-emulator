@@ -140,11 +140,11 @@ pub struct UserPool {
     /// configuration so that you can stage, stop, start, review, and delete
     /// them" (`ListUserImportJobs`).
     pub user_import_jobs: BTreeMap<String, UserImportJob>,
-    /// The key pair this pool's tokens are signed with and whose public half
-    /// its key set publishes, minted with the pool and kept for its lifetime,
-    /// so every token the pool ever issued stays verifiable against the key set
-    /// it publishes now.
-    pub signing_key: PoolSigningKey,
+    /// The key pairs this pool's tokens are signed with and whose public halves
+    /// its key set publishes — one per token type — minted with the pool and kept
+    /// for its lifetime, so every token the pool ever issued stays verifiable
+    /// against the key set it publishes now.
+    pub signing_keys: PoolSigningKeys,
     /// The `DeviceGroupKey` every device of this pool is reported under:
     /// "an identifier used in generating the `DEVICE_PASSWORD_VERIFIER` for
     /// device SRP authentication" (`NewDeviceMetadataType.DeviceGroupKey`).
@@ -240,13 +240,21 @@ pub const CASE_INSENSITIVE_ALIAS_ATTRIBUTES: [&str; 2] = ["email", "preferred_us
 /// (`service_common::data_plane_addressing`), so no value a host is not shaped
 /// like reaches a token claim.
 pub fn served_endpoint(parts: &::http::request::Parts, region: &str) -> String {
-    let addressed = ::service_common::data_plane_addressing::addressed_host(
+    served_endpoint_of(
         &parts.uri.to_string(),
         parts
             .headers
             .get(::http::header::HOST)
             .and_then(|value| value.to_str().ok()),
-    );
+        region,
+    )
+}
+
+/// [`served_endpoint`] for a request read as its `uri` and its `Host` header:
+/// the same rule, for a caller that holds those two values rather than a whole
+/// set of request parts (the non-modelled document routes this service serves).
+pub fn served_endpoint_of(uri: &str, host_header: Option<&str>, region: &str) -> String {
+    let addressed = ::service_common::data_plane_addressing::addressed_host(uri, host_header);
     let host = addressed
         .filter(|host| serves_pool(region, host))
         .unwrap_or_else(|| published_endpoint_host(region));
@@ -315,7 +323,7 @@ impl UserPool {
     /// leads a verifier to (Amazon Cognito Developer Guide, "Verifying a JSON
     /// web token").
     pub fn jwks_uri(&self, endpoint: &str) -> String {
-        format!("{}/.well-known/jwks.json", self.issuer(endpoint))
+        format!("{}/{JWKS_DOCUMENT_PATH}", self.issuer(endpoint))
     }
 
     /// Whether `issuer` is a token issuer OF THIS POOL — the question a verifier
@@ -328,9 +336,9 @@ impl UserPool {
         is_pool_issuer(&self.region, &self.id, issuer)
     }
 
-    /// This pool's token-signing key pair, minted when the pool was created.
-    pub fn signing_key(&self) -> &PoolSigningKey {
-        &self.signing_key
+    /// This pool's token-signing keys, minted when the pool was created.
+    pub fn signing_keys(&self) -> &PoolSigningKeys {
+        &self.signing_keys
     }
 
     /// This pool's JSON Web Key Set (RFC 7517 §5): the public half of every key
@@ -338,9 +346,9 @@ impl UserPool {
     /// header carries. This is the document a verifier reads from
     /// [`UserPool::jwks_uri`], and it holds only PUBLIC key parameters.
     ///
-    /// A pure read: it renders the stored key and changes nothing.
+    /// A pure read: it renders the stored keys and changes nothing.
     pub fn jwks(&self) -> serde_json::Value {
-        serde_json::json!({ "keys": [self.signing_key.to_jwk()] })
+        serde_json::json!({ "keys": self.signing_keys.to_jwks_entries() })
     }
 
     /// This pool with a freshly minted id, and the ARN that id implies. Used

@@ -58,6 +58,10 @@ const USERNAME_CLIENT_NOT_FOUND_MESSAGE: &str = "Username/client id combination 
 /// or against an access token, answers for a username it cannot resolve.
 const USER_NOT_FOUND_MESSAGE: &str = "User does not exist.";
 
+/// The sentence a confirmation carrying a code nothing outstanding matches is
+/// refused with: the remediation is to ask for a code.
+const EXPIRED_CODE_MESSAGE: &str = "Invalid code provided, please request a code again.";
+
 /// A `ConfirmationCodeType` value (len 1..2048, pattern `^[\S]+$`) that no code
 /// this emulator minted can be, so a confirmation carrying it resolves nothing.
 const UNISSUED_CODE: &str = "000000";
@@ -350,9 +354,9 @@ async fn an_absent_user_of_a_public_operation_is_refused_as_an_unresolved_pair()
         // The same pair through a client that suppresses user-existence errors:
         // an operation that REPORTS A DELIVERY answers one, to a simulated
         // destination, so nothing about the answer tells the caller whether the
-        // account exists; for the operations that report no delivery the CODE is
-        // the one a wrong credential earns, and the sentence is the same
-        // unresolved-pair sentence.
+        // account exists; for the operations that report no delivery the refusal
+        // is the one a user that DOES exist earns at the same point of that
+        // operation's own validation order, so it discloses nothing either.
         for (operation, body) in public_requests(&hiding_client, username) {
             let case = format!("{operation} with {name_case}, through the hiding client");
             let (status, payload) =
@@ -369,15 +373,29 @@ async fn an_absent_user_of_a_public_operation_is_refused_as_an_unresolved_pair()
                 );
                 continue;
             }
+            // `ConfirmForgotPassword` checks the user and then the outstanding
+            // reset code, and a user that exists with no code outstanding is
+            // refused with the code refusal — so the masked refusal of an
+            // unknown username is that same refusal, not one of its own class.
+            let (expected_code, expected_message) = if operation == "ConfirmForgotPassword" {
+                ("ExpiredCodeException", EXPIRED_CODE_MESSAGE)
+            } else {
+                ("NotAuthorizedException", USERNAME_CLIENT_NOT_FOUND_MESSAGE)
+            };
             assert_eq!(
                 (status, error_code(&payload)),
-                (400, "NotAuthorizedException"),
-                "case {case:?}: expected a 400 NotAuthorizedException, got {status} with {payload}"
+                (400, expected_code),
+                "case {case:?}: expected a 400 {expected_code}, got {status} with {payload}"
             );
             let message = error_message(&payload);
             assert_eq!(
-                message, USERNAME_CLIENT_NOT_FOUND_MESSAGE,
-                "case {case:?}: expected {USERNAME_CLIENT_NOT_FOUND_MESSAGE:?}, got {message:?}"
+                message, expected_message,
+                "case {case:?}: expected {expected_message:?}, got {message:?}"
+            );
+            assert!(
+                !message.contains(username.as_str()) && !message.contains(hiding_client.as_str()),
+                "case {case:?}: the refusal must quote neither the username nor the client id, \
+                 got {message:?}"
             );
         }
 

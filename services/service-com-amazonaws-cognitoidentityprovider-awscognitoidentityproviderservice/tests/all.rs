@@ -69,6 +69,10 @@ mod client_secret_not_found_message;
 mod clock_dependent_state;
 #[path = "all/code_delivery_destination_masking.rs"]
 mod code_delivery_destination_masking;
+#[path = "all/confidential_client_challenge_response.rs"]
+mod confidential_client_challenge_response;
+#[path = "all/confirm_forgot_password_validation_order.rs"]
+mod confirm_forgot_password_validation_order;
 #[path = "all/constraint_refusal_values.rs"]
 mod constraint_refusal_values;
 #[path = "all/custom_email_sender_trigger.rs"]
@@ -179,6 +183,8 @@ mod per_operation_refusal_wording;
 mod pool_configuration_refusal_wire;
 #[path = "all/pool_plan_and_csv_header.rs"]
 mod pool_plan_and_csv_header;
+#[path = "all/pool_well_known_documents.rs"]
+mod pool_well_known_documents;
 #[path = "all/post_confirmation_trigger.rs"]
 mod post_confirmation_trigger;
 #[path = "all/provider_link_source_user_claim.rs"]

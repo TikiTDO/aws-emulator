@@ -57,18 +57,24 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-# Key generation and ES256 (ECDSA on NIST P-256 with SHA-256, RFC 7518 §3.4)
-# signing of the user-pool tokens, plus the public curve point the pool's JWKS
-# publishes. ES256 rather than the RS256 AWS uses because the only maintained
-# pure-Rust RSA implementation carries two unfixable timing advisories
-# (RUSTSEC-2023-0071, GHSA-4grx-2x9w-596c) this repository's dependency audit
-# blocks; what a verifier checks is unchanged (see `src/state.rs`). `ring`
-# rather than a pure-Rust P-256 crate because every released version of those
-# resolves to a `crypto-bigint` the audit blocks (RUSTSEC-2026-0387), and this
-# workspace already builds `ring`.
+# Key generation and signing of the user-pool tokens: a pool's keys are RSA and
+# every token it issues is signed RSASSA-PKCS1-v1_5 over SHA-256 (RS256, RFC 7518
+# §3.3), which is the algorithm a pool's own discovery document advertises and the
+# one every verifier of a Cognito token is configured for. The key generation and
+# the signature come from `aws-lc-rs`, which this workspace already builds and
+# whose RSA implementation carries no advisory, rather than from the pure-Rust
+# `rsa` crate, whose timing advisories (RUSTSEC-2023-0071, GHSA-4grx-2x9w-596c)
+# this repository's dependency audit blocks.
+aws-lc-rs = "1"
+# Reads the PKCS#8 structure `aws-lc-rs` encodes a private key as, to take the
+# PKCS#1 `RSAPrivateKey` out of it (`src/state/tokens.rs`).
+pkcs8 = "0.10"
+# The PKCS#1 `RSAPrivateKey`, which carries the modulus and public exponent a
+# pool's published JWK renders (RFC 7518 §6.3.1).
+pkcs1 = "0.7"
+# HMAC-SHA256 for the app client `SecretHash` verification
+# (`src/state/pool_resources.rs`).
 ring = "0.17"
-# SHA-256 for the RFC 7638 JWK thumbprint used as the key's `kid`.
-sha2 = { workspace = true }
 # A custom sender trigger's event carries the encrypted code as text, so the message is
 # base64-encoded into it (`src/state/lambda_triggers/custom_email.rs`).
 base64 = "0.22"

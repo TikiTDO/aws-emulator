@@ -252,14 +252,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .clients
                 .get(&input.client_id)
                 .ok_or_else(|| client_not_found(&input.client_id))?;
-            if !client.accepts_secret_hash(&input.username, input.secret_hash.as_deref()) {
-                return Err(unverified_secret_hash(&input.client_id));
+            if let Some(defect) =
+                client.secret_hash_defect(&input.username, input.secret_hash.as_deref())
+            {
+                return Err(secret_hash_refused(defect, &input.client_id));
             }
             let hides_user_existence = client.hides_user_existence();
 
             let Some(user) = pool.user(&input.username) else {
                 return Err(if hides_user_existence {
-                    not_authorized(crate::state::USERNAME_CLIENT_NOT_FOUND_MESSAGE)
+                    // `PreventUserExistenceErrors=ENABLED` "suppresses messages
+                    // that might indicate a valid user exists", so the refusal
+                    // has to be the one the NEXT check would answer for a user
+                    // that does exist and holds no outstanding reset code: the
+                    // code refusal below. A refusal of its own class, or one
+                    // worded about the username and app client, tells the caller
+                    // the user is absent.
+                    code_rejected(crate::state::CodeRejection::Expired)
                 } else {
                     user_not_found()
                 });
@@ -397,11 +406,14 @@ fn client_not_found(client_id: &str) -> ConfirmForgotPasswordError {
 }
 
 /// This operation's `NotAuthorizedException` for a request whose `SecretHash` is not the
-/// one the app client's stored secret expects — including a request that carries none.
-fn unverified_secret_hash(client_id: &str) -> ConfirmForgotPasswordError {
-    not_authorized(&format!(
-        "Unable to verify secret hash for client {client_id}."
-    ))
+/// one the app client's stored secret requires — including a request that carries none,
+/// which is a different fact about the request and a different sentence
+/// ([`crate::state::SecretHashDefect`]).
+fn secret_hash_refused(
+    defect: crate::state::SecretHashDefect,
+    client_id: &str,
+) -> ConfirmForgotPasswordError {
+    not_authorized(&defect.message(client_id))
 }
 
 /// This operation's `UserNotFoundException`. The user is resolved from the `Username`

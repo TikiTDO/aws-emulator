@@ -2,8 +2,10 @@
 
 //! @op AdminRespondToAuthChallenge
 //! Answers the challenge a stored `AdminInitiateAuth` session is waiting on.
-//! The `Session` token resolves to the STORED challenge session for the same
-//! user pool and app client; the response parameters that challenge requires
+//! A response to a CONFIDENTIAL app client authenticates itself with that
+//! client's secret first (its `SECRET_HASH` entry); the `Session` token then
+//! resolves to the STORED challenge session for the same user pool and app
+//! client; the response parameters that challenge requires
 //! are checked against stored state, the state change the challenge owes is
 //! applied, the session is ended (it answers its challenge once) and the token
 //! triple is issued from stored state. A `NEW_PASSWORD_REQUIRED` response
@@ -370,12 +372,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> AdminRespondToAut
                 // whether the `ClientId` names an app client of ANOTHER pool, a
                 // question about the whole store, asked only where the lookup
                 // has failed.
-                if !pool.clients.contains_key(&input.client_id) {
+                let Some(client) = pool.clients.get(&input.client_id) else {
                     return Err(client_not_found(guard.app_client_lookup_refusal(
                         &input.user_pool_id,
                         &input.client_id,
                         &crate::state::app_client_not_found_message(&input.client_id),
                     )));
+                };
+                // An app client that holds a secret is a CONFIDENTIAL client, and
+                // its secret is what authenticates a caller acting as it: "you
+                // must provide a SECRET_HASH parameter in all challenge responses
+                // to an app client that has a client secret"
+                // (`ChallengeResponses` in this service's model). The hash
+                // authenticates the username plus the client id, and the username
+                // a challenge response names is its own `USERNAME` entry, which
+                // every challenge requires. Checked before the session is
+                // resumed, so a caller that does not hold the secret moves no
+                // stored state and is told nothing about the challenge.
+                if let Some(defect) = client.secret_hash_defect(
+                    responses.get(USERNAME).map_or("", String::as_str),
+                    responses.get(SECRET_HASH).map(String::as_str),
+                ) {
+                    return Err(not_authorized(&defect.message(&input.client_id)));
                 }
             }
 
@@ -402,7 +420,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> AdminRespondToAut
                         },
                     );
                 }
-                crate::state::SessionLookup::Unknown => return Err(invalid_auth_state()),
+                // A `Session` value this emulator never handed out resolves no
+                // outstanding challenge, so it is no session OF THIS REQUEST and is
+                // answered as one: a value that names nothing and one that names
+                // another request's session are the same fact about this request.
+                crate::state::SessionLookup::Unknown => return Err(invalid_session()),
             };
             if session.user_pool_id != input.user_pool_id
                 || session.client_id != input.client_id
@@ -410,13 +432,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> AdminRespondToAut
                 return Err(invalid_session());
             }
             // `ChallengeName` is "the name of the challenge that you are responding
-            // to", so it has to name the challenge this session is waiting on.
+            // to", so it has to name the challenge this session is waiting on; one
+            // that names another answers no challenge, and the state the response
+            // carries is not the state the server holds.
             if input.challenge_name != session.challenge_name {
-                return Err(invalid_parameter(format!(
-                    "Invalid challenge name provided, this session is waiting for a response \
-                     to {}",
-                    session.challenge_name
-                )));
+                return Err(invalid_challenge_state());
             }
             if session.challenge_name != NEW_PASSWORD_REQUIRED {
                 // No other challenge is started with a session yet, so no stored
@@ -432,9 +452,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> AdminRespondToAut
             // `"userAttributes.[attribute_name]": "[attribute_value]"` for the
             // attributes the challenge asked for (`ChallengeResponses` in this
             // service's model).
-            let new_password = responses.get(NEW_PASSWORD).cloned().ok_or_else(|| {
-                missing_challenge_response(NEW_PASSWORD, &session.challenge_name)
-            })?;
+            let new_password = responses
+                .get(NEW_PASSWORD)
+                .cloned()
+                .ok_or_else(missing_new_password)?;
+            // "All challenges require USERNAME" (`ChallengeResponses` in this
+            // service's model), so a response that names no user answers none.
+            if !responses.contains_key(USERNAME) {
+                return Err(missing_parameter(USERNAME));
+            }
             let requested: ::std::collections::BTreeMap<String, String> = responses
                 .iter()
                 .filter_map(|(key, value)| {
@@ -456,7 +482,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> AdminRespondToAut
             }
             if let Some(message) = pool.check_password(
                 &new_password,
-                crate::state::PasswordPolicyWording::UserSuppliesPassword,
+                crate::state::PasswordPolicyWording::AnswersChallenge,
             ) {
                 return Err(invalid_password(message));
             }
@@ -586,6 +612,14 @@ const NEW_PASSWORD: &str = "NEW_PASSWORD";
 /// The `ChallengeResponses` entry naming the user a response is for.
 const USERNAME: &str = "USERNAME";
 
+/// The `ChallengeResponses` entry a response to a CONFIDENTIAL app client
+/// authenticates itself with: "a keyed-hash message authentication code (HMAC)
+/// calculated using the secret key of a user pool client and username plus the
+/// client ID in the message" (`SecretHashType` in this service's model), which
+/// the challenge-response operations carry in the response map rather than in an
+/// input member of their own.
+const SECRET_HASH: &str = "SECRET_HASH";
+
 /// The `ChallengeResponses` key prefix an attribute value is submitted under:
 /// `"userAttributes.[attribute_name]": "[attribute_value]"`. The challenge that
 /// ASKS for those attributes names them under the same prefix, so both sides read
@@ -652,12 +686,12 @@ fn user_not_found() -> AdminRespondToAuthChallengeError {
     .into()
 }
 
-/// This operation's `CodeMismatchException` for a `Session` that resolves to no stored
-/// challenge of this emulator: the state a response carries beside its code is not one
-/// the server was expecting.
-fn invalid_auth_state() -> AdminRespondToAuthChallengeError {
+/// This operation's `CodeMismatchException` for a `ChallengeName` that is not the
+/// challenge the stored session is waiting on
+/// ([`crate::state::INVALID_CHALLENGE_STATE_MESSAGE`]).
+fn invalid_challenge_state() -> AdminRespondToAuthChallengeError {
     AdminRespondToAuthChallengeErrorModeled::CodeMismatchException(CodeMismatchException {
-        message: Some(crate::state::INVALID_AUTH_STATE_MESSAGE.to_string()),
+        message: Some(crate::state::INVALID_CHALLENGE_STATE_MESSAGE.to_string()),
     })
     .into()
 }
@@ -669,7 +703,8 @@ fn session_already_used() -> AdminRespondToAuthChallengeError {
 
 /// The refusal for a stored `Session` that does not belong to this request: one
 /// started for another pool or app client, for another user than the response
-/// names, or one whose challenge the stored user no longer owes.
+/// names, one whose challenge the stored user no longer owes, or a value that
+/// names no stored session at all.
 fn invalid_session() -> AdminRespondToAuthChallengeError {
     not_authorized(crate::state::SESSION_NOT_FOR_THIS_REQUEST_MESSAGE)
 }
@@ -693,15 +728,17 @@ fn missing_parameter(parameter: &str) -> AdminRespondToAuthChallengeError {
     invalid_parameter(format!("Missing required parameter {parameter}"))
 }
 
-/// The refusal for a `ChallengeResponses` entry the challenge requires and the
-/// request did not carry.
-fn missing_challenge_response(
-    parameter: &str,
-    challenge_name: &str,
-) -> AdminRespondToAuthChallengeError {
+/// The refusal for a `NEW_PASSWORD_REQUIRED` response that carries no
+/// `NEW_PASSWORD` entry.
+///
+/// The challenge is answered by the entries of its response map, so a map that
+/// is missing the one the new password travels in is reported as the other
+/// refusals of that map are — "Invalid attributes given, …" — naming the KEY
+/// the password has to be given under rather than an input member of the
+/// request.
+fn missing_new_password() -> AdminRespondToAuthChallengeError {
     invalid_parameter(format!(
-        "Missing required parameter {parameter} in ChallengeResponses for ChallengeName \
-         {challenge_name}"
+        "Invalid attributes given, new password should be given with key {NEW_PASSWORD}"
     ))
 }
 

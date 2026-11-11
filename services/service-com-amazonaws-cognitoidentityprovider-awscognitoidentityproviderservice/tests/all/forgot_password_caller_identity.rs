@@ -157,6 +157,9 @@ enum Expected {
     ClientNotFound,
     /// The refusal that names the client whose secret the request did not prove.
     UnverifiedSecretHash,
+    /// The refusal that names the client the request presented no hash for at
+    /// all, which is a different fact about the request.
+    SecretHashNotReceived,
 }
 
 /// One table row.
@@ -522,7 +525,7 @@ async fn forgot_password_answers_only_the_pool_its_app_client_names() {
             hash: Hash::Absent,
             status: 400,
             error: Some("NotAuthorizedException"),
-            message: Expected::UnverifiedSecretHash,
+            message: Expected::SecretHashNotReceived,
         },
         Row {
             case: "a client that holds a secret, with ANOTHER client's secret's hash",
@@ -549,7 +552,7 @@ async fn forgot_password_answers_only_the_pool_its_app_client_names() {
             hash: Hash::Absent,
             status: 400,
             error: Some("NotAuthorizedException"),
-            message: Expected::UnverifiedSecretHash,
+            message: Expected::SecretHashNotReceived,
         },
         Row {
             case: "a client that holds a secret, with its hash, for a user nobody registered",
@@ -676,8 +679,11 @@ async fn forgot_password_answers_only_the_pool_its_app_client_names() {
                 format!("User pool client {client_id} does not exist.")
             }
             Expected::UnverifiedSecretHash => {
-                format!("Unable to verify secret hash for client {client_id}.")
+                format!("Unable to verify secret hash for client {client_id}")
             }
+            Expected::SecretHashNotReceived => format!(
+                "Client {client_id} is configured with secret but SECRET_HASH was not received"
+            ),
         };
 
         match row.error {
