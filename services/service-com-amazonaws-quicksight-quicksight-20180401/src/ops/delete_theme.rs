@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteTheme
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteTheme`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteTheme::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Deletes a stored theme, or one version of it when the request names a
+//! `VersionNumber`: without that member the call deletes every version of the theme,
+//! which is the theme, so the record keyed by `(AwsAccountId, ThemeId)` is removed and
+//! no later read reports it. An alias is a name for one of the theme's versions, so a
+//! name for a version this call removed goes with it.
 //!
 //! ## Shape of an operation
 //!
@@ -165,18 +162,81 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteTheme` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteThemeErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteTheme"))
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(DeleteThemeErrorModeled::InternalFailureException(
+                InternalFailureException {
+                    message: Some("the QuickSight store is unavailable".to_string()),
+                    request_id: Some(crate::state::next_request_id()),
+                },
+            )
+            .into());
+        };
+
+        let request_id = crate::state::next_request_id();
+        let now = std::time::SystemTime::now();
+        let key = (input.aws_account_id, input.theme_id);
+        let mut store = state.lock();
+        let Some(record) = store.themes.get_mut(&key) else {
+            return Err(DeleteThemeErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: Some(format!("Theme with ID {} not found.", key.1)),
+                    // `ExceptionResourceType` declares no member for a theme, so this
+                    // refusal reports none rather than an unmodelled value.
+                    resource_type: None,
+                    request_id: Some(request_id),
+                },
+            )
+            .into());
+        };
+
+        // The response reports the theme the call addressed, whichever of its versions
+        // the call removed, so both values are read off the record before it goes.
+        let arn = record.arn.clone();
+        let theme_id = record.theme_id.clone();
+
+        let theme_is_gone = match input.version_number {
+            // A request that names no version deletes all versions of the theme, which
+            // is the theme itself.
+            None => true,
+            Some(version_number) => {
+                if record.version(version_number).is_none() {
+                    return Err(DeleteThemeErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException {
+                            message: Some(format!(
+                                "Theme with ID {theme_id} has no version {version_number}."
+                            )),
+                            resource_type: None,
+                            request_id: Some(request_id),
+                        },
+                    )
+                    .into());
+                }
+                record
+                    .versions
+                    .retain(|version| version.version_number != version_number);
+                // An alias IS a name for one of the theme's versions, so a name for the
+                // version just deleted points at nothing and goes with it.
+                record
+                    .aliases
+                    .retain(|_, alias| alias.theme_version_number != version_number);
+                // Removing a version changes the theme, so the theme's own
+                // last-updated instant moves with it.
+                record.last_updated_time = crate::state::now_timestamp(now);
+                // A theme IS its version history: with its last version gone there is
+                // no theme left for a read to report, so the record goes with it.
+                record.versions.is_empty()
+            }
+        };
+        if theme_is_gone {
+            store.themes.remove(&key);
+        }
+
+        Ok(DeleteThemeOutput {
+            arn: Some(arn),
+            theme_id: Some(theme_id),
+            request_id: Some(request_id),
+            status: 200,
+        })
     }
 }
