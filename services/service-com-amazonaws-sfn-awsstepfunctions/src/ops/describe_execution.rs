@@ -256,24 +256,49 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let now = crate::state::now();
+        // `includedData` is `ALL_DATA | METADATA_ONLY`, and what the latter asks for is
+        // the execution's METADATA with none of its sensitive data — `input`, `output`,
+        // `error` and `cause`, the members this report seals under the state machine's
+        // key. A value outside the modelled enum is a bad request this operation models
+        // no error for, so it goes out through the one non-modelled channel the crate
+        // has rather than being read as either member.
+        let Some(included_data) =
+            crate::state::IncludedData::from_wire(input.included_data.as_deref())
+        else {
+            return Err(crate::scaffolded::Scaffolded::validation(format!(
+                "includedData must be one of [{}], got '{}'",
+                INCLUDED_DATA_VALUES.join(", "),
+                input.included_data.unwrap_or_default()
+            )));
+        };
+
         // A state machine encrypted with a CUSTOMER MANAGED KMS key hands its
         // execution's data out only through that key: this report carries the
         // execution's `input` and `output`, which were sealed under it, so unsealing
         // them is decided before any of it is read — the key's own key state, and the
-        // caller's `kms:Decrypt` grant on it. The decision is made with no store of
-        // this service locked.
-        if let Some(refusal) = crate::state::encryption::execution_read_denied(
-            &*self.engine,
-            ctx,
-            &endpoint_region,
-            &input.execution_arn,
-        ) {
-            return Err(crate::kms_key_refusal!(DescribeExecutionErrorModeled, refusal).into());
+        // caller's `kms:Decrypt` grant on it. A METADATA-ONLY read reports none of
+        // those members, so it unseals nothing and makes no KMS call at all: it keeps
+        // answering the execution's status while the key is in a key state no
+        // cryptographic operation can use, and while the policies in force deny the
+        // caller that key — which is what the member exists for. The decision is made
+        // with no store of this service locked.
+        if !included_data.is_metadata_only() {
+            if let Some(refusal) = crate::state::encryption::execution_read_denied(
+                &*self.engine,
+                ctx,
+                &endpoint_region,
+                &input.execution_arn,
+            ) {
+                return Err(crate::kms_key_refusal!(DescribeExecutionErrorModeled, refusal).into());
+            }
         }
 
         let mut store = state.lock();
         // The one write a report may make: the terminal status was owed at the instant
-        // the clock made it due, whether or not anybody described the execution.
+        // the clock made it due, whether or not anybody described the execution — and
+        // what the clock owes an encrypted execution was already decided in front of
+        // this call (`service::identity_authorization`), so it is not decided twice
+        // here.
         store.settle(now);
 
         let Some(execution) = store.executions.get(&input.execution_arn) else {
@@ -312,8 +337,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // `inputDetails`/`outputDetails` say whether the data itself is included: it
         // is, because the stored execution carries it ("Indicates whether input or
-        // output was included in the response. Always true for API calls.").
-        let included = Some(CloudWatchEventsExecutionDataDetails { included: true });
+        // output was included in the response. Always true for API calls."). A
+        // METADATA-ONLY read includes none of it, so it reports neither the data nor a
+        // detail structure about data it did not report.
+        let included = (!included_data.is_metadata_only())
+            .then_some(CloudWatchEventsExecutionDataDetails { included: true });
 
         // The redrive projection: `redriveStatus` is `REDRIVABLE` exactly when
         // `RedriveExecution` would redrive this execution now, `NOT_REDRIVABLE`
@@ -346,17 +374,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             status: execution.status.clone(),
             start_date: crate::state::to_date_time(execution.start_date),
             stop_date: execution.stop_date.map(crate::state::to_date_time),
-            input: Some(execution.input.clone()),
+            // The sensitive members this report seals under the state machine's key,
+            // each withheld from a METADATA-ONLY read through the crate's ONE projection
+            // of that family ([`crate::state::sensitive_member`]): the data is what that
+            // read asks not to be given.
+            input: crate::state::sensitive_member(included_data, Some(execution.input.clone())),
             input_details: included.clone(),
-            output: execution.output.clone(),
+            output: crate::state::sensitive_member(included_data, execution.output.clone()),
             output_details: execution.output.as_ref().and(included),
             trace_header: execution.trace_header.clone(),
             // "The Amazon Resource Name (ARN) that identifies a Map Run, which
             // dispatched this execution": the Map Run the record belongs to, and null
             // for an execution no Map Run dispatched.
             map_run_arn: execution.map_run_arn.clone(),
-            error: execution.error.clone(),
-            cause: execution.cause.clone(),
+            error: crate::state::sensitive_member(included_data, execution.error.clone()),
+            cause: crate::state::sensitive_member(included_data, execution.cause.clone()),
             // The alias and version the start was made through, which the execution
             // record carries: "the alias ARN is a combination of state machine ARN
             // and the alias name" and the version ARN "a combination of state machine

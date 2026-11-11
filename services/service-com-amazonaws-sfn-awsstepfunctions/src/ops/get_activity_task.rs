@@ -189,6 +189,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // An activity on a CUSTOMER MANAGED KMS key has the input of every task it
+        // queues sealed under that key, and a delivery hands that input to the worker:
+        // KMS decides whether this caller may have the key used to unseal it before any
+        // task is claimed — the key's own key state, and the worker's `kms:Decrypt`
+        // grant on the ACTIVITY's key, bound to the activity's own encryption context.
+        // A refused poll claims nothing, so the task stays queued for a worker the key
+        // does permit. The decision is made with no store of this service locked.
+        if let Some(refusal) = crate::state::encryption::activity_read_denied(
+            &*self.engine,
+            ctx,
+            &endpoint_region,
+            &input.activity_arn,
+        ) {
+            return Err(crate::kms_key_refusal!(GetActivityTaskErrorModeled, refusal).into());
+        }
+
         // First look: a task already waiting is answered without holding anything.
         {
             let now = crate::state::now();

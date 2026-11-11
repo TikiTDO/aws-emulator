@@ -295,6 +295,20 @@ impl<Eng: Send + Sync + 'static> ErasedOperation for IamAuthorized<Eng> {
         ctx: &'r OperationContext<'r>,
     ) -> BoxFuture<'r, RtResponse> {
         Box::pin(async move {
+            // What the CLOCK and the KEY owe this service's records does not depend on
+            // which call is being made, or on whether this caller may make it: an
+            // execution of a state machine on a customer managed KMS key does its
+            // remaining work under that key, so an outcome that comes due while the key
+            // cannot be used for the work is a FAILURE rather than the outcome the walk
+            // computed ([`crate::state::encryption::fail_due_runs_the_key_refuses`]).
+            // It is materialised here, in front of every call this service serves, for
+            // the same reason the management event behind this seam is recorded here:
+            // it is a property of the service answering at this instant and of no one
+            // operation, so no handler can forget it and none decides it twice.
+            crate::state::encryption::fail_due_runs_the_key_refuses(
+                &*self.engine,
+                crate::state::now(),
+            );
             // WHICH operation this is, read off the routing key this protocol resolves —
             // the same key the generated table is keyed by, so the action asked about
             // cannot drift from the operation served. A request the key cannot be read

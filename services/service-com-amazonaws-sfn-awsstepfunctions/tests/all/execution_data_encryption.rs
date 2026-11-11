@@ -418,9 +418,22 @@ pub(crate) fn reads() -> Vec<Read> {
             request: |_machine, execution| json!({ "executionArn": execution }),
         },
         Read {
+            case: "DescribeExecution asked for metadata only",
+            operation: "DescribeExecution",
+            // "METADATA_ONLY" reports none of the execution's sensitive data, so the
+            // read opens nothing the key sealed.
+            decrypts: false,
+            request: |_machine, execution| {
+                json!({ "executionArn": execution, "includedData": "METADATA_ONLY" })
+            },
+        },
+        Read {
             case: "GetExecutionHistory asked for no execution data",
             operation: "GetExecutionHistory",
-            decrypts: false,
+            // The WHOLE history of an encrypted execution is sealed under the key —
+            // each event's metadata as much as the payloads this member leaves out —
+            // so a read that asks for no execution data still has to open it.
+            decrypts: true,
             request: |_machine, execution| {
                 json!({ "executionArn": execution, "includeExecutionData": false })
             },
@@ -580,8 +593,13 @@ async fn a_state_machine_on_an_aws_owned_key_needs_no_grant() {
 #[tokio::test]
 async fn an_absent_resource_is_still_reported_as_absent() {
     let chain = Chain::new();
-    let key = chain.create_key(&withdrawn_policy()).await;
+    // The state machine is created while the policy still grants the caller the data
+    // key the create seals its definition with — a create the key refuses creates
+    // nothing — and the grant is WITHDRAWN afterwards, which is what leaves the reads
+    // below with a key policy that allows them nothing.
+    let key = chain.create_key(&granting_policy()).await;
     let (machine, execution) = chain.run("absent-reads", Some(customer_managed(&key))).await;
+    chain.put_policy(&key, &withdrawn_policy()).await;
 
     // Rows differ along WHICH read is made and which ARN it names: an execution of
     // the account that was never started, and a state machine that was never created.

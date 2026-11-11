@@ -267,10 +267,12 @@ async fn a_write_of_sealed_data_follows_the_keys_own_policy() {
         );
         // Every variable part of the relayed sentence comes from the request and the
         // state: the operation the write makes on the key, and the key it is made on.
+        // A reply to a task the execution is already holding re-uses the data key its
+        // payloads go under, which is what opening that data key asks for.
         let refusal = message(&answer);
         assert!(
-            refusal.contains("kms:GenerateDataKey") && refusal.contains(&key),
-            "case {case:?}: expected the refusal to name the mint of the data key and the key \
+            refusal.contains("kms:Decrypt") && refusal.contains(&key),
+            "case {case:?}: expected the refusal to name the use of the data key and the key \
              itself, got {answer:?}"
         );
 

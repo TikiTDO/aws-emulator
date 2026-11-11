@@ -227,12 +227,41 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx.parts());
         let arn = crate::state::activity_arn(&region, &input.name);
         let created = crate::state::now();
+
+        // The configuration commits this activity's data to the key it names, so the
+        // key itself decides whether it is a configuration the service can apply: a
+        // key in a key state that admits no cryptographic use of it would seal
+        // nothing, and a caller KMS does not let mint a data key with it cannot have
+        // the activity's data sealed at all. Both are refused HERE, before anything is
+        // created, each in the class this operation models for it
+        // (`crate::state::encryption`). The decision is made with no store of this
+        // service locked.
+        if let Some(refusal) = crate::state::encryption::activity_configuration_refusal(
+            &*self.engine,
+            ctx,
+            &region,
+            input.encryption_configuration.as_ref(),
+            &arn,
+        ) {
+            return Err(crate::kms_configuration_refusal!(CreateActivityErrorModeled, refusal).into());
+        }
+
+        // `kmsKeyId` accepts "an alias, alias ARN, key ID, or key ARN", which are four
+        // ways of naming ONE key: what the activity is stored on — and what every read
+        // of it reports — is the key itself, so the reference is resolved to the ARN KMS
+        // holds the key under before it is kept.
+        let encryption_configuration = crate::state::encryption::with_resolved_key(
+            &*self.engine,
+            &region,
+            input.encryption_configuration,
+        );
         // The configuration a repeat is compared against: an activity's whole
         // configuration is its encryption settings, at their EFFECTIVE values, so a
-        // repeat that spells the default out explicitly is the same request.
-        let encryption = crate::state::effective_encryption_configuration(
-            input.encryption_configuration.as_ref(),
-        );
+        // repeat that spells the default out explicitly is the same request — and one
+        // that names the same key by another reference form is too, since both resolved
+        // to the same key.
+        let encryption =
+            crate::state::effective_encryption_configuration(encryption_configuration.as_ref());
 
         let mut store = state.lock();
         store.settle(created);
@@ -278,7 +307,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             arn: arn.clone(),
             name: input.name,
             creation_date: created,
-            encryption_configuration: input.encryption_configuration,
+            encryption_configuration,
             tags,
             // Measured and counted by `insert_activity`.
             retained_bytes: 0,

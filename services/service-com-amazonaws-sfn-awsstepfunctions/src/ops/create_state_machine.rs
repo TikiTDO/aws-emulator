@@ -315,6 +315,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // modelled, but which members each `type` needs is not, so that rule lives
         // in `crate::state` and every operation that accepts the structure reads
         // it.
+        let region = crate::state::request_region(ctx.parts());
+        let arn = crate::state::state_machine_arn(&region, &input.name);
         if let Some(configuration) = input.encryption_configuration.as_ref() {
             if let Some(why) = crate::state::invalid_encryption_reason(configuration) {
                 return Err(
@@ -325,6 +327,37 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 );
             }
         }
+
+        // And the KEY the configuration names decides the rest of it: this state
+        // machine's definition and the data of every execution of it are sealed under
+        // that key, so a key in a key state that admits no cryptographic use of it
+        // would seal nothing — an invalid encryption configuration — and a caller KMS
+        // does not let mint a data key with it cannot have anything sealed at all.
+        // Both are refused before the state machine exists, each in the class this
+        // operation models for it (`crate::state::encryption`), with no store of this
+        // service locked.
+        if let Some(refusal) = crate::state::encryption::state_machine_configuration_refusal(
+            &*self.engine,
+            ctx,
+            &region,
+            input.encryption_configuration.as_ref(),
+            &arn,
+        ) {
+            return Err(
+                crate::kms_configuration_refusal!(CreateStateMachineErrorModeled, refusal).into(),
+            );
+        }
+
+        // `kmsKeyId` accepts "an alias, alias ARN, key ID, or key ARN", which are four
+        // ways of naming ONE key: what the state machine is stored on — and what every
+        // read of it reports — is the key itself, so the reference is resolved to the
+        // ARN KMS holds the key under before it is kept, and two creates naming the
+        // same key by different reference forms are the same configuration.
+        let encryption_configuration = crate::state::encryption::with_resolved_key(
+            &*self.engine,
+            &region,
+            input.encryption_configuration,
+        );
 
         // A `loggingConfiguration` is the same kind of rule: `destinations` is
         // "limited to size 1" and "required, if your log level is not set to OFF",
@@ -387,15 +420,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // ARN, so `stateMachineVersionArn` names a record a later
         // `DescribeStateMachine` answers from.
 
-        let region = crate::state::request_region(ctx.parts());
-        let arn = crate::state::state_machine_arn(&region, &input.name);
         let created = crate::state::now();
         let fingerprint = crate::state::configuration_fingerprint(
             &input.definition,
             &sm_type,
             input.logging_configuration.as_ref(),
             input.tracing_configuration.as_ref(),
-            input.encryption_configuration.as_ref(),
+            encryption_configuration.as_ref(),
             input.publish,
             input.version_description.as_deref(),
         );
@@ -476,7 +507,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             update_date: created,
             logging_configuration: input.logging_configuration,
             tracing_configuration: input.tracing_configuration,
-            encryption_configuration: input.encryption_configuration,
+            encryption_configuration,
             revision_id: None,
             description: input.version_description,
             tags,

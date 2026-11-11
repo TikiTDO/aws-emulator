@@ -218,7 +218,7 @@ pub fn role_gate<Eng: Send + Sync + 'static>(
         let iam = iam_state(&*engine)?;
         let (action, resource) = access_request(call, request, &region)?;
         let (code, status) = denied_answer(targets.denied);
-        let refused = refusal(
+        if let Some(refused) = refusal(
             &iam.lock(),
             &role_arn,
             &action,
@@ -226,17 +226,37 @@ pub fn role_gate<Eng: Send + Sync + 'static>(
             call.api.sdk_client,
             code,
             status,
-        )?;
-        // The refusal reaches the state as the error the invoked OPERATION models for
-        // an unauthorized call, where it models one; an operation that models none
-        // leaves the invoked service's BASE SDK exception, which is what its client
-        // deserializes an unmodelled code into.
+        ) {
+            // The refusal reaches the state as the error the invoked OPERATION models for
+            // an unauthorized call, where it models one; an operation that models none
+            // leaves the invoked service's BASE SDK exception, which is what its client
+            // deserializes an unmodelled code into.
+            return Some(Failed {
+                error: targets.denied.map_or_else(
+                    || call.api.base_error(),
+                    |denied| call.api.task_error(denied.exception),
+                ),
+                cause: refused,
+            });
+        }
+        // A target of THIS service that is on a customer managed KMS key seals the data
+        // this call hands it under that key, and the call is made as this execution's
+        // own role — so a role the TARGET's key does not permit cannot have that data
+        // sealed, which fails the task rather than starting work whose data cannot be
+        // recorded. Decided after the role's own documents, because a call its policies
+        // do not allow never reaches the key at all. The work the state named is what
+        // did not happen, so the failure is the task's own — ASL's [`TASK_FAILED_ERROR`]
+        // — carrying the refusal the key answered with, exactly as every other refusal
+        // of a call this state would have made is carried.
+        let key_refusal =
+            super::encryption::target_key_denied(&*engine, &region, &resource, &role_arn)?;
+        let cause = match key_refusal {
+            super::encryption::KeyRefusal::InvalidState { message, .. }
+            | super::encryption::KeyRefusal::AccessDenied(message) => message,
+        };
         Some(Failed {
-            error: targets.denied.map_or_else(
-                || call.api.base_error(),
-                |denied| call.api.task_error(denied.exception),
-            ),
-            cause: refused,
+            error: TASK_FAILED_ERROR.to_string(),
+            cause,
         })
     }))
 }

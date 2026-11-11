@@ -4231,6 +4231,21 @@ pub fn reported_definition(definition: &str, included_data: IncludedData) -> Str
     }
 }
 
+/// The value a read reports for one of the `@sensitive` members a resource's customer
+/// managed key seals — an execution's `input`, `output`, `error` and `cause` — given its
+/// `includedData`.
+///
+/// `METADATA_ONLY` asks for the resource's metadata and none of that data, so such a
+/// read reports none of those members and makes no call on the key at all. One function
+/// for the whole family, so no member of it is elided on a different rule from the rest,
+/// and beside [`reported_definition`], which is the same rule over the other datum the
+/// key seals.
+pub fn sensitive_member(included_data: IncludedData, value: Option<String>) -> Option<String> {
+    (!included_data.is_metadata_only())
+        .then_some(value)
+        .flatten()
+}
+
 /// The `variableReferences` a read reports for `definition`, given its
 /// `includedData`.
 ///

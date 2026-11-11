@@ -968,6 +968,69 @@ impl ComAmazonawsSfnAwsstepfunctionsState {
             .retain(|pending| pending != execution_arn);
     }
 
+    /// Make the outcome the clock has already made due for the execution `arn` a
+    /// FAILURE of `error` carrying `cause`, keeping the events the attempt had already
+    /// produced.
+    ///
+    /// The one caller is the key gate ([`encryption::fail_due_runs_the_key_refuses`]):
+    /// an execution does its remaining work under its state machine's customer managed
+    /// key, so an outcome that comes due while that key cannot be used for the work is
+    /// a failure and not the outcome the walk computed. The event the attempt ENDS on
+    /// becomes `ExecutionFailed` in place — same id, same predecessor, same instant —
+    /// so the history keeps one terminal event and numbers nothing twice, and the
+    /// outcome is left for [`Self::settle`] to apply at the instant it was owed.
+    ///
+    /// Nothing is changed for an execution that is already terminal, or one whose
+    /// outcome is not owed yet: this materialises what the clock made due, and never
+    /// anticipates it.
+    pub fn fail_due_outcome(&mut self, arn: &str, error: &str, cause: &str) {
+        let Some(execution) = self.executions.get_mut(arn) else {
+            return;
+        };
+        if execution.is_terminal() || execution.pending.is_none() {
+            return;
+        }
+        let before = execution.retained_bytes;
+        let last = execution.history.last();
+        let next_id = last.map_or(0, |event| event.id) + 1;
+        let follows = last.map_or(NO_PREVIOUS_EVENT, |event| {
+            follows_event(event.id, &event.event_type)
+        });
+        let details = EventDetails::of_failure(Some(error.to_string()), Some(cause.to_string()));
+        if let Some(pending) = execution.pending.as_mut() {
+            pending.status = EXECUTION_STATUS_FAILED.to_string();
+            // "This field is set only if the execution succeeds": a run that failed
+            // reports no output.
+            pending.output = None;
+            pending.error = Some(error.to_string());
+            pending.cause = Some(cause.to_string());
+            match pending.events.last_mut() {
+                Some(ending) => {
+                    ending.event_type = EVENT_EXECUTION_FAILED.to_string();
+                    ending.state_name = None;
+                    ending.details = details;
+                }
+                // An attempt that planned no terminal event of its own — nothing is
+                // owed but the outcome itself — ends on one minted here, following the
+                // last event the history holds.
+                None => pending.events.push(HistoryEvent {
+                    id: next_id,
+                    previous_event_id: follows,
+                    event_type: EVENT_EXECUTION_FAILED.to_string(),
+                    timestamp: pending.due_at,
+                    state_name: None,
+                    details,
+                }),
+            }
+        }
+        execution.retained_bytes = execution.measure();
+        let after = execution.retained_bytes;
+        self.retained_bytes = self
+            .retained_bytes
+            .saturating_add(after)
+            .saturating_sub(before);
+    }
+
     /// The definition the execution `arn` RUNS, which is where its states are read
     /// from.
     ///

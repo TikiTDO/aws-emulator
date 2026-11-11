@@ -61,6 +61,15 @@ struct Unusable {
     create: Value,
     /// The KMS calls that put the created key into this key state.
     into: Vec<KeyCall>,
+    /// Whether the key is in this key state from the MOMENT IT EXISTS, with no call of
+    /// the caller's to get it there.
+    ///
+    /// Such a key can carry no encrypted resource at all: a configuration naming a key
+    /// in a key state that admits no cryptographic use of it is refused outright
+    /// (`InvalidEncryptionConfiguration`), so the only way to observe this key state is
+    /// that refusal, which
+    /// `encrypted_resource_key_configuration` exercises.
+    from_creation: bool,
     /// What KMS's own `KeyState` reports, which is what `DescribeKey` answers.
     reported: &'static str,
     /// The value of the refusal's `kmsKeyState` member
@@ -85,6 +94,7 @@ fn unusable_states() -> Vec<Unusable> {
             case: "the key is disabled",
             create: json!({ "KeySpec": "SYMMETRIC_DEFAULT" }),
             into: vec![("DisableKey", by_key)],
+            from_creation: false,
             reported: "Disabled",
             kms_key_state: "DISABLED",
             prose: "disabled",
@@ -97,6 +107,7 @@ fn unusable_states() -> Vec<Unusable> {
                 "ScheduleKeyDeletion",
                 |key| json!({ "KeyId": key, "PendingWindowInDays": SHORTEST_DELETION_WINDOW_DAYS }),
             )],
+            from_creation: false,
             reported: "PendingDeletion",
             kms_key_state: "PENDING_DELETION",
             prose: "pending deletion",
@@ -111,6 +122,7 @@ fn unusable_states() -> Vec<Unusable> {
             // with no call of the caller's needed to get it there.
             create: json!({ "KeySpec": "SYMMETRIC_DEFAULT", "Origin": "EXTERNAL" }),
             into: Vec::new(),
+            from_creation: true,
             reported: "PendingImport",
             kms_key_state: "PENDING_IMPORT",
             prose: "pending import",
@@ -185,6 +197,12 @@ fn assert_refused(case: &str, status: u16, answer: &Value, key: &str, state: &Un
 #[tokio::test]
 async fn a_read_of_encrypted_data_follows_the_keys_state() {
     for (index, state) in unusable_states().into_iter().enumerate() {
+        // A key that is unusable from the moment it exists carries no encrypted
+        // resource to read: configuring one on it is refused instead (see
+        // [`Unusable::from_creation`]).
+        if state.from_creation {
+            continue;
+        }
         let chain = Chain::new();
         let mut create = state.create.clone();
         create["Policy"] = Value::String(granting_policy().to_string());

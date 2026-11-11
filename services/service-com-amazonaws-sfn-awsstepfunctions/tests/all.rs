@@ -71,6 +71,8 @@ mod describe_state_machine_for_execution;
 mod distributed_map_children;
 #[path = "all/encrypted_execution_writes.rs"]
 mod encrypted_execution_writes;
+#[path = "all/encrypted_resource_key_configuration.rs"]
+mod encrypted_resource_key_configuration;
 #[path = "all/error_messages.rs"]
 mod error_messages;
 #[path = "all/execution_alias_routing.rs"]

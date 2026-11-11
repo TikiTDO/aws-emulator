@@ -115,7 +115,11 @@ fn unrelated_policy() -> Value {
 
 /// A policy allowing the KMS calls sealing an execution's data makes, which is what a key
 /// policy that delegates to the account leaves to the role's own documents.
-fn data_key_policy() -> Value {
+///
+/// `pub(crate)`: `tests/all.rs` is this binary's crate root, so a sibling suite that needs
+/// a role allowed an execution's own cryptographic work reads this document rather than
+/// carrying a second copy of it.
+pub(crate) fn data_key_policy() -> Value {
     json!({
         "Version": "2012-10-17",
         "Statement": [{
@@ -127,7 +131,9 @@ fn data_key_policy() -> Value {
 }
 
 /// A role of this account carrying `policy` as its inline policy, as its ARN.
-async fn role(chain: &Chain, name: &str, policy: &Value) -> String {
+///
+/// `pub(crate)` for the reason [`data_key_policy`] is.
+pub(crate) async fn role(chain: &Chain, name: &str, policy: &Value) -> String {
     let created = chain
         .iam(
             "CreateRole",
@@ -496,9 +502,9 @@ async fn a_start_follows_the_key_policy_and_the_roles_own_policies() {
              {answered:?}"
         );
         assert!(
-            message.contains(&role_arn),
-            "case {case:?}: expected the refusal to name the role the use was decided for, got \
-             {message:?}"
+            message.contains(&format!("assumed-role/key-role-{index}/")),
+            "case {case:?}: expected the refusal to name the session of the role the use was \
+             decided for, got {message:?}"
         );
         // Nothing was started: the machine has no executions.
         let listed = chain

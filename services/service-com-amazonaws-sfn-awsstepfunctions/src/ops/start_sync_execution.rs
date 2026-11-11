@@ -288,6 +288,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let started = crate::state::now();
+        // `includedData` is `ALL_DATA | METADATA_ONLY`: the latter asks for this run's
+        // metadata with none of its sensitive data — `input`, `output`, `error` and
+        // `cause`, the members a state machine's key seals. A value outside the
+        // modelled enum goes out through the crate's one non-modelled channel rather
+        // than being read as either member.
+        let Some(included_data) =
+            crate::state::IncludedData::from_wire(input.included_data.as_deref())
+        else {
+            return Err(crate::scaffolded::Scaffolded::validation(format!(
+                "includedData must be one of [{}], got '{}'",
+                INCLUDED_DATA_VALUES.join(", "),
+                input.included_data.unwrap_or_default()
+            )));
+        };
 
         // Phase 1, under the lock: resolve the state machine and read what the run
         // needs. The lock is released before the walk, so no other request waits on
@@ -386,6 +400,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // same work allowance. The one difference is that this call answers the outcome
         // itself, so it settles with NO delay: the response carries the terminal
         // `status`, `stopDate` and payload.
+        //
+        // Before any of it runs: a state machine on a CUSTOMER MANAGED KMS key cannot
+        // run at all while that key's own key state admits no cryptographic use of it,
+        // and this call hands the run's data straight back to the caller, which is what
+        // the caller's own `kms:Decrypt` grant decides ("callers must have kms:Decrypt
+        // permission to decrypt the definition. Alternatively, you can call the API with
+        // includedData = METADATA_ONLY to get a successful response without the
+        // encrypted definition"). A METADATA-ONLY call reports none of that data, so it
+        // asks the caller for nothing. The decision is made with no store of this
+        // service locked, and a refused call runs nothing.
+        if let Some(refusal) = crate::state::encryption::synchronous_run_denied(
+            &*self.engine,
+            ctx,
+            &region,
+            &machine_arn,
+            !included_data.is_metadata_only(),
+        ) {
+            return Err(crate::kms_key_refusal!(StartSyncExecutionErrorModeled, refusal).into());
+        }
         let context = crate::state::asl::Context {
             execution_arn: arn.clone(),
             execution_name: execution_name.clone(),
@@ -534,13 +567,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // which is what the walk already left on the record, so `outputDetails` follows
         // the output rather than being reported beside an absent one.
         //
-        // `includedData` is not read here: it selects whether a state machine's
-        // KMS-ENCRYPTED DEFINITION is decrypted for the caller ("callers must have
-        // kms:Decrypt permission to decrypt the definition. Alternatively, you can
-        // call the API with includedData = METADATA_ONLY to get a successful response
-        // without the encrypted definition"), and this response declares no definition
-        // member, so both values answer the same body.
-        let included = Some(CloudWatchEventsExecutionDataDetails { included: true });
+        // A METADATA-ONLY call reports none of the sensitive data — `input`, `output`,
+        // `error` and `cause`, the members the state machine's key seals — and so no
+        // detail structure about data it did not report: that is what makes it a call
+        // that needs no grant to decrypt ("you can call the API with includedData =
+        // METADATA_ONLY to get a successful response without the encrypted
+        // definition").
+        let metadata_only = included_data.is_metadata_only();
+        let included =
+            (!metadata_only).then_some(CloudWatchEventsExecutionDataDetails { included: true });
+        let sensitive = |value: Option<String>| {
+            crate::state::sensitive_member(included_data, value)
+        };
         let response = StartSyncExecutionOutput {
             execution_arn: executed.arn.clone(),
             state_machine_arn: Some(executed.state_machine_arn.clone()),
@@ -548,11 +586,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             start_date: crate::state::to_date_time(executed.start_date),
             stop_date: crate::state::to_date_time(stopped),
             status: executed.status.clone(),
-            error: executed.error.clone(),
-            cause: executed.cause.clone(),
-            input: Some(executed.input.clone()),
+            error: sensitive(executed.error.clone()),
+            cause: sensitive(executed.cause.clone()),
+            input: sensitive(Some(executed.input.clone())),
             input_details: included.clone(),
-            output: executed.output.clone(),
+            output: sensitive(executed.output.clone()),
             output_details: executed.output.as_ref().and(included),
             trace_header: executed.trace_header.clone(),
             // What the run cost, in the increments Express Workflows are billed in:

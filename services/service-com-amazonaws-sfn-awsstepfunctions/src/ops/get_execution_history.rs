@@ -221,23 +221,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // "You can select whether execution data (input or output of a history event)
         // is returned. The default is true."
         let with_data = input.include_execution_data.unwrap_or(true);
-        // The data of an execution of a state machine encrypted with a CUSTOMER
-        // MANAGED KMS key is handed out only through that key, so unsealing it is
-        // decided before any of it is read — the key's own key state, and the caller's
-        // `kms:Decrypt` grant on it. A request that asks for no execution data
-        // decrypts nothing, so it needs neither. The decision is made with no store of
-        // this service locked.
-        if with_data {
-            if let Some(refusal) = crate::state::encryption::execution_read_denied(
-                &*self.engine,
-                ctx,
-                &endpoint_region,
-                &input.execution_arn,
-            ) {
-                return Err(
-                    crate::kms_key_refusal!(GetExecutionHistoryErrorModeled, refusal).into(),
-                );
-            }
+        // An execution of a state machine encrypted with a CUSTOMER MANAGED KMS key has
+        // its WHOLE history sealed under that key — every event's metadata as much as
+        // the payloads a caller can ask this read to leave out — so reporting any of it
+        // means unsealing it, and the key decides that first: its own key state, and the
+        // caller's `kms:Decrypt` grant on it. Asking for no execution data narrows what
+        // the events carry, not whether the history has to be opened to read them, so it
+        // is no way around the key. The decision is made with no store of this service
+        // locked.
+        if let Some(refusal) = crate::state::encryption::execution_read_denied(
+            &*self.engine,
+            ctx,
+            &endpoint_region,
+            &input.execution_arn,
+        ) {
+            return Err(crate::kms_key_refusal!(GetExecutionHistoryErrorModeled, refusal).into());
         }
 
         let mut store = state.lock();

@@ -352,6 +352,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .into(),
                 );
             }
+            // And the same gate over the KEY the configuration names, from the same
+            // place `CreateStateMachine` reads it: an update moves this state machine's
+            // definition and every later execution's data onto that key, so a key no
+            // cryptographic operation can use is an invalid encryption configuration and
+            // a caller KMS does not let mint a data key with it is refused the KMS
+            // refusal — before the state machine is touched, with no store of this
+            // service locked. The resource the key use is bound to is the state machine
+            // the request names, unqualified: a version is a snapshot of it rather than
+            // a resource of its own.
+            if let Some(refusal) = crate::state::encryption::state_machine_configuration_refusal(
+                &*self.engine,
+                ctx,
+                &endpoint_region,
+                Some(configuration),
+                &input.state_machine_arn,
+            ) {
+                return Err(
+                    crate::kms_configuration_refusal!(UpdateStateMachineErrorModeled, refusal)
+                        .into(),
+                );
+            }
         }
         if let Some(configuration) = input.logging_configuration.as_ref() {
             if let Some(why) = crate::state::invalid_logging_reason(configuration) {
@@ -402,6 +423,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let now = crate::state::now();
+        // The reference the update names the key by is resolved to the ARN KMS holds
+        // that key under, for the same reason a create resolves it: what the state
+        // machine is stored on, and what every read reports, is the key itself.
+        let encryption_configuration = crate::state::encryption::with_resolved_key(
+            &*self.engine,
+            &endpoint_region,
+            input.encryption_configuration,
+        );
         let mut store = state.lock();
         store.settle(now);
 
@@ -411,7 +440,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             role_arn: input.role_arn,
             logging_configuration: input.logging_configuration,
             tracing_configuration: input.tracing_configuration,
-            encryption_configuration: input.encryption_configuration,
+            encryption_configuration,
             revision_id: revision_id.clone(),
             now,
         };

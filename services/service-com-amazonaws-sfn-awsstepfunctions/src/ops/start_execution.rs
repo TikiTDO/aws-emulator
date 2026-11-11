@@ -447,11 +447,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::arn_region(&machine_arn);
 
         // An execution of a state machine on a CUSTOMER MANAGED key has its data
-        // sealed under that key, which Step Functions does as the state machine's
-        // EXECUTION ROLE — so a key no cryptographic operation can use, and a role
-        // whose policies do not allow minting a data key with it, each refuse the
-        // start with the modelled `Kms*` error and start nothing. The decision is
-        // taken with no store of this service locked, before the walk.
+        // sealed under that key, and TWO identities have to be allowed to seal it:
+        // the CALLER, whose `input` this call hands the service to keep, and the state
+        // machine's EXECUTION ROLE, which is the identity Step Functions does the run's
+        // own cryptographic work as. A key no cryptographic operation can use, and
+        // either identity being refused the data key, each refuse the start with the
+        // modelled `Kms*` error and start nothing. Both decisions are taken with no
+        // store of this service locked, before the walk.
+        if let Some(refusal) = crate::state::encryption::state_machine_seal_denied(
+            &*self.engine,
+            ctx,
+            &region,
+            &machine_arn,
+        ) {
+            return Err(crate::kms_key_refusal!(StartExecutionErrorModeled, refusal).into());
+        }
         if let Some(refusal) = crate::state::encryption::execution_start_denied(
             &*self.engine,
             &region,
