@@ -22,7 +22,11 @@
 //!   Redshift database is. A batch's statements run serially on that one
 //!   connection, which is what lets [`ExecutionMode::Transaction`] commit or
 //!   roll back all of them together. `DescribeTable` reads its catalog, so a
-//!   table's columns are the ones the engine really declares.
+//!   table's columns are the ones the engine really declares. What a caller
+//!   submits is REDSHIFT's SQL, which [`redshift_sql`] reads and [`functions`]
+//!   completes: the schemas a database holds are its own, and the databases a
+//!   warehouse holds are the catalogue this state keeps beside the engines it
+//!   opens for them.
 //! * [`Session`] — the connection a caller's later statements reuse. A submit
 //!   operation that asks to keep a session alive opens one; a statement that
 //!   names only its `SessionId` runs on the warehouse and database that session
@@ -31,17 +35,19 @@
 //!   connection target and a lifetime, not an isolated transaction of its own.
 //!
 //! The asynchronous status timeline is the ENGINE's, not a clock's: a statement
-//! is `SUBMITTED` when the submit operation returns, its execution runs on the
-//! blocking pool, and it reaches its terminal status when that execution really
-//! finishes — so a statement reports `SUBMITTED` for exactly as long as its work
-//! takes, a caller that cancels while it runs stops the engine itself, and
-//! nothing is ever reported for work that has not been done. A submission the
+//! is `SUBMITTED` when the submit operation returns, `PICKED` once its turn on
+//! its database is its, `STARTED` from the moment the engine is running it on
+//! the blocking pool, and it reaches its terminal status when that execution
+//! really finishes — so a statement reports STARTED for exactly as long as its
+//! work takes, a caller that polls a long query sees it running, a caller that
+//! cancels while it runs stops the engine itself, and nothing is ever reported
+//! for work that has not been done. A submission the
 //! caller asked to wait for ([`wait_budget`]) is awaited inside its own request;
 //! one it did not is left to finish on its own, which is what makes two
 //! concurrently submitted statements concurrent. A session's close is on the
 //! clock, through the `SessionTtl` it carries.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
@@ -55,6 +61,14 @@ pub mod warehouse;
 /// Resolving a submission's named `Parameters` against the placeholders the SQL
 /// it submits really references.
 pub mod sql_parameters;
+
+/// Reading a submitted statement as Amazon Redshift's dialect, and handing the
+/// engine what it has to run for it.
+pub mod redshift_sql;
+
+/// The Amazon Redshift SQL functions the engine does not carry, implemented and
+/// registered on every connection.
+pub mod functions;
 
 /// Page size `ListStatements` uses when the request leaves `MaxResults` at its
 /// modelled default of 0 — the modelled maximum, so an unparameterised call
@@ -246,6 +260,14 @@ const SQL_STEPS_PER_SECOND: u64 = 150_000_000;
 /// the timeout and the step budget.
 const PROGRESS_HANDLER_OPS: i32 = 1_000;
 
+/// How many statements the text of ONE submission may carry.
+///
+/// The text itself is bounded by the engine's own `SQLITE_LIMIT_SQL_LENGTH`, but
+/// that still admits very many statements, and each one is a prepare and a run
+/// of its own — so how many a submission may hold is bounded here, as every
+/// other thing a request can multiply is.
+pub const MAX_STATEMENTS_PER_SUBMISSION: usize = 100;
+
 /// Cap on the number of rows one submission's results retain.
 pub const MAX_RESULT_ROWS: usize = 100_000;
 
@@ -254,11 +276,28 @@ pub const MAX_RESULT_ROWS: usize = 100_000;
 /// constants is bounded by this even though it charges almost nothing in bytes.
 const MAX_RESULT_CELLS: usize = 2_000_000;
 
-/// Cap on the MATERIALISED size of one SUBMISSION's results, in bytes. Held
-/// low enough that [`MAX_RETAINED_STATEMENTS`] of them still fit in the
-/// emulator's own memory. A batch's statements share this one budget, so a
-/// request cannot retain more by submitting more statements.
-const MAX_RESULT_BYTES: usize = 4 * 1024 * 1024;
+/// Cap on the MATERIALISED size of one SUBMISSION's results, in bytes.
+///
+/// The Amazon Redshift Data API publishes a maximum query-result size of 100 MB,
+/// so a result up to that size is one the service itself serves and this
+/// emulator has to hold: a lower bound would refuse a query the real service
+/// answers. What it measures is what holding the result costs THIS process
+/// (every owned value, plus the per-row and per-cell overhead), charged against
+/// that ceiling, which is stricter than charging the engine's own value sizes.
+/// A batch's statements share this one budget, so a request cannot retain more
+/// by submitting more statements.
+const MAX_RESULT_BYTES: usize = 100 * 1024 * 1024;
+
+/// Cap on what the retained statement history holds in RESULTS at once, across
+/// every statement of it.
+///
+/// [`MAX_RESULT_BYTES`] bounds ONE submission, and this bounds their sum: the
+/// oldest statements whose execution has reported are dropped (with their
+/// results) until the history is inside it, so a caller repeating a large query
+/// cannot make the emulator hold result sets without limit. Larger than one
+/// submission's ceiling, so a submission that is inside its own bound is never
+/// refused by this one.
+const MAX_RETAINED_RESULT_BYTES: usize = 384 * 1024 * 1024;
 
 /// What one retained cell costs beyond its payload: the `Field` union itself.
 /// Charged against [`MAX_RESULT_BYTES`] so a NULL or integer cell is never free.
@@ -295,20 +334,44 @@ const MAX_BOUND_PARAMETERS: i32 = 999;
 
 /// `PRAGMA max_page_count`: the engine's own storage bound, in pages, applied to
 /// BOTH schemas a statement can write — `main` and `temp`. At SQLite's default
-/// 4 KiB page this is 16 MiB each, so a statement that builds a huge table, or a
-/// huge TEMP table, runs out of database rather than out of the host's memory.
-const MAX_DATABASE_PAGES: i64 = 4_096;
+/// 4 KiB page this is 256 MiB each, so a statement that builds a huge table, or
+/// a huge TEMP table, runs out of database rather than out of the host's memory.
+///
+/// It has to admit the tables a Data API caller really builds: the service's own
+/// documented ceiling on what ONE query may answer with is 100 MB, so a caller
+/// paging through a large result set has a table of that order to build first,
+/// and a bound below it would refuse work the real service serves. What bounds
+/// the TOTAL across the databases a caller can open is the engine's allocator
+/// ceiling ([`MAX_ENGINE_HEAP_BYTES`]), which is process-wide.
+const MAX_DATABASE_PAGES: i64 = 65_536;
 
 /// `PRAGMA hard_heap_limit`: the ceiling on what the SQL engine may allocate.
 /// The page counts above bound each schema; this bounds the allocator itself, so
 /// aggregate engine memory is capped however many databases are open and
-/// whatever a statement does inside one.
-const MAX_ENGINE_HEAP_BYTES: i64 = 256 * 1024 * 1024;
+/// whatever a statement does inside one. Above the per-schema bound, so one
+/// database may really fill the pages it is allowed, and far below it times
+/// [`MAX_OPEN_DATABASES`], so the databases a caller opens cannot add up to the
+/// host's memory.
+const MAX_ENGINE_HEAP_BYTES: i64 = 1024 * 1024 * 1024;
 
 /// How many distinct connection targets and database names may be open at once.
 /// The key is caller-chosen, so without this bound a caller could make the
 /// emulator open connections and handles without limit.
 pub const MAX_OPEN_DATABASES: usize = 16;
+
+/// How many schemas one database holds. Amazon Redshift publishes a quota of
+/// 9,900 schemas per database, which is what a `CREATE SCHEMA` past this reports
+/// — and it bounds a map a caller grows one statement at a time.
+pub const MAX_SCHEMAS_PER_DATABASE: usize = 9_900;
+
+/// How many databases the warehouses of this emulator hold between them because
+/// a caller CREATED them.
+///
+/// The catalogue is a map a caller grows one `CREATE DATABASE` at a time, under
+/// names it chooses, so it is bounded like every other map here. It is larger
+/// than [`MAX_OPEN_DATABASES`] because a database in the catalogue costs a name
+/// until a statement runs on it, and only then an engine.
+pub const MAX_CATALOGUE_DATABASES: usize = 64;
 
 /// How many submissions may be running or queued at once.
 ///
@@ -337,12 +400,10 @@ const DATABASE_IDLE_TIMEOUT: Duration = STATEMENT_RETENTION;
 /// per-statement caps above only bind if the number retained is bounded too.
 ///
 /// It counts STATEMENTS, not submissions: a batch counts as itself plus each of
-/// its statements, because each of those holds a result set of its own. Since
-/// one submission's results share a single [`MAX_RESULT_BYTES`] budget (see
-/// `Retention`), this caps the retained result data at
-/// `MAX_RETAINED_STATEMENTS` times [`MAX_RESULT_BYTES`] whatever mix of single
-/// statements and batches a caller sends. The oldest submissions are evicted
-/// first.
+/// its statements, because each of those holds a result set of its own. What
+/// those result sets add up to is bounded by [`MAX_RETAINED_RESULT_BYTES`],
+/// whatever mix of single statements and batches a caller sends. The oldest
+/// submissions are evicted first.
 pub const MAX_RETAINED_STATEMENTS: usize = 100;
 
 /// How long a statement stays readable. The Amazon Redshift Data API
@@ -384,16 +445,24 @@ const FIRST_PID: i64 = 1_000;
 /// The statement lifecycle states this emulator produces.
 ///
 /// The wire spellings are the ones `StatementStatusString` declares
-/// (`shared_types::STATEMENT_STATUS_STRING_VALUES`): ABORTED, FAILED, FINISHED,
-/// PICKED, STARTED, SUBMITTED. A statement here is SUBMITTED while its
-/// execution is queued or running and then FINISHED, FAILED or ABORTED; PICKED
-/// and STARTED describe a real cluster's scheduling queue, which this emulator
-/// does not model, so no statement ever reports them (a `ListStatements` filter
-/// naming one therefore matches nothing, which is correct rather than an error).
+/// (`shared_types::STATEMENT_STATUS_STRING_VALUES`), and the model documents
+/// what each one means: "PICKED - The query has been chosen to be run. STARTED -
+/// The query run has started. SUBMITTED - The query was submitted, but not yet
+/// processed." A statement here walks exactly that timeline, because its
+/// execution really does: it is SUBMITTED while it waits for its turn on its
+/// database, PICKED once that turn is its, STARTED from the moment the engine is
+/// running it, and then FINISHED, FAILED or ABORTED when that run ends. So a
+/// caller polling a long statement sees it RUNNING — which is what makes it
+/// cancellable — rather than one state covering queued and running alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatementStatus {
     /// The query was submitted, but not yet processed.
     Submitted,
+    /// The query has been chosen to be run: its turn on its database is its, and
+    /// the engine has not started it yet.
+    Picked,
+    /// The query run has started: the engine is running it now.
+    Started,
     /// The query has finished running.
     Finished,
     /// The query run failed.
@@ -443,6 +512,8 @@ impl StatementStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Submitted => "SUBMITTED",
+            Self::Picked => "PICKED",
+            Self::Started => "STARTED",
             Self::Finished => "FINISHED",
             Self::Failed => "FAILED",
             Self::Aborted => "ABORTED",
@@ -451,7 +522,7 @@ impl StatementStatus {
 
     /// Whether the statement has stopped moving on its own.
     pub fn is_terminal(self) -> bool {
-        !matches!(self, Self::Submitted)
+        matches!(self, Self::Finished | Self::Failed | Self::Aborted)
     }
 }
 
@@ -704,6 +775,9 @@ pub struct Statement {
     client_token: Option<String>,
     /// The rows the statement produced, if any.
     result: Option<ResultSet>,
+    /// What holding that result costs this process, in bytes: what
+    /// [`MAX_RETAINED_RESULT_BYTES`] bounds across the retained history.
+    retained_bytes: usize,
 }
 
 impl Statement {
@@ -738,17 +812,30 @@ impl Statement {
         self.result_rows = execution.result_rows;
         self.result_size = execution.result_size;
         self.result = execution.result;
+        self.retained_bytes = execution.retained_bytes;
         self.due_at = Some(now);
         self.completed_at = now_wall;
         self.interrupt = None;
         self.advance(now);
     }
 
+    /// What holding this statement's results costs this process: its own, plus
+    /// those of the statements of a batch, which are held on it.
+    fn retained_bytes(&self) -> usize {
+        self.sub_statements
+            .iter()
+            .fold(self.retained_bytes, |total, sub_statement| {
+                total.saturating_add(sub_statement.retained_bytes())
+            })
+    }
+
     /// The `Error` to report: the engine's own message, and only once the
-    /// statement has actually failed.
+    /// statement has stopped WITHOUT finishing — a statement that failed carries
+    /// the engine's reason, and a cancelled one the cancellation the caller
+    /// asked for.
     pub fn error(&self) -> Option<String> {
         match self.status {
-            StatementStatus::Failed => self.error.clone(),
+            StatementStatus::Failed | StatementStatus::Aborted => self.error.clone(),
             _ => None,
         }
     }
@@ -774,7 +861,7 @@ impl Statement {
     /// "null" marker) when it stopped without producing a count.
     pub fn result_rows(&self) -> i64 {
         match self.status {
-            StatementStatus::Submitted => 0,
+            StatementStatus::Submitted | StatementStatus::Picked | StatementStatus::Started => 0,
             StatementStatus::Finished => self.result_rows,
             StatementStatus::Failed | StatementStatus::Aborted => -1,
         }
@@ -783,7 +870,7 @@ impl Statement {
     /// `ResultSize`. Same shape as [`Statement::result_rows`].
     pub fn result_size(&self) -> i64 {
         match self.status {
-            StatementStatus::Submitted => 0,
+            StatementStatus::Submitted | StatementStatus::Picked | StatementStatus::Started => 0,
             StatementStatus::Finished => self.result_size,
             StatementStatus::Failed | StatementStatus::Aborted => -1,
         }
@@ -868,6 +955,20 @@ impl Statement {
         })
     }
 
+    /// Move this statement along its lifecycle to `reached`, which its own
+    /// execution has really got to: PICKED when the submission's turn on its
+    /// database is its, STARTED when the engine begins running it.
+    ///
+    /// Never moves a statement that has already stopped: a caller that cancelled
+    /// it, or an execution that has already reported, has the last word.
+    fn reach(&mut self, reached: StatementStatus, now_wall: SystemTime) {
+        if self.status.is_terminal() {
+            return;
+        }
+        self.status = reached;
+        self.updated_at = now_wall;
+    }
+
     /// Stop a still-running statement, as `CancelStatement` does. Returns false
     /// when the statement had already stopped, which is not a cancellation.
     ///
@@ -890,6 +991,15 @@ impl Statement {
         }
         self.status = StatementStatus::Aborted;
         self.terminal_status = StatementStatus::Aborted;
+        // The query was stopped at the caller's request, which is what the
+        // backend reports as the reason it stopped. A batch is not itself a
+        // query, so it carries the message of the statement it was running.
+        self.error = Some(
+            self.sub_statements
+                .iter()
+                .find_map(Statement::error)
+                .unwrap_or_else(|| cancelled_message(self.redshift_query_id)),
+        );
         self.due_at = Some(Instant::now());
         self.completed_at = now_wall;
         self.updated_at = now_wall;
@@ -901,6 +1011,7 @@ impl Statement {
         // The rows the engine produced are discarded: a cancelled statement has
         // no result set to fetch.
         self.result = None;
+        self.retained_bytes = 0;
         self.has_result_set = false;
         true
     }
@@ -909,6 +1020,16 @@ impl Statement {
 // ---------------------------------------------------------------------------
 // The SQL engine
 // ---------------------------------------------------------------------------
+
+/// The `Error` a statement stopped at the caller's request carries.
+///
+/// The query was running when it was stopped, so what is reported is the
+/// backend's own reason for stopping it, naming the query it stopped
+/// (`RedshiftQueryId`) — the id this service really minted for that query, never
+/// a number of its own.
+fn cancelled_message(redshift_query_id: i64) -> String {
+    format!("ERROR: Query ({redshift_query_id}) cancelled on user's request")
+}
 
 /// The bound ONE execution runs under: a deadline, a remaining step budget and
 /// an abandon flag, read by the connection's progress handler.
@@ -943,6 +1064,23 @@ impl ExecutionGuard {
     /// flag outlives [`ExecutionGuard::arm`] rather than being overwritten by it.
     fn abandon(&self) {
         self.abandoned.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether this execution must start no FURTHER work: it was abandoned, or
+    /// its wall-clock deadline has passed.
+    ///
+    /// Read between the statements of ONE submission, where the engine's
+    /// progress handler cannot be: a submission a caller cancelled runs no
+    /// further statement of its text, and one past its deadline starts none. It
+    /// spends no step budget, so asking costs the execution nothing.
+    fn stopped(&self) -> bool {
+        if self.abandoned.load(Ordering::SeqCst) {
+            return true;
+        }
+        self.deadline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|deadline| Instant::now() >= deadline)
     }
 
     /// Whether SQLite should abort the running statement. Called from the
@@ -1031,6 +1169,12 @@ impl Interrupt {
 #[derive(Debug)]
 pub struct Database {
     connection: rusqlite::Connection,
+    /// The schemas this database holds — its own catalogue, which the engine has
+    /// no notion of. `CREATE SCHEMA` adds one and `DROP SCHEMA` removes one, and
+    /// a table of a schema is held under its qualified name (see
+    /// [`redshift_sql::engine_table_name`]), so which schemas exist decides
+    /// which tables a qualified name reaches.
+    schemas: redshift_sql::SchemaSet,
 }
 
 impl Database {
@@ -1102,7 +1246,18 @@ impl Database {
         // introduces — is refused.
         connection.authorizer(Some(authorize))?;
 
-        Ok(Self { connection })
+        // The Redshift functions the engine does not carry, installed BEFORE
+        // any caller SQL reaches the connection so that a statement naming one
+        // of them finds an implementation rather than an unknown function.
+        functions::install(&connection)?;
+
+        Ok(Self {
+            connection,
+            // "PUBLIC schema … Every database created in Amazon Redshift has a
+            // schema named PUBLIC": a database holds it from the moment it
+            // exists, and a table nothing qualifies is a table of it.
+            schemas: [DEFAULT_SCHEMA.to_string()].into_iter().collect(),
+        })
     }
 }
 
@@ -1176,6 +1331,31 @@ pub struct Execution {
     result_rows: i64,
     result_size: i64,
     result: Option<ResultSet>,
+    /// What holding this statement's result costs this process, in bytes — what
+    /// [`MAX_RETAINED_RESULT_BYTES`] bounds across the whole retained history.
+    retained_bytes: usize,
+    /// What this statement does to the WAREHOUSE's catalogue of databases, for
+    /// the statements that act on it rather than on one database's contents, in
+    /// the order the submission's statements asked for it. Applied by
+    /// [`ComAmazonawsRedshiftdataRedshiftdataState::complete`], which is where
+    /// that catalogue is reachable.
+    catalogue: Vec<CatalogueEffect>,
+}
+
+/// What one statement does to the WAREHOUSE's catalogue of databases.
+///
+/// A `CREATE DATABASE` adds a database to the warehouse. That is not work for
+/// the engine the statement runs on — that engine IS one database — so the
+/// statement is carried out where the catalogue lives, under the state lock that
+/// holds it, and the statement reports what the catalogue answered. `DROP
+/// DATABASE` is NOT handled here: this emulator's catalogue holds the databases
+/// the warehouse's own control plane provisioned beside the ones callers
+/// created, and it cannot drop what it does not own, so the statement is left to
+/// the engine, which refuses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CatalogueEffect {
+    /// Add a database of this name to the warehouse.
+    CreateDatabase(String),
 }
 
 impl Execution {
@@ -1190,6 +1370,8 @@ impl Execution {
             result_rows: -1,
             result_size: -1,
             result: None,
+            retained_bytes: 0,
+            catalogue: Vec::new(),
         }
     }
 
@@ -1209,6 +1391,8 @@ impl Execution {
             result_rows: -1,
             result_size: -1,
             result: None,
+            retained_bytes: 0,
+            catalogue: Vec::new(),
         }
     }
 
@@ -1225,6 +1409,10 @@ impl Execution {
         self.result_rows = -1;
         self.result_size = -1;
         self.result = None;
+        self.retained_bytes = 0;
+        // Nothing this statement asked of the warehouse's catalogue happened
+        // either: the transaction that held it was never committed.
+        self.catalogue = Vec::new();
     }
 }
 
@@ -1283,7 +1471,11 @@ enum Binding {
 /// affected. SQLite reports a statement that returns no columns as having none,
 /// which is exactly the Data API's `HasResultSet=false` case.
 enum Produced {
-    Rows(ResultSet, i64),
+    /// The rows a query returned: the result set, the size the engine reports
+    /// for it (`ResultSize`), and what holding it costs this process — which is
+    /// what the retained-history bound measures.
+    Rows(ResultSet, i64, usize),
+    /// The rows a DML or DDL statement affected.
     Affected(i64),
 }
 
@@ -1295,6 +1487,10 @@ enum ExecutionFailure {
     /// statement FAILS rather than reporting a truncated result as a complete
     /// one: a caller must never be handed a short answer that looks whole.
     Bound(String),
+    /// A catalogue refused the statement: a schema that is already there, one
+    /// that is not, or one that still holds objects. The message is the one the
+    /// data warehouse states for that refusal.
+    Catalogue(String),
 }
 
 impl From<rusqlite::Error> for ExecutionFailure {
@@ -1308,7 +1504,7 @@ impl ExecutionFailure {
     fn message(&self) -> String {
         match self {
             Self::Engine(error) => scrub_paths(&error.to_string()),
-            Self::Bound(message) => message.clone(),
+            Self::Bound(message) | Self::Catalogue(message) => message.clone(),
         }
     }
 }
@@ -1320,6 +1516,19 @@ impl ExecutionFailure {
 pub fn unreported_executions(statements: usize) -> Vec<Execution> {
     (0..statements)
         .map(|_| Execution::failed(UNREPORTED_EXECUTION_MESSAGE.to_string()))
+        .collect()
+}
+
+/// One `Execution` per submitted statement for a submission that never reached
+/// an engine at all, each FAILED with `message`.
+///
+/// The submit operations' channel for a statement whose CONNECTION is what
+/// fails: a statement naming a database the warehouse does not hold is admitted
+/// like any other and then fails with the backend's own message for a database
+/// that is not there, rather than running against a database nobody created.
+pub fn connection_failures(statements: usize, message: &str) -> Vec<Execution> {
+    (0..statements)
+        .map(|_| Execution::failed(message.to_string()))
         .collect()
 }
 
@@ -1480,12 +1689,56 @@ fn run_sql(
 
     let started = Instant::now();
     guard.arm(timeout, step_budget(timeout));
-    let produced = execute_once(&database.connection, sql, parameters, binding, budget);
+    // The text ONE submission carries may hold several statements, which a data
+    // warehouse runs in order; each of them is read as Redshift SQL and run on
+    // its own ([`redshift_sql`]). The submission reports the LAST statement it
+    // ran, and stops at the first one that fails — the statements after it are
+    // not run, exactly as they are not on the real service.
+    let statements = redshift_sql::split_statements(sql);
+    // A submission of several statements binds each one the parameters IT
+    // references, as a batch's statements are bound: a parameter the first
+    // statement does not reference belongs to another statement of the same
+    // text, not to nothing.
+    let binding = if statements.len() > 1 {
+        Binding::Referenced
+    } else {
+        binding
+    };
+    let mut effects: Vec<CatalogueEffect> = Vec::new();
+    let mut produced = Ok(Produced::Affected(0));
+    if statements.len() > MAX_STATEMENTS_PER_SUBMISSION {
+        produced = Err(bound_reached(format!(
+            "the text of one submission may carry at most \
+             {MAX_STATEMENTS_PER_SUBMISSION} statements, and this one carries {}",
+            statements.len()
+        )));
+    }
+    for (index, statement) in statements.into_iter().enumerate() {
+        if produced.is_err() {
+            break;
+        }
+        // The bound belongs to the SUBMISSION, not to one statement of it: a
+        // text of many statements cannot outlast the deadline by running them
+        // one after another, and a submission a caller cancelled runs no
+        // further statement.
+        if index > 0 && guard.stopped() {
+            produced = Err(ExecutionFailure::Bound(format!(
+                "the statements left in this submission were not run: its execution reached this \
+                 emulator's bound of {} seconds",
+                timeout.as_secs()
+            )));
+            break;
+        }
+        produced = run_statement(database, statement, parameters, binding, budget, &mut effects);
+        if produced.is_err() {
+            break;
+        }
+    }
     guard.disarm();
     let duration_nanos = i64::try_from(started.elapsed().as_nanos()).unwrap_or(i64::MAX);
 
     match produced {
-        Ok(Produced::Rows(result, bytes)) => Execution {
+        Ok(Produced::Rows(result, bytes, retained)) => Execution {
             status: StatementStatus::Finished,
             error: None,
             duration_nanos,
@@ -1493,6 +1746,8 @@ fn run_sql(
             result_rows: i64::try_from(result.rows.len()).unwrap_or(i64::MAX),
             result_size: bytes,
             result: Some(result),
+            retained_bytes: retained,
+            catalogue: effects,
         },
         Ok(Produced::Affected(rows)) => Execution {
             status: StatementStatus::Finished,
@@ -1503,6 +1758,8 @@ fn run_sql(
             // No result set, so the size is the modelled null marker.
             result_size: -1,
             result: None,
+            retained_bytes: 0,
+            catalogue: effects,
         },
         Err(failure) => Execution {
             status: StatementStatus::Failed,
@@ -1512,8 +1769,176 @@ fn run_sql(
             result_rows: -1,
             result_size: -1,
             result: None,
+            retained_bytes: 0,
+            // Nothing a failed submission asked of a catalogue happened: it
+            // stopped at the statement that failed.
+            catalogue: Vec::new(),
         },
     }
+}
+
+/// Run ONE statement of a submission: read it as Redshift SQL and do what that
+/// reads as — run it on the engine, change the database's own catalogue of
+/// schemas, take a lock, or record what it asks of the warehouse's catalogue of
+/// databases in `effects` for the state store to carry out.
+fn run_statement(
+    database: &mut Database,
+    sql: &str,
+    parameters: &[SqlParameter],
+    binding: Binding,
+    budget: &mut Retention,
+    effects: &mut Vec<CatalogueEffect>,
+) -> Result<Produced, ExecutionFailure> {
+    match redshift_sql::translate(sql, &database.schemas) {
+        redshift_sql::Translated::Run(text) => {
+            execute_once(&database.connection, &text, parameters, binding, budget)
+        }
+        redshift_sql::Translated::CreateSchema {
+            name,
+            if_not_exists,
+        } => create_schema_on(database, &name, if_not_exists),
+        redshift_sql::Translated::DropSchema {
+            names,
+            if_exists,
+            cascade,
+        } => drop_schema_on(database, &names, if_exists, cascade),
+        redshift_sql::Translated::Lock { tables } => lock_tables(&database.connection, &tables),
+        redshift_sql::Translated::CreateDatabase { name } => {
+            effects.push(CatalogueEffect::CreateDatabase(name));
+            Ok(Produced::Affected(0))
+        }
+        // "BEGIN … There is no effect on any transaction that is already in
+        // progress", and a `COMMIT` or `ROLLBACK` outside a transaction is
+        // likewise answered with a warning rather than an error — so a control
+        // with nothing to do reports the statement as run, where the engine
+        // would refuse it.
+        redshift_sql::Translated::Transaction(control) => {
+            let in_transaction = !database.connection.is_autocommit();
+            if control.opens() == in_transaction {
+                return Ok(Produced::Affected(0));
+            }
+            database.connection.execute_batch(control.as_sql())?;
+            Ok(Produced::Affected(0))
+        }
+    }
+}
+
+/// `CREATE SCHEMA`: add a schema to the database's own catalogue.
+///
+/// The catalogue is what decides whether a qualified name reaches a schema's
+/// table, so creating one is a real change to this database and not a statement
+/// reported as run and then forgotten.
+fn create_schema_on(
+    database: &mut Database,
+    name: &str,
+    if_not_exists: bool,
+) -> Result<Produced, ExecutionFailure> {
+    if redshift_sql::holds_schema(&database.schemas, name) {
+        // "IF NOT EXISTS … the command makes no changes and returns a message
+        // that the schema exists, rather than terminating with an error."
+        if if_not_exists {
+            return Ok(Produced::Affected(0));
+        }
+        return Err(ExecutionFailure::Catalogue(format!(
+            "ERROR: schema \"{name}\" already exists"
+        )));
+    }
+    if database.schemas.len() >= MAX_SCHEMAS_PER_DATABASE {
+        return Err(ExecutionFailure::Catalogue(format!(
+            "ERROR: schema limit exceeded: a database holds at most \
+             {MAX_SCHEMAS_PER_DATABASE} schemas"
+        )));
+    }
+    database.schemas.insert(name.to_string());
+    Ok(Produced::Affected(0))
+}
+
+/// `DROP SCHEMA`: remove schemas from the database's catalogue.
+///
+/// `CASCADE` drops the tables each schema holds with it, which is what makes the
+/// schema's name reusable; the default `RESTRICT` refuses a schema that still
+/// holds objects, so nothing is dropped silently.
+fn drop_schema_on(
+    database: &mut Database,
+    names: &[String],
+    if_exists: bool,
+    cascade: bool,
+) -> Result<Produced, ExecutionFailure> {
+    for name in names {
+        if !redshift_sql::holds_schema(&database.schemas, name) {
+            if if_exists {
+                continue;
+            }
+            return Err(ExecutionFailure::Catalogue(format!(
+                "ERROR: schema \"{name}\" does not exist"
+            )));
+        }
+        let held = schema_objects(&database.connection, name)?;
+        if !held.is_empty() && !cascade {
+            return Err(ExecutionFailure::Catalogue(format!(
+                "ERROR: cannot drop schema {name} because other objects depend on it"
+            )));
+        }
+        for (object, kind) in held {
+            let quoted = object.replace('"', "\"\"");
+            let statement = if kind == "view" {
+                format!("DROP VIEW \"{quoted}\"")
+            } else {
+                format!("DROP TABLE \"{quoted}\"")
+            };
+            database.connection.execute_batch(&statement)?;
+        }
+        database
+            .schemas
+            .retain(|schema| !schema.eq_ignore_ascii_case(name));
+    }
+    Ok(Produced::Affected(0))
+}
+
+/// The tables and views one schema holds, by engine name and kind: the objects
+/// held under that schema's qualified prefix, read from the engine's own
+/// catalog.
+fn schema_objects(
+    connection: &rusqlite::Connection,
+    schema: &str,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let prefix = format!("{schema}.");
+    let mut listing = connection.prepare(
+        "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') \
+         AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )?;
+    let mut held: Vec<(String, String)> = Vec::new();
+    let mut rows = listing.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(0)?;
+        let kind: String = row.get(1)?;
+        // `get` answers None for an index that is not a character boundary, so a
+        // name whose bytes do not split there is simply not this schema's.
+        if name
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(&prefix))
+        {
+            held.push((name, kind));
+        }
+    }
+    Ok(held)
+}
+
+/// `LOCK`: take the locks the statement asks for.
+///
+/// Statements of one database run one at a time here (see [`QueueSlot`]), so the
+/// lock a statement asks for is already held for the whole of it; what is left
+/// is to resolve the relations it names, which the engine does — a `LOCK` on a
+/// table that is not there is an error on the real service too.
+fn lock_tables(
+    connection: &rusqlite::Connection,
+    tables: &[String],
+) -> Result<Produced, ExecutionFailure> {
+    for table in tables {
+        let quoted = table.replace('"', "\"\"");
+        let _resolved = connection.prepare(&format!("SELECT 1 FROM \"{quoted}\" LIMIT 0"))?;
+    }
+    Ok(Produced::Affected(0))
 }
 
 /// Redact anything path-shaped from an engine message before it goes on the
@@ -1686,6 +2111,7 @@ fn execute_once(
             rows: records,
         },
         i64::try_from(reported).unwrap_or(i64::MAX),
+        retained,
     ))
 }
 
@@ -2510,6 +2936,15 @@ pub struct ComAmazonawsRedshiftdataRedshiftdataState {
     client_tokens: HashMap<String, String>,
     /// The SQL engine, one database per connection target and database name.
     databases: HashMap<String, OpenDatabase>,
+    /// The databases each warehouse holds because a caller CREATED them, by
+    /// warehouse key ([`ConnectionTarget::key`]) and in name order.
+    ///
+    /// A warehouse's catalogue is the database its own control plane provisioned
+    /// it with plus these, and that catalogue is what a statement's `Database`
+    /// is resolved against — so it outlives the ENGINES in `databases`, which
+    /// are opened on first use and closed again when nothing has used them: a
+    /// database a caller created does not stop existing because it went idle.
+    catalogue: HashMap<String, BTreeSet<String>>,
     /// The next submission sequence number.
     next_seq: u64,
     /// The next session sequence number.
@@ -2541,6 +2976,38 @@ impl ComAmazonawsRedshiftdataRedshiftdataState {
             .values()
             .filter(|statement| !statement.status.is_terminal())
             .count()
+    }
+
+    /// Report that the submission's turn on its database is now its: the query
+    /// "has been chosen to be run", which is PICKED.
+    pub fn pick(&mut self, id: &str) {
+        if let Some(statement) = self.statements.get_mut(id) {
+            statement.reach(StatementStatus::Picked, SystemTime::now());
+        }
+    }
+
+    /// Report that the engine has begun running the submission: the query "run
+    /// has started", which is STARTED. A statement reports it for exactly as
+    /// long as the engine is really running its work, which is what makes a long
+    /// query observable as running — and cancellable — rather than only
+    /// reported once it has stopped.
+    pub fn start(&mut self, id: &str) {
+        if let Some(statement) = self.statements.get_mut(id) {
+            statement.reach(StatementStatus::Started, SystemTime::now());
+        }
+    }
+
+    /// A `RedshiftPid` for a connection that is not an open database of this
+    /// emulator: the backend a statement whose connection FAILS was answered
+    /// by. Drawn from the same sequence every open database draws from, so no
+    /// two connections ever report one pid.
+    pub fn mint_pid(&mut self) -> i64 {
+        if self.next_pid == 0 {
+            self.next_pid = FIRST_PID;
+        }
+        let pid = self.next_pid;
+        self.next_pid += 1;
+        pid
     }
 
     /// The statement with this `Id`.
@@ -2794,10 +3261,122 @@ impl ComAmazonawsRedshiftdataRedshiftdataState {
     /// database would add one to the warehouse every later caller then found
     /// there.
     pub fn database_names(&self, target: &ConnectionTarget) -> Vec<String> {
-        self.warehouse_handles(target)
+        let mut names: Vec<String> = self
+            .warehouse_handles(target)
             .into_iter()
             .map(|(database, _handle)| database)
+            .collect();
+        names.extend(
+            self.catalogue
+                .get(&target.key())
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Record the databases the warehouse's own control plane reports it was
+    /// provisioned with, so this service's catalogue of that warehouse names
+    /// every database of it: the ones it was created with and the ones callers
+    /// have created since.
+    ///
+    /// Best effort by design: a catalogue already at
+    /// [`MAX_CATALOGUE_DATABASES`] records nothing more, and a provisioned
+    /// database is a database of the warehouse whether or not it was recorded —
+    /// its owner is what says so.
+    pub fn hold_databases(&mut self, target: &ConnectionTarget, provisioned: &[String]) {
+        for database in provisioned {
+            if self.holds_database(target, database) || self.catalogued() >= MAX_CATALOGUE_DATABASES
+            {
+                continue;
+            }
+            self.catalogue
+                .entry(target.key())
+                .or_default()
+                .insert(database.clone());
+        }
+    }
+
+    /// Whether this service's catalogue of `target` names a database of this
+    /// name: one it holds an engine for, or one its catalogue records.
+    pub fn holds_database(&self, target: &ConnectionTarget, database: &str) -> bool {
+        self.databases
+            .contains_key(&target.database_key(database))
+            || self
+                .catalogue
+                .get(&target.key())
+                .is_some_and(|names| names.contains(database))
+    }
+
+    /// How many databases the catalogue names across every warehouse — what
+    /// [`MAX_CATALOGUE_DATABASES`] bounds.
+    fn catalogued(&self) -> usize {
+        self.catalogue.values().map(BTreeSet::len).sum()
+    }
+
+    /// Carry out what each of a submission's statements asked of the
+    /// WAREHOUSE's catalogue of databases, and report each statement as the
+    /// catalogue answered it.
+    ///
+    /// Applied HERE, under the state lock that holds the catalogue, because the
+    /// engine a statement runs on is one database and has no notion of the
+    /// warehouse's others — and applied before the statement's outcome is
+    /// materialised, so no caller reads a `CREATE DATABASE` as FINISHED before
+    /// the database it creates is in the catalogue.
+    fn apply_catalogue(
+        &mut self,
+        target: &ConnectionTarget,
+        executions: Vec<Execution>,
+    ) -> Vec<Execution> {
+        executions
+            .into_iter()
+            .map(|mut execution| {
+                let effects = std::mem::take(&mut execution.catalogue);
+                if execution.status != StatementStatus::Finished {
+                    return execution;
+                }
+                for effect in &effects {
+                    if let Err(message) = self.apply_effect(target, effect) {
+                        let mut refused = Execution::failed(message);
+                        // The statement ran for as long as it ran, whatever the
+                        // catalogue then answered.
+                        refused.duration_nanos = execution.duration_nanos;
+                        return refused;
+                    }
+                }
+                execution
+            })
             .collect()
+    }
+
+    /// Carry out ONE catalogue effect, or report the message the data warehouse
+    /// refuses it with.
+    fn apply_effect(
+        &mut self,
+        target: &ConnectionTarget,
+        effect: &CatalogueEffect,
+    ) -> Result<(), String> {
+        match effect {
+            CatalogueEffect::CreateDatabase(name) => {
+                if self.holds_database(target, name) {
+                    return Err(format!("ERROR: database \"{name}\" already exists"));
+                }
+                if self.catalogued() >= MAX_CATALOGUE_DATABASES {
+                    return Err(format!(
+                        "ERROR: database limit exceeded: this emulator's warehouses hold at most \
+                         {MAX_CATALOGUE_DATABASES} databases between them"
+                    ));
+                }
+                self.catalogue
+                    .entry(target.key())
+                    .or_default()
+                    .insert(name.clone());
+                Ok(())
+            }
+        }
     }
 
     /// Resolve the database a submission will run on, opening and confining it on
@@ -2833,13 +3412,9 @@ impl ComAmazonawsRedshiftdataRedshiftdataState {
         if self.databases.len() >= MAX_OPEN_DATABASES {
             return Err(NoDatabase::TooManyOpen(MAX_OPEN_DATABASES));
         }
-        if self.next_pid == 0 {
-            self.next_pid = FIRST_PID;
-        }
-        let pid = self.next_pid;
         let opened = Database::open()
             .map_err(|error| NoDatabase::EngineUnavailable(scrub_paths(&error.to_string())))?;
-        self.next_pid += 1;
+        let pid = self.mint_pid();
         let handle: DatabaseHandle = std::sync::Arc::new(Mutex::new(opened));
         let mut entry = OpenDatabase {
             handle: std::sync::Arc::clone(&handle),
@@ -2917,11 +3492,7 @@ impl ComAmazonawsRedshiftdataRedshiftdataState {
         let now = SystemTime::now();
         self.databases.retain(|_, open| &open.target != target);
         for (database, engine) in restored {
-            if self.next_pid == 0 {
-                self.next_pid = FIRST_PID;
-            }
-            let pid = self.next_pid;
-            self.next_pid += 1;
+            let pid = self.mint_pid();
             self.databases.insert(
                 target.database_key(&database),
                 OpenDatabase {
@@ -3044,6 +3615,18 @@ impl ComAmazonawsRedshiftdataRedshiftdataState {
     /// the engine was abandoned, so whatever it managed to report is not an
     /// outcome the caller may read as this statement's.
     pub fn complete(&mut self, id: &str, executions: Vec<Execution>) {
+        let Some(target) = self
+            .statements
+            .get(id)
+            .filter(|statement| !statement.status.is_terminal())
+            .map(|statement| statement.target.clone())
+        else {
+            return;
+        };
+        // What a statement asked of the warehouse's catalogue is carried out
+        // before its outcome is materialised, and the statement reports what the
+        // catalogue answered.
+        let executions = self.apply_catalogue(&target, executions);
         let Some(statement) = self.statements.get_mut(id) else {
             return;
         };
@@ -3080,6 +3663,11 @@ impl ComAmazonawsRedshiftdataRedshiftdataState {
                 .unwrap_or_else(Execution::never_ran);
             statement.apply(execution, now, now_wall);
         }
+
+        // The result this submission retains is part of what the history holds,
+        // so the history is brought back inside its bounds as the outcome lands
+        // rather than only when something else is submitted.
+        self.evict_expired_statements(now_wall);
     }
 
     /// Drop the statements this service no longer retains: those past
@@ -3120,6 +3708,36 @@ impl ComAmazonawsRedshiftdataRedshiftdataState {
             };
             self.forget(&oldest);
         }
+
+        // And the RESULTS the history holds: a caller repeating a large query
+        // would otherwise make the emulator hold result sets up to the number of
+        // statements it retains times what one of them may retain, so the oldest
+        // reported submissions are dropped until the history is inside the
+        // bound.
+        while self.retained_result_bytes() > MAX_RETAINED_RESULT_BYTES {
+            let Some(oldest) = self
+                .statements
+                .values()
+                .filter(|statement| {
+                    statement.status.is_terminal() && statement.retained_bytes() > 0
+                })
+                .min_by_key(|statement| statement.seq)
+                .map(|statement| statement.id.clone())
+            else {
+                break;
+            };
+            self.forget(&oldest);
+        }
+    }
+
+    /// What holding the retained statements' results costs this process — what
+    /// [`MAX_RETAINED_RESULT_BYTES`] bounds.
+    fn retained_result_bytes(&self) -> usize {
+        self.statements
+            .values()
+            .fold(0_usize, |total, statement| {
+                total.saturating_add(statement.retained_bytes())
+            })
     }
 
     /// How many statements the history holds: every retained submission, plus
@@ -3211,6 +3829,7 @@ fn build_statement(shared: &Shared<'_>, recorded: Recorded) -> Statement {
         session_id: shared.session_id.clone(),
         client_token: recorded.client_token,
         result: None,
+        retained_bytes: 0,
         is_batch: recorded.is_batch,
         execution_mode: submission.kind.execution_mode(),
         sub_statements: recorded.sub_statements,
@@ -3250,6 +3869,12 @@ fn batch_outcome(executions: &[Execution]) -> Execution {
         result_rows: -1,
         result_size: -1,
         result: None,
+        // A batch holds no result of its own either: its statements each hold
+        // theirs, and each of those is charged for itself.
+        retained_bytes: 0,
+        // A batch does nothing of its own to a catalogue either: each statement
+        // of it carries its own effect, and each one is applied for itself.
+        catalogue: Vec::new(),
     }
 }
 
@@ -3724,6 +4349,10 @@ fn copy_database(
             }
         }
     }
+    // The schemas the source holds are the source's catalogue, and the copy is
+    // the same database: a captured warehouse restores the schemas its tables
+    // are held under, not only the tables.
+    destination.schemas = source.schemas.clone();
     Ok(i64::from(backup.progress().pagecount.max(0)))
 }
 

@@ -35,6 +35,12 @@ mod list_databases;
 #[path = "all/numeric_bounds.rs"]
 mod numeric_bounds;
 
+#[path = "all/probe.rs"]
+mod probe;
+
+#[path = "all/redshift_dialect.rs"]
+mod redshift_dialect;
+
 #[path = "all/refusal_wording.rs"]
 mod refusal_wording;
 
@@ -43,6 +49,9 @@ mod state_roundtrip;
 
 #[path = "all/statement_lifecycle.rs"]
 mod statement_lifecycle;
+
+#[path = "all/statement_run_states.rs"]
+mod statement_run_states;
 
 #[path = "all/statement_submission_surface.rs"]
 mod statement_submission_surface;

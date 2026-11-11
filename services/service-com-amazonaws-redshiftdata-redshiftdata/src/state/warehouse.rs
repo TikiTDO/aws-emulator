@@ -90,6 +90,34 @@ impl TargetFacts {
             .iter()
             .any(|provisioned| provisioned == database)
     }
+
+    /// Whether the owner's answer DECIDES that the warehouse has no database of
+    /// this name — the question a statement's `Database` is resolved against.
+    ///
+    /// Only an owner that answered can decide it: a target whose owner could not
+    /// be asked, and one whose owner reported no database at all, leaves the
+    /// catalogue UNKNOWN, and a statement is admitted rather than failed on the
+    /// strength of a peer that did not answer. `held` are the databases this
+    /// service's own catalogue of the warehouse names
+    /// ([`ComAmazonawsRedshiftdataRedshiftdataState::database_names`]), which are
+    /// databases of it too: a caller that created one may run statements in it.
+    pub fn decides_database_absent(&self, held: &[String], database: &str) -> bool {
+        self.resolution == TargetResolution::Exists
+            && !self.provisioned_databases.is_empty()
+            && !catalogue_databases(held.to_vec(), &self.provisioned_databases)
+                .iter()
+                .any(|name| name == database)
+    }
+}
+
+/// The message a connection to a database the warehouse has none of fails with.
+///
+/// The Data API accepts the submission and reports this as the statement's
+/// `Error`: the backend the statement was handed to is what answers, and it
+/// answers with the fatal line it ends the connection attempt on, naming the
+/// database the request asked for.
+pub fn absent_database_message(database: &str) -> String {
+    format!("FATAL: database \"{database}\" does not exist")
 }
 
 /// Every database of one warehouse the Data API's catalogue holds: the databases

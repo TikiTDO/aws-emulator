@@ -4,10 +4,13 @@
 //! Submits one SQL statement to the database the request names and answers with the
 //! statement's `Id`. The statement runs on this emulator's in-process SQL engine (see
 //! [`crate::state`]); the Data API's own lifecycle is asynchronous, so the response
-//! reports `SUBMITTED` and the statement reaches its terminal status when its
-//! execution finishes, whatever the caller does with this response. A caller that
-//! supplies `WaitTimeSeconds` waits for that execution here, up to the wait it
-//! asked for.
+//! reports the state the statement has reached — `SUBMITTED` when nothing waited for
+//! it — and the statement then walks `PICKED` and `STARTED` to its terminal status as
+//! its execution really does, whatever the caller does with this response. A caller
+//! that supplies `WaitTimeSeconds` waits for that execution here, up to the wait it
+//! asked for. A `Database` the warehouse holds none of is NOT a synchronous refusal:
+//! the submission is accepted and the statement then fails with the backend's own
+//! fatal line, because the connection it needs cannot be made.
 //!
 //! ## Shape of an operation
 //!
@@ -316,11 +319,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // endpoint to run on, whatever the request asks for. A target the owner
         // could not be asked about is UNDECIDED, and is admitted rather than
         // refused on the strength of a peer that did not answer.
-        if crate::state::warehouse::resolve_target(ctx, &connection.target).await
-            == crate::state::warehouse::TargetResolution::Absent
-        {
+        //
+        // The same answer carries the databases that warehouse holds, which is
+        // what the statement's `Database` is resolved against below.
+        let warehouse = crate::state::warehouse::describe_target(ctx, &connection.target).await;
+        if warehouse.resolution == crate::state::warehouse::TargetResolution::Absent {
             return Err(validation(ABSENT_ENDPOINT_MESSAGE));
         }
+
+        // A `Database` is NOT a synchronous rejection: the Data API accepts the
+        // submission and the connection to the database is made when the
+        // statement runs, so a database the warehouse has none of is a statement
+        // that FAILS with the backend's own fatal line. Decided here, where the
+        // owner's answer is, and carried out by the statement's own execution.
+        let absent_database = {
+            let mut store = state.lock();
+            // What the owner reports the warehouse holds belongs in this
+            // service's catalogue of it, beside the databases callers created.
+            store.hold_databases(&connection.target, &warehouse.provisioned_databases);
+            warehouse.decides_database_absent(
+                &store.database_names(&connection.target),
+                &connection.database,
+            )
+        };
+        // The database the statement connects to, read before the submission
+        // takes it, so a connection that fails can name it.
+        let connection_database = connection.database.clone();
 
         let client_token = non_empty(input.client_token.as_ref());
 
@@ -395,7 +419,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // happens to this request — and the SQL runs on a blocking pool with
         // only its own database's lock held, so a slow statement starves no
         // async worker and serialises no other caller.
-        let (handle, mut slot, id) = {
+        let (reserved, id) = {
             let mut store = state.lock();
             store.materialise_due_transitions();
             // Every accepted submission runs independently of this request, so
@@ -417,41 +441,53 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .into(),
                 );
             }
-            let (handle, pid, slot) =
-                match store.reserve_database(&submission.target, &submission.database) {
-                    Ok(reserved) => reserved,
-                    // A capacity limit of this emulator, not a malformed
-                    // request, so it is answered with the modelled capacity
-                    // error rather than a ValidationException that would tell
-                    // the client its ClusterIdentifier or Database was wrong.
-                    Err(NoDatabase::TooManyOpen(limit)) => {
-                        return Err(
-                            ExecuteStatementErrorModeled::ActiveStatementsExceededException(
-                                ActiveStatementsExceededException {
-                                    message: Some(format!(
-                                        "this emulator holds at most {limit} databases at once; \
-                                         no further ClusterIdentifier/WorkgroupName and Database \
-                                         combination can be opened"
-                                    )),
+            // A statement whose database the warehouse has none of gets no
+            // engine: opening one would ADD that database to the warehouse,
+            // which is exactly what the caller's typo must not do. It is
+            // recorded against a connection of its own, which is the backend
+            // that answers it with the fatal line.
+            if absent_database {
+                let pid = store.mint_pid();
+                let id = store.record_pending(submission, pid, bound.interrupt());
+                (None, id)
+            } else {
+                let (handle, pid, slot) =
+                    match store.reserve_database(&submission.target, &submission.database) {
+                        Ok(reserved) => reserved,
+                        // A capacity limit of this emulator, not a malformed
+                        // request, so it is answered with the modelled capacity
+                        // error rather than a ValidationException that would tell
+                        // the client its ClusterIdentifier or Database was wrong.
+                        Err(NoDatabase::TooManyOpen(limit)) => {
+                            return Err(
+                                ExecuteStatementErrorModeled::ActiveStatementsExceededException(
+                                    ActiveStatementsExceededException {
+                                        message: Some(format!(
+                                            "this emulator holds at most {limit} databases at \
+                                             once; no further \
+                                             ClusterIdentifier/WorkgroupName and Database \
+                                             combination can be opened"
+                                        )),
+                                    },
+                                )
+                                .into(),
+                            )
+                        }
+                        Err(NoDatabase::EngineUnavailable(reason)) => {
+                            return Err(ExecuteStatementErrorModeled::InternalServerException(
+                                InternalServerException {
+                                    message: format!(
+                                        "the SQL engine could not open the database for this \
+                                         statement: {reason}"
+                                    ),
                                 },
                             )
-                            .into(),
-                        )
-                    }
-                    Err(NoDatabase::EngineUnavailable(reason)) => {
-                        return Err(ExecuteStatementErrorModeled::InternalServerException(
-                            InternalServerException {
-                                message: format!(
-                                    "the SQL engine could not open the database for this \
-                                     statement: {reason}"
-                                ),
-                            },
-                        )
-                        .into())
-                    }
-                };
-            let id = store.record_pending(submission, pid, bound.interrupt());
-            (handle, slot, id)
+                            .into())
+                        }
+                    };
+                let id = store.record_pending(submission, pid, bound.interrupt());
+                (Some((handle, slot)), id)
+            }
         };
 
         let sql = input.sql.clone();
@@ -463,9 +499,38 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // dropping the queue slot at the end hands the database on.
         let engine = ::std::sync::Arc::clone(&self.engine);
         let recorded = id.clone();
+        let absent = connection_database.clone();
         let execution = tokio::spawn(async move {
+            let Some((handle, mut slot)) = reserved else {
+                // No connection was ever made, so nothing ran: the statement
+                // fails with what the backend answers a connection to a
+                // database that is not there.
+                if let Some(state) = crate::state::service_state(&*engine) {
+                    state.lock().complete(
+                        &recorded,
+                        crate::state::connection_failures(
+                            1,
+                            &crate::state::warehouse::absent_database_message(&absent),
+                        ),
+                    );
+                }
+                return;
+            };
             slot.wait_for_turn().await;
+            // The submission's turn on its database is now its: the query "has
+            // been chosen to be run".
+            if let Some(state) = crate::state::service_state(&*engine) {
+                state.lock().pick(&recorded);
+            }
+            let running = ::std::sync::Arc::clone(&engine);
+            let started = recorded.clone();
             let produced = tokio::task::spawn_blocking(move || {
+                // STARTED from here: the engine is about to run this
+                // statement's work, and it reports STARTED for as long as that
+                // really takes.
+                if let Some(state) = crate::state::service_state(&*running) {
+                    state.lock().start(&started);
+                }
                 vec![crate::state::run_on(
                     &handle,
                     &sql,

@@ -27,9 +27,9 @@ use service_com_amazonaws_redshiftdata_redshiftdata::state::{
 
 // The harness every suite in this crate drives the emulator through.
 use super::emulator::{
-    error_code, flag, id_of, list, number, timestamp, wait_for_terminal, Emulator, ABSENT_ID,
-    LONGER_THAN_A_QUICK_STATEMENT, RUN_TIME_LOWER_BOUND_SECONDS, SLOW_SQL, UNBOUNDED_SQL,
-    WAIT_SECONDS,
+    error_code, flag, id_of, list, number, timestamp, wait_for_terminal, wait_until_started,
+    Emulator, ABSENT_ID, LONGER_THAN_A_QUICK_STATEMENT, RUN_TIME_LOWER_BOUND_SECONDS, SLOW_SQL,
+    UNBOUNDED_SQL, WAIT_SECONDS,
 };
 
 // ---------------------------------------------------------------------------
@@ -536,9 +536,10 @@ async fn an_inferred_integer_column_widens_to_hold_every_value_it_carries() {
 // The asynchronous lifecycle
 // ---------------------------------------------------------------------------
 
-/// A submitted statement is `SUBMITTED` while its execution runs and reports its
-/// terminal status once that execution has finished; nothing about the result is
-/// reported before then.
+/// A submitted statement walks the lifecycle its execution really walks —
+/// `SUBMITTED` when it is answered, `STARTED` while the engine runs it — and
+/// reports its terminal status once that execution has finished; nothing about
+/// the result is reported before then.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_submitted_statement_reaches_its_terminal_status_when_its_execution_does() {
     let emulator = Emulator::new();
@@ -558,9 +559,11 @@ async fn a_submitted_statement_reaches_its_terminal_status_when_its_execution_do
         )
         .await;
     let quick_id = id_of(&quick);
-    assert_eq!(
-        quick["Status"], "SUBMITTED",
-        "a statement nobody waited for is answered as submitted: {quick}"
+    assert!(
+        ["SUBMITTED", "PICKED", "STARTED", "FINISHED"]
+            .contains(&quick["Status"].as_str().unwrap_or("")),
+        "a statement nobody waited for is answered with the state its execution has reached, \
+         which is one of the states of a statement that was really submitted: {quick}"
     );
     assert!(
         quick["CreatedAt"].is_number(),
@@ -613,7 +616,8 @@ async fn a_submitted_statement_reaches_its_terminal_status_when_its_execution_do
     );
 
     // And a statement that takes real time is observable WHILE it runs: it
-    // reports SUBMITTED, nothing about its result, and no rows to fetch.
+    // reports STARTED — the query run has started — nothing about its result,
+    // and no rows to fetch.
     let submitted = emulator
         .ok(
             "ExecuteStatement",
@@ -627,15 +631,16 @@ async fn a_submitted_statement_reaches_its_terminal_status_when_its_execution_do
         )
         .await;
     let id = id_of(&submitted);
-    assert_eq!(
-        submitted["Status"], "SUBMITTED",
-        "a statement nobody waited for must still be SUBMITTED: {submitted}"
+    assert!(
+        ["SUBMITTED", "PICKED", "STARTED"].contains(&submitted["Status"].as_str().unwrap_or("")),
+        "a statement nobody waited for is answered with the state it has reached, which is not \
+         a terminal one: {submitted}"
     );
 
-    let pending = emulator.ok("DescribeStatement", &json!({"Id": id})).await;
+    let pending = wait_until_started(&emulator, "a statement that takes real time", &id).await;
     assert_eq!(
-        pending["Status"], "SUBMITTED",
-        "a statement whose execution is still running is SUBMITTED: {pending}"
+        pending["Status"], "STARTED",
+        "a statement whose execution the engine is running is STARTED: {pending}"
     );
     assert_eq!(
         number(&pending, "Duration"),
@@ -1007,7 +1012,7 @@ async fn list_statements_honours_each_filter() {
             expected: &[],
         },
         FilterCase {
-            label: "a status a real cluster passes through but this emulator does not report",
+            label: "a status every statement in this table has already left",
             request: || json!({"Status": "STARTED"}),
             expected: &[],
         },
@@ -1911,10 +1916,12 @@ async fn statements_outside_the_engine_s_bounds_are_interrupted_or_refused() {
             ),
         ),
         (
-            // The engine's storage bound on the `main` schema.
+            // The engine's storage bound on the `main` schema. Each row carries
+            // a value just under the engine's own per-value ceiling, so the
+            // bound is reached in few rows rather than many.
             "a table larger than the database may hold",
             "CREATE TABLE bulk AS WITH RECURSIVE counter(x) AS (SELECT 1 UNION ALL \
-             SELECT x + 1 FROM counter WHERE x < 20000) SELECT x, randomblob(2000) AS pad \
+             SELECT x + 1 FROM counter WHERE x < 400) SELECT x, randomblob(900000) AS pad \
              FROM counter"
                 .to_string(),
         ),
@@ -1923,7 +1930,7 @@ async fn statements_outside_the_engine_s_bounds_are_interrupted_or_refused() {
             // puts on the process heap and which a `main`-only bound would miss.
             "a temporary table larger than the database may hold",
             "CREATE TEMP TABLE bulk AS WITH RECURSIVE counter(x) AS (SELECT 1 UNION ALL \
-             SELECT x + 1 FROM counter WHERE x < 20000) SELECT x, randomblob(2000) AS pad \
+             SELECT x + 1 FROM counter WHERE x < 400) SELECT x, randomblob(900000) AS pad \
              FROM counter"
                 .to_string(),
         ),

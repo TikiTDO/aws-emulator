@@ -339,12 +339,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Every statement of the batch runs on an ENDPOINT, so the target this
         // request selected is resolved against the service that owns it before
         // the batch is admitted — the same gate `ExecuteStatement` applies,
-        // because both operations take the same target selection.
-        if crate::state::warehouse::resolve_target(ctx, &connection.target).await
-            == crate::state::warehouse::TargetResolution::Absent
-        {
+        // because both operations take the same target selection. The same
+        // answer carries the databases that warehouse holds, which is what the
+        // batch's `Database` is resolved against.
+        let warehouse = crate::state::warehouse::describe_target(ctx, &connection.target).await;
+        if warehouse.resolution == crate::state::warehouse::TargetResolution::Absent {
             return Err(validation(ABSENT_ENDPOINT_MESSAGE));
         }
+
+        // A `Database` the warehouse has none of is not a synchronous rejection
+        // here either: the batch is accepted and every statement of it then
+        // fails with the backend's own fatal line, because the connection the
+        // whole batch runs on is what could not be made.
+        let absent_database = {
+            let mut store = state.lock();
+            store.hold_databases(&connection.target, &warehouse.provisioned_databases);
+            warehouse.decides_database_absent(
+                &store.database_names(&connection.target),
+                &connection.database,
+            )
+        };
+        // The database the batch connects to, read before the submission takes
+        // it, so a connection that fails can name it.
+        let connection_database = connection.database.clone();
 
         // "If set to TRANSACTION (the default), all SQL statements are run as a
         // single transaction". A value outside the modelled set names no mode.
@@ -445,7 +462,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // on that database, so the submissions of one database run one at a
         // time and in submission order — which is what serialises two
         // transactions contending for the same row.
-        let (handle, mut slot, id) = {
+        let (reserved, id) = {
             let mut store = state.lock();
             store.materialise_due_transitions();
             // Every accepted submission runs independently of this request, so
@@ -467,41 +484,53 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .into(),
                 );
             }
-            let (handle, pid, slot) =
-                match store.reserve_database(&submission.target, &submission.database) {
-                    Ok(reserved) => reserved,
-                    // A capacity limit of this emulator, not a malformed
-                    // request, so it is answered with the modelled capacity
-                    // error rather than a ValidationException that would tell
-                    // the client its ClusterIdentifier or Database was wrong.
-                    Err(NoDatabase::TooManyOpen(limit)) => {
-                        return Err(
-                            BatchExecuteStatementErrorModeled::ActiveStatementsExceededException(
-                                ActiveStatementsExceededException {
-                                    message: Some(format!(
-                                        "this emulator holds at most {limit} databases at once; \
-                                         no further ClusterIdentifier/WorkgroupName and Database \
-                                         combination can be opened"
-                                    )),
-                                },
+            // A batch whose database the warehouse has none of gets no engine,
+            // for the same reason one statement does not: opening one would add
+            // that database to the warehouse.
+            if absent_database {
+                let pid = store.mint_pid();
+                let id = store.record_pending(submission, pid, bound.interrupt());
+                (None, id)
+            } else {
+                let (handle, pid, slot) =
+                    match store.reserve_database(&submission.target, &submission.database) {
+                        Ok(reserved) => reserved,
+                        // A capacity limit of this emulator, not a malformed
+                        // request, so it is answered with the modelled capacity
+                        // error rather than a ValidationException that would tell
+                        // the client its ClusterIdentifier or Database was wrong.
+                        Err(NoDatabase::TooManyOpen(limit)) => {
+                            return Err(
+                                BatchExecuteStatementErrorModeled::ActiveStatementsExceededException(
+                                    ActiveStatementsExceededException {
+                                        message: Some(format!(
+                                            "this emulator holds at most {limit} databases at \
+                                             once; no further \
+                                             ClusterIdentifier/WorkgroupName and Database \
+                                             combination can be opened"
+                                        )),
+                                    },
+                                )
+                                .into(),
                             )
-                            .into(),
-                        )
-                    }
-                    Err(NoDatabase::EngineUnavailable(reason)) => {
-                        return Err(BatchExecuteStatementErrorModeled::InternalServerException(
-                            InternalServerException {
-                                message: format!(
-                                    "the SQL engine could not open the database for this batch: \
-                                     {reason}"
-                                ),
-                            },
-                        )
-                        .into())
-                    }
-                };
-            let id = store.record_pending(submission, pid, bound.interrupt());
-            (handle, slot, id)
+                        }
+                        Err(NoDatabase::EngineUnavailable(reason)) => {
+                            return Err(
+                                BatchExecuteStatementErrorModeled::InternalServerException(
+                                    InternalServerException {
+                                        message: format!(
+                                            "the SQL engine could not open the database for this \
+                                             batch: {reason}"
+                                        ),
+                                    },
+                                )
+                                .into(),
+                            )
+                        }
+                    };
+                let id = store.record_pending(submission, pid, bound.interrupt());
+                (Some((handle, slot)), id)
+            }
         };
 
         // The transaction is the batch's, not the request's: it runs to a
@@ -511,9 +540,38 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the queue slot at the end hands the database on.
         let engine = ::std::sync::Arc::clone(&self.engine);
         let recorded = id.clone();
+        let absent = connection_database.clone();
         let execution = tokio::spawn(async move {
+            let Some((handle, mut slot)) = reserved else {
+                // No connection was ever made, so no statement of the batch
+                // ran: each one fails with what the backend answers a
+                // connection to a database that is not there.
+                if let Some(state) = crate::state::service_state(&*engine) {
+                    state.lock().complete(
+                        &recorded,
+                        crate::state::connection_failures(
+                            statements,
+                            &crate::state::warehouse::absent_database_message(&absent),
+                        ),
+                    );
+                }
+                return;
+            };
             slot.wait_for_turn().await;
+            // The batch's turn on its database is now its: the query "has been
+            // chosen to be run".
+            if let Some(state) = crate::state::service_state(&*engine) {
+                state.lock().pick(&recorded);
+            }
+            let running = ::std::sync::Arc::clone(&engine);
+            let started = recorded.clone();
             let produced = tokio::task::spawn_blocking(move || {
+                // STARTED from here: the engine is about to run this batch's
+                // transaction, and it reports STARTED for as long as that
+                // really takes.
+                if let Some(state) = crate::state::service_state(&*running) {
+                    state.lock().start(&started);
+                }
                 crate::state::run_batch_on(
                     &handle,
                     &sqls,

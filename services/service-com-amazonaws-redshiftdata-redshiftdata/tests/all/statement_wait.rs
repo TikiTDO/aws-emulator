@@ -58,7 +58,7 @@ async fn a_batch_callers_wait_bounds_its_own_response_and_not_the_execution() {
             wait: None,
             // Nobody waited, so whether this batch's execution has already
             // reported when the response is written is the engine's business.
-            answered: &["SUBMITTED", "FINISHED"],
+            answered: &["SUBMITTED", "PICKED", "STARTED", "FINISHED"],
             verdict: Verdict::Finished,
         },
         PatienceRow {
@@ -71,14 +71,14 @@ async fn a_batch_callers_wait_bounds_its_own_response_and_not_the_execution() {
             // to stop the batch inside the wait. Which one it is must not depend
             // on the machine, so both are admitted here and the verdict itself
             // is pinned by the read below.
-            answered: &["SUBMITTED", "FAILED"],
+            answered: &["SUBMITTED", "PICKED", "STARTED", "FAILED"],
             verdict: Verdict::Interrupted,
         },
         PatienceRow {
             label: "the shortest wait the model admits, for a batch the engine completes",
             sqls: QUICK_SQLS,
             wait: Some(SHORTEST_MODELLED_WAIT_SECONDS),
-            answered: &["SUBMITTED", "FINISHED"],
+            answered: &["SUBMITTED", "PICKED", "STARTED", "FINISHED"],
             verdict: Verdict::Finished,
         },
         PatienceRow {

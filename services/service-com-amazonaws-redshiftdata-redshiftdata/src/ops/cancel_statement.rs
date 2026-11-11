@@ -165,13 +165,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         match store.cancel(&input.id) {
             Cancellation::Cancelled => Ok(CancelStatementOutput { status: Some(true) }),
             // Already stopped: not a cancellation, and reporting one would tell
-            // the caller it stopped a query it did not stop.
+            // the caller it stopped a query it did not stop. The service names
+            // the state the query is already in and the query it asked about.
             Cancellation::AlreadyStopped(status) => {
                 Err(CancelStatementErrorModeled::ValidationException(ValidationException {
                     message: Some(format!(
-                        "Query {} is not running; its status is {}",
+                        "Could not cancel a query that is already in {} state with ID: {}",
+                        status.as_str(),
                         input.id,
-                        status.as_str()
                     )),
                 })
                 .into())

@@ -18,8 +18,8 @@ use serde_json::{json, Value};
 use service_com_amazonaws_redshiftdata_redshiftdata::state::MAX_RETAINED_STATEMENTS;
 
 use super::emulator::{
-    error_code, flag, id_of, list, number, Emulator, LONGER_THAN_A_QUICK_STATEMENT, SLOW_SQL,
-    WAIT_SECONDS,
+    error_code, flag, id_of, list, number, wait_until_started, Emulator,
+    LONGER_THAN_A_QUICK_STATEMENT, SLOW_SQL, WAIT_SECONDS,
 };
 
 /// The connection every batch below is submitted with: one documented
@@ -593,9 +593,10 @@ async fn batch_parameters_are_bound_to_the_statements_that_reference_them() {
 // The batch's lifecycle, listing and idempotency
 // ---------------------------------------------------------------------------
 
-/// A batch nobody waited for is SUBMITTED, with every statement of it
-/// SUBMITTED, while its transaction runs; cancelling it stops the whole batch,
-/// and one statement of a batch cannot be cancelled on its own.
+/// A batch nobody waited for walks the lifecycle its transaction walks —
+/// `STARTED` while the engine runs it, with every statement of it still
+/// `SUBMITTED` until the transaction reports; cancelling it stops the whole
+/// batch, and one statement of a batch cannot be cancelled on its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unwaited_batch_is_submitted_while_its_transaction_runs() {
     let emulator = Emulator::new();
@@ -608,15 +609,17 @@ async fn an_unwaited_batch_is_submitted_while_its_transaction_runs() {
         )
         .await;
     let id = id_of(&submitted);
-    assert_eq!(
-        submitted["Status"], "SUBMITTED",
-        "a batch nobody waited for is submitted, not finished: {submitted}"
+    assert!(
+        ["SUBMITTED", "PICKED", "STARTED"].contains(&submitted["Status"].as_str().unwrap_or("")),
+        "a batch nobody waited for is answered with the state it has reached, which is not a \
+         terminal one: {submitted}"
     );
 
-    let pending = emulator.ok("DescribeStatement", &json!({"Id": id})).await;
+    let pending = wait_until_started(&emulator, "a batch whose transaction takes real time", &id)
+        .await;
     assert_eq!(
-        pending["Status"], "SUBMITTED",
-        "the batch is still submitted: {pending}"
+        pending["Status"], "STARTED",
+        "the batch whose transaction the engine is running is STARTED: {pending}"
     );
     let pending_subs = sub_statements(&pending);
     assert_eq!(
@@ -860,9 +863,9 @@ async fn a_batch_s_statements_count_against_the_retained_statement_bound() {
 /// cannot keep more rows by submitting more statements.
 #[tokio::test]
 async fn a_batch_shares_one_retained_result_budget() {
-    // Each of these retains well under the per-submission byte budget
-    // (`MAX_RESULT_BYTES`), while two of them together are past it.
-    const ROWS: usize = 35_000;
+    // Each of these retains well under the rows one submission may keep
+    // (`MAX_RESULT_ROWS`), while two of them together are past it.
+    const ROWS: usize = 60_000;
     let wide = format!(
         "WITH RECURSIVE counter(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM counter \
          WHERE x < {ROWS}) SELECT x, x + 1 AS y FROM counter"

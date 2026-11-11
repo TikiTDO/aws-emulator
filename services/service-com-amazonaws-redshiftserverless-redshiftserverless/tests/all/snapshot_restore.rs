@@ -49,6 +49,11 @@ const WAIT_SECONDS: i32 = 10;
 /// addresses a database by workgroup and database name.
 const DB_USER: &str = "awsuser";
 
+/// The database every namespace here is provisioned with: `CreateNamespace` names none, so
+/// the control plane names its first database itself. A warehouse holds that database plus
+/// the ones statements CREATED in it, so a case using another one creates it first.
+const PROVISIONED_DATABASE: &str = "dev";
+
 /// One emulator carrying BOTH services over ONE shared engine, the way the router mounts
 /// them in production.
 ///
@@ -327,6 +332,13 @@ async fn a_restore_makes_the_named_workgroup_serve_the_snapshots_databases() {
 
         create_namespace(&router, &source_namespace).await;
         create_workgroup(&router, &source_workgroup, &source_namespace).await;
+        // A case that writes to a database other than the one the namespace was
+        // provisioned with CREATES that database first: a warehouse holds the database its
+        // control plane gave it plus the ones callers created, and nothing else.
+        if case.database != PROVISIONED_DATABASE {
+            let created = format!("CREATE DATABASE {}", case.database);
+            run_sql(&router, &source_workgroup, PROVISIONED_DATABASE, &created).await;
+        }
         for sql in case.writes {
             run_sql(&router, &source_workgroup, case.database, sql).await;
         }
@@ -341,6 +353,10 @@ async fn a_restore_makes_the_named_workgroup_serve_the_snapshots_databases() {
         // no workgroup, and the workgroup is what serves the restored databases.
         create_namespace(&router, &target_namespace).await;
         create_workgroup(&router, &target_workgroup, &target_namespace).await;
+        if !case.stale_writes.is_empty() && case.database != PROVISIONED_DATABASE {
+            let created = format!("CREATE DATABASE {}", case.database);
+            run_sql(&router, &target_workgroup, PROVISIONED_DATABASE, &created).await;
+        }
         for sql in case.stale_writes {
             run_sql(&router, &target_workgroup, case.database, sql).await;
         }
@@ -519,7 +535,10 @@ async fn a_restore_leaves_the_workgroup_holding_only_the_snapshots_databases() {
 
     create_namespace(&router, "only-dst-ns").await;
     create_workgroup(&router, "only-dst-wg", "only-dst-ns").await;
-    // The target holds a database the snapshot never had.
+    // The target holds a database the snapshot never had. A database is a database of the
+    // warehouse because it was CREATED there, so the statement that creates it runs on the
+    // one its namespace was provisioned with.
+    run_sql(&router, "only-dst-wg", "dev", "CREATE DATABASE sandbox").await;
     run_sql(
         &router,
         "only-dst-wg",
@@ -595,13 +614,14 @@ async fn a_restored_database_is_still_bounded_by_the_engines_storage_limit() {
     );
 
     // The same statement the Data API's own bound test uses: a table far larger than a
-    // database may hold.
+    // database may hold, each row carrying a value just under the engine's own per-value
+    // ceiling so the bound is reached in few rows rather than many.
     let overflowing = try_sql(
         &router,
         "bound-dst-wg",
         "dev",
         "CREATE TABLE bulk AS WITH RECURSIVE counter(x) AS (SELECT 1 UNION ALL \
-         SELECT x + 1 FROM counter WHERE x < 20000) SELECT x, randomblob(2000) AS pad \
+         SELECT x + 1 FROM counter WHERE x < 400) SELECT x, randomblob(900000) AS pad \
          FROM counter",
     )
     .await;

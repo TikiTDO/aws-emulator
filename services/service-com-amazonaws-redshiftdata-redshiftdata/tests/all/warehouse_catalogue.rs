@@ -199,17 +199,57 @@ async fn a_warehouse_lists_the_database_it_was_provisioned_with() {
     }
 }
 
-/// A database a statement creates JOINS the one the warehouse was provisioned
-/// with: the catalogue reports both, in name order and each exactly once —
-/// including when the statement ran on the provisioned database itself.
+/// A database a `CREATE DATABASE` statement adds JOINS the one the warehouse was
+/// provisioned with: the catalogue reports both, in name order and each exactly
+/// once. A statement naming a database the warehouse holds NONE of creates
+/// nothing — it is accepted and then fails with the backend's own fatal line,
+/// because the connection it needs cannot be made.
 #[tokio::test]
-async fn a_statements_database_joins_the_provisioned_one() {
+async fn a_created_database_joins_the_provisioned_one() {
     let (warehouses, rows) = provisioned_warehouses().await;
 
     for row in &rows {
         let label = row.label;
-        // A statement against a database is what creates one here, so this row
-        // ends up with a second database beside the one it was created with.
+        // A database nothing created is not a database of the warehouse, so the
+        // statement fails asynchronously instead of opening one.
+        let mut absent = connect(&row.target, "scratch");
+        absent["Sql"] = json!("CREATE TABLE marker (id INTEGER)");
+        absent["WaitTimeSeconds"] = json!(30);
+        let submitted = warehouses.data_ok("ExecuteStatement", &absent).await;
+        let described = warehouses
+            .data_ok("DescribeStatement", &json!({"Id": submitted["Id"]}))
+            .await;
+        assert_eq!(
+            described["Status"], "FAILED",
+            "case {label}: a statement naming a database the warehouse holds none of must fail, \
+             got {described}"
+        );
+        assert_eq!(
+            described["Error"],
+            json!("FATAL: database \"scratch\" does not exist"),
+            "case {label}: expected the backend's fatal line for the absent database, got \
+             {described}"
+        );
+        let response = warehouses
+            .data_ok("ListDatabases", &connect(&row.target, &row.provisioned))
+            .await;
+        assert_eq!(
+            reported(&response),
+            vec![row.provisioned.clone()],
+            "case {label}: a statement that failed to connect added no database, got {response}"
+        );
+
+        // `CREATE DATABASE` is what adds one, and the statements that follow run
+        // on it.
+        let mut create = connect(&row.target, &row.provisioned);
+        create["Sql"] = json!("CREATE DATABASE scratch");
+        create["WaitTimeSeconds"] = json!(30);
+        let created = warehouses.data_ok("ExecuteStatement", &create).await;
+        assert_eq!(
+            created["Status"], "FINISHED",
+            "case {label}: CREATE DATABASE must finish, got {created}"
+        );
+
         for database in [row.provisioned.as_str(), "scratch"] {
             let mut request = connect(&row.target, database);
             request["Sql"] = json!("CREATE TABLE marker (id INTEGER)");

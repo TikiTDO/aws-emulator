@@ -43,13 +43,17 @@ rationale is recorded here so it is visible with the code rather than only in a 
   schema, `SQLITE_LIMIT_ATTACHED = 0`, and length, SQL-length, column, expression-depth,
   compound-select and bound-parameter limits. Execution is additionally bounded by a
   wall-clock deadline and a step budget enforced from the engine's progress handler, and
-  the retained result set is capped in rows, cells and bytes. `load_extension` is not an
+  the retained result set is capped in rows, cells and bytes — with a further cap on what
+  the retained statement history holds in results at once, the oldest reported submission
+  being dropped until it fits. `load_extension` is not an
   enabled feature of the dependency, so it is not reachable from this crate at all.
   `tests/all/statement_lifecycle.rs` asserts that statements which would reach the host
   are refused and that statements outside those bounds end FAILED.
 * **Where it runs.** A submission's execution belongs to the SUBMISSION, not to the
   request that made it: the statement is recorded as `SUBMITTED` before anything runs,
-  its SQL runs on a blocking pool under the bounds above, and its outcome is written
+  reports `PICKED` once its turn on its database is its and `STARTED` for as long as the
+  engine is really running it, its SQL runs on a blocking pool under the bounds above,
+  and its outcome is written
   back by the task that produced it — so a statement reaches a terminal status because
   the engine stopped and never because a caller stopped waiting, and two statements
   submitted at once are really concurrent. The statements of ONE database run one at a
@@ -78,21 +82,29 @@ rationale is recorded here so it is visible with the code rather than only in a 
   while waiting for a database a statement is running on and between copy steps, so it is
   always the copy's own deadline that ends it.
 
-### The two text formats this crate does not hand-render
+### The formats and functions this crate does not hand-render
 
-Two pure-Rust crates carry the two text formats a statement's text and its result
-would otherwise be scanned and written by hand:
+The SQL a caller submits is Amazon Redshift's dialect, and the engine behind this
+service is a different SQL engine, so neither the statement nor the functions it
+reaches for are read or computed by hand:
 
-* `sqlparser` — which named placeholders (`:name`) a submitted statement references is
-  read off the statement's own TOKENS, so a `:name` inside a string literal or a
-  comment, a `::` cast and a real placeholder are told apart by the SQL grammar rather
-  than by a scan of the text. That is what lets a submit resolve its `Parameters`
-  against its SQL before the statement is admitted (`src/state/sql_parameters.rs`).
+* `sqlparser` — the statement is READ by the dialect's own parser and tokenizer
+  (`src/state/redshift_sql.rs`): the text of one submission is cut into the statements it
+  carries at the semicolons the GRAMMAR reports, a construct the engine spells differently
+  (a `::` cast, a schema-qualified name) is re-spelled from the parsed statement, and which
+  named placeholders (`:name`) a statement references is read off its tokens, so a `:name`
+  inside a string literal or a comment, a `::` cast and a real placeholder are told apart
+  by the SQL grammar rather than by a scan of the text (`src/state/sql_parameters.rs`). A
+  statement no rewrite applies to is run exactly as the caller wrote it.
+* `md-5`, `sha1`, `sha2` — the Redshift hash functions (`MD5`, `SHA`, `SHA1`, `SHA2`) the
+  engine does not carry are registered on every connection and COMPUTE the digest
+  (`src/state/functions.rs`), beside the string and conditional functions implemented
+  there; `tests/all/redshift_dialect.rs` pins them against their published test vectors.
 * `csv` — `GetStatementResultV2` answers a statement's rows as CSV text, so the
   separator, the quoting of a value carrying a comma, a quote or a newline, and the
   CRLF record terminator are a CSV writer's rather than this crate's own rendering.
 
-Neither adds a native component: both are pure Rust, and this crate keeps
+None of them adds a native component: all are pure Rust, and this crate keeps
 `#![forbid(unsafe_code)]`.
 
 ## Layout

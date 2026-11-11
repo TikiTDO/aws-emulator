@@ -48,8 +48,9 @@ async fn a_callers_wait_bounds_its_own_response_and_not_the_execution() {
             wait: None,
             // Nothing waited for this execution, and the execution runs until a
             // bound of the engine stops it, so the response reports the status
-            // the statement has at that instant.
-            answered: &["SUBMITTED"],
+            // the statement has at that instant: one of the states a statement
+            // that has not stopped is in.
+            answered: &["SUBMITTED", "PICKED", "STARTED"],
             verdict: Verdict::Interrupted,
         },
         PatienceRow {
@@ -62,7 +63,7 @@ async fn a_callers_wait_bounds_its_own_response_and_not_the_execution() {
             // happened to stop the statement inside the wait. Which one it is
             // must not depend on the machine, so both are admitted here and the
             // verdict itself is pinned by the read below.
-            answered: &["SUBMITTED", "FAILED"],
+            answered: &["SUBMITTED", "PICKED", "STARTED", "FAILED"],
             verdict: Verdict::Interrupted,
         },
         PatienceRow {
@@ -71,14 +72,14 @@ async fn a_callers_wait_bounds_its_own_response_and_not_the_execution() {
             wait: None,
             // Nobody waited, so whether this statement's execution has already
             // reported when the response is written is the engine's business.
-            answered: &["SUBMITTED", "FINISHED"],
+            answered: &["SUBMITTED", "PICKED", "STARTED", "FINISHED"],
             verdict: Verdict::Finished,
         },
         PatienceRow {
             label: "the shortest wait the model admits, for a statement that finishes at once",
             sqls: &[QUICK_SQL],
             wait: Some(SHORTEST_MODELLED_WAIT_SECONDS),
-            answered: &["SUBMITTED", "FINISHED"],
+            answered: &["SUBMITTED", "PICKED", "STARTED", "FINISHED"],
             verdict: Verdict::Finished,
         },
         PatienceRow {

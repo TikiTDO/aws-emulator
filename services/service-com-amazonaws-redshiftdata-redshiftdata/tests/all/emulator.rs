@@ -307,6 +307,60 @@ pub async fn wait_for_terminal(emulator: &Emulator, case: &str, id: &str) -> Val
     }
 }
 
+/// The statuses `StatementStatusString` declares, which are the only ones a
+/// statement of this service ever reports
+/// (`smithy_query(query="shape",shape="StatementStatusString")`).
+pub const MODELLED_STATUSES: [&str; 6] = [
+    "ABORTED",
+    "FAILED",
+    "FINISHED",
+    "PICKED",
+    "STARTED",
+    "SUBMITTED",
+];
+
+/// The states a statement that has not stopped is in, in lifecycle order: the
+/// query was submitted, it has been chosen to be run, its run has started.
+pub const RUNNING_STATUSES: [&str; 3] = ["SUBMITTED", "PICKED", "STARTED"];
+
+/// Poll `id` until it reports `STARTED` — the engine running its work — and
+/// answer the record that reported it.
+///
+/// A statement reaches STARTED only once its execution has been scheduled, taken
+/// its turn on its database and entered the engine, so the state is POLLED for
+/// rather than read once: what this asserts is that a statement which takes real
+/// time is observable while it runs, not how quickly the runtime got to it.
+pub async fn wait_until_started(emulator: &Emulator, case: &str, id: &str) -> Value {
+    let started = Instant::now();
+    let mut seen: Vec<String> = Vec::new();
+    loop {
+        let described = emulator.ok("DescribeStatement", &json!({"Id": id})).await;
+        let status = described["Status"].as_str().unwrap_or_default().to_string();
+        assert!(
+            MODELLED_STATUSES.contains(&status.as_str()),
+            "case {case}: {status:?} is not one of the modelled statuses {MODELLED_STATUSES:?}: \
+             {described}"
+        );
+        if status == "STARTED" {
+            return described;
+        }
+        if seen.last() != Some(&status) {
+            seen.push(status.clone());
+        }
+        assert!(
+            RUNNING_STATUSES.contains(&status.as_str()),
+            "case {case}: a statement that takes real time must be observable as STARTED before \
+             it stops, saw {seen:?}: {described}"
+        );
+        assert!(
+            started.elapsed() < TERMINAL_STATUS_BUDGET,
+            "case {case}: {id} never reported STARTED in {:?}, saw {seen:?}: {described}",
+            started.elapsed()
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
 /// The `Id` a response carries.
 pub fn id_of(response: &Value) -> String {
     response["Id"]

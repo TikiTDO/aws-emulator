@@ -42,7 +42,10 @@ hex = { workspace = true }
 # default-deny authorizer, `SQLITE_LIMIT_ATTACHED = 0`, defensive mode,
 # untrusted schema, no URI filenames, `temp_store = MEMORY`, `max_page_count`,
 # plus length, column, depth and compound-select limits. `limits` and `hooks`
-# are the features those controls need; `load_extension` is deliberately absent.
+# are the features those controls need; `functions` is what registers the
+# Redshift functions this engine does not carry (`src/state/functions.rs`) as
+# Rust implementations on the connection, adding no native component;
+# `load_extension` is deliberately absent.
 #
 # `backup` is the engine's own page-level copy between two OPEN connections
 # (`sqlite3_backup_*`). It is what `state::capture_warehouse` /
@@ -59,7 +62,7 @@ hex = { workspace = true }
 # and are not linked into a host build, so the engine in the process is still one
 # bundled SQLite. The linked release is asserted against that floor by the
 # engine-release suite of `services/service-com-amazonaws-rdsdata-rdsdataservice`.
-rusqlite = { version = "0.41", features = ["backup", "bundled", "column_decltype", "hooks", "limits"] }
+rusqlite = { version = "0.41", features = ["backup", "bundled", "column_decltype", "functions", "hooks", "limits"] }
 # `ops::get_statement_result_v2`: the CSV form of a statement's result is
 # WRITTEN by this CSV writer, so the separator, the quoting of a value carrying a
 # comma, a quote or a newline, and the line terminator are a CSV
@@ -67,11 +70,21 @@ rusqlite = { version = "0.41", features = ["backup", "bundled", "column_decltype
 csv = "1.4"
 # Mints the `UUID`-shaped statement, query and session identifiers.
 uuid = { version = "1", features = ["v4"] }
-# `state::sql_parameters`: which named placeholders a submitted statement
-# references is read off the statement's own TOKENS, from this dialect-aware SQL
-# tokenizer, so a `:name` inside a string literal or a comment, a `::` cast and a
-# real placeholder are told apart by the SQL grammar rather than by a text scan.
-sqlparser = "0.59"
+# `state::redshift_sql`: the dialect-aware SQL parser this service reads a
+# submitted statement with. `state::sql_parameters` reads which named
+# placeholders a statement references off its TOKENS, so a `:name` inside a
+# string literal or a comment, a `::` cast and a real placeholder are told apart
+# by the SQL grammar rather than by a text scan; `state::redshift_sql` reads the
+# whole statement, so a Redshift construct the engine spells differently is
+# re-spelled from the parsed statement and never by rewriting text. `visitor` is
+# the feature that walk needs.
+sqlparser = { version = "0.59", features = ["visitor"] }
+# `state::functions`: the hash functions Amazon Redshift's `MD5`, `SHA`/`SHA1`
+# and `SHA2` compute, which the SQL engine does not carry. Real implementations,
+# so a statement hashing a value gets that value's hash.
+md-5 = "0.10"
+sha1 = "0.10"
+sha2 = { workspace = true }
 # `state::warehouse`: the clients this service resolves a statement's compute
 # target through, over the in-process callback into this same emulator (no network
 # client feature is enabled: the transport is the emulator's own). A provisioned
@@ -88,7 +101,6 @@ service-common = { path = "../common" }
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
-sha2 = { workspace = true }
 hex = { workspace = true }
 # The Data API tests mount the two Redshift control planes beside this service on
 # one engine, because the cluster and the workgroup a statement runs on are THEIR
