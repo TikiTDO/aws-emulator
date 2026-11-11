@@ -530,6 +530,58 @@ pub fn value_not_supported_message(value: &str, parameter: &str) -> String {
     format!("The value {value} for parameter {parameter} is not supported.")
 }
 
+/// How CloudWatch states a value outside the set a named parameter supports: the value it was
+/// given, the parameter, and the whole supported set.
+///
+/// The form for a parameter whose admissible values are a SERVICE rule the model cannot express
+/// — a member modelled as a plain string, so the constraint walk never sees the set — which is
+/// why the sentence has to carry the set itself: the value tells the caller what it sent, and
+/// the bracketed set what it may send instead. Everything but the value and the parameter is
+/// fixed text.
+pub fn value_not_supported_for_parameter_message(
+    value: &str,
+    parameter: &str,
+    supported: &[&str],
+) -> String {
+    format!(
+        "The value {value} is not supported for {parameter} parameter. Supported values are [{}].",
+        supported.join(", ")
+    )
+}
+
+/// How CloudWatch states an OPTION outside the set a named parameter offers: the option it was
+/// given, the parameter, and the options it offers written as prose ([`conjoined`]).
+///
+/// The sibling of [`value_not_supported_for_parameter_message`] for a parameter whose set is a
+/// handful of named behaviours rather than a list of values; fixed text apart from the option
+/// and the parameter.
+pub fn option_not_supported_message(value: &str, parameter: &str, options: &[&str]) -> String {
+    format!(
+        "Option {value} is not supported. Supported options for parameter {parameter} are {}.",
+        conjoined(options)
+    )
+}
+
+/// `values` written as prose: comma-separated, with the last joined by `and`.
+pub fn conjoined(values: &[&str]) -> String {
+    match values {
+        [] => String::new(),
+        [only] => (*only).to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// How CloudWatch states a count member that may not exceed another count member of the same
+/// request: the two members and the relation between them, in the words the bounded member's
+/// own documentation states it in ("Must be less than or equal to QueryResultsToEvaluate.",
+/// `smithy_query(query="doc",shape="PutLogAlarmInput",member="QueryResultsToAlarm")`).
+///
+/// Wholly fixed text apart from the member names: what has to change is the relation between
+/// the two values, not either value, so neither is echoed.
+pub fn at_most_message(member: &str, bound: &str) -> String {
+    format!("{member} must be less than or equal to {bound}")
+}
+
 /// How CloudWatch states a member given a name that is no statistic of its grammar: the member
 /// path, and nothing of the value — the member is what a client repairs.
 ///
@@ -2641,6 +2693,13 @@ pub const ALARM_TYPE_LOG: &str = "LogAlarm";
 /// and missing." (`smithy_query(query="doc",shape="PutLogAlarmInput",member="TreatMissingData")`)
 /// — the member is a plain string in the model, so the value list is enforced here.
 pub const TREAT_MISSING_DATA_VALUES: [&str; 4] = ["breaching", "notBreaching", "ignore", "missing"];
+
+/// The options `EvaluateLowSampleCountPercentile` offers: "Valid Values: evaluate | ignore"
+/// (`smithy_query(query="doc",shape="PutMetricAlarmInput",member="EvaluateLowSampleCountPercentile")`)
+/// — the member is a plain string in the model (`@length 1..255`), so the set is enforced here,
+/// and `ignore` is the one option that withholds a thinly sampled period's verdict
+/// (`alarm_evaluation`'s own reading of the member).
+pub const LOW_SAMPLE_COUNT_PERCENTILE_OPTIONS: [&str; 2] = ["evaluate", "ignore"];
 
 /// `Alarm`, one of the modelled `ActionsSuppressedBy` values
 /// (`ACTIONS_SUPPRESSED_BY_VALUES`): "When the value is `ALARM`, it means that the actions

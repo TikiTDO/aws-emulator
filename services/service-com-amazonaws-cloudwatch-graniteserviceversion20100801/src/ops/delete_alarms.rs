@@ -208,9 +208,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 ///
 /// "You can delete up to 100 alarms in one operation. However, this total can include no more
 /// than one composite alarm." (`DeleteAlarms`) — the refusal states that constraint in the
-/// service's own words, fixed text with no part taken from the request, so it reads the same
-/// however many composite alarms the call named and whatever they are called.
-const MULTIPLE_COMPOSITE_ALARMS: &str = "Only one composite alarm delete is allowed per API call";
+/// service's own words and carries ONE value from the request: how many composite alarms it
+/// named, which is what tells the caller how far over the limit the batch was. Nothing else of
+/// the request is part of it — what is wrong is the COUNT, not any one of the alarms, so none
+/// of them is named.
+fn multiple_composite_alarms_refusal(composites: usize) -> String {
+    format!(
+        "Cannot delete [{composites}] Composite Alarms as only one composite alarm delete is \
+         allowed in single request"
+    )
+}
 
 /// Delete the alarms `input` names, and re-evaluate the composite alarms downstream of them.
 ///
@@ -232,7 +239,7 @@ fn delete_named_alarms(
     composites.dedup();
     if composites.len() > 1 {
         return Err(crate::scaffolded::Scaffolded::validation_error(
-            MULTIPLE_COMPOSITE_ALARMS,
+            multiple_composite_alarms_refusal(composites.len()),
         ));
     }
     // "Log alarms cannot be batch deleted." — a call that deletes a log alarm deletes that

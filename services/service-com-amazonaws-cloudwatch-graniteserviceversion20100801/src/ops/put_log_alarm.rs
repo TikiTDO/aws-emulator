@@ -503,12 +503,14 @@ fn validate(input: &PutLogAlarmInput) -> Result<(), PutLogAlarmError> {
         ));
     }
     // "Must be less than or equal to QueryResultsToEvaluate." (`QueryResultsToAlarm`) — the M
-    // of an M-of-N evaluation cannot ask for more breaches than there are results to evaluate.
+    // of an M-of-N evaluation cannot ask for more breaches than there are results to evaluate,
+    // the same relation the metric alarm write enforces between `DatapointsToAlarm` and
+    // `EvaluationPeriods`, stated in the one sentence this service states it in
+    // ([`crate::state::at_most_message`]).
     if input.query_results_to_alarm > input.query_results_to_evaluate {
-        return refuse(format!(
-            "QueryResultsToAlarm is {} and QueryResultsToEvaluate is {}, so the alarm could \
-             never see enough breaching results",
-            input.query_results_to_alarm, input.query_results_to_evaluate
+        return refuse(crate::state::at_most_message(
+            "QueryResultsToAlarm",
+            "QueryResultsToEvaluate",
         ));
     }
     // "Valid values are GreaterThanThreshold, GreaterThanOrEqualToThreshold,
@@ -520,13 +522,15 @@ fn validate(input: &PutLogAlarmInput) -> Result<(), PutLogAlarmError> {
             LOG_ALARM_COMPARISON_OPERATORS.join(", ")
         ));
     }
-    // "Valid values are breaching, notBreaching, ignore, and missing." (`TreatMissingData`)
+    // "Valid values are breaching, notBreaching, ignore, and missing." (`TreatMissingData`) —
+    // the same member, the same published set and so the same sentence as the metric alarm
+    // write refuses one with ([`crate::state::value_not_supported_for_parameter_message`]).
     if let Some(treat_missing_data) = input.treat_missing_data.as_deref() {
         if !crate::state::TREAT_MISSING_DATA_VALUES.contains(&treat_missing_data) {
-            return refuse(format!(
-                "TreatMissingData {treat_missing_data} is not a value this alarm can handle \
-                 missing data with; valid values are {}",
-                crate::state::TREAT_MISSING_DATA_VALUES.join(", ")
+            return refuse(crate::state::value_not_supported_for_parameter_message(
+                treat_missing_data,
+                "TreatMissingData",
+                &crate::state::TREAT_MISSING_DATA_VALUES,
             ));
         }
     }

@@ -26,8 +26,14 @@ const QUERY_ROLE: &str = "arn:aws:iam::000000000000:role/cwl-scheduled-query";
 
 /// The sentence a `DeleteAlarms` call naming more than one composite alarm is refused with:
 /// the service's own wording for the constraint "this total can include no more than one
-/// composite alarm" (`DeleteAlarms`), fixed text carrying nothing of the request.
-const MULTIPLE_COMPOSITE_ALARMS: &str = "Only one composite alarm delete is allowed per API call";
+/// composite alarm" (`DeleteAlarms`), carrying one value from the request — how many composite
+/// alarms it named — and nothing else of it.
+fn multiple_composite_alarms(composites: usize) -> String {
+    format!(
+        "Cannot delete [{composites}] Composite Alarms as only one composite alarm delete is \
+         allowed in single request"
+    )
+}
 
 /// The smallest `PutMetricAlarm` request: every required member and nothing else.
 fn metric_alarm(name: &str) -> Value {
@@ -338,21 +344,24 @@ async fn an_alarm_a_live_composite_alarm_references_cannot_be_deleted() {
 async fn one_call_deletes_no_more_than_one_composite_alarm() {
     // "However, this total can include no more than one composite alarm." (`DeleteAlarms`) —
     // the rows differ along how many composite alarms the call names and what they are named
-    // beside.
-    let cases: Vec<(&str, Vec<&str>)> = vec![
-        ("two composite alarms", vec!["one", "two"]),
-        ("three composite alarms", vec!["one", "two", "three"]),
+    // beside, and each row states the count the refusal must report: a name the call repeats
+    // names ONE alarm, so the repeated row is still two.
+    let cases: Vec<(&str, Vec<&str>, usize)> = vec![
+        ("two composite alarms", vec!["one", "two"], 2),
+        ("three composite alarms", vec!["one", "two", "three"], 3),
         (
             "two composite alarms and a metric alarm",
             vec!["one", "leaf", "two"],
+            2,
         ),
         (
             "the same two composite alarms, one of them repeated",
             vec!["one", "two", "two"],
+            2,
         ),
     ];
 
-    for (case, deleted) in cases {
+    for (case, deleted, composites) in cases {
         let router = build_router();
         ok(&router, "PutMetricAlarm", &metric_alarm("leaf")).await;
         for name in ["one", "two", "three"] {
@@ -366,10 +375,11 @@ async fn one_call_deletes_no_more_than_one_composite_alarm() {
             "case {case:?}: expected HTTP 400 ValidationException, got {status} with {body}"
         );
         let message = error_message(&body);
+        let expected = multiple_composite_alarms(composites);
         assert_eq!(
-            message, MULTIPLE_COMPOSITE_ALARMS,
+            message, expected,
             "case {case:?}: the refusal must name the constraint it enforced in CloudWatch's \
-             own words, got {message:?}"
+             own words, expected {expected:?}, got {message:?}"
         );
         let remaining = remaining_alarm_names(&router).await;
         assert_eq!(

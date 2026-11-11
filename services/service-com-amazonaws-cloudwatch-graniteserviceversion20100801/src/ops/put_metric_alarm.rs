@@ -12,11 +12,15 @@
 //! The same refusal answers a configuration CloudWatch would not create: a `Period` it does
 //! not evaluate on (10, 20, 30 or a multiple of 60), a total evaluation period
 //! (`Period` x `EvaluationPeriods`) past the published ceiling, a `Period` no clock boundary
-//! matches on an alarm whose `EvaluationWindow` is a wall clock window, and a `Metrics` query
+//! matches on an alarm whose `EvaluationWindow` is a wall clock window, a `Metrics` query
 //! array that does not designate exactly one query as the single time series an alarm
-//! watches, and an action
+//! watches, a `TreatMissingData` or `EvaluateLowSampleCountPercentile` naming no policy the
+//! evaluation implements, a `DatapointsToAlarm` asking for more breaching datapoints than
+//! there are `EvaluationPeriods` to grade, and an action
 //! naming a Region other than the alarm's own (CloudWatch executes an alarm's actions in the
-//! alarm's Region). Each is checked
+//! alarm's Region). An `ExtendedStatistic` naming no statistic this service can compute is a
+//! parameter VALUE it cannot serve, so that one is answered as the modelled
+//! `InvalidParameterValueException`. Each is checked
 //! before the write, so a refused request stores nothing.
 //!
 //! The alarm this write stores is then EVALUATED from the datapoints `PutMetricData` stored
@@ -266,6 +270,9 @@
 //!
 //! * `LimitExceededFault` (HTTP 400) — The quota for alarms for this customer has already
 //!   been reached.
+//! * `InvalidParameterValueException` (HTTP 400) — widened in through `extra_errors` (see
+//!   below): the value of an input parameter is bad or out-of-range, which is the class this
+//!   service answers for an `ExtendedStatistic` naming no statistic it can compute.
 
 #[allow(unused_imports)]
 use super::types::*;
@@ -355,6 +362,36 @@ const HIGH_RESOLUTION_ALARM_PERIODS: [i32; 3] = [10, 20, 30];
 
 /// One minute in seconds: every alarm period that is not high resolution is a multiple of it.
 const REGULAR_PERIOD_SECS: i32 = 60;
+
+/// CloudWatch's refusal for a `Period` it does not evaluate alarms on.
+///
+/// A fixed sentence, not built from the request: it names the GRAMMAR an alarm period has to
+/// match ("Valid values are 10, 20, 30, and any multiple of 60.",
+/// `PutMetricAlarmInput$Period`), and the cadences in it are constants OF THAT RULE
+/// ([`HIGH_RESOLUTION_ALARM_PERIODS`], [`REGULAR_PERIOD_SECS`]) rather than values of the
+/// request — so a caller branching on the message sees the same string whatever period was
+/// asked for, and the period it sent is not part of the text.
+fn period_grammar_refusal() -> String {
+    let valid = HIGH_RESOLUTION_ALARM_PERIODS
+        .map(|period| period.to_string())
+        .join(", ");
+    format!("Period must be {valid} or a multiple of {REGULAR_PERIOD_SECS}")
+}
+
+/// The request member a refusal of the `TreatMissingData` policy names, as the wire spells it.
+const TREAT_MISSING_DATA: &str = "TreatMissingData";
+
+/// The request member a refusal of the low-sample-count policy names, as the wire spells it.
+const EVALUATE_LOW_SAMPLE_COUNT_PERCENTILE: &str = "EvaluateLowSampleCountPercentile";
+
+/// The request member holding the M of an "M out of N" evaluation.
+const DATAPOINTS_TO_ALARM: &str = "DatapointsToAlarm";
+
+/// The request member holding its N.
+const EVALUATION_PERIODS: &str = "EvaluationPeriods";
+
+/// The request member an extended statistic arrives on, as a refusal of its value names it.
+const EXTENDED_STATISTIC: &str = "ExtendedStatistic";
 
 /// One hour in seconds, the resolution boundary the evaluation-horizon ceiling turns on:
 /// "For alarms with a period of less than one hour (3,600 seconds), the total evaluation
@@ -490,6 +527,55 @@ fn configuration_refusal(input: &PutMetricAlarmInput) -> Option<String> {
             crate::state::ONLY_ONE_STATISTIC,
         ));
     }
+    // "Sets how this alarm is to handle missing data points." … "Valid Values: breaching |
+    // notBreaching | ignore | missing"
+    // (`smithy_query(query="doc",shape="PutMetricAlarmInput",member="TreatMissingData")`) — the
+    // member is a plain string in the model, so the set of policies the evaluation can apply is
+    // a rule only the service enforces, and a value outside it names a policy no alarm could be
+    // evaluated under. Stated with the value and the whole set
+    // ([`crate::state::value_not_supported_for_parameter_message`]), which is what tells a near
+    // miss of a documented value from a value that was never offered.
+    if let Some(policy) = input.treat_missing_data.as_deref() {
+        if !crate::state::TREAT_MISSING_DATA_VALUES.contains(&policy) {
+            return Some(crate::state::value_not_supported_for_parameter_message(
+                policy,
+                TREAT_MISSING_DATA,
+                &crate::state::TREAT_MISSING_DATA_VALUES,
+            ));
+        }
+    }
+    // "If you specify ignore, the alarm state does not change during periods with too few data
+    // points to be statistically significant. If you specify evaluate or omit this parameter,
+    // the alarm is always evaluated" … "Valid Values: evaluate | ignore"
+    // (`smithy_query(query="doc",shape="PutMetricAlarmInput",member="EvaluateLowSampleCountPercentile")`)
+    // — a plain string in the model too, and the same rule: the member selects one of two
+    // behaviours the evaluation implements, so a third name selects none.
+    if let Some(option) = input.evaluate_low_sample_count_percentile.as_deref() {
+        if !crate::state::LOW_SAMPLE_COUNT_PERCENTILE_OPTIONS.contains(&option) {
+            return Some(crate::state::option_not_supported_message(
+                option,
+                EVALUATE_LOW_SAMPLE_COUNT_PERCENTILE,
+                &crate::state::LOW_SAMPLE_COUNT_PERCENTILE_OPTIONS,
+            ));
+        }
+    }
+    // "The number of data points that must be breaching to trigger the alarm. … In that case,
+    // this value is the M." (`PutMetricAlarmInput$DatapointsToAlarm`) against "The number of
+    // periods over which data is compared to the specified threshold. … this value is the N."
+    // (`PutMetricAlarmInput$EvaluationPeriods`) — the M of an "M out of N" cannot ask for more
+    // breaching datapoints than there are periods to grade, or the alarm could never reach
+    // `ALARM` at all. The relation is between the two members and nothing else, so it is
+    // checked wherever BOTH are named: the series the alarm watches may be stated as one metric
+    // or as a `Metrics` query array, and neither form changes what M and N mean.
+    if let (Some(datapoints), Some(periods)) = (input.datapoints_to_alarm, input.evaluation_periods)
+    {
+        if datapoints > periods {
+            return Some(crate::state::at_most_message(
+                DATAPOINTS_TO_ALARM,
+                EVALUATION_PERIODS,
+            ));
+        }
+    }
     // An aligned window lays its boundaries on the CLOCK of the zone it names ("You can specify
     // an IANA time zone name […], a fixed UTC offset […], or an offset-prefixed identifier […].
     // The offset must be aligned to a multiple of 5 minutes.",
@@ -507,12 +593,7 @@ fn configuration_refusal(input: &PutMetricAlarmInput) -> Option<String> {
     }
     if let Some(period) = input.period {
         if !is_alarm_period(period) {
-            let valid = HIGH_RESOLUTION_ALARM_PERIODS
-                .map(|period| period.to_string())
-                .join(", ");
-            return Some(format!(
-                "Period must be {valid} or a multiple of {REGULAR_PERIOD_SECS}; got {period}"
-            ));
+            return Some(period_grammar_refusal());
         }
         // An aligned window starts at a clock boundary, so only the periods a clock boundary
         // repeats at can be evaluated in one.
@@ -659,6 +740,38 @@ fn unresolvable_metrics(input: &PutMetricAlarmInput) -> Option<String> {
     None
 }
 
+/// The refusal of an `ExtendedStatistic` naming no statistic CloudWatch can compute, or `None`
+/// when the request names one it can.
+///
+/// The member is modelled as an unconstrained string, so which names are statistics at all is a
+/// service rule: the percentile form and the bounded families the member's own documentation
+/// lists ("p90 tm90 tc90 ts90 wm90 IQM PR(n:m) … TM(X%:X%) …",
+/// `smithy_query(query="doc",shape="PutMetricAlarmInput",member="ExtendedStatistic")`), read
+/// through the ONE statistic grammar this crate holds
+/// ([`crate::state::is_extended_statistic`]) — the same parse the evaluation folds the alarm's
+/// windows by, so an alarm can never be created on a statistic its own evaluation could not
+/// compute. A percentile outside `p0`..`p100`, or a name of no family at all, is such a value.
+///
+/// It is a VALUE this service cannot serve on the member it arrived on rather than a
+/// combination of members, so it is answered as the modelled parameter-value fault — the class
+/// a CloudWatch client branches on for one — in the sentence this service states such a value
+/// in ([`crate::state::value_not_supported_message`]).
+fn unsupported_extended_statistic(input: &PutMetricAlarmInput) -> Option<PutMetricAlarmError> {
+    let statistic = input.extended_statistic.as_deref()?;
+    if crate::state::is_extended_statistic(statistic) {
+        return None;
+    }
+    Some(
+        PutMetricAlarmErrorModeled::InvalidParameterValueException(InvalidParameterValueException {
+            message: Some(crate::state::value_not_supported_message(
+                statistic,
+                EXTENDED_STATISTIC,
+            )),
+        })
+        .into(),
+    )
+}
+
 /// Whether the alarm WATCHES the result of `query`: whether this is a query whose value the
 /// alarm grades, rather than one that only feeds the query it grades or states what that value
 /// is compared against.
@@ -712,14 +825,21 @@ impl ::aws_smithy_schema::serde::SerializableStruct for PutMetricAlarmOutput {
 // `InternalServiceFault` is widened in: it is THIS service's own server fault (every
 // metric operation declares it), and it is the only honest answer when the shared store
 // cannot be reached. Reporting that as a 4xx would tell the caller to fix its request.
+//
+// `InvalidParameterValueException` — "The value of an input parameter is bad or
+// out-of-range" — is widened in for the same reason: this SERVICE models the shape (the
+// metric operations declare it) and it is the class CloudWatch answers for a VALUE it cannot
+// serve on the member it arrived on, which this operation has one of
+// ([`unsupported_extended_statistic`]).
 #[smithy_macros::operation_error(
     "com.amazonaws.cloudwatch#PutMetricAlarm",
-    extra_errors = ["InternalServiceFault"]
+    extra_errors = ["InternalServiceFault", "InvalidParameterValueException"]
 )]
 #[derive(Debug)]
 pub enum PutMetricAlarmErrorModeled {
     LimitExceededFault(LimitExceededFault),
     InternalServiceFault(InternalServiceFault),
+    InvalidParameterValueException(InvalidParameterValueException),
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
@@ -790,6 +910,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // here, before the write, for the same reason as the EC2 precondition above.
         if let Some(message) = configuration_refusal(&input) {
             return Err(crate::scaffolded::Scaffolded::validation_error(message));
+        }
+
+        // A statistic name outside the grammar is a VALUE this service cannot serve rather than
+        // a combination of members, so it is answered under the modelled parameter-value fault
+        // instead — after the checks above, which judge whether the members of the request may
+        // stand together at all. Refused before the write, like every precondition here.
+        if let Some(refusal) = unsupported_extended_statistic(&input) {
+            return Err(refusal);
         }
 
         let region = crate::state::request_region(ctx.parts());

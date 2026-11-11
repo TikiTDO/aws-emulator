@@ -428,13 +428,13 @@ fn unanchored_pattern_refusal(refusal: &Refusal) -> Option<Refused> {
 /// Only the code and two RENDERINGS are this service's; the envelope, the clauses and the
 /// member paths are the shared ones, so this and the walk behind it cannot drift:
 ///
-/// * the clause states NO submitted value, exactly as this service's own parameter sentences
-///   do ([`crate::state::value_in_set_message`] — "the member path and the whole accepted set,
-///   and nothing of the submitted value"): what locates the repair is the member and the set
-///   the type admits;
-/// * that set is stated SORTED
-///   ([`service_common::validation_message::in_sorted_enum_order`]), which is how AWS states a
-///   value set whose model declares its members in an order of its own.
+/// * the clause quotes the SUBMITTED value, which is what tells a client which of the values
+///   it sent was rejected — a near miss of a declared value (a mis-cased one, say) cannot be
+///   told from an unsupported one without it;
+/// * the value set is stated in the order the SET ITSELF is walked
+///   ([`service_common::validation_message::in_hashed_enum_order`]), which is the order this
+///   service is recorded listing an enumerated type's values in — neither the model's
+///   declaration order nor a sorted one.
 fn scalar_enum_refusal(violations: &[aws_smithy_schema_server::Violation]) -> Option<Refused> {
     if !violations.iter().any(is_scalar_enum_violation) {
         return None;
@@ -442,14 +442,11 @@ fn scalar_enum_refusal(violations: &[aws_smithy_schema_server::Violation]) -> Op
     let stated = Refusal::Invalid(
         violations
             .iter()
-            .map(service_common::validation_message::in_sorted_enum_order)
+            .map(service_common::validation_message::in_hashed_enum_order)
             .collect(),
     );
-    // The whole envelope is the shared renderer's, with the value half dropped from every
-    // clause; only the CODE is this service's.
-    let message =
-        service_common::validation_message::aws_validation_refusal_withholding(&stated, |_| true)?
-            .message;
+    // The whole envelope is the shared renderer's; only the CODE is this service's.
+    let message = service_common::validation_message::aws_validation_refusal(&stated)?.message;
     Some(Refused {
         code: VALIDATION.shape_name.to_string(),
         message,

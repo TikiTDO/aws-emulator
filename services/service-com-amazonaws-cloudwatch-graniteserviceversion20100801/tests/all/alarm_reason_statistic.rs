@@ -245,23 +245,29 @@ async fn an_evaluated_reason_document_names_the_statistic_it_folded_the_window_b
 
 #[tokio::test]
 async fn a_statistic_no_fold_describes_leaves_the_alarm_unevaluated_and_names_none() {
-    // One step PAST the published percentile range ("between p0.0 and p100"): nothing folds a
+    // A percentile of a window CloudWatch computes no percentile over: "Percentile statistics
+    // are not available for metrics when any of the metric values are negative numbers."
+    // (`smithy_query(query="doc",shape="GetMetricStatisticsInput",member="ExtendedStatistics")`)
+    // — the statistic is one the alarm may name, so the alarm is created, but nothing folds its
     // window by it, so the alarm keeps the state its creation left it in — "the alarm state is
     // immediately set to INSUFFICIENT_DATA"
     // (`smithy_query(query="doc",shape="PutMetricAlarmInput",member="AlarmName")`) — and reports
     // no machine-readable explanation at all rather than one naming a statistic nothing computed.
     let router = build_router();
-    let name = "past-the-percentile-range";
+    let name = "no-percentile-over-this-window";
     ok(
         &router,
         "PutMetricAlarm",
         &patched(
             name,
-            &json!({"Statistic": Value::Null, "ExtendedStatistic": "p100.5"}),
+            &json!({"Statistic": Value::Null, "ExtendedStatistic": "p50"}),
         ),
     )
     .await;
-    let published: Vec<_> = PUBLISHED.iter().map(|value| datum(*value, 0.0)).collect();
+    let published: Vec<_> = [-2.0, 4.0, 12.0]
+        .iter()
+        .map(|value| datum(*value, 0.0))
+        .collect();
     publish(&router, name, &published).await;
     wait_for_evaluation();
 

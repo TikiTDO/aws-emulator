@@ -657,12 +657,13 @@ async fn a_value_outside_a_modelled_enum_is_refused_with_this_services_validatio
                 "case {case:?}: expected the refusal to state {expected:?}, got {message:?}"
             );
         }
-        // The refusal names the member and the set the type admits, and NOT the value that
-        // was submitted: the set is what a client repairs the request from.
+        // The refusal quotes the value that was submitted: a client can only tell WHICH of the
+        // values it sent was rejected — a mis-cased declared value from one the type never
+        // offered — from the message.
         assert!(
-            !message.contains(value),
-            "case {case:?}: the refusal must not quote the submitted value {value:?} back, got \
-             {message:?}"
+            message.contains(&format!("Value '{value}' at '{path}'")),
+            "case {case:?}: expected the refusal to quote the submitted value {value:?} at \
+             {path:?}, got {message:?}"
         );
     }
 

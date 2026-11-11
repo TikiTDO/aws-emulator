@@ -61,6 +61,8 @@ mod alarm_reason_statistic;
 mod alarm_rule_parse_diagnosis;
 #[path = "all/alarm_update_regrades.rs"]
 mod alarm_update_regrades;
+#[path = "all/alarm_value_set_refusals.rs"]
+mod alarm_value_set_refusals;
 #[path = "all/alarm_watched_query_designation.rs"]
 mod alarm_watched_query_designation;
 #[path = "all/announced_value_sets.rs"]
