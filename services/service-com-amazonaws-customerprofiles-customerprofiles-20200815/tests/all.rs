@@ -17,6 +17,8 @@ mod batch_get_profile;
 mod batch_put_profile_object;
 #[path = "all/calculated_attribute_definitions.rs"]
 mod calculated_attribute_definitions;
+#[path = "all/calculated_attribute_readiness.rs"]
+mod calculated_attribute_readiness;
 #[path = "all/delete_calculated_attribute_definition.rs"]
 mod delete_calculated_attribute_definition;
 #[path = "all/delete_profile_object_type.rs"]
