@@ -129,6 +129,8 @@ mod state_roundtrip;
 mod tag_limit_diagnostic;
 #[path = "all/trust_conflict_message.rs"]
 mod trust_conflict_message;
+#[path = "all/trust_failure_lifecycle.rs"]
+mod trust_failure_lifecycle;
 #[path = "all/trust_outcomes.rs"]
 mod trust_outcomes;
 #[path = "all/trust_peer_resolution.rs"]
