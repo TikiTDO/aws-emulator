@@ -268,6 +268,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         state.groups.remove(&name);
+        // A policy only exists against a group that exists, so the group's policies go
+        // with it — and the CloudWatch alarms that would have executed them, which are
+        // retired once this store's lock is released below.
+        let retired_policies = state.take_group_policies(&name);
         // A forced delete specifies "that the group is to be deleted along with all
         // instances associated with the group" (`ForceDelete`), so the instances it was
         // holding are terminated where they live: in the account's own Amazon EC2
@@ -316,6 +320,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The terminations above are already due, so the pump publishes them on its first
         // wake-up. The store's lock is released first: the pump takes it itself.
         drop(state);
+        crate::state::scaling_policies::remove_policy_alarms(&*self.engine, &retired_policies);
         crate::state::drive_lifecycle_clock(ctx, &self.engine);
         Ok(DeleteAutoScalingGroupOutput)
     }

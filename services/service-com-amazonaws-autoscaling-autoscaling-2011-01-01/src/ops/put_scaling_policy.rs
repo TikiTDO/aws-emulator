@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op PutScalingPolicy
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `PutScalingPolicy`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`PutScalingPolicy::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Creates or updates a scaling policy on an existing Auto Scaling group and answers its
+//! `PolicyARN`. A policy's `PolicyType` decides which members are part of it, so a put
+//! keeps only those and `DescribePolicies` reports exactly them
+//! ([`crate::state::scaling_policies`]). A target-tracking policy IS its CloudWatch
+//! alarms: putting one materialises them in the account's own CloudWatch store and the
+//! response reports the alarms that store holds for it.
 //!
 //! ## Shape of an operation
 //!
@@ -223,18 +221,280 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `PutScalingPolicy` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(PutScalingPolicyErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("PutScalingPolicy"))
+        use crate::state::scaling_policies as policies;
+
+        let Some(store) = crate::state::service_state(&*self.engine) else {
+            return Err(PutScalingPolicyErrorModeled::ResourceContentionFault(
+                ResourceContentionFault {
+                    message: Some(
+                        "the Auto Scaling store is not mounted on this engine".to_string(),
+                    ),
+                },
+            )
+            .into());
+        };
+
+        let key = crate::state::PolicyKey {
+            auto_scaling_group_name: input.auto_scaling_group_name.clone(),
+            policy_name: input.policy_name.clone(),
+        };
+        // "SimpleScaling (default)" (`PutScalingPolicyType$PolicyType`): a request that
+        // names no type asks for the default one.
+        let policy_type = input
+            .policy_type
+            .clone()
+            .unwrap_or_else(|| policies::POLICY_TYPE_SIMPLE_SCALING.to_string());
+        let now = ::std::time::SystemTime::now();
+
+        let mut state = store.lock();
+        state.materialize_due(&*self.engine, now);
+
+        // A policy only exists against a group that exists, so the group is resolved
+        // before any other member of the request is read: a request naming no stored
+        // group is refused for the group whatever else it carries.
+        let Some(group) = state.groups.get(&key.auto_scaling_group_name) else {
+            crate::state::audit(
+                ctx.parts(),
+                Self::NAME,
+                &key.auto_scaling_group_name,
+                "refused: no such group",
+            );
+            return Err(crate::scaffolded::Scaffolded::validation_error(
+                crate::state::ABSENT_GROUP_MESSAGE_WITHOUT_DETAIL,
+            ));
+        };
+        let region = group.region.clone();
+
+        if !policies::POLICY_TYPES.contains(&policy_type.as_str()) {
+            return Err(crate::scaffolded::Scaffolded::validation_error(
+                policies::valid_policy_types_message(),
+            ));
+        }
+        let members = policies::policy_members_of_type(&policy_type);
+        check_policy_input(&input, members)?;
+
+        let held = state.scaling_policies.get(&key).cloned();
+        // The ARN, the creation time and the alarm identity are minted once per policy
+        // and survive every later put of the same name: putting a policy again UPDATES
+        // that policy rather than replacing it with a different resource.
+        let (policy_arn, created_time, alarm_id) = match held.as_ref() {
+            Some(existing) => (
+                existing.policy_arn.clone(),
+                existing.created_time,
+                existing.alarm_id.clone(),
+            ),
+            None => {
+                if state.scaling_policies.len() >= policies::MAX_SCALING_POLICIES {
+                    return Err(PutScalingPolicyErrorModeled::LimitExceededFault(
+                        LimitExceededFault {
+                            message: Some(format!(
+                                "This emulator holds at most {} scaling policies; delete one \
+                                 before creating another",
+                                policies::MAX_SCALING_POLICIES
+                            )),
+                        },
+                    )
+                    .into());
+                }
+                let resource_id = state.mint_resource_id();
+                let alarm_id = state.mint_resource_id();
+                (
+                    policies::policy_arn(&region, &resource_id, &key),
+                    now,
+                    alarm_id,
+                )
+            }
+        };
+
+        let policy = crate::state::StoredScalingPolicy {
+            policy_arn: policy_arn.clone(),
+            region,
+            policy_type,
+            adjustment_type: input.adjustment_type.filter(|_| members.adjustment),
+            min_adjustment_step: input.min_adjustment_step.filter(|_| members.adjustment),
+            min_adjustment_magnitude: input
+                .min_adjustment_magnitude
+                .filter(|_| members.adjustment),
+            scaling_adjustment: input
+                .scaling_adjustment
+                .filter(|_| members.scaling_adjustment),
+            cooldown: input.cooldown.filter(|_| members.cooldown),
+            step_adjustments: input.step_adjustments.filter(|_| members.step),
+            metric_aggregation_type: input.metric_aggregation_type.filter(|_| members.step),
+            estimated_instance_warmup: input
+                .estimated_instance_warmup
+                .filter(|_| members.instance_warmup),
+            // "The default is enabled" (`PutScalingPolicyType$Enabled`).
+            enabled: input.enabled.unwrap_or(true),
+            target_tracking_configuration: input
+                .target_tracking_configuration
+                .filter(|_| members.target_tracking),
+            predictive_scaling_configuration: input
+                .predictive_scaling_configuration
+                .filter(|_| members.predictive),
+            // Filled in by the alarm sync below, which is what creates them in
+            // CloudWatch: a policy's alarms are state, not a value a response invents.
+            alarms: Vec::new(),
+            alarm_id,
+            created_time,
+        };
+        state.scaling_policies.insert(key.clone(), policy.clone());
+        // The CloudWatch write happens with this service's lock RELEASED, so no request
+        // holds two stores at once.
+        drop(state);
+
+        let alarms = policies::sync_policy_alarms(&*self.engine, &key, &policy);
+        // Read the minted set back onto the policy record, so a later `DescribePolicies`
+        // reports the alarms CloudWatch holds rather than a list it recomputes. A policy
+        // deleted while the sync ran holds none.
+        let mut state = store.lock();
+        if let Some(stored) = state.scaling_policies.get_mut(&key) {
+            stored.alarms = alarms.clone();
+        }
+        drop(state);
+
+        crate::state::audit(
+            ctx.parts(),
+            Self::NAME,
+            &key.auto_scaling_group_name,
+            "scaling policy put",
+        );
+
+        Ok(PutScalingPolicyOutput {
+            policy_arn: Some(policy_arn),
+            alarms: Some(alarms),
+        })
     }
+}
+
+/// This operation's refusal of a request it cannot satisfy: the `ValidationError` Amazon
+/// EC2 Auto Scaling answers such a request with, carrying the sentence the service states
+/// for that error class.
+fn refuse(message: impl Into<String>) -> PutScalingPolicyError {
+    crate::scaffolded::Scaffolded::validation_error(message)
+}
+
+/// Refuse a put whose members cannot describe a policy of the type the request named,
+/// where `members` says which members that type owns.
+///
+/// Every rule here is one the model documents but cannot express, so the boundary
+/// validator passed the request: `AdjustmentType` is an unconstrained string whose
+/// "valid values are ChangeInCapacity, ExactCapacity, and PercentChangeInCapacity",
+/// `Cooldown` is an unconstrained integer that counts seconds, and each configuration is
+/// "Required if the policy type is …". Each refusal states that rule in the sentence the
+/// SERVICE answers for it, and the whole request is refused before anything is stored.
+fn check_policy_input(
+    input: &PutScalingPolicyInput,
+    members: crate::state::scaling_policies::PolicyMembers,
+) -> Result<(), PutScalingPolicyError> {
+    use crate::state::scaling_policies as policies;
+
+    // A cooldown is a span of seconds, so a negative one is no cooldown at all. Checked
+    // wherever the request carries it, not only where the policy keeps it.
+    if let Some(cooldown) = input.cooldown {
+        if cooldown < policies::MIN_COOLDOWN_SECONDS {
+            return Err(refuse(policies::member_below_minimum_message(
+                policies::COOLDOWN_MEMBER_PATH,
+                cooldown,
+                policies::MIN_COOLDOWN_SECONDS,
+            )));
+        }
+    }
+    if let Some(adjustment_type) = input.adjustment_type.as_deref() {
+        if !crate::state::ADJUSTMENT_TYPES.contains(&adjustment_type) {
+            return Err(refuse(policies::VALID_ADJUSTMENT_TYPES_MESSAGE));
+        }
+    }
+    if let Some(aggregation) = input.metric_aggregation_type.as_deref() {
+        if !policies::METRIC_AGGREGATION_TYPES.contains(&aggregation) {
+            return Err(refuse(policies::valid_metric_aggregation_types_message()));
+        }
+    }
+    // "Required if the policy type is StepScaling or SimpleScaling" — the adjustment type
+    // is how such a policy's adjustment is read, so it has no meaning without one.
+    if members.adjustment && input.adjustment_type.is_none() {
+        return Err(refuse(policies::member_must_not_be_null_message(
+            "adjustmentType",
+        )));
+    }
+    // "Required if the policy type is SimpleScaling": a simple scaling policy IS one
+    // adjustment.
+    if members.scaling_adjustment && input.scaling_adjustment.is_none() {
+        return Err(refuse(policies::member_must_not_be_null_message(
+            "scalingAdjustment",
+        )));
+    }
+    // "Required if the policy type is StepScaling": with no step, no breach selects an
+    // adjustment, so the policy could never scale.
+    if members.step
+        && input
+            .step_adjustments
+            .as_ref()
+            .is_none_or(|steps| steps.is_empty())
+    {
+        return Err(refuse(policies::STEP_ADJUSTMENT_REQUIRED_MESSAGE));
+    }
+    if members.target_tracking {
+        let Some(configuration) = input.target_tracking_configuration.as_ref() else {
+            return Err(refuse(policies::member_must_not_be_null_message(
+                "targetTrackingConfiguration",
+            )));
+        };
+        check_target_tracking_configuration(configuration)?;
+    }
+    // "Required if the policy type is PredictiveScaling."
+    if members.predictive && input.predictive_scaling_configuration.is_none() {
+        return Err(refuse(policies::member_must_not_be_null_message(
+            "predictiveScalingConfiguration",
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse a target-tracking configuration that cannot name one metric to track, or that
+/// tracks it to a value outside the window the service holds.
+///
+/// "A predefined metric. You must specify either a predefined metric or a customized
+/// metric" (`TargetTrackingConfiguration$PredefinedMetricSpecification`) — either, so
+/// exactly one: with both the policy has two metrics to track and with neither it has
+/// none. The remaining rules are the ones each specification's own documentation states:
+/// the request count per target is counted per target group, so it needs the
+/// `ResourceLabel` naming that group, and a named customized metric is graded by a
+/// statistic of it.
+fn check_target_tracking_configuration(
+    configuration: &TargetTrackingConfiguration,
+) -> Result<(), PutScalingPolicyError> {
+    use crate::state::scaling_policies as policies;
+
+    match (
+        configuration.predefined_metric_specification.as_ref(),
+        configuration.customized_metric_specification.as_ref(),
+    ) {
+        (Some(_), Some(_)) | (None, None) => {
+            return Err(refuse(policies::ONE_METRIC_SPECIFICATION_MESSAGE))
+        }
+        (Some(predefined), None) => {
+            if predefined.predefined_metric_type == policies::ALB_REQUEST_COUNT_PER_TARGET
+                && predefined.resource_label.is_none()
+            {
+                return Err(refuse(policies::resource_label_required_message(
+                    &predefined.predefined_metric_type,
+                )));
+            }
+        }
+        (None, Some(customized)) => {
+            // A customized specification describes its metric either by naming one or as
+            // a metric data query; only the named form is graded by a statistic of a
+            // single series, and that statistic is what grades it.
+            if policies::names_one_metric(customized) && customized.statistic.is_none() {
+                return Err(refuse(policies::member_must_not_be_null_message(
+                    policies::CUSTOMIZED_STATISTIC_MEMBER_PATH,
+                )));
+            }
+        }
+    }
+    if !policies::target_value_in_range(configuration.target_value) {
+        return Err(refuse(policies::TARGET_VALUE_RANGE_MESSAGE));
+    }
+    Ok(())
 }

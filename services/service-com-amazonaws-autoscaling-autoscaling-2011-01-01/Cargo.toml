@@ -44,6 +44,11 @@ service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 # same answer `sts:GetCallerIdentity` gives — so the authorization gate blames the principal
 # the caller reads back for the credential it signed with.
 service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# The account's own CloudWatch store holds the alarms a target-tracking scaling policy is
+# driven by: `PutScalingPolicy` materialises them there and reports back the ones that store
+# holds, so an alarm this service reports is one CloudWatch's own `DescribeAlarms` resolves
+# (`state::scaling_policies`).
+service-com-amazonaws-cloudwatch-graniteserviceversion20100801 = { workspace = true }
 # `service-common` carries the ONE reading of which IAM entity a caller-supplied IAM ARN
 # names, which that instance-profile ARN is read through, and the ONE in-process
 # EventBridge client an emulated service publishes an event through.

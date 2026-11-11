@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribePolicies
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribePolicies`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribePolicies::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the scaling policies the store holds, filtered by the group they belong to,
+//! their names and their types, a page at a time. Implemented alongside
+//! `PutScalingPolicy` because it is the reader that resolves what a put stored; its own
+//! stub is filed as
+//! `issues/things-that-do-not-work/20261109T144605Z-auto-scaling-describepolicies-stub.md`.
 //!
 //! ## Shape of an operation
 //!
@@ -160,18 +157,96 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribePolicies` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribePoliciesErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribePolicies"))
+        let _ = ctx;
+        let Some(store) = crate::state::service_state(&*self.engine) else {
+            return Err(DescribePoliciesErrorModeled::ResourceContentionFault(
+                ResourceContentionFault {
+                    message: Some(
+                        "the Auto Scaling store is not mounted on this engine".to_string(),
+                    ),
+                },
+            )
+            .into());
+        };
+
+        let wanted_names = input.policy_names.unwrap_or_default();
+        let wanted_types = input.policy_types.unwrap_or_default();
+
+        let mut state = store.lock();
+        state.materialize_due(&*self.engine, ::std::time::SystemTime::now());
+
+        // `AutoScalingGroupName` is optional — this read is of "the scaling policies in
+        // the account and Region" — but a name the request DOES carry has to name a
+        // stored group, and that is resolved before any other member is read, cursor
+        // included.
+        if let Some(group_name) = input.auto_scaling_group_name.as_deref() {
+            if !state.groups.contains_key(group_name) {
+                return Err(crate::scaffolded::Scaffolded::validation_error(
+                    crate::state::absent_group_message(group_name),
+                ));
+            }
+        }
+
+        // The requested cursor: the offset it decodes to, and the token itself, kept so a
+        // later refusal can name the token the caller actually submitted.
+        let (offset, token) = match input.next_token.clone() {
+            None => (0, String::new()),
+            Some(token) => match crate::state::decode_next_token(&token) {
+                Some(offset) => (offset, token),
+                None => {
+                    return Err(DescribePoliciesErrorModeled::InvalidNextToken(
+                        InvalidNextToken {
+                            message: Some(crate::state::invalid_pagination_token_message(&token)),
+                        },
+                    )
+                    .into())
+                }
+            },
+        };
+        // `MaxRecords` has a documented range; a page size outside it is refused, not
+        // quietly reshaped.
+        if let Some(max_records) = crate::state::max_records_out_of_range(input.max_records) {
+            return Err(crate::scaffolded::Scaffolded::validation_error(
+                crate::state::max_records_violation_message(max_records),
+            ));
+        }
+
+        // "If you omit this property, all policies are described. If a group name is
+        // provided, the results are limited to that group. If you specify an unknown
+        // policy name, it is ignored with no error."
+        // (`smithy_query(query="doc",shape="DescribePoliciesType",member="PolicyNames")`):
+        // a name nothing answers to selects nothing rather than refusing the read.
+        let matching: Vec<ScalingPolicy> = state
+            .scaling_policies
+            .iter()
+            .filter(|(key, _)| {
+                input
+                    .auto_scaling_group_name
+                    .as_deref()
+                    .is_none_or(|group_name| key.auto_scaling_group_name == group_name)
+            })
+            .filter(|(key, _)| wanted_names.is_empty() || wanted_names.contains(&key.policy_name))
+            .filter(|(_, policy)| {
+                wanted_types.is_empty() || wanted_types.contains(&policy.policy_type)
+            })
+            .map(|(key, policy)| policy.view(key))
+            .collect();
+        // A token this service issued always points inside the list it was issued for;
+        // one that points past the end was not issued for this list. Only a decoded token
+        // reaches a non-zero offset, so `token` is the one submitted.
+        if offset > 0 && offset >= matching.len() {
+            return Err(DescribePoliciesErrorModeled::InvalidNextToken(
+                InvalidNextToken {
+                    message: Some(crate::state::invalid_pagination_token_message(&token)),
+                },
+            )
+            .into());
+        }
+        let (scaling_policies, next_token) = crate::state::page(&matching, offset, input.max_records);
+
+        Ok(DescribePoliciesOutput {
+            scaling_policies: Some(scaling_policies),
+            next_token,
+        })
     }
 }

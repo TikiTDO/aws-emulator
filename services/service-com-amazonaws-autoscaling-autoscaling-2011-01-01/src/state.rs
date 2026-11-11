@@ -66,6 +66,13 @@ pub mod iam_instance_profiles;
 /// that puts them on the bus as they fall due.
 pub mod lifecycle_events;
 
+/// The scaling policies of a group — what `PutScalingPolicy` creates and
+/// `DescribePolicies` reports — and the CloudWatch alarms a target-tracking policy is
+/// driven by, which live in the account's own CloudWatch store.
+pub mod scaling_policies;
+
+pub use scaling_policies::{PolicyKey, StoredScalingPolicy};
+
 pub use lifecycle_events::{
     drive_lifecycle_clock, InstanceLifecycle, InstanceLifecycleChange, PendingLifecycleEvent,
 };
@@ -593,6 +600,11 @@ pub struct ComAmazonawsAutoscalingAutoscaling20110101State {
     pub launch_configurations: BTreeMap<String, StoredLaunchConfiguration>,
     /// Auto Scaling groups, keyed by `AutoScalingGroupName`.
     pub groups: BTreeMap<String, StoredGroup>,
+    /// The scaling policies of those groups, keyed by the group they belong to and their
+    /// name within it ([`PolicyKey`]), so the collection iterates group by group and, in
+    /// a group, policy name by policy name. A group's policies are removed with the
+    /// group: a policy only exists against a group that does.
+    pub scaling_policies: BTreeMap<PolicyKey, StoredScalingPolicy>,
     /// Every scaling activity this service has recorded, oldest first.
     pub activities: Vec<StoredActivity>,
     /// Every instance refresh this service has recorded, oldest first.
@@ -640,6 +652,30 @@ impl AutoScalingState {
     pub fn mint_resource_id(&mut self) -> String {
         self.next_resource_seq += 1;
         uuid_shaped(self.next_resource_seq)
+    }
+
+    /// Remove every scaling policy of `group_name` and answer them, so the caller can
+    /// retire the CloudWatch alarms they held once this store's lock is released.
+    ///
+    /// A policy only exists against a group that exists, so deleting the group deletes
+    /// its policies: nothing a later put or read of the same name sees is left behind.
+    pub fn take_group_policies(
+        &mut self,
+        group_name: &str,
+    ) -> BTreeMap<PolicyKey, StoredScalingPolicy> {
+        let keys: Vec<PolicyKey> = self
+            .scaling_policies
+            .keys()
+            .filter(|key| key.auto_scaling_group_name == group_name)
+            .cloned()
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| {
+                self.scaling_policies
+                    .remove(&key)
+                    .map(|policy| (key, policy))
+            })
+            .collect()
     }
 
     /// Store one instance refresh under a freshly minted id and answer that id,
@@ -2042,6 +2078,17 @@ pub fn decode_next_token(token: &str) -> Option<usize> {
 /// not something the model or a recording pins down.
 pub fn invalid_next_token_message(token: &str) -> String {
     format!("The token '{token}' was invalid")
+}
+
+/// The message `DescribePolicies` refuses an unusable `NextToken` with: the sentence that
+/// operation's own recorded refusal states, which names the member by its role (a
+/// pagination token) and quotes the token the caller sent.
+///
+/// Separate from [`invalid_next_token_message`] because the sentence is this
+/// operation's: the one above is the example wording its callers already answer with,
+/// and rewording them is not this operation's to do.
+pub fn invalid_pagination_token_message(token: &str) -> String {
+    format!("The pagination token '{token}' is invalid")
 }
 
 /// Encode the offset the next page starts at as a `NextToken`.

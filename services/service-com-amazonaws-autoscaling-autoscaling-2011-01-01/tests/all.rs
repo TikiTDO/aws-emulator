@@ -49,6 +49,8 @@ mod reference_data_catalogs;
 mod rollback_instance_refresh;
 #[path = "all/scale_out_launches_ec2_instances.rs"]
 mod scale_out_launches_ec2_instances;
+#[path = "all/scaling_policies.rs"]
+mod scaling_policies;
 #[path = "all/scaling_activity_log.rs"]
 mod scaling_activity_log;
 #[path = "all/set_desired_capacity_on_subnet_placed_groups.rs"]
