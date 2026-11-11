@@ -1,0 +1,41 @@
+Issue-Severity: HIGH
+Issue-Corpus: simparity-behavioral-aws-v1
+Issue-Corpus-Kind: behavioral
+Issue-Trace-Ids: elbv2.source-ip-condition-uses-the-layer3-address-not-x-forwarded-for
+Issue-Shape-Id: com.amazonaws.elasticloadbalancingv2#ElasticLoadBalancing_v10
+Issue-Key: elbv2.source-ip-condition-uses-the-layer3-address-not-x-forwarded-for|_http#20|Timeout|except urllib.error.HTTPError as exc:
+Issue-Commit: b37a548368ed88ff8e9aed060c39391f1ed9f4cf
+
+# elbv2: the source-ip listener-rule check reaches no verdict — the ALB never answers the forward rule into its Lambda target group, so the source-ip-vs-X-Forwarded-For contract is unverifiable
+
+> _Note: this issue was identified against the code base at commit `b37a548368ed88ff8e9aed060c39391f1ed9f4cf`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
+
+## Operation
+CreateRule
+
+## Description
+Cause 1 of 1: an ALB with an HTTP:80 listener, a priority-5 path-pattern rule forwarding to a `lambda`-type target group, and a priority-20 `source-ip` rule never serves the first data-plane request, so the whole check is killed by the suite's 60 s ceiling before a single assertion about source-ip routing is reached. Failing check id: elbv2.source-ip-condition-uses-the-layer3-address-not-x-forwarded-for.
+
+AWS: Smithy (elasticloadbalancingv2, elasticloadbalancing-v10): RuleCondition.Field value `source-ip` – "[ALB, NLB] Matches on the source IP address. For ALB, use SourceIpConfig with Values to specify CIDR ranges"; SourceIpConditionConfig documents "You can use this condition to route based on the IP address of the source that connects to the load balancer. If a client is behind a proxy, this is the IP address of the proxy not the IP address of the client" — i.e. the layer-3 peer address, and a client-supplied X-Forwarded-For header can never satisfy it. On real AWS the sequence the check performs answers at every step: (a) a GET through the priority-5 forward rule reaches the registered Lambda target and comes back 200 with a JSON body of the headers the ALB attached, including the ALB-added `x-forwarded-for` whose first entry is the client address; (b) a priority-20 rule whose conditions are path-pattern + source-ip for that address/32 wins over the priority-30 fall-through rule and serves its fixed response; (c) with the source-ip condition pointed at an unroutable CIDR (RFC 5737 TEST-NET-1 192.0.2.0/24), the same request falls through to priority 30 — and still falls through when the client sends `X-Forwarded-For: 192.0.2.7` or `X-Forwarded-For: <its own address>`; (d) restoring the original /32 makes the priority-20 rule win again; (e) ModifyRule with the documented-forbidden CIDR 255.255.255.255/32 is refused — recorded behavior only for the wire shape: error code `ValidationError`, HTTP 400, message `The specified value '255.255.255.255/32' is not a valid CIDR block` (fixed text "The specified value '" + the rejected CIDR from the request + "' is not a valid CIDR block"; the CIDR is the only variable part), and the stored rule is left unchanged.
+
+Emulator: the check produces no verdict at all — the replay detail is the bare `Check timed out after 60.0s`. The only blocking step the check can be sitting in at that point is its first data-plane poll (`_poll_until` on `http://<DNSName>/<slug>/echo`, interval 10 s, budget 420 s) waiting for the Lambda target behind the priority-5 forward rule to echo back a dict containing `x-forwarded-for`; every control-plane call before it (CreateVpc/CreateSecurityGroup, IAM role, CreateFunction, CreateLoadBalancer + wait-active, CreateTargetGroup(TargetType=lambda), AddPermission, RegisterTargets, CreateListener, CreateRule) is unbounded-fast and would surface its own ClientError rather than a timeout. So the emulator's published ALB endpoint either never accepts/answers the request or never answers it 200 with the Lambda's body, and none of legs (b)-(e) above — the source-ip match, the X-Forwarded-For discriminator, the DescribeRules round trip of SourceIpConfig, or the 255.255.255.255/32 ValidationError refusal — is ever exercised. Note: several neighbouring data-plane failures are owned by open issues 20261110T220525Z-elbv2-5-net-new-data-plane-causes-dnsname.md and 20261109T153103Z-elbv2-4-net-new-causes-the-published-dnsname.md; neither carries this check's replay key, so this check is still unowned and its legs (the source-ip/X-Forwarded-For contract and the forbidden-CIDR refusal) are not described by them.
+
+Why: a client that gates access with a `source-ip` listener rule gets no usable signal from the emulator. Because the request never completes, a caller cannot tell whether its CIDR allow-list routes at all; worse, the behavior that actually matters for security — that a source-ip condition is NOT satisfiable by a client-supplied X-Forwarded-For header — can neither be confirmed nor disproved, so an allow-list that real AWS enforces on the layer-3 address may be silently spoofable (or silently dead) on the emulator, and ModifyRule may accept a CIDR AWS refuses.
+
+Fix: the ALB data-plane request path — the listener/rule evaluation and the lambda-target invocation that answers a request arriving on the published DNSName (including the X-Forwarded-For header the ALB attaches before invoking the target) — plus source-ip condition evaluation against the connection's layer-3 peer address (never X-Forwarded-For) in the rule matcher, and CIDR validation in ModifyRule/CreateRule's condition validation.
+
+Traces: elbv2.source-ip-condition-uses-the-layer3-address-not-x-forwarded-for (timed out at the suite's 60 s ceiling in its first data-plane poll).
+
+## Evidence
+Expected (real AWS): GET http://<alb-dns>/<slug>/echo -> 200 with the Lambda's JSON body containing an `x-forwarded-for` header added by the ALB; GET http://<alb-dns>/<slug>/src -> 200 "BY-SOURCE-IP" while the priority-20 rule's SourceIpConfig.Values == ["<client-ip>/32"]; after ModifyRule sets SourceIpConfig.Values == ["192.0.2.0/24"], the same GET -> 200 "FELL-THROUGH", and still 200 "FELL-THROUGH" when sent with `X-Forwarded-For: 192.0.2.7` or `X-Forwarded-For: <client-ip>`; restoring the /32 -> 200 "BY-SOURCE-IP"; DescribeRules echoes SourceIpConfig.Values unchanged; ModifyRule with SourceIpConfig.Values=["255.255.255.255/32"] -> HTTP 400 ValidationError "The specified value '255.255.255.255/32' is not a valid CIDR block" and the stored condition unchanged.
+
+Actual (emulator): no response is ever observed. The suite reports only `[mismatch] elbv2.source-ip-condition-uses-the-layer3-address-not-x-forwarded-for / Error: Check timed out after 60.0s`, i.e. the check was still polling the ALB endpoint for its first 200 when the ceiling fired; none of the source-ip, X-Forwarded-For or forbidden-CIDR assertions ran.
+
+## Steps to Reproduce
+1. Create a VPC with public subnets and a security group open on TCP 80.
+2. Create an IAM role for Lambda and a Lambda function that returns {"statusCode": 200, "headers": {"Content-Type": "application/json"}, "body": json.dumps(event["headers"])}.
+3. CreateLoadBalancer (Scheme=internet-facing, the subnets, the SG) and wait for state active.
+4. CreateTargetGroup(TargetType="lambda"); lambda AddPermission for principal elasticloadbalancing.amazonaws.com with SourceArn=<target group arn>; RegisterTargets(Targets=[{"Id": <function arn>}]).
+5. CreateListener(Port=80, Protocol=HTTP, DefaultActions=fixed-response "DEFAULT-RULE"); CreateRule(Priority=5, Conditions=[path-pattern /<slug>/echo], Actions=[forward -> the lambda target group]).
+6. GET http://<LoadBalancer DNSName>/<slug>/echo. Expected: 200 with a JSON body containing an `x-forwarded-for` header. Observed: the request never returns 200 and the check is killed at the suite's 60 s ceiling.
+7. (Blocked by step 6) CreateRule(Priority=20, Conditions=[path-pattern /<slug>/src, source-ip <client-ip>/32], Actions=fixed-response "BY-SOURCE-IP") and CreateRule(Priority=30, Conditions=[path-pattern /<slug>/src], Actions=fixed-response "FELL-THROUGH"), then GET /<slug>/src with and without an X-Forwarded-For header, and ModifyRule the priority-20 rule to SourceIpConfig.Values=["255.255.255.255/32"].
