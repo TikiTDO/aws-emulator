@@ -32,7 +32,7 @@ use super::zonal_shift_lifecycle::{call, emulator, encoded, error_code, seeded, 
 
 /// Register `arn` with ARC the way the service that OWNS the resource does: by writing the
 /// ONE shared registry in the shared engine.
-fn register(engine: &engine::InMemoryEngine, arn: &str, name: &str, zones: &[&str]) {
+pub(crate) fn register(engine: &engine::InMemoryEngine, arn: &str, name: &str, zones: &[&str]) {
     engine
         .state::<ManagedResourceRegistry>()
         .lock()

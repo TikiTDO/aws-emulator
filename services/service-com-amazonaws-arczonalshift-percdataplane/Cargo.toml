@@ -13,6 +13,10 @@ engine = { workspace = true }
 # zonal-shift integration on for it — so which resources are registered lives in
 # `arc_managed_resources`, written by that service and read here.
 service-common = { path = "../common" }
+# `chrono` reads the calendar dates and times of day a practice run configuration is
+# written in (`blockedDates`, `allowedWindows`, `blockedWindows`), so a value of the
+# modelled shape that names no real date or clock time is refused.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }
 aws-smithy-schema-server = { workspace = true }

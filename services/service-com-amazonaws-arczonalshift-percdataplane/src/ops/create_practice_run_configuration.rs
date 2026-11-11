@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreatePracticeRunConfiguration
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreatePracticeRunConfiguration`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreatePracticeRunConfiguration::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Records the practice run configuration ARC holds for a managed resource and PERSISTS
+//! it, so every later read — `GetManagedResource`, `ListManagedResources` — reports the
+//! configuration and the `practiceRunStatus` derived from it.
 //!
 //! ## Shape of an operation
 //!
@@ -135,6 +129,7 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+use crate::state::requested_practice_run_configuration;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -209,18 +204,75 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreatePracticeRunConfiguration` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreatePracticeRunConfigurationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreatePracticeRunConfiguration"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            CreatePracticeRunConfigurationError::from(
+                CreatePracticeRunConfigurationErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: Some("the ARC zonal shift store is unavailable".to_string()),
+                    },
+                ),
+            )
+        })?;
+        // The resources the services that own them have registered with ARC, read before
+        // this store is locked: a resource registered through one of them is as much a
+        // target of this call as one this store was seeded with.
+        let published = crate::state::published_resources(&*self.engine);
+
+        let mut store = state.lock();
+
+        // The caller's authorization on the named target is decided BEFORE the target is
+        // resolved: a resourceIdentifier ARC holds nothing for is refused 403
+        // AccessDeniedException, disclosing nothing about what exists. One helper takes
+        // this branch for every operation that acts on a target.
+        let resource = store
+            .authorized_resource(&published, &input.resource_identifier)
+            .map_err(CreatePracticeRunConfigurationErrorModeled::AccessDeniedException)?;
+
+        // The configuration the request asks ARC to hold, read the ONE way every
+        // operation that writes a configuration reads it.
+        let configuration = requested_practice_run_configuration(
+            input.outcome_alarms,
+            input.blocking_alarms,
+            input.blocked_windows,
+            input.allowed_windows,
+            input.blocked_dates,
+        )
+        .map_err(|refused| {
+            CreatePracticeRunConfigurationErrorModeled::ValidationException(ValidationException {
+                message: refused.message,
+                reason: refused.reason.to_string(),
+            })
+        })?;
+
+        // A resource has at most one practice run configuration, and this operation
+        // CREATES one: the configuration of a resource that already has one is changed
+        // through `UpdatePracticeRunConfiguration`, so creating a second is a conflict
+        // in the resource's current state.
+        if resource.practice_run_configuration.is_some() {
+            return Err(CreatePracticeRunConfigurationErrorModeled::ConflictException(
+                ConflictException {
+                    message: crate::state::PRACTICE_CONFIGURATION_EXISTS_MESSAGE.to_string(),
+                    reason: "PracticeConfigurationAlreadyExists".to_string(),
+                    zonal_shift_id: None,
+                },
+            )
+            .into());
+        }
+
+        // Stored under the resource's own ARN — the key every reader looks a
+        // configuration up by — so the write stays correct whatever identifier form
+        // resolution accepts.
+        store.set_practice_run_configuration(&resource.arn, configuration.clone());
+
+        Ok(CreatePracticeRunConfigurationOutput {
+            arn: resource.arn,
+            name: resource.name,
+            // Creating a practice run configuration does not enable zonal autoshift —
+            // `UpdateZonalAutoshiftConfiguration` is what does — so what is reported is
+            // the status the resource carries now.
+            zonal_autoshift_status: resource.zonal_autoshift_status.as_wire().to_string(),
+            practice_run_configuration: configuration,
+        })
     }
 }

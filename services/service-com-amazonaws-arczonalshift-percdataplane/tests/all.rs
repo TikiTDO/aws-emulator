@@ -15,6 +15,8 @@
 mod access_denied_precedence;
 #[path = "all/autoshift_observer_notification.rs"]
 mod autoshift_observer_notification;
+#[path = "all/practice_run_configuration.rs"]
+mod practice_run_configuration;
 #[path = "all/refusal_message_rules.rs"]
 mod refusal_message_rules;
 #[path = "all/registered_managed_resources.rs"]

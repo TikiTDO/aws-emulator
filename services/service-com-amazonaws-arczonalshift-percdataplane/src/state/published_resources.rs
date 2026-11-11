@@ -70,6 +70,10 @@ impl ZonalShiftState {
     /// this store holds ITSELF is the one reported, since this store is the authority on
     /// its own resources; a published one carries the facts its owner recorded and the
     /// defaults ARC reports for a resource nothing has been configured for.
+    ///
+    /// The practice run configuration is ARC's own record about a resource, so every
+    /// resource in the answer carries the one this store holds for it, whichever way the
+    /// resource reached ARC.
     #[must_use]
     pub fn managed_resource_inventory(
         &self,
@@ -94,6 +98,9 @@ impl ZonalShiftState {
         for (arn, resource) in &self.managed_resources {
             inventory.insert(arn.clone(), resource.clone());
         }
+        for (arn, resource) in &mut inventory {
+            resource.practice_run_configuration = self.practice_run_configuration(arn);
+        }
         inventory
     }
 
@@ -103,14 +110,16 @@ impl ZonalShiftState {
     /// The identifier is the ARN of the resource and nothing more
     /// (`ResourceIdentifier`'s documentation: "The identifier is the Amazon Resource Name
     /// (ARN) for the resource"), so a resource is matched by that ARN as the owning
-    /// service recorded it.
+    /// service recorded it. The resource carries the practice run configuration this
+    /// store holds for it, which is ARC's own record about it.
     #[must_use]
     pub fn managed_resource(
         &self,
         published: &[RegisteredResource],
         resource_identifier: &str,
     ) -> Option<ManagedResource> {
-        self.managed_resources
+        let mut resource = self
+            .managed_resources
             .get(resource_identifier)
             .cloned()
             .or_else(|| {
@@ -125,6 +134,8 @@ impl ZonalShiftState {
                         practice_run_configuration: None,
                         zonal_autoshift_status: ZonalAutoshiftStatus::Disabled,
                     })
-            })
+            })?;
+        resource.practice_run_configuration = self.practice_run_configuration(resource_identifier);
+        Some(resource)
     }
 }

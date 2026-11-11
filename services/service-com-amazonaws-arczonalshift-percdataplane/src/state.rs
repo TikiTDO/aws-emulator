@@ -27,6 +27,15 @@ mod published_resources;
 
 pub use published_resources::{managed_resource_registry, published_resources};
 
+/// The practice run configuration ARC holds for a resource, and the rules every
+/// operation that writes one applies to it.
+mod practice_runs;
+
+pub use practice_runs::{
+    requested_practice_run_configuration, PracticeRunConfigurationRefused,
+    PRACTICE_CONFIGURATION_EXISTS_MESSAGE,
+};
+
 /// The Amazon Web Services Region the seeded managed resources live in. The
 /// Availability Zone IDs they are deployed in (`use1-az*`) are this Region's, so
 /// the two are changed together.
@@ -261,9 +270,17 @@ pub struct ManagedResource {
     /// Autoshifts ARC has run for this resource. Empty until the autoshift
     /// operations are implemented, which is what fills it.
     pub autoshifts: Vec<AutoshiftInResource>,
-    /// The resource's practice run configuration, when one exists. `None` until
-    /// `CreatePracticeRunConfiguration` is implemented; `practiceRunStatus` is
-    /// read from whether this is set.
+    /// The resource's practice run configuration, when one exists, and the value
+    /// `practiceRunStatus` is read from.
+    ///
+    /// Filled for the length of one call by the accessors that answer about a
+    /// managed resource ([`ComAmazonawsArczonalshiftPercdataplaneState::managed_resource`]
+    /// and [`ComAmazonawsArczonalshiftPercdataplaneState::managed_resource_inventory`])
+    /// from the one place the store keeps it
+    /// ([`ComAmazonawsArczonalshiftPercdataplaneState::practice_run_configurations`]):
+    /// a resource ARC did not create carries a configuration just as one this store
+    /// was seeded with does, and the registry its owner writes holds no ARC
+    /// configuration at all.
     pub practice_run_configuration: Option<PracticeRunConfiguration>,
     pub zonal_autoshift_status: ZonalAutoshiftStatus,
 }
@@ -316,6 +333,16 @@ pub struct ComAmazonawsArczonalshiftPercdataplaneState {
     /// `UpdateAutoshiftObserverNotificationStatus` writes it and
     /// `GetAutoshiftObserverNotificationStatus` reports it.
     pub autoshift_observer_notification_status: AutoshiftObserverNotificationStatus,
+    /// The practice run configuration ARC holds for a resource, keyed by
+    /// `resourceIdentifier` (its ARN).
+    ///
+    /// Kept BESIDE the resources rather than inside one, because a configuration is
+    /// ARC's own record about a resource ARC did not create: a resource reaches ARC
+    /// either seeded into [`Self::managed_resources`] or published by the service
+    /// that owns it ([`published_resources`]), and a configuration written for
+    /// either is held here, so the shared registry stays the sole authority on what
+    /// it published.
+    pub practice_run_configurations: BTreeMap<String, PracticeRunConfiguration>,
 }
 
 impl Default for ComAmazonawsArczonalshiftPercdataplaneState {
@@ -330,6 +357,7 @@ impl Default for ComAmazonawsArczonalshiftPercdataplaneState {
             next_shift_seq: 0,
             autoshift_observer_notification_status:
                 DEFAULT_AUTOSHIFT_OBSERVER_NOTIFICATION_STATUS,
+            practice_run_configurations: BTreeMap::new(),
         }
     }
 }
