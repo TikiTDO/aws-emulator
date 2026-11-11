@@ -49,6 +49,12 @@
 //!   emulator, and a self-managed Active Directory is no Directory Service resource at
 //!   all.
 //!
+//! A self-managed Active Directory's `ActiveDirectorySettings.DomainCredentialsProvider`
+//! names a Secrets Manager secret of the account the same way — the credentials "needed for
+//! user administration in the Active Directory" — and this service creates no secret, so it
+//! is resolved against the service that owns secrets by that same existence rule
+//! ([`crate::state::credentials_secret::resolve_domain_credentials`]).
+//!
 //! The directory is resolved BEFORE the network resources a supplied `Settings` names: the
 //! registration is for that directory, so a request that gets both wrong is refused for
 //! the directory — the prerequisite a caller has to fix first is the one it is told about.
@@ -239,6 +245,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // so they are resolved by the same rule, against the same owner. Existence only:
         // nothing is provisioned in them, so there is no endpoint to confine to one VPC.
         crate::state::ec2_fleet::resolve_domain_subnets(ctx, &input.identity_provider)
+            .await
+            .map_err(into_error)?;
+
+        // And `ActiveDirectorySettings.DomainCredentialsProvider` names a Secrets Manager
+        // secret of the account — the credentials domain user administration runs through —
+        // which this service does not create either, so it is resolved against the service
+        // that owns secrets by the same existence rule
+        // ([`crate::state::credentials_secret::resolve_domain_credentials`]): a registration
+        // is not stored against credentials that cannot be retrieved.
+        crate::state::credentials_secret::resolve_domain_credentials(ctx, &input.identity_provider)
             .await
             .map_err(into_error)?;
 

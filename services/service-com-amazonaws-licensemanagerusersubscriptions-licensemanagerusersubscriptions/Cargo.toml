@@ -30,6 +30,13 @@ hex = { workspace = true }
 # has rather than keeping a list of ids here. Only the generated client is needed — the
 # emulator supplies the transport.
 aws-sdk-ec2 = { version = "1", default-features = false }
+# The AWS SDK for Secrets Manager, driven over the same in-process callback: a
+# `CredentialsProvider` a request supplies names a secret of the caller's account
+# (`SecretsManagerCredentialsProvider$SecretId`), which is Secrets Manager's resource, so
+# `src/state/credentials_secret.rs` asks the service that owns secrets whether the account
+# holds it rather than treating the id as opaque text. Only the generated client is needed —
+# the emulator supplies the transport.
+aws-sdk-secretsmanager = { version = "1", default-features = false }
 # The shared refusal-wording helpers every service in this tree reads the same rules
 # from: `validation::unanchored` is the one implementation of quoting a `@pattern`
 # requirement without the whole-value anchors a model writes around it, and
@@ -53,6 +60,10 @@ sha2 = { workspace = true }
 # those resources on the same engine. DEV-ONLY: this crate depends on no other service's
 # crate outside its tests.
 service-com-amazonaws-ec2-amazonec2 = { workspace = true }
+# Secrets Manager, mounted beside this one in the test harness for the same reason: that a
+# license server endpoint and a registration resolve the credentials secret they name can
+# only be driven end to end with the owner of secrets on the same engine. DEV-ONLY.
+service-com-amazonaws-secretsmanager-secretsmanager = { workspace = true }
 
 [lints]
 workspace = true

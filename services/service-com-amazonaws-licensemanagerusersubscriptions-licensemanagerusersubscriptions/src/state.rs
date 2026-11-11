@@ -11,7 +11,9 @@
 //! live here too, each behind its own seed seam; the instances are ALSO resolved against
 //! the service that owns them ([`ec2_fleet`]), which is what makes an instance a client
 //! really launched a target this service accepts, and so are the subnets and the security
-//! group a registration's `Settings` name. The
+//! group a registration's `Settings` name. The credentials secret a request's
+//! `CredentialsProvider` names is resolved the same way, against the service that owns
+//! secrets ([`credentials_secret`]). The
 //! list/lookup/pagination/filter helpers live here as well, so the operation handlers in
 //! `ops/` all resolve a resource the same way instead of each growing its own copy.
 
@@ -19,6 +21,10 @@
 /// registration's settings name — against what the account has, through the service that
 /// owns them.
 pub mod ec2_fleet;
+
+/// Resolving the Secrets Manager secret a request's `CredentialsProvider` names against the
+/// secrets the account holds, through the service that owns them.
+pub mod credentials_secret;
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};

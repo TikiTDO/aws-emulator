@@ -14,6 +14,16 @@
 //! not with a not-found, which this surface does not answer for an identity-provider
 //! reference.
 //!
+//! So is the credentials secret the request's `LicenseServerSettings` name: the settings
+//! carry "the Secrets Manager secret that enables administrators to add or remove users
+//! associated with the license server", a secret of the caller's own account that this
+//! service does not create, so it is resolved against the service that OWNS secrets
+//! ([`crate::state::credentials_secret::resolve_license_server_credentials`]) before
+//! anything is minted. An endpoint whose administrator credentials cannot be retrieved
+//! cannot be provisioned, so such a request is refused — by the same existence rule, and
+//! with the same modelled `ValidationException`, that a registration naming a subnet the
+//! account does not have is refused by.
+//!
 //! The endpoint is returned in the non-terminal `PROVISIONING` status; the `PROVISIONED`
 //! transition is owed by the clock (see `crate::state::materialise_due`) and
 //! materialises on any later read. The record is stored through
@@ -177,26 +187,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
         })?;
 
-        let now = std::time::SystemTime::now();
         let region = crate::state::request_region(&ctx.parts().headers);
         let signing_name = ctx.identity().signing_name().to_string();
         let server_type = input.license_server_settings.server_type.clone();
 
-        let mut state = state.lock();
-        state.materialise_due(now);
-
-        // The ARN is resolved as part of validating the request: an identity provider
-        // reference that does not resolve is an invalid parameter rather than a missing
-        // resource, so it is refused before anything is minted. A registration whose
-        // deregistration was accepted does not resolve: it is being torn down, so nothing
-        // new is provisioned for it. The resolved registration is what the license servers
-        // below are provisioned from, so it is taken out of the store here.
-        let Some(registration) = state
-            .live_identity_provider(&input.identity_provider_arn)
-            .cloned()
-        else {
-            return Err(identity_provider_not_valid());
-        };
+        // THE IDENTITY PROVIDER PREREQUISITE, ahead of the credentials secret below: the
+        // endpoint is created FOR that registration, so a request that gets both wrong is
+        // refused for the registration — the prerequisite a caller has to fix first is the
+        // one it is told about. An identity provider reference that does not resolve is an
+        // invalid parameter rather than a missing resource, so it is refused before
+        // anything is minted. A registration whose deregistration was accepted does not
+        // resolve: it is being torn down, so nothing new is provisioned for it. The store
+        // is locked for this resolution alone and released before the hop below, which asks
+        // another service.
+        {
+            let mut state = state.lock();
+            state.materialise_due(std::time::SystemTime::now());
+            if state
+                .live_identity_provider(&input.identity_provider_arn)
+                .is_none()
+            {
+                return Err(identity_provider_not_valid());
+            }
+        }
 
         // Whether a tag is a legal AWS tag is a fact about the request (the model bounds
         // the `Tags` MAP and nothing inside it), asked once the identity provider has been
@@ -204,8 +217,39 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `merge_tags`, the one validated tag writer, so no path into the tag store skips
         // the rule.
         if let Some(tags) = input.tags.as_ref() {
-            crate::state::validate_tags(tags).map_err(invalid_tags)?;
+            crate::state::validate_tags(tags).map_err(invalid_parameter)?;
         }
+
+        // The credentials secret the endpoint's `LicenseServerSettings` name is a secret of
+        // the caller's own account — "the Secrets Manager secret that enables administrators
+        // to add or remove users associated with the license server" — and this service
+        // creates none, so it is resolved against the service that OWNS secrets before
+        // anything is minted or stored: an endpoint whose administrator credentials cannot
+        // be retrieved is not one that can be provisioned, so the request is refused rather
+        // than answered with an endpoint that settles as if the license server had been
+        // configured. Resolved AFTER the facts about the request itself (the tags) and after
+        // the registration the endpoint is for, with no lock of this service held.
+        crate::state::credentials_secret::resolve_license_server_credentials(
+            ctx,
+            &input.license_server_settings,
+        )
+        .await
+        .map_err(invalid_parameter)?;
+
+        let now = std::time::SystemTime::now();
+        let mut state = state.lock();
+        state.materialise_due(now);
+
+        // The registration is resolved again, through the same accessor, now that the store
+        // is held for the write: the hop above released the lock, and an endpoint is never
+        // provisioned for a registration that stopped resolving meanwhile. The resolved
+        // registration is what the license servers below are provisioned from.
+        let Some(registration) = state
+            .live_identity_provider(&input.identity_provider_arn)
+            .cloned()
+        else {
+            return Err(identity_provider_not_valid());
+        };
 
         // `@idempotent`: a repeat create for the same (identity provider, server type)
         // answers with the endpoint already in state instead of minting a second one —
@@ -284,7 +328,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         if let Some(tags) = input.tags.as_ref() {
-            state.merge_tags(&arn, tags).map_err(invalid_tags)?;
+            state.merge_tags(&arn, tags).map_err(invalid_parameter)?;
         }
         // The ONE writer of an endpoint: it stores the record, the creation order and the
         // `(IdentityProviderArn, ServerType)` entry a repeat create resolves it by, and
@@ -325,19 +369,24 @@ fn settings_conflict(server_type: &str, existing: &str) -> CreateLicenseServerEn
     .into()
 }
 
-/// Map the tag-rule refusal the state layer raises onto this operation's modelled
-/// `ValidationException` (HTTP 400): a `Tags` map carrying an illegal key or value is a
-/// parameter that is not valid.
-fn invalid_tags(error: crate::state::StateError) -> CreateLicenseServerEndpointError {
+/// Map a refusal the state layer raises onto this operation's modelled
+/// `ValidationException` (HTTP 400): a `Tags` map carrying an illegal key or value, and a
+/// `LicenseServerSettings` naming a credentials secret the account holds none of, are both
+/// a parameter that is not valid — the refusal this surface already states for an
+/// identity-provider reference that resolves to nothing, and the one every caller-named
+/// resource of ANOTHER service that cannot be resolved is refused with here (a subnet and a
+/// security group of a registration's `Settings`, a directory of its provider).
+fn invalid_parameter(error: crate::state::StateError) -> CreateLicenseServerEndpointError {
     let message = match error {
         crate::state::StateError::NotFound(message)
         | crate::state::StateError::Conflict(message)
         | crate::state::StateError::Validation(message) => message,
-        // The tag rules address no identity provider, so the merge cannot report either of
-        // these; the arms keep the wording this handler already uses for an unresolvable
-        // reference, and this operation addresses a registration by its ARN alone
-        // (`IdentityProviderArn` is its only identity-provider member), so there is no
-        // fail-closed answer it could give instead.
+        // The tag rules and the credentials-secret resolution address no identity provider,
+        // so neither can report either of these; the arms keep the wording this handler
+        // already uses for an unresolvable reference, and this operation addresses a
+        // registration by its ARN alone (`IdentityProviderArn` is its only
+        // identity-provider member), so there is no fail-closed answer it could give
+        // instead.
         crate::state::StateError::ProviderNotRegistered
         | crate::state::StateError::ProviderNotAuthorized => {
             crate::state::IDENTITY_PROVIDER_NOT_VALID.to_string()

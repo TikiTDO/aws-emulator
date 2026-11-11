@@ -19,6 +19,8 @@ mod arn_and_members_address_one_resource;
 mod association_is_stamped_at_write_time;
 #[path = "all/associations_follow_their_registration.rs"]
 mod associations_follow_their_registration;
+#[path = "all/credentials_secret_resolution.rs"]
+mod credentials_secret_resolution;
 #[path = "all/deregistration_spares_what_it_was_not_asked_about.rs"]
 mod deregistration_spares_what_it_was_not_asked_about;
 #[path = "all/fail_closed_refusals_answer_401.rs"]
