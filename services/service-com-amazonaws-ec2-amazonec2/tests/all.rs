@@ -1840,3 +1840,10 @@ mod spot_fleet_fulfilled_capacity;
 // instance type alone is the pool it names — over both fleet APIs that take overrides.
 #[path = "all/launch_template_override_instance_selection.rs"]
 mod launch_template_override_instance_selection;
+// The ONE attachment record an `AttachNetworkInterface` writes: answered out of the store in
+// the transient state the clock owes `attached`, reported member for member by both
+// `DescribeNetworkInterfaces` and `DescribeInstances`, and not given to a second instance
+// while one holds it. Declared at the tail for the reason the note at the head of this file
+// gives: the sorted neighbourhood is where concurrent ec2 landings insert their lines.
+#[path = "all/attach_network_interface.rs"]
+mod attach_network_interface;
