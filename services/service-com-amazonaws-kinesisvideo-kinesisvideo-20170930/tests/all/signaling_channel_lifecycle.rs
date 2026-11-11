@@ -349,10 +349,10 @@ async fn a_signaling_channel_is_created_read_listed_endpointed_and_deleted() {
 }
 
 /// RULE: a reader addressed by `ChannelName` and the same reader addressed by the
-/// `ChannelARN` the create minted resolve to the ONE stored record; an identifier pair
-/// that names two different records is a contradiction (400) and one that names no
-/// stored record is a missing resource (404), stated the same way by every reader that
-/// takes the pair.
+/// `ChannelARN` the create minted resolve to the ONE stored record; the choice between the
+/// two identifiers is EXCLUSIVE, so a pair naming neither or both — even two that agree —
+/// is a bad argument (400), and an identifier that names no stored record is a missing
+/// resource (404), stated the same way by every reader that takes the pair.
 #[tokio::test]
 async fn every_channel_reader_resolves_the_same_record_from_either_identifier() {
     let router = harness();
@@ -389,8 +389,8 @@ async fn every_channel_reader_resolves_the_same_record_from_either_identifier() 
             (
                 "the name and the ARN, agreeing",
                 serde_json::json!({ "ChannelName": "present", "ChannelARN": arn.clone() }),
-                200,
-                "",
+                400,
+                "InvalidArgumentException",
             ),
             (
                 "neither identifier",

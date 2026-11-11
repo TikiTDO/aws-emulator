@@ -27,12 +27,18 @@
 //! all and surfaces the refusal with no text, though its status and its code are right.
 //!
 //! This layer therefore reports that text in `Message` on the error bodies this service
-//! answers, wherever it was produced. The renaming itself is `service-common`'s, so this
-//! file states only the two member names and the shapes the rule covers; the status, the
-//! `__type` discriminator, the `x-amzn-errortype` header, every other member and the whole
-//! success path stay with the renderer that owns them. A failure whose class this model
-//! does not declare — the scaffold's own 501 — keeps the member the framework wrote it in,
-//! because the rename is keyed on the modelled shapes.
+//! answers that way, wherever it was produced. WHICH of them those are is
+//! [`super::refusal_envelope`]'s: a refusal of an operation the stream stack fronts stays in
+//! the generic validation envelope, code, header and `message` member together, and only the
+//! other bodies are completed here — which is also where that layer restates the modelled
+//! shape a body names before this renaming reads it.
+//!
+//! The renaming itself is `service-common`'s, so this file states only the two member names
+//! and the shapes the rule covers; the status, the `__type` discriminator, the
+//! `x-amzn-errortype` header, every other member and the whole success path stay with the
+//! renderer that owns them. A failure whose class this model does not declare — the
+//! scaffold's own 501 — keeps the member the framework wrote it in, because the rename is
+//! keyed on the modelled shapes.
 //!
 //! The structural home for the rule is the framework's error renderer, which writes the
 //! synthetic shape's `message` for every service; that renderer is in the agent-immutable
@@ -116,14 +122,15 @@ pub fn routes(definition: &dyn ErasedServiceDefinition, req: &RtRequest) -> bool
 }
 
 /// Serves the modelled operation the routing table names for the request, exactly as that
-/// table would, then reports the text of whatever it answered in this service's `Message`
-/// member.
+/// table would, then answers whatever it produced in the envelope this service answers that
+/// operation's refusals in ([`super::refusal_envelope`]).
 ///
 /// WHY a wrapper and not [`Service::override_refusal`]: that seam chooses the CODE and the
-/// WORDS of a pre-handler refusal, not the body member they are serialized into — the
-/// framework writes a framework-rendered error's text into its own synthetic shape's
-/// `message`. A wrapper sees the whole response, so it can report that text where this
-/// service's model says an error carries it.
+/// WORDS of a pre-handler refusal, not the body member they are serialized into, nor the
+/// header the shape is named in — the framework writes a framework-rendered error's text into
+/// its own synthetic shape's `message`, and names the shape bare. A wrapper sees the whole
+/// response, and it sees WHICH operation answered, which is what the envelope is a property
+/// of.
 ///
 /// It stores no operation of its own: the one it delegates to is the one the service's
 /// routing table names for the request, resolved from the `svc` the framework passes into
@@ -131,7 +138,7 @@ pub fn routes(definition: &dyn ErasedServiceDefinition, req: &RtRequest) -> bool
 /// is held beside, which is why the key is resolved here rather than carried in. The
 /// framework therefore owns the whole deserialize -> validate -> handle -> serialize walk
 /// and every status, code and word it answers with; this wrapper owns only which member the
-/// text is in.
+/// text is in and how the shape is named.
 #[derive(Debug, Clone, Copy)]
 pub struct ErrorMessageMemberOperation;
 
@@ -143,8 +150,19 @@ impl ErasedOperation for ErrorMessageMemberOperation {
         ctx: &'r OperationContext<'r>,
     ) -> BoxFuture<'r, RtResponse> {
         Box::pin(async move {
+            // Read out of the definition BEFORE the await: `&dyn ErasedServiceDefinition` is
+            // not `Sync`, so holding one across the await would make this future non-`Send`.
+            let operation = svc
+                .definition()
+                .protocol()
+                .routing_key(req)
+                .unwrap_or_default()
+                .to_string();
             match routed(svc.definition(), req) {
-                Some(op) => with_modelled_message_member(op.run(svc, req, ctx).await),
+                Some(op) => super::refusal_envelope::with_refusal_envelope(
+                    op.run(svc, req, ctx).await,
+                    &operation,
+                ),
                 // Unreachable through `Service::override_operation`, which claims a request
                 // only when the routing table holds its key ([`routes`]); answered as the
                 // framework answers an unroutable request rather than guessed at.

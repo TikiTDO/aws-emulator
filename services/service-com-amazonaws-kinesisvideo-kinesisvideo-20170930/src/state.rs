@@ -181,12 +181,17 @@ pub const STREAM_NOT_FOUND_MESSAGE: &str = "The requested stream is not found or
 /// is the stream's status, so no request value belongs in it.
 pub const STREAM_NOT_ACTIVE_MESSAGE: &str = "The requested stream is not active.";
 
-/// How this service words the `InvalidArgumentException` for a request that named
-/// NEITHER identifier of the stream it addresses. Every stream operation accepts the
-/// `StreamName`/`StreamARN` pair ("You must specify either the StreamName or the
-/// StreamARN"), so the refusal is stated once here.
-pub const STREAM_IDENTIFIER_REQUIRED_MESSAGE: &str =
-    "Either StreamName or StreamARN must be specified.";
+/// How this service words the `InvalidArgumentException` for a request that did not name
+/// EXACTLY one identifier of the stream it addresses — it named neither, or it named both.
+///
+/// Every stream operation models the `StreamName`/`StreamARN` pair as two OPTIONAL members
+/// and documents the choice between them as exclusive ("You must specify either the
+/// `StreamName` or the `StreamARN`" — `smithy_query(query="doc",shape="DescribeStream")`),
+/// so one refusal covers both ways of missing it and is stated once here. The sentence is
+/// wholly fixed text: its only parts drawn from anywhere are the two member NAMES the
+/// model declares, and nothing of the request's values belongs in it.
+pub const STREAM_IDENTIFIER_MESSAGE: &str =
+    "One of StreamName or StreamARN must be provided, but not both.";
 
 /// How this service words the `VersionMismatchException` every stream mutation
 /// guarded by `CurrentVersion` answers. The sentence the service sends names the two
@@ -200,11 +205,13 @@ pub const STREAM_IDENTIFIER_REQUIRED_MESSAGE: &str =
 pub const STREAM_VERSION_MISMATCH_MESSAGE: &str =
     "The provided stream version does not match the existing stream version.";
 
-/// How this service words the `InvalidArgumentException` for a request whose
-/// `StreamName` and `StreamARN` name two different streams. The companion of
-/// [`STREAM_IDENTIFIER_REQUIRED_MESSAGE`].
-pub const STREAM_IDENTIFIER_MISMATCH_MESSAGE: &str =
-    "StreamName and StreamARN refer to different streams.";
+/// [`STREAM_IDENTIFIER_MESSAGE`] for the signaling-channel pair, whose operations model and
+/// document the same exclusive choice ("You must specify either the name or the Amazon
+/// Resource Name (ARN) of the channel" —
+/// `smithy_query(query="doc",shape="DescribeSignalingChannel")`): one sentence, with the
+/// member names of the pair the operation takes.
+pub const CHANNEL_IDENTIFIER_MESSAGE: &str =
+    "One of ChannelName or ChannelARN must be provided, but not both.";
 
 /// How this service words a `StreamEdgeConfigurationNotFoundException`: the stream
 /// exists, but no edge configuration has ever been submitted for it, which is the
@@ -367,15 +374,17 @@ pub fn tag_value_violation(member: &str, value: &str) -> Option<String> {
 }
 
 /// Why a `StreamName`/`StreamARN` or `ChannelName`/`ChannelARN` pair did not name a
-/// stored resource. One enum for both resources: the three ways such a pair fails to
+/// stored resource. One enum for both resources: the two ways such a pair fails to
 /// resolve do not depend on which resource it addresses, so the readers of either one
-/// state the same three failures.
+/// state the same two failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LookupError {
-    /// Neither identifier was supplied; the operation requires one of them.
-    NoIdentifier,
-    /// Both were supplied and they name different resources.
-    Mismatch,
+    /// The pair did not name EXACTLY one identifier: neither was supplied, or both were.
+    /// The choice the model documents is exclusive, so both ways of missing it are the
+    /// one refusal ([`STREAM_IDENTIFIER_MESSAGE`], [`CHANNEL_IDENTIFIER_MESSAGE`]) — a
+    /// request that names both resolves to no ONE resource even when the two agree, since
+    /// which of them the service would have read is the caller's to state.
+    NotExactlyOneIdentifier,
     /// No resource of that name or ARN exists in this account and region.
     NotFound,
 }
@@ -562,63 +571,49 @@ impl ComAmazonawsKinesisvideoKinesisvideo20170930State {
     }
 
     /// The stored stream a `StreamName`/`StreamARN` pair names.
+    ///
+    /// The pair is an EXCLUSIVE choice ([`LookupError::NotExactlyOneIdentifier`]): exactly
+    /// one of the two identifies the stream, and a request naming neither or both never
+    /// reaches the store at all.
     pub fn resolve(
         &self,
         stream_name: Option<&str>,
         stream_arn: Option<&str>,
     ) -> Result<&Stream, LookupError> {
         let name = match (stream_name, stream_arn) {
-            (None, None) => return Err(LookupError::NoIdentifier),
+            (None, None) | (Some(_), Some(_)) => {
+                return Err(LookupError::NotExactlyOneIdentifier)
+            }
             (Some(name), None) => name.to_string(),
             (None, Some(arn)) => self
                 .stream_arn_index
                 .get(arn)
                 .cloned()
                 .ok_or(LookupError::NotFound)?,
-            (Some(name), Some(arn)) => {
-                let from_arn = self
-                    .stream_arn_index
-                    .get(arn)
-                    .cloned()
-                    .ok_or(LookupError::NotFound)?;
-                if from_arn != name {
-                    return Err(LookupError::Mismatch);
-                }
-                from_arn
-            }
         };
         self.streams.get(&name).ok_or(LookupError::NotFound)
     }
 
     /// The stored signaling channel a `ChannelName`/`ChannelARN` pair names.
     ///
-    /// The same rule [`Self::resolve`] applies to a stream's identifier pair: either
-    /// identifier resolves to the one record, a pair that names two different records
-    /// is a contradiction, and neither identifier is no identifier at all.
+    /// The same rule [`Self::resolve`] applies to a stream's identifier pair: the choice
+    /// between the two identifiers is exclusive, so exactly one of them names the record
+    /// and a pair that names neither or both is refused before the store is read.
     pub fn resolve_channel(
         &self,
         channel_name: Option<&str>,
         channel_arn: Option<&str>,
     ) -> Result<&SignalingChannel, LookupError> {
         let name = match (channel_name, channel_arn) {
-            (None, None) => return Err(LookupError::NoIdentifier),
+            (None, None) | (Some(_), Some(_)) => {
+                return Err(LookupError::NotExactlyOneIdentifier)
+            }
             (Some(name), None) => name.to_string(),
             (None, Some(arn)) => self
                 .channel_arn_index
                 .get(arn)
                 .cloned()
                 .ok_or(LookupError::NotFound)?,
-            (Some(name), Some(arn)) => {
-                let from_arn = self
-                    .channel_arn_index
-                    .get(arn)
-                    .cloned()
-                    .ok_or(LookupError::NotFound)?;
-                if from_arn != name {
-                    return Err(LookupError::Mismatch);
-                }
-                from_arn
-            }
         };
         self.signaling_channels
             .get(&name)

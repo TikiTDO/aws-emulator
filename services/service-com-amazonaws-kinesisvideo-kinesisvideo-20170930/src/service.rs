@@ -43,11 +43,12 @@
 //! Two of those seams are taken here. `override_refusal` states a refused input value in
 //! this service's own error code and AWS's own wording ([`invalid_argument_refusal`]), and
 //! `override_operation` serves every routable request through
-//! [`error_message_member::ErrorMessageMemberOperation`], so the text of a failure reaches
-//! the caller in the body member this service's model declares for it — see
-//! [`error_message_member`] for that rule and why the refusal seam cannot state it. That
-//! same seam SCOPES this service's routes to the endpoint a control call arrives on: a call
-//! that reached an address this service announced for a data plane is answered as the
+//! [`error_message_member::ErrorMessageMemberOperation`], so a failure reaches the caller in
+//! the envelope this service answers that operation's refusals in — see
+//! [`refusal_envelope`] for which envelope that is and why the refusal seam cannot state it,
+//! and [`error_message_member`] for the body member a modelled failure carries its text in.
+//! That same seam SCOPES this service's routes to the endpoint a control call arrives on: a
+//! call that reached an address this service announced for a data plane is answered as the
 //! unrouted path it is ([`data_plane_address`]).
 //!
 //! A third seam is taken too: `override_routing_error` answers a request this service
@@ -58,6 +59,7 @@
 
 pub mod data_plane_address;
 pub mod error_message_member;
+pub mod refusal_envelope;
 pub mod unknown_operation;
 
 use aws_smithy_schema_server::Violation;
@@ -214,54 +216,79 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     }
 }
 
-/// The error code Kinesis Video Streams answers a refused input value with:
-/// `InvalidArgumentException` — "The value for this input parameter is invalid." —
-/// which `smithy_query(query="service_info")` lists among this service's common
-/// errors, so every operation declares it. The framework would otherwise answer the
-/// synthetic `ValidationException`, a code no kinesisvideo client branches on.
-const INVALID_ARGUMENT_EXCEPTION: &str = "InvalidArgumentException";
+/// The MODELLED error Kinesis Video Streams answers a refused input value with on the
+/// operations its control plane fronts: `InvalidArgumentException` — "The value for this
+/// input parameter is invalid." — which `smithy_query(query="service_info")` lists among
+/// this service's common errors, so every operation declares it. WHICH refusals carry it,
+/// rather than the generic code the framework's renderer writes, is
+/// [`refusal_envelope`]'s: the seam below cannot see which operation a refusal belongs to.
+pub(crate) const INVALID_ARGUMENT_EXCEPTION: &str = "InvalidArgumentException";
 
 /// What this service says when the refusal carries no violation to state at all — the
 /// modeled shape's own sentence, since there is no member to name.
 const INVALID_ARGUMENT_MESSAGE: &str = "The value for this input parameter is invalid.";
 
-/// How this service words a request the boundary validator refused before any handler
+/// How this service WORDS a request the boundary validator refused before any handler
 /// ran, or `None` to keep the framework's wording for a refusal that is not about a
 /// value.
 ///
-/// The code and the message travel together. The message is the shared AWS wording of
-/// the constraint envelope — the framework's own envelope, member paths and
-/// requirements, with the two renderings AWS differs from the framework in: a
-/// `@pattern` requirement is quoted without the whole-value anchors the model wraps it
-/// in, and a clause states NO rejected value. Nothing about the envelope, the paths or
-/// the requirements is spelled here, so this service cannot drift from the others that
-/// state the same sentence; what it chooses, and all it chooses, is its error code and
-/// which clauses state no value ([`states_no_value`]).
+/// The message is the shared AWS wording of the constraint envelope — the framework's own
+/// envelope, member paths and requirements, with the two renderings AWS differs from the
+/// framework in: a `@pattern` requirement is quoted without the whole-value anchors the
+/// model wraps it in, and a clause states NO rejected value. Nothing about the envelope,
+/// the paths or the requirements is spelled here, so this service cannot drift from the
+/// others that state the same sentence; what it chooses, and all it chooses, is which
+/// clauses state no value ([`states_no_value`]) and the ORDER an enumerated type's value
+/// set is listed in.
+///
+/// The CODE stays the one the framework's renderer picks for a constraint refusal, because
+/// this seam is handed the violations alone and the code is a property of the STACK that
+/// fronts the refused operation: [`refusal_envelope`] states it, at the one seam that sees
+/// which operation answered.
 fn invalid_argument_refusal(refusal: &Refusal) -> Option<Refused> {
-    if !matches!(refusal, Refusal::Invalid(_)) {
+    let Refusal::Invalid(violations) = refusal else {
         return None;
-    }
+    };
+    // An enumerated type's admissible values are listed in the order this service's front
+    // door walks its own TABLE of them, which is neither the order the model declares them
+    // in nor lexicographic, so each violation is re-ordered before the envelope is rendered
+    // (`service_common::validation_message::in_hashed_enum_order`). The derivation is
+    // computed from the declared values themselves, so it belongs to the enumerated TYPE
+    // rather than to a member, an operation or a depth, and a type the model gains needs no
+    // row anywhere. Only the values move: the member path, the value half and the
+    // requirement's wording stay with the one place that writes them, and every other
+    // violation class comes back untouched.
+    let stated = Refusal::Invalid(
+        violations
+            .iter()
+            .map(service_common::validation_message::in_hashed_enum_order)
+            .collect(),
+    );
     let message = service_common::validation_message::aws_validation_refusal_withholding_violations(
-        refusal,
+        &stated,
         states_no_value,
     )
     .map(|stated| stated.message)
     .unwrap_or_else(|| INVALID_ARGUMENT_MESSAGE.to_string());
     Some(Refused {
-        code: INVALID_ARGUMENT_EXCEPTION.to_string(),
+        code: refusal_envelope::GENERIC_VALIDATION_EXCEPTION.to_string(),
         message,
     })
 }
 
-/// Whether the clause for `violation` states no value — true for every value a request
-/// actually carried, whatever constraint class it broke.
+/// Whether the clause for `violation` states no value — true for EVERY violation, whatever
+/// constraint class it broke and whether or not the request carried a value at all.
 ///
-/// This service's refusals state the REQUIREMENT a member's value had to satisfy and
-/// never the value that missed it: the sentence is therefore the same for every request
-/// that breaks one constraint of one member, so no caller-supplied bytes reach the
-/// message. A member that was not there at all has no value to withhold, and keeps the
-/// `null` the framework states an absent member with, which is a fact about the request
-/// rather than a value out of it.
-fn states_no_value(violation: &Violation) -> bool {
-    violation.value.is_some()
+/// This service's refusals state the REQUIREMENT a member's value had to satisfy and never
+/// the value that missed it: the sentence is therefore the same for every request that
+/// breaks one constraint of one member, so no caller-supplied bytes reach the message. A
+/// member the request did not carry has no value to state either — not even the `null` the
+/// framework writes for an absent one — because the requirement (`Member must not be null`)
+/// is already the whole of what such a clause reports.
+///
+/// It is asked about the VIOLATION rather than about a member path because the answer is a
+/// property of this service's whole envelope rather than of one member
+/// (`service_common::validation_message::aws_validation_refusal_withholding_violations`).
+fn states_no_value(_violation: &Violation) -> bool {
+    true
 }

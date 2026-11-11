@@ -485,9 +485,10 @@ async fn a_duplicate_stream_name_is_refused_as_resource_in_use() {
     );
 }
 
-/// How a reader states an identifier it cannot resolve: an absent or contradictory
-/// pair is a bad argument (400), a well-formed identifier for no stored stream is a
-/// missing resource (404). Asserted for both readers that take the pair.
+/// How a reader states an identifier it cannot resolve: a pair that does not name
+/// EXACTLY one identifier — neither, or both, even two that agree — is a bad argument
+/// (400), a well-formed identifier for no stored stream is a missing resource (404).
+/// Asserted for both readers that take the pair.
 #[tokio::test]
 async fn an_unresolvable_identifier_is_stated_the_same_by_every_reader() {
     let router = harness();
@@ -524,8 +525,8 @@ async fn an_unresolvable_identifier_is_stated_the_same_by_every_reader() {
         (
             "a name and its own ARN",
             serde_json::json!({ "StreamName": "present", "StreamARN": arn }),
-            200,
-            "",
+            400,
+            "InvalidArgumentException",
         ),
     ];
 
@@ -610,7 +611,9 @@ async fn get_data_endpoint_serves_every_modeled_api_name() {
         );
         assert_eq!(
             error_code(&body),
-            "InvalidArgumentException",
+            // Refused at the boundary, which the stream stack states as the generic
+            // validation refusal (this crate's `service::refusal_envelope`).
+            "ValidationException",
             "case {case:?}: got {body:?}"
         );
     }
@@ -627,7 +630,7 @@ async fn get_data_endpoint_serves_every_modeled_api_name() {
     );
     assert_eq!(
         error_code(&body),
-        "InvalidArgumentException",
+        "ValidationException",
         "an absent required APIName: got {body:?}"
     );
 }

@@ -548,6 +548,12 @@ async fn a_stream_holds_the_modeled_maximum_tags_and_refuses_one_more() {
 }
 
 /// What a refused tagging request must answer.
+///
+/// `code` is the error shape the refusal names, which for a request refused BEFORE the
+/// handler ran is the one the stack fronting that operation states a refusal with (this
+/// crate's `service::refusal_envelope`): the generic validation one on the stream-addressed
+/// operations, this service's modelled `InvalidArgumentException` on the rest and on every
+/// refusal a handler states itself.
 struct Refusal {
     name: &'static str,
     path: &'static str,
@@ -613,21 +619,21 @@ const REFUSALS: &[Refusal] = &[
         path: "/listTagsForStream",
         body: |_| serde_json::json!({ "StreamARN": MALFORMED_ARN }),
         status: 400,
-        code: "InvalidArgumentException",
+        code: "ValidationException",
     },
     Refusal {
         name: "TagStream with a malformed streamARN",
         path: "/tagStream",
         body: |_| serde_json::json!({ "StreamARN": MALFORMED_ARN, "Tags": { "a": "1" } }),
         status: 400,
-        code: "InvalidArgumentException",
+        code: "ValidationException",
     },
     Refusal {
         name: "UntagStream with a malformed streamARN",
         path: "/untagStream",
         body: |_| serde_json::json!({ "StreamARN": MALFORMED_ARN, "TagKeyList": ["a"] }),
         status: 400,
-        code: "InvalidArgumentException",
+        code: "ValidationException",
     },
     Refusal {
         name: "TagResource with a malformed resourceARN",
@@ -692,7 +698,7 @@ const REFUSALS: &[Refusal] = &[
             serde_json::json!({ "StreamName": "refusals-stream", "TagKeyList": ["keep", ""] })
         },
         status: 400,
-        code: "InvalidArgumentException",
+        code: "ValidationException",
     },
     Refusal {
         name: "TagStream with a tag key one past TagKey's maximum length",
@@ -716,21 +722,21 @@ const REFUSALS: &[Refusal] = &[
             })
         },
         status: 400,
-        code: "InvalidArgumentException",
+        code: "ValidationException",
     },
     Refusal {
         name: "TagStream with an empty Tags map, below ResourceTags' minimum length",
         path: "/tagStream",
         body: |_| serde_json::json!({ "StreamName": "refusals-stream", "Tags": {} }),
         status: 400,
-        code: "InvalidArgumentException",
+        code: "ValidationException",
     },
     Refusal {
         name: "UntagStream with an empty TagKeyList, below its minimum length",
         path: "/untagStream",
         body: |_| serde_json::json!({ "StreamName": "refusals-stream", "TagKeyList": [] }),
         status: 400,
-        code: "InvalidArgumentException",
+        code: "ValidationException",
     },
 ];
 
@@ -867,7 +873,10 @@ async fn one_tag_stream_call_past_the_modeled_tags_maximum_is_refused() {
                 "51 tags in one call",
                 &reply,
                 400,
-                "InvalidArgumentException",
+                // Refused at the boundary on a stream-addressed operation, which the stream
+                // stack states as the generic validation refusal (this crate's
+                // `service::refusal_envelope`).
+                "ValidationException",
             );
         }
     }

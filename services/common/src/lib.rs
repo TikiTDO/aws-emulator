@@ -361,6 +361,10 @@ pub mod email_address;
 /// service whose wire form reports that text under a different member name from the one its
 /// model declares — so a client reads one member whichever layer answered.
 pub mod error_detail_member;
+/// The TWO places a rendered JSON failure names its error SHAPE — the body's `__type` and
+/// the `x-amzn-errortype` header — and the ONE restatement of that shape, for a service
+/// whose wire names a different one there from the one the rendering layer wrote.
+pub mod error_type_locator;
 /// The ONE reading and matching of an EventBridge EVENT PATTERN, for every service
 /// whose API accepts one — a rule's `EventPattern`, a pipe's `FilterCriteria` filter —
 /// so two services handed the same pattern and event cannot disagree about whether it

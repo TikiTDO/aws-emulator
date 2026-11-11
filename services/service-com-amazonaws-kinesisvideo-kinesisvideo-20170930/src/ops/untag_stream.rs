@@ -187,18 +187,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 }
 
 /// State the failure to resolve a `StreamName`/`StreamARN` pair as this operation's
-/// own modeled error: absent or contradictory identifiers are a bad argument (400),
-/// a well-formed identifier for no stored stream is a missing resource (404).
+/// own modeled error: a pair that does not name exactly one identifier is a bad
+/// argument (400), a well-formed identifier for no stored stream is a missing
+/// resource (404).
 fn lookup_error(error: crate::state::LookupError) -> UntagStreamError {
     match error {
-        crate::state::LookupError::NoIdentifier => {
+        crate::state::LookupError::NotExactlyOneIdentifier => {
             UntagStreamErrorModeled::InvalidArgumentException(InvalidArgumentException {
-                message: Some(crate::state::STREAM_IDENTIFIER_REQUIRED_MESSAGE.to_string()),
-            })
-        }
-        crate::state::LookupError::Mismatch => {
-            UntagStreamErrorModeled::InvalidArgumentException(InvalidArgumentException {
-                message: Some(crate::state::STREAM_IDENTIFIER_MISMATCH_MESSAGE.to_string()),
+                message: Some(crate::state::STREAM_IDENTIFIER_MESSAGE.to_string()),
             })
         }
         crate::state::LookupError::NotFound => {

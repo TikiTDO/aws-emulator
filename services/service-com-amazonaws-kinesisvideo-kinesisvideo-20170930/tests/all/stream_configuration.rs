@@ -211,14 +211,18 @@ const CONFIGURATION_READ_PATHS: &[&str] = &[
     "/describeEdgeConfiguration",
 ];
 
-/// RULE: a request that violates a modelled constraint is refused with
-/// `InvalidArgumentException` (400) whose message is the framework's validation
-/// envelope, naming the member path and the requirement that member failed, so the
-/// caller can fix the request from the message alone.
+/// RULE: a request that violates a modelled constraint is refused with HTTP 400 whose
+/// message is the framework's validation envelope, naming the member path and the
+/// requirement that member failed, so the caller can fix the request from the message
+/// alone. The CODE is the one the stack fronting the operation states a refusal with (this
+/// crate's `service::refusal_envelope`): the generic validation one for the
+/// stream-addressed operations, this service's modelled `InvalidArgumentException` for the
+/// rest.
 ///
 /// The rows differ along which constraint class the request violates (enum value set,
-/// `@range`, `@pattern`, `@length`) and which operation carries it, since the code and
-/// the envelope are a property of the service rather than of one operation.
+/// `@range`, `@pattern`, `@length`), which operation carries it, and which stack fronts
+/// that operation, since the envelope is a property of the stack rather than of one
+/// constraint.
 #[tokio::test]
 async fn a_constraint_violation_is_refused_as_an_invalid_argument() {
     let router = harness();
@@ -228,7 +232,9 @@ async fn a_constraint_violation_is_refused_as_an_invalid_argument() {
     // constraint the request violates.
     let over_long_name = "n".repeat(300);
 
-    let cases: Vec<(&str, &str, serde_json::Value, &str, &str)> = vec![
+    // (case, path, request, the member the clause names, the requirement, the code the
+    // stack fronting that operation refuses with)
+    let cases: Vec<(&str, &str, serde_json::Value, &str, &str, &str)> = vec![
         (
             "a ComparisonOperator outside the enum value set",
             "/listStreams",
@@ -240,6 +246,7 @@ async fn a_constraint_violation_is_refused_as_an_invalid_argument() {
             }),
             "streamNameCondition.comparisonOperator",
             "Member must satisfy enum value set: [BEGINS_WITH]",
+            "InvalidArgumentException",
         ),
         (
             "a MaxResults below the modeled range",
@@ -247,6 +254,7 @@ async fn a_constraint_violation_is_refused_as_an_invalid_argument() {
             serde_json::json!({ "MaxResults": 0 }),
             "maxResults",
             "Member must have value greater than or equal to 1",
+            "InvalidArgumentException",
         ),
         (
             "a StreamARN that is not an ARN at all",
@@ -254,6 +262,7 @@ async fn a_constraint_violation_is_refused_as_an_invalid_argument() {
             serde_json::json!({ "StreamARN": "not-an-arn" }),
             "streamARN",
             "Member must satisfy regular expression pattern:",
+            "ValidationException",
         ),
         (
             "a StreamName past the modeled length",
@@ -261,10 +270,11 @@ async fn a_constraint_violation_is_refused_as_an_invalid_argument() {
             serde_json::json!({ "StreamName": over_long_name }),
             "streamName",
             "Member must have length less than or equal to 256",
+            "ValidationException",
         ),
     ];
 
-    for (case, path, request, member, requirement) in &cases {
+    for (case, path, request, member, requirement, code) in &cases {
         let answer = call(&router, path, request.clone()).await;
         assert_eq!(
             answer.status, 400,
@@ -273,7 +283,7 @@ async fn a_constraint_violation_is_refused_as_an_invalid_argument() {
         );
         assert_eq!(
             answer.error_code(),
-            "InvalidArgumentException",
+            *code,
             "case {case:?}: got {:?}",
             answer.body
         );

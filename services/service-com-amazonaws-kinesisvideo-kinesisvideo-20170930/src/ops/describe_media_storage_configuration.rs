@@ -175,25 +175,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 }
 
 /// State the failure to resolve a `ChannelName`/`ChannelARN` pair as this service's own
-/// modeled error: absent or contradictory identifiers are a bad argument (400), a
-/// well-formed identifier for no stored channel is a missing resource (404).
+/// modeled error: a pair that does not name exactly one identifier is a bad argument
+/// (400), a well-formed identifier for no stored channel is a missing resource (404).
 fn lookup_error(error: crate::state::LookupError) -> DescribeMediaStorageConfigurationError {
     match error {
-        crate::state::LookupError::NoIdentifier => {
+        crate::state::LookupError::NotExactlyOneIdentifier => {
             DescribeMediaStorageConfigurationErrorModeled::InvalidArgumentException(
                 InvalidArgumentException {
-                    message: Some(
-                        "Either ChannelName or ChannelARN must be specified.".to_string(),
-                    ),
-                },
-            )
-        }
-        crate::state::LookupError::Mismatch => {
-            DescribeMediaStorageConfigurationErrorModeled::InvalidArgumentException(
-                InvalidArgumentException {
-                    message: Some(
-                        "ChannelName and ChannelARN refer to different channels.".to_string(),
-                    ),
+                    message: Some(crate::state::CHANNEL_IDENTIFIER_MESSAGE.to_string()),
                 },
             )
         }

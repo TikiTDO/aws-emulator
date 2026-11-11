@@ -707,7 +707,10 @@ async fn every_published_api_name_is_placed_on_a_plane_and_nothing_else_is() {
                 .rsplit('#')
                 .next()
                 .unwrap_or_default(),
-            "InvalidArgumentException",
+            // The boundary refuses an unpublished value before the handler runs, and the
+            // stack that fronts a stream-addressed operation states such a refusal as the
+            // generic validation one (this crate's `service::refusal_envelope`).
+            "ValidationException",
             "case {case:?}: got {body:?}"
         );
     }
