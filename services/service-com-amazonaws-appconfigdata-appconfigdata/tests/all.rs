@@ -17,6 +17,8 @@ mod configuration_session_poll;
 mod deletion_does_not_break_a_bound_session;
 #[path = "all/feature_flag_resolution.rs"]
 mod feature_flag_resolution;
+#[path = "all/identity_authorization.rs"]
+mod identity_authorization;
 #[path = "all/name_bindings_survive_renames.rs"]
 mod name_bindings_survive_renames;
 #[path = "all/next_poll_token_poll_rate.rs"]

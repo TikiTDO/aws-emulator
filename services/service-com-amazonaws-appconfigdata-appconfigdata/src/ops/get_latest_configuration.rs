@@ -12,6 +12,11 @@
 //! rotated token and the poll interval — is read out of persisted state: the session
 //! out of this service's own store, the configuration out of AppConfig's.
 //!
+//! Whether the CALLER may poll at all is decided first, against its own identity-based
+//! IAM policies ([`crate::state::identity_authorization`]), as AWS decides it: a caller
+//! granted none of this service's actions is refused `AccessDeniedException` rather than
+//! told anything about the session or the configuration behind the token.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -273,10 +278,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // Request metadata is not read: the token in the query string identifies the
-        // session, and everything else comes out of persisted state.
-        let _ = ctx;
-
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(session_store_unavailable());
         };
@@ -292,6 +293,44 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // whitespace satisfies.
         if token.trim().is_empty() {
             return Err(configuration_token_required());
+        }
+
+        // STEP 0b — whether the CALLER may poll at all, decided against its own
+        // identity-based IAM policies before any verdict about the token's state: AWS
+        // decides authorization at the IAM layer, ahead of the service's own reading of
+        // the request ([`crate::state::identity_authorization`]).
+        //
+        // A poll's own input names only the token, so the configuration the action is
+        // judged against is the one the session that token resolves to is over — the
+        // identifiers it was started with — and a token resolving to no session at all
+        // addresses no configuration this service can name, so the decision is taken on
+        // the action alone. The identifiers are read out and the guard released before
+        // anything else is asked, so no other store is read with this one held.
+        let addressed = {
+            let store = state.lock();
+            store.session(&token).map(|session| {
+                crate::state::identity_authorization::configuration_addressed(
+                    ctx.parts(),
+                    &session.application_identifier,
+                    &session.environment_identifier,
+                    &session.configuration_profile_identifier,
+                )
+            })
+        };
+        if let Some(denial) = crate::state::identity_authorization::refusal(
+            &*self.engine,
+            ctx,
+            <Self as smithy_server_runtime::Operation>::NAME,
+            addressed
+                .as_deref()
+                .unwrap_or(crate::state::identity_authorization::ANY_RESOURCE),
+        ) {
+            tracing::debug!(
+                operation = "GetLatestConfiguration",
+                outcome = "AccessDeniedException",
+                "refused a poll the caller's identity policies do not allow"
+            );
+            return Err(crate::scaffolded::Scaffolded::access_denied(denial));
         }
 
         // STEP 1 — resolve the token and check it may be used, under this service's

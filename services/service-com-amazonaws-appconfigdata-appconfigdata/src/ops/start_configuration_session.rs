@@ -13,6 +13,13 @@
 //! engine state, keyed by the opaque token it returns. `GetLatestConfiguration`
 //! resolves that token back to the session.
 //!
+//! Whether the CALLER may open a session at all is decided first, against its own
+//! identity-based IAM policies ([`crate::state::identity_authorization`]): AWS decides
+//! authorization ahead of the service's reading of the request, so a caller granted none
+//! of this service's actions is refused `AccessDeniedException` rather than told anything
+//! about the identifiers it named — which is what keeps a missing GRANT distinguishable
+//! from an identifier that resolves to nothing.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -163,9 +170,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // Request metadata is not read: a session is identified entirely by the
-        // three identifiers in the body.
-        let _ = ctx;
+        // Request metadata is read for ONE thing: WHO is calling, and in which Region
+        // the configuration this call addresses is held. A session is identified
+        // entirely by the three identifiers in the body.
+        //
+        // AWS decides authorization at the IAM layer, ahead of the service looking at the
+        // request's own input, so this is the FIRST thing this handler does and the
+        // resource it is decided against is built from the identifiers the request
+        // carried rather than from a record — a refused call therefore tells an
+        // unauthorized caller nothing about what the account holds, and changes nothing.
+        let addressed = crate::state::identity_authorization::configuration_addressed(
+            ctx.parts(),
+            &input.application_identifier,
+            &input.environment_identifier,
+            &input.configuration_profile_identifier,
+        );
+        if let Some(denial) = crate::state::identity_authorization::refusal(
+            &*self.engine,
+            ctx,
+            <Self as smithy_server_runtime::Operation>::NAME,
+            &addressed,
+        ) {
+            tracing::debug!(
+                operation = "StartConfigurationSession",
+                outcome = "AccessDeniedException",
+                "refused a session the caller's identity policies do not allow"
+            );
+            return Err(crate::scaffolded::Scaffolded::access_denied(denial));
+        }
 
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(StartConfigurationSessionErrorModeled::InternalServerException(

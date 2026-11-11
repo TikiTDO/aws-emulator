@@ -40,6 +40,21 @@
 //! place it can return an error its own model does not declare — `validation` above,
 //! for a service whose model carries no client-input error. Delete the wrapper and the
 //! handler has no way to refuse a bad request at all.
+//!
+//! ## The authorization refusal
+//!
+//! A caller whose identity-based policies do not allow the action it asks for is refused
+//! with HTTP 403 `AccessDeniedException` ([`Scaffolded::access_denied`], the verdict
+//! `crate::state::identity_authorization` reaches). Authorization is decided at the IAM
+//! layer rather than by the service, so no operation of this service's model declares a
+//! shape for it (`smithy_query(query="operation",operation="StartConfigurationSession")`
+//! lists `BadRequestException`, `InternalServerException`, `ResourceNotFoundException` and
+//! `ThrottlingException`) — which is why it travels as [`Scaffolded::Unmodeled`], carrying
+//! the code and status that go with it rather than one of the modelled client errors. A
+//! client branches on that code, and telling an unauthorized caller its identifiers were
+//! not found would be a different claim.
+
+use std::borrow::Cow;
 
 use aws_smithy_schema::serde::{SerdeError, SerializableStruct, ShapeSerializer};
 use aws_smithy_schema::{Schema, ShapeId, ShapeType};
@@ -177,6 +192,97 @@ impl SerializableStruct for ValidationException {
     }
 }
 
+/// The `Message` member of the synthetic unmodeled-refusal shape.
+///
+/// Spelled as this service's own error shapes spell it — every modelled exception of its
+/// model carries `Message` (`smithy_query(query="shape",shape="ResourceNotFoundException")`)
+/// — so a client reads one refusal of this service the way it reads the others.
+static UNMODELED_REFUSAL_MESSAGE: Schema = Schema::new_member(
+    ShapeId::from_static(
+        "smithy.framework#UnmodeledRefusal$Message",
+        "smithy.framework",
+        "Message",
+    ),
+    ShapeType::String,
+    "Message",
+    0,
+)
+.with_xml_name("Message");
+
+/// Schema for the synthetic unmodeled-refusal shape — the BODY (`{"Message": …}`) of a
+/// refusal this service states with an error code its Smithy model does not declare.
+///
+/// In the `smithy.framework` namespace for the same reason as [`NOT_IMPLEMENTED_SCHEMA`]:
+/// `AccessDeniedException` is not a shape this service's model carries, so the schema must
+/// not collide with a modeled one. The wire error code and the HTTP status travel beside
+/// it, on [`UnmodeledRefusal`], because a schema only shapes the body.
+pub static UNMODELED_REFUSAL_SCHEMA: Schema = Schema::new_struct(
+    ShapeId::from_static(
+        "smithy.framework#UnmodeledRefusal",
+        "smithy.framework",
+        "UnmodeledRefusal",
+    ),
+    ShapeType::Structure,
+    &[&UNMODELED_REFUSAL_MESSAGE],
+);
+
+/// The wire error code an authorization failure carries: the code AWS states this class
+/// with, which is what a client branches on.
+pub const ACCESS_DENIED_CODE: &str = "AccessDeniedException";
+
+/// The HTTP status of that refusal: 403, the status of an authorization failure, which a
+/// client reads as a permanent refusal to be surfaced to the operator — as opposed to the
+/// 404 of the modelled `ResourceNotFoundException`, which says the identifiers named
+/// nothing.
+pub const ACCESS_DENIED_STATUS: u16 = 403;
+
+/// One refusal this service states with an error code its model does not declare.
+///
+/// It carries its own wire code, HTTP status and message precisely because the shape is not
+/// in the model, so there is no `#[operation_error]` variant that could render it. The one
+/// this service states is [`access_denied`](Self::access_denied).
+///
+/// The message is a [`Cow`] because it has a variable part — the calling principal, the
+/// action and the resource the request addressed, as IAM words a denial — while a refusal
+/// stating constant text needs no allocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmodeledRefusal {
+    /// The wire error code (`__type`, and `x-amzn-errortype` where the protocol sets it).
+    pub code: &'static str,
+    /// The HTTP status.
+    pub status: u16,
+    /// The message this refusal carries.
+    pub message: Cow<'static, str>,
+}
+
+impl UnmodeledRefusal {
+    /// The refusal of a caller whose identity-based policies do not allow the action:
+    /// HTTP 403 `AccessDeniedException`, carrying `message` — IAM's own denial sentence,
+    /// which `crate::state::identity_authorization` words.
+    pub fn access_denied(message: String) -> Self {
+        Self {
+            code: ACCESS_DENIED_CODE,
+            status: ACCESS_DENIED_STATUS,
+            message: Cow::Owned(message),
+        }
+    }
+}
+
+impl std::fmt::Display for UnmodeledRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for UnmodeledRefusal {}
+
+impl SerializableStruct for UnmodeledRefusal {
+    fn serialize_members(&self, s: &mut dyn ShapeSerializer) -> Result<(), SerdeError> {
+        s.write_string(&UNMODELED_REFUSAL_MESSAGE, self.message.as_ref())?;
+        Ok(())
+    }
+}
+
 /// An operation's error channel: either the synthetic scaffold signal, or one of the
 /// operation's own modeled errors.
 #[derive(Debug)]
@@ -185,6 +291,10 @@ pub enum Scaffolded<E> {
     NotImplemented(NotImplemented),
     /// A modeled error the operation declares. Renders with the model's own status.
     Modeled(E),
+    /// A refusal this service states with a code its model does not declare — so it
+    /// cannot travel as [`Modeled`](Self::Modeled). Renders with the status and code the
+    /// refusal itself carries.
+    Unmodeled(UnmodeledRefusal),
     /// The request was refused as invalid. Renders as HTTP 400 with the error code
     /// `ValidationException`.
     ///
@@ -221,6 +331,16 @@ impl<E> Scaffolded<E> {
     pub fn validation(message: impl Into<String>) -> Self {
         Self::ValidationException(ValidationException::new(message))
     }
+
+    /// Refuse the request the way AWS refuses a caller whose identity-based policies do not
+    /// allow the action it asked for: HTTP 403 `AccessDeniedException`, carrying IAM's own
+    /// denial sentence.
+    ///
+    /// Reached through `crate::state::identity_authorization`, which is where the verdict
+    /// and the wording both live; this constructor is only how it travels.
+    pub fn access_denied(message: String) -> Self {
+        Self::Unmodeled(UnmodeledRefusal::access_denied(message))
+    }
 }
 
 impl<E: std::fmt::Display> std::fmt::Display for Scaffolded<E> {
@@ -228,6 +348,7 @@ impl<E: std::fmt::Display> std::fmt::Display for Scaffolded<E> {
         match self {
             Self::NotImplemented(e) => write!(f, "{e}"),
             Self::Modeled(e) => write!(f, "{e}"),
+            Self::Unmodeled(e) => write!(f, "{e}"),
             Self::ValidationException(e) => write!(f, "{e}"),
         }
     }
@@ -240,6 +361,7 @@ impl<E: std::error::Error + 'static> std::error::Error for Scaffolded<E> {
         match self {
             Self::NotImplemented(e) => e.source(),
             Self::Modeled(e) => e.source(),
+            Self::Unmodeled(e) => e.source(),
             Self::ValidationException(e) => e.source(),
         }
     }
@@ -254,6 +376,7 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
         match self {
             Self::NotImplemented(e) => e,
             Self::Modeled(e) => e.as_serializable(),
+            Self::Unmodeled(e) => e,
             Self::ValidationException(e) => e,
         }
     }
@@ -262,6 +385,7 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
         match self {
             Self::NotImplemented(_) => &NOT_IMPLEMENTED_SCHEMA,
             Self::Modeled(e) => e.variant_schema(),
+            Self::Unmodeled(_) => &UNMODELED_REFUSAL_SCHEMA,
             Self::ValidationException(_) => &VALIDATION_EXCEPTION_SCHEMA,
         }
     }
@@ -274,6 +398,7 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
         match self {
             Self::NotImplemented(_) => "NotImplemented",
             Self::Modeled(e) => e.shape_name(),
+            Self::Unmodeled(e) => e.code,
             Self::ValidationException(_) => "ValidationException",
         }
     }
@@ -286,6 +411,7 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
         match self {
             Self::NotImplemented(_) => 501,
             Self::Modeled(e) => e.http_status(),
+            Self::Unmodeled(e) => e.status,
             Self::ValidationException(_) => 400,
         }
     }
@@ -297,8 +423,9 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
             // envelope carries the signal on the query protocols too.
             Self::NotImplemented(_) => None,
             Self::Modeled(e) => e.query_error_code(),
-            // Same reason: the synthetic shape carries no `awsQueryError` trait.
-            Self::ValidationException(_) => None,
+            // Same reason: neither synthetic shape carries an `awsQueryError` trait — and
+            // this service speaks `restJson1`, which has no query envelope at all.
+            Self::Unmodeled(_) | Self::ValidationException(_) => None,
         }
     }
 }

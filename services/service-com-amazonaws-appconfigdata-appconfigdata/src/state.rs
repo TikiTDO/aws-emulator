@@ -34,6 +34,10 @@
 //! configured with the old name nor re-points that name at whatever record claims it
 //! next.
 
+/// Whether the caller's own identity-based IAM policies allow the action a request asks
+/// for, which both operations decide before they read anything.
+pub mod identity_authorization;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};

@@ -34,6 +34,14 @@ hex = { workspace = true }
 # against live in the AppConfig control plane's own store, read through the one
 # shared engine.
 service-com-amazonaws-appconfig-amazonappconfig = { workspace = true }
+# A session is opened and polled under the CALLER's own credentials, and AWS decides such
+# a call against that principal's identity-based policies before the service reads the
+# request (`state::identity_authorization`): the principal the access key id speaks for is
+# the session the token service minted it for — the record `GetCallerIdentity` answers
+# from — and the policies in force on it live in the IAM emulator's own store. Both are
+# reached through the one shared engine, which needs the owning services' state TYPES.
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

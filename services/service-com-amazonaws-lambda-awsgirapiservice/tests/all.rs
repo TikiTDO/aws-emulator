@@ -213,6 +213,8 @@ mod function_version_listing;
 mod function_versions_by_capacity_provider;
 #[path = "all/functions_by_code_signing_config.rs"]
 mod functions_by_code_signing_config;
+#[path = "all/handler_appconfig_execution_role.rs"]
+mod handler_appconfig_execution_role;
 #[path = "all/handler_appconfig_sdk.rs"]
 mod handler_appconfig_sdk;
 #[path = "all/handler_aws_sdk.rs"]
