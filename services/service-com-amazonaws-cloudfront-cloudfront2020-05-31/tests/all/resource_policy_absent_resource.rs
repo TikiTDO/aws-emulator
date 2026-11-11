@@ -188,12 +188,15 @@ async fn the_resource_policy_surface_tells_an_absent_resource_from_a_type_it_ref
         .map(|(case, arn)| (case.clone(), arn.clone(), Expected::WrongType))
         .collect();
 
-    // Every resource type this service mints an ARN for, each naming a resource the store
-    // holds none of: the ANSWER is the absent one, whatever the type.
+    // Every resource type this service mints an ARN for, OTHER than the one this surface
+    // attaches policies to, each naming a resource the store holds none of: the ANSWER is the
+    // absent one, whatever the type. The ACCEPTED type is answered by whether the ARN carries
+    // a policy rather than by whether the resource is there, which the rows below cover.
     rows.extend(
         TAGGABLE_RESOURCE_TYPES
             .iter()
             .chain(OTHER_RESOURCE_TYPES.iter())
+            .filter(|kind| **kind != RESOURCE_POLICY_RESOURCE_TYPE)
             .map(|kind| {
                 (
                     format!("an absent {kind}"),

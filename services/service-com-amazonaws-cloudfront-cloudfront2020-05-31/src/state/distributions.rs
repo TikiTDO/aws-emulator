@@ -12,8 +12,10 @@
 //!
 //! Every bound the work in this module can be asked for is a constant declared in it:
 //! [`MAX_EDGE_CACHE_ENTRIES`] caps what one distribution's cache holds,
-//! [`MAX_INVALIDATION_MATCHES`] caps the comparisons one finished batch makes against it,
-//! and [`MAX_GLOB_COMPARISONS`] caps one pattern-against-path match.
+//! [`MAX_INVALIDATION_MATCHES`] caps the comparisons one finished batch makes against it —
+//! and the comparisons ONE settlement's whole sweep makes, however many batches the clock
+//! finishes at the same instant — and [`MAX_GLOB_COMPARISONS`] caps one
+//! pattern-against-path match.
 
 use super::*;
 
@@ -133,15 +135,19 @@ pub const MAX_INVALIDATION_MATCHES: usize = 4096;
 /// creates it takes tags — `CreateDistributionWithTags` and
 /// `CreateStreamingDistributionWithTags` through their `…ConfigWithTags` payload, and
 /// `CreateFunction`, `CreateConnectionFunction`, `CreateKeyValueStore`,
-/// `CreateAnycastIpList`, `CreateConnectionGroup`, `CreateDistributionTenant` and
-/// `CreateTrustStore` through their `Tags` member (`smithy_query(query="operation",
+/// `CreateAnycastIpList`, `CreateConnectionGroup`, `CreateDistributionTenant`,
+/// `CreateTrustStore` and `CreateVpcOrigin` through their `Tags` member
+/// (`smithy_query(query="operation",
 /// operation="…")`). Every other kind of CloudFront resource — a cache policy, an origin
 /// request policy, a response headers policy, an origin access control, a public key, a
 /// real-time log configuration, a continuous deployment policy, an origin access identity —
 /// is created by an operation that takes no tags at all, so its ARN names no taggable type.
 ///
+/// Each is spelled as the ARN of that resource spells it, which is not always the way its
+/// route spells it: a VPC origin's ARN carries [`RESOURCE_POLICY_RESOURCE_TYPE`].
+///
 /// Sorted, so the list reads as the SET it is.
-pub const TAGGABLE_RESOURCE_TYPES: [&str; 9] = [
+pub const TAGGABLE_RESOURCE_TYPES: [&str; 10] = [
     "anycast-ip-list",
     "connection-function",
     "connection-group",
@@ -151,6 +157,7 @@ pub const TAGGABLE_RESOURCE_TYPES: [&str; 9] = [
     "key-value-store",
     "streaming-distribution",
     "trust-store",
+    RESOURCE_POLICY_RESOURCE_TYPE,
 ];
 
 /// The resource TYPE an ARN names — the token its resource part opens with — or `None`
@@ -416,11 +423,14 @@ impl StoredDistribution {
     /// before it reads: the sweep that empties the cache runs only for the batches this
     /// call is the one to finish — so its cost is paid once per invalidation ever created,
     /// not once per request — it stops as soon as the cache is empty, and it holds one
-    /// batch's paths at a time. The most comparisons it can make is
-    /// [`MAX_EDGE_CACHE_ENTRIES`] per batch, each batch capped at
-    /// [`MAX_INVALIDATION_MATCHES`] by [`StoredDistribution::invalidate_edge_cache`], and a
-    /// batch large enough to exceed that cap empties the cache instead — which ends the
-    /// sweep. Nothing here allocates once the cache is empty.
+    /// batch's paths at a time. The comparisons the WHOLE sweep may make are capped at
+    /// [`MAX_INVALIDATION_MATCHES`], the same cap
+    /// [`StoredDistribution::invalidate_edge_cache`] holds one batch to: the clock can owe
+    /// many batches at one instant, so the budget is shared across them rather than granted
+    /// to each, and a sweep that would exceed it empties the cache and ends — the answer that
+    /// method already gives a single batch too large to match, for the same reason (removing
+    /// more than a batch named can only cost a later request a cache MISS). Nothing here
+    /// allocates once the cache is empty.
     pub fn settle(&mut self, now: SystemTime) {
         if self.status != STATUS_DEPLOYED && now >= self.deployed_due {
             self.status = STATUS_DEPLOYED.to_string();
@@ -440,6 +450,11 @@ impl StoredDistribution {
             .map(|invalidation| invalidation.id.clone())
             .collect();
         settle_invalidations(&mut self.invalidations, now);
+        // ONE comparison budget for the whole sweep: every batch the clock owes at this
+        // instant is swept inside this one call, under the store's lock, so what bounds the
+        // work a request pays for is the sum over the batches rather than each batch's own
+        // cap.
+        let mut budget = MAX_INVALIDATION_MATCHES;
         for id in finished {
             if self.edge_cache.is_empty() {
                 // Nothing is held, so no batch has anything to remove: the rest of this
@@ -453,6 +468,15 @@ impl StoredDistribution {
             else {
                 continue;
             };
+            let comparisons = self.edge_cache.len().saturating_mul(paths.len());
+            if comparisons > budget {
+                // Past the budget the sweep answers as a single oversized batch does: the
+                // cache is emptied rather than matched, which removes at least what the
+                // remaining batches named and ends the sweep here.
+                self.edge_cache.clear();
+                break;
+            }
+            budget -= comparisons;
             self.invalidate_edge_cache(&paths);
         }
     }

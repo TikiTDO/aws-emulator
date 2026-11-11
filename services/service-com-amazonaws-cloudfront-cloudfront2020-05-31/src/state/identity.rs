@@ -206,20 +206,29 @@ pub fn connection_group_arn(id: &str) -> String {
 /// spells it.
 ///
 /// CloudFront's resource-policy surface scopes cross-account sharing of ONE kind of
-/// resource, a VPC origin, and the model spells that type the same way the service's own
-/// routes do (`/2020-05-31/vpc-origin/{Id}`), as every other resource type of this service
-/// is spelled in its ARN ([`arn_resource_type`]).
-pub const RESOURCE_POLICY_RESOURCE_TYPE: &str = "vpc-origin";
+/// resource, a VPC origin, and the ARN of one spells that type WITHOUT the separator its
+/// route carries (`/2020-05-31/vpc-origin/{Id}`): the model's own VPC origin examples carry
+/// `arn:aws:cloudfront::<account>:vpcorigin/<Id>`. So this is the one spelling both the
+/// minting ([`vpc_origin_arn`]) and every resolution of a submitted ARN read
+/// ([`resource_policy_resource`]), and neither derives it from a route.
+pub const RESOURCE_POLICY_RESOURCE_TYPE: &str = "vpcorigin";
 
 /// The ARN of a VPC origin. CloudFront is a GLOBAL service, so the ARN's region segment is
-/// empty: `arn:aws:cloudfront::<account>:vpc-origin/<Id>`, the resource type this service's
-/// own `/vpc-origin` routes name.
+/// empty: `arn:aws:cloudfront::<account>:vpcorigin/<Id>`, the resource type the model's own
+/// VPC origin examples spell ([`RESOURCE_POLICY_RESOURCE_TYPE`]).
 pub fn vpc_origin_arn(id: &str) -> String {
     ::engine::emulator_arn(
         "cloudfront",
         "",
         &format!("{RESOURCE_POLICY_RESOURCE_TYPE}/{id}"),
     )
+}
+
+/// The path of a VPC origin resource under this service's API version — the route
+/// `GetVpcOrigin` serves (`/2020-05-31/vpc-origin/{Id}`), which is therefore the resource
+/// the create's `Location` names.
+pub fn vpc_origin_path(id: &str) -> String {
+    format!("/2020-05-31/vpc-origin/{id}")
 }
 
 /// The resource an ARN of THIS service names, as the `(type, id)` pair its resource part
@@ -337,9 +346,9 @@ pub fn malformed_arn() -> crate::ops::types::InvalidArgument {
 ///   of a type other than [`RESOURCE_POLICY_RESOURCE_TYPE`], is refused on the resource TYPE
 ///   it names: that resource exists and takes no resource policy.
 ///
-/// The accepted type is not resolved against the store: this emulator holds no VPC origins
-/// of its own, so a policy is keyed by the ARN it was attached to and whether that key
-/// carries one is the surface's own existence answer ([`resource_policy_not_found`]).
+/// The accepted type is not resolved against the store: a policy is keyed by the ARN it was
+/// attached to, and whether that key carries one is the surface's own existence answer
+/// ([`resource_policy_not_found`]).
 ///
 /// ONE rule for every operation of the surface, which all take the one `ResourceArn`, so no
 /// two of them can disagree about which values they accept. The SENTENCE each puts on the

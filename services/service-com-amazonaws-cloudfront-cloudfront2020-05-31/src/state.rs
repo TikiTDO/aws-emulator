@@ -51,7 +51,9 @@
 //!   and each of its IPAM CIDR configurations is provisioned on the same deadline;
 //! * a trust store CloudFront has just created is `pending` until the CA certificates
 //!   bundle it was built from has propagated to the edge locations, and `active` after
-//!   ([`PROPAGATION_DELAY`]).
+//!   ([`PROPAGATION_DELAY`]);
+//! * a VPC origin CloudFront has just created is `Deploying` until its endpoint has been
+//!   deployed to the edge locations, and `Deployed` after ([`PROPAGATION_DELAY`]).
 //!
 //! Each of them is materialised by
 //! [`ComAmazonawsCloudfrontCloudfront20200531State::settle`],
@@ -143,6 +145,13 @@ pub use trust_stores::*;
 /// [`functions`] is one; `pub use` keeps every name reachable as `crate::state::<name>`.
 pub mod ca_certificates_bundle;
 pub use ca_certificates_bundle::*;
+
+/// The VPC ORIGIN slice of this store: the VPC origin record, the id one is addressed by,
+/// the lookup every read goes through, the bound a create is refused at, and the modelled
+/// errors the VPC origin operations answer with. A SUBMODULE for the same reason
+/// [`functions`] is one; `pub use` keeps every name reachable as `crate::state::<name>`.
+pub mod vpc_origins;
+pub use vpc_origins::*;
 
 /// `Distribution$Status` while a configuration is still propagating to the edge
 /// locations. The model documents the terminal value — "When the status is `Deployed`,
@@ -3748,6 +3757,11 @@ pub struct ComAmazonawsCloudfrontCloudfront20200531State {
     /// document, never a re-derivation of one, so what a read reports is byte for byte what
     /// the last write persisted.
     pub resource_policies: BTreeMap<String, String>,
+    /// Every VPC origin this emulator holds, keyed by its minted id — the identifier every
+    /// VPC origin operation addresses one by. A `BTreeMap` for the same reason as
+    /// `distributions`: one stable total order for `ListVpcOrigins`'s `Marker` to index
+    /// into. Everything that reads or writes it lives in [`vpc_origins`].
+    pub vpc_origins: BTreeMap<String, StoredVpcOrigin>,
 }
 
 // ---------------------------------------------------------------------------

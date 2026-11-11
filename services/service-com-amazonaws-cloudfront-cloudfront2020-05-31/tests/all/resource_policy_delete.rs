@@ -342,10 +342,12 @@ async fn deleting_under_an_arn_the_surface_does_not_accept_is_refused() {
 
     // Every other resource type this service mints an ARN for, naming a resource the store
     // holds none of, plus the ARN forms that name no resource at all: reported ABSENT, since
-    // there is no resource to remove a policy from.
+    // there is no resource to remove a policy from. The type this surface DOES accept is
+    // answered by whether the ARN carries a policy, which this suite's own delete rows cover.
     let mut absent: Vec<(String, String)> = TAGGABLE_RESOURCE_TYPES
         .iter()
         .chain(OTHER_RESOURCE_TYPES.iter())
+        .filter(|kind| **kind != RESOURCE_POLICY_RESOURCE_TYPE)
         .map(|kind| {
             (
                 format!("an ARN naming an absent {kind}"),
