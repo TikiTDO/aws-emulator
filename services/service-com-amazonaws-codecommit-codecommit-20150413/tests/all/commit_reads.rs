@@ -182,7 +182,7 @@ async fn get_commit_reports_the_commit_the_object_id_names() {
     let router = emulator();
     // The principal these calls are signed by: the identity a commit records where
     // the write names no author.
-    let caller = crate::wire::caller_arn(crate::wire::DEFAULT_ACCESS_KEY_ID);
+    let caller = crate::wire::caller_identity_name(crate::wire::DEFAULT_ACCESS_KEY_ID);
     let started = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("the clock is after the epoch")
@@ -275,9 +275,9 @@ async fn get_commit_reports_the_commit_the_object_id_names() {
                     .get(role)
                     .unwrap_or_else(|| panic!("case {case:?}: no {role} in {commit}"));
                 // "If no name is specified, the user's ARN is used as the author
-                // name and committer name", and an email the write does not carry
-                // is that same calling principal — so both members are REPORTED
-                // whatever the write named.
+                // name and committer name" — recorded as that principal's NAME —
+                // and an email the write does not carry is that same name, so both
+                // members are REPORTED whatever the write named.
                 let expected_name = write.name.unwrap_or(caller.as_str());
                 assert_eq!(
                     user.get("name").and_then(Value::as_str),

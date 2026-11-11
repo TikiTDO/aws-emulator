@@ -8,9 +8,10 @@
 //! 1. A commit this service writes always records an identity: "If no name is
 //!    specified, the user's ARN is used as the author name and committer name"
 //!    (`smithy_query(query="shape",shape="DeleteFileInput")`, the member the model
-//!    states the rule on), and an email the request does not carry is that same
-//!    calling principal — the only identity of a caller the service holds — except
-//!    on the one operation whose model says its own email member "is left blank".
+//!    states the rule on) — recorded as the NAME of that principal, the git identity
+//!    field a commit carries — and an email the request does not carry is that same
+//!    calling principal's name, except on the one operation whose model says its own
+//!    email member "is left blank".
 //!    A reader of that commit therefore reports `name`, `email` and `date` for
 //!    both the author and the committer, plus `additionalData`, which is the empty
 //!    string for a commit that carries no data beyond the modelled members.
@@ -28,7 +29,7 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::repository_lifecycle::{base64, emulator, git_blob_id, ok, string_at};
-use crate::wire::{caller_arn, DEFAULT_ACCESS_KEY_ID};
+use crate::wire::{caller_identity_name, DEFAULT_ACCESS_KEY_ID};
 
 /// The branches the merge rows work with.
 const DESTINATION: &str = "main";
@@ -76,7 +77,7 @@ impl Identity {
     }
 
     /// The name the stored commit must report: the one that was sent, or the
-    /// caller's ARN where the request named none.
+    /// calling principal's own name where the request named none.
     fn expected_name(self, caller: &str) -> String {
         match self.sent_name().map(str::trim).filter(|name| !name.is_empty()) {
             Some(name) => name.to_string(),
@@ -139,8 +140,8 @@ impl Writer {
     }
 
     /// The email a commit this operation writes records when the request sends
-    /// none: the calling principal, except for the one operation whose model says
-    /// its own email member "is left blank"
+    /// none: the calling principal's name, except for the one operation whose model
+    /// says its own email member "is left blank"
     /// (`smithy_query(query="shape",shape="DeleteFileInput")`).
     fn default_email(self, caller: &str) -> String {
         match self {
@@ -338,7 +339,7 @@ fn assert_commit_members(
 #[tokio::test]
 async fn every_written_commit_reads_back_with_a_full_identity() {
     let router = emulator();
-    let caller = caller_arn(DEFAULT_ACCESS_KEY_ID);
+    let caller = caller_identity_name(DEFAULT_ACCESS_KEY_ID);
 
     for (index, writer) in every_writer().into_iter().enumerate() {
         for (variant, identity) in identities().into_iter().enumerate() {
@@ -374,7 +375,7 @@ async fn every_written_commit_reads_back_with_a_full_identity() {
 #[tokio::test]
 async fn the_revision_dag_embeds_the_same_full_commit() {
     let router = emulator();
-    let caller = caller_arn(DEFAULT_ACCESS_KEY_ID);
+    let caller = caller_identity_name(DEFAULT_ACCESS_KEY_ID);
     let repository = "history-identity";
     ok(
         &router,

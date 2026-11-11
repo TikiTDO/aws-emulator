@@ -85,6 +85,8 @@ mod comment_thread_traversal;
 mod commit_file_entry_bound;
 #[path = "all/commit_folder_and_diff_members.rs"]
 mod commit_folder_and_diff_members;
+#[path = "all/commit_identity_from_caller.rs"]
+mod commit_identity_from_caller;
 #[path = "all/commit_reads.rs"]
 mod commit_reads;
 #[path = "all/compared_commit_comments.rs"]

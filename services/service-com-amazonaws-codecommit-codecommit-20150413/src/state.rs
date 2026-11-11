@@ -4174,16 +4174,39 @@ fn identity_info(user: &UserInfo) -> UserInfo {
     }
 }
 
+/// The NAME of a principal: the last segment of the resource part of its ARN —
+/// the IAM user name of `.../user/<name>`, the session name of an assumed-role
+/// principal, `root` for an account's own principal.
+///
+/// A git identity line records a person's name, not an account's address for
+/// them, and CodeCommit fills an identity member the request left out with the
+/// name of the calling principal — the value a git client shows for the commit,
+/// and the value a reader comparing a commit's author against a user name can
+/// match. A value that is no ARN at all has no resource part and stands for
+/// itself.
+pub fn identity_name(principal: &str) -> &str {
+    let resource = principal
+        .strip_prefix("arn:")
+        .and_then(|rest| rest.splitn(5, ':').nth(4))
+        .unwrap_or(principal);
+    resource
+        .split(['/', ':'])
+        .next_back()
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or(principal)
+}
+
 /// The identity a commit this service writes is attributed to, from the identity
 /// members the request carried and the principal that made the call.
 ///
 /// "If no name is specified, the user's ARN is used as the author name and
 /// committer name" (`DeleteFileInput`'s `name`, the member the model states the
 /// rule on): a commit is never authored by nobody, so an identity member the
-/// request leaves out is the calling principal — the ARN this service records for
-/// everything a caller creates, and the only identity of a caller it holds. An
-/// operation whose model says a member of ITS OWN is left blank instead passes
-/// that blank explicitly.
+/// request leaves out is filled from the calling principal — the only identity of
+/// a caller this service holds. What is recorded for it is that principal's NAME
+/// ([`identity_name`]), the git identity field a commit carries, rather than the
+/// whole ARN naming it. An operation whose model says a member of ITS OWN is left
+/// blank instead passes that blank explicitly.
 ///
 /// `caller` is the principal the request was signed by ([`caller_identity_arn`]),
 /// and `at` the instant the commit is written.
@@ -4193,14 +4216,15 @@ pub fn commit_identity(
     caller: &str,
     at: SystemTime,
 ) -> UserInfo {
+    let caller_name = identity_name(caller);
     UserInfo {
         // A name of nothing but whitespace specifies no name at all: it would
         // leave the commit's identity line naming nobody.
         name: Some(
             name.filter(|name| !name.trim().is_empty())
-                .unwrap_or_else(|| caller.to_string()),
+                .unwrap_or_else(|| caller_name.to_string()),
         ),
-        email: Some(email.unwrap_or_else(|| caller.to_string())),
+        email: Some(email.unwrap_or_else(|| caller_name.to_string())),
         date: Some(git_date(at)),
     }
 }

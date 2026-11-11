@@ -788,7 +788,8 @@ async fn the_deletion_commit_carries_the_caller_identity_and_message() {
     );
 
     // With none of them sent: "If no name is specified, the user's ARN is used as
-    // the author name and committer name", "if no email address is specified, the
+    // the author name and committer name" — recorded as that principal's NAME, the
+    // git identity field a commit carries — "if no email address is specified, the
     // email address is left blank" and "if no message is specified, a default
     // message is used".
     let payload = ok(
@@ -804,13 +805,13 @@ async fn the_deletion_commit_carries_the_caller_identity_and_message() {
         &json!({ "repositoryName": "identity", "commitId": commit_id }),
     )
     .await;
-    let caller = crate::wire::caller_arn(crate::wire::DEFAULT_ACCESS_KEY_ID);
+    let caller = crate::wire::caller_identity_name(crate::wire::DEFAULT_ACCESS_KEY_ID);
     for member in ["author", "committer"] {
         assert_eq!(
             string_at(&commit, &format!("/commit/{member}/name")),
             caller,
-            "case default identity: the {member} name defaults to the caller's ARN, \
-             got {commit}"
+            "case default identity: the {member} name defaults to the caller's identity \
+             name, got {commit}"
         );
         let email = commit
             .pointer(&format!("/commit/{member}/email"))

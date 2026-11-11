@@ -321,11 +321,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Reporting only: the comments are read exactly as the operations that post
         // them left them, so two reads of one pull request answer the same.
         let store = state.lock();
+        // Where the request NAMES a repository, that repository is resolved FIRST:
+        // it is the resource the read is scoped to, and a pull request is addressable
+        // only within one, so a name the account holds no repository for is reported
+        // as naming none whatever the pull request id holds.
+        let named_repository = match requested_repository {
+            Some(repository_name) => {
+                Some(store.repositories.get(repository_name).ok_or_else(|| {
+                    GetCommentsForPullRequestErrorModeled::RepositoryDoesNotExistException(
+                        RepositoryDoesNotExistException {
+                            message: Some(crate::state::repository_does_not_exist_message(
+                                repository_name,
+                            )),
+                        },
+                    )
+                })?)
+            }
+            None => None,
+        };
         // Whether the id names a pull request AT ALL is a question about the whole
         // store, because a pull request id is unique per account; it is answered
-        // BEFORE the repository the request names is resolved, so an id naming no
-        // pull request is reported as naming none even when the repository named is
-        // not one either.
+        // before the named repository's own pull requests are read, so an id naming
+        // no pull request anywhere is reported as naming none rather than as one
+        // this repository does not hold.
         if store.pull_request(pull_request_id).is_none() {
             return Err(
                 GetCommentsForPullRequestErrorModeled::PullRequestDoesNotExistException(
@@ -341,17 +359,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The repository whose comments this read reports: the one the request
         // names, or — where it names none — the one holding the pull request, since
         // a pull request's comments live on the repository that holds it.
-        let repository = match requested_repository {
-            Some(repository_name) => {
-                let repository = store.repositories.get(repository_name).ok_or_else(|| {
-                    GetCommentsForPullRequestErrorModeled::RepositoryDoesNotExistException(
-                        RepositoryDoesNotExistException {
-                            message: Some(crate::state::repository_does_not_exist_message(
-                                repository_name,
-                            )),
-                        },
-                    )
-                })?;
+        let repository = match named_repository {
+            Some(repository) => {
                 if !repository.pull_requests.contains_key(&pull_request_id) {
                     // The pull request exists — answered above — so another
                     // repository holds it, which is the refusal for a request naming

@@ -38,6 +38,19 @@ pub(crate) fn caller_arn(access_key_id: &str) -> String {
     )
 }
 
+/// The NAME of the principal a request signed with `access_key_id` speaks for: the
+/// last segment of that principal's ARN ([`caller_arn`]), which for a long-term key
+/// the account holds is the IAM user's name.
+///
+/// This is the identity a git commit records, so it is what a commit written with no
+/// `name`/`authorName` and no `email` reads back as, for both author and committer.
+pub(crate) fn caller_identity_name(access_key_id: &str) -> String {
+    let arn = caller_arn(access_key_id);
+    arn.rsplit_once('/')
+        .map(|(_, name)| name.to_string())
+        .unwrap_or(arn)
+}
+
 /// Make `access_key_id` a long-term access key the ACCOUNT HOLDS for an IAM user
 /// named after it — the way `iam:CreateUser` and `iam:CreateAccessKey` record one —
 /// and answer that user's ARN ([`caller_arn`]).

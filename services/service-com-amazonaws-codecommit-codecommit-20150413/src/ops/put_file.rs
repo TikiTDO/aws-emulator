@@ -515,7 +515,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // request reading from this branch attributes the source update to.
         let actor = crate::state::caller_identity_arn(&*self.engine, ctx);
         // The commit records an identity whatever the request named: the name it
-        // carried, or this caller's ARN where it carried none.
+        // carried, or this caller's own name where it carried none.
         let user =
             crate::state::commit_identity(input.name.clone(), input.email.clone(), &actor, now);
 
