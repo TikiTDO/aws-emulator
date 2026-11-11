@@ -762,6 +762,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             let provenance = crate::state::provisioning::StackProvenance {
                 managed_names: managed,
+                // Executing a change set deploys a template over the resources the stack
+                // already has, so a resource whose change its provider refuses is put back
+                // the way it was — and where the stack RESTS in the failed status there is
+                // no rollback of its own to report that revert
+                // ([`crate::state::provisioning::FailedResourceRevert`]).
+                failed_resource_revert: if stack.disable_rollback {
+                    crate::state::provisioning::FailedResourceRevert::OfTheResourceAlone
+                } else {
+                    crate::state::provisioning::FailedResourceRevert::WithTheStackRollback
+                },
                 ..stack.provenance()
             };
 
@@ -926,6 +936,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                                     failure.clone(),
                                 );
                             }
+                            // A failed operation is not an operation that did nothing: every
+                            // resource it acted on reports what became of it — the ones it
+                            // changed, the one whose change its provider refused, and the
+                            // ones it put back again — exactly as a failed `UpdateStack`
+                            // records them.
+                            stack.record_failed_resource_statuses(
+                                &materialised.transitions,
+                                failed_at,
+                            );
                             if creating {
                                 if stack.disable_rollback {
                                     None

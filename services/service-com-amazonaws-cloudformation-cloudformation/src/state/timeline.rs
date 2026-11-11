@@ -309,6 +309,21 @@ fn resolve_order(steps: &mut [Step], dependencies: &BTreeMap<String, BTreeSet<St
     for (index, step) in steps.iter().enumerate() {
         by_resource.insert((step.logical_id.as_str(), step.pass), index);
     }
+    // The step of the SAME resource the walk recorded BEFORE this one, where there is one.
+    // A walk that acted on one resource twice did the second thing AFTER the first had ended
+    // — a resource whose failed change was then put back, a resource created and then
+    // deleted again — so the later step is scheduled from the earlier one's end rather than
+    // beside it, and the two transitions read in the order they happened.
+    let previous_of_resource: Vec<Option<usize>> = {
+        let mut previous: Vec<Option<usize>> = vec![None; steps.len()];
+        let mut last_seen: BTreeMap<String, usize> = BTreeMap::new();
+        for (index, step) in steps.iter().enumerate() {
+            if let Some(earlier) = last_seen.insert(step.logical_id.clone(), index) {
+                previous[index] = Some(earlier);
+            }
+        }
+        previous
+    };
     let resolved: Vec<(BTreeSet<String>, Vec<usize>)> = steps
         .iter()
         .enumerate()
@@ -331,7 +346,7 @@ fn resolve_order(steps: &mut [Step], dependencies: &BTreeMap<String, BTreeSet<St
                     .unwrap_or_default()
             };
             after.remove(&step.logical_id);
-            let waits_for = after
+            let mut waits_for: Vec<usize> = after
                 .iter()
                 .filter_map(|waited_for| {
                     (0..=step.pass).rev().find_map(|pass| {
@@ -342,6 +357,9 @@ fn resolve_order(steps: &mut [Step], dependencies: &BTreeMap<String, BTreeSet<St
                     })
                 })
                 .collect();
+            if let Some(earlier) = previous_of_resource.get(index).copied().flatten() {
+                waits_for.push(earlier);
+            }
             (after, waits_for)
         })
         .collect();

@@ -454,6 +454,48 @@ pub struct StackProvenance {
     /// resolved yet ([`deferred`]). EMPTY is a relation the caller does not know, and then
     /// nothing is held back.
     pub dependencies: Dependencies,
+    /// Whether a resource whose change this deployment could not carry through is rolled
+    /// back INDIVIDUALLY and reported as such ([`roll_back_failed_resource`]).
+    ///
+    /// CloudFormation puts a resource whose change its provider refused back the way it was
+    /// either way. What differs is WHOSE work that is: a deployment whose stack goes on to
+    /// roll back reports the revert as part of that rollback, as the resource's own update
+    /// reaching its terminal status; one whose stack RESTS in the failed status
+    /// (`DisableRollback`) has no such rollback to report it, so the resource's own
+    /// `UPDATE_ROLLBACK_*` transitions are what say the failed resource was put back.
+    ///
+    /// Set by the operation that deploys a CHANGED template (`UpdateStack`,
+    /// `ExecuteChangeSet`), from the setting in force on the stack. Every other deployment
+    /// reverts nothing ([`FailedResourceRevert::None`]): a rollback, a resumption and a
+    /// revert ARE the putting back, and a create has no previous configuration of a resource
+    /// to put back.
+    pub failed_resource_revert: FailedResourceRevert,
+}
+
+/// How a deployment puts back a resource whose change it could not carry through
+/// ([`roll_back_failed_resource`]).
+///
+/// CloudFormation does not leave such a resource half-changed: the configuration in force
+/// before the deployment is put back through the owning service's own update API. Which
+/// statuses REPORT that revert is what the variants separate, because that follows from what
+/// becomes of the stack.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FailedResourceRevert {
+    /// Nothing is put back: this deployment IS the putting back (a rollback, a resumption, a
+    /// revert), or it is a CREATE, where a resource that failed has no earlier configuration
+    /// of its own to go back to.
+    #[default]
+    None,
+    /// The revert belongs to the STACK's own rollback, which follows this deployment: a
+    /// rollback reports every resource it puts back as that resource's own update reaching
+    /// its terminal status, so the revert is reported as `UPDATE_IN_PROGRESS` and then
+    /// `UPDATE_COMPLETE`.
+    WithTheStackRollback,
+    /// The revert is the RESOURCE's alone: the stack rests in the failed status
+    /// (`DisableRollback`), so there is no rollback of the stack's own to report it and the
+    /// resource's `UPDATE_ROLLBACK_IN_PROGRESS`/`UPDATE_ROLLBACK_COMPLETE` transitions are
+    /// what say it was put back.
+    OfTheResourceAlone,
 }
 
 impl StackProvenance {
@@ -1540,6 +1582,15 @@ pub async fn reconcile(
     // owning service is still bringing up, a custom resource held for its provider's answer,
     // and every resource withheld behind one of them ([`awaits_a_dependency`]).
     let mut unpublished: BTreeSet<String> = BTreeSet::new();
+    // Every resource of this walk whose own provider REFUSED to carry the declaration out,
+    // in the order the walk reached them, each against the verb its failure is summarised
+    // under ([`failed_resource_summary`]).
+    //
+    // A deployment attempts every resource whose dependencies allow it, so one broken
+    // resource does not stop the walk: each of them reports its own transitions, the ones
+    // that depend on a failed resource are left alone ([`depends_on_a_failure`]), and the
+    // stack-level reason names the whole set rather than the first of it.
+    let mut failed: Vec<(String, &'static str)> = Vec::new();
     let mut declared = declared.into_iter();
     // Every `{{resolve:...}}` DYNAMIC REFERENCE the declarations carry is resolved by
     // CLOUDFORMATION ITSELF, here, before anything is asked of any owning service: a
@@ -1590,6 +1641,20 @@ pub async fn reconcile(
         // are re-pointed, since both name that dependency.
         repoint_references(&mut resource.properties, &minted);
         repoint_references(&mut deployed_properties, &minted);
+        // A resource the walk could not carry out holds back every resource that DEPENDS on
+        // it: what such a declaration reads is the resource that failed, so there is nothing
+        // its owning service could be asked for, and CloudFormation records no transition for
+        // a resource it never attempted. The record is the declaration — carried forward
+        // where the stack already had the resource, which still exists in its owning service.
+        if depends_on_a_failure(&resource.logical_id, &stack.dependencies, &failed) {
+            if let Some(existing) = previous.iter().find(|existing| {
+                already_deployed(existing) && is_same_resource(existing, &resource)
+            }) {
+                carry_forward(existing, &mut resource);
+            }
+            outcome.resources.push(resource);
+            continue;
+        }
         if let Some(existing) = previous
             .iter()
             .find(|existing| already_deployed(existing) && is_same_resource(existing, &resource))
@@ -1628,9 +1693,9 @@ pub async fn reconcile(
                     if let Some(reason) =
                         custom_resource::service_timeout_refusal(&deployed_properties)
                     {
-                        outcome.failure = Some(super::resource_failure_summary(
+                        failed.push((
+                            resource.logical_id.clone(),
                             super::failed_action::UPDATE,
-                            [resource.logical_id.as_str()],
                         ));
                         outcome.transitions.push(ResourceTransition::finished(
                             &resource,
@@ -1638,7 +1703,7 @@ pub async fn reconcile(
                             Some(reason.to_string()),
                         ));
                         outcome.resources.push(resource);
-                        break;
+                        continue;
                     }
                     let request_id = custom_resource::new_request_id();
                     let call = custom_resource::ProviderCall {
@@ -1682,9 +1747,9 @@ pub async fn reconcile(
                             continue;
                         }
                         Err(refusal) => {
-                            outcome.failure = Some(super::resource_failure_summary(
+                            failed.push((
+                                resource.logical_id.clone(),
                                 super::failed_action::UPDATE,
-                                [resource.logical_id.as_str()],
                             ));
                             outcome.transitions.push(ResourceTransition::finished(
                                 &resource,
@@ -1696,7 +1761,7 @@ pub async fn reconcile(
                                 )),
                             ));
                             outcome.resources.push(resource);
-                            break;
+                            continue;
                         }
                     }
                 }
@@ -1795,17 +1860,26 @@ pub async fn reconcile(
                             // waiting it out would report a resource as changed that is not:
                             // the update of this resource failed, carrying what it said.
                             Ok(Readiness::Failed(reason)) => {
-                                outcome.failure = Some(super::resource_failure_summary(
+                                failed.push((
+                                    resource.logical_id.clone(),
                                     super::failed_action::UPDATE,
-                                    [resource.logical_id.as_str()],
                                 ));
                                 outcome.transitions.push(ResourceTransition::finished(
                                     &resource,
                                     super::resource_status::UPDATE_FAILED,
                                     Some(reason),
                                 ));
+                                Box::pin(roll_back_failed_resource(
+                                    ctx,
+                                    region,
+                                    stack,
+                                    &mut resource,
+                                    existing,
+                                    &mut outcome,
+                                ))
+                                .await;
                                 outcome.resources.push(resource);
-                                break;
+                                continue;
                             }
                             // The service could not be asked at all. One unanswered read is
                             // no evidence about the resource, and the change WAS accepted,
@@ -1832,25 +1906,34 @@ pub async fn reconcile(
                              an existing {} in place; the resource was left as it is.",
                             resource.resource_type
                         );
-                        outcome.failure = Some(super::resource_failure_summary(
+                        failed.push((
+                            resource.logical_id.clone(),
                             super::failed_action::UPDATE,
-                            [resource.logical_id.as_str()],
                         ));
                         outcome.transitions.push(ResourceTransition::finished(
                             &resource,
                             super::resource_status::UPDATE_FAILED,
                             Some(unsupported),
                         ));
+                        Box::pin(roll_back_failed_resource(
+                            ctx,
+                            region,
+                            stack,
+                            &mut resource,
+                            existing,
+                            &mut outcome,
+                        ))
+                        .await;
                         outcome.resources.push(resource);
-                        break;
+                        continue;
                     }
                     Err(refusal) => {
                         // The owning service refused the change: nothing changed there, so
                         // the deployment reports that refusal rather than a configuration
                         // nothing applied.
-                        outcome.failure = Some(super::resource_failure_summary(
+                        failed.push((
+                            resource.logical_id.clone(),
                             super::failed_action::UPDATE,
-                            [resource.logical_id.as_str()],
                         ));
                         outcome.transitions.push(ResourceTransition::finished(
                             &resource,
@@ -1861,8 +1944,17 @@ pub async fn reconcile(
                                 &resource.physical_resource_id,
                             )),
                         ));
+                        Box::pin(roll_back_failed_resource(
+                            ctx,
+                            region,
+                            stack,
+                            &mut resource,
+                            existing,
+                            &mut outcome,
+                        ))
+                        .await;
                         outcome.resources.push(resource);
-                        break;
+                        continue;
                     }
                 }
             }
@@ -1907,10 +1999,7 @@ pub async fn reconcile(
                             super::resource_status::UPDATE_IN_PROGRESS,
                         ));
                     }
-                    outcome.failure = Some(super::resource_failure_summary(
-                        super::failed_action::UPDATE,
-                        [resource.logical_id.as_str()],
-                    ));
+                    failed.push((resource.logical_id.clone(), super::failed_action::UPDATE));
                     outcome.transitions.push(ResourceTransition::finished(
                         &resource,
                         super::resource_status::UPDATE_FAILED,
@@ -1920,8 +2009,17 @@ pub async fn reconcile(
                             &resource.physical_resource_id,
                         )),
                     ));
+                    Box::pin(roll_back_failed_resource(
+                        ctx,
+                        region,
+                        stack,
+                        &mut resource,
+                        existing,
+                        &mut outcome,
+                    ))
+                    .await;
                     outcome.resources.push(resource);
-                    break;
+                    continue;
                 }
             }
             outcome.resources.push(resource);
@@ -1978,9 +2076,9 @@ pub async fn reconcile(
             )
         });
         if let Some(reason) = collision {
-            outcome.failure = Some(super::resource_failure_summary(
+            failed.push((
+                resource.logical_id.clone(),
                 super::create_action(stack.express),
-                [resource.logical_id.as_str()],
             ));
             outcome.transitions.push(ResourceTransition::failed(
                 &resource,
@@ -1988,7 +2086,7 @@ pub async fn reconcile(
                 reason,
             ));
             outcome.resources.push(resource);
-            break;
+            continue;
         }
         // A CUSTOM RESOURCE is backed by no API of this emulator's: it is backed by the
         // PROVIDER its own `ServiceToken` names. CloudFormation SENDS that provider a
@@ -2002,9 +2100,9 @@ pub async fn reconcile(
             // is one CloudFormation refuses itself, so the provider is never asked about it
             // and the resource fails with the rule as its reason.
             if let Some(reason) = custom_resource::service_timeout_refusal(&deployed_properties) {
-                outcome.failure = Some(super::resource_failure_summary(
+                failed.push((
+                    resource.logical_id.clone(),
                     super::create_action(stack.express),
-                    [resource.logical_id.as_str()],
                 ));
                 outcome.transitions.push(ResourceTransition::failed(
                     &resource,
@@ -2012,7 +2110,7 @@ pub async fn reconcile(
                     reason.to_string(),
                 ));
                 outcome.resources.push(resource);
-                break;
+                continue;
             }
             let request_id = custom_resource::new_request_id();
             let call = custom_resource::ProviderCall {
@@ -2064,9 +2162,9 @@ pub async fn reconcile(
                 // to answer for this resource and the deployment stops here, exactly as it
                 // does on a refused create.
                 Err(refusal) => {
-                    outcome.failure = Some(super::resource_failure_summary(
+                    failed.push((
+                        resource.logical_id.clone(),
                         super::create_action(stack.express),
-                        [resource.logical_id.as_str()],
                     ));
                     outcome.transitions.push(ResourceTransition::failed(
                         &resource,
@@ -2074,7 +2172,7 @@ pub async fn reconcile(
                         handler_failure_reason(None, &refusal, &resource.physical_resource_id),
                     ));
                     outcome.resources.push(resource);
-                    break;
+                    continue;
                 }
             }
         }
@@ -2241,9 +2339,9 @@ pub async fn reconcile(
                     // does on a refused create. The record keeps `materialised`, so the
                     // rollback still deletes what the create made.
                     Ok(Readiness::Failed(reason)) => {
-                        outcome.failure = Some(super::resource_failure_summary(
+                        failed.push((
+                            resource.logical_id.clone(),
                             super::create_action(stack.express),
-                            [resource.logical_id.as_str()],
                         ));
                         outcome.transitions.push(ResourceTransition::finished(
                             &resource,
@@ -2251,12 +2349,12 @@ pub async fn reconcile(
                             Some(reason),
                         ));
                         outcome.resources.push(resource);
-                        break;
+                        continue;
                     }
                     Err(refusal) => {
-                        outcome.failure = Some(super::resource_failure_summary(
+                        failed.push((
+                            resource.logical_id.clone(),
                             super::create_action(stack.express),
-                            [resource.logical_id.as_str()],
                         ));
                         outcome.transitions.push(ResourceTransition::finished(
                             &resource,
@@ -2268,14 +2366,14 @@ pub async fn reconcile(
                             )),
                         ));
                         outcome.resources.push(resource);
-                        break;
+                        continue;
                     }
                 }
             }
             Err(refusal) => {
-                outcome.failure = Some(super::resource_failure_summary(
+                failed.push((
+                    resource.logical_id.clone(),
                     super::create_action(stack.express),
-                    [resource.logical_id.as_str()],
                 ));
                 outcome.transitions.push(ResourceTransition::failed(
                     &resource,
@@ -2289,10 +2387,18 @@ pub async fn reconcile(
                     }),
                 ));
                 outcome.resources.push(resource);
-                break;
+                continue;
             }
         }
         outcome.resources.push(resource);
+    }
+    // What this walk could not carry through, named in ONE stack-level reason: the field a
+    // client parses to recover the set of failed logical ids reports every resource that
+    // failed, not only the first of them ([`failed_resource_summary`]). A refusal
+    // CloudFormation itself reached stands as it is — no resource of that deployment was
+    // attempted at all.
+    if outcome.failure.is_none() {
+        outcome.failure = failed_resource_summary(&failed);
     }
     // Whatever the failure stopped: nothing was created for it, so it is recorded as the
     // declaration left it — except where the stack ALREADY had that resource, which still
@@ -2824,6 +2930,149 @@ fn awaits_a_dependency(
     needed_by(dependencies, logical_id)
         .iter()
         .any(|needed| unpublished.contains(needed))
+}
+
+/// Whether `logical_id` depends — directly or through another resource — on one of the
+/// resources this walk could not carry out ([`reconcile`]'s own `failed`).
+///
+/// Judged by the same relation [`awaits_a_dependency`] reads, for the same reason: what a
+/// resource depends on is what its declaration reads, and a declaration reading a resource
+/// that failed is not one any owning service could be asked for. Such a resource is left
+/// alone — nothing is attempted for it and it reports no transition of its own — while every
+/// resource whose dependencies DID come through is still attempted, which is what makes a
+/// failed deployment report every broken resource rather than the first one.
+fn depends_on_a_failure(
+    logical_id: &str,
+    dependencies: &Dependencies,
+    failed: &[(String, &'static str)],
+) -> bool {
+    if failed.is_empty() {
+        return false;
+    }
+    needed_by(dependencies, logical_id)
+        .iter()
+        .any(|needed| failed.iter().any(|(id, _)| id == needed))
+}
+
+/// The stack-level reason a deployment whose RESOURCES failed reports, or `None` for a walk
+/// that failed none of them.
+///
+/// One summary sentence per verb the failures fall under
+/// ([`super::resource_failure_summary`]), each naming every resource that failed under that
+/// verb in the order the walk reached them. A deployment attempts every resource whose
+/// dependencies allow it, so more than one can have failed — and the field a client parses
+/// to recover the set of failed logical ids has to name all of them. One deployment can be
+/// doing two things at once (creating one resource while changing another), and then each
+/// verb reports its own set, which is what keeps the sentence true of the resources it names.
+fn failed_resource_summary(failed: &[(String, &'static str)]) -> Option<String> {
+    let mut verbs: Vec<&'static str> = Vec::new();
+    for (_, action) in failed {
+        if !verbs.contains(action) {
+            verbs.push(action);
+        }
+    }
+    let mut summary = String::new();
+    for verb in verbs {
+        let named = failed
+            .iter()
+            .filter(|(_, action)| *action == verb)
+            .map(|(logical_id, _)| logical_id.as_str());
+        summary.push_str(&super::resource_failure_summary(verb, named));
+    }
+    (!summary.is_empty()).then_some(summary)
+}
+
+/// Put ONE resource whose change this deployment could not carry through back the way it
+/// was, through the owning service's own update API, and report that revert on the
+/// resource's own transitions.
+///
+/// CloudFormation does not leave a resource whose provider refused its change half-changed:
+/// the resource is rolled back to the configuration in force before the deployment. WHICH
+/// statuses report that revert follows from what becomes of the stack
+/// ([`FailedResourceRevert`]), and a deployment that is itself a revert puts nothing back.
+///
+/// `in_force` is the record of the same resource the stack had BEFORE this deployment, whose
+/// properties are the configuration being put back; a refusal of the change never applied it,
+/// so for most failures the call confirms the configuration rather than changing it — which
+/// is what the owning service's answer is asked for. The record is left stating that
+/// configuration, and a service that would not take it leaves the resource in the failed
+/// status with its own refusal, never a revert nothing carried out.
+async fn roll_back_failed_resource(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    stack: &StackProvenance,
+    resource: &mut StoredResource,
+    in_force: &StoredResource,
+    outcome: &mut Materialised,
+) {
+    // The statuses this revert is reported under, which is what the deployment's own mode
+    // says: a stack that goes on to roll back reports every resource it puts back as that
+    // resource's own update reaching its terminal status, while one that rests in the failed
+    // status has only the resource's own rollback transitions to report it.
+    let (opened, ended, refused) = match stack.failed_resource_revert {
+        FailedResourceRevert::None => return,
+        FailedResourceRevert::WithTheStackRollback => (
+            super::resource_status::UPDATE_IN_PROGRESS,
+            super::resource_status::UPDATE_COMPLETE,
+            super::resource_status::UPDATE_FAILED,
+        ),
+        FailedResourceRevert::OfTheResourceAlone => (
+            super::resource_status::UPDATE_ROLLBACK_IN_PROGRESS,
+            super::resource_status::UPDATE_ROLLBACK_COMPLETE,
+            super::resource_status::UPDATE_ROLLBACK_FAILED,
+        ),
+    };
+    outcome
+        .transitions
+        .push(ResourceTransition::starting(resource, opened));
+    let restored = in_force.properties.clone();
+    let owner = owner_for(&resource.resource_type);
+    let put_back = match owner {
+        Some(provisioner) => {
+            // BOXED, like every other provider call this walk makes from inside a future
+            // this big: the call's own future is the owning service's whole handler, and
+            // holding a second one of those inline in [`reconcile`]'s state machine is what
+            // takes a deployment of a wide template past the thread's stack.
+            Box::pin(super::service_role::on_resource(
+                super::service_role::target_of(resource),
+                provisioner.update(
+                    ctx,
+                    region,
+                    resource,
+                    &restored,
+                    &stack.tags_for(&resource.logical_id),
+                    &stack.capabilities,
+                ),
+            ))
+            .await
+        }
+        // Nothing exists in any owning service for this type, so there is nothing anywhere
+        // to put back: the stack's own record IS the resource, and restoring the record
+        // below is the whole revert.
+        None => Ok(Some(Created::default())),
+    };
+    match put_back {
+        // Either the owning service took the previous configuration, or the type has no
+        // update path at all and so was never changed: the resource carries the
+        // configuration it had before this deployment, which is what the record states.
+        Ok(_) => {
+            resource.properties = restored;
+            outcome
+                .transitions
+                .push(ResourceTransition::finished(resource, ended, None));
+        }
+        Err(refusal) => {
+            outcome.transitions.push(ResourceTransition::finished(
+                resource,
+                refused,
+                Some(handler_failure_reason(
+                    owner,
+                    &refusal,
+                    &resource.physical_resource_id,
+                )),
+            ));
+        }
+    }
 }
 
 /// Whether a teardown reads each resource's own `DeletionPolicy`

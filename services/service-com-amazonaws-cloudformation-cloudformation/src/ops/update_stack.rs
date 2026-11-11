@@ -345,7 +345,7 @@ fn disables_rollback(input: &UpdateStackInput) -> Option<bool> {
 /// nothing asks for nothing, which is that member's own documented default ("Default:
 /// False") and not the setting the FAILING operation ran under.
 fn fix_forward_refusal(stack: &StoredStack, asked: Option<bool>) -> Option<String> {
-    if stack.status != status::UPDATE_FAILED || asked.unwrap_or(false) {
+    if !crate::state::status_preserved_a_failure(&stack.status) || asked.unwrap_or(false) {
         return None;
     }
     Some(crate::state::stack_is_in_a_non_terminal_state(&stack.status))
@@ -699,20 +699,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             PreviousValues::of(previous)
         };
 
-        let (template_body, reuses_previous_stage) = match submitted {
-            Some(body) => (body, false),
+        let template_body = match submitted {
+            Some(body) => body,
             // `UsePreviousTemplate`: "Reuse the existing template that is associated with
             // the stack that you are updating." A stack a `CREATE` change set created and
             // nothing has executed yet carries no template to reuse.
-            None => (
-                previous.template_body.clone().ok_or_else(|| {
-                    crate::scaffolded::Scaffolded::validation_error(format!(
-                        "Stack [{}] has no template to reuse",
-                        input.stack_name
-                    ))
-                })?,
-                true,
-            ),
+            None => previous.template_body.clone().ok_or_else(|| {
+                crate::scaffolded::Scaffolded::validation_error(format!(
+                    "Stack [{}] has no template to reuse",
+                    input.stack_name
+                ))
+            })?,
         };
         // "In some cases, you must explicitly acknowledge that your stack template contains
         // certain capabilities in order for CloudFormation to update the stack ... If you
@@ -753,14 +750,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         crate::state::ssm_parameters::resolve(ctx, &request_region, &template_body, &mut parameters)
             .await;
         let parameter_values = crate::state::parameter_value_map(&parameters);
-        // The stage this update would deploy, computed from the values in force: a
-        // language-extensions directive reads them, so the stage depends on them. An update
-        // reusing the stack's own template keeps the stage that was computed for it.
-        let processed_template = if reuses_previous_stage {
-            previous.processed_template.clone()
-        } else {
-            crate::state::template::process_with_parameters(&template_body, &parameter_values)
-        };
+        // The stage this update would deploy, computed from the body it deploys and the
+        // parameter values in force: the stage is a function of BOTH — a directive and a
+        // transform's own expansion read those values — so an update that reuses the stack's
+        // own template still computes the stage its OWN parameters make, never the one the
+        // deployment before it computed from the values that were in force then.
+        let processed_template =
+            crate::state::template::process_with_parameters(&template_body, &parameter_values);
         // The same template validation a create is held to: a body whose own declarations
         // CloudFormation cannot resolve is refused HERE, so the stack keeps the template it
         // has rather than starting an update from one real AWS would never accept.
@@ -1262,6 +1258,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 previous_resources,
                 crate::state::provisioning::StackProvenance {
                     managed_names: managed,
+                    // This deployment CHANGES resources the stack already has, so a resource
+                    // whose change its provider refuses is put back the way it was. Where
+                    // the stack RESTS in `UPDATE_FAILED` there is no rollback of the stack's
+                    // own to report that revert, so the resource's own rollback transitions
+                    // are ([`crate::state::provisioning::FailedResourceRevert`]).
+                    failed_resource_revert: if stack.disable_rollback {
+                        crate::state::provisioning::FailedResourceRevert::OfTheResourceAlone
+                    } else {
+                        crate::state::provisioning::FailedResourceRevert::WithTheStackRollback
+                    },
                     ..stack.provenance()
                 },
                 refused_deployment,
@@ -1383,6 +1389,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     );
                     stack.begin_owed_update_rollback(failed_at, failure);
                 }
+                // A failed update is not an update that did nothing: every resource it acted
+                // on reports what became of it — the ones it changed, the one whose change
+                // its provider refused, and the ones it put back again — which is what a
+                // client reads to see how far the update got and which resource stopped it.
+                stack.record_failed_resource_statuses(&materialised.transitions, failed_at);
             }
         }
 

@@ -1115,6 +1115,12 @@ pub mod status {
     /// was successful, and CloudFormation is deleting the old resources" — so the update's
     /// own work is done and the stack is not settled until the replaced resources are gone.
     pub const UPDATE_COMPLETE_CLEANUP_IN_PROGRESS: &str = "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS";
+    /// The same phase of a ROLLBACK: "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS —
+    /// CloudFormation is cleaning up the resources after the rollback", so the revert itself
+    /// has landed and the stack is not settled until what the failed operation created is
+    /// gone ([`StoredStack::record_rollback_cleanup`](super::StoredStack)).
+    pub const UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS: &str =
+        "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS";
     /// The status of a stack a `CREATE` change set brought into existence and nothing has
     /// executed yet (`CreateChangeSetInput$ChangeSetType`: "If you create a change set for
     /// a new stack, CloudFormation creates a stack with a unique stack ID, but no template
@@ -1203,6 +1209,15 @@ pub mod resource_status {
     /// The status of a resource an IMPORT brought under the stack's management: it was
     /// neither created nor changed, it is now the stack's ([`resource_import`]).
     pub const IMPORT_COMPLETE: &str = "IMPORT_COMPLETE";
+    /// [`CREATE_IN_PROGRESS`]'s counterpart while a resource is being PUT BACK the way it
+    /// was: the individual rollback of a resource whose change the service that owns it
+    /// refused, which CloudFormation performs whatever becomes of the stack.
+    pub const UPDATE_ROLLBACK_IN_PROGRESS: &str = "UPDATE_ROLLBACK_IN_PROGRESS";
+    /// The status of a resource that was put back: it carries the configuration in force
+    /// before the operation whose change it failed.
+    pub const UPDATE_ROLLBACK_COMPLETE: &str = "UPDATE_ROLLBACK_COMPLETE";
+    /// The status of a resource the service that owns it would not put back.
+    pub const UPDATE_ROLLBACK_FAILED: &str = "UPDATE_ROLLBACK_FAILED";
 }
 
 /// The `DeletionPolicy` values the resource attribute takes: "With the `DeletionPolicy`
@@ -4064,19 +4079,21 @@ pub fn status_preserved_a_failure(status: &str) -> bool {
     matches!(status, status::CREATE_FAILED | status::UPDATE_FAILED)
 }
 
-/// The message CloudFormation answers an update of a stack whose own update FAILED and was
-/// left standing, where the request does not ask for that state to go on being preserved.
+/// The message CloudFormation answers an operation on a stack whose own last operation FAILED
+/// and was left standing, where the request does not ask for that state to go on being
+/// preserved.
 ///
 /// Such a status is not a terminal one: the stack is mid-change, with resources that do not
 /// carry the configuration its template declares. The sentence names the status the stack is
 /// in and the two ways out of it — the member that asks for the failed state to be kept
 /// while the template is corrected (`DisableRollback`), and the call that puts the stack
-/// back to its last stable state (`RollbackStack`).
+/// back to its last stable state (`RollbackStack`) — and it is the status alone that varies.
+/// The last clause carries no full stop, as CloudFormation words it.
 pub fn stack_is_in_a_non_terminal_state(status: &str) -> String {
     format!(
         "This stack is currently in a non-terminal [{status}] state. To update the stack from \
          this state, please use the disable-rollback parameter with update-stack API. To \
-         rollback to the last known good state, use the rollback-stack API."
+         rollback to the last known good state, use the rollback-stack API"
     )
 }
 

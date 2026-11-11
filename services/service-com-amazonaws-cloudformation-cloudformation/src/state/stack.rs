@@ -1602,6 +1602,16 @@ impl StoredStack {
         let pending = self.pending.take().expect("checked just above");
         let completing_deletion = pending.status == status::DELETE_COMPLETE;
         let deployed = self.pending_deployment.take();
+        // A ROLLBACK that is completing went through the phase that removes what the
+        // operation it reverted had created, between putting the previous configuration back
+        // and its own terminal status: that phase is an event of the stack's, recorded ahead
+        // of the terminal one it leads to.
+        self.record_rollback_cleanup(
+            due_at,
+            &pending.status,
+            pending.operation_id.clone(),
+            pending.client_request_token.clone(),
+        );
         // The per-RESOURCE events of this operation were recorded as its walk reached each
         // resource ([`Self::drain_resource_timeline`], flushed just above) — so by now the
         // only event still owed is the stack's own terminal one, which closes the operation
@@ -1677,6 +1687,47 @@ impl StoredStack {
             reason,
             pending.operation_id,
             pending.client_request_token,
+        );
+    }
+
+    /// Record the CLEANUP phase of a ROLLBACK that is completing at `at`.
+    ///
+    /// "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS — CloudFormation is cleaning up the
+    /// resources after the rollback": a rollback does not go straight from putting the
+    /// previous configuration back to its terminal status — it then removes what the
+    /// operation it reverted had created, and that phase is a status of its own in the
+    /// stack's event stream, which is what a client auditing the documented rollback phases
+    /// reads. It belongs to every rollback alike: the one a failed update owed, the one
+    /// `RollbackStack` asked for and the one `ContinueUpdateRollback` resumed, all of which
+    /// reach their terminal status through here.
+    ///
+    /// The phase falls due at the instant the rollback's terminal status does, because by
+    /// then the revert itself is through: [`Self::settle`] holds that status back until the
+    /// work the rollback owed the owning services has been carried out
+    /// ([`Self::owed_rollback`]), and what is left is the removal this phase reports.
+    ///
+    /// `terminal` is the status the operation is settling into, so nothing is recorded for an
+    /// operation that is not a rollback of an update.
+    ///
+    /// The phase is an EVENT of the rollback and not a status the stack rests in: the
+    /// terminal status falls due at the same instant, and it is what a client reading the
+    /// stack sees, so nothing here writes [`Self::status`].
+    fn record_rollback_cleanup(
+        &mut self,
+        at: SystemTime,
+        terminal: &str,
+        operation_id: Option<String>,
+        client_request_token: Option<String>,
+    ) {
+        if terminal != status::UPDATE_ROLLBACK_COMPLETE {
+            return;
+        }
+        self.record_event(
+            at,
+            status::UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS,
+            None,
+            operation_id,
+            client_request_token,
         );
     }
 
@@ -2613,6 +2664,11 @@ impl StoredStack {
             // these resources is reported ([`provisioning::StackProvenance::express`]).
             express: super::stored_deployment_mode(self.deployment_config.as_ref())
                 == Some(super::DEPLOYMENT_MODE_EXPRESS),
+            // A deployment reverts a resource whose change it failed only where it is one
+            // that CHANGES resources the stack already has: the operation deploying such a
+            // template is what says so, and how that revert is reported
+            // ([`provisioning::FailedResourceRevert`]).
+            failed_resource_revert: provisioning::FailedResourceRevert::None,
             // A stack holds no record of another stack's resources, so the index of which
             // stack manages which physical name is the STORE's to read: the operation that
             // deploys this stack fills it in
@@ -2916,6 +2972,27 @@ impl StoredStack {
     /// Only the transitions that ENDED are applied, through the one writer of a resource's
     /// current status ([`Self::record_resource_statuses`]).
     pub fn record_rollback_resource_statuses(
+        &mut self,
+        transitions: &[provisioning::ResourceTransition],
+        at: SystemTime,
+    ) {
+        self.record_resource_statuses(transitions, at);
+    }
+
+    /// Leave each of the stack's resource records in the status a deployment that FAILED
+    /// left it in.
+    ///
+    /// `StackResource$ResourceStatus` is the resource's "Current status", and a failed
+    /// operation is not an operation that did nothing: the resource whose change its provider
+    /// refused, and every resource the operation had already changed before it, report what
+    /// became of them — which is what a client reads to see how far the deployment got and
+    /// which resource stopped it. A resource the operation never touched keeps the status it
+    /// carried, since nothing happened to it.
+    ///
+    /// Applied through the one writer of a resource's current status
+    /// ([`Self::record_resource_statuses`]), so what the per-resource views report and what
+    /// the event stream of that operation says cannot disagree.
+    pub fn record_failed_resource_statuses(
         &mut self,
         transitions: &[provisioning::ResourceTransition],
         at: SystemTime,

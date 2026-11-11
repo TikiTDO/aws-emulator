@@ -628,6 +628,10 @@ async fn a_parked_change_set_create_takes_the_next_operation() {
                     &acknowledging_iam(&[
                         member("StackName", row.stack),
                         member("TemplateBody", &corrected_body),
+                        // The parked stack is mid-change, so the fix-forward goes on asking
+                        // for the failed state to be kept — which is what makes it an update
+                        // of that state rather than one of a settled stack.
+                        member("DisableRollback", "true"),
                     ]),
                 )
                 .await;

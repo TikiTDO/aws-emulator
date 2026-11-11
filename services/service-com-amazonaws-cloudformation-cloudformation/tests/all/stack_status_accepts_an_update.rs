@@ -4,9 +4,9 @@
 //!
 //! RULE under test: **an update changes the configuration the stack HOLDS, so it is
 //! accepted from the statuses the stack's last operation COMPLETED in, and from the failed
-//! statuses an operation that PRESERVED what it had provisioned leaves — where a stack whose
-//! own UPDATE failed takes one only from a caller that asks for that state to be preserved
-//! again; a stack whose own failure another operation has to resolve first — a deletion or a
+//! statuses an operation that PRESERVED what it had provisioned leaves — where such a stack
+//! takes one only from a caller that asks for that state to be preserved again; a stack whose
+//! own failure another operation has to resolve first — a deletion or a
 //! rollback that could not be carried out, and a create that was rolled back — and one a
 //! `CREATE` change set brought into existence refuse the request with a `ValidationError`
 //! reading `Stack:<stack-id> is in <status> state and can not be updated.`**
@@ -16,7 +16,7 @@
 //! preserving them is for, which is why the two statuses it leaves take an update while the
 //! statuses a FAILED delete or rollback leaves do not: those are resolved by retrying the
 //! delete, by continuing the rollback, or by deleting the stack. That member defaults to
-//! `False`, so an update of a stack whose own update failed and does not restate it is not
+//! `False`, so an update of a stack whose own operation failed and does not restate it is not
 //! asking for the failed state to be kept at all: that stack is mid-change, and the refusal
 //! names the two ways on from it rather than saying the status takes no update.
 //!
@@ -81,11 +81,18 @@ const ROWS: &[Row] = &[
         accepted: true,
     },
     Row {
-        case: "a create that failed with its resources preserved",
+        case: "a create that failed, asked again to preserve what it provisioned",
         stack: "updatable-create-failed",
         seeded: status::CREATE_FAILED,
-        preserves: false,
+        preserves: true,
         accepted: true,
+    },
+    Row {
+        case: "a create that failed, with nothing asked about preserving it",
+        stack: "updatable-create-failed-unpreserved",
+        seeded: status::CREATE_FAILED,
+        preserves: false,
+        accepted: false,
     },
     Row {
         case: "an update that failed, asked again to preserve what it provisioned",
@@ -196,9 +203,9 @@ async fn only_a_stack_that_holds_a_configuration_takes_an_update() {
             row.case
         );
         // A status that takes no update at all is refused by the sentence that names it; a
-        // stack whose own update failed is mid-change, and its refusal names the two ways
-        // on from that state instead.
-        let expected = if row.seeded == status::UPDATE_FAILED {
+        // stack whose own operation failed and was left standing is mid-change, and its
+        // refusal names the two ways on from that state instead.
+        let expected = if service_com_amazonaws_cloudformation_cloudformation::state::status_preserved_a_failure(row.seeded) {
             stack_is_in_a_non_terminal_state(row.seeded)
         } else {
             stack_cannot_be_updated(&stack_id, row.seeded)

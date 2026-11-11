@@ -455,7 +455,7 @@ fn expanded_resources(
         .map(|(logical_id, declaration)| {
             (
                 logical_id.clone(),
-                merged(globals.get("Function"), declaration.get("Properties")),
+                merged(globals.get("Function"), declaration.get("Properties"), 0),
             )
         })
         .collect();
@@ -488,7 +488,7 @@ fn expanded_resources(
                 );
             }
             Some(API) => {
-                let properties = merged(globals.get("Api"), declaration.get("Properties"));
+                let properties = merged(globals.get("Api"), declaration.get("Properties"), 0);
                 expand_rest_api(
                     &mut primary,
                     &mut added,
@@ -497,7 +497,8 @@ fn expanded_resources(
                 );
             }
             Some(HTTP_API) => {
-                let properties = merged(globals.get("HttpApi"), declaration.get("Properties"));
+                let properties =
+                    merged(globals.get("HttpApi"), declaration.get("Properties"), 0);
                 expand_http_api(
                     &mut primary,
                     &mut added,
@@ -506,7 +507,8 @@ fn expanded_resources(
                 );
             }
             Some(SIMPLE_TABLE) => {
-                let properties = merged(globals.get("SimpleTable"), declaration.get("Properties"));
+                let properties =
+                    merged(globals.get("SimpleTable"), declaration.get("Properties"), 0);
                 primary.insert(
                     logical_id.clone(),
                     carried_over(
@@ -670,7 +672,7 @@ fn api_stages(resources: &Map<String, Value>, globals: &Value) -> Map<String, Va
             Some(HTTP_API) => "HttpApi",
             _ => continue,
         };
-        let properties = merged(globals.get(section), declaration.get("Properties"));
+        let properties = merged(globals.get(section), declaration.get("Properties"), 0);
         if let Some(name) = properties.get(STAGE_NAME_PROPERTY) {
             stages.insert(logical_id.clone(), name.clone());
         }
@@ -882,8 +884,13 @@ fn auto_published_version(
     else {
         return;
     };
-    let hash = stated_code_sha(properties, parameters)
-        .unwrap_or_else(|| digest(code.unwrap_or(&Value::Null)));
+    let hash = stated_code_sha(properties, parameters).unwrap_or_else(|| {
+        digest(&with_resolved_parameters(
+            code.unwrap_or(&Value::Null),
+            parameters,
+            0,
+        ))
+    });
     let version_id = format!("{logical_id}{VERSION_ID_INFIX}{hash}");
 
     let mut version = Map::new();
@@ -924,6 +931,136 @@ fn auto_published_version(
         conditioned(resource("AWS::Lambda::Alias", generated), condition),
     );
 }
+
+/// `value` with every reference to a template PARAMETER replaced by a FINGERPRINT of the
+/// value in force for it ([`parameter_fingerprint`]): a `Ref` to one, and a parameter
+/// interpolated into an `Fn::Sub`'s text.
+///
+/// What the generated version's hash stands for is the function's CODE, and the code a
+/// deployment really deploys is the one those values resolve: a pipeline that restates the
+/// handler's source — or the asset object it points at — as a parameter changes the code
+/// without changing a character of the template. SAM resolves the template's parameters
+/// before it hashes, so the generated id is a function of the code itself and not of the way
+/// the template spells it, and a deployment that changes only such a parameter declares a
+/// DIFFERENT version resource — which is what publishes the next version.
+///
+/// Read ONLY to be hashed ([`digest`]), which is why a fingerprint serves: two deployments
+/// differ here exactly when a value they read differs, and nothing reads the text itself.
+///
+/// A reference to anything else — another resource, a pseudo parameter — is left exactly as
+/// written: its value is not this expansion's to know, and it is the same text in every
+/// deployment of the template anyway. Bounded by [`MAX_TEMPLATE_DEPTH`], as every other walk
+/// over a caller-supplied document here is.
+fn with_resolved_parameters(
+    value: &Value,
+    parameters: &BTreeMap<String, String>,
+    depth: usize,
+) -> Value {
+    if depth > MAX_TEMPLATE_DEPTH {
+        return value.clone();
+    }
+    match value {
+        Value::Object(members) => {
+            if members.len() == 1 {
+                if let Some((name, in_force)) = members
+                    .get(REF)
+                    .and_then(Value::as_str)
+                    .and_then(|name| parameters.get(name).map(|in_force| (name, in_force)))
+                {
+                    return Value::String(parameter_fingerprint(name, in_force));
+                }
+                if let Some(substitution) = members.get(FN_SUB) {
+                    return substituted_value(substitution, parameters, depth);
+                }
+            }
+            Value::Object(
+                members
+                    .iter()
+                    .map(|(name, member)| {
+                        (
+                            name.clone(),
+                            with_resolved_parameters(member, parameters, depth + 1),
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| with_resolved_parameters(item, parameters, depth + 1))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+/// One `Fn::Sub`'s value with its source string substituted, in BOTH forms the function takes
+/// ([`rename_substitution`] reads the same two): the source string on its own, or
+/// `[ String, { Name: Value, … } ]`.
+///
+/// The variables of the source string are walked by the crate's own `Fn::Sub` variable walk
+/// ([`renamed_substitution`], which trims the variable, reads the name off the dotted
+/// `${Name.Attribute}` form and keeps the function's own `${!Literal}` escape), with each
+/// parameter in force mapped to its fingerprint — so there is one reader of that form here
+/// rather than a second scanner beside it.
+///
+/// A variable the substitution supplies ITSELF shadows a parameter of the same name, so it is
+/// left as written and the supplied value — which may be a `Ref` to a parameter — is
+/// fingerprinted where it stands, at this value's own depth.
+fn substituted_value(
+    substitution: &Value,
+    parameters: &BTreeMap<String, String>,
+    depth: usize,
+) -> Value {
+    let fingerprints: BTreeMap<String, String> = parameters
+        .iter()
+        .map(|(name, value)| (name.clone(), parameter_fingerprint(name, value)))
+        .collect();
+    match substitution {
+        Value::String(source) => {
+            Value::String(renamed_substitution(source, &fingerprints, &[]))
+        }
+        Value::Array(parts) => {
+            let supplied: Vec<String> = parts
+                .get(1)
+                .and_then(Value::as_object)
+                .map(|variables| variables.keys().cloned().collect())
+                .unwrap_or_default();
+            let mut resolved: Vec<Value> = Vec::with_capacity(parts.len());
+            for (at, part) in parts.iter().enumerate() {
+                match (at, part) {
+                    (0, Value::String(source)) => resolved.push(Value::String(
+                        renamed_substitution(source, &fingerprints, &supplied),
+                    )),
+                    _ => resolved.push(with_resolved_parameters(part, parameters, depth + 1)),
+                }
+            }
+            Value::Array(resolved)
+        }
+        _ => substitution.clone(),
+    }
+}
+
+/// What stands in for one parameter's VALUE in the text that is hashed: the parameter's name
+/// and a digest of the value in force for it.
+///
+/// Two deployments of one template therefore differ here exactly when a value they read
+/// differs, which is all the hash has to tell apart — while the stand-in's own length is
+/// [`DIGEST_CHARS`] whatever the value's is. That is what keeps the work BOUNDED: both the
+/// text and the values are the REQUESTER's, so inlining a value would make the produced text
+/// the product of the occurrence count and the value's length, neither of which this service
+/// bounds.
+fn parameter_fingerprint(name: &str, value: &str) -> String {
+    format!(
+        "{name}={}",
+        super::template::content_digest(PARAMETER_DIGEST_SALT, value, DIGEST_CHARS)
+    )
+}
+
+/// What a parameter value's fingerprint is derived under, which keeps it apart from every
+/// other digest this module takes.
+const PARAMETER_DIGEST_SALT: &str = "sam-parameter";
 
 /// The `AutoPublishCodeSha256` a declaration states, as it wrote it, where the declaration
 /// asks for the automatic publication at all — the property has meaning only beside
@@ -2165,14 +2302,21 @@ fn object(value: Option<&Value>) -> Map<String, Value> {
 /// Two objects are merged member by member, so a resource stating one environment variable
 /// keeps the global ones beside it; anything else the resource states REPLACES the global
 /// value.
-fn merged(global: Option<&Value>, declared: Option<&Value>) -> Value {
+///
+/// Bounded by [`MAX_TEMPLATE_DEPTH`], as every other walk over a caller-supplied document
+/// here is ([`canonical`]): both sides are sub-trees of the submitted template, so the
+/// nesting is the REQUESTER's, and past that depth the resource's own value stands as it
+/// wrote it rather than being recursed into.
+fn merged(global: Option<&Value>, declared: Option<&Value>, depth: usize) -> Value {
     match (global, declared) {
-        (Some(Value::Object(global)), Some(Value::Object(declared))) => {
+        (Some(Value::Object(global)), Some(Value::Object(declared)))
+            if depth <= MAX_TEMPLATE_DEPTH =>
+        {
             let mut out = global.clone();
             for (name, value) in declared {
                 match out.get(name) {
                     Some(global) if global.is_object() && value.is_object() => {
-                        out.insert(name.clone(), merged(Some(global), Some(value)));
+                        out.insert(name.clone(), merged(Some(global), Some(value), depth + 1));
                     }
                     _ => {
                         out.insert(name.clone(), value.clone());
