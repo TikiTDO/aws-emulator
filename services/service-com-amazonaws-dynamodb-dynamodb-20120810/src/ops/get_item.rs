@@ -307,6 +307,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .map_err(lift)?
             .admit_read(units, now)
         {
+            // A read refused for exceeding the table's throughput is an access of the key it
+            // addressed that was THROTTLED, which is what a throttled-keys insight rule
+            // collects ([`crate::state::contributor_insights`]).
+            crate::state::contributor_insights::record_key_access(
+                &*self.engine,
+                &store,
+                &region,
+                &name,
+                &input.key,
+                crate::state::contributor_insights::Access::Throttled,
+                now,
+            );
             return Err(GetItemErrorModeled::ProvisionedThroughputExceededException(
                 crate::state::read_throughput_exceeded(
                     &crate::state::table_arn(&region, &name),
@@ -315,6 +327,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         }
+        // The key activity this read made: the units it consumed on the partition (and sort)
+        // key it addressed, attributed where the table's Contributor Insights rules collect.
+        // What the read REPORTS is untouched by it — the item below is the one the store held.
+        crate::state::contributor_insights::record_key_access(
+            &*self.engine,
+            &store,
+            &region,
+            &name,
+            &input.key,
+            crate::state::contributor_insights::Access::Consumed(units),
+            now,
+        );
         Ok(GetItemOutput {
             // "Item - A map of attribute names to AttributeValue objects, as specified
             // by ProjectionExpression": what the request asked for of the item it found,

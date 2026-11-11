@@ -336,6 +336,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut keyed: std::collections::BTreeSet<(String, crate::state::ItemKey)> =
             std::collections::BTreeSet::new();
         let mut tables: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        // The key activity each table's keys made, attributed once the batch is done: a read of
+        // a key is an access of it, and a key the batch handed back was throttled
+        // ([`crate::state::contributor_insights`]).
+        let mut key_activity: Vec<TableKeyActivity> = Vec::new();
         for &(table_name, requested_keys) in &addressed {
             // A key that names no table is refused as a MAP KEY, with the map it sat in
             // quoted as the request carried it ([`crate::state::batch_table_key`]).
@@ -372,6 +376,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::check_table_key_accessible(&*self.engine, table).map_err(lift)?;
             let mut found: Vec<crate::state::Item> = Vec::new();
             let mut withheld: Vec<crate::state::Item> = Vec::new();
+            let mut accesses: Vec<crate::state::contributor_insights::KeyAccess> = Vec::new();
             for key_map in &requested_keys.keys {
                 for (attribute, value) in key_map {
                     crate::state::check_attribute_value(attribute, value).map_err(lift)?;
@@ -394,10 +399,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // operation on those items" (`BatchGetItem$UnprocessedKeys`), which is
                 // how a batch keeps serving what the table's capacity covers.
                 if !withheld.is_empty() || table.admit_read(units, now).is_err() {
+                    accesses.push((
+                        crate::state::contributor_insights::contributor_keys(table, key_map),
+                        crate::state::contributor_insights::Access::Throttled,
+                    ));
                     withheld.push(key_map.clone());
                     throttled_table.get_or_insert_with(|| name.clone());
                     continue;
                 }
+                accesses.push((
+                    crate::state::contributor_insights::contributor_keys(table, key_map),
+                    crate::state::contributor_insights::Access::Consumed(units),
+                ));
                 ledger.record(&name, units);
                 processed += 1;
                 if let Some(item) = item {
@@ -418,6 +431,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // results up under — while the store and the capacity report use the
             // resolved table name.
             responses.insert(table_name.clone(), found);
+            key_activity.push((name.clone(), accesses));
             if !withheld.is_empty() {
                 // The residue is handed back in the form it was sent, so it can be
                 // passed straight to a later `BatchGetItem`.
@@ -429,6 +443,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     },
                 );
             }
+        }
+
+        // Every key this batch read or handed back, attributed to the Contributor Insights
+        // rules of the table it addressed.
+        for (name, accesses) in &key_activity {
+            crate::state::contributor_insights::record_access(
+                &*self.engine,
+                &store,
+                &region,
+                name,
+                None,
+                accesses,
+                now,
+            );
         }
 
         // "If none of the items can be processed due to insufficient provisioned
@@ -484,3 +512,7 @@ fn lift(error: crate::state::RequestError) -> BatchGetItemError {
 
 /// The input member a projection travels in, which is what its refusals name.
 const PROJECTION_EXPRESSION: &str = "ProjectionExpression";
+
+/// The key activity ONE table's entries made in this batch: the resolved table name, and what
+/// each of its keys contributed ([`crate::state::contributor_insights`]).
+type TableKeyActivity = (String, Vec<crate::state::contributor_insights::KeyAccess>);

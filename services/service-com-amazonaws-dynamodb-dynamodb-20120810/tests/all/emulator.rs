@@ -219,6 +219,51 @@ pub fn emulator_with_kms() -> MultiServiceRouter {
     router
 }
 
+/// One emulator holding this service AND CloudWatch, over ONE shared engine.
+///
+/// Contributor Insights for DynamoDB IS a set of CloudWatch Contributor Insights rules: the
+/// rules an enable mints live in that service's store, so a suite that asserts them mounts
+/// CloudWatch beside DynamoDB, exactly as `core/router` assembles them.
+pub fn emulator_with_cloudwatch() -> MultiServiceRouter {
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    let mut router = MultiServiceRouter::new();
+    router.set_request_authentication(false);
+    router.register_service(EmulatedService::new(Arc::clone(&engine)));
+    router.register_service(
+        service_com_amazonaws_cloudwatch_graniteserviceversion20100801::EmulatedService::new(
+            engine,
+        ),
+    );
+    router
+}
+
+/// Send one CLOUDWATCH operation in [`REGION`], signed for that service (`monitoring`) and
+/// named under its own `X-Amz-Target` prefix.
+pub async fn call_cloudwatch(
+    router: &MultiServiceRouter,
+    operation: &str,
+    body: Value,
+) -> (u16, Value) {
+    dispatch_as(
+        router,
+        REGION,
+        "monitoring",
+        &format!("GraniteServiceVersion20100801.{operation}"),
+        body,
+    )
+    .await
+}
+
+/// [`call_cloudwatch`] for an operation that must succeed, returning its parsed body.
+pub async fn ok_cloudwatch(router: &MultiServiceRouter, operation: &str, body: Value) -> Value {
+    let (status, parsed) = call_cloudwatch(router, operation, body.clone()).await;
+    assert_eq!(
+        status, 200,
+        "case cloudwatch {operation} {body}: expected HTTP 200, got {status} with {parsed}"
+    );
+    parsed
+}
+
 /// Send one KMS operation in `region`, signed for that service. KMS names its operations
 /// under its own `X-Amz-Target` prefix, which is what tells it apart here.
 pub async fn call_kms_in(

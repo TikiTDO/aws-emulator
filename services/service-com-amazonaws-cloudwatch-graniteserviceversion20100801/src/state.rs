@@ -91,6 +91,13 @@ pub mod insight_rule_records;
 
 pub use insight_rule_records::*;
 
+/// The Contributor Insights rules another service mints for one of its own resources, and the
+/// contributions that resource's data plane attributes to them. Re-exported below, so a handler
+/// and a service crate reach them as `crate::state::…` like every other part of this store.
+pub mod resource_insight_rules;
+
+pub use resource_insight_rules::*;
+
 /// The metric math expression language a `MetricDataQuery$Expression` carries, parsed and
 /// evaluated over the series this store holds.
 pub mod metric_math;

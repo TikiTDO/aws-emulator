@@ -877,6 +877,24 @@ pub enum AttributeValueKey {
     S(String),
 }
 
+impl AttributeValueKey {
+    /// The text this key value is addressed BY outside the item: the string itself for an
+    /// `S` value, the canonical rendering for an `N` one, and the base64 the wire carries
+    /// for a `B` one.
+    ///
+    /// The same text [`authorization::condition_key_text`] reads off the value a REQUEST
+    /// carried, so one key value is one partition and one Contributor Insights contributor
+    /// ([`contributor_insights`]) however a caller spelled it.
+    #[must_use]
+    pub fn key_text(&self) -> String {
+        match self {
+            Self::B(bytes) => ::aws_smithy_types::base64::encode(bytes),
+            Self::N(number) => number.canonical_text(),
+            Self::S(text) => text.clone(),
+        }
+    }
+}
+
 /// A primary key: the partition key value, and the sort key value when the table
 /// declares a `RANGE` key.
 ///
@@ -1687,6 +1705,16 @@ pub struct PendingStreamRecord {
     pub old_image: Option<Item>,
     /// The item after the change, for a write that stored one.
     pub new_image: Option<Item>,
+    /// Whether a CALLER's write made this change, rather than the service itself (an
+    /// expiring item's deletion).
+    ///
+    /// The two are told apart because the feature that attributes a table's key activity
+    /// attributes what an ACCESS consumed, and an expiring item's deletion is charged to
+    /// nobody: "the delete operations ... are background operations that don't affect your
+    /// table's provisioned throughput" (the `UpdateTimeToLive` doc), so it is no access of
+    /// the key it removed ([`contributor_insights::record_item_changes`]). The streams both
+    /// read the queue carry either kind of change alike.
+    pub by_caller: bool,
 }
 
 /// The most changes this store queues for the streams service before a handler hands
@@ -2986,6 +3014,8 @@ impl ComAmazonawsDynamodbDynamodb20120810State {
                             keys: table.stream_keys(&item),
                             old_image: Some(item),
                             new_image: None,
+                            // The clock's own deletion, charged to no caller's access.
+                            by_caller: false,
                         });
                     }
                 }
@@ -3471,7 +3501,13 @@ impl ComAmazonawsDynamodbDynamodb20120810State {
         // the only reason to keep a copy of the item, so a table that publishes nowhere
         // clones nothing.
         let publishes_to = table.enabled_stream_arn();
-        let publishes = publishes_to.is_some() || table.delivers_to_kinesis(now);
+        let publishes = publishes_to.is_some()
+            || table.delivers_to_kinesis(now)
+            // A table that is COLLECTING key activity owes a record too: a write of an item
+            // is an access of its key, and this queue is where a landed write's changes are
+            // handed to the stores that answer for them
+            // ([`contributor_insights::record_item_changes`]).
+            || table.contributor_insights.collecting();
         let keys = if publishes {
             table.stream_keys(&item)
         } else {
@@ -3487,6 +3523,7 @@ impl ComAmazonawsDynamodbDynamodb20120810State {
             keys,
             old_image: replaced.clone(),
             new_image,
+            by_caller: true,
         });
         self.queue_stream_record(change);
         // A global table's data is the same in every Region of its group, so the item
@@ -3521,7 +3558,11 @@ impl ComAmazonawsDynamodbDynamodb20120810State {
         // for it: a stream is a sequence of modifications, and a delete of an absent key
         // is none.
         let stream_arn = table.enabled_stream_arn();
-        let publishes = stream_arn.is_some() || table.delivers_to_kinesis(now);
+        let publishes = stream_arn.is_some()
+            || table.delivers_to_kinesis(now)
+            // See the same predicate in `put_item`: a collecting table's landed writes are
+            // attributed from this queue.
+            || table.contributor_insights.collecting();
         let change = removed
             .as_ref()
             .filter(|_| publishes)
@@ -3532,6 +3573,7 @@ impl ComAmazonawsDynamodbDynamodb20120810State {
                 keys: table.stream_keys(before),
                 old_image: Some(before.clone()),
                 new_image: None,
+                by_caller: true,
             });
         self.queue_stream_record(change);
         // The same item change the local table applied is applied to every replica of it,
@@ -4765,6 +4807,12 @@ mod kinesis;
 /// every caller still names them `crate::state::…`.
 pub mod kinesis_delivery;
 pub use kinesis_delivery::deliver_item_changes;
+
+/// The CloudWatch side of Contributor Insights: the insight rules an enable mints for a
+/// table or index, and the key activity its data plane attributes to them. Reached as
+/// `crate::state::contributor_insights::…`, so the rule names and measures it mints under
+/// are read from the one place that states them.
+pub mod contributor_insights;
 
 /// The export catalogue: the records `ExportTableToPointInTime` writes, their ARNs and
 /// the status every export reader derives from the clock. Re-exported below, so every

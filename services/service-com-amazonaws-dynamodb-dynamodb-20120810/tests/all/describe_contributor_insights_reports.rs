@@ -12,10 +12,10 @@
 //!    `DescribeContributorInsights$TableName`) — and echoes `IndexName` exactly when the
 //!    request named one, because the setting reported is that index's rather than the
 //!    table's;
-//! 2. no `ContributorInsightsRuleList` and no `FailureException` is reported in any
-//!    status: those name the CloudWatch Contributor Insights rules behind the feature and
-//!    the last failure of one, and nothing here runs a rule that could be named or could
-//!    fail;
+//! 2. `ContributorInsightsRuleList` names the CloudWatch Contributor Insights rules the
+//!    resource has — the ones an enable minted, and none once a disable has deleted them —
+//!    while no `FailureException` is reported in any status, since nothing here fails a
+//!    rule;
 //! 3. `LastUpdateDateTime` is "Timestamp of the last time the status was changed"
 //!    (`DescribeContributorInsightsOutput$LastUpdateDateTime`): absent while the status
 //!    has never been set, never in the future, the same across reads that report the same
@@ -108,7 +108,7 @@ async fn the_report_names_the_stored_table_and_echoes_only_an_index_the_request_
 }
 
 #[tokio::test]
-async fn no_cloudwatch_rule_and_no_failure_is_reported_in_any_status() {
+async fn the_rules_the_resource_has_are_named_and_no_failure_is_reported_in_any_status() {
     let router = emulator();
     create_table(&router, "InsightsReported", &["Reported.Index"]).await;
     settle().await;
@@ -138,15 +138,21 @@ async fn no_cloudwatch_rule_and_no_failure_is_reported_in_any_status() {
             let report = describe_insights(&router, "InsightsReported", index).await;
             // The untouched index stays off through every row: only the table was named.
             let expected_status = if index.is_some() { "DISABLED" } else { expected };
+            // The rules named are the ones the feature has: an enable mints them for the
+            // resource it names, so the table carries them from the enable until the disable
+            // deletes them, and the index that was never enabled carries none.
+            let rules_expected = index.is_none() && expected.starts_with("ENABL");
+            let rules = reported(&report, "ContributorInsightsRuleList");
+            let named = rules.as_array().map_or(0, Vec::len);
             assert_eq!(
                 (
                     reported(&report, "ContributorInsightsStatus"),
-                    reported(&report, "ContributorInsightsRuleList"),
+                    named > 0,
                     reported(&report, "FailureException"),
                 ),
-                (json!(expected_status), Value::Null, Value::Null),
-                "case {case} on {resource}: the status is reported with no rule named and no \
-                 failure, got {report}"
+                (json!(expected_status), rules_expected, Value::Null),
+                "case {case} on {resource}: the status is reported with the resource's own rules \
+                 and no failure, got {report}"
             );
         }
     }

@@ -53,6 +53,11 @@ pub struct StoredInsightRule {
     /// What this rule was enabled from, for a rule `PutManagedInsightRules` created;
     /// `None` for one a caller wrote with `PutInsightRule`.
     pub managed: Option<ManagedRuleOrigin>,
+    /// What this rule collects for a RESOURCE, for a rule another Amazon Web Services service
+    /// minted when Contributor Insights was turned on for one of its own resources
+    /// ([`insight_rules`] is the log-rule evaluation; this is the other kind of collection a
+    /// rule can hold). `None` for every rule written against the log-rule syntax.
+    pub resource: Option<super::resource_insight_rules::ResourceCollection>,
 }
 
 /// What a managed Contributor Insights rule was enabled from: the template

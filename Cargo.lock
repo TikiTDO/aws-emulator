@@ -11997,6 +11997,7 @@ dependencies = [
  "memchr",
  "ruzstd",
  "serde_json",
+ "service-com-amazonaws-cloudwatch-graniteserviceversion20100801",
  "service-com-amazonaws-dynamodbstreams-dynamodbstreams-20120810",
  "service-com-amazonaws-kinesis-kinesis-20131202",
  "service-com-amazonaws-kms-trentservice",

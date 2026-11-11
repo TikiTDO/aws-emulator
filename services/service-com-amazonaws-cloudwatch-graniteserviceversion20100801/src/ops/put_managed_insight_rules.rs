@@ -353,6 +353,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                             observations: Vec::new(),
                             tags: rule.tags.clone().unwrap_or_default(),
                             managed: Some(origin),
+                            // Enabled from a managed-rule template rather than minted for a
+                            // resource by the service that owns it, so it collects no
+                            // resource's accesses.
+                            resource: None,
                         },
                     );
                 }

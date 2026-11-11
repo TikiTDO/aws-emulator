@@ -170,6 +170,13 @@ pub const CONTRIBUTOR_INSIGHTS_DISABLE: &str = "DISABLE";
 /// asked for no narrowing asked for neither half to be dropped.
 pub const DEFAULT_CONTRIBUTOR_INSIGHTS_MODE: &str = "ACCESSED_AND_THROTTLED_KEYS";
 
+/// The narrower of the two modes the model declares
+/// ([`crate::ops::types::CONTRIBUTOR_INSIGHTS_MODE_VALUES`]): "throttled events only for the
+/// DynamoDB table or index" (`UpdateContributorInsights$ContributorInsightsMode`), which is
+/// what makes it track one half of the key activity the wider mode does
+/// ([`crate::state::contributor_insights`]).
+pub const CONTRIBUTOR_INSIGHTS_MODE_THROTTLED_KEYS: &str = "THROTTLED_KEYS";
+
 /// The separator between the table name and the index name in the key one contributor
 /// insights summary pages by ([`contributor_insights_key`]).
 ///
@@ -256,6 +263,15 @@ impl ContributorInsights {
     /// The mode in force, which a setting that is off carries none of.
     pub fn mode(&self) -> Option<String> {
         self.mode.clone()
+    }
+
+    /// Whether this resource is COLLECTING key activity: the feature's CloudWatch rules exist
+    /// from the enable that minted them ([`crate::state::contributor_insights`]), so an access
+    /// contributes to them from that instant on and stops contributing when a disable deletes
+    /// them — which is the last accepted action either way, whether or not the status it leaves
+    /// has settled.
+    pub fn collecting(&self) -> bool {
+        self.enabled
     }
 
     /// Whether this setting is one `ListContributorInsights` reports a summary for.

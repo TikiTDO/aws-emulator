@@ -685,6 +685,27 @@ impl Table {
             .collect()
     }
 
+    /// Whether the resource an `IndexName` addresses declares a SORT key: this table's own
+    /// key schema where the request names no index, and the named secondary index's where it
+    /// does.
+    ///
+    /// The two are different questions — an index declares its own `HASH` and `RANGE`
+    /// elements, whichever ones the table declares — so a setting that is the INDEX's is
+    /// decided against the index's schema ([`crate::state::contributor_insights`], where the
+    /// sort-key half of a feature only exists for a resource that has a sort key to report
+    /// on). `None` for an index this table does not carry, which declares no key at all.
+    pub fn resource_declares_sort_key(&self, index_name: Option<&str>) -> bool {
+        match index_name {
+            None => self.sort_key_name().is_some(),
+            Some(name) => self.secondary_index(name).is_some_and(|index| {
+                index
+                    .key_schema
+                    .iter()
+                    .any(|element| element.key_type != "HASH")
+            }),
+        }
+    }
+
     /// The secondary index an `IndexName` names, whichever kind it is, or `None` when
     /// this table declares no index by that name.
     ///

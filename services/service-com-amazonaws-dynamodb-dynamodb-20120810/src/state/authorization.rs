@@ -333,7 +333,12 @@ impl AddressedKeys {
 /// two spellings of one figure address one partition and decide alike), and the base64 the
 /// wire carries for a `B` one — the three types a key attribute may be declared as.
 /// Anything else is no key value at all, so it names no text.
-fn condition_key_text(value: &AttributeValue) -> Option<String> {
+///
+/// This is the store's ONE rendering of a key attribute's value as the text something outside
+/// the item addresses it by, so the partition a policy clause is decided against and the
+/// contributor a key activity is attributed to ([`super::contributor_insights`]) are the same
+/// string for the same value.
+pub(crate) fn condition_key_text(value: &AttributeValue) -> Option<String> {
     match value {
         AttributeValue::S(text) => Some(text.clone()),
         AttributeValue::N(text) => canonical_number_text(text).ok(),

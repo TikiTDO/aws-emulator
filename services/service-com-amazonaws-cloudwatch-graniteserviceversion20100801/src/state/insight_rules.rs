@@ -686,6 +686,11 @@ pub fn report(rule: &StoredInsightRule, request: &ReportRequest) -> InsightRepor
     // evaluation reads classifies no contributor and has collected nothing, so it reports no
     // key and no contributor — but still the series its window spans.
     let definition = rule.collection.as_ref();
+    // The other kind of collection a rule can hold: one a service minted for a RESOURCE
+    // (`super::resource_insight_rules`), which classifies its contributors by the key labels it
+    // was minted with and aggregates the measure it collects. The fold below is the same either
+    // way; only where the rule's keys and its aggregation come from differs.
+    let resource = rule.resource.as_ref();
     let period = request.period_secs.max(1);
 
     let mut periods: BTreeMap<i64, PeriodAggregate> = BTreeMap::new();
@@ -719,16 +724,22 @@ pub fn report(rule: &StoredInsightRule, request: &ReportRequest) -> InsightRepor
         aggregate_value += observation.value;
     }
 
-    let aggregate_on = definition.map_or(AGGREGATE_ON_COUNT, |definition| {
-        definition.aggregate_on.as_str()
-    });
+    let aggregate_on = match resource {
+        // A rule minted for a resource aggregates the measure each access contributed, so what
+        // a datapoint of it reports is the sum of those values.
+        Some(_) => AGGREGATE_ON_SUM,
+        None => definition.map_or(AGGREGATE_ON_COUNT, |definition| {
+            definition.aggregate_on.as_str()
+        }),
+    };
     InsightReport {
         // No rule attribute, since a log rule declares none
         // ([`InsightReport::rule_attributes`]) — an empty series, which the report still
         // answers.
         rule_attributes: Vec::new(),
-        key_labels: definition
-            .map(|definition| definition.keys.clone())
+        key_labels: resource
+            .map(|collection| collection.key_labels.clone())
+            .or_else(|| definition.map(|definition| definition.keys.clone()))
             .unwrap_or_default(),
         aggregation_statistic: Some(aggregation_statistic(aggregate_on).to_string()),
         aggregate_value,

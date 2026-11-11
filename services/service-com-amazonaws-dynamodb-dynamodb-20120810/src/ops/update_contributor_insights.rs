@@ -16,6 +16,11 @@
 //! does not carry, are both the modelled `ResourceNotFoundException` — "the operation
 //! tried to access a nonexistent table or index" — and the refused call writes nothing.
 //!
+//! The feature itself is a set of CloudWatch Contributor Insights RULES over the resource's key
+//! activity, so an accepted `ENABLE` mints them where CloudWatch holds every insight rule and a
+//! `DISABLE` deletes that resource's ([`crate::state::contributor_insights`]): which kinds are
+//! minted follows from the mode in force and from whether the table declares a sort key.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -199,10 +204,41 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store.apply_due_transitions(now);
         let table = store.table_mut(&region, &name).map_err(lift)?;
         let table_name = table.name.clone();
+        // The sort-key kinds belong to the resource the request ADDRESSED: an index declares
+        // its own key schema, so the question is asked of the index where the request named
+        // one and of the table where it named none.
+        let has_sort_key = table.resource_declares_sort_key(index_name);
         let insights = table.contributor_insights_mut(index_name).map_err(lift)?;
         insights.apply(enable, input.contributor_insights_mode.as_deref(), now);
         let status = insights.status(now).to_string();
         let mode = insights.mode();
+
+        // The feature IS its CloudWatch Contributor Insights rules — "CloudWatch Contributor
+        // Insights for DynamoDB graphs display the partition key and (if applicable) sort key
+        // of frequently accessed items and frequently throttled items" — so the accepted action
+        // is applied where those rules live: an `ENABLE` mints the rules its mode and the
+        // resource's key schema call for, and a `DISABLE` deletes exactly that resource's
+        // ([`crate::state::contributor_insights`]). Done with this store's guard still held, so
+        // the setting this call wrote and the rules behind it cannot be seen apart.
+        let rules = if enable {
+            crate::state::contributor_insights::mint_rules(
+                &*self.engine,
+                &region,
+                &table_name,
+                index_name,
+                mode.as_deref()
+                    .unwrap_or(crate::state::DEFAULT_CONTRIBUTOR_INSIGHTS_MODE),
+                has_sort_key,
+                now,
+            )
+        } else {
+            crate::state::contributor_insights::delete_rules(
+                &*self.engine,
+                &region,
+                &table_name,
+                index_name,
+            )
+        };
 
         // The audit record for a state-changing call: who asked, what was changed and
         // that it succeeded. Never a credential — only the access key id the caller
@@ -213,6 +249,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             table_name = %table_name,
             index_name = %index_name.unwrap_or_default(),
             contributor_insights_status = %status,
+            insight_rules = rules.len(),
             outcome = "updated",
             "contributor insights updated"
         );

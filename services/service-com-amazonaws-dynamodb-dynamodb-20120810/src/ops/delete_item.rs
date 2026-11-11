@@ -431,6 +431,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             (capacity, throttle)
         };
         if let Some(throttle) = throttle {
+            // The key activity of a write refused for throughput: the key it addressed was
+            // THROTTLED, which is what a throttled-keys insight rule collects
+            // ([`crate::state::contributor_insights`]). A write that LANDS is attributed
+            // through the change it published instead.
+            crate::state::contributor_insights::record_key_access(
+                &*self.engine,
+                &store,
+                &region,
+                &name,
+                &input.key,
+                crate::state::contributor_insights::Access::Throttled,
+                now,
+            );
             return Err(
                 DeleteItemErrorModeled::ProvisionedThroughputExceededException(
                     crate::state::throughput_exceeded(

@@ -253,6 +253,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // transaction that is refused consumed nothing anywhere.
         let mut per_table: std::collections::BTreeMap<String, f64> =
             std::collections::BTreeMap::new();
+        // The key activity each `Get` makes — `(table, contributor keys, units)` — attributed
+        // once the transaction is settled ([`record_key_activity`]).
+        let mut key_activity: Vec<GetKeyActivity> = Vec::with_capacity(input.transact_items.len());
         for (requested, projected) in input.transact_items.iter().zip(&projections) {
             let name = crate::state::resolve_table_name_in(&requested.get.table_name, &region)
                 .map_err(lift)?;
@@ -290,6 +293,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             let size = item.as_ref().map_or(0, crate::state::item_size);
             let units = crate::state::read_capacity_units(size, true)
                 * crate::state::TRANSACTIONAL_CAPACITY_FACTOR;
+            // One `Get` is one access of that item's key, charged the units this element
+            // billed: attributed once the transaction is settled, because a transaction that
+            // is refused served none of its reads ([`crate::state::contributor_insights`]).
+            key_activity.push((
+                name.clone(),
+                crate::state::contributor_insights::contributor_keys(table, &requested.get.key),
+                units,
+            ));
             *per_table.entry(name.clone()).or_default() += units;
             ledger.record(&name, units);
             // "ProjectionExpression - One or more attributes of the specified item to
@@ -311,6 +322,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .map_err(lift)?
                 .read_admits(*units, now)
             {
+                record_key_activity(&*self.engine, &store, &region, &key_activity, true, now);
                 return Err(
                     TransactGetItemsErrorModeled::ProvisionedThroughputExceededException(
                         crate::state::read_throughput_exceeded(
@@ -329,6 +341,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .map_err(lift)?
                 .admit_read(*units, now);
         }
+        record_key_activity(&*self.engine, &store, &region, &key_activity, false, now);
 
         Ok(TransactGetItemsOutput {
             consumed_capacity: ledger.consumed_capacity(input.return_consumed_capacity.as_deref()),
@@ -339,6 +352,40 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
 /// The input member a projection travels in, which is what its refusals name.
 const PROJECTION_EXPRESSION: &str = "ProjectionExpression";
+
+/// The key activity ONE `Get` of the transaction makes: the table it read, the contributor keys
+/// it addressed, and the units it billed ([`crate::state::contributor_insights`]).
+type GetKeyActivity = (String, Vec<String>, f64);
+
+/// Attribute the key activity of one transactional get: each `Get` is one access of the item's
+/// key, consuming the units that element billed — or, for a transaction refused for throughput,
+/// a throttled access of it, since "the entire transaction is rejected" and every key it
+/// addressed went unserved ([`crate::state::contributor_insights`]).
+fn record_key_activity<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>(
+    engine: &Eng,
+    store: &crate::state::ComAmazonawsDynamodbDynamodb20120810State,
+    region: &str,
+    activity: &[GetKeyActivity],
+    throttled: bool,
+    at: ::std::time::SystemTime,
+) {
+    for (name, keys, units) in activity {
+        let access = if throttled {
+            crate::state::contributor_insights::Access::Throttled
+        } else {
+            crate::state::contributor_insights::Access::Consumed(*units)
+        };
+        crate::state::contributor_insights::record_access(
+            engine,
+            store,
+            region,
+            name,
+            None,
+            &[(keys.clone(), access)],
+            at,
+        );
+    }
+}
 
 /// The modelled server error for a request that cannot reach this service's store.
 fn store_unavailable() -> TransactGetItemsError {

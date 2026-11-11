@@ -226,6 +226,11 @@ pub fn publish_item_changes<Eng: Send + Sync + 'static>(
     // to its own stream, to a Kinesis data stream, or to both, so each store is handed the
     // queue independently of what the other holds.
     crate::state::deliver_item_changes(engine, store, &changes, at);
+    // And the key activity each change made, to the CloudWatch Contributor Insights rules of
+    // the table it was made on: a write of an item is an access of its key, so what the write
+    // consumed is attributed to that key where those rules collect
+    // ([`crate::state::contributor_insights`]).
+    crate::state::contributor_insights::record_item_changes(engine, store, &changes, at);
 }
 
 /// Append every change to the DynamoDB stream it belongs to, for the changes made on a

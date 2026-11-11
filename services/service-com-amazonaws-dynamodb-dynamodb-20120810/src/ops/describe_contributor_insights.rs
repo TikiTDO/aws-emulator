@@ -12,10 +12,11 @@
 //! are both the modelled `ResourceNotFoundException` — "the operation tried to access a
 //! nonexistent table or index".
 //!
-//! `ContributorInsightsRuleList` is reported by no read here: the member lists the
-//! CloudWatch Contributor Insights rules AWS creates for the resource, and this emulator
-//! creates none, so naming rules nothing runs would be a fabrication rather than a
-//! report.
+//! `ContributorInsightsRuleList` names the CloudWatch Contributor Insights rules the enable
+//! minted for the resource, read from the CloudWatch store that holds them
+//! ([`crate::state::contributor_insights`]): a resource with no rule of its own — the
+//! feature off, or its rules deleted by a disable — names none, so the member is left out
+//! rather than answered empty.
 //!
 //! ## Shape of an operation
 //!
@@ -186,20 +187,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store.apply_due_transitions(now);
         let table = store.table(&region, &name).map_err(lift)?;
         let insights = table.contributor_insights(index_name).map_err(lift)?;
+        let table_name = table.name.clone();
+        let status = insights.status(now).to_string();
+        let last_update = insights.last_update(now);
+        let mode = insights.mode();
+        // "List of names of the associated contributor insights rules."
+        // (`DescribeContributorInsightsOutput$ContributorInsightsRuleList`) — the rules the
+        // enable minted, read from the CloudWatch store that HOLDS them
+        // ([`crate::state::contributor_insights`]), so a rule deleted there is not reported
+        // here as one that exists. A resource that has none — the feature off, or its rules
+        // deleted — names no rule, which is the member left out rather than an empty list.
+        // Read with this service's own guard dropped: this is a read of another service's
+        // store and it writes nothing.
+        drop(store);
+        let rule_list =
+            crate::state::contributor_insights::rule_names(&*self.engine, &region, &name, index_name);
 
         Ok(DescribeContributorInsightsOutput {
-            table_name: Some(table.name.clone()),
+            table_name: Some(table_name),
             // The index is echoed only where the request named one: the setting reported
             // is then that index's rather than the table's.
             index_name: index_name.map(str::to_string),
-            contributor_insights_status: Some(insights.status(now).to_string()),
-            last_update_date_time: insights
-                .last_update(now)
-                .map(::aws_smithy_types::DateTime::from),
-            contributor_insights_mode: insights.mode(),
-            // This emulator creates no CloudWatch rule, so there is none to name, and a
-            // setting that cannot fail has no failure to report.
-            contributor_insights_rule_list: None,
+            contributor_insights_status: Some(status),
+            last_update_date_time: last_update.map(::aws_smithy_types::DateTime::from),
+            contributor_insights_mode: mode,
+            contributor_insights_rule_list: Some(rule_list).filter(|list| !list.is_empty()),
+            // A setting that cannot fail has no failure to report.
             failure_exception: None,
         })
     }

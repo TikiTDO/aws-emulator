@@ -250,6 +250,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // Not a rule Amazon Web Services manages: it carries no managed-rule
                 // template, so `ListManagedInsightRules` never reports it.
                 managed: None,
+                // Written against the log-rule syntax, so it collects from the log groups its
+                // definition names rather than from a resource.
+                resource: None,
             },
         );
 

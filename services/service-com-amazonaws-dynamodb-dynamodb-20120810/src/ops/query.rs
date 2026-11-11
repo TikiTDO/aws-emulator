@@ -741,6 +741,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .map_err(lift)?
             .admit_read(units, now)
         {
+            // The key activity of a read refused for exceeding the table's throughput: the
+            // partition the condition pinned was THROTTLED.
+            crate::state::contributor_insights::record_access(
+                &*self.engine,
+                &store,
+                &region,
+                &name,
+                input.index_name.as_deref(),
+                &[(
+                    vec![condition.partition.key_text()],
+                    crate::state::contributor_insights::Access::Throttled,
+                )],
+                now,
+            );
             return Err(QueryErrorModeled::ProvisionedThroughputExceededException(
                 crate::state::read_throughput_exceeded(
                     &crate::state::table_arn(&region, &name),
@@ -749,6 +763,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         }
+        // The key activity this query made: one access of the partition its condition pinned —
+        // the only one a query reads — consuming the units the page billed, attributed to the
+        // resource the query was pointed at. A query constrains a RANGE of sort keys rather
+        // than naming one, so it addresses no single sort-key contributor and the rules keyed by
+        // one collect nothing from it ([`crate::state::contributor_insights`]).
+        crate::state::contributor_insights::record_access(
+            &*self.engine,
+            &store,
+            &region,
+            &name,
+            input.index_name.as_deref(),
+            &[(
+                vec![condition.partition.key_text()],
+                crate::state::contributor_insights::Access::Consumed(units),
+            )],
+            now,
+        );
 
         Ok(QueryOutput {
             items,
