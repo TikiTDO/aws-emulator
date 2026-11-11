@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! The Amazon S3 half of the SDK seam a RUNNING handler calls another service through:
-//! one object operation, built the way S3's own protocol binds it.
+//! one call on a bucket or on its objects, built the way S3's own protocol binds it.
+//!
+//! The calls on ONE object live here; the calls on a bucket's own configuration and on its
+//! objects as a SET live beside them in [`bucket`], because those are the operations a
+//! handler ADMINISTERS a bucket with rather than stores through.
 //!
 //! The other services a handler reaches bind their requests with an AWS JSON protocol,
 //! where the request body IS the operation's input document, so one code path serves every
@@ -44,6 +48,10 @@ use ::smithy_server_runtime::EmbeddedEmulator;
 
 use super::aws_api::{Answer, CallerIdentity, Refusal, MAX_RESPONSE_BYTES};
 
+/// The bucket-wide half of this seam: a bucket's own configuration subresources, and the
+/// operations that act on its objects as a set.
+mod bucket;
+
 /// The provider name the signing identity carries: it names this runtime rather than any
 /// AWS credential source, and never travels on the wire.
 const PROVIDER_NAME: &str = "aws-lambda-execution-role";
@@ -64,6 +72,15 @@ pub const BOUND_OPERATIONS: &[&str] = &[
     "CopyObject",
     "DeleteObject",
     "ListObjectsV2",
+    // The bucket-wide half ([`bucket`]): what a handler administering a bucket calls —
+    // reading and replacing the bucket's own notification and tagging subresources, listing
+    // the versions it holds, and removing a set of them in one call.
+    "GetBucketNotificationConfiguration",
+    "PutBucketNotificationConfiguration",
+    "GetBucketTagging",
+    "PutBucketTagging",
+    "ListObjectVersions",
+    "DeleteObjects",
 ];
 
 /// Make ONE Amazon S3 call: `operation`, with `body` as the operation's input document (the
@@ -91,6 +108,16 @@ pub async fn call(
         "CopyObject" => copy_object(&client, &input, &observed).await,
         "DeleteObject" => delete_object(&client, &input, &observed).await,
         "ListObjectsV2" => list_objects_v2(&client, &input, &observed).await,
+        "GetBucketNotificationConfiguration" => {
+            bucket::get_bucket_notification_configuration(&client, &input, &observed).await
+        }
+        "PutBucketNotificationConfiguration" => {
+            bucket::put_bucket_notification_configuration(&client, &input, &observed).await
+        }
+        "GetBucketTagging" => bucket::get_bucket_tagging(&client, &input, &observed).await,
+        "PutBucketTagging" => bucket::put_bucket_tagging(&client, &input, &observed).await,
+        "ListObjectVersions" => bucket::list_object_versions(&client, &input, &observed).await,
+        "DeleteObjects" => bucket::delete_objects(&client, &input, &observed).await,
         other => Err(Refusal::NotMade(format!(
             "the AWS SDK this runtime supplies binds no {other} call on Amazon S3; the \
              operations it binds are {}",
@@ -662,6 +689,117 @@ impl Input {
                 "{name} must be a whole number, got {other}"
             ))),
         }
+    }
+
+    /// A boolean member, as the model's own `boolean` shape carries it.
+    fn boolean(&self, name: &str) -> Result<Option<bool>, Refusal> {
+        match self.members.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Bool(value)) => Ok(Some(*value)),
+            Some(other) => Err(Refusal::NotMade(format!(
+                "{name} must be true or false, got {other}"
+            ))),
+        }
+    }
+
+    /// A member whose shape is a STRUCTURE, read as the document its own members make up, or
+    /// `None` where the document carries none.
+    fn structure(&self, name: &str) -> Result<Option<Self>, Refusal> {
+        match self.members.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Object(members)) => Ok(Some(Self {
+                members: members.clone(),
+            })),
+            Some(other) => Err(Refusal::NotMade(format!(
+                "{name} must be a document of its own members, got {other}"
+            ))),
+        }
+    }
+
+    /// The same, for a member the operation requires.
+    fn required_structure(&self, name: &str) -> Result<Self, Refusal> {
+        self.structure(name)?.ok_or_else(|| {
+            Refusal::NotMade(format!("this Amazon S3 call needs a {name} parameter"))
+        })
+    }
+
+    /// A member whose shape is a LIST OF STRUCTURES, read as one document per element; an
+    /// empty list where the document carries the member as none at all, which is what a list
+    /// member a caller left out holds.
+    fn structures(&self, name: &str) -> Result<Vec<Self>, Refusal> {
+        let elements = match self.members.get(name) {
+            None | Some(Value::Null) => return Ok(Vec::new()),
+            Some(Value::Array(elements)) => elements,
+            Some(other) => {
+                return Err(Refusal::NotMade(format!(
+                    "{name} must be a list, got {other}"
+                )))
+            }
+        };
+        elements
+            .iter()
+            .map(|element| match element {
+                Value::Object(members) => Ok(Self {
+                    members: members.clone(),
+                }),
+                other => Err(Refusal::NotMade(format!(
+                    "every element of {name} must be a document of its own members, got {other}"
+                ))),
+            })
+            .collect()
+    }
+
+    /// The same, for a list-of-structures member the operation REQUIRES: a document that
+    /// carries none of it stops the call rather than sending the required member emptied.
+    fn required_structures(&self, name: &str) -> Result<Vec<Self>, Refusal> {
+        if !self
+            .members
+            .get(name)
+            .is_some_and(|value| !value.is_null())
+        {
+            return Err(Refusal::NotMade(format!(
+                "this Amazon S3 call needs a {name} parameter"
+            )));
+        }
+        self.structures(name)
+    }
+
+    /// A member whose shape is a LIST OF STRINGS, read as the values it holds; an empty list
+    /// where the document carries the member as none at all.
+    fn text_list(&self, name: &str) -> Result<Vec<String>, Refusal> {
+        let elements = match self.members.get(name) {
+            None | Some(Value::Null) => return Ok(Vec::new()),
+            Some(Value::Array(elements)) => elements,
+            Some(other) => {
+                return Err(Refusal::NotMade(format!(
+                    "{name} must be a list, got {other}"
+                )))
+            }
+        };
+        elements
+            .iter()
+            .map(|element| match element {
+                Value::String(text) => Ok(text.clone()),
+                other => Err(Refusal::NotMade(format!(
+                    "every element of {name} must be a string, got {other}"
+                ))),
+            })
+            .collect()
+    }
+
+    /// The same, for a list member the operation REQUIRES: a document that carries none of
+    /// it stops the call rather than sending the required member emptied.
+    fn required_text_list(&self, name: &str) -> Result<Vec<String>, Refusal> {
+        if !self
+            .members
+            .get(name)
+            .is_some_and(|value| !value.is_null())
+        {
+            return Err(Refusal::NotMade(format!(
+                "this Amazon S3 call needs a {name} parameter"
+            )));
+        }
+        self.text_list(name)
     }
 
     /// A map of strings to strings (`Metadata`), or `None` where the document carries none.

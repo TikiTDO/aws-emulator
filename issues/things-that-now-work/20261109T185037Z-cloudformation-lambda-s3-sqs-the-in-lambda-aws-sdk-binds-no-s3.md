@@ -29,3 +29,16 @@ AssertionError: `cdk deploy` rc=1, expected 0: '...CREATE_FAILED Custom::S3Bucke
 1. `cdk deploy` an app whose bucket adds an SQS event notification with a prefix filter and sets autoDeleteObjects.
 2. The CDK-generated Custom::S3BucketNotifications Lambda calls PutBucketNotificationConfiguration through the runtime's SDK.
 3. Expect CREATE_COMPLETE; the emulator fails the custom resource with 'binds no PutBucketNotificationConfiguration call on Amazon S3' and rolls back.
+
+## Resolution
+The in-Lambda SDK seam now binds the bucket-administration half of Amazon S3 — the
+notification and tagging subresources, the version listing and the multi-object delete — so
+the provider's call is answered by the emulated S3 service
+(`services/service-com-amazonaws-lambda-awsgirapiservice/src/state/execution/aws_s3/bucket.rs`,
+with `tests/all/handler_bucket_administration_sdk.rs` and
+`core/router/tests/all/cloudformation_cdk_bucket_notifications_custom_resource.rs`, where the
+CDK-shaped stack reaches CREATE_COMPLETE and the prefix-filtered notification reaches the
+queue). The rollback line of the evidence above has a cause of its own, filed separately as
+`20261110T214500Z-cloudformation-a-custom-resources-delete-is-sent-and-its-provider-torn-down.md`:
+a teardown sends a custom resource's `Delete` to its provider and then deletes the provider
+before it can answer.
