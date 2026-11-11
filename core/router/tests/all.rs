@@ -97,6 +97,12 @@ mod events_sns_lambda_delivery_observed_in_logs;
 // regions concurrently landing suites add their line to.
 #[path = "all/cloudformation_sfn_reference_starts_execution.rs"]
 mod cloudformation_sfn_reference_starts_execution;
+// Declared here, in this same head region, for the reason the entries above record: a typed,
+// nested PutEvents detail crossing an EventBridge rule's queue target and the Lambda event
+// source mapping that consumes that queue, which spans EventBridge, Amazon SQS, IAM,
+// CloudFormation, Lambda and DynamoDB at once.
+#[path = "all/events_queue_target_nested_detail_reaches_its_lambda_consumer.rs"]
+mod events_queue_target_nested_detail_reaches_its_lambda_consumer;
 // appended tail and the sorted `r…` span are both regions concurrently landing suites add
 // their line to.
 #[path = "all/rds_s3_snapshot_export_flow.rs"]
