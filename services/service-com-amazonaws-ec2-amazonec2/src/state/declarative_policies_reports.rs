@@ -78,22 +78,28 @@ pub const INVALID_DECLARATIVE_POLICIES_REPORT_ID_MALFORMED: &str =
 pub const INVALID_DECLARATIVE_POLICIES_REPORT_ID_NOT_FOUND: &str =
     "InvalidDeclarativePoliciesReportId.NotFound";
 
-/// How this service names the resource in a refusal about one of its ids: the resource type
-/// as EC2's own `ResourceType` enum spells it
-/// ([`DECLARATIVE_POLICIES_REPORT_TAGGABLE_RESOURCE`]), which is how the recorded refusals
-/// word it.
-const REPORT_RESOURCE_NAME: &str = DECLARATIVE_POLICIES_REPORT_TAGGABLE_RESOURCE;
+/// How this service names the resource in the refusal the recording settles: "report", which
+/// is how the recorded `InvalidDeclarativePoliciesReportId.NotFound` sentence words it.
+const REPORT_RESOURCE_NAME: &str = "report";
 
 /// Whether `report_id` READS as a report id: the `report-` prefix every id this service mints
 /// for one carries ([`DECLARATIVE_POLICIES_REPORT_ID_PREFIX`]), followed by something.
 ///
 /// The model publishes no pattern for `DeclarativePoliciesReportId`
 /// (`smithy_query(query="shape",shape="DeclarativePoliciesReportId")`), so the PREFIX is all
-/// there is to read: a value that does not carry it is not a report id at all and is refused
-/// [`INVALID_DECLARATIVE_POLICIES_REPORT_ID_MALFORMED`] before any lookup, while one that
-/// does and names no report of this organization is reported
-/// [`INVALID_DECLARATIVE_POLICIES_REPORT_ID_NOT_FOUND`] — the two halves the recorded contract
-/// of `CancelDeclarativePoliciesReport` and `GetDeclarativePoliciesReportSummary` answers.
+/// there is to read: a value that does not carry it is not a report id at all.
+///
+/// WHICH half of the refusal family an operation answers for an id it cannot resolve is the
+/// OPERATION's, not this function's. The operation that ACTS on one named report
+/// (`CancelDeclarativePoliciesReport`, through
+/// [`require_declarative_policies_report`]) refuses a value that is no report id
+/// [`INVALID_DECLARATIVE_POLICIES_REPORT_ID_MALFORMED`] before any lookup, and one inside the
+/// form this organization started no report under
+/// [`INVALID_DECLARATIVE_POLICIES_REPORT_ID_NOT_FOUND`] — the two halves its recorded contract
+/// answers. The operations that REPORT reports (`GetDeclarativePoliciesReportSummary` and
+/// `DescribeDeclarativePoliciesReports`) answer the NOT-FOUND half for every id they cannot
+/// resolve, whatever its form, which is what their own recorded contracts answer — so a reader
+/// of this surface does not reach for this function at all.
 pub fn declarative_policies_report_id_is_well_formed(report_id: &str) -> bool {
     report_id
         .strip_prefix(DECLARATIVE_POLICIES_REPORT_ID_PREFIX)
@@ -102,29 +108,34 @@ pub fn declarative_policies_report_id_is_well_formed(report_id: &str) -> bool {
 }
 
 /// Refuse a value that is not a report id at all: HTTP 400
-/// [`INVALID_DECLARATIVE_POLICIES_REPORT_ID_MALFORMED`], in the wording the recorded refusal
-/// carries — the resource named as its own `ResourceType` member spells it and the id the
-/// REQUEST sent.
+/// [`INVALID_DECLARATIVE_POLICIES_REPORT_ID_MALFORMED`], naming the resource as EC2's own
+/// `ResourceType` enum spells it ([`DECLARATIVE_POLICIES_REPORT_TAGGABLE_RESOURCE`]) and the
+/// id the REQUEST sent.
+///
+/// The resource word differs from the not-found half's below because only that half's
+/// sentence is recorded: this one keeps the wording it was written with rather than inferring
+/// AWS's from the other half.
 pub fn invalid_declarative_policies_report_id_malformed<E>(report_id: &str) -> Scaffolded<E> {
     Scaffolded::service_error(
         INVALID_DECLARATIVE_POLICIES_REPORT_ID_MALFORMED,
         400,
         format!(
-            "The {REPORT_RESOURCE_NAME} ID '{report_id}' is malformed",
+            "The {resource} ID '{report_id}' is malformed",
+            resource = DECLARATIVE_POLICIES_REPORT_TAGGABLE_RESOURCE,
             report_id = echoed_resource_id(report_id)
         ),
     )
 }
 
-/// Refuse a report id inside the form this organization started no report under: HTTP 400
-/// [`INVALID_DECLARATIVE_POLICIES_REPORT_ID_NOT_FOUND`], worded as the malformed half's
-/// sentence is — one template per resource, with the clause each half states.
+/// Refuse a report id this organization started no report under: HTTP 400
+/// [`INVALID_DECLARATIVE_POLICIES_REPORT_ID_NOT_FOUND`], in the sentence the recorded refusal
+/// carries — "The report ID '<id>' does not exist.", with the id the REQUEST sent.
 pub fn invalid_declarative_policies_report_id_not_found<E>(report_id: &str) -> Scaffolded<E> {
     Scaffolded::service_error(
         INVALID_DECLARATIVE_POLICIES_REPORT_ID_NOT_FOUND,
         400,
         format!(
-            "The {REPORT_RESOURCE_NAME} ID '{report_id}' does not exist",
+            "The {REPORT_RESOURCE_NAME} ID '{report_id}' does not exist.",
             report_id = echoed_resource_id(report_id)
         ),
     )

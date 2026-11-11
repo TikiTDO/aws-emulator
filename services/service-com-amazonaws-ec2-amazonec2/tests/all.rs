@@ -1863,3 +1863,9 @@ mod release_address;
 // records.
 #[path = "all/traffic_mirror_target_creation.rs"]
 mod traffic_mirror_target_creation;
+// What `DescribeDeclarativePoliciesReports` reports for the declarative-policies account
+// status reports an organization holds: the stored set in `ReportId` order, narrowed by the
+// report ids the request names, paged by `MaxResults` / `NextToken`, with the status the clock
+// has left each generation in — and what it refuses.
+#[path = "all/describe_declarative_policies_reports.rs"]
+mod describe_declarative_policies_reports;

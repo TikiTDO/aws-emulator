@@ -1,15 +1,25 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeDeclarativePoliciesReports
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeDeclarativePoliciesReports`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: reports the metadata of the account status reports this organization
+//! started, narrowed by the report ids the request names and paged by `MaxResults` /
+//! `NextToken`. This is the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeDeclarativePoliciesReports::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! "Describes the metadata of an account status report, INCLUDING THE STATUS of the report":
+//! a report is a resource of the organization, held and ordered by its `ReportId` in
+//! [`crate::state::declarative_policies_reports`], and the status it carries is DERIVED from
+//! the completion the clock owes a running generation
+//! ([`crate::state::DeclarativePoliciesReportRecord::view_at`]) — so this report writes
+//! nothing and cannot change what a later caller sees.
+//!
+//! "One or more report IDs" (`$ReportIds`) NARROWS that set: every id this operation cannot
+//! resolve to a report of the organization is reported NOT FOUND, whatever its form — the
+//! half the recorded contract of this operation answers an id no report was started under
+//! with, and the one `GetDeclarativePoliciesReportSummary` answers the same id with. The
+//! malformed half of that family belongs to the operation that ACTS on one named report
+//! (`CancelDeclarativePoliciesReport`), where a value that is no report id names nothing to
+//! cancel; a report READS the set it was asked about, so it has one answer for every id it
+//! cannot resolve.
 //!
 //! ## Shape of an operation
 //!
@@ -147,18 +157,119 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeDeclarativePoliciesReports` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeDeclarativePoliciesReportsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeDeclarativePoliciesReports"))
+        use crate::scaffolded::Scaffolded;
+        use crate::state::{
+            MAX_PAGE_SIZE, MAX_RESOURCE_IDS, PageTokenRule, decode_page_token,
+            dry_run_operation, invalid_declarative_policies_report_id_not_found,
+            invalid_pagination_token_for, page_from_cursor, require_service_state,
+        };
+
+        // `ctx` carries request metadata only, and this operation reads none of it: a report
+        // is a resource of the organization, so the Region a request was signed for does not
+        // narrow which reports it holds. The store is reached through the engine held on
+        // `self`.
+        let _ = ctx;
+
+        // "Checks whether you have the required permissions for the action, WITHOUT ACTUALLY
+        // MAKING THE REQUEST … the error response is DryRunOperation" (`$DryRun`): the probe
+        // asks about the CALLER's permissions, so it is answered FIRST — before the ids the
+        // request carries are read at all, which is the recorded contract of the sibling
+        // operations of this surface (`GetDeclarativePoliciesReportSummary` and
+        // `CancelDeclarativePoliciesReport` answer a probe naming a report id the service
+        // cannot resolve the same way).
+        if input.dry_run == Some(true) {
+            return Err(dry_run_operation());
+        }
+
+        // Read in place rather than copied: the ids only go into the lookup set below, and
+        // the cap is asked before anything proportional to them is done. The model publishes
+        // no `@length` on `ValueStringList`, so the service-wide id-list ceiling is what
+        // bounds the narrowing.
+        let requested_ids: &[String] = input.report_ids.as_deref().unwrap_or_default();
+        if requested_ids.len() > MAX_RESOURCE_IDS {
+            return Err(Scaffolded::invalid_parameter_value(format!(
+                "ReportIds carries {} ids, above the maximum of {MAX_RESOURCE_IDS}",
+                requested_ids.len()
+            )));
+        }
+
+        // "The token returned from a previous paginated request. Pagination continues from
+        // the end of the items returned by the previous request" (`$NextToken`) — anything
+        // this service did not mint is refused rather than read as a position, and it is
+        // refused before the ids are looked at, so whether a bogus token is caught never
+        // depends on the rest of the request.
+        let start_at = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => {
+                Some(decode_page_token(token).ok_or_else(|| invalid_pagination_token_for(token))?)
+            }
+        };
+
+        // "One or more report IDs" (`$ReportIds`) go into a SET, so narrowing one stored
+        // report is a logarithmic lookup rather than a scan of up to `MAX_RESOURCE_IDS` ids
+        // per report under the state lock.
+        let named_ids: ::std::collections::BTreeSet<&str> =
+            requested_ids.iter().map(String::as_str).collect();
+
+        let state = require_service_state(&*self.engine)?;
+        let store = state.lock();
+
+        // The ids name this operation's OWN resource, so one the organization started no
+        // report under is an error rather than an absent row — reported NOT FOUND whatever
+        // its form, which is what this operation's recorded contract answers and the half
+        // `GetDeclarativePoliciesReportSummary` answers the same id with (see the module
+        // docs). Asked before anything is reported, so a request naming one id it cannot
+        // resolve is refused rather than answered with the rest, and asked in the order the
+        // REQUEST listed its ids, so the refusal names the first one it could not resolve
+        // rather than whichever sorts lowest.
+        for report_id in requested_ids {
+            if !store.declarative_policies_reports.contains_key(report_id) {
+                return Err(invalid_declarative_policies_report_id_not_found(report_id));
+            }
+        }
+
+        // This walk only READS: the `running` -> `complete` move the clock owes a generation
+        // is DERIVED from the stored instants by
+        // [`crate::state::DeclarativePoliciesReportRecord::view_at`], so reporting a report
+        // stores nothing. The store is ordered by `ReportId` and the narrowing preserves that
+        // order, so the selected set is already ascending by the id the cursor names a
+        // position in.
+        let now = ::std::time::Instant::now();
+        let selected: Vec<DeclarativePoliciesReport> = store
+            .declarative_policies_reports
+            .iter()
+            .filter(|(report_id, _record)| {
+                named_ids.is_empty() || named_ids.contains(report_id.as_str())
+            })
+            .map(|(_report_id, record)| record.view_at(now))
+            .collect();
+
+        // "The maximum number of items to return for this request" (`$MaxResults`) carries
+        // the modelled `range 1..1000`, so a value outside it is refused at the request
+        // boundary before this handler runs and the clamp here only bounds the DEFAULT: a
+        // request naming no page size gets the largest page this service serves, so the
+        // `NextToken` path behaves the same whether or not one was asked for.
+        let limit = input
+            .max_results
+            .and_then(|max_results| usize::try_from(max_results).ok())
+            .unwrap_or(MAX_PAGE_SIZE)
+            .clamp(1, MAX_PAGE_SIZE);
+
+        // "The token to include in another request to get the next page of items. This value
+        // is null when there are no more items to return" (`$NextToken`): a token only when a
+        // report FOLLOWS this page.
+        let (page, next_token) = page_from_cursor(
+            &selected,
+            start_at.as_deref(),
+            Some(limit),
+            PageTokenRule::WhenAnotherItemFollows,
+            |report| report.report_id.as_deref().unwrap_or_default(),
+        );
+
+        Ok(DescribeDeclarativePoliciesReportsOutput {
+            reports: Some(page.to_vec()),
+            next_token,
+        })
     }
 }
+
