@@ -234,7 +234,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         Ok(GetFunctionUrlConfigOutput {
-            function_url: config.url(&record.region),
+            function_url: config.url.clone(),
             function_arn: resource,
             auth_type: config.auth_type.clone(),
             cors: config.cors.clone(),

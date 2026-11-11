@@ -226,7 +226,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })?;
 
         let resource = record.versioned_arn(&version);
-        let function_region = record.region.clone();
         let Some(config) = record.url_configs.get_mut(&version) else {
             return Err(not_found(
                 crate::state::RESOURCE_NOT_FOUND_MESSAGE.to_string(),
@@ -251,7 +250,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `GetFunctionUrlConfig` reports exactly what this call persisted — the same URL
         // address included, which an update never re-mints.
         Ok(UpdateFunctionUrlConfigOutput {
-            function_url: config.url(&function_region),
+            function_url: config.url.clone(),
             function_arn: resource,
             auth_type: config.auth_type.clone(),
             cors: config.cors.clone(),

@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! How a request ADDRESSES a function URL, and which stored configuration it names.
+//! How a request ADDRESSES a function URL, which stored configuration it names, and which
+//! address this service ANNOUNCES for one.
 //!
 //! `CreateFunctionUrlConfig` hands out "a dedicated HTTP(S) endpoint that you can use to
-//! invoke your function", whose form [`super::function_url`] mints:
+//! invoke your function", whose documented form [`super::function_url`] mints:
 //! `https://<url-id>.lambda-url.<region>.on.aws/`. The first label of that host names no
 //! service, so the emulator's front door resolves no target from it and the request would
 //! be answered `UnknownService` — for an address this service itself told the caller to
 //! use. This module is the one reading of that addressing: it answers which function URL a
 //! request names, out of the SAME records `CreateFunctionUrlConfig` persisted, so the URL
-//! this service mints and the request it claims back cannot disagree.
+//! this service mints and the request it claims back cannot disagree. It is also where the
+//! announced address is chosen ([`announced_function_url`]), so a caller is never handed an
+//! address no addressing here resolves.
 //!
 //! THREE addressings resolve, for the reason the shared data-plane reading states
 //! ([`service_common::data_plane_addressing`]): a client on the machine this emulator runs
@@ -39,6 +42,11 @@ pub const FUNCTION_URL_LABEL: &str = FUNCTION_URL_HOST_SUFFIX;
 
 /// The domain a function URL host ends in, after the region label.
 const FUNCTION_URL_DOMAIN: &str = "on.aws";
+
+/// The ceiling the model puts on `FunctionUrl`
+/// (`smithy_query(query="shape", shape="FunctionUrl")`: `@length(min: 40, max: 100)`), which
+/// is what every announced endpoint has to fit inside — see [`announced_function_url`].
+const FUNCTION_URL_MAX_LEN: usize = 100;
 
 /// What a request ADDRESSES, read from the two parts of it that carry an address.
 ///
@@ -121,6 +129,90 @@ pub fn function_url_host_parts(host: &str) -> Option<(&str, &str)> {
 #[must_use]
 pub fn function_url_id_of_host(host: &str) -> Option<&str> {
     function_url_host_parts(host).map(|(url_id, _region)| url_id)
+}
+
+/// The function URL ENDPOINT HOST of `url_id` in `region`, as AWS documents the form:
+/// `<url-id>.lambda-url.<region>.on.aws`.
+///
+/// The one spelling of that host — [`super::function_url`] builds the documented URL from
+/// it, [`function_url_host_parts`] reads it back, and the data plane reports it as the
+/// event's `requestContext.domainName` — so the host this service mints, the host it claims
+/// and the host it tells a handler about cannot drift.
+#[must_use]
+pub fn function_url_endpoint_host(region: &str, url_id: &str) -> String {
+    format!("{url_id}.{FUNCTION_URL_LABEL}.{region}.{FUNCTION_URL_DOMAIN}")
+}
+
+/// The `FunctionUrl` this service ANNOUNCES for the function URL `url_id`, resolved once
+/// when the URL is created and stored on its [`FunctionUrlConfigRecord`], so every later
+/// read of the same function URL reports the same endpoint.
+///
+/// The member exists for a client to FETCH — "the HTTP URL endpoint for your function", "a
+/// dedicated HTTP(S) endpoint that you can use to invoke your function" — so the address
+/// announced has to be one this emulator itself answers on. Which address that is follows
+/// the addressings the module doc above states, in the same order the API Gateway V2 plane
+/// announces an api's endpoint in:
+///
+/// * a request that addressed the EMULATOR'S OWN endpoint
+///   ([`::service_common::data_plane_addressing::reached_emulator_endpoint`]) comes from a
+///   client that resolves nothing else, so the URL is announced on that same endpoint with
+///   its own id behind the reserved data-plane marker and the label that names this plane
+///   (`/_aws/lambda-url/<url-id>/`), the LOCAL-ENDPOINT addressing [`addressed_url`] serves.
+///   It is the SHORTER of the two spellings of that addressing, which is what keeps the
+///   announced value inside the modelled length however long the authority a client reaches
+///   this emulator at is; the endpoint's Region is not needed in the address, because the
+///   function a URL resolves to is the one the stored record names and the plane reports
+///   that record's own Region as the event's `requestContext.domainName`;
+/// * a URL created through any other request on an emulator that IS served on a port
+///   ([`::service_common::data_plane_addressing::served_endpoint_authority`]) is announced
+///   on that port, the one address this process answers on, so a URL minted by an
+///   in-process call of another service announces an address its caller can reach too;
+/// * a request that addressed one of AWS's own hosts on an emulator served on no port at
+///   all comes from a client that resolves them, so the URL is announced as
+///   [`super::function_url()`] mints it — the form `FunctionUrlConfig$FunctionUrl`
+///   documents, which this module claims host-style.
+///
+/// Both forms stay inside the model's 40..100 `FunctionUrl` length constraint: the
+/// documented URL is 69 characters for a Region label of nine, and the announced local form
+/// is 58 characters plus the authority the request reached this emulator at. The authority
+/// comes off a caller-supplied `Host`, which a DNS name or a full IPv6 literal may make
+/// longer than that leaves room for, so an announced local form past
+/// [`FUNCTION_URL_MAX_LEN`] falls back to the documented one rather than answering a value
+/// the member's own constraint refuses.
+///
+/// The scheme is `https` in every form rather than the one the endpoint base carries,
+/// because a function URL IS an HTTPS endpoint — `CreateFunctionUrlConfig` hands out "a
+/// dedicated HTTP(S) endpoint" and every listener of this process presents the core's
+/// certificate, so the scheme is the resource's and not the request's.
+#[must_use]
+pub fn announced_function_url(
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    url_id: &str,
+) -> String {
+    let addressed = AddressedFunctionUrl::of_parts(ctx.parts());
+    let served = ::service_common::data_plane_addressing::reached_emulator_endpoint(
+        "",
+        addressed.host.as_deref(),
+    )
+    .or_else(|| {
+        ::service_common::data_plane_addressing::served_endpoint_authority(
+            ctx.endpoint().as_str(),
+        )
+    });
+    match served {
+        Some(authority) => {
+            let announced = format!(
+                "https://{authority}/{marker}/{FUNCTION_URL_LABEL}/{url_id}/",
+                marker = ::service_common::data_plane_addressing::EMULATOR_PATH_NAMESPACE,
+            );
+            if announced.len() <= FUNCTION_URL_MAX_LEN {
+                return announced;
+            }
+            function_url(region, url_id)
+        }
+        None => function_url(region, url_id),
+    }
 }
 
 /// What a request ADDRESSES, read from the address ALONE: which function URL it names and

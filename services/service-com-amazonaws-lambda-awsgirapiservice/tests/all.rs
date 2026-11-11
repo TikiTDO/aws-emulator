@@ -195,6 +195,8 @@ mod function_scaling_config_convergence;
 mod function_scaling_config_default;
 #[path = "all/function_update_window_conflict.rs"]
 mod function_update_window_conflict;
+#[path = "all/function_url_announced_endpoint.rs"]
+mod function_url_announced_endpoint;
 #[path = "all/function_url_config.rs"]
 mod function_url_config;
 #[path = "all/function_url_cors.rs"]

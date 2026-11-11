@@ -256,8 +256,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        let url_id = crate::state::mint_function_url_id();
         let created = crate::state::FunctionUrlConfigRecord {
-            url_id: crate::state::mint_function_url_id(),
+            url_id: url_id.clone(),
+            // Resolved once, from the request that created the URL: the endpoint announced
+            // is one this emulator answers on, and every later read reports this same
+            // value.
+            url: crate::state::function_url::announced_function_url(
+                ctx,
+                &record.region,
+                &url_id,
+            ),
             auth_type: input.auth_type.clone(),
             // Stored exactly as configured: a member the caller did not set is not
             // reported with a value this emulator made up.
@@ -273,7 +282,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let output = CreateFunctionUrlConfigOutput {
-            function_url: created.url(&record.region),
+            function_url: created.url.clone(),
             function_arn: resource,
             auth_type: created.auth_type.clone(),
             cors: created.cors.clone(),

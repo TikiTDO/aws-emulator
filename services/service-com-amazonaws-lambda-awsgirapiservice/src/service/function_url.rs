@@ -692,14 +692,11 @@ fn raw_query(uri: &str) -> &str {
 }
 
 /// The host the function URL `url_id` publishes in `region`, which the event reports as
-/// `requestContext.domainName` — read off the ONE minting of a function URL, so the host
-/// the event names is the host the control plane handed the caller.
+/// `requestContext.domainName` — read off the ONE spelling of a function URL endpoint host
+/// ([`crate::state::function_url::function_url_endpoint_host`]), so the host the event names
+/// is the endpoint the control plane handed the caller.
 fn function_url_host(region: &str, url_id: &str) -> String {
-    let url = crate::state::function_url(region, url_id);
-    url.strip_prefix("https://")
-        .and_then(|rest| rest.split('/').next())
-        .unwrap_or(&url)
-        .to_string()
+    crate::state::function_url::function_url_endpoint_host(region, url_id)
 }
 
 /// One served response: the status, headers and body the handler's result described.

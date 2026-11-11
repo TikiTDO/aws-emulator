@@ -223,7 +223,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 (
                     qualifier.clone(),
                     FunctionUrlConfig {
-                        function_url: config.url(&record.region),
+                        function_url: config.url.clone(),
                         function_arn: record.versioned_arn(qualifier),
                         auth_type: config.auth_type.clone(),
                         cors: config.cors.clone(),

@@ -1483,13 +1483,23 @@ pub const DEFAULT_INVOKE_MODE: &str = "BUFFERED";
 /// minted URL inside the model's 40..100 `FunctionUrl` length constraint.
 pub const FUNCTION_URL_HOST_SUFFIX: &str = "lambda-url";
 
-/// The URL of the function URL whose id is `url_id`, in the region it was created in.
+/// The URL of the function URL whose id is `url_id`, in the region it was created in, in
+/// the form AWS documents.
 ///
-/// The trailing `/` is part of the endpoint AWS vends, so the value a caller gets back
-/// is the URL they can address as-is.
+/// The host is the one [`function_url::function_url_endpoint_host`] spells and the trailing
+/// `/` is part of the endpoint AWS vends, so the value a caller gets back is the URL they
+/// can address as-is.
+///
+/// What this service ANNOUNCES for a function URL is
+/// [`function_url::announced_function_url`], which answers this form only for a caller that
+/// resolves AWS's own hosts — every other caller is announced an address this emulator
+/// itself answers on, carrying this same endpoint host.
 #[must_use]
 pub fn function_url(region: &str, url_id: &str) -> String {
-    format!("https://{url_id}.{FUNCTION_URL_HOST_SUFFIX}.{region}.on.aws/")
+    format!(
+        "https://{}/",
+        function_url::function_url_endpoint_host(region, url_id)
+    )
 }
 
 /// A fresh function-URL id: the opaque, per-URL subdomain label AWS mints for a
@@ -1686,6 +1696,12 @@ pub struct FunctionUrlConfigRecord {
     /// The subdomain label the URL is addressed by, minted once by
     /// [`mint_function_url_id`].
     pub url_id: String,
+    /// The HTTP(S) endpoint this function URL is ANNOUNCED on, resolved once at creation
+    /// by [`function_url::announced_function_url`] — an address this emulator itself
+    /// answers on — and stored, so `CreateFunctionUrlConfig`, `GetFunctionUrlConfig`,
+    /// `UpdateFunctionUrlConfig` and `ListFunctionUrlConfigs` cannot report the same
+    /// function URL at two different addresses.
+    pub url: String,
     /// The `FunctionUrlAuthType` the URL enforces (`AWS_IAM` or `NONE`), as supplied.
     pub auth_type: String,
     /// The CORS settings, exactly as configured; absent when the caller configured
@@ -1700,14 +1716,6 @@ pub struct FunctionUrlConfigRecord {
     /// ISO-8601 instant of the last change to this configuration; equal to
     /// [`Self::creation_time`] until one is made.
     pub last_modified_time: String,
-}
-
-impl FunctionUrlConfigRecord {
-    /// The HTTP(S) endpoint of this function URL in `region`; see [`function_url`].
-    #[must_use]
-    pub fn url(&self, region: &str) -> String {
-        function_url(region, &self.url_id)
-    }
 }
 
 /// `ProvisionedConcurrencyStatusEnum` values an allocation moves through, from the

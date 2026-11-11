@@ -21,7 +21,8 @@
 //! ([`names_a_service`]) — which is what separates the emulator's own endpoint from
 //! another service's — and the address of the endpoint this emulator answers on, which is
 //! what a DISCOVERY operation publishes for a plane served at the front door
-//! ([`emulator_endpoint_authority`]).
+//! ([`emulator_endpoint_authority`]), or the one a service ANNOUNCES to a caller that
+//! resolves AWS's own hosts ([`served_endpoint_authority`]).
 //!
 //! Services still carrying their own copy of these: this module postdates them, and
 //! `grep -rln 'EMULATOR_PATH_NAMESPACE' services/*/src` lists them (today the API Gateway,
@@ -160,6 +161,37 @@ pub fn emulator_endpoint_authority(
     ctx: &::smithy_server_runtime::OperationContext<'_>,
 ) -> String {
     url_authority(ctx.endpoint().as_str()).to_string()
+}
+
+/// The `host[:port]` this emulator is SERVED at, read off the base URL
+/// [`::smithy_server_runtime::OperationContext::endpoint`] reports ("the base URL a later
+/// request addresses… Callers send normally signed requests to it"), or `None` for an
+/// emulator that is served on no port at all — which is what its unserved base names
+/// ([`::smithy_server_runtime::UNSERVED_URL_BASE`], a host RFC 6761 reserves so that
+/// nothing resolves it).
+///
+/// The address a service announces for a resource whose plane is served at the front door,
+/// for a request that addressed one of AWS's own hosts: an in-process call of another
+/// service is announced the one address this process answers on, so the caller of that
+/// service can reach the resource too. [`reached_emulator_endpoint`] is the reading for the
+/// request that addressed the emulator's own endpoint directly, and this one the fallback
+/// behind it.
+///
+/// Only a value SHAPED like a host is taken ([`is_host_shaped`]), so nothing that is not an
+/// address reaches a URL a service announces.
+///
+/// Services still carrying their own copy of this reading, to be MIGRATED onto it (they
+/// predate this function):
+/// `services/service-com-amazonaws-apigatewayv2-apigatewayv2/src/state.rs` and
+/// `services/service-com-amazonaws-pcaconnectorscep-pcaconnectorscep/src/state.rs`. Nothing
+/// new inlines it again — call this module.
+#[must_use]
+pub fn served_endpoint_authority(served_base: &str) -> Option<String> {
+    if served_base == ::smithy_server_runtime::UNSERVED_URL_BASE {
+        return None;
+    }
+    let authority = url_authority(served_base).trim_end_matches('/');
+    is_host_shaped(authority).then(|| authority.to_string())
 }
 
 /// The authority of `url`: what follows its `scheme://`, or the whole value when it names
@@ -332,6 +364,29 @@ mod tests {
             let authority = url_authority(base);
             assert_eq!(
                 authority, *expected,
+                "case {base:?}: expected {expected:?}, got {authority:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_served_base_reads_as_the_authority_only_when_the_emulator_is_served() {
+        // The rows span the bases `OperationContext::endpoint` reports: the unserved base
+        // (served on no port at all), a loopback bind with a port, a bracketed IPv6 bind, a
+        // name, a base carrying a trailing slash, and a value no host is shaped like.
+        let cases: &[(&str, Option<&str>)] = &[
+            (::smithy_server_runtime::UNSERVED_URL_BASE, None),
+            ("https://127.0.0.1:39355", Some("127.0.0.1:39355")),
+            ("https://[::1]:9297", Some("[::1]:9297")),
+            ("http://localhost:9297", Some("localhost:9297")),
+            ("https://127.0.0.1:9297/", Some("127.0.0.1:9297")),
+            ("https://host with spaces", None),
+        ];
+        for (base, expected) in cases {
+            let authority = served_endpoint_authority(base);
+            assert_eq!(
+                authority.as_deref(),
+                *expected,
                 "case {base:?}: expected {expected:?}, got {authority:?}"
             );
         }
