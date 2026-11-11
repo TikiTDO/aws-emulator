@@ -1,0 +1,42 @@
+Issue-Severity: HIGH
+Issue-Corpus: simparity-behavioral-aws-v1
+Issue-Corpus-Kind: behavioral
+Issue-Trace-Ids: elasticache__logs.slow-log-delivery-lands-the-engine-command-in-cloudwatch-logs
+Issue-Key: elasticache__logs.slow-log-delivery-lands-the-engine-command-in-cloudwatch-logs|_bring_up_executor#1|AssertionError|raise _no_executor(
+Issue-Commit: dff6e291e5e6489707888b0049fa49b367909ca3
+
+# elasticache__logs: the slow-log-to-CloudWatch-Logs check cannot run — a VpcConfig-attached Lambda opens no connection, so the in-VPC RESP command that must be logged is never issued
+
+> _Note: this issue was identified against the code base at commit `dff6e291e5e6489707888b0049fa49b367909ca3`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
+
+## Operation
+Invoke
+
+## Description
+One root cause (Cause 1 of 1), grounded in the one failing elasticache__logs check the replay report binds to no open issue. The sibling check elasticache__logs.slow-log-delivery-to-missing-log-group-rejected is owned by 20261108T145640Z-elasticache-logs-elasticache-a-slow-log-logdeliveryconfiguration-naming-a-cloudwatch.md (a different cause: a LogDeliveryConfiguration naming a nonexistent log group settles to 'active' instead of 'error'), and 20261105T090541Z-elasticache-logs-the-slow-log-delivery-check-cannot.md reports the same family with a different symptom (the runtime's os module lacking register_at_fork); neither carries this check id or this failure signature.
+
+Cause 1 of 1: a Lambda function created with VpcConfig has no network vantage point inside the VPC it named, so the in-VPC executor the slow-log check needs cannot be stood up and no engine command is ever issued for ElastiCache to deliver to CloudWatch Logs.
+AWS: recorded behavior only (no Smithy shape governs a runtime sandbox). CreateFunction with VpcConfig{SubnetIds, SecurityGroupIds} attaches ENIs in those subnets; the running function's outbound socket toward an in-VPC address reports getsockname()[0] inside the VPC's CIDR, and a DNS query to the VPC resolver at the VPC CIDR base + 2 is answered. With that vantage point the check connects to the cache's RESP endpoint, runs a command slower than the configured slowlog-log-slower-than threshold, and then expects ElastiCache's slow-log LogDeliveryConfiguration (DestinationType 'cloudwatch-logs', LogFormat 'json', Status 'active') to land a record naming that command in the configured CloudWatch Logs group, readable through FilterLogEvents/GetLogEvents.
+Emulator: CreateFunction accepts the VpcConfig, Invoke returns 200 with no FunctionError and the selftest payload verifies ({'ok': True, 'proof': <digest>}), but every socket operation fails with the emulator's own OSError `[Errno 101] a Lambda function in this emulator opens no connection: the only address its datagrams reach is the X-Ray daemon named by AWS_XRAY_DAEMON_ADDRESS`: src_ip is None and the VPC resolver never replies, so _bring_up_executor raises 'the in-VPC executor is unusable, so this run measured nothing'. That sentence is the emulator's own prose; AWS emits no such message. The only per-run values are the resolver address (VPC CIDR base + 2), the CIDR, the function name and the subnet/security-group ids.
+Why: slow-log delivery is only observable by issuing a slow command from inside the VPC and then reading the log group. A client gets 200 from CreateFunction and 200 from Invoke, then finds no socket works, so it can neither prove the cache serves data nor prove ElastiCache publishes slow-log records to CloudWatch Logs — and it cannot distinguish a broken log-delivery configuration from a function with no networking.
+Fix: the Lambda invoke/execution path's VPC attachment in the emulator — give a VpcConfig-attached function a network vantage point inside the named VPC with that VPC's resolver reachable, or refuse the VpcConfig rather than accepting it and running the function with no network. Once an in-VPC command can be issued, the elasticache log-delivery path that writes slow-log records into the configured CloudWatch Logs group is what the check then grades.
+Traces: elasticache__logs.slow-log-delivery-lands-the-engine-command-in-cloudwatch-logs.
+
+## Evidence
+Replay of suite simparity-behavioral-aws-v1 against this checkout: 84/186 passed; elasticache__logs 0/2 (both failed, one of them owned by an existing issue).
+
+elasticache__logs.slow-log-delivery-lands-the-engine-command-in-cloudwatch-logs [mismatch]
+check_elasticache__logs_slow_log_delivery_lands_the_engine_command_in_cloudwatch_logs.py:1388 in _body -> `net, subnet_group, prober_for, release_executor = _bring_up_executor(ctx, _REDIS_PORT)` -> :974 `raise _no_executor(`
+AssertionError: "the in-VPC executor is unusable, so this run measured nothing: CreateFunction accepted VpcConfig={'SubnetIds': ['subnet-...','subnet-...'], 'SecurityGroupIds': ['sg-...']} and the package ran, but neither in-VPC signal fired: the source address toward 10.179.0.2 was None (error 'OSError: errno=101 [Errno 101] a Lambda function in this emulator opens no connection: the only address its datagrams reach is the X-Ray daemon named by AWS_XRAY_DAEMON_ADDRESS'), which is not inside the executor VPC CIDR 10.179.0.0/16; and the VPC resolver at 10.179.0.2 did not reply at all (error 'OSError: [Errno 101] a Lambda function in this emulator opens no connection: the only address its datagrams reach is the X-Ray daemon named by AWS_XRAY_DAEMON_ADDRESS'). Selftest evidence: {'ok': True, 'nonce': '976385936abc0043859a136959d81da5', 'proof': 'a52ef7610d8fcfbd55289acf82fc736ad04d9d556ce1728bdc94154898101dcf', 'src_ip': None, 'src_ip_error': 'OSError: errno=101 ...', 'resolver': '10.179.0.2', 'resolver_rcode': None, 'resolver_ancount': None, 'resolver_error': 'OSError: [Errno 101] ...', 'runtime': {'python': '3.14.0.alpha', 'exec_env': 'AWS_Lambda_python3.12', ...}}"
+
+Expected (AWS): Invoke returns 200 with no FunctionError, the selftest reports a source address inside the executor VPC CIDR and/or a reply from that VPC's resolver, the probe then opens a RESP session to the cache endpoint, issues a command exceeding the slowlog-log-slower-than threshold, and the configured CloudWatch Logs group subsequently contains a slow-log record naming that command.
+Actual (emulator): no socket of any kind opens inside a VPC-attached function; the check dies before any cache command or any log read. 'ok': True with a verified proof digest shows the package DID execute — only the network is absent. The CIDR (10.179.0.0/16), the resolver address, the nonce/proof digests, the function name and the subnet/sg ids are per-run values and are not part of the requirement.
+
+## Steps to Reproduce
+1. Boot the emulator from this checkout and run suite simparity-behavioral-aws-v1.
+2. Minimal reproduction, no ElastiCache or Logs needed: CreateVpc with a /16, two subnets in it, a security group; CreateRole for Lambda; CreateFunction(Runtime='python3.12', Handler='index.handler', VpcConfig={those SubnetIds, that SecurityGroupId}); wait State='Active'; Invoke a handler that (a) opens a UDP socket toward <vpc-cidr-base+2>:53 and reports getsockname()[0] and (b) sends a DNS A query to that resolver.
+   Expect (AWS): a source address inside the VPC CIDR and a DNS reply (any rcode).
+   Observe: src_ip None and no reply, both with OSError [Errno 101] 'a Lambda function in this emulator opens no connection: the only address its datagrams reach is the X-Ray daemon named by AWS_XRAY_DAEMON_ADDRESS'.
+3. Full path: CreateCacheSubnetGroup over those subnets; CreateCacheParameterGroup and ModifyCacheParameterGroup setting slowlog-log-slower-than low; CreateLogGroup in CloudWatch Logs; CreateReplicationGroup (or CreateCacheCluster) with a slow-log LogDeliveryConfiguration{DestinationType='cloudwatch-logs', DestinationDetails.CloudWatchLogsDetails.LogGroup=<that group>, LogFormat='json', LogType='slow-log'} and wait for Status 'available'/'active'; from a VPC-attached Lambda in that VPC run a command slower than the threshold; then FilterLogEvents on the log group.
+   Expect: a slow-log record naming that command; observe the run die in _bring_up_executor before the cache is ever contacted.
+4. Re-replay elasticache__logs.slow-log-delivery-lands-the-engine-command-in-cloudwatch-logs; it must reach its assertions on the log-group contents rather than failing on the executor.
