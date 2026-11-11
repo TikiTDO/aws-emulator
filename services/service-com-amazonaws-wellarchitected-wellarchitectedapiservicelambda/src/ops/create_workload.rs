@@ -440,10 +440,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "The name must be unique within an account within an Amazon Web Services Region.
         // Spaces and capitalization are ignored when checking for uniqueness." The refusal
-        // quotes the name AS SUBMITTED and points at the workload already holding it.
-        if let Some((_, existing_id)) = store.workload_holding_name(&input.workload_name) {
+        // names the workload already holding the name, by the name it is STORED under.
+        if let Some((existing_name, existing_id)) = store.workload_holding_name(&input.workload_name)
+        {
             return Err(CreateWorkloadErrorModeled::ConflictException(
-                crate::state::workload_name_conflict(&input.workload_name, existing_id),
+                crate::state::workload_name_conflict(existing_name, existing_id),
             )
             .into());
         }

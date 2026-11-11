@@ -228,10 +228,10 @@ async fn an_unrecorded_milestone_is_a_not_found_naming_the_composite_id() {
 }
 
 /// Rule 2 for a collision: the 409 identifies the resource already holding the value
-/// through its `ResourceId`, and its message quotes the name AS SUBMITTED by the refused
-/// request, not the stored spelling of it. Rows differ along the spelling submitted (the
-/// uniqueness check ignores spaces and capitalization) and along which operation submits
-/// it, so every row must read back its own spelling.
+/// through its `ResourceId`, and its message names that resource by the name it is STORED
+/// under rather than the spelling the refused request submitted. Rows differ along the
+/// spelling submitted (the uniqueness check ignores spaces and capitalization) and along
+/// which operation submits it, so every row must read back the one stored spelling.
 #[tokio::test]
 async fn a_name_collision_is_a_conflict_naming_the_workload_that_holds_the_name() {
     let client = Client::new();
@@ -286,8 +286,8 @@ async fn a_name_collision_is_a_conflict_naming_the_workload_that_holds_the_name(
             );
             assert_eq!(
                 member(&answer, "Message"),
-                format!("[Conflict] A workload with name {submitted} already exists."),
-                "case {case:?}/{operation}: the message must quote the SUBMITTED name, got {answer:?}"
+                format!("[Conflict] A workload with name {STORED_NAME} already exists."),
+                "case {case:?}/{operation}: the message must name the STORED workload name, got {answer:?}"
             );
         }
     }

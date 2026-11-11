@@ -202,8 +202,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // leaves nothing to create it on. The crate's one resolver for this id refuses a
         // malformed one before an unknown one; an account without an Outpost holds no local
         // gateway at all, so `.NotFound` is the answer every well-formed id gets until one
-        // has been stored.
-        state::require_known_local_gateway(&store, local_gateway_id)?;
+        // has been stored. This operation's own `NotFound` sentence names the gateway by the
+        // API's `LocalGateway`, which is the sentence its recorded refusal carries.
+        state::require_known_local_gateway_for_create_route_table(&store, local_gateway_id)?;
         // "The Amazon Resource Name (ARN) of the Outpost" is a fact of the GATEWAY
         // (`LocalGateway$OutpostArn`), so the table reports the Outpost its gateway is part
         // of, read off the stored record rather than taken from the request. The store's own

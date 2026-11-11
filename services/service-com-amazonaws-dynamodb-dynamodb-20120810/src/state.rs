@@ -141,15 +141,17 @@ pub const START_KEY_INVALID_MESSAGE: &str =
 /// mismatch; an `Item` a SINGLE-item write carries is the whole item, so a key
 /// attribute it does not carry is reported as the value it did not give, and one
 /// of another type as the mismatch between the two types; an `ExclusiveStartKey`
-/// is a resume token, so a key attribute it gives no value for leaves it
-/// INCOMPLETE and anything else about it makes it an invalid token; and the item
-/// an element of a BATCHED or TRANSACTIONAL write carries is
-/// held to the schema as a whole, so every way it differs from it is the one
-/// mismatch sentence.
+/// is a resume token, so a key attribute it gives no value for leaves it INCOMPLETE and
+/// anything else about it makes it an invalid token; the item an element of a BATCHED write
+/// carries is held to the schema as a whole, so every way it differs from it is the one
+/// mismatch sentence; and the item an element of a TRANSACTIONAL write carries is reported
+/// per defect for its TYPE, as a single-item write's is, which is the mismatch its
+/// cancellation reason states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeySource {
     Item,
-    MultiItem,
+    BatchItem,
+    TransactItem,
     Key,
     StartKey,
 }
@@ -163,8 +165,20 @@ impl KeySource {
             Self::StartKey => {
                 RequestError::Validation(START_KEY_INCOMPLETE_MESSAGE.to_string())
             }
-            Self::MultiItem | Self::Key => self.mismatch(),
+            Self::BatchItem | Self::TransactItem | Self::Key => self.mismatch(),
         }
+    }
+
+    /// Whether this source reports a key attribute of another TYPE than the schema
+    /// declares as the one mismatch sentence, rather than as the mismatch between the
+    /// declared and the supplied type.
+    ///
+    /// A `Key`-shaped member and a resume token name the key as a whole, so an element
+    /// of the wrong type does not name that key either; a BATCHED write's element is
+    /// held to the schema as a whole the same way. A single-item write and a
+    /// TRANSACTIONAL write's element state the two types instead.
+    fn hides_the_type_mismatch(self) -> bool {
+        matches!(self, Self::BatchItem | Self::Key | Self::StartKey)
     }
 
     /// The one sentence a key that is not this table's primary key is refused
@@ -172,7 +186,7 @@ impl KeySource {
     fn mismatch(self) -> RequestError {
         match self {
             Self::StartKey => RequestError::Validation(START_KEY_INVALID_MESSAGE.to_string()),
-            Self::Item | Self::MultiItem | Self::Key => {
+            Self::Item | Self::BatchItem | Self::TransactItem | Self::Key => {
                 RequestError::Validation(KEY_SCHEMA_MISMATCH_MESSAGE.to_string())
             }
         }

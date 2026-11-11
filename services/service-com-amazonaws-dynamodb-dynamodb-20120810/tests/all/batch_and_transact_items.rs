@@ -1165,26 +1165,37 @@ async fn a_refusals_class_says_whether_the_transaction_was_cancelled() {
     });
 
     // One row: what it is called, the elements it sends, the error code it must be
-    // answered with, and the `CancellationReason$Code`s that answer carries (`None`
-    // when a request-level refusal carries no reasons at all).
+    // answered with, the `CancellationReason$Code`s that answer carries (`None`
+    // when a request-level refusal carries no reasons at all), and the `Message` the
+    // refused element's reason states.
     struct Row {
         case: &'static str,
         elements: Vec<Value>,
         code: &'static str,
         reasons: Option<Vec<&'static str>>,
+        /// What the refused element's reason says. A key attribute of another TYPE than
+        /// the schema declares is stated as the mismatch between the two types when it is
+        /// read out of an ITEM, and as the one key-schema sentence when it is read out of
+        /// a `Key`-shaped member, which names the key as a whole.
+        message: &'static str,
     }
+    const TYPE_MISMATCH: &str =
+        "One or more parameter values were invalid: Type mismatch for key pk expected: S actual: N";
+    const KEY_SCHEMA_MISMATCH: &str = "The provided key element does not match the schema";
     let cases: Vec<Row> = vec![
         Row {
             case: "an item typing the key attribute the table does not",
             elements: vec![mistyped_item.clone()],
             code: "TransactionCanceledException",
             reasons: Some(vec!["ValidationError"]),
+            message: TYPE_MISMATCH,
         },
         Row {
             case: "that item after an element nothing is wrong with",
             elements: vec![innocent.clone(), mistyped_item.clone()],
             code: "TransactionCanceledException",
             reasons: Some(vec!["None", "ValidationError"]),
+            message: TYPE_MISMATCH,
         },
         Row {
             case: "that item before two elements nothing is wrong with",
@@ -1195,6 +1206,7 @@ async fn a_refusals_class_says_whether_the_transaction_was_cancelled() {
             ],
             code: "TransactionCanceledException",
             reasons: Some(vec!["ValidationError", "None", "None"]),
+            message: TYPE_MISMATCH,
         },
         Row {
             case: "a Key member that does not name this table's key",
@@ -1204,6 +1216,7 @@ async fn a_refusals_class_says_whether_the_transaction_was_cancelled() {
             ],
             code: "ValidationException",
             reasons: None,
+            message: KEY_SCHEMA_MISMATCH,
         },
         Row {
             case: "a Key member typing the key attribute the table does not",
@@ -1220,6 +1233,7 @@ async fn a_refusals_class_says_whether_the_transaction_was_cancelled() {
             // table, so the element that carried it cancels the transaction.
             code: "TransactionCanceledException",
             reasons: Some(vec!["None", "ValidationError"]),
+            message: KEY_SCHEMA_MISMATCH,
         },
         Row {
             case: "one item addressed twice",
@@ -1229,12 +1243,14 @@ async fn a_refusals_class_says_whether_the_transaction_was_cancelled() {
             ],
             code: "ValidationException",
             reasons: None,
+            message: KEY_SCHEMA_MISMATCH,
         },
         Row {
             case: "an entry naming no action",
             elements: vec![innocent.clone(), json!({})],
             code: "ValidationException",
             reasons: None,
+            message: KEY_SCHEMA_MISMATCH,
         },
     ];
     for Row {
@@ -1242,6 +1258,7 @@ async fn a_refusals_class_says_whether_the_transaction_was_cancelled() {
         elements,
         code,
         reasons,
+        message: expected_message,
     } in cases
     {
         let (status, refused) = call(
@@ -1287,9 +1304,9 @@ async fn a_refusals_class_says_whether_the_transaction_was_cancelled() {
                     .unwrap_or_default()
                     .to_string();
                 assert_eq!(
-                    message, "The provided key element does not match the schema",
-                    "case {case}: the refused element's reason states the sentence the \
-                     single-item path states for that defect, got {message:?}"
+                    message, expected_message,
+                    "case {case}: expected the refused element's reason to state \
+                     {expected_message:?}, got {message:?}"
                 );
                 for (index, reason) in refused["CancellationReasons"]
                     .as_array()

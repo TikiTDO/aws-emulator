@@ -489,8 +489,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// * "If you are requesting a private certificate, domain validation is not required"
 ///   (`RequestCertificate` doc), so a request naming a private certificate authority
 ///   has nothing left to prove and is ISSUED.
-/// * A request naming a domain the public DNS delegates to nobody — a name whose
-///   top-level label is a reserved special-use one
+/// * A request naming a domain the public DNS delegates to nobody — a name the
+///   registries reserve rather than delegate, at or under a special-use top-level label
+///   or a reserved documentation second-level name
 ///   ([`crate::state::domain_is_not_in_public_dns`]) — is one of the requests that
 ///   fail "upon being requested" instead of entering `PENDING_VALIDATION`
 ///   (`CertificateDetail$Status` doc), with the reason ACM models for a request it

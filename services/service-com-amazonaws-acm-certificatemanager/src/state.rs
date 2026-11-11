@@ -264,16 +264,33 @@ pub const VALIDATION_WINDOW: Duration = Duration::from_secs(72 * 60 * 60);
 ///
 /// A name whose top-level label is one of these is no public domain at all, which is
 /// what makes a request for it one ACM cannot carry through — see
-/// [`domain_is_not_in_public_dns`]. Only WHOLE top-level labels belong here: a
-/// registrable name under a delegated label (`.com`, `.net`, `.org`) is a public domain
-/// whoever holds it, including the names RFC 2606 §3 reserves for documentation, so
-/// such a request is one ACM waits for evidence on rather than refuses.
+/// [`domain_is_not_in_public_dns`]. Only WHOLE top-level labels belong here: an
+/// ordinary registrable name under a delegated label (`.com`, `.net`, `.org`) is a
+/// public domain whoever holds it, so such a request is one ACM waits for evidence on
+/// rather than refuses — unless the name the registries reserve for documentation under
+/// that label is one of the [`RESERVED_SECOND_LEVEL_NAMES`].
 pub const RESERVED_TOP_LEVEL_LABELS: &[&str] = &[
     "example", "invalid", "localhost", "test", "local", "onion",
 ];
 
-/// Whether `domain_name` names no domain in the public DNS, because its top-level
-/// label is one the registry delegates to nobody ([`RESERVED_TOP_LEVEL_LABELS`]).
+/// The SECOND-level names the registries reserve the same way, so that they too are
+/// delegated to no registrant: `example.com`, `example.net` and `example.org` are
+/// "reserved for use in documentation" and registered permanently to the registry itself
+/// (RFC 2606 §3, IANA "Example Domains"), so nobody holds them and nobody can publish
+/// evidence of control over a name under one.
+///
+/// A request naming such a name is therefore one ACM cannot carry through either, for
+/// the same reason a reserved top-level label is ([`domain_is_not_in_public_dns`]). Only
+/// names the registries reserve belong here: an ordinary registrable name under a
+/// delegated top-level label (`probe-domain.com`) has a holder who could publish the
+/// evidence, so its request waits rather than being refused.
+pub const RESERVED_SECOND_LEVEL_NAMES: &[&str] =
+    &["example.com", "example.net", "example.org"];
+
+/// Whether `domain_name` names no domain in the public DNS, because the registries
+/// reserve the name itself rather than delegating it to a registrant: its top-level
+/// label is a reserved one ([`RESERVED_TOP_LEVEL_LABELS`]) or it sits at or under a
+/// reserved second-level name ([`RESERVED_SECOND_LEVEL_NAMES`]).
 ///
 /// A certificate request for such a name is one ACM cannot carry through at all, so it
 /// is refused up front rather than left waiting for evidence that cannot arrive — "a
@@ -294,12 +311,15 @@ pub const RESERVED_TOP_LEVEL_LABELS: &[&str] = &[
 /// judged by the domain it covers.
 pub fn domain_is_not_in_public_dns(domain_name: &str) -> bool {
     let name = validation_target(domain_name).to_ascii_lowercase();
-    RESERVED_TOP_LEVEL_LABELS.iter().any(|label| {
-        name == *label
-            || name
-                .strip_suffix(label)
-                .is_some_and(|higher| higher.ends_with('.'))
-    })
+    RESERVED_TOP_LEVEL_LABELS
+        .iter()
+        .chain(RESERVED_SECOND_LEVEL_NAMES)
+        .any(|reserved| {
+            name == *reserved
+                || name
+                    .strip_suffix(reserved)
+                    .is_some_and(|higher| higher.ends_with('.'))
+        })
 }
 
 /// How long after the domain-validation email was last sent ACM will send it again.

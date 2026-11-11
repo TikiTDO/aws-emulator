@@ -75,11 +75,13 @@
 //! * `InvalidDBInstanceStateFault` (HTTP 400) — The DB instance isn't in a valid state.
 //! * `ResourceNotFoundFault` (HTTP 404) — The specified resource ID was not found.
 //!
-//! `ResourceIdentifier` carries the ARN of the resource this call ACTS ON, and Amazon RDS
-//! answers an ARN that resolves to no resource of the account on the MEMBER rather than with
-//! the modelled `ResourceNotFoundFault`: HTTP 400 `InvalidParameterValue` (see
-//! [`unknown_resource_message`] and the handler). The two state faults need a maintenance
-//! action to be pending, and nothing in this service schedules one.
+//! `ResourceIdentifier` carries the ARN of the resource this call ACTS ON. An ARN that
+//! resolves to no resource of the account is answered by the CLASS of resource it names: an
+//! ARN naming a DB CLUSTER gets the modelled `ResourceNotFoundFault` (HTTP 404) with the
+//! cluster identifier that ARN names ([`resource_not_found_message`]), and every other
+//! identifier that resolves to nothing is answered on the MEMBER — HTTP 400
+//! `InvalidParameterValue` ([`unknown_resource_message`]). The two state faults need a
+//! maintenance action to be pending, and nothing in this service schedules one.
 
 #[allow(unused_imports)]
 use super::types::*;
@@ -159,6 +161,38 @@ fn unknown_resource_message(resource_identifier: &str) -> String {
     format!("Unknown resource: {resource_identifier}")
 }
 
+/// The resource type an RDS ARN gives a DB CLUSTER: `arn:aws:rds:<region>:<account>:cluster:
+/// <identifier>` ("Constructing an RDS Amazon Resource Name (ARN)"), the type whose absent
+/// resource is the modelled not-found fault below.
+const CLUSTER_RESOURCE_TYPE: &str = "cluster";
+
+/// The message this operation's modelled `ResourceNotFoundFault` carries for a DB cluster the
+/// account does not hold: the fixed text `Resource not found: `, then the cluster IDENTIFIER
+/// the request's ARN names.
+///
+/// The identifier rather than the whole ARN, as the RECORDED refusal of this class words it
+/// (the DocumentDB front door's `docdb-instance-not-found-envelope-variants` answers
+/// `Resource not found: <identifier>` for an ARN-form `ResourceIdentifier`): the fault is
+/// about the resource the ARN resolved to, so what it names is that resource — the identifier
+/// field of the ARN's `cluster:<identifier>` resource — while the sentence for the classes
+/// below echoes the whole value the request supplied ([`unknown_resource_message`]).
+fn resource_not_found_message(cluster_identifier: &str) -> String {
+    format!("Resource not found: {cluster_identifier}")
+}
+
+/// The cluster identifier `resource_identifier` names, for a value that is an ARN of this
+/// service naming a DB CLUSTER; `None` for every other value — a DB instance ARN, an ARN of
+/// another resource type or another vendor, and a value that is no ARN at all.
+///
+/// Read through the crate's one reader of its own resource ARNs
+/// ([`crate::state::parse_rds_resource_arn`]), so which type an ARN names is decided in one
+/// place.
+fn cluster_identifier_named_by(resource_identifier: &str) -> Option<&str> {
+    crate::state::parse_rds_resource_arn(resource_identifier)
+        .filter(|arn| arn.resource_type == CLUSTER_RESOURCE_TYPE)
+        .map(|arn| arn.identifier)
+}
+
 /// The `ApplyPendingMaintenanceAction` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -226,15 +260,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .map(|record| record.arn()),
             )
             .find(|arn| *arn == resource);
-        // An identifier that resolves to no resource of this account is refused on the
-        // MEMBER that carried it: HTTP 400 with the Query API's `InvalidParameterValue` and
-        // the `Unknown resource: <identifier>` sentence. `ResourceIdentifier` is an ARN the
-        // caller composes, so a value naming nothing (one that is no ARN at all, an ARN of
-        // another region, or one of a resource that was never created) is a value this
-        // parameter does not accept — a 4xx a client treats as "fix the request" — and not
-        // the modelled `ResourceNotFoundFault`, whose 404 an SDK retry policy reads as a
-        // resource that may yet appear.
+        // An identifier that resolves to no resource of this account is answered by the
+        // CLASS of resource it names.
+        //
+        // An ARN naming a DB CLUSTER the account does not hold is this operation's modelled
+        // `ResourceNotFoundFault` — "the specified resource ID was not found" — HTTP 404 with
+        // the cluster identifier the ARN names: the request named a resource of a kind this
+        // front door owns, and the fault the model declares for a resource id it cannot find
+        // is what says so.
+        //
+        // Every OTHER identifier that resolves to nothing is refused on the MEMBER that
+        // carried it: HTTP 400 with the Query API's `InvalidParameterValue` and the `Unknown
+        // resource: <identifier>` sentence. `ResourceIdentifier` is an ARN the caller
+        // composes, so a value that is no ARN at all, one of another resource type or vendor,
+        // or a DB instance ARN naming nothing is a value this parameter does not accept — a
+        // 4xx a client treats as "fix the request".
         let Some(resource_arn) = resolved else {
+            if let Some(cluster) = cluster_identifier_named_by(&resource) {
+                return Err(ApplyPendingMaintenanceActionErrorModeled::ResourceNotFoundFault(
+                    ResourceNotFoundFault {
+                        message: Some(resource_not_found_message(cluster)),
+                    },
+                )
+                .into());
+            }
             return Err(ApplyPendingMaintenanceActionError::invalid_parameter_value(
                 unknown_resource_message(&input.resource_identifier),
             ));

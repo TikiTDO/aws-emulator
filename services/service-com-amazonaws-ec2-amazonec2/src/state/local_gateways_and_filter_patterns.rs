@@ -1541,17 +1541,46 @@ pub fn invalid_local_gateway_id_malformed<E>(id: &str) -> Scaffolded<E> {
     )
 }
 
-/// Refuse a well-formed local gateway id this account holds no gateway for: HTTP 400
-/// [`INVALID_LOCAL_GATEWAY_ID_NOT_FOUND`], worded the way AWS words it for this resource —
-/// "The local-gateway ID '…' does not exist", naming the resource by the one spelling
-/// [`RESOURCE_TYPE_LOCAL_GATEWAY`] holds, as the recorded wire corpus behind this surface
-/// shows and as [`invalid_local_gateway_id_malformed`] already names it in the sentence for
-/// the form of the same id.
+/// The name `CreateLocalGatewayRouteTable`'s recorded refusal gives this resource: the
+/// API's own `LocalGateway`, the same `<Kind>` token the error code carries
+/// ([`INVALID_LOCAL_GATEWAY_ID_NOT_FOUND`]) and the same spelling the route tables ON a
+/// gateway are named by ("The LocalGateway Route Table ID '…' does not exist",
+/// [`invalid_local_gateway_route_table_id_not_found`]).
+///
+/// Distinct from [`RESOURCE_TYPE_LOCAL_GATEWAY`], the spelling the TAGGING `ResourceType`
+/// enum holds, which is the one every OTHER reader of this id is recorded answering with.
+pub const LOCAL_GATEWAY_API_NAME: &str = "LocalGateway";
+
+/// Refuse a well-formed local gateway id this account holds no gateway for, for an
+/// operation whose recorded refusal names the resource by the `ResourceType` member it is
+/// tagged under: HTTP 400 [`INVALID_LOCAL_GATEWAY_ID_NOT_FOUND`], "The local-gateway ID
+/// '…' does not exist".
+///
+/// This is the sentence every operation that resolves a `LocalGatewayId` answers, bar one:
+/// `CreateLocalGatewayRouteTable` names the resource by its API name instead
+/// ([`invalid_local_gateway_id_not_found_for_create_route_table`]), as the recorded
+/// refusals of the two show. Which sentence an operation answers is a fact of that
+/// operation's validator, and only the operation whose recorded refusal differs carries
+/// its own writer — the division
+/// [`invalid_local_gateway_route_table_id_malformed`] already makes for the route table id.
 pub fn invalid_local_gateway_id_not_found<E>(id: &str) -> Scaffolded<E> {
     Scaffolded::service_error(
         INVALID_LOCAL_GATEWAY_ID_NOT_FOUND,
         400,
         format!("The {RESOURCE_TYPE_LOCAL_GATEWAY} ID '{id}' does not exist"),
+    )
+}
+
+/// Refuse a well-formed local gateway id this account holds no gateway for, for
+/// `CreateLocalGatewayRouteTable`: HTTP 400 [`INVALID_LOCAL_GATEWAY_ID_NOT_FOUND`], "The
+/// LocalGateway ID '…' does not exist" — the resource named by its API name
+/// ([`LOCAL_GATEWAY_API_NAME`]), which is the sentence THAT operation's recorded refusal
+/// carries.
+pub fn invalid_local_gateway_id_not_found_for_create_route_table<E>(id: &str) -> Scaffolded<E> {
+    Scaffolded::service_error(
+        INVALID_LOCAL_GATEWAY_ID_NOT_FOUND,
+        400,
+        format!("The {LOCAL_GATEWAY_API_NAME} ID '{id}' does not exist"),
     )
 }
 
@@ -1565,19 +1594,49 @@ pub fn require_well_formed_local_gateway_id<E>(id: &str) -> Result<(), Scaffolde
     Ok(())
 }
 
-/// Refuse a `LocalGatewayId` this service cannot resolve: a malformed one before an unknown
-/// one, the order [`require_well_formed_id`] documents.
+/// Refuse a `LocalGatewayId` an operation other than `CreateLocalGatewayRouteTable` cannot
+/// resolve: a malformed one before an unknown one, the order [`require_well_formed_id`]
+/// documents.
 ///
-/// The ONE place a local gateway id is resolved, so every operation that takes one refuses
-/// the same id the same way; the contract [`require_known_local_gateway_route_table`] writes
-/// out for the route tables on a gateway.
+/// The ONE place those operations resolve a local gateway id, so each refuses the same id
+/// the same way; the contract [`require_known_local_gateway_route_table`] writes out for
+/// the route tables on a gateway. `CreateLocalGatewayRouteTable` resolves it through
+/// [`require_known_local_gateway_for_create_route_table`] instead, which shares this
+/// resolution and differs only in the sentence it words an unknown id with.
 pub fn require_known_local_gateway<E>(
     store: &ComAmazonawsEc2Amazonec2State,
     id: &str,
 ) -> Result<(), Scaffolded<E>> {
+    require_known_local_gateway_worded(store, id, invalid_local_gateway_id_not_found)
+}
+
+/// Refuse a `LocalGatewayId` `CreateLocalGatewayRouteTable` cannot resolve, with that
+/// operation's own `NotFound` sentence
+/// ([`invalid_local_gateway_id_not_found_for_create_route_table`]).
+pub fn require_known_local_gateway_for_create_route_table<E>(
+    store: &ComAmazonawsEc2Amazonec2State,
+    id: &str,
+) -> Result<(), Scaffolded<E>> {
+    require_known_local_gateway_worded(
+        store,
+        id,
+        invalid_local_gateway_id_not_found_for_create_route_table,
+    )
+}
+
+/// Resolve a local gateway id — malformed before unknown — with `not_found` writing the
+/// sentence the CALLING operation's validator words an unknown id with.
+///
+/// The ONE lookup and the ONE ordering behind both of this resource's `NotFound`
+/// sentences, so only the wording is per-validator.
+fn require_known_local_gateway_worded<E>(
+    store: &ComAmazonawsEc2Amazonec2State,
+    id: &str,
+    not_found: fn(&str) -> Scaffolded<E>,
+) -> Result<(), Scaffolded<E>> {
     require_well_formed_local_gateway_id(id)?;
     if !store.local_gateways.contains_key(id) {
-        return Err(invalid_local_gateway_id_not_found(id));
+        return Err(not_found(id));
     }
     Ok(())
 }

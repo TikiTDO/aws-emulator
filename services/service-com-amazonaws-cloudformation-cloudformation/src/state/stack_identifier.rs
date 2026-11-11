@@ -11,14 +11,15 @@
 //! that its request is malformed rather than that the stack is missing, and EVERY constraint
 //! the value breaks is reported in one envelope, the expression first.
 //!
-//! What "no stack could ever carry" means is every FORM CloudFormation addresses a stack by,
-//! not the name expression alone: a stack is addressed by its name, by its stack id
-//! (`arn:…:stack/<name>/<unique-id>`) and by the UNIQUE ID that stack id ends in — which is
-//! hexadecimal and so starts with a digit as often as not. An identifier in one of those
-//! forms is RESOLVED, and a request carrying one that names no stack is answered as the
-//! missing stack it is ([`super::stack_does_not_exist`] and the forms beside it), because a
-//! caller holding a unique id out of an event or a split stack id has to be able to tell "the
-//! stack is gone" from "your parameter is malformed".
+//! The expression is the whole of what CloudFormation admits: a stack NAME, or a stack ARN.
+//! The unique id a stack id ENDS in is no identifier of a stack on its own — it is
+//! hexadecimal, so it falls outside the name alternative whenever it starts with a digit, and
+//! a request carrying one is answered as the malformed request it is rather than as a missing
+//! stack, which is what the recorded refusal of a mis-spelled stack id shows. A stack is
+//! addressed by its name and by its WHOLE stack id (`arn:…:stack/<name>/<unique-id>`), and a
+//! request carrying either of those is RESOLVED, so a value in one of them that names no
+//! stack is answered as the missing stack it is ([`super::stack_does_not_exist`] and the forms
+//! beside it).
 //!
 //! ## Why the check lives here and not at the boundary
 //!
@@ -79,34 +80,13 @@ fn whole_identifier() -> Option<&'static ::regex::Regex> {
         .as_ref()
 }
 
-/// The group lengths a stack's UNIQUE ID is written in: the 8-4-4-4-12 hexadecimal form every
-/// identifier this service mints carries (`super::new_stack_id`, which ends a stack id in
-/// one), and the form CloudFormation's own stack ids end in.
-const UNIQUE_ID_GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
-
-/// Whether `identifier` is written as a stack's UNIQUE ID — the last segment of a stack id,
-/// `arn:…:stack/<name>/<unique-id>`.
-///
-/// A form CloudFormation ADMITS as an identifier of a stack, which is why it is asked here:
-/// the value is hexadecimal, so it is outside the name expression whenever it starts with a
-/// digit, and a request carrying one has to reach the lookup rather than be refused as
-/// malformed. Hexadecimal of EITHER case, since the case of a hexadecimal digit is not what
-/// makes a value this form; whether a stack answers to it is then the store's to say.
-fn is_stack_unique_id(identifier: &str) -> bool {
-    let mut groups = identifier.split('-');
-    UNIQUE_ID_GROUPS.iter().all(|length| {
-        groups.next().is_some_and(|group| {
-            group.len() == *length && group.chars().all(|digit| digit.is_ascii_hexdigit())
-        })
-    }) && groups.next().is_none()
-}
-
-/// Whether CloudFormation admits `identifier` as naming a stack at all: a value in one of the
-/// forms a stack is addressed by — a stack NAME or a stack ARN ([`STACK_IDENTIFIER_PATTERN`]),
-/// or the UNIQUE ID a stack id ends in ([`is_stack_unique_id`]).
+/// Whether CloudFormation admits `identifier` as naming a stack at all: a value the
+/// expression it states for an identifier matches ([`STACK_IDENTIFIER_PATTERN`]) — a stack
+/// NAME or a stack ARN, and nothing else. The unique id a stack id ENDS in is hexadecimal and
+/// so falls outside the name alternative whenever it starts with a digit, which is why a
+/// request carrying one is refused rather than resolved.
 fn is_an_addressable_form(identifier: &str) -> bool {
     whole_identifier().is_none_or(|expression| expression.is_match(identifier))
-        || is_stack_unique_id(identifier)
 }
 
 /// The message CloudFormation answers for an identifier that breaks its constraints, stated
@@ -169,10 +149,10 @@ pub fn refuse_malformed_identifier<E>(
 mod tests {
     use super::*;
 
-    /// RULE: the identifiers CloudFormation admits are the forms a stack is addressed by — a
-    /// stack name, a stack ARN, and the unique id a stack ARN ends in; every other value is
-    /// refused, and a value breaking BOTH constraints is reported with both clauses, the
-    /// expression first.
+    /// RULE: the identifiers CloudFormation admits are the ones the expression it states for
+    /// an identifier matches — a stack name and a stack ARN; every other value is refused,
+    /// the unique id a stack id ends in included, and a value breaking BOTH constraints is
+    /// reported with both clauses, the expression first.
     #[test]
     fn an_identifier_is_admitted_by_the_services_own_expression() {
         for admitted in [
@@ -181,11 +161,10 @@ mod tests {
             "Stack9",
             "arn:aws:cloudformation:us-east-1:123456789012:stack/a/0",
             "arn:aws-cn:cloudformation:cn-north-1:123456789012:stack/a/0",
-            // A stack's unique id, which is hexadecimal and so starts with a digit as often
-            // as not, in either case of hexadecimal.
-            "0e81d159-090a-7b61-9856-04d0999cb465",
+            // A value in the 8-4-4-4-12 form that happens to START with a letter: the name
+            // alternative admits it, since what the expression reads is the characters and
+            // their positions rather than what the value was minted as.
             "ae81d159-090a-7b61-9856-04d0999cb465",
-            "0E81D159-090A-7B61-9856-04D0999CB465",
         ] {
             assert_eq!(
                 malformed_identifier(STACK_NAME_PATH, admitted),
@@ -198,8 +177,15 @@ mod tests {
             ("a name with a dot", "a.stack"),
             ("a name starting with a digit", "9stack"),
             ("a name starting with a hyphen", "-stack"),
-            // A value that is nearly a unique id is not one: the groups and their lengths
-            // are what the form IS.
+            // The unique id a stack id ends in, in either case of hexadecimal: hexadecimal
+            // starting with a digit, which the name alternative does not admit.
+            ("a stack's unique id", "0e81d159-090a-7b61-9856-04d0999cb465"),
+            (
+                "a stack's unique id in upper-case hexadecimal",
+                "0E81D159-090A-7B61-9856-04D0999CB465",
+            ),
+            // A value that is nearly a unique id is no identifier either: the groups and
+            // their lengths are what the form IS, and neither form is admitted.
             ("a unique id a group short", "0e81d159-090a-7b61-04d0999cb465"),
             (
                 "a unique id with a short last group",

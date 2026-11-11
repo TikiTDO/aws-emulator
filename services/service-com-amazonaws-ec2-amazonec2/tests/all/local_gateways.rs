@@ -855,10 +855,12 @@ async fn a_next_token_this_service_did_not_issue_is_refused() {
 // ---------------------------------------------------------------------------
 
 /// The operations that resolve a `LocalGatewayId` all refuse an id the account holds no
-/// gateway for with the resource's own code and AWS's sentence for it, which names the
-/// resource by the one spelling the `ResourceType` member `local-gateway` holds — the same
-/// spelling the sentence for a malformed id of the same resource uses. Driven through each
-/// operation that takes one, so the sentence cannot differ between them.
+/// gateway for with the resource's own code, and each words the sentence the way AWS words
+/// it for THAT operation: `CreateLocalGatewayRouteTable` names the gateway by the API's own
+/// `LocalGateway` — the same `<Kind>` token the error code carries — while every other
+/// reader of the id names it by the `ResourceType` member `local-gateway`, which is also
+/// the spelling the sentence for a MALFORMED id of this resource uses. Driven through each
+/// operation that takes one, so neither sentence can drift between them.
 #[tokio::test]
 async fn an_unresolvable_local_gateway_id_is_refused_with_the_resources_own_sentence() {
     let (router, engine) = super::ec2_query::emulator();
@@ -875,19 +877,20 @@ async fn an_unresolvable_local_gateway_id_is_refused_with_the_resources_own_sent
         "lgwrtb-00000000000000000",
         "lgw-rtb-059615ef7d000000",
     ];
+    // Each operation beside the resource noun ITS refusal names the gateway by.
     let actions = [
-        "CreateLocalGatewayRouteTable",
-        "CreateLocalGatewayVirtualInterfaceGroup",
+        ("CreateLocalGatewayRouteTable", "LocalGateway"),
+        ("CreateLocalGatewayVirtualInterfaceGroup", "local-gateway"),
     ];
 
-    for action in actions {
+    for (action, noun) in actions {
         for (id, expected_code, expected_sentence) in unknown
             .iter()
             .map(|id| {
                 (
                     *id,
                     ec2::state::INVALID_LOCAL_GATEWAY_ID_NOT_FOUND,
-                    format!("The local-gateway ID '{id}' does not exist"),
+                    format!("The {noun} ID '{id}' does not exist"),
                 )
             })
             .chain(malformed.iter().map(|id| {

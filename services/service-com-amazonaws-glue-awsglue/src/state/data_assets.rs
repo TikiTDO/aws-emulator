@@ -248,40 +248,55 @@ fn stated_business_metadata_constraint(
     Some(catalog_refusal_document(&stated.message))
 }
 
-/// Which asset types still REFERENCE one form type, and the sentence a delete held up by
-/// such a reference is refused with.
+/// Which records still USE one form type, and the sentence a delete held up by such a use
+/// is refused with.
 impl ComAmazonawsGlueAwsglueState {
-    /// Every asset type whose forms name the form type `identifier` addresses, by name, in
-    /// the order this namespace holds them — empty when no asset type references it, and
-    /// when `identifier` names no form type this store holds at all.
+    /// Every ASSET that carries a form of the form type `identifier` addresses, named by the
+    /// asset TYPE it is an instance of, deduplicated and in the order this namespace holds
+    /// those assets — empty when no asset uses it, and when `identifier` names no form type
+    /// this store holds at all.
     ///
     /// A form type "cannot be deleted if it is still referenced by an asset type"
-    /// (`DeleteFormType`), so the delete asks this before removing anything, and the
-    /// refusal names every dependency that holds it up rather than one of them. An asset
-    /// type's forms carry the `FormTypeIdentifier` its own put wrote
-    /// ([`AssetTypeEntry::forms`]) and a form type's identifier is its name
-    /// ([`FormTypeEntry::id`]), so a reference names the record exactly as this namespace
-    /// keys it. The walk is bounded by [`MAX_ASSET_TYPES`] records of [`MAX_ASSET_FORMS`]
-    /// forms.
-    pub fn asset_types_referencing_form_type(&self, identifier: &str) -> Vec<String> {
+    /// (`DeleteFormType`), and what makes that reference LIVE is an asset carrying a form of
+    /// the type: an asset type that merely declares the form type among its forms does not
+    /// hold the delete up, as the recorded delete of a form type whose only declaring asset
+    /// type is still stored shows. So the delete asks this before removing anything, and the
+    /// refusal names every dependency that holds it up rather than one of them.
+    ///
+    /// An asset's forms carry the `FormTypeIdentifier` its own put wrote
+    /// ([`AssetEntry::forms`]) and a form type's identifier is its name
+    /// ([`FormTypeEntry::id`]), so a use names the record exactly as this namespace keys it;
+    /// the asset type each such asset is an instance of is resolved the way every other
+    /// reader of that reference resolves it ([`Self::asset_type_by_reference`]), falling back
+    /// to the identifier the put stored for an asset type that is no longer there. The walk
+    /// is bounded by [`MAX_ASSETS`] records of [`MAX_ASSET_FORMS`] forms.
+    pub fn asset_types_using_form_type(&self, identifier: &str) -> Vec<String> {
         let Some(form_type) = self.form_type_by_reference(identifier) else {
             return Vec::new();
         };
-        self.asset_types
-            .values()
-            .filter(|asset_type| {
-                asset_type
-                    .forms
-                    .values()
-                    .any(|reference| reference == &form_type.name)
-            })
-            .map(|asset_type| asset_type.name.clone())
-            .collect()
+        let mut dependencies: Vec<String> = Vec::new();
+        for asset in self.assets.values() {
+            let uses_it = asset.forms.values().any(|form| {
+                form.form_type_id
+                    .as_deref()
+                    .is_some_and(|reference| reference == form_type.name)
+            });
+            if !uses_it {
+                continue;
+            }
+            let asset_type = self
+                .asset_type_by_reference(&asset.asset_type_id)
+                .map_or_else(|| asset.asset_type_id.clone(), |stored| stored.name.clone());
+            if !dependencies.contains(&asset_type) {
+                dependencies.push(asset_type);
+            }
+        }
+        dependencies
     }
 }
 
-/// The message the form type surface refuses a DELETE held up by an asset type's reference
-/// with: the value of that refusal's `ConflictException$Message`.
+/// The message the form type surface refuses a DELETE held up by an asset's use of it with:
+/// the value of that refusal's `ConflictException$Message`.
 ///
 /// RECORDED template, worded the way this surface words every refusal
 /// ([`form_type_not_found_message`]): the text is itself a JSON document carrying the
@@ -289,8 +304,8 @@ impl ComAmazonawsGlueAwsglueState {
 /// ("A form type cannot be deleted if it is still referenced by an asset type",
 /// `DeleteFormType`) and then LISTS the dependencies that hold the delete up, each named the
 /// way this surface names an asset type as a dependency ([`asset_type_dependency`]). Both
-/// variable parts are read off the store: the form type the delete addressed, and every
-/// asset type still referencing it.
+/// variable parts are read off the store: the form type the delete addressed, and the asset
+/// type of every asset still using it.
 pub fn form_type_referenced_message(form_type: &str, asset_types: &[String]) -> String {
     let dependencies: Vec<String> = asset_types
         .iter()

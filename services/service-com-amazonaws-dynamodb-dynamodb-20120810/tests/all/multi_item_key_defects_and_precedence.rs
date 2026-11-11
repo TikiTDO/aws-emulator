@@ -7,14 +7,17 @@
 //! Every suite here is a TABLE spanning what its rule generalises over rather than one
 //! recorded request, and every assertion names its case and the value it actually read.
 //!
-//! RULE 1 — in the batched and transactional write surfaces, an item whose key does not
-//! match the table's `KeySchema` — a key attribute the item omits, or one carrying another
-//! type than the table's `AttributeDefinitions` declare for it — is refused with the ONE
-//! fixed key-schema sentence, naming no attribute and neither type, whichever of the two
-//! defects it was. The `Key`-shaped members of every surface state the same sentence; the
-//! single-item `PutItem` states its own per-defect wording, which is a different member's
-//! rule. The rows span the defect, the key's role in the schema, the supplied type and the
-//! surface.
+//! RULE 1 — in the BATCHED write surface, an item whose key does not match the table's
+//! `KeySchema` — a key attribute the item omits, or one carrying another type than the
+//! table's `AttributeDefinitions` declare for it — is refused with the ONE fixed key-schema
+//! sentence, naming no attribute and neither type, whichever of the two defects it was. The
+//! `Key`-shaped members of every surface state that same sentence. The TRANSACTIONAL
+//! surface states the defect instead: a key attribute of another type is reported as the
+//! mismatch between the declared and the supplied type, naming the attribute, inside that
+//! element's cancellation reason, while a key attribute the item omits is the fixed
+//! sentence. The single-item `PutItem` states its own per-defect wording, which is a
+//! different member's rule. The rows span the defect, the key's role in the schema, the
+//! supplied type and the surface.
 //!
 //! WHICH ANSWER states that sentence inside a transaction follows the side that decided
 //! it: a key the TABLE's key schema does not admit — a type it does not declare for that
@@ -161,41 +164,53 @@ fn item(members: &[(&str, Value)]) -> Value {
 }
 
 // ===========================================================================
-// RULE 1. A key defect of a batched or transactional element states the one
-//         key-schema sentence
+// RULE 1. A key defect of a batched element states the one key-schema sentence;
+//         a transactional element states the type mismatch
 // ===========================================================================
 
+/// The detail a transactional element's cancellation reason states for a key attribute of
+/// another type than the schema declares: the attribute, its declared type and the supplied
+/// one.
+fn type_mismatch_detail(attribute: &str, declared: &str, supplied: &str) -> String {
+    format!("Type mismatch for key {attribute} expected: {declared} actual: {supplied}")
+}
+
 #[tokio::test]
-async fn a_multi_item_key_defect_states_the_one_key_schema_sentence() {
+async fn a_multi_item_key_defect_states_its_surfaces_sentence() {
     let router = emulator();
     create_indexed_table(&router).await;
 
-    // Each row: the case, the item the element carries, the sentence the defect earns, and
-    // whether a TRANSACTION cancels for it (the table's key schema decided it) or refuses
-    // the request (the element is not shaped like a key). They span the defect (a key
-    // attribute omitted, one of another type, one whose value is empty), the key's ROLE in
-    // the schema (partition and sort), the supplied type (`N`, `B`, a set, a map) and an
-    // item that breaks both halves at once.
+    // Each row: the case, the item the element carries, the sentence the defect earns on the
+    // BATCHED surface, whether a TRANSACTION cancels for it (the table's key schema decided
+    // it) or refuses the request (the element is not shaped like a key), and — for a key
+    // attribute of another TYPE, which is the schema's own defect — the attribute and the two
+    // types the transactional surface names in that element's cancellation reason. They span
+    // the defect (a key attribute omitted, one of another type, one whose value is empty),
+    // the key's ROLE in the schema (partition and sort), the supplied type (`N`, `B`, a set,
+    // a map) and an item that breaks both halves at once.
     let empty_key_value = "One or more parameter values are not valid. The AttributeValue for a \
                            key attribute cannot contain an empty string value. Key: pk";
-    let rows: Vec<(&str, Value, &str, bool)> = vec![
+    let rows: Vec<(&str, Value, &str, bool, Option<String>)> = vec![
         (
             "an item omitting the sort key",
             item(&[("pk", json!({"S": "k"}))]),
             KEY_SCHEMA_MISMATCH,
             false,
+            None,
         ),
         (
             "an item omitting the partition key",
             item(&[("sk", json!({"S": "s"}))]),
             KEY_SCHEMA_MISMATCH,
             false,
+            None,
         ),
         (
             "an item omitting both key attributes",
             item(&[("note", json!({"S": "plain"}))]),
             KEY_SCHEMA_MISMATCH,
             false,
+            None,
         ),
         (
             // An empty key VALUE is its own documented refusal, which names the key it was
@@ -204,40 +219,48 @@ async fn a_multi_item_key_defect_states_the_one_key_schema_sentence() {
             item(&[("pk", json!({"S": ""})), ("sk", json!({"S": "s"}))]),
             empty_key_value,
             false,
+            None,
         ),
         (
             "a partition key supplied as a number",
             item(&[("pk", json!({"N": "7"})), ("sk", json!({"S": "s"}))]),
             KEY_SCHEMA_MISMATCH,
             true,
+            Some(type_mismatch_detail("pk", "S", "N")),
         ),
         (
             "a sort key supplied as a number",
             item(&[("pk", json!({"S": "k"})), ("sk", json!({"N": "7"}))]),
             KEY_SCHEMA_MISMATCH,
             true,
+            Some(type_mismatch_detail("sk", "S", "N")),
         ),
         (
             "a partition key supplied as binary",
             item(&[("pk", json!({"B": "AQI="})), ("sk", json!({"S": "s"}))]),
             KEY_SCHEMA_MISMATCH,
             true,
+            Some(type_mismatch_detail("pk", "S", "B")),
         ),
         (
             "a sort key supplied as a string set",
             item(&[("pk", json!({"S": "k"})), ("sk", json!({"SS": ["s"]}))]),
             KEY_SCHEMA_MISMATCH,
             true,
+            Some(type_mismatch_detail("sk", "S", "SS")),
         ),
         (
+            // Both halves at once: the schema is walked in its own order, so the
+            // partition key's type is the defect reported.
             "a partition key supplied as a map, the sort key omitted",
             item(&[("pk", json!({"M": {"inner": {"S": "s"}}}))]),
             KEY_SCHEMA_MISMATCH,
             true,
+            Some(type_mismatch_detail("pk", "S", "M")),
         ),
     ];
 
-    for (case, carried, stated_defect, cancels) in rows {
+    for (case, carried, stated_defect, cancels, type_mismatch) in rows {
         // The batched surface refuses the whole request with that sentence, whichever of
         // the two defects it was.
         let stated = refusal(
@@ -267,7 +290,9 @@ async fn a_multi_item_key_defect_states_the_one_key_schema_sentence() {
             continue;
         }
         // The table's own key schema decided it, so it is that element's cancellation
-        // reason — carrying the same sentence behind the documented reason clause.
+        // reason — and for a key attribute of another TYPE that reason states the two
+        // types behind the documented reason clause rather than the fixed sentence the
+        // batched surface answers.
         let (codes, reason) = cancellation(&router, case, "TransactWriteItems", transaction, 0).await;
         assert_eq!(
             codes,
@@ -275,7 +300,10 @@ async fn a_multi_item_key_defect_states_the_one_key_schema_sentence() {
             "case {case:?} (TransactWriteItems): expected the element named ValidationError, got \
              {codes:?}"
         );
-        let expected = KEY_SCHEMA_MISMATCH.to_string();
+        let detail = type_mismatch
+            .clone()
+            .unwrap_or_else(|| panic!("case {case:?}: a cancelling row names the two types"));
+        let expected = format!("{CANCELLATION_CLAUSE}: {detail}");
         assert_eq!(
             reason, expected,
             "case {case:?} (TransactWriteItems): expected {expected:?}, got {reason:?}"

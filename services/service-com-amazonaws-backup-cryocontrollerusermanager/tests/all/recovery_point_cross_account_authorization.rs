@@ -5,13 +5,12 @@
 //!
 //! The rule under test: when the account field of the `RecoveryPointArn` a
 //! request carries is not the account serving the request, the call is refused
-//! HTTP 403 with the error type `AccessDeniedException` and AWS's
-//! resource-policy denial sentence — the calling principal, the IAM action
-//! (`backup:` plus the API name) and the ARN the request supplied — and the
-//! refusal discloses nothing about whether that point exists. A recovery point
-//! belongs to the account its ARN names, and only that account's own policies
-//! could grant a caller anything on it, so there is nothing here to resolve it
-//! against and nothing to report as absent.
+//! HTTP 403 with the error type `AccessDeniedException` and this service's own
+//! insufficient-privileges sentence, and the refusal discloses nothing about
+//! whether that point exists — not even the ARN or the action it was asked for. A
+//! recovery point belongs to the account its ARN names, and only that account's
+//! own policies could grant a caller anything on it, so there is nothing here to
+//! resolve it against and nothing to report as absent.
 //!
 //! The table spans every implemented operation that addresses a recovery point
 //! by the ARN the request supplies (the delete and the read, which bind it into
@@ -49,18 +48,9 @@ fn caller_principal() -> String {
     format!("arn:aws:iam::{ACCOUNT}:user/emulator")
 }
 
-/// AWS's sentence for a request the named resource's account grants nothing on:
-/// the principal that signed, the action asked for, and the resource asked for.
-///
-/// `action` is the fully qualified IAM action — this service's action namespace
-/// (`backup`, its `arnNamespace`) plus the API name.
-fn denial(action: &str, resource: &str) -> String {
-    format!(
-        "User: {} is not authorized to perform: {action} on resource: {resource} \
-         because no resource-based policy allows the {action} action",
-        caller_principal()
-    )
-}
+/// The sentence AWS Backup refuses a request for lack of privileges with: the
+/// service's own fixed text, built from nothing in the request.
+const DENIAL: &str = "Insufficient privileges to perform this action.";
 
 /// The role every request that needs one names.
 fn role() -> String {
@@ -196,7 +186,6 @@ async fn a_recovery_point_arn_of_another_account_is_denied() {
 
         for (case, arn) in &foreign {
             let (status, error_type, refused) = address(&router, &operation, arn).await;
-            let expected = denial(&format!("backup:{}", operation.operation), arn);
             assert_eq!(
                 (
                     status,
@@ -204,7 +193,7 @@ async fn a_recovery_point_arn_of_another_account_is_denied() {
                     error_code(&refused).as_str(),
                     string_at(&refused, "Message").as_str()
                 ),
-                (403, "AccessDeniedException", "AccessDeniedException", expected.as_str()),
+                (403, "AccessDeniedException", "AccessDeniedException", DENIAL),
                 "case {case:?} on {}: expected the authorization refusal, got {status} \
                  {error_type} {refused:?}",
                 operation.operation
@@ -216,6 +205,16 @@ async fn a_recovery_point_arn_of_another_account_is_denied() {
                  got {rendered}",
                 operation.operation
             );
+            // The refusal is taken before anything is resolved, so it discloses
+            // neither what was asked for nor who asked.
+            for disclosed in [arn.as_str(), operation.operation, &caller_principal()] {
+                assert!(
+                    !rendered.contains(disclosed),
+                    "case {case:?} on {}: the refusal must not disclose {disclosed:?}, \
+                     got {rendered}",
+                    operation.operation
+                );
+            }
         }
 
         // The control: the account's OWN stored point is still addressable

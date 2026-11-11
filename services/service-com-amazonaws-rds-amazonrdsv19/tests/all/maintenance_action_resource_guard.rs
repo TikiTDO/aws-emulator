@@ -7,13 +7,16 @@
 //! request:
 //!
 //! * `ApplyPendingMaintenanceAction` acts on the resource its `ResourceIdentifier` names,
-//!   and Amazon RDS refuses an identifier that resolves to no resource of the account on
-//!   that MEMBER: HTTP 400 `InvalidParameterValue`, carrying the fixed text `Unknown
-//!   resource: ` and the identifier the request supplied, as it supplied it — not the 404
-//!   of a resource that may yet appear. The identifier resolves when it is the ARN a DB
-//!   cluster or a DB instance of the request's region reports for itself, which is what the
-//!   rows below vary: the resource kind, the ARN's account, region and resource type, and a
-//!   value that is no ARN at all.
+//!   and an identifier that resolves to no resource of the account is answered by the CLASS
+//!   of resource it names: an ARN naming a DB CLUSTER gets the operation's modelled
+//!   `ResourceNotFoundFault` (HTTP 404) carrying the fixed text `Resource not found: ` and
+//!   the cluster identifier that ARN names, while every other identifier — a DB instance
+//!   ARN, an ARN of another resource type or vendor, a value that is no ARN at all — is
+//!   refused on the MEMBER: HTTP 400 `InvalidParameterValue`, carrying the fixed text
+//!   `Unknown resource: ` and the identifier the request supplied, as it supplied it. The
+//!   identifier RESOLVES when it is the ARN a DB cluster or a DB instance of the request's
+//!   region reports for itself, which is what the rows below vary: the resource kind, the
+//!   ARN's account, region and resource type, and a value that is no ARN at all.
 //! * `CreateDBSnapshot` refuses a source DB instance that is not in the `available` state
 //!   with `InvalidDBInstanceState` (HTTP 400) and the sentence the service words for that
 //!   class, whatever stage of its lifecycle the instance is in.
@@ -47,6 +50,11 @@ const INVALID_PARAMETER_VALUE: &str = "InvalidParameterValue";
 /// under test: the wording is part of what this suite pins, so a drift away from it must
 /// fail.
 const UNKNOWN_RESOURCE: &str = "Unknown resource: ";
+
+/// The code and the fixed text an absent DB CLUSTER is answered with instead, pinned here
+/// for the same reason.
+const RESOURCE_NOT_FOUND_FAULT: &str = "ResourceNotFoundFault";
+const RESOURCE_NOT_FOUND: &str = "Resource not found: ";
 
 /// The ARN a stored DB instance of [`REGION`] reports for itself (`db` is the resource type
 /// RDS gives a DB instance in its ARN format).
@@ -102,7 +110,7 @@ async fn apply(
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn an_unknown_maintenance_action_resource_is_refused_on_the_member() {
+async fn an_unknown_maintenance_action_resource_is_refused_by_the_class_of_resource_it_names() {
     let router = emulator();
 
     // One cluster and one instance that DO resolve, so every row below fails for the
@@ -110,80 +118,113 @@ async fn an_unknown_maintenance_action_resource_is_refused_on_the_member() {
     create_available_cluster(&router, "emu-maint-guard-cluster", "aurora-postgresql", &[]).await;
     create_available_instance(&router, "emu-maint-guard-instance").await;
 
-    // The shapes an identifier that names no resource of this account can take. The
-    // `ApplyAction` / `OptInType` pairings rotate through the values those two members
-    // publish, so no row can pass on one pairing being special — and the last row carries
-    // an action AWS does not publish, which pins that the identifier is decided FIRST.
-    // Each row's refusal must echo the identifier the request supplied, whatever shape it
-    // took, so the rows are the message's one variable part.
-    let rows: &[(&str, String, &str, &str)] = &[
+    // The shapes an identifier that names no resource of this account can take, each with
+    // the class of refusal its resource kind is answered with. The `ApplyAction` /
+    // `OptInType` pairings rotate through the values those two members publish, so no row
+    // can pass on one pairing being special — and the last row carries an action AWS does
+    // not publish, which pins that the identifier is decided FIRST. Each row's refusal must
+    // name the identifier its class names, so the rows are the message's one variable part.
+    //
+    // (case, the identifier, ApplyAction, OptInType, the cluster the 404 names — `None` for
+    // the rows refused on the member)
+    let rows: &[(&str, String, &str, &str, Option<&str>)] = &[
         (
             "a DB instance ARN for an instance that was never created",
             instance_arn("emu-maint-guard-absent"),
             "system-update",
             "immediate",
+            None,
         ),
         (
             "a DB cluster ARN for a cluster that was never created",
             cluster_arn("emu-maint-guard-absent-cluster"),
             "db-upgrade",
             "next-maintenance",
+            Some("emu-maint-guard-absent-cluster"),
         ),
         (
             "a value that is no ARN at all",
             "emu-maint-guard-instance".to_string(),
             "os-upgrade",
             "undo-opt-in",
+            None,
         ),
         (
             "the stored instance's name under the cluster resource type",
             format!("arn:aws:rds:{REGION}:{ACCOUNT}:cluster:emu-maint-guard-instance"),
             "hardware-maintenance",
             "immediate",
+            Some("emu-maint-guard-instance"),
         ),
         (
             "a DB snapshot ARN, which carries no maintenance action",
             format!("arn:aws:rds:{REGION}:{ACCOUNT}:snapshot:emu-maint-guard-snap"),
             "ca-certificate-rotation",
             "next-maintenance",
+            None,
         ),
         (
             "the stored instance's ARN in another account",
             format!("arn:aws:rds:{REGION}:210987654321:db:emu-maint-guard-instance"),
             "system-update",
             "immediate",
+            None,
         ),
         (
             "the stored instance's ARN in another region",
             "arn:aws:rds:eu-west-1:000000000000:db:emu-maint-guard-instance".to_string(),
             "db-upgrade",
             "immediate",
+            None,
+        ),
+        (
+            "the stored cluster's ARN in another region",
+            "arn:aws:rds:eu-west-1:000000000000:cluster:emu-maint-guard-cluster".to_string(),
+            "db-upgrade",
+            "immediate",
+            Some("emu-maint-guard-cluster"),
         ),
         (
             "another service's ARN",
             format!("arn:aws:ec2:{REGION}:{ACCOUNT}:instance:i-0a1b2c3d4e5f60718"),
             "os-upgrade",
             "next-maintenance",
+            None,
         ),
         (
             "an absent resource named with an unpublished action",
             instance_arn("emu-maint-guard-absent-too"),
             "reboot-now",
             "immediate",
+            None,
         ),
     ];
 
-    for (case, resource, action, opt_in) in rows {
+    for (case, resource, action, opt_in, absent_cluster) in rows {
+        let (expected_status, expected_code, expected_message) = match absent_cluster {
+            // The resource kind the ARN names is a DB cluster, so the answer is the fault
+            // the model declares for a resource id that was not found.
+            Some(cluster) => (
+                404,
+                RESOURCE_NOT_FOUND_FAULT,
+                format!("{RESOURCE_NOT_FOUND}{cluster}"),
+            ),
+            // Everything else is a value the member does not accept, and the refusal names
+            // the identifier the REQUEST carried, so a caller that logs the message still
+            // has the value it sent.
+            None => (
+                400,
+                INVALID_PARAMETER_VALUE,
+                format!("{UNKNOWN_RESOURCE}{resource}"),
+            ),
+        };
         let body = expect_error(
             case,
             apply(&router, resource, action, opt_in).await,
-            400,
-            INVALID_PARAMETER_VALUE,
+            expected_status,
+            expected_code,
         );
         let message = text(&body, "Message");
-        // The refusal names the identifier the REQUEST carried, so a caller that logs the
-        // message still has the value it sent.
-        let expected_message = format!("{UNKNOWN_RESOURCE}{resource}");
         assert_eq!(
             message, expected_message,
             "case {case:?}: expected the refusal to read {expected_message:?}, got \

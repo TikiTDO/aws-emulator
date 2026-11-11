@@ -1646,13 +1646,15 @@ pub fn lens_version_conflict(lens_arn: &str, version: &str) -> ConflictException
 /// A modelled `ConflictException` (HTTP 409) for a request that collides with a
 /// resource that already exists.
 ///
-/// `resource_id` identifies the resource that is IN THE WAY, so a caller can fetch it,
-/// while a sentence that quotes a name quotes it as the REFUSED REQUEST SUBMITTED it: the
-/// two spellings differ wherever the uniqueness rule compares loosely (a workload name, a
-/// review template's and a milestone name all ignore spaces and capitalization —
-/// [`normalize_unique_name`]), and the name a refusal echoes is the one the caller can
-/// match against what it sent. Normalization stays confined to the COMPARISON that found
-/// the collision.
+/// `resource_id` identifies the resource that is IN THE WAY, so a caller can fetch it.
+/// Which spelling of a NAME the sentence quotes is each refusal's own recorded fact,
+/// because the uniqueness rules here compare loosely (a workload name, a review
+/// template's and a milestone name all ignore spaces and capitalization —
+/// [`normalize_unique_name`]) and the two spellings then differ: a workload collision
+/// names the workload as stored ([`workload_name_conflict`]), while a review template's
+/// and a milestone's echo the name the refused request submitted
+/// ([`review_template_name_conflict`], [`milestone_name_conflict`]). Normalization stays
+/// confined to the COMPARISON that found the collision either way.
 pub fn conflict(resource_type: &str, resource_id: String, sentence: &str) -> ConflictException {
     ConflictException {
         message: tagged_message("Conflict", sentence),
@@ -1665,14 +1667,18 @@ pub fn conflict(resource_type: &str, resource_id: String, sentence: &str) -> Con
 /// within an account within an Amazon Web Services Region. Spaces and capitalization
 /// are ignored when checking for uniqueness" (`CreateWorkloadInput$WorkloadName` doc).
 ///
-/// `submitted_name` is the `WorkloadName` the refused request carried, echoed as sent
-/// (see [`conflict`]); `existing_id` is the id of the workload already holding the name,
-/// which is what `ResourceId` points the caller at.
-pub fn workload_name_conflict(submitted_name: &str, existing_id: &str) -> ConflictException {
+/// The sentence names the workload that is IN THE WAY by the name it is STORED under
+/// rather than the spelling the refused request submitted, as this refusal's recorded
+/// wording shows: where the uniqueness comparison is loose the two spellings differ, and
+/// what the caller is told is which workload already holds the name. `existing_name` and
+/// `existing_id` are both that workload's, the pair
+/// [`crate::state::ComAmazonawsWellarchitectedWellarchitectedapiservicelambdaState::workload_holding_name`]
+/// answers with, so `ResourceId` and the sentence name one resource.
+pub fn workload_name_conflict(existing_name: &str, existing_id: &str) -> ConflictException {
     conflict(
         WORKLOAD_RESOURCE_TYPE,
         existing_id.to_string(),
-        &format!("A workload with name {submitted_name} already exists."),
+        &format!("A workload with name {existing_name} already exists."),
     )
 }
 

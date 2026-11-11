@@ -633,13 +633,14 @@ async fn a_put_retried_under_its_own_token_is_idempotent() {
     }
 
     // A retry is served only while the request it retries is one this catalog would still
-    // serve: the references are resolved before the token is read, so a retry naming a form
-    // type the store no longer holds is refused like any other put naming an entity that
-    // does not exist, and the stored asset is left as it was.
+    // serve: the references are resolved before the token is read, so a retry naming an
+    // asset type the store no longer holds is refused like any other put naming an entity
+    // that does not exist, and the stored asset is left as it was.
     let gone_form = form_type(&router, "GoneForm").await;
+    let gone_asset_type = asset_type(&router, "GoneAssetType", &[("Details", &gone_form)]).await;
     let request = json!({
         "Identifier": "stale-retry",
-        "AssetTypeId": &order_asset_type,
+        "AssetTypeId": &gone_asset_type,
         "Name": "First",
         "Forms": { "Details": { "FormTypeId": &gone_form, "Content": "{\"a\":\"1\"}" } },
         "ClientToken": "token-three",
@@ -647,25 +648,25 @@ async fn a_put_retried_under_its_own_token_is_idempotent() {
     let created = ok(&router, "PutAsset", &request).await;
     ok(
         &router,
-        "DeleteFormType",
-        &json!({ "Identifier": &gone_form }),
+        "DeleteAssetType",
+        &json!({ "Identifier": &gone_asset_type }),
     )
     .await;
 
     let (status, body) = call(&router, "PutAsset", &request).await;
     assert_eq!(
         status, 400,
-        "case a retry whose form type is gone: expected 400, got {status} with {body}"
+        "case a retry whose asset type is gone: expected 400, got {status} with {body}"
     );
     assert!(
         error_code(&body).contains("EntityNotFoundException"),
-        "case a retry whose form type is gone: expected EntityNotFoundException, got {body}"
+        "case a retry whose asset type is gone: expected EntityNotFoundException, got {body}"
     );
     let read = get(&router, "stale-retry").await;
     assert_eq!(
-        Some(&stored_forms("a retry whose form type is gone", &read)),
+        Some(&stored_forms("a retry whose asset type is gone", &read)),
         created.get("Forms"),
-        "case a retry whose form type is gone: the stored asset must be left as it was, got \
+        "case a retry whose asset type is gone: the stored asset must be left as it was, got \
          {read}"
     );
 }

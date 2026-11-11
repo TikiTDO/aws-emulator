@@ -378,19 +378,20 @@ impl Table {
         self.key_from(item, KeySource::Item).map_err(Into::into)
     }
 
-    /// The primary key of an item ONE ELEMENT of a batched or transactional write
-    /// carries (a `BatchWriteItem` `PutRequest`, a transactional `Put`).
+    /// The primary key of an item ONE ELEMENT of a BATCHED write carries (a
+    /// `BatchWriteItem` `PutRequest`).
     ///
-    /// Those surfaces hold the element's item to the table's KEY SCHEMA as a whole, so
+    /// That surface holds the element's item to the table's KEY SCHEMA as a whole, so
     /// every way it differs from that schema — a key attribute the item omits, or one
     /// carrying another type than the table declares for it — is the one mismatch
     /// sentence ([`KEY_SCHEMA_MISMATCH_MESSAGE`]), with no attribute name and no
     /// expected/actual type, whichever element and whichever of the two defects it was.
     /// The single-item write keeps its own per-defect wording
-    /// ([`Self::key_of_item`]), and a `Key`-shaped member of either surface is read
-    /// through [`Self::key_of_key_map`], which states the same mismatch sentence.
+    /// ([`Self::key_of_item`]), a TRANSACTIONAL write's element states the type mismatch
+    /// ([`Self::key_of_transact_item`]), and a `Key`-shaped member of either surface is
+    /// read through [`Self::key_of_key_map`], which states the same mismatch sentence.
     pub fn key_of_multi_item(&self, item: &Item) -> Result<ItemKey, RequestError> {
-        self.key_from(item, KeySource::MultiItem).map_err(Into::into)
+        self.key_from(item, KeySource::BatchItem).map_err(Into::into)
     }
 
     /// The primary key named by a `Key` member: exactly the key attributes, no more.
@@ -413,12 +414,17 @@ impl Table {
     /// The primary key of the ITEM a transactional `Put` carries, with WHICH side
     /// decided a refusal of it ([`KeyRefusal`]).
     ///
-    /// The same walk and the same sentences as [`Self::key_of_multi_item`]; what the
-    /// caller also learns is whether the key was refused against the table's key schema
-    /// or against the request's own shape, which is what decides whether the transaction
-    /// cancels that element or refuses the call.
+    /// The same walk as [`Self::key_of_multi_item`]; two things differ. A key attribute
+    /// carrying another type than the table declares for it is stated as the mismatch
+    /// between the two types, naming the attribute, the declared type and the supplied
+    /// one — the sentence the transaction's cancellation reason for that element carries,
+    /// as a single-item write's refusal states it ([`Self::key_of_item`]) — while a key
+    /// attribute the item OMITS is the one mismatch sentence, as a batched element's is.
+    /// And the caller also learns whether the key was refused against the table's key
+    /// schema or against the request's own shape, which is what decides whether the
+    /// transaction cancels that element or refuses the call.
     pub fn key_of_transact_item(&self, item: &Item) -> Result<ItemKey, KeyRefusal> {
-        self.key_from(item, KeySource::MultiItem)
+        self.key_from(item, KeySource::TransactItem)
     }
 
     /// The primary key named by the `Key` member of a transactional `Delete`,
@@ -452,10 +458,10 @@ impl Table {
             let value = supplied
                 .get(name)
                 .ok_or_else(|| KeyRefusal::Request(source.absent(name)))?;
-            // Read out of a `Key`, an element of the wrong type does not name
-            // this key either, so it is the same mismatch rather than a report
-            // of the declared and the supplied type.
-            if !matches!(source, KeySource::Item)
+            // Read out of a member that names the key as a WHOLE, an element of the
+            // wrong type does not name this key either, so it is the same mismatch
+            // rather than a report of the declared and the supplied type.
+            if source.hides_the_type_mismatch()
                 && self
                     .declared_type(name)
                     .is_some_and(|declared| declared != attribute_value_type(value))

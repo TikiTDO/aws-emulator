@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! End-to-end HTTP tests for the name a 409 `ConflictException` echoes when a request
+//! End-to-end HTTP tests for the name a 409 `ConflictException` names when a request
 //! collides with a name already taken.
 //!
 //! The rule these pin, over a TABLE of spellings and every resource of this service whose
 //! name is metered for uniqueness rather than one recorded request: the comparison that
 //! finds the collision is the service's loose one (capitalization and surrounding
-//! whitespace ignored), and the message quotes the name AS THE REFUSED REQUEST SUBMITTED
-//! IT — padding, capitalization and all — while `ResourceId` identifies the resource that
-//! is in the way. Normalization stays confined to the comparison, so a client that matches
-//! the refusal against its own request input always matches.
+//! whitespace ignored), `ResourceId` identifies the resource that is in the way, and WHICH
+//! spelling of the name the sentence carries is each resource's own recorded fact — a
+//! workload collision names the workload as STORED, while a review template's and a
+//! milestone's quote the name AS THE REFUSED REQUEST SUBMITTED IT, padding, capitalization
+//! and all. Normalization stays confined to the comparison either way.
 //!
 //! The rows cover the three names this service meters: a workload's (`CreateWorkload` and
 //! the rename `UpdateWorkload` performs), a review template's (`CreateReviewTemplate` and
@@ -55,9 +56,9 @@ fn collisions(stored: &str) -> Vec<(String, String)> {
 }
 
 /// The refusal every row owes: 409 `ConflictException` of the named resource type, with
-/// `ResourceId` identifying the resource in the way and the message quoting the SUBMITTED
-/// spelling inside the sentence this resource's collision is worded with.
-fn assert_conflict_echoes_submitted(
+/// `ResourceId` identifying the resource in the way and the sentence this resource's
+/// collision is worded with.
+fn assert_conflict(
     case: &str,
     answer: &Answer,
     resource_type: &str,
@@ -85,7 +86,7 @@ fn assert_conflict_echoes_submitted(
     assert_eq!(
         member(answer, "Message"),
         expected_message,
-        "case {case:?}: the message must quote the submitted name, got {answer:?}"
+        "case {case:?}: expected the message {expected_message:?}, got {answer:?}"
     );
 }
 
@@ -99,9 +100,11 @@ fn assert_inside_the_bound(case: &str, submitted: &str) {
     );
 }
 
-/// A workload-name collision, through both operations that take a `WorkloadName`.
+/// A workload-name collision, through both operations that take a `WorkloadName`: the
+/// sentence names the workload already holding the name, by the spelling it is STORED
+/// under, whatever spelling the refused request submitted.
 #[tokio::test]
-async fn a_workload_name_collision_quotes_the_submitted_spelling() {
+async fn a_workload_name_collision_names_the_stored_spelling() {
     // Rows differ along the stored spelling: one plain, one with inner spaces, one mixed
     // case — so the submitted spelling is not simply the stored one in disguise.
     for (index, stored_name) in ["wl-plain", "work load name", "MiXeD Case Workload"]
@@ -129,7 +132,7 @@ async fn a_workload_name_collision_quotes_the_submitted_spelling() {
             let case = format!("{stored_name:?}/{spelling}");
             assert_inside_the_bound(&case, &submitted);
             let expected =
-                format!("[Conflict] A workload with name {submitted} already exists.");
+                format!("[Conflict] A workload with name {stored_name} already exists.");
 
             let created = client
                 .create(minimal_create(
@@ -137,7 +140,7 @@ async fn a_workload_name_collision_quotes_the_submitted_spelling() {
                     &format!("tok-dup-{index}-{spelling}"),
                 ))
                 .await;
-            assert_conflict_echoes_submitted(
+            assert_conflict(
                 &format!("{case}/CreateWorkload"),
                 &created,
                 "WORKLOAD",
@@ -148,7 +151,7 @@ async fn a_workload_name_collision_quotes_the_submitted_spelling() {
             let renamed = client
                 .update(&other, json!({ "WorkloadName": submitted }))
                 .await;
-            assert_conflict_echoes_submitted(
+            assert_conflict(
                 &format!("{case}/UpdateWorkload"),
                 &renamed,
                 "WORKLOAD",
@@ -199,7 +202,7 @@ async fn a_review_template_name_collision_quotes_the_submitted_spelling() {
                     &format!("tok-dup-{index}-{spelling}"),
                 ))
                 .await;
-            assert_conflict_echoes_submitted(
+            assert_conflict(
                 &format!("{case}/CreateReviewTemplate"),
                 &created,
                 "REVIEW_TEMPLATE",
@@ -210,7 +213,7 @@ async fn a_review_template_name_collision_quotes_the_submitted_spelling() {
             let renamed = client
                 .update_review_template(&other, json!({ "TemplateName": submitted }))
                 .await;
-            assert_conflict_echoes_submitted(
+            assert_conflict(
                 &format!("{case}/UpdateReviewTemplate"),
                 &renamed,
                 "REVIEW_TEMPLATE",
@@ -273,7 +276,7 @@ async fn a_milestone_name_collision_quotes_the_submitted_spelling() {
                     })),
                 )
                 .await;
-            assert_conflict_echoes_submitted(
+            assert_conflict(
                 &case,
                 &refused,
                 "MILESTONE",

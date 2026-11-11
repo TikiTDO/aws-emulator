@@ -298,8 +298,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             Some(new_name) => {
                 let normalized = crate::state::normalize_unique_name(new_name);
                 match store.workload_holding_name(new_name) {
-                    Some((_, owner)) if owner != input.workload_id => {
-                        let collision = crate::state::workload_name_conflict(new_name, owner);
+                    Some((existing_name, owner)) if owner != input.workload_id => {
+                        let collision =
+                            crate::state::workload_name_conflict(existing_name, owner);
                         return Err(
                             UpdateWorkloadErrorModeled::ConflictException(collision).into()
                         );

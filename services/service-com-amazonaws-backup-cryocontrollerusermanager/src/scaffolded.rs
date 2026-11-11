@@ -232,13 +232,14 @@ impl AccessDeniedException {
         }
     }
 
-    /// The same refusal, carrying the sentence the DECISION words.
+    /// The same refusal, carrying a sentence a CALLER words.
     ///
-    /// A refusal AWS states as an authorization decision names the principal that
-    /// signed, the action it asked for and the resource it asked for, each a value of
-    /// the request itself; the decision that reaches it builds the sentence
-    /// ([`crate::state::authorized_recovery_point`]) and hands it here, so the
-    /// wording lives with the rule rather than with the error channel.
+    /// Every refusal this service words itself is the fixed
+    /// [`Self::insufficient_privileges`] sentence — the one AWS Backup answers, and the
+    /// one [`crate::state::authorized_recovery_point`] returns — so nothing in this crate
+    /// reaches for this constructor today. It stays as the error channel's own entry point
+    /// for a refusal whose wording belongs to the rule that reached it rather than to this
+    /// channel, which is where a sentence built from the request would be stated.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),

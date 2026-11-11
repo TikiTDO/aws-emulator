@@ -3,23 +3,25 @@
 //! How this service answers a stack identifier written as a stack's UNIQUE ID — the segment
 //! a stack id (`arn:…:stack/<name>/<unique-id>`) ends in — over the awsQuery wire.
 //!
-//! **The rule every case here holds the service to:** the identifier forms CloudFormation
-//! admits are the forms a stack is ADDRESSED by — a stack name, a stack id, and the unique id
-//! that stack id ends in — so a value in one of those forms reaches the stack lookup and a
-//! request naming no stack is answered as the missing stack it is, in each operation's own
-//! wording; only a value in none of those forms is refused as a malformed request, with the
-//! constraint envelope naming the member path the operation states.
+//! **The rule every case here holds the service to:** the identifiers CloudFormation admits
+//! are the ones the expression it states for a stack identifier matches — a stack NAME or a
+//! stack ARN — so the unique id a stack id ends in is NOT one of them: a request carrying one
+//! that the expression does not match is refused as the malformed request it is, with the
+//! constraint envelope naming the member path the operation states, and never as a missing
+//! stack. The forms a stack IS addressed by — its name and its whole stack id — still reach
+//! the lookup and are served.
 //!
-//! A unique id is hexadecimal, so it starts with a digit as often as not and is outside the
-//! stack-NAME expression: that is what makes it the case the name expression alone gets wrong.
+//! What the expression reads is the characters of the value and their positions, not what the
+//! value was minted as: a unique id is hexadecimal, so one starting with a digit falls outside
+//! the name alternative while one starting with a letter is admitted BY that alternative and
+//! reaches the lookup, where it names no stack. Both sides are rows below.
 //!
-//! The tables span the class rather than one recorded request: the admitted side crosses three
+//! The tables span the class rather than one recorded request: the refused side crosses three
 //! unique ids differing along what the rule generalises over (a live stack's own, that same
 //! value in the other case of hexadecimal, and one nothing ever minted) with every operation
-//! whose identifier member this service checks itself and whose answer for an absent stack is
-//! a refusal. The values that are only NEARLY a unique id — the group count, the group lengths
-//! and the digits being what the form is — are rows of the malformed-identifier table in
-//! `stack_identifier_refusals.rs`, which is the one suite that pins that refusal.
+//! whose identifier member this service checks itself. The values that are only NEARLY a
+//! unique id are rows of the malformed-identifier table in `stack_identifier_refusals.rs`,
+//! which is the one suite that pins the shape of that refusal.
 
 use crate::harness::{call, create_stack, member, router, wait_for_the_transition, xml_text};
 
@@ -32,36 +34,31 @@ const TEMPLATE: &str = r#"{"Resources":{
 const POLICY: &str = r#"{"Statement":[{"Effect":"Allow","Action":"Update:*",
      "Principal":"*","Resource":"*"}]}"#;
 
-/// `Stack with id <identifier> does not exist`, the wording the reads of a stack's own record
-/// and of its resources answer.
-fn with_id(identifier: &str) -> String {
-    format!("Stack with id {identifier} does not exist")
-}
+/// The expression CloudFormation's own input validation states a stack identifier has to
+/// match, quoted in the refusal exactly as the service states it.
+///
+/// Source: the service's own constant (`state::stack_identifier::STACK_IDENTIFIER_PATTERN`),
+/// spelled out here because the sentence IS the requirement — a reworded message must fail
+/// this suite.
+const IDENTIFIER_PATTERN: &str = "[a-zA-Z][-a-zA-Z0-9]*|arn:[-a-zA-Z0-9:/._+]*";
 
-/// `Stack '<identifier>' does not exist`, `DescribeStackResource`'s wording.
-fn quoted(identifier: &str) -> String {
-    format!("Stack '{identifier}' does not exist")
-}
-
-/// `Stack [<identifier>] does not exist`, the wording the read of a stack's event log answers.
-fn bracketed(identifier: &str) -> String {
-    format!("Stack [{identifier}] does not exist")
-}
-
-/// `Stack: <identifier> does not exist`, the wording the stack-policy read and
-/// `CancelUpdateStack` answer.
-fn labelled(identifier: &str) -> String {
-    format!("Stack: {identifier} does not exist")
+/// The refusal a value the expression does not match is answered with, at the member path the
+/// operation states it at.
+fn constraint_refusal(path: &str, value: &str) -> String {
+    format!(
+        "1 validation error detected: Value '{value}' at '{path}' failed to satisfy \
+         constraint: Member must satisfy regular expression pattern: {IDENTIFIER_PATTERN}"
+    )
 }
 
 /// One operation that takes a stack identifier this service checks itself: the members it
-/// needs besides `StackName`, the not-found wording it answers for a stack that is not
-/// addressable, and whether a request naming a LIVE stack is served (a mutation is left out of
-/// that control, since it would move the stack the other rows read).
+/// needs besides `StackName`, the member path its refusal states the identifier at, and
+/// whether a request naming a LIVE stack is served (a mutation is left out of that control,
+/// since it would move the stack the other rows read).
 struct UniqueIdRow {
     action: &'static str,
     extra: &'static [(&'static str, &'static str)],
-    not_found: fn(&str) -> String,
+    path: &'static str,
     serves_a_live_stack: bool,
 }
 
@@ -69,71 +66,77 @@ const ROWS: &[UniqueIdRow] = &[
     UniqueIdRow {
         action: "ListStackResources",
         extra: &[],
-        not_found: with_id,
+        // The one operation whose validator names the member `StackNameOrId`.
+        path: "stackNameOrId",
         serves_a_live_stack: true,
     },
     UniqueIdRow {
         action: "DescribeStackResources",
         extra: &[],
-        not_found: with_id,
+        path: "stackName",
         serves_a_live_stack: true,
     },
     UniqueIdRow {
         action: "DescribeStacks",
         extra: &[],
-        not_found: with_id,
+        path: "stackName",
         serves_a_live_stack: true,
     },
     UniqueIdRow {
         action: "GetTemplate",
         extra: &[],
-        not_found: with_id,
+        path: "stackName",
         serves_a_live_stack: true,
     },
     UniqueIdRow {
         action: "DescribeStackResource",
         extra: &[("LogicalResourceId", "First")],
-        not_found: quoted,
+        path: "stackName",
         serves_a_live_stack: true,
     },
     UniqueIdRow {
         action: "DescribeStackEvents",
         extra: &[],
-        not_found: bracketed,
+        path: "stackName",
         serves_a_live_stack: true,
     },
     UniqueIdRow {
         action: "GetStackPolicy",
         extra: &[],
-        not_found: labelled,
+        path: "stackName",
         serves_a_live_stack: true,
     },
     UniqueIdRow {
         action: "CancelUpdateStack",
         extra: &[],
-        not_found: labelled,
+        path: "stackName",
         serves_a_live_stack: false,
     },
-    // Two operations that WRITE: an identifier that resolves to nothing is refused by them
-    // too, so the rule holds for the mutating reads of a stack as well as the reporting
+    // Two operations that WRITE: an identifier the expression does not admit is refused by
+    // them too, so the rule holds for the mutating reads of a stack as well as the reporting
     // ones. Neither is crossed with the live stack, since a write would move the stack the
     // rows above read.
     UniqueIdRow {
         action: "SetStackPolicy",
         extra: &[("StackPolicyBody", POLICY)],
-        not_found: labelled,
+        path: "stackName",
         serves_a_live_stack: false,
     },
     UniqueIdRow {
         action: "UpdateStack",
         extra: &[("TemplateBody", TEMPLATE)],
-        not_found: bracketed,
+        path: "stackName",
         serves_a_live_stack: false,
     },
 ];
 
-/// A unique id nothing ever minted, in the 8-4-4-4-12 hexadecimal form a stack id ends in.
+/// A unique id nothing ever minted, in the 8-4-4-4-12 hexadecimal form a stack id ends in and
+/// starting with a digit, so the name alternative does not admit it.
 const UNMINTED_UNIQUE_ID: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+
+/// A value in the same form that starts with a LETTER: the name alternative admits it, so it
+/// reaches the lookup and names no stack.
+const LETTER_LED_UNIQUE_ID: &str = "af2504e0-4f89-11d3-9a0c-0305e82c3301";
 
 fn members_of(row: &UniqueIdRow, identifier: &str) -> Vec<(String, String)> {
     let mut members = vec![member("StackName", identifier)];
@@ -151,7 +154,7 @@ fn unique_id_of(stack_id: &str) -> String {
 }
 
 #[tokio::test]
-async fn a_stack_unique_id_reaches_the_lookup_and_is_answered_as_a_missing_stack() {
+async fn a_stack_unique_id_is_refused_as_a_malformed_identifier() {
     let router = router();
     let (status, body) = create_stack(&router, "unique-id-live", TEMPLATE, &[]).await;
     assert_eq!(
@@ -171,15 +174,19 @@ async fn a_stack_unique_id_reaches_the_lookup_and_is_answered_as_a_missing_stack
         "expected the stack to be readable, got {status} {described}"
     );
     let stack_id = xml_text(&described, "StackId").expect("the stack's own id");
-    let unique_id = unique_id_of(&stack_id);
+    let minted = unique_id_of(&stack_id);
+    // The minted id's own leading character is random hexadecimal, so each side of the
+    // boundary is built from it: the same 8-4-4-4-12 value led by a digit (which the name
+    // alternative cannot admit) and led by a letter (which it does).
+    let digit_led = format!("0{}", &minted[1..]);
+    let letter_led = format!("a{}", &minted[1..]);
 
-    // The unique id of the live stack, that same value in the other case of hexadecimal, and
-    // one nothing ever minted: each is an addressable FORM, so each reaches the lookup — and
-    // none of them addresses a stack, since a stack answers to its name and to its whole
-    // stack id.
-    let upper = unique_id.to_ascii_uppercase();
+    // A digit-led unique id of the live stack, that same value in the other case of
+    // hexadecimal, and one nothing ever minted: no stack is addressed by any of them, and the
+    // expression admits none of them, so each is refused as a malformed identifier.
+    let upper = digit_led.to_ascii_uppercase();
     for (case, identifier) in [
-        ("the live stack's own unique id", unique_id.as_str()),
+        ("the live stack's own unique id", digit_led.as_str()),
         ("that unique id in upper-case hexadecimal", upper.as_str()),
         ("a unique id nothing ever minted", UNMINTED_UNIQUE_ID),
     ] {
@@ -195,7 +202,7 @@ async fn a_stack_unique_id_reaches_the_lookup_and_is_answered_as_a_missing_stack
                 Some("ValidationError"),
                 "case {case:?}: expected <Code>ValidationError</Code>, got {body}"
             );
-            let expected = (row.not_found)(identifier);
+            let expected = constraint_refusal(row.path, identifier);
             assert_eq!(
                 xml_text(&body, "Message").as_deref(),
                 Some(expected.as_str()),
@@ -204,7 +211,30 @@ async fn a_stack_unique_id_reaches_the_lookup_and_is_answered_as_a_missing_stack
         }
     }
 
-    // ...and the forms that DO address the stack are still served, so admitting the unique id
+    // The boundary: the same FORM starting with a letter is a value the name alternative
+    // admits, so it reaches the lookup and is answered as the stack it does not name. Both
+    // the live stack's own value led by a letter and one nothing ever minted.
+    for (case, identifier) in [
+        ("the live stack's unique id led by a letter", letter_led.as_str()),
+        ("a letter-led value nothing ever minted", LETTER_LED_UNIQUE_ID),
+    ] {
+        for row in ROWS {
+            let case = format!("{} naming {case}", row.action);
+            let (status, body) = call(&router, row.action, &members_of(row, identifier)).await;
+            assert_eq!(
+                status, 400,
+                "case {case:?}: expected HTTP 400, got {status} {body}"
+            );
+            let message = xml_text(&body, "Message").unwrap_or_default();
+            assert!(
+                message.contains("does not exist") && !message.contains("validation error"),
+                "case {case:?}: expected the stack-not-found refusal rather than a constraint \
+                 clause, got {message:?}"
+            );
+        }
+    }
+
+    // ...and the forms that DO address the stack are still served, so refusing the unique id
     // costs none of them.
     for (case, identifier) in [
         ("its name", "unique-id-live"),

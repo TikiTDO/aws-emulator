@@ -202,7 +202,10 @@ async fn a_transactional_key_is_answered_by_the_side_that_decided_it() {
             json!({"TransactItems": [{"Put": {"TableName": "Keys",
                                               "Item": {"pk": {"N": "1"}, "sk": {"S": "s"}}}}]}),
             Answer::Cancels,
-            KEY_SCHEMA_MISMATCH.to_string(),
+            // Read out of an ITEM, a key attribute of another type is stated as the
+            // mismatch between the declared and the supplied type; the `Key`-shaped
+            // members below name the key as a whole and state the one key-schema sentence.
+            format!("{INVALID_PARAMETER}: Type mismatch for key pk expected: S actual: N"),
         ),
         (
             "a delete key whose sort key has a type the schema does not declare",

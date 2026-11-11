@@ -14,17 +14,18 @@
 //! `FailureReason` that "exists only when the certificate status is FAILED"
 //! (`CertificateDetail$FailureReason` doc) — when the request fails for one of the
 //! modelled request-failure reasons. An unpublished challenge is NOT one of them: the
-//! only names refused up front are those the public DNS delegates to nobody, whose
-//! top-level label is a special-use one, and a name under a DELEGATED top-level label is
-//! a public domain whoever holds it — including the second-level names reserved for
-//! documentation.
+//! only names refused up front are those the registries reserve rather than delegate —
+//! a name at or under a special-use top-level label or a reserved documentation
+//! second-level name — and an ordinary registrable name under a delegated top-level
+//! label is a public domain whoever holds it.
 //!
 //! The tables span what the rule generalises over: the validation method (every modelled
 //! value and none), the number and form of the covered names (apex, `www.`, wildcard,
-//! deep, mixed case), the kind of parent domain (a documentation second-level name, an
-//! ordinary one, one whose SECOND label is a special-use top-level label), and — for the
-//! refusal — every special-use top-level label, each paired with the delegated name that
-//! differs from it only in where that label sits.
+//! deep, mixed case), the kind of parent domain (an ordinary registrable one, one whose
+//! SECOND label is a special-use top-level label, one whose registrable label merely
+//! resembles a reserved one), and — for the refusal — every special-use top-level label
+//! and every reserved documentation second-level name, each paired with the delegated
+//! name that differs from it only in where that label sits.
 //!
 //! Every claim is read back through `DescribeCertificate` and `ListCertificates`, so
 //! nothing here can pass on a response the store does not back. One test waits the
@@ -52,6 +53,15 @@ use crate::certificate_validation_state_machine::{
 /// `.onion` are entries it never cited.
 const UNDELEGATED_TOP_LEVEL_LABELS: &[&str] =
     &["example", "invalid", "localhost", "test", "local", "onion"];
+
+/// The SECOND-level names the registries reserve the same way, registered permanently to
+/// the registry itself rather than delegated to any holder: `example.com`, `example.net`
+/// and `example.org` are "reserved for use in documentation" (RFC 2606 §3, IANA "Example
+/// Domains").
+///
+/// The source is that RFC and the IANA registry, not the issue that prompted this suite:
+/// `example.net` and `example.org` are entries it never cited.
+const UNDELEGATED_SECOND_LEVEL_NAMES: &[&str] = &["example.com", "example.net", "example.org"];
 
 /// One pending row: what it is, the `RequestCertificate` body, and every name the
 /// certificate it creates covers (its `DomainName` first, then its SANs).
@@ -108,74 +118,90 @@ fn pending_cases() -> Vec<PendingCase<'static>> {
         (
             "an apex and its www. SAN, validated by DNS",
             json!({
-                "DomainName": "apex.example.com",
-                "SubjectAlternativeNames": ["www.apex.example.com"],
+                "DomainName": "apex.probe-domain.com",
+                "SubjectAlternativeNames": ["www.apex.probe-domain.com"],
                 "ValidationMethod": "DNS",
             }),
-            &["apex.example.com", "www.apex.example.com"],
+            &["apex.probe-domain.com", "www.apex.probe-domain.com"],
         ),
         (
             "three names in one request, validated by DNS",
             json!({
-                "DomainName": "three.example.com",
-                "SubjectAlternativeNames": ["www.three.example.com", "api.three.example.com"],
+                "DomainName": "three.probe-domain.com",
+                "SubjectAlternativeNames": [
+                    "www.three.probe-domain.com",
+                    "api.three.probe-domain.com",
+                ],
                 "ValidationMethod": "DNS",
             }),
             &[
-                "three.example.com",
-                "www.three.example.com",
-                "api.three.example.com",
+                "three.probe-domain.com",
+                "www.three.probe-domain.com",
+                "api.three.probe-domain.com",
             ],
         ),
         (
             "a wildcard name beside the apex it covers",
             json!({
-                "DomainName": "*.wild.example.net",
-                "SubjectAlternativeNames": ["wild.example.net"],
+                "DomainName": "*.wild.probe-domain.net",
+                "SubjectAlternativeNames": ["wild.probe-domain.net"],
                 "ValidationMethod": "DNS",
             }),
-            &["*.wild.example.net", "wild.example.net"],
+            &["*.wild.probe-domain.net", "wild.probe-domain.net"],
         ),
         (
             "one name validated by EMAIL",
-            json!({ "DomainName": "mail.example.org", "ValidationMethod": "EMAIL" }),
-            &["mail.example.org"],
+            json!({ "DomainName": "mail.probe-domain.org", "ValidationMethod": "EMAIL" }),
+            &["mail.probe-domain.org"],
         ),
         (
             "one name validated by HTTP",
-            json!({ "DomainName": "http.example.com", "ValidationMethod": "HTTP" }),
-            &["http.example.com"],
+            json!({ "DomainName": "http.probe-domain.com", "ValidationMethod": "HTTP" }),
+            &["http.probe-domain.com"],
         ),
         (
             // No method named: ACM validates a public certificate by email unless the
             // request asks for DNS or HTTP validation.
             "a request that named no validation method",
-            json!({ "DomainName": "defaulted.example.com" }),
-            &["defaulted.example.com"],
+            json!({ "DomainName": "defaulted.probe-domain.com" }),
+            &["defaulted.probe-domain.com"],
         ),
         (
-            "a deep name under a documentation domain",
-            json!({ "DomainName": "a.b.c.deep.example.com", "ValidationMethod": "DNS" }),
-            &["a.b.c.deep.example.com"],
+            "a deep name under a delegated domain",
+            json!({ "DomainName": "a.b.c.deep.probe-domain.com", "ValidationMethod": "DNS" }),
+            &["a.b.c.deep.probe-domain.com"],
         ),
         (
             // DNS labels are case-insensitive, so the casing of the request cannot
             // decide whether ACM waits for the challenge.
             "a mixed-case name",
-            json!({ "DomainName": "MiXeD.Example.COM", "ValidationMethod": "DNS" }),
-            &["MiXeD.Example.COM"],
+            json!({ "DomainName": "MiXeD.Probe-Domain.COM", "ValidationMethod": "DNS" }),
+            &["MiXeD.Probe-Domain.COM"],
         ),
         (
             "an ordinary delegated name nobody published a challenge for",
-            json!({ "DomainName": "ordinary.probe-domain.com", "ValidationMethod": "DNS" }),
-            &["ordinary.probe-domain.com"],
+            json!({ "DomainName": "ordinary.probe-domain.io", "ValidationMethod": "DNS" }),
+            &["ordinary.probe-domain.io"],
         ),
         (
             // The special-use labels are refused only as TOP-LEVEL labels, so the same
-            // label one position down is a delegated public domain.
-            "a name whose second label is a special-use top-level one",
-            json!({ "DomainName": "probe.invalid.com", "ValidationMethod": "DNS" }),
-            &["probe.invalid.com"],
+            // label further down a delegated name is part of a public domain.
+            "a name whose inner label is a special-use top-level one",
+            json!({ "DomainName": "probe.invalid.probe-domain.com", "ValidationMethod": "DNS" }),
+            &["probe.invalid.probe-domain.com"],
+        ),
+        (
+            // The reserved documentation names are whole names: a registrable label that
+            // merely CONTAINS one is a different, delegated name.
+            "a registrable label that only resembles a reserved documentation name",
+            json!({ "DomainName": "probe.myexample.com", "ValidationMethod": "DNS" }),
+            &["probe.myexample.com"],
+        ),
+        (
+            // ... and so is the same second-level label under another top-level one.
+            "a documentation label under a top-level label that does not reserve it",
+            json!({ "DomainName": "probe.example.io", "ValidationMethod": "DNS" }),
+            &["probe.example.io"],
         ),
     ]
 }
@@ -260,16 +286,16 @@ async fn an_unobserved_challenge_is_still_pending_past_every_owed_transition() {
         (
             "an apex and its www. SAN, validated by DNS",
             json!({
-                "DomainName": "waited.example.com",
-                "SubjectAlternativeNames": ["www.waited.example.com"],
+                "DomainName": "waited.probe-domain.com",
+                "SubjectAlternativeNames": ["www.waited.probe-domain.com"],
                 "ValidationMethod": "DNS",
             }),
-            &["waited.example.com", "www.waited.example.com"],
+            &["waited.probe-domain.com", "www.waited.probe-domain.com"],
         ),
         (
             "a wildcard name validated by EMAIL",
-            json!({ "DomainName": "*.waited.example.net", "ValidationMethod": "EMAIL" }),
-            &["*.waited.example.net"],
+            json!({ "DomainName": "*.waited.probe-domain.net", "ValidationMethod": "EMAIL" }),
+            &["*.waited.probe-domain.net"],
         ),
         (
             "an ordinary delegated name validated by HTTP",
@@ -295,90 +321,121 @@ async fn an_unobserved_challenge_is_still_pending_past_every_owed_transition() {
     }
 }
 
-/// RULE: the ONLY names refused up front are those the public DNS delegates to nobody —
-/// a name whose TOP-LEVEL label is a special-use one — and such a request settles into
-/// `FAILED` with the `FailureReason` that exists only beside it, on the certificate and
-/// on every covered name. The same label one position down names a delegated domain,
-/// which waits instead.
+/// Assert that `name` is one of the names refused up front: the request still ENTERS
+/// `PENDING_VALIDATION`, owes its outcome within the settle span, and settles into
+/// `FAILED` with the `FailureReason` that exists only beside that status, on the
+/// certificate and on every covered name.
+async fn assert_refused_up_front(name: &str) {
+    let case = format!("the undelegated name {name}");
+    let (router, engine) = router_with_engine();
+    let arn =
+        request_certificate(&router, &json!({ "DomainName": name, "ValidationMethod": "DNS" })).await;
+
+    // Even a refusal is reached through the status a request enters on being
+    // requested: it is the OUTCOME that differs, not the entry state.
+    let detail = describe(&router, &arn).await;
+    assert_awaiting_validation(&case, &detail, &[name]);
+    let due_in = pending_due_in(&engine, &arn)
+        .unwrap_or_else(|| panic!("case {case:?}: the request owed no outcome"));
+    assert!(
+        due_in > Duration::ZERO && due_in <= VALIDATION_SETTLE_DELAY,
+        "case {case:?}: a request ACM refuses up front settles within \
+         {VALIDATION_SETTLE_DELAY:?} and never instantly, got {due_in:?}"
+    );
+
+    make_validation_due_now(&engine);
+    let settled = describe(&router, &arn).await;
+    assert_eq!(
+        settled["Status"].as_str(),
+        Some("FAILED"),
+        "case {case:?}: a name the public DNS delegates to nobody is refused up front, \
+         got {settled}"
+    );
+    assert_eq!(
+        settled["FailureReason"].as_str(),
+        Some("ADDITIONAL_VERIFICATION_REQUIRED"),
+        "case {case:?}: a FAILED certificate reports the reason it failed for, got {settled}"
+    );
+    for entry in validations(&case, &settled) {
+        assert_eq!(
+            entry["ValidationStatus"].as_str(),
+            Some("FAILED"),
+            "case {case:?}: the refused request proved no domain, got {entry}"
+        );
+    }
+}
+
+/// Assert that `name` is a name the public DNS delegates: the only outcome the clock owes
+/// it is the timeout at the end of the documented window, so it waits rather than
+/// failing.
+async fn assert_waits_for_its_window(name: &str) {
+    let case = format!("the delegated name {name}");
+    let (router, engine) = router_with_engine();
+    let arn =
+        request_certificate(&router, &json!({ "DomainName": name, "ValidationMethod": "DNS" })).await;
+    let detail = describe(&router, &arn).await;
+    assert_awaiting_validation(&case, &detail, &[name]);
+    let due_in = pending_due_in(&engine, &arn)
+        .unwrap_or_else(|| panic!("case {case:?}: the request owed no outcome"));
+    assert!(
+        due_in > VALIDATION_SETTLE_DELAY,
+        "case {case:?}: a delegated name waits its validation window out rather than \
+         settling within {VALIDATION_SETTLE_DELAY:?}, got {due_in:?}"
+    );
+    make_validation_due_now(&engine);
+    let elapsed = describe(&router, &arn).await;
+    assert_eq!(
+        elapsed["Status"].as_str(),
+        Some("VALIDATION_TIMED_OUT"),
+        "case {case:?}: a delegated name whose challenge nobody published times out \
+         rather than failing, got {elapsed}"
+    );
+}
+
+/// RULE: the ONLY names refused up front are those the registries reserve rather than
+/// delegate — a name at or under a special-use TOP-LEVEL label or a reserved
+/// documentation SECOND-LEVEL name — and such a request settles into `FAILED` with the
+/// `FailureReason` that exists only beside it, on the certificate and on every covered
+/// name. The same label somewhere a registry does delegate names a public domain, which
+/// waits instead.
 #[tokio::test]
 async fn only_a_name_outside_the_public_dns_is_refused_up_front() {
     for label in UNDELEGATED_TOP_LEVEL_LABELS {
         // Three forms of a name under the label, so the refusal is seen to follow the
         // label and not the shape of the name: a plain one, a wildcard (judged by the
         // domain it covers) and one in mixed case.
-        let undelegated = [
+        for name in [
             format!("probe.{label}"),
             format!("*.wild.{label}"),
             format!("MiXeD.{}", label.to_uppercase()),
-        ];
-        for name in &undelegated {
-            let case = format!("the undelegated name {name}");
-            let (router, engine) = router_with_engine();
-            let arn =
-                request_certificate(&router, &json!({ "DomainName": name, "ValidationMethod": "DNS" }))
-                    .await;
-
-            // Even a refusal is reached through the status a request enters on being
-            // requested: it is the OUTCOME that differs, not the entry state.
-            let detail = describe(&router, &arn).await;
-            assert_awaiting_validation(&case, &detail, &[name.as_str()]);
-            let due_in = pending_due_in(&engine, &arn)
-                .unwrap_or_else(|| panic!("case {case:?}: the request owed no outcome"));
-            assert!(
-                due_in > Duration::ZERO && due_in <= VALIDATION_SETTLE_DELAY,
-                "case {case:?}: a request ACM refuses up front settles within \
-                 {VALIDATION_SETTLE_DELAY:?} and never instantly, got {due_in:?}"
-            );
-
-            make_validation_due_now(&engine);
-            let settled = describe(&router, &arn).await;
-            assert_eq!(
-                settled["Status"].as_str(),
-                Some("FAILED"),
-                "case {case:?}: a name the public DNS delegates to nobody is refused up \
-                 front, got {settled}"
-            );
-            assert_eq!(
-                settled["FailureReason"].as_str(),
-                Some("ADDITIONAL_VERIFICATION_REQUIRED"),
-                "case {case:?}: a FAILED certificate reports the reason it failed for, \
-                 got {settled}"
-            );
-            for entry in validations(&case, &settled) {
-                assert_eq!(
-                    entry["ValidationStatus"].as_str(),
-                    Some("FAILED"),
-                    "case {case:?}: the refused request proved no domain, got {entry}"
-                );
-            }
+        ] {
+            assert_refused_up_front(&name).await;
         }
 
-        // The boundary: the same label as a SECOND-level one sits under a delegated
-        // top-level label, so it is a public domain and the request waits.
-        let delegated = format!("probe.{label}.com");
-        let case = format!("the delegated name {delegated}");
-        let (router, engine) = router_with_engine();
-        let arn = request_certificate(
-            &router,
-            &json!({ "DomainName": &delegated, "ValidationMethod": "DNS" }),
-        )
-        .await;
-        let detail = describe(&router, &arn).await;
-        assert_awaiting_validation(&case, &detail, &[delegated.as_str()]);
-        let due_in = pending_due_in(&engine, &arn)
-            .unwrap_or_else(|| panic!("case {case:?}: the request owed no outcome"));
-        assert!(
-            due_in > VALIDATION_SETTLE_DELAY,
-            "case {case:?}: a delegated name waits its validation window out rather than \
-             settling within {VALIDATION_SETTLE_DELAY:?}, got {due_in:?}"
-        );
-        make_validation_due_now(&engine);
-        let elapsed = describe(&router, &arn).await;
-        assert_eq!(
-            elapsed["Status"].as_str(),
-            Some("VALIDATION_TIMED_OUT"),
-            "case {case:?}: a delegated name whose challenge nobody published times out \
-             rather than failing, got {elapsed}"
-        );
+        // The boundary: the same label INSIDE a name whose registrable label is
+        // delegated is part of a public domain, so the request waits.
+        assert_waits_for_its_window(&format!("probe.{label}.probe-domain.com")).await;
+    }
+
+    for reserved in UNDELEGATED_SECOND_LEVEL_NAMES {
+        // The reserved name itself, a name under it, a wildcard over it and a mixed-case
+        // one: none of them has a holder who could publish the evidence.
+        for name in [
+            (*reserved).to_string(),
+            format!("probe.{reserved}"),
+            format!("*.wild.{reserved}"),
+            format!("MiXeD.{}", reserved.to_uppercase()),
+        ] {
+            assert_refused_up_front(&name).await;
+        }
+
+        // The boundaries: a registrable label that only CONTAINS the reserved one, and
+        // the reserved label under a top-level label that does not reserve it, are both
+        // delegated names.
+        let (label, _) = reserved
+            .split_once('.')
+            .unwrap_or_else(|| panic!("{reserved} is not a second-level name"));
+        assert_waits_for_its_window(&format!("probe.my{label}.com")).await;
+        assert_waits_for_its_window(&format!("probe.{label}.io")).await;
     }
 }
