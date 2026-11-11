@@ -61,10 +61,10 @@ fn rows(answer: &Answer) -> Vec<serde_json::Value> {
 /// The rows of the whole shipped calendar, which is the table every suite below
 /// runs over.
 ///
-/// Read with `includeAll`, because an unfiltered listing publishes only the
-/// versions Amazon EKS still offers — a row whose extended support has ended is
-/// reported only to a caller that asks for it — and these suites are about what
-/// every row of the calendar reports, not about which rows are offered.
+/// Read with `includeAll`, which asks for every available version — the same
+/// whole calendar an unfiltered listing publishes — because these suites are
+/// about what every row of the calendar reports, not about which rows a cluster
+/// can be created on.
 async fn whole_calendar(router: &MultiServiceRouter) -> Vec<serde_json::Value> {
     let answer = describe_versions(router, "includeAll=true").await;
     assert_eq!(
@@ -111,10 +111,14 @@ const MODELLED_CLUSTER_VERSION_STATUS: &[&str] =
 async fn every_row_publishes_the_platform_version_a_new_cluster_runs() {
     let (router, _engine) = emulator();
     let listed = whole_calendar(&router).await;
-    // The rows a cluster can be CREATED on are the ones an unfiltered listing
-    // publishes: a row whose extended support has ended is a version Amazon EKS no
-    // longer offers, so `CreateCluster` refuses it.
-    let offered = rows(&describe_versions(&router, "").await);
+    // The rows a cluster can be CREATED on are the published rows whose support
+    // has not ended: a row whose extended support has ended is a version Amazon
+    // EKS no longer offers, so `CreateCluster` refuses it even though the calendar
+    // still publishes it.
+    let offered: Vec<serde_json::Value> = rows(&describe_versions(&router, "").await)
+        .into_iter()
+        .filter(|row| row["versionStatus"].as_str() != Some("UNSUPPORTED"))
+        .collect();
 
     // Rows: every Kubernetes version the catalog offers, pinned on the create,
     // plus the create that names NO version at all (which lands on the row the

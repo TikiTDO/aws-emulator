@@ -93,8 +93,10 @@ async fn describe_versions(router: &MultiServiceRouter, query: &str) -> Answer {
     call(router, REGION, "GET", &uri, "").await
 }
 
-/// The Kubernetes versions the catalog OFFERS a control plane for — the rows an
-/// unfiltered listing publishes, which is the set a caller picks a `version` from.
+/// The Kubernetes versions the catalog OFFERS a control plane for — the published
+/// rows whose support has not ended, which is the set a caller picks a `version`
+/// from. The listing publishes the whole calendar, out-of-support rows included,
+/// so the `versionStatus` on each row is what narrows it to the offered ones.
 async fn offered_versions(router: &MultiServiceRouter) -> Vec<String> {
     let answer = describe_versions(router, "maxResults=100").await;
     assert_eq!(
@@ -105,6 +107,7 @@ async fn offered_versions(router: &MultiServiceRouter) -> Vec<String> {
         .as_array()
         .unwrap_or_else(|| panic!("setup: expected a clusterVersions list, got {:?}", answer.body))
         .iter()
+        .filter(|row| row["versionStatus"].as_str() != Some("UNSUPPORTED"))
         .filter_map(|row| row["clusterVersion"].as_str().map(str::to_owned))
         .collect::<Vec<String>>();
     assert!(

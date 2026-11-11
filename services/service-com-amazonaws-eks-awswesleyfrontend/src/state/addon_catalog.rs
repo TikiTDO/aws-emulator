@@ -97,7 +97,8 @@ pub(super) struct AddonCatalogSeed {
     /// The OLDEST Kubernetes version in [`VERSION_CALENDAR`] this add-on has a
     /// published build for: the calendar row Amazon EKS first offered it on, or
     /// the oldest cluster version it still supports. `None` for an add-on
-    /// published for every row the calendar carries.
+    /// published for every cluster version Amazon EKS offers add-ons on, whose
+    /// line therefore starts at [`ADDON_CATALOG_FIRST_CLUSTER_VERSION`].
     ///
     /// An add-on offered later than a calendar row has NO build for that row,
     /// which is what makes `AddonVersionInfo$compatibilities` the add-on's own
@@ -162,6 +163,31 @@ pub(super) struct AddonCatalogSeed {
 /// this part of the store.
 pub(super) const ADDON_CATALOG: &[AddonCatalogSeed] = &[
     AddonCatalogSeed {
+        // AccuKnox's KubeArmor: the runtime security enforcement agent, a node
+        // agent a caller subscribes to through AWS Marketplace.
+        addon_name: "accuknox_kubearmor",
+        workload: AddonWorkload::PerNode,
+        required_addons: &[],
+        admission_webhook: false,
+        owner: ADDON_OWNER_MARKETPLACE,
+        publisher: "accuknox",
+        addon_type: "security",
+        default_namespace: "kubearmor",
+        requires_iam_permissions: false,
+        // KubeArmor enforces policy on the cluster it runs on, so it needs no
+        // vendor credentials to start: a Marketplace add-on requires
+        // configuration only when it cannot run without it.
+        required_configuration: &[],
+        pod_identity: &[],
+        configuration_properties: &[
+            ("kubearmorConfig", "object"),
+            ("kubearmorOperator", "object"),
+        ],
+        schema_dialect: ADDON_SCHEMA_DIALECT_DRAFT_06,
+        first_cluster_version: None,
+        releases: &[(1, 4, 3)],
+    },
+    AddonCatalogSeed {
         addon_name: "adot",
         // The OpenTelemetry Operator, whose admission webhooks are served with
         // certificates cert-manager issues.
@@ -186,6 +212,27 @@ pub(super) const ADDON_CATALOG: &[AddonCatalogSeed] = &[
         first_cluster_version: None,
         // The operator's line stays inside its 0.x series.
         releases: &[(0, 102, 1)],
+    },
+    AddonCatalogSeed {
+        // Akuity's agent, which connects the cluster to the Akuity Platform's
+        // managed Argo CD control plane.
+        addon_name: "akuity_akuity-agent",
+        workload: AddonWorkload::Replicated,
+        required_addons: &[],
+        admission_webhook: false,
+        owner: ADDON_OWNER_MARKETPLACE,
+        publisher: "akuity",
+        addon_type: "kubernetes-management",
+        default_namespace: "akuity",
+        requires_iam_permissions: false,
+        // The agent registers with ONE Akuity instance, which it cannot do
+        // without that instance's id and its credentials.
+        required_configuration: &["agentId", "agentToken"],
+        pod_identity: &[],
+        configuration_properties: &[("replicaCount", "integer"), ("server", "string")],
+        schema_dialect: ADDON_SCHEMA_DIALECT_DRAFT_06,
+        first_cluster_version: None,
+        releases: &[(0, 24, 0)],
     },
     AddonCatalogSeed {
         addon_name: "amazon-cloudwatch-observability",
@@ -585,6 +632,27 @@ pub(super) const ADDON_CATALOG: &[AddonCatalogSeed] = &[
         releases: &[(1, 3, 0)],
     },
     AddonCatalogSeed {
+        // eG Innovations' universal agent operator, which installs the eG agents
+        // that report the cluster's workloads to an eG Manager.
+        addon_name: "eg-innovations_eg-universal-agent-operator",
+        workload: AddonWorkload::Replicated,
+        required_addons: &[],
+        admission_webhook: false,
+        owner: ADDON_OWNER_MARKETPLACE,
+        publisher: "eg-innovations",
+        addon_type: "monitoring",
+        default_namespace: "eg-agents",
+        requires_iam_permissions: false,
+        // The agents report to one eG Manager, which they cannot reach without
+        // that manager's address and the licence it authorises them with.
+        required_configuration: &["managerUrl", "licenseKey"],
+        pod_identity: &[],
+        configuration_properties: &[("agent", "object"), ("resources", "object")],
+        schema_dialect: ADDON_SCHEMA_DIALECT_DRAFT_06,
+        first_cluster_version: None,
+        releases: &[(1, 0, 2)],
+    },
+    AddonCatalogSeed {
         addon_name: "eks-node-monitoring-agent",
         workload: AddonWorkload::PerNode,
         required_addons: &[],
@@ -658,6 +726,49 @@ pub(super) const ADDON_CATALOG: &[AddonCatalogSeed] = &[
         schema_dialect: ADDON_SCHEMA_DIALECT_DRAFT_07,
         first_cluster_version: None,
         releases: &[(0, 15, 0)],
+    },
+    AddonCatalogSeed {
+        // HAProxy Technologies' enterprise Kubernetes ingress controller.
+        addon_name: "haproxy-technologies_kubernetes-ingress-ee",
+        workload: AddonWorkload::Replicated,
+        required_addons: &[],
+        admission_webhook: false,
+        owner: ADDON_OWNER_MARKETPLACE,
+        publisher: "haproxy-technologies",
+        addon_type: "networking",
+        default_namespace: "haproxy-controller",
+        requires_iam_permissions: false,
+        required_configuration: &[],
+        pod_identity: &[],
+        configuration_properties: &[
+            ("controller", "object"),
+            ("defaultBackend", "object"),
+            ("replicaCount", "integer"),
+        ],
+        schema_dialect: ADDON_SCHEMA_DIALECT_DRAFT_06,
+        first_cluster_version: None,
+        releases: &[(1, 11, 0)],
+    },
+    AddonCatalogSeed {
+        // Kong's Konnect reference implementation: the Kong gateway, managed from
+        // a Konnect control plane.
+        addon_name: "kong_konnect-ri",
+        workload: AddonWorkload::Replicated,
+        required_addons: &[],
+        admission_webhook: false,
+        owner: ADDON_OWNER_MARKETPLACE,
+        publisher: "kong",
+        addon_type: "networking",
+        default_namespace: "kong",
+        requires_iam_permissions: false,
+        // The gateway is managed from one Konnect control plane, which it cannot
+        // join without that control plane's endpoint and certificate.
+        required_configuration: &["clusterControlPlane", "clusterCertificate"],
+        pod_identity: &[],
+        configuration_properties: &[("gateway", "object"), ("replicaCount", "integer")],
+        schema_dialect: ADDON_SCHEMA_DIALECT_DRAFT_06,
+        first_cluster_version: None,
+        releases: &[(2, 46, 0)],
     },
     AddonCatalogSeed {
         addon_name: "kube-proxy",
@@ -759,6 +870,28 @@ pub(super) const ADDON_CATALOG: &[AddonCatalogSeed] = &[
         releases: &[(0, 7, 0)],
     },
     AddonCatalogSeed {
+        // NetApp's Trident operator, which installs the Trident CSI driver for
+        // NetApp storage.
+        addon_name: "netapp_trident-operator",
+        workload: AddonWorkload::Replicated,
+        required_addons: &[],
+        admission_webhook: false,
+        owner: ADDON_OWNER_MARKETPLACE,
+        publisher: "netapp",
+        addon_type: "storage",
+        default_namespace: "trident",
+        requires_iam_permissions: false,
+        required_configuration: &[],
+        pod_identity: &[],
+        configuration_properties: &[
+            ("cloudProvider", "string"),
+            ("tridentDebug", "boolean"),
+        ],
+        schema_dialect: ADDON_SCHEMA_DIALECT_DRAFT_06,
+        first_cluster_version: None,
+        releases: &[(100, 2, 0)],
+    },
+    AddonCatalogSeed {
         addon_name: "prometheus-node-exporter",
         workload: AddonWorkload::PerNode,
         required_addons: &[],
@@ -783,6 +916,27 @@ pub(super) const ADDON_CATALOG: &[AddonCatalogSeed] = &[
         releases: &[(1, 8, 2)],
     },
     AddonCatalogSeed {
+        // Rafay Systems' operator, which registers the cluster with the Rafay
+        // controller that manages it.
+        addon_name: "rafay-systems_rafay-operator",
+        workload: AddonWorkload::Replicated,
+        required_addons: &[],
+        admission_webhook: false,
+        owner: ADDON_OWNER_MARKETPLACE,
+        publisher: "rafay-systems",
+        addon_type: "kubernetes-management",
+        default_namespace: "rafay-system",
+        requires_iam_permissions: false,
+        // The operator reports to one Rafay controller, which it cannot register
+        // with without that controller's address and the project's credentials.
+        required_configuration: &["controllerAddress", "apiKey"],
+        pod_identity: &[],
+        configuration_properties: &[("clusterName", "string"), ("resources", "object")],
+        schema_dialect: ADDON_SCHEMA_DIALECT_DRAFT_06,
+        first_cluster_version: None,
+        releases: &[(1, 1, 0)],
+    },
+    AddonCatalogSeed {
         addon_name: "snapshot-controller",
         workload: AddonWorkload::Replicated,
         required_addons: &[],
@@ -803,6 +957,164 @@ pub(super) const ADDON_CATALOG: &[AddonCatalogSeed] = &[
         schema_dialect: ADDON_SCHEMA_DIALECT_DRAFT_06,
         first_cluster_version: None,
         releases: &[(8, 1, 0)],
+    },
+    AddonCatalogSeed {
+        // Solo.io's Istio distribution: the service mesh's control plane, built
+        // and supported by Solo.io.
+        addon_name: "solo-io_istio-distro",
+        workload: AddonWorkload::Replicated,
+        required_addons: &[],
+        admission_webhook: true,
+        owner: ADDON_OWNER_MARKETPLACE,
+        publisher: "solo-io",
+        addon_type: "networking",
+        default_namespace: "istio-system",
+        requires_iam_permissions: false,
+        required_configuration: &[],
+        pod_identity: &[],
+        configuration_properties: &[
+            ("admissionWebhooks", "object"),
+            ("global", "object"),
+            ("pilot", "object"),
+        ],
+        schema_dialect: ADDON_SCHEMA_DIALECT_DRAFT_06,
+        first_cluster_version: None,
+        releases: &[(1, 23, 0)],
+    },
+    AddonCatalogSeed {
+        // Splunk's OpenTelemetry collector chart, which ships the cluster's
+        // metrics, traces and logs to a Splunk Observability realm.
+        addon_name: "splunk_splunk-otel-collector-chart",
+        workload: AddonWorkload::Replicated,
+        required_addons: &[],
+        admission_webhook: false,
+        owner: ADDON_OWNER_MARKETPLACE,
+        publisher: "splunk",
+        addon_type: "observability",
+        default_namespace: "splunk-otel-collector",
+        requires_iam_permissions: false,
+        // The collector sends to one Splunk realm, which it cannot reach without
+        // that realm and its access token.
+        required_configuration: &["splunkRealm", "splunkAccessToken"],
+        pod_identity: &[],
+        configuration_properties: &[
+            ("agent", "object"),
+            ("clusterName", "string"),
+            ("gateway", "object"),
+        ],
+        schema_dialect: ADDON_SCHEMA_DIALECT_DRAFT_06,
+        first_cluster_version: None,
+        releases: &[(0, 111, 0)],
+    },
+    AddonCatalogSeed {
+        // StormForge Optimize Live, which right-sizes the cluster's workloads
+        // from the recommendations its own platform computes.
+        addon_name: "stormforge_optimize-live",
+        workload: AddonWorkload::Replicated,
+        required_addons: &[],
+        admission_webhook: false,
+        owner: ADDON_OWNER_MARKETPLACE,
+        publisher: "stormforge",
+        addon_type: "cost-management",
+        default_namespace: "stormforge-system",
+        requires_iam_permissions: false,
+        // The agent reports to one StormForge organisation, which it cannot do
+        // without that organisation's client credentials.
+        required_configuration: &["clusterName", "stormforgeClientId"],
+        pod_identity: &[],
+        configuration_properties: &[("agent", "object"), ("resources", "object")],
+        schema_dialect: ADDON_SCHEMA_DIALECT_DRAFT_06,
+        first_cluster_version: None,
+        releases: &[(2, 11, 0)],
+    },
+    AddonCatalogSeed {
+        // Teleport's Kubernetes agent, which joins the cluster to a Teleport
+        // cluster so access to it goes through Teleport.
+        addon_name: "teleport_teleport-kube-agent",
+        workload: AddonWorkload::Replicated,
+        required_addons: &[],
+        admission_webhook: false,
+        owner: ADDON_OWNER_MARKETPLACE,
+        publisher: "teleport",
+        addon_type: "security",
+        default_namespace: "teleport-agent",
+        requires_iam_permissions: false,
+        // The agent joins ONE Teleport cluster, which it cannot do without that
+        // cluster's proxy address and a join token.
+        required_configuration: &["proxyAddr", "authToken"],
+        pod_identity: &[],
+        configuration_properties: &[("roles", "string"), ("kubeClusterName", "string")],
+        schema_dialect: ADDON_SCHEMA_DIALECT_DRAFT_06,
+        first_cluster_version: None,
+        releases: &[(16, 4, 0)],
+    },
+    AddonCatalogSeed {
+        // Tetrate's Istio distribution, the hardened build of the mesh Tetrate
+        // supports.
+        addon_name: "tetrate-io_istio-distro",
+        workload: AddonWorkload::Replicated,
+        required_addons: &[],
+        admission_webhook: true,
+        owner: ADDON_OWNER_MARKETPLACE,
+        publisher: "tetrate-io",
+        addon_type: "networking",
+        default_namespace: "istio-system",
+        requires_iam_permissions: false,
+        required_configuration: &[],
+        pod_identity: &[],
+        configuration_properties: &[
+            ("admissionWebhooks", "object"),
+            ("global", "object"),
+            ("profile", "string"),
+        ],
+        schema_dialect: ADDON_SCHEMA_DIALECT_DRAFT_06,
+        first_cluster_version: None,
+        releases: &[(1, 23, 0)],
+    },
+    AddonCatalogSeed {
+        // Upbound's Universal Crossplane, which reconciles the cloud
+        // infrastructure the cluster's own resources declare.
+        addon_name: "upbound_universal-crossplane",
+        workload: AddonWorkload::Replicated,
+        required_addons: &[],
+        admission_webhook: false,
+        owner: ADDON_OWNER_MARKETPLACE,
+        publisher: "upbound",
+        addon_type: "infra-management",
+        default_namespace: "upbound-system",
+        requires_iam_permissions: true,
+        required_configuration: &[],
+        // Crossplane's AWS providers call AWS for the infrastructure they
+        // reconcile, so the add-on runs as a service account of its own.
+        pod_identity: &[(
+            "crossplane",
+            &["arn:aws:iam::aws:policy/AdministratorAccess"],
+        )],
+        configuration_properties: &[("provider", "object"), ("replicas", "integer")],
+        schema_dialect: ADDON_SCHEMA_DIALECT_DRAFT_06,
+        first_cluster_version: None,
+        releases: &[(1, 17, 0)],
+    },
+    AddonCatalogSeed {
+        // Upwind Security's operator, which runs its runtime sensors on the
+        // cluster's nodes.
+        addon_name: "upwind-security_upwind-operator",
+        workload: AddonWorkload::Replicated,
+        required_addons: &[],
+        admission_webhook: false,
+        owner: ADDON_OWNER_MARKETPLACE,
+        publisher: "upwind-security",
+        addon_type: "security",
+        default_namespace: "upwind",
+        requires_iam_permissions: false,
+        // The sensors report to one Upwind organisation, which they cannot do
+        // without that organisation's client credentials.
+        required_configuration: &["upwindClientId", "upwindClientSecret"],
+        pod_identity: &[],
+        configuration_properties: &[("sensor", "object"), ("resources", "object")],
+        schema_dialect: ADDON_SCHEMA_DIALECT_DRAFT_06,
+        first_cluster_version: None,
+        releases: &[(1, 3, 0)],
     },
     AddonCatalogSeed {
         addon_name: "vpc-cni",
@@ -1047,10 +1359,21 @@ impl AddonCatalogRecord {
     /// [`Self::configuration_violation`] holds a configuration document to:
     /// ONE source, with no serialise-and-parse round trip between the schema a
     /// client reads and the schema a create is judged by.
+    ///
+    /// The document has the shape Amazon EKS publishes an add-on's schema in: a
+    /// ROOT `$ref` into the document's own `definitions`, whose named definition
+    /// is the add-on's chart values type, with one further definition per
+    /// object-valued key that type carries ([`schema_definition_title`] names
+    /// them). A key whose value is an object therefore reads as
+    /// `{"$ref": "#/definitions/<Type>"}` and the type it names declares that
+    /// object's own keys ([`nested_configuration_properties`]), so a client that
+    /// loads the document into a validator walks the same definitions Amazon EKS
+    /// publishes rather than one flat object.
     pub(super) fn configuration_schema_value(
         &self,
         version: &AddonCatalogVersionRecord,
     ) -> ::serde_json::Value {
+        let mut definitions = ::serde_json::Map::new();
         let mut properties = ::serde_json::Map::new();
         properties.insert(
             "namespace".to_string(),
@@ -1061,10 +1384,12 @@ impl AddonCatalogRecord {
             }),
         );
         if let Some((service_account, _)) = self.pod_identity.first() {
-            properties.insert(
-                "serviceAccount".to_string(),
+            let title = schema_definition_title("serviceAccount");
+            definitions.insert(
+                title.clone(),
                 ::serde_json::json!({
                     "type": "object",
+                    "title": title,
                     "properties": {
                         "name": {
                             "type": "string",
@@ -1075,20 +1400,35 @@ impl AddonCatalogRecord {
                     },
                 }),
             );
+            properties.insert("serviceAccount".to_string(), definition_ref(&title));
         }
         for (property, json_type) in &self.configuration_properties {
-            properties.insert(
-                property.clone(),
-                ::serde_json::json!({ "type": json_type }),
-            );
+            if json_type == "object" {
+                let title = schema_definition_title(property);
+                definitions
+                    .entry(title.clone())
+                    .or_insert_with(|| object_definition(&title, self.nested_properties(property)));
+                properties.insert(property.clone(), definition_ref(&title));
+            } else {
+                properties.insert(
+                    property.clone(),
+                    ::serde_json::json!({ "type": json_type }),
+                );
+            }
         }
         for property in &version.required_configuration {
-            // A required key keeps the type the add-on's own schema gives it —
-            // only the "you cannot install without this" description is added —
-            // so a required property of a type other than string cannot be
-            // mis-declared here and then refused when a caller sets it.
-            let declared = properties
-                .get(property)
+            // A required key keeps what the add-on's own schema declares it as —
+            // only the "you cannot install without this" description is added, and
+            // only to a key declared inline — so a required property of a type
+            // other than string cannot be mis-declared here and then refused when
+            // a caller sets it. A key that reads as a `$ref` is left as the
+            // reference it is: in this dialect the keywords beside a `$ref` are
+            // not read, so a description there would say nothing.
+            let declared = properties.get(property);
+            if declared.is_some_and(|declared| declared.get("$ref").is_some()) {
+                continue;
+            }
+            let json_type = declared
                 .and_then(|declared| declared.get("type"))
                 .and_then(::serde_json::Value::as_str)
                 .unwrap_or("string")
@@ -1096,7 +1436,7 @@ impl AddonCatalogRecord {
             properties.insert(
                 property.clone(),
                 ::serde_json::json!({
-                    "type": declared,
+                    "type": json_type,
                     "description": format!(
                         "Required to install {}: the add-on cannot run without it.",
                         self.addon_name
@@ -1104,15 +1444,32 @@ impl AddonCatalogRecord {
                 }),
             );
         }
+        let root = schema_definition_title(&self.addon_name);
+        definitions.insert(
+            root.clone(),
+            ::serde_json::json!({
+                "type": "object",
+                "title": root,
+                "properties": ::serde_json::Value::Object(properties),
+                "required": version.required_configuration,
+                // A key the schema does not declare is not a key this add-on
+                // takes, so a document that sets one does not satisfy the schema.
+                "additionalProperties": false,
+            }),
+        );
         ::serde_json::json!({
             "$schema": self.schema_dialect,
-            "type": "object",
-            "properties": ::serde_json::Value::Object(properties),
-            "required": version.required_configuration,
-            // A key the schema does not declare is not a key this add-on takes,
-            // so a document that sets one does not satisfy the schema.
-            "additionalProperties": false,
+            "$ref": format!("{JSON_SCHEMA_DEFINITION_PREFIX}{root}"),
+            "definitions": ::serde_json::Value::Object(definitions),
         })
+    }
+
+    /// The keys the object-valued configuration key `property` of THIS add-on
+    /// declares; EMPTY for one whose own keys the catalog does not publish, which
+    /// is published as an object with no declared key rather than as one with
+    /// none allowed. See [`nested_configuration_properties`].
+    fn nested_properties(&self, property: &str) -> &'static [AddonSchemaProperty] {
+        nested_configuration_properties(&self.addon_name, property)
     }
 
     /// How `document` fails the configuration schema this entry publishes for
@@ -1141,20 +1498,114 @@ impl AddonCatalogRecord {
 /// violation below is reported relative to.
 pub(super) const JSON_SCHEMA_ROOT_PATH: &str = "$";
 
+/// The pointer prefix a published add-on schema names its own definitions by:
+/// every `$ref` in one of these documents points into its `definitions` section.
+pub(super) const JSON_SCHEMA_DEFINITION_PREFIX: &str = "#/definitions/";
+
+/// The name a published add-on schema gives the definition of `name`: its
+/// segments capitalised and run together, which is the form the published
+/// documents title their chart types by (`vpc-cni` is published as `VpcCni`,
+/// its `eniConfig` key as `EniConfig`).
+pub(super) fn schema_definition_title(name: &str) -> String {
+    name.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            let mut characters = segment.chars();
+            match characters.next() {
+                None => String::new(),
+                Some(first) => {
+                    first.to_ascii_uppercase().to_string() + characters.as_str()
+                }
+            }
+        })
+        .collect()
+}
+
+/// A reference to the definition titled `title`, as a schema node.
+fn definition_ref(title: &str) -> ::serde_json::Value {
+    ::serde_json::json!({ "$ref": format!("{JSON_SCHEMA_DEFINITION_PREFIX}{title}") })
+}
+
+/// The definition of one object-valued configuration key: the keys it declares,
+/// each with the JSON type that key takes.
+///
+/// A key whose own keys the catalog publishes declares them; one whose keys it
+/// does not declares none, and such an object carries whatever the chart's own
+/// values take — which is why `additionalProperties` is not closed here the way
+/// it is on the root type. Only the ROOT bounds the keys a document may set.
+fn object_definition(
+    title: &str,
+    properties: &'static [AddonSchemaProperty],
+) -> ::serde_json::Value {
+    let declared: ::serde_json::Map<String, ::serde_json::Value> = properties
+        .iter()
+        .map(|(property, json_type)| {
+            ((*property).to_string(), ::serde_json::json!({ "type": json_type }))
+        })
+        .collect();
+    ::serde_json::json!({
+        "type": "object",
+        "title": title,
+        "properties": ::serde_json::Value::Object(declared),
+    })
+}
+
+/// The schema node `schema` stands for: the definition it references, or
+/// `schema` itself when it references nothing.
+///
+/// A `$ref` in one of these documents points into the document's own
+/// `definitions` ([`JSON_SCHEMA_DEFINITION_PREFIX`]), so resolving one is a
+/// lookup in `root`. The hops are BOUNDED, so a document whose definitions
+/// referenced each other could not make this loop.
+fn resolved_schema<'document>(
+    root: &'document ::serde_json::Value,
+    schema: &'document ::serde_json::Value,
+) -> &'document ::serde_json::Value {
+    let mut node = schema;
+    for _ in 0..MAX_CONFIGURATION_DEPTH {
+        let Some(title) = node
+            .get("$ref")
+            .and_then(::serde_json::Value::as_str)
+            .and_then(|pointer| pointer.strip_prefix(JSON_SCHEMA_DEFINITION_PREFIX))
+        else {
+            return node;
+        };
+        match root.get("definitions").and_then(|section| section.get(title)) {
+            // A reference the document does not define constrains nothing, which
+            // is what an unresolvable keyword means: the node is taken as it is.
+            None => return node,
+            Some(definition) => node = definition,
+        }
+    }
+    node
+}
+
 /// How `value` fails `schema`, as a validator states it — the path at fault and
 /// what is wrong with it — or `None` when it satisfies the schema.
 ///
-/// It reads the four keywords the add-on configuration schemas above are written
-/// with: `type`, `properties`, `required` and `additionalProperties`. The first
-/// violation found is the one reported, and the walk is depth-first through the
-/// properties the SCHEMA declares, so its depth is bounded by the nesting of
-/// these schemas rather than by the document a caller sent; the document itself
-/// is parsed by `serde_json`, not here.
+/// It reads the keywords the add-on configuration schemas above are written with:
+/// `$ref` into the document's own `definitions`, `type`, `properties`, `required`
+/// and `additionalProperties`. The first violation found is the one reported, and
+/// the walk is depth-first through the properties the SCHEMA declares, so its
+/// depth is bounded by the nesting of these schemas rather than by the document a
+/// caller sent; the document itself is parsed by `serde_json`, not here.
 pub(super) fn json_schema_violation(
     path: &str,
     schema: &::serde_json::Value,
     value: &::serde_json::Value,
 ) -> Option<String> {
+    json_schema_violation_in(schema, path, schema, value)
+}
+
+/// [`json_schema_violation`] with the whole document in hand, so a `$ref` can be
+/// resolved against the `definitions` it points into at every depth.
+fn json_schema_violation_in(
+    root: &::serde_json::Value,
+    path: &str,
+    schema: &::serde_json::Value,
+    value: &::serde_json::Value,
+) -> Option<String> {
+    let schema = resolved_schema(root, schema);
     if let Some(expected) = schema.get("type").and_then(::serde_json::Value::as_str) {
         if !json_value_has_type(expected, value) {
             return Some(format!(
@@ -1195,7 +1646,7 @@ pub(super) fn json_schema_violation(
     let properties = properties?;
     members.iter().find_map(|(key, member)| {
         let declared = properties.get(key)?;
-        json_schema_violation(&format!("{path}.{key}"), declared, member)
+        json_schema_violation_in(root, &format!("{path}.{key}"), declared, member)
     })
 }
 
@@ -1240,6 +1691,130 @@ pub(super) fn json_type_name(value: &::serde_json::Value) -> &'static str {
     }
 }
 
+/// The keys an object-valued configuration key declares, per add-on: the rows of
+/// the published schemas' own `definitions` sections.
+///
+/// Source: the chart values each add-on's published configuration schema is
+/// generated from — what `aws eks describe-addon-configuration --addon-name
+/// <name> --addon-version <build>` reports under the definition of that key. The
+/// VPC CNI's `env` definition is the add-on's documented environment-variable
+/// surface (the `ENABLE_PREFIX_DELEGATION`, `WARM_*`/`MINIMUM_IP_TARGET`,
+/// SNAT, log-level and network-policy variables the Amazon EKS User Guide sets
+/// through `configurationValues`), its `eniConfig` definition the custom
+/// networking keys, and its `init` and `nodeAgent` definitions the sidecars the
+/// chart runs beside the node agent.
+///
+/// A key missing from this table is published as an object with no declared key,
+/// which is what an object whose own surface the catalog does not publish is: a
+/// document may still set it, and the keys inside it are the chart's own.
+const ADDON_NESTED_CONFIGURATION_PROPERTIES: &[(&str, &str, &[AddonSchemaProperty])] = &[
+    (
+        "vpc-cni",
+        "env",
+        &[
+            ("ADDITIONAL_ENI_TAGS", "string"),
+            ("ANNOTATE_POD_IP", "string"),
+            ("AWS_VPC_CNI_NODE_PORT_SUPPORT", "string"),
+            ("AWS_VPC_ENI_MTU", "string"),
+            ("AWS_VPC_K8S_CNI_CONFIGURE_RPFILTER", "string"),
+            ("AWS_VPC_K8S_CNI_CUSTOM_NETWORK_CFG", "string"),
+            ("AWS_VPC_K8S_CNI_EXCLUDE_SNAT_CIDRS", "string"),
+            ("AWS_VPC_K8S_CNI_EXTERNALSNAT", "string"),
+            ("AWS_VPC_K8S_CNI_LOGLEVEL", "string"),
+            ("AWS_VPC_K8S_CNI_LOG_FILE", "string"),
+            ("AWS_VPC_K8S_CNI_RANDOMIZESNAT", "string"),
+            ("AWS_VPC_K8S_CNI_VETHPREFIX", "string"),
+            ("AWS_VPC_K8S_PLUGIN_LOG_FILE", "string"),
+            ("AWS_VPC_K8S_PLUGIN_LOG_LEVEL", "string"),
+            ("DISABLE_INTROSPECTION", "string"),
+            ("DISABLE_METRICS", "string"),
+            ("DISABLE_NETWORK_RESOURCE_PROVISIONING", "string"),
+            ("ENABLE_POD_ENI", "string"),
+            ("ENABLE_PREFIX_DELEGATION", "string"),
+            ("MINIMUM_IP_TARGET", "string"),
+            ("NETWORK_POLICY_ENFORCING_MODE", "string"),
+            ("POD_SECURITY_GROUP_ENFORCING_MODE", "string"),
+            ("WARM_ENI_TARGET", "string"),
+            ("WARM_IP_TARGET", "string"),
+            ("WARM_PREFIX_TARGET", "string"),
+        ],
+    ),
+    (
+        "vpc-cni",
+        "eniConfig",
+        &[
+            ("create", "boolean"),
+            ("region", "string"),
+            ("subnets", "object"),
+        ],
+    ),
+    (
+        "vpc-cni",
+        "init",
+        &[("env", "object"), ("image", "object"), ("resources", "object")],
+    ),
+    (
+        "vpc-cni",
+        "nodeAgent",
+        &[
+            ("enabled", "boolean"),
+            ("healthzBindAddr", "string"),
+            ("image", "object"),
+            ("metricsBindAddr", "string"),
+            ("resources", "object"),
+        ],
+    ),
+    (
+        "aws-ebs-csi-driver",
+        "controller",
+        &[
+            ("env", "object"),
+            ("logLevel", "integer"),
+            ("replicaCount", "integer"),
+            ("resources", "object"),
+            ("volumeModificationFeature", "object"),
+        ],
+    ),
+    (
+        "aws-ebs-csi-driver",
+        "defaultStorageClass",
+        &[("enabled", "boolean")],
+    ),
+    (
+        "aws-ebs-csi-driver",
+        "node",
+        &[
+            ("enableMetrics", "boolean"),
+            ("logLevel", "integer"),
+            ("resources", "object"),
+            ("volumeAttachLimit", "integer"),
+        ],
+    ),
+    (
+        "coredns",
+        "autoScaling",
+        &[
+            ("enabled", "boolean"),
+            ("maxReplicas", "integer"),
+            ("minReplicas", "integer"),
+        ],
+    ),
+];
+
+/// The keys the object-valued configuration key `property` of the add-on named
+/// `addon_name` declares, or EMPTY for one the catalog publishes no keys for.
+/// See [`ADDON_NESTED_CONFIGURATION_PROPERTIES`].
+pub(super) fn nested_configuration_properties(
+    addon_name: &str,
+    property: &str,
+) -> &'static [AddonSchemaProperty] {
+    ADDON_NESTED_CONFIGURATION_PROPERTIES
+        .iter()
+        .find(|(addon, key, _)| *addon == addon_name && *key == property)
+        .map(|(_, _, properties)| *properties)
+        .unwrap_or_default()
+}
+
 /// The AWS Marketplace listing one Marketplace add-on is subscribed through.
 ///
 /// `MarketplaceInformation` is the listing's `productId` and `productUrl`. This
@@ -1263,15 +1838,17 @@ pub(super) fn marketplace_listing(addon_name: &str) -> MarketplaceInformation {
 
 /// The index of the [`VERSION_CALENDAR`] row an add-on's published history
 /// starts at: the row [`AddonCatalogSeed::first_cluster_version`] names, or the
-/// OLDEST row for an add-on published for every version the calendar carries.
+/// oldest row the published add-on build lines target
+/// ([`ADDON_CATALOG_FIRST_CLUSTER_VERSION`]) for an add-on published for every
+/// cluster version Amazon EKS offers add-ons on.
 ///
 /// A name no calendar row carries is a typo in the seed, which is why it panics
 /// here — at seed time, with the add-on named — rather than quietly publishing
 /// the add-on for every row.
 fn first_published_row(seed: &AddonCatalogSeed) -> usize {
-    let Some(first) = seed.first_cluster_version else {
-        return 0;
-    };
+    let first = seed
+        .first_cluster_version
+        .unwrap_or(ADDON_CATALOG_FIRST_CLUSTER_VERSION);
     VERSION_CALENDAR
         .iter()
         .position(|(cluster_version, _, _, _)| *cluster_version == first)

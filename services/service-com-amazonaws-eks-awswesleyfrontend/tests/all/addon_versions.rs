@@ -33,6 +33,7 @@ use service_com_amazonaws_eks_awswesleyfrontend::state::{
 };
 use smithy_server_runtime::MultiServiceRouter;
 
+use crate::addon_catalog_publication::schema_root;
 use crate::cluster_lifecycle::REGION;
 use crate::wire::{call, emulator, encode_label, error_code, Answer};
 
@@ -123,13 +124,13 @@ pub(crate) fn version_key(version: &str) -> (u32, u32, u32, u32) {
     (major, minor, patch, build)
 }
 
-/// The Kubernetes versions `DescribeClusterVersions` publishes, newest first —
-/// the versions the add-on catalog publishes builds for.
+/// The Kubernetes versions `DescribeClusterVersions` publishes, newest first.
 ///
 /// `include_all` widens the listing to the versions Amazon EKS no longer
-/// supports, which the calendar still publishes: the add-on catalog publishes
-/// builds for every row the calendar carries, while a cluster can only be
-/// created on one still in support.
+/// supports, which the calendar still publishes. The add-on catalog's own window
+/// is NARROWER than the calendar — the oldest rows carry no published add-on
+/// build any more — so which versions have add-ons is read from the add-on
+/// catalog itself rather than assumed from this list.
 async fn calendar_cluster_versions(router: &MultiServiceRouter, include_all: bool) -> Vec<String> {
     let query = if include_all {
         "/cluster-versions?maxResults=100&includeAll=true"
@@ -145,6 +146,25 @@ async fn calendar_cluster_versions(router: &MultiServiceRouter, include_all: boo
         .as_array()
         .unwrap_or_else(|| panic!("expected a clusterVersions list, got {:?}", answer.body))
         .iter()
+        .map(|row| string_member(row, "clusterVersion"))
+        .collect()
+}
+
+/// The Kubernetes versions a cluster can be CREATED on, newest first: the
+/// published rows the clock has not carried past their own end of extended
+/// support. The listing publishes the whole calendar, so the state on each row is
+/// what says which of its versions `CreateCluster` accepts.
+async fn creatable_cluster_versions(router: &MultiServiceRouter) -> Vec<String> {
+    let answer = call(router, REGION, "GET", "/cluster-versions?maxResults=100", "").await;
+    assert_eq!(
+        answer.status, 200,
+        "setup DescribeClusterVersions: expected HTTP 200, got {answer:?}"
+    );
+    answer.body["clusterVersions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected a clusterVersions list, got {:?}", answer.body))
+        .iter()
+        .filter(|row| row["versionStatus"].as_str() != Some("UNSUPPORTED"))
         .map(|row| string_member(row, "clusterVersion"))
         .collect()
 }
@@ -446,6 +466,13 @@ async fn filters_narrow_the_listing() {
         "publisher",
     );
     let published_by_vendor = named_by("publisher", &a_vendor);
+    // An add-on the Marketplace owner filter does NOT keep, so the two-member row
+    // below is satisfied by a different add-on in each member whatever order the
+    // catalog publishes its rows in.
+    let an_eks_managed_addon = aws_owned
+        .first()
+        .cloned()
+        .expect("an Amazon EKS-managed add-on");
 
     let cases: Vec<(&str, String, Vec<String>)> = vec![
         (
@@ -537,7 +564,7 @@ async fn filters_narrow_the_listing() {
         ),
         (
             "two members combine, each satisfied by a different add-on",
-            format!("addonName={first}&owners={ADDON_OWNER_MARKETPLACE}"),
+            format!("addonName={an_eks_managed_addon}&owners={ADDON_OWNER_MARKETPLACE}"),
             Vec::new(),
         ),
     ];
@@ -559,6 +586,17 @@ async fn filters_narrow_the_listing() {
     // `kubernetesVersion` keeps the builds that support that version, and reports
     // each kept build's compatibility for that version alone. Every published
     // Kubernetes version is a row, plus one the calendar does not publish.
+    //
+    // Which versions have builds at all comes from the CATALOG — the cluster
+    // versions its published builds name as compatible — so a calendar row older
+    // than the published add-on build lines is expected to keep nothing rather
+    // than assumed to keep something.
+    let with_builds: std::collections::BTreeSet<String> = catalog
+        .iter()
+        .flat_map(versions_of)
+        .flat_map(|build| compatibilities_of(&build))
+        .map(|compatibility| string_member(&compatibility, "clusterVersion"))
+        .collect();
     let published_versions = calendar_cluster_versions(&router, true).await;
     for cluster_version in &published_versions {
         let answer = describe_addon_versions(
@@ -571,10 +609,19 @@ async fn filters_narrow_the_listing() {
             "case kubernetesVersion {cluster_version}: expected HTTP 200, got {answer:?}"
         );
         let narrowed = addons(&answer);
+        if !with_builds.contains(cluster_version) {
+            assert!(
+                narrowed.is_empty(),
+                "case kubernetesVersion {cluster_version}: no published build names this \
+                 version, so the listing keeps nothing, got {:?}",
+                answer.body["addons"]
+            );
+            continue;
+        }
         assert!(
             !narrowed.is_empty(),
-            "case kubernetesVersion {cluster_version}: a published Kubernetes version has \
-             add-ons, got {:?}",
+            "case kubernetesVersion {cluster_version}: a Kubernetes version the catalog \
+             publishes builds for has add-ons, got {:?}",
             answer.body
         );
         for addon in &narrowed {
@@ -824,20 +871,23 @@ async fn the_configuration_schema_matches_the_catalog_flag() {
                 "case {case}: expected a JSON Schema dialect, got {:?}",
                 schema["$schema"]
             );
+            // The published document is a reference into its own definitions, and
+            // the type it names is the add-on's chart values object.
+            let root = schema_root(&schema);
             assert_eq!(
-                schema["type"].as_str(),
+                root["type"].as_str(),
                 Some("object"),
                 "case {case}: an add-on configuration is an object, got {:?}",
-                schema["type"]
+                root["type"]
             );
             assert_eq!(
-                schema["properties"]["namespace"]["default"].as_str(),
+                root["properties"]["namespace"]["default"].as_str(),
                 addon["defaultNamespace"].as_str(),
                 "case {case}: the schema's namespace default is the add-on's own namespace, \
                  got {:?}",
-                schema["properties"]["namespace"]
+                root["properties"]["namespace"]
             );
-            let required = schema["required"]
+            let required = root["required"]
                 .as_array()
                 .unwrap_or_else(|| panic!("case {case}: expected a required list, got {schema:?}"));
             assert_eq!(
@@ -945,11 +995,11 @@ async fn the_configuration_schema_matches_the_catalog_flag() {
 #[tokio::test]
 async fn a_created_addon_runs_the_catalog_default_version() {
     let router = emulator();
-    let published_versions = calendar_cluster_versions(&router, false).await;
+    let published_versions = creatable_cluster_versions(&router).await;
 
     // The rows differ along the cluster's Kubernetes version — the newest and the
-    // oldest the calendar publishes — and along the add-on, so the default is read
-    // from the catalog rather than from one add-on's version line.
+    // oldest a cluster can be created on — and along the add-on, so the default is
+    // read from the catalog rather than from one add-on's version line.
     let cluster_versions = [
         published_versions
             .first()

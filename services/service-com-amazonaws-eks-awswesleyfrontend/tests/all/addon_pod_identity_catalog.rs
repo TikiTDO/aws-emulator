@@ -31,6 +31,7 @@ use std::collections::BTreeSet;
 
 use smithy_server_runtime::MultiServiceRouter;
 
+use crate::addon_catalog_publication::{resolved, schema_root};
 use crate::addon_versions::{
     addons, describe_addon_configuration, string_member, versions_of, whole_catalog,
 };
@@ -186,11 +187,19 @@ async fn newest_and_oldest_build(router: &MultiServiceRouter, addon_name: &str) 
 
 /// The `serviceAccount.name` default the published configuration schema declares, or
 /// `None` when the schema declares no service account at all.
+///
+/// The document is a `$ref` into its own `definitions`, so both the root type and
+/// the service-account type are read through the references that name them.
 fn schema_service_account_default(body: &serde_json::Value, case: &str) -> Option<String> {
     let schema: serde_json::Value =
         serde_json::from_str(&string_member(body, "configurationSchema"))
             .unwrap_or_else(|error| panic!("case {case}: configurationSchema must be JSON: {error}"));
-    schema["properties"]["serviceAccount"]["properties"]["name"]["default"]
+    let root = schema_root(&schema);
+    let declared = &root["properties"]["serviceAccount"];
+    if declared.is_null() {
+        return None;
+    }
+    resolved(&schema, declared)["properties"]["name"]["default"]
         .as_str()
         .map(str::to_string)
 }

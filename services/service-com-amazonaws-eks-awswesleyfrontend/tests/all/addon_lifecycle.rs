@@ -854,7 +854,10 @@ pub(crate) async fn catalog_default_version(
 }
 
 /// The Kubernetes versions `DescribeClusterVersions` publishes for a cluster to be
-/// created on, newest first.
+/// created on, newest first: the published rows the clock has not carried past
+/// their own end of extended support, which is the set `CreateCluster` accepts —
+/// the listing publishes the whole calendar, out-of-support rows included, and
+/// each row's `versionStatus` is what says which of them a cluster can run.
 pub(crate) async fn published_cluster_versions(router: &MultiServiceRouter) -> Vec<String> {
     let answer = call(router, REGION, "GET", "/cluster-versions?maxResults=100", "").await;
     assert_eq!(
@@ -865,6 +868,7 @@ pub(crate) async fn published_cluster_versions(router: &MultiServiceRouter) -> V
         .as_array()
         .unwrap_or_else(|| panic!("expected a clusterVersions list, got {:?}", answer.body))
         .iter()
+        .filter(|row| row["versionStatus"].as_str() != Some("UNSUPPORTED"))
         .map(|row| {
             row["clusterVersion"]
                 .as_str()

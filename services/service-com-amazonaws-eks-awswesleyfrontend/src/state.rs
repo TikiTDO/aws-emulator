@@ -1687,7 +1687,9 @@ impl IdentityProviderConfigRecord {
 /// policies Amazon EKS publishes for the Amazon Web Services services that
 /// orchestrate workloads ON a cluster — Amazon EMR on EKS (its virtual-cluster
 /// controller and its job runs) and Amazon SageMaker HyperPod (its cluster and
-/// controller access plus its inference, space and space-template components).
+/// controller access, its inference, space and space-template components, the
+/// system namespaces its orchestration owns, its training jobs and the
+/// cluster-wide access a HyperPod user is granted).
 /// The catalogue is what a caller discovers
 /// through `ListAccessPolicies` INSTEAD of hardcoding ARNs, so a policy missing
 /// here is a policy no caller can associate.
@@ -1763,6 +1765,12 @@ pub const ACCESS_POLICY_NAMES: &[&str] = &[
     "AmazonSagemakerHyperpodInferencePolicy",
     "AmazonSagemakerHyperpodSpacePolicy",
     "AmazonSagemakerHyperpodSpaceTemplatePolicy",
+    // The rest of the HyperPod family: the access its operators are granted in the
+    // system namespaces its orchestration owns, the access a training job is
+    // granted, and the cluster-wide access a HyperPod user is granted.
+    "AmazonSagemakerHyperpodSystemNamespacePolicy",
+    "AmazonSagemakerHyperpodTrainingPolicy",
+    "AmazonSagemakerHyperpodUserClusterPolicy",
 ];
 
 /// The prefix every access-policy ARN carries.
@@ -4131,17 +4139,30 @@ pub fn derive_association_external_id(association_arn: &str) -> String {
 /// months, so the calendar keeps carrying versions in standard support as the
 /// clock advances rather than ageing into a table where every row is unsupported.
 ///
-/// The table is the calendar as PUBLISHED, not the whole history of the service:
-/// it carries the versions still in standard or extended support plus the one
-/// most recently retired from support — the version a caller may still be running
-/// and needs the dates for — and a version that dropped off the published
-/// calendar before those is not a version `DescribeClusterVersions` reports.
+/// The table is the WHOLE published calendar, not only the part a new cluster can
+/// be created at: `DescribeClusterVersions` "Lists available Kubernetes versions
+/// for Amazon EKS clusters" and reports each row's lifecycle state on the row
+/// itself (`versionStatus`), so a version whose support has ended is still a row
+/// of the calendar — the version a caller may still be running, or reading the
+/// dates of — reported to a caller that asks for it with `includeAll` or with a
+/// status filter naming the unsupported state. The OLDEST row is the oldest
+/// Kubernetes version this API carries at all, and every minor version released
+/// since has a row: a caller walking the whole catalogue reads one unbroken run
+/// of minor versions, which is what lets it tell a version it has never heard of
+/// from one that has aged out.
 ///
 /// Rows are written here in ascending Kubernetes version order; the calendar is
 /// PUBLISHED newest version first (see [`seed_cluster_versions`]), which is the
 /// order `DescribeClusterVersions` reports and pages them in. The calendar is a
 /// fixed table, so it also bounds this part of the store.
 const VERSION_CALENDAR: &[(&str, &str, &str, &str)] = &[
+    ("1.23", "2022-08-11", "2023-10-11", "2024-10-11"),
+    ("1.24", "2022-11-15", "2024-01-31", "2025-01-31"),
+    ("1.25", "2023-02-22", "2024-05-01", "2025-05-01"),
+    ("1.26", "2023-04-11", "2024-06-11", "2025-06-11"),
+    ("1.27", "2023-05-24", "2024-07-24", "2025-07-24"),
+    ("1.28", "2023-09-26", "2024-11-26", "2025-11-26"),
+    ("1.29", "2024-01-23", "2025-03-23", "2026-03-23"),
     ("1.30", "2024-05-23", "2025-07-23", "2026-07-23"),
     ("1.31", "2024-09-26", "2025-11-26", "2026-11-26"),
     ("1.32", "2025-01-23", "2026-03-23", "2027-03-23"),
@@ -4151,6 +4172,17 @@ const VERSION_CALENDAR: &[(&str, &str, &str, &str)] = &[
     ("1.36", "2026-06-01", "2027-08-01", "2028-08-01"),
     ("1.37", "2026-10-01", "2027-12-01", "2028-12-01"),
 ];
+
+/// The oldest Kubernetes version the published ADD-ON build lines target.
+///
+/// An add-on build is published for the cluster versions Amazon EKS offers it on,
+/// which is not the whole version calendar: the oldest rows the calendar carries
+/// for the sake of a caller still running them have no add-on build published
+/// against them any more. This is where the add-on catalog's own window starts
+/// ([`crate::state::addon_catalog`]'s `first_published_row`), so widening the
+/// version calendar backwards publishes calendar rows without inventing add-on
+/// builds for them.
+pub const ADDON_CATALOG_FIRST_CLUSTER_VERSION: &str = "1.30";
 
 /// The first instant (UTC) of a `YYYY-MM-DD` day in [`VERSION_CALENDAR`].
 ///

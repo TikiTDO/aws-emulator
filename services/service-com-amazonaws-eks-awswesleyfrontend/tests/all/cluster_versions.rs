@@ -339,9 +339,10 @@ async fn support_status_is_derived_from_the_clock() {
         ("2.13", "STANDARD_SUPPORT", "STANDARD_SUPPORT", false),
     ];
 
-    // Every row the calendar holds is read with `includeAll`, because an unfiltered
-    // listing publishes only the versions Amazon EKS still offers (the suite below
-    // pins that); what this case is about is the status each row reports.
+    // Every row the calendar holds is read in one go; `includeAll` asks for the
+    // whole calendar, which is what an unfiltered listing already publishes (the
+    // suite below pins that). What this case is about is the status each row
+    // reports.
     let answer = describe_versions(&router, "includeAll=true").await;
     assert_eq!(
         answer.status, 200,
@@ -391,19 +392,19 @@ async fn filters_narrow_the_listing() {
 
     // (case, query, expected versions in order)
     let cases: Vec<(&str, String, Vec<&str>)> = vec![
-        ("no filter", String::new(), vec!["2.12", "2.11"]),
+        ("no filter", String::new(), vec!["2.12", "2.11", "2.10"]),
         (
             "one named version",
             "clusterVersions=2.11".to_string(),
             vec!["2.11"],
         ),
         (
-            // `clusterVersions` NARROWS the listing; it does not widen it to a
-            // version the service no longer offers, which only `includeAll` or a
-            // status filter naming the unsupported state does.
+            // `clusterVersions` NARROWS the listing to the versions it names,
+            // whatever lifecycle state each of them is in: the calendar publishes
+            // a version past extended support too, with that state on the row.
             "two named versions, one of them past extended support",
             "clusterVersions=2.10&clusterVersions=2.12".to_string(),
-            vec!["2.12"],
+            vec!["2.12", "2.10"],
         ),
         (
             "a version the calendar does not publish",
@@ -418,7 +419,7 @@ async fn filters_narrow_the_listing() {
         (
             "the published cluster type",
             format!("clusterType={CLUSTER_TYPE_EKS}"),
-            vec!["2.12", "2.11"],
+            vec!["2.12", "2.11", "2.10"],
         ),
         (
             "another cluster type",
@@ -429,7 +430,7 @@ async fn filters_narrow_the_listing() {
         (
             "default only, off",
             "defaultOnly=false".to_string(),
-            vec!["2.12", "2.11"],
+            vec!["2.12", "2.11", "2.10"],
         ),
         (
             "versionStatus STANDARD_SUPPORT",
@@ -462,14 +463,14 @@ async fn filters_narrow_the_listing() {
             vec![],
         ),
         (
-            "includeAll widens the listing to the versions EKS no longer offers",
+            "includeAll asks for the whole calendar, which is what is published",
             "includeAll=true".to_string(),
             vec!["2.12", "2.11", "2.10"],
         ),
         (
-            "includeAll=false is the unfiltered listing",
+            "includeAll=false reports the same whole calendar",
             "includeAll=false".to_string(),
-            vec!["2.12", "2.11"],
+            vec!["2.12", "2.11", "2.10"],
         ),
         (
             "includeAll with a status filter still narrows to that status",
@@ -753,25 +754,24 @@ async fn pagination_walks_every_row_once() {
     }
 }
 
-/// A version whose extended support has ENDED is no longer one Amazon EKS offers:
-/// an unfiltered listing reports only the versions still inside standard or
-/// extended support, and every row it does report agrees with its own dates — so a
-/// caller can hand any version it reads straight to `CreateCluster`. The row is
-/// still PUBLISHED: a caller that asks for it, with `includeAll` or with a status
-/// filter naming the unsupported state, gets it.
+/// Every RELEASED row of the calendar is published, whatever lifecycle state the
+/// clock puts it in: a version whose extended support has ended is still a row a
+/// caller reads the dates of, and the state is reported ON the row, in both
+/// modelled spellings. A row whose release date has not arrived is not published
+/// at all, and a status filter narrows the listing to one state.
 #[tokio::test]
-async fn an_unfiltered_listing_offers_only_versions_still_in_support() {
+async fn an_unfiltered_listing_publishes_every_released_version() {
     let (router, engine) = emulator();
     let now = SystemTime::now();
 
     // The rows differ along where the clock sits relative to a row's two
     // end-of-support dates, including BOTH published boundaries (a row whose
     // standard support ends exactly now, and one whose extended support does) and
-    // one day either side of each: the rule is a comparison against those dates,
-    // so the boundary is where it can be wrong.
+    // one day either side of each: the status a row reports is a comparison
+    // against those dates, so the boundary is where it can be wrong.
     //
-    // (version, end of standard support, end of extended support, offered
-    //  unfiltered)
+    // (version, end of standard support, end of extended support, still in
+    //  support)
     let calendar: Vec<(&str, SystemTime, SystemTime, bool)> = vec![
         ("3.9", now - 400 * DAY, now - 300 * DAY, false),
         ("3.10", now - 400 * DAY, now - DAY, false),
@@ -797,9 +797,9 @@ async fn an_unfiltered_listing_offers_only_versions_still_in_support() {
             .collect(),
     );
 
+    // Every released row is published, whatever its state.
     let offered: Vec<String> = calendar
         .iter()
-        .filter(|(_, _, _, offered)| *offered)
         .map(|(version, _, _, _)| (*version).to_string())
         .collect();
 
@@ -822,18 +822,12 @@ async fn an_unfiltered_listing_offers_only_versions_still_in_support() {
                 "case page size {page_size:?}: expected HTTP 200, got {} ({:?})",
                 answer.status, answer.body
             );
-            // Every reported row agrees with its own dates, and none of them is
-            // past its end of extended support.
+            // Every reported row's status agrees with its own dates.
             let clock = now_secs();
             for row in rows(&answer) {
                 let case = row["clusterVersion"].as_str().unwrap_or_default().to_owned();
                 let end_of_standard = epoch_secs(&row["endOfStandardSupportDate"]);
                 let end_of_extended = epoch_secs(&row["endOfExtendedSupportDate"]);
-                assert!(
-                    clock < end_of_extended,
-                    "case {case}: an unfiltered listing must not offer a version past extended \
-                     support, got end of extended support {end_of_extended} at now {clock}"
-                );
                 let (version_status, status) =
                     expected_status(clock, end_of_standard, end_of_extended);
                 assert_eq!(
@@ -862,20 +856,20 @@ async fn an_unfiltered_listing_offers_only_versions_still_in_support() {
         }
         assert_eq!(
             walked, offered,
-            "case page size {page_size:?}: expected only the versions still in support, got \
-             {walked:?}"
+            "case page size {page_size:?}: expected every released version, got {walked:?}"
         );
     }
 
-    // Asked for, every row is reported — the out-of-support ones are hidden from
-    // the default listing, not dropped from the calendar.
+    // Asked for by state, the listing narrows to that state; asked for with
+    // `includeAll`, it reports the whole calendar — which is what it reports
+    // unasked.
     let every_version: Vec<String> = calendar
         .iter()
         .map(|(version, _, _, _)| (*version).to_string())
         .collect();
     let out_of_support: Vec<String> = calendar
         .iter()
-        .filter(|(_, _, _, offered)| !*offered)
+        .filter(|(_, _, _, in_support)| !*in_support)
         .map(|(version, _, _, _)| (*version).to_string())
         .collect();
     for (case, query, expected) in [
@@ -906,24 +900,25 @@ async fn an_unfiltered_listing_offers_only_versions_still_in_support() {
 }
 
 /// The same rule on the calendar AS SHIPPED, walked the way a client discovers
-/// versions: every page of an unfiltered listing offers only versions still inside
-/// standard or extended support, each row agrees with its own dates, and the rows
-/// the support window hides are still reachable with `includeAll`.
+/// versions: every page of an unfiltered listing publishes the released rows
+/// whatever their state, each row's status agrees with its own dates, and
+/// `includeAll` reports that same set rather than a wider one.
 ///
 /// The suites above install a calendar to put the clock in every support class at
 /// once; this one leaves the shipped rows in place, so the table a caller actually
-/// reads is held to the same rule and `includeAll` is shown to change the answer
-/// against it rather than being inert.
+/// reads is held to the same rule — including that the shipped calendar really
+/// does carry rows the clock has carried past their own end of extended support.
 #[tokio::test]
-async fn the_shipped_calendar_hides_out_of_support_versions_until_asked() {
+async fn the_shipped_calendar_is_published_whole_with_each_rows_own_status() {
     let (router, _engine) = emulator();
 
-    // The page size differs per case so the support window is proven to hold for
-    // the listing as a WHOLE: a filter applied per page would let an out-of-support
-    // row through on a later page.
+    // The page size differs per case so the rule is proven to hold for the listing
+    // as a WHOLE: a filter applied per page would otherwise let a page disagree
+    // with the listing.
     for page_size in [None, Some(1), Some(3), Some(100)] {
         let mut walked: Vec<String> = Vec::new();
         let mut defaults: Vec<String> = Vec::new();
+        let mut out_of_support: Vec<String> = Vec::new();
         let mut token: Option<String> = None;
         loop {
             let mut parts: Vec<String> = Vec::new();
@@ -947,11 +942,9 @@ async fn the_shipped_calendar_hides_out_of_support_versions_until_asked() {
                     .to_string();
                 let end_of_standard = epoch_secs(&row["endOfStandardSupportDate"]);
                 let end_of_extended = epoch_secs(&row["endOfExtendedSupportDate"]);
-                assert!(
-                    clock < end_of_extended,
-                    "case {case}: the shipped calendar must not offer a version past extended \
-                     support, got end of extended support {end_of_extended} at now {clock}"
-                );
+                if clock >= end_of_extended {
+                    out_of_support.push(case.clone());
+                }
                 let (version_status, status) =
                     expected_status(clock, end_of_standard, end_of_extended);
                 assert_eq!(
@@ -998,12 +991,20 @@ async fn the_shipped_calendar_hides_out_of_support_versions_until_asked() {
             "case page size {page_size:?}: expected every version once, got {walked:?}"
         );
         // Version discovery is the first call of a provisioning flow, so the
-        // default listing has to keep offering a choice of versions as the clock
+        // listing has to keep publishing a choice of versions as the clock
         // advances, not decay into one row or none.
         assert!(
             walked.len() >= 2,
-            "case page size {page_size:?}: expected at least two versions still in support, got \
+            "case page size {page_size:?}: expected at least two published versions, got \
              {walked:?}"
+        );
+        // And the shipped calendar really does carry a version the clock has
+        // carried past its own end of extended support, so publishing the whole
+        // calendar is a rule with something to prove rather than a vacuous one.
+        assert!(
+            !out_of_support.is_empty(),
+            "case page size {page_size:?}: expected the published calendar to carry a version \
+             past extended support, got {walked:?}"
         );
         assert_eq!(
             defaults,
@@ -1019,33 +1020,45 @@ async fn the_shipped_calendar_hides_out_of_support_versions_until_asked() {
         );
     }
 
-    // `includeAll` is what reaches the rows the support window hides: it is a
-    // superset of the default listing, and every row it adds is one the clock has
-    // carried past its own end of extended support.
+    // `includeAll` asks for every available version, which is what the listing
+    // publishes unasked: the two answers are the same set, in the same order.
     let unfiltered = reported_versions(&describe_versions(&router, "maxResults=100").await);
     let widened = describe_versions(&router, "includeAll=true&maxResults=100").await;
     let every_version = reported_versions(&widened);
-    assert!(
-        unfiltered
-            .iter()
-            .all(|version| every_version.contains(version)),
-        "case includeAll: expected a superset of the default listing {unfiltered:?}, got \
-         {every_version:?}"
+    assert_eq!(
+        every_version, unfiltered,
+        "case includeAll: expected the same whole calendar as the unfiltered listing \
+         {unfiltered:?}, got {every_version:?}"
     );
-    let clock = now_secs();
-    for row in rows(&widened) {
-        let case = row["clusterVersion"]
-            .as_str()
-            .unwrap_or_else(|| panic!("expected a clusterVersion string, got {row:?}"))
-            .to_string();
-        if unfiltered.contains(&case) {
-            continue;
-        }
-        let end_of_extended = epoch_secs(&row["endOfExtendedSupportDate"]);
-        assert!(
-            clock >= end_of_extended,
-            "case {case}: includeAll must add only versions past extended support, got end of \
-             extended support {end_of_extended} at now {clock}"
+    // Narrowing is the caller's to ask for: a status filter reports only the rows
+    // in that state, and the states together are the whole listing.
+    let mut by_status: Vec<String> = Vec::new();
+    for state in ["STANDARD_SUPPORT", "EXTENDED_SUPPORT", "UNSUPPORTED"] {
+        let answer =
+            describe_versions(&router, &format!("versionStatus={state}&maxResults=100")).await;
+        assert_eq!(
+            answer.status, 200,
+            "case versionStatus {state}: expected HTTP 200, got {} ({:?})",
+            answer.status, answer.body
         );
+        for row in rows(&answer) {
+            let case = row["clusterVersion"].as_str().unwrap_or_default().to_owned();
+            assert_eq!(
+                row["versionStatus"].as_str(),
+                Some(state),
+                "case versionStatus {state} / {case}: expected only rows in that state, got \
+                 {:?}",
+                row["versionStatus"]
+            );
+            by_status.push(case);
+        }
     }
+    by_status.sort();
+    let mut published = unfiltered.clone();
+    published.sort();
+    assert_eq!(
+        by_status, published,
+        "case status partition: expected the three states to partition the published calendar \
+         {published:?}, got {by_status:?}"
+    );
 }

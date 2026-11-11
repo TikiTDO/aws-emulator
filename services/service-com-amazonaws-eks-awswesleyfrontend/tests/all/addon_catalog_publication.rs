@@ -186,6 +186,50 @@ pub(crate) async fn configuration_schema(
     })
 }
 
+/// The schema node `node` stands for in `document`: the definition its `$ref`
+/// names, or `node` itself when it names none.
+///
+/// A published add-on schema is a `$ref` into its own `definitions`, so reading
+/// what it declares means following that reference — once at the root, and again
+/// for every key whose value is an object.
+pub(crate) fn resolved<'a>(
+    document: &'a serde_json::Value,
+    node: &'a serde_json::Value,
+) -> &'a serde_json::Value {
+    let Some(title) = node["$ref"]
+        .as_str()
+        .and_then(|pointer| pointer.strip_prefix("#/definitions/"))
+    else {
+        return node;
+    };
+    let definition = &document["definitions"][title];
+    assert!(
+        definition.is_object(),
+        "a $ref must name a definition the document carries, got {node:?} against {:?}",
+        document["definitions"]
+    );
+    definition
+}
+
+/// The type the published document `document` declares its root as: the
+/// definition of the add-on's own chart values type.
+pub(crate) fn schema_root(document: &serde_json::Value) -> &serde_json::Value {
+    resolved(document, document)
+}
+
+/// The JSON Schema `type` the published document declares for the top-level key
+/// `property`, following the key's `$ref` when it has one, or `None` for a key
+/// the document does not declare.
+pub(crate) fn declared_type(document: &serde_json::Value, property: &str) -> Option<String> {
+    let declared = &schema_root(document)["properties"][property];
+    if declared.is_null() {
+        return None;
+    }
+    resolved(document, declared)["type"]
+        .as_str()
+        .map(str::to_owned)
+}
+
 /// The `message` of a refusal, which is what a client reads to see what it did
 /// wrong.
 fn message_of(answer: &Answer) -> String {
@@ -316,17 +360,17 @@ async fn the_configuration_schema_declares_the_addons_own_keys() {
             let schema = configuration_schema(&router, &addon_name, &addon_version).await;
             for (property, json_type) in &record.configuration_properties {
                 assert_eq!(
-                    schema["properties"][property]["type"].as_str(),
+                    declared_type(&schema, property).as_deref(),
                     Some(json_type.as_str()),
                     "case {case}: the schema must declare {property} as {json_type}, got {:?}",
-                    schema["properties"][property]
+                    schema_root(&schema)["properties"][property]
                 );
             }
             assert_eq!(
-                schema["additionalProperties"],
+                schema_root(&schema)["additionalProperties"],
                 serde_json::json!(false),
                 "case {case}: a key the add-on does not take is not allowed, got {:?}",
-                schema["additionalProperties"]
+                schema_root(&schema)["additionalProperties"]
             );
             // No two add-ons are served the same document: the keys of one are
             // not the keys of another.
@@ -360,10 +404,10 @@ async fn the_configuration_schema_declares_the_addons_own_keys() {
         let case = format!("{addon_name}/{addon_version}: {property}");
         let schema = configuration_schema(&router, addon_name, &addon_version).await;
         assert_eq!(
-            schema["properties"][property]["type"].as_str(),
+            declared_type(&schema, property).as_deref(),
             Some(*json_type),
             "case {case}: expected a {json_type} property, got {:?}",
-            schema["properties"][property]
+            schema_root(&schema)["properties"][property]
         );
     }
 }
@@ -584,13 +628,13 @@ async fn the_schema_a_client_reads_is_the_schema_the_install_is_held_to() {
         let addon_name = addon_name.as_str();
         let addon_version = newest_build(&router, addon_name, &kubernetes_version).await;
         let schema = configuration_schema(&router, addon_name, &addon_version).await;
-        let properties = schema["properties"]
+        let properties = schema_root(&schema)["properties"]
             .as_object()
             .unwrap_or_else(|| panic!("case {addon_name}: expected declared properties"))
             .clone();
         let mut document = serde_json::Map::new();
         for (property, declared) in &properties {
-            let value = match declared["type"].as_str() {
+            let value = match resolved(&schema, declared)["type"].as_str() {
                 Some("boolean") => serde_json::json!(true),
                 Some("integer") => serde_json::json!(3),
                 Some("string") => serde_json::json!("declared"),

@@ -179,10 +179,10 @@ impl ComAmazonawsEksAwswesleyfrontendState {
     /// extended support has not ended.
     ///
     /// "A version whose extended support has ended is no longer one Amazon EKS
-    /// offers", which is why `DescribeClusterVersions` reports one only to a
-    /// caller that asks for it (`includeAll`) — and why a new cluster is not
-    /// created at one. One reading of "offered", so the catalog and
-    /// `CreateCluster` cannot disagree about which versions exist.
+    /// offers", so a new cluster is not created at one — while
+    /// `DescribeClusterVersions` still PUBLISHES its row, with the lifecycle state
+    /// on the row. One reading of "offered", so the catalog and `CreateCluster`
+    /// cannot disagree about which versions a cluster can run.
     pub fn offered_cluster_versions(
         &self,
         now: SystemTime,
