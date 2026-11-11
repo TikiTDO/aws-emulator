@@ -87,6 +87,11 @@ mod s3_notification_invokes_its_lambda_target;
 // deployed search domain — which spans S3, Lambda, IAM, STS, Amazon OpenSearch Service and
 #[path = "all/s3_notification_indexes_into_its_opensearch_domain.rs"]
 mod s3_notification_indexes_into_its_opensearch_domain;
+// Declared here, in this same head region, beside the two suites above it shares its wiring
+// with: what a STACK-DEPLOYED bucket notification does — the copy the handler writes back into
+// the bucket the event came from — which spans CloudFormation, S3, Lambda and IAM at once.
+#[path = "all/s3_deployed_notification_copies_within_its_bucket.rs"]
+mod s3_deployed_notification_copies_within_its_bucket;
 #[path = "all/cloudformation_asset_bucket_publishing_role.rs"]
 mod cloudformation_asset_bucket_publishing_role;
 // client SEES of an EventBridge rule's and an SNS subscription's deliveries to their Lambda and
