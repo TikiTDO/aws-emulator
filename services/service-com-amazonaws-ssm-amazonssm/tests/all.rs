@@ -67,6 +67,8 @@ mod parameter_last_modified_user;
 mod parameter_metadata;
 #[path = "all/parameter_not_found_payload.rs"]
 mod parameter_not_found_payload;
+#[path = "all/parameter_read_payload_shape.rs"]
+mod parameter_read_payload_shape;
 #[path = "all/parameter_refusal_messages.rs"]
 mod parameter_refusal_messages;
 #[path = "all/parameter_store.rs"]

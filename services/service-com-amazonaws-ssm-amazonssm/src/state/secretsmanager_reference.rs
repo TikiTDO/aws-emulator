@@ -49,7 +49,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ::service_com_amazonaws_secretsmanager_secretsmanager::state as secrets;
 
-use super::{canonical_name, DEFAULT_DATA_TYPE, TYPE_SECURE_STRING};
+use super::{canonical_name, reported_selector, DEFAULT_DATA_TYPE, TYPE_SECURE_STRING};
 use crate::ops::types::Parameter;
 
 /// The reserved hierarchy itself, canonical (no leading `/`), as a parameter name spells
@@ -59,10 +59,6 @@ pub const REFERENCE_PATH: &str = "aws/reference/secretsmanager";
 /// The Secrets Manager action a caller needs for a read through this path, which is the
 /// action this resolution asks that service's own gate about.
 const SOURCE_ACTION: &str = "GetSecretValue";
-
-/// What separates a parameter name from the selector that chose a version of it: a read of
-/// the reserved path echoes the selector back with it (`Parameter$Selector`).
-const SELECTOR_SEPARATOR: char = ':';
 
 /// The `SecretId` the reserved path `name` references, or `None` when `name` is not a read
 /// of that path. Takes either spelling of the name (with or without its leading `/`).
@@ -273,7 +269,7 @@ fn reported(
         // "Either the version number or the label used to retrieve the parameter value"
         // (`Parameter$Selector`): for a reference that is the suffix the read carried, colon
         // and all, as the service echoes it back.
-        selector: selector.map(|selector| format!("{SELECTOR_SEPARATOR}{selector}")),
+        selector: selector.map(reported_selector),
         source_result: value
             .as_ref()
             .map(|_| source_result(resolved, value.clone(), secret_binary)),

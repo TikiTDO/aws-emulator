@@ -356,30 +356,37 @@ pub const MAX_POLICIES: usize = 10;
 pub const POLICY_STATUS_PENDING: &str = "Pending";
 
 /// The policies a stored `Policies` document carries, as the modelled
-/// `ParameterInlinePolicy` list: one entry per policy in the document, carrying "the
-/// JSON text of the policy" and the type that text declares.
+/// `ParameterPolicyList`: one entry per policy in the document, carrying "the JSON text
+/// of the policy" and the type that text declares.
 ///
-/// `None` for a version that carries no policy document, so a read reports no policy
-/// list rather than an empty one. `PutParameter` refuses anything that is not a JSON
-/// array of policy objects before it is stored, so the arms that give up on a document
-/// here are backstops.
-pub fn inline_policies(policies: Option<&str>) -> Option<Vec<ParameterInlinePolicy>> {
-    let document = policies.filter(|policies| !policies.trim().is_empty())?;
-    let parsed: ::serde_json::Value = ::serde_json::from_str(document).ok()?;
-    let entries = parsed.as_array()?;
-    Some(
-        entries
-            .iter()
-            .map(|entry| ParameterInlinePolicy {
-                policy_text: Some(entry.to_string()),
-                policy_type: entry
-                    .get("Type")
-                    .and_then(::serde_json::Value::as_str)
-                    .map(str::to_string),
-                policy_status: Some(POLICY_STATUS_PENDING.to_string()),
-            })
-            .collect(),
-    )
+/// A version that carries no policy document carries no policies, which is an EMPTY list
+/// rather than a missing member: every parameter has "a list of policies associated with
+/// a parameter" (`ParameterMetadata$Policies`) whether or not anything was attached to
+/// it, so a client enumerating a version's policies reads the list it has instead of
+/// having to tell "none attached" from "not reported". `PutParameter` refuses anything
+/// that is not a JSON array of policy objects before it is stored, so the arms that give
+/// up on a document here are backstops.
+pub fn inline_policies(policies: Option<&str>) -> Vec<ParameterInlinePolicy> {
+    let Some(document) = policies.filter(|policies| !policies.trim().is_empty()) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = ::serde_json::from_str::<::serde_json::Value>(document) else {
+        return Vec::new();
+    };
+    let Some(entries) = parsed.as_array() else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .map(|entry| ParameterInlinePolicy {
+            policy_text: Some(entry.to_string()),
+            policy_type: entry
+                .get("Type")
+                .and_then(::serde_json::Value::as_str)
+                .map(str::to_string),
+            policy_status: Some(POLICY_STATUS_PENDING.to_string()),
+        })
+        .collect()
 }
 
 /// The `DataType` values Parameter Store supports: "The following data type values are
@@ -591,13 +598,17 @@ pub fn allowed_pattern_mismatch_message(pattern: &str) -> String {
     format!("Parameter value, cannot be validated against allowedPattern: {pattern}")
 }
 
-/// The name a refusal quotes a parameter back by.
+/// The one rendering of a parameter name: what the store keeps for a name a request
+/// supplied, and therefore what every read and every refusal reports it by.
 ///
 /// A top-level parameter's name carries no leading separator — that is the whole of its
 /// name, which is why `MyParameter` and `/MyParameter` are the one parameter
 /// ([`canonical_name`]) — while a hierarchical name is its whole path, separator and
 /// all: "For parameters in a hierarchy, you must include a leading forward slash
 /// character (/)" (`PutParameter`'s `Name` doc), so the separator is part of that name.
+/// The parameter's ARN carries the same rendering after its `parameter/` prefix
+/// ([`parameter_arn`]), so a client that round-trips a reported `Name` into another call
+/// addresses the parameter it read.
 pub fn reported_name(name: &str) -> &str {
     let path = canonical_name(name);
     if path.contains('/') {
@@ -605,6 +616,22 @@ pub fn reported_name(name: &str) -> &str {
     } else {
         path
     }
+}
+
+/// The separator a `Name` carries between a parameter's name and the version or label a
+/// read selects: "Specify selectors by using one of the following formats:
+/// parameter_name:version parameter_name:label" (`Parameter$Selector`).
+pub const SELECTOR_SEPARATOR: char = ':';
+
+/// The selector a read echoes back, as `Parameter$Selector` renders it.
+///
+/// The member is "either the version number or the label used to retrieve the parameter
+/// value" in the `parameter_name:version` / `parameter_name:label` forms its doc names,
+/// so the separator is part of what is echoed: a client that rebuilds the reference it
+/// read by appending the reported selector to the reported name gets a `Name` that
+/// resolves to the very version it was served.
+pub fn reported_selector(selector: &str) -> String {
+    format!("{SELECTOR_SEPARATOR}{selector}")
 }
 
 /// What a read whose `name:version` selector names a version the parameter does not
@@ -771,7 +798,9 @@ impl ParameterVersionRecord {
             r#type: Some(self.type_.clone()),
             value: Some(self.value.clone()),
             version: self.version,
-            selector: selector.map(str::to_string),
+            // The selector is echoed in the documented `parameter_name:version` /
+            // `parameter_name:label` form, separator and all ([`reported_selector`]).
+            selector: selector.map(reported_selector),
             // `SourceResult` is "the raw result or response from the source" for a
             // parameter that references another Amazon Web Services service. Nothing
             // in this store references one, so there is no source result to report.
@@ -804,7 +833,10 @@ impl ParameterVersionRecord {
             allowed_pattern: self.allowed_pattern.clone(),
             version: self.version,
             tier: Some(self.tier.clone()),
-            policies: inline_policies(self.policies.as_deref()),
+            // "A list of policies associated with a parameter": the list the version
+            // holds, empty when no policy document was stored with it
+            // ([`inline_policies`]).
+            policies: Some(inline_policies(self.policies.as_deref())),
             data_type: Some(self.data_type.clone()),
         }
     }
@@ -833,12 +865,15 @@ impl ParameterVersionRecord {
             value: Some(self.value.clone()),
             allowed_pattern: self.allowed_pattern.clone(),
             version: self.version,
-            // "Labels assigned to the parameter version", whose modelled list length is
-            // 1..10: a version carrying none reports no list rather than an empty one.
-            labels: Some(self.labels.iter().cloned().collect::<Vec<String>>())
-                .filter(|labels| !labels.is_empty()),
+            // "Labels assigned to the parameter version": the labels pointing at THIS
+            // version, which is an empty list for a version no label points at — a
+            // version always has a label set, so a client enumerating it before a label
+            // or policy edit never has to tell "none assigned" from "not reported".
+            labels: Some(self.labels.iter().cloned().collect::<Vec<String>>()),
             tier: Some(self.tier.clone()),
-            policies: inline_policies(self.policies.as_deref()),
+            // As in [`Self::to_parameter_metadata`]: the policies the version holds,
+            // empty when it was stored with no policy document.
+            policies: Some(inline_policies(self.policies.as_deref())),
             data_type: Some(self.data_type.clone()),
         }
     }
@@ -866,7 +901,9 @@ impl ParameterVersionRecord {
 /// the store still retains.
 #[derive(Debug, Clone)]
 pub struct ParameterRecord {
-    /// The name as the create supplied it (trimmed), which is what a read reports.
+    /// The name the create supplied, trimmed and rendered the one way the service
+    /// renders a parameter name ([`reported_name`]), which is what every read reports
+    /// and what this record's ARN carries.
     pub name: String,
     /// The Region the parameter was created in; part of its store key and of its ARN.
     pub region: String,

@@ -154,6 +154,10 @@ async fn a_label_attaches_to_the_version_its_request_names() {
         let expected_value = VALUES[(row.expected_version - 1) as usize];
         for label in [row.label.to_string(), long_label.clone()] {
             let selected = format!("{}:{}", row.addressed, label);
+            // The read echoes the selector it resolved by in the documented
+            // `parameter_name:label` form, separator and all
+            // (`smithy_query(query="doc", shape="Parameter", member="Selector")`).
+            let echoed = format!(":{label}");
             let (status, read) = call(&router, "GetParameter", &json!({ "Name": selected })).await;
             assert_eq!(
                 status, 200,
@@ -169,7 +173,7 @@ async fn a_label_attaches_to_the_version_its_request_names() {
                 (
                     Some(expected_value),
                     Some(row.expected_version),
-                    Some(label.as_str()),
+                    Some(echoed.as_str()),
                 ),
                 "case {case:?}: expected the label to resolve to version {} ({expected_value:?}), \
                  got {read}",

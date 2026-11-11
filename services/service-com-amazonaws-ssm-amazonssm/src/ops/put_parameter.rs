@@ -855,7 +855,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 }
             }
             None => store.insert_parameter(crate::state::ParameterRecord {
-                name: name.to_string(),
+                // The name is rendered the one way the service renders a parameter name
+                // before it is persisted ([`crate::state::reported_name`]), so every read
+                // of this parameter reports the name it is addressed and ARN'd by rather
+                // than the spelling one create happened to use.
+                name: crate::state::reported_name(name).to_string(),
                 region,
                 tags: crate::state::to_btree_map(input.tags),
                 versions: vec![stored_version],

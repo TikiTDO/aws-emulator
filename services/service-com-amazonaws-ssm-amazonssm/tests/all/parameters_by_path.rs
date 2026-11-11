@@ -269,7 +269,10 @@ async fn a_path_read_reports_the_parameters_under_that_level() {
             "the root's own level, however a top-level name is spelled",
             "/",
             false,
-            vec!["/RootLevel", "TopLevel"],
+            // Both top-level parameters are reported without a leading separator,
+            // whichever spelling their put used: the separator is not part of a
+            // top-level name.
+            vec!["RootLevel", "TopLevel"],
         ),
         (
             "every parameter under the root",
@@ -283,7 +286,7 @@ async fn a_path_read_reports_the_parameters_under_that_level() {
                 "/Dev/secret",
                 "/DevOps/tool",
                 "/Prod/DBServer/db-url",
-                "/RootLevel",
+                "RootLevel",
                 "TopLevel",
             ],
         ),

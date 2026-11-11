@@ -459,10 +459,10 @@ async fn a_selector_chooses_the_version_a_batch_read_reports() {
     assert_eq!(
         versions,
         vec![
-            (json!(1), json!("1")),
-            (json!(2), json!("2")),
+            (json!(1), json!(":1")),
+            (json!(2), json!(":2")),
             (json!(3), Value::Null),
-            (json!(3), json!("3")),
+            (json!(3), json!(":3")),
         ],
         "case every selector form: one entry per resolved selector, ordered by the version it \
          resolved to, got {response}"

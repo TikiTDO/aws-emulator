@@ -487,8 +487,9 @@ async fn overwriting_appends_a_version_each_selector_resolves() {
         );
         assert_eq!(
             selected["Selector"],
-            json!(version.to_string()),
-            "case {case}: the read reports the selector it resolved, got {selected}"
+            json!(format!(":{version}")),
+            "case {case}: the read echoes the selector it resolved, separator and all, \
+             got {selected}"
         );
     }
 

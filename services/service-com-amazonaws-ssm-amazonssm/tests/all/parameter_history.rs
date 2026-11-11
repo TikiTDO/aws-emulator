@@ -170,6 +170,20 @@ async fn seed_versions(
     seed_versions_in_region(router, REGION, name, type_, values).await
 }
 
+/// The `Name` a read reports for the parameter whose put named `name`: a top-level
+/// parameter's name carries no leading separator, while a hierarchical name is its whole
+/// path (`PutParameterRequest$Name`: "For parameters in a hierarchy, you must include a
+/// leading forward slash character (/)"), which is the rendering the parameter's ARN
+/// carries too.
+fn reported_name(name: &str) -> &str {
+    let canonical = name.strip_prefix('/').unwrap_or(name);
+    if canonical.contains('/') {
+        name
+    } else {
+        canonical
+    }
+}
+
 /// `GetParameterHistory` signed for `region`.
 async fn history_in_region(
     router: &MultiServiceRouter,
@@ -288,8 +302,8 @@ async fn a_history_read_reports_every_version_a_put_created_oldest_first() {
         for entry in entries(case, &response) {
             assert_eq!(
                 entry["Name"].as_str(),
-                Some(*name),
-                "case {case}: every entry names the parameter, got {entry}"
+                Some(reported_name(name)),
+                "case {case}: every entry names the parameter as a read reports it, got {entry}"
             );
             assert_eq!(
                 entry["Type"].as_str(),
@@ -313,11 +327,13 @@ async fn a_history_read_reports_every_version_a_put_created_oldest_first() {
                  {modified} after {last_modified} in {entry}"
             );
             last_modified = modified;
-            // A version nothing labelled reports no label list, and nothing here
-            // invents a user for a change no identity was recorded for.
-            assert!(
-                entry.get("Labels").is_none(),
-                "case {case}: a version nobody labelled reports no Labels, got {entry}"
+            // A version nothing labelled carries an empty label list rather than none:
+            // the member is the version's label set, which it always has.
+            assert_eq!(
+                entry["Labels"].as_array().map(Vec::len),
+                Some(0),
+                "case {case}: a version nobody labelled reports an empty Labels list, got \
+                 {entry}"
             );
         }
 
