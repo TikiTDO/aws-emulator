@@ -3,7 +3,9 @@
 //! @op CreateForm
 //! Mints a form: the record is persisted in [`crate::state`] and every member of the
 //! returned `Form` is computed from it. A repeated call carrying the same `clientToken`
-//! answers with the form that token already created.
+//! answers with the form that token already created. A payload whose `sectionalElements`
+//! carry a `type`, `level` or `orientation` outside the values the model documents for
+//! them is refused with the modelled `InvalidParameterException` (400) and stores nothing.
 //!
 //! ## Shape of an operation
 //!
@@ -156,6 +158,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let data = input.form_to_create;
+
+        // `SectionalElement$type`, `$level` and `$orientation` each target a plain
+        // `String`/`Integer` while the model spells out the values they admit, so
+        // the validating walk cannot refuse one outside them and this handler
+        // does: the documented set is `crate::state::SECTIONAL_ELEMENT_TYPES` and
+        // the two beside it, and `InvalidParameterException` is the modelled
+        // refusal for a value a member does not admit. The same check runs on
+        // `UpdateForm`, the service's other form write path.
+        if let Some(refusal) =
+            crate::state::invalid_sectional_element_value("formToCreate", &data.sectional_elements)
+        {
+            return Err(CreateFormErrorModeled::InvalidParameterException(refusal).into());
+        }
+
         let key = (input.app_id.clone(), input.environment_name.clone());
         let mut store = state.lock();
 

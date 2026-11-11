@@ -56,6 +56,9 @@ mod form_lifecycle;
 #[path = "all/form_list.rs"]
 mod form_list;
 
+#[path = "all/form_sectional_element_values.rs"]
+mod form_sectional_element_values;
+
 #[path = "all/form_update.rs"]
 mod form_update;
 

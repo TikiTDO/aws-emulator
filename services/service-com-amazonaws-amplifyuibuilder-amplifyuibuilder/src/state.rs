@@ -192,6 +192,33 @@ pub const THEME_QUOTA: usize = 1_000;
 /// any of them is refused rather than stored.
 pub const RESERVED_PROPERTY_NAME: &str = "tags";
 
+/// The values `SectionalElement$type` admits, in the order the model lists them
+/// ("The type of sectional element. Valid values are `Heading`, `Text`, and
+/// `Divider`", `smithy_query(query="shape",shape="SectionalElement")`).
+///
+/// The member targets a plain `String` rather than an enum, so the valid set
+/// cannot be read off the shape and the framework's validating walk cannot refuse
+/// a value outside it — exactly the situation [`RESERVED_PROPERTY_NAME`] and
+/// [`METADATA_FEATURES`] are held here for. A form write naming anything else is
+/// refused rather than stored.
+pub const SECTIONAL_ELEMENT_TYPES: [&str; 3] = ["Heading", "Text", "Divider"];
+
+/// The values `SectionalElement$orientation` admits, from the same shape
+/// ("Specifies the orientation for a `Divider` sectional element. Valid values are
+/// `horizontal` or `vertical`"). A plain `String` in the model, so it is checked
+/// here for the reason [`SECTIONAL_ELEMENT_TYPES`] is.
+pub const SECTIONAL_ELEMENT_ORIENTATIONS: [&str; 2] = ["horizontal", "vertical"];
+
+/// The smallest value `SectionalElement$level` admits ("Specifies the size of the
+/// font for a `Heading` sectional element. Valid values are `1 | 2 | 3 | 4 | 5 |
+/// 6`"). A plain `Integer` in the model, carrying neither `@range` nor an enum, so
+/// it is checked here for the reason [`SECTIONAL_ELEMENT_TYPES`] is.
+pub const SECTIONAL_ELEMENT_LEVEL_MIN: i32 = 1;
+
+/// The largest value `SectionalElement$level` admits. See
+/// [`SECTIONAL_ELEMENT_LEVEL_MIN`].
+pub const SECTIONAL_ELEMENT_LEVEL_MAX: i32 = 6;
+
 /// The `CodegenJobStatus` values the model declares, so no handler spells one as
 /// a bare literal. The full set is `ops::types::CODEGEN_JOB_STATUS_VALUES`.
 pub const CODEGEN_JOB_IN_PROGRESS: &str = "in_progress";
@@ -1541,6 +1568,79 @@ pub fn reserved_name_in_variants(variants: &[ComponentVariant]) -> Option<String
         ]
         .into_iter()
         .find_map(|(member, carries)| carries.then(|| format!("variants[{index}].{member}")))
+    })
+}
+
+/// The `InvalidParameterException` payload a write answers for `path` carrying a
+/// value outside the set the model documents for that member.
+///
+/// ONE message form for the class, so every member whose valid values the model
+/// spells out in prose is refused the same way: what was supplied, where, and
+/// what would have been accepted — the caller has to fix the request from this
+/// text alone.
+fn value_not_valid(path: &str, value: &str, valid: &[String]) -> InvalidParameterException {
+    InvalidParameterException {
+        message: Some(format!(
+            "Invalid value {value} for {path}; valid values are {}",
+            valid.join(", ")
+        )),
+    }
+}
+
+/// The refusal a form write answers for a sectional element whose `type`, `level`
+/// or `orientation` lies outside the values the model documents for it, or `None`
+/// when every element of `elements` is within them.
+///
+/// The three members target plain `String`/`Integer` shapes, so the valid sets
+/// live in [`SECTIONAL_ELEMENT_TYPES`], [`SECTIONAL_ELEMENT_ORIENTATIONS`] and
+/// [`SECTIONAL_ELEMENT_LEVEL_MIN`]..=[`SECTIONAL_ELEMENT_LEVEL_MAX`] rather than
+/// in the shape, and the check is shared by every form write path
+/// (`CreateForm`, `UpdateForm`) the way `carries_reserved_name` is shared by the
+/// component ones. `payload_member` is the input member holding the map
+/// (`formToCreate`, `updatedForm`), so the refusal names the member the caller
+/// wrote.
+///
+/// A map has no order, so the elements are examined by key in sorted order and
+/// the members of one element in the order the shape declares them: the same
+/// payload is always refused for the same value.
+pub fn invalid_sectional_element_value(
+    payload_member: &str,
+    elements: &HashMap<String, SectionalElement>,
+) -> Option<InvalidParameterException> {
+    let valid_levels = SECTIONAL_ELEMENT_LEVEL_MIN..=SECTIONAL_ELEMENT_LEVEL_MAX;
+    let levels: Vec<String> = valid_levels.clone().map(|level| level.to_string()).collect();
+    let types: Vec<String> = SECTIONAL_ELEMENT_TYPES
+        .iter()
+        .map(|value| value.to_string())
+        .collect();
+    let orientations: Vec<String> = SECTIONAL_ELEMENT_ORIENTATIONS
+        .iter()
+        .map(|value| value.to_string())
+        .collect();
+
+    let mut keys: Vec<&str> = elements.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    keys.into_iter().find_map(|key| {
+        let element = &elements[key];
+        let path = |member: &str| format!("{payload_member}.sectionalElements.{key}.{member}");
+        if !SECTIONAL_ELEMENT_TYPES.contains(&element.r#type.as_str()) {
+            return Some(value_not_valid(&path("type"), &element.r#type, &types));
+        }
+        if let Some(level) = element.level.filter(|level| !valid_levels.contains(level)) {
+            return Some(value_not_valid(&path("level"), &level.to_string(), &levels));
+        }
+        if let Some(orientation) = element
+            .orientation
+            .as_deref()
+            .filter(|orientation| !SECTIONAL_ELEMENT_ORIENTATIONS.contains(orientation))
+        {
+            return Some(value_not_valid(
+                &path("orientation"),
+                orientation,
+                &orientations,
+            ));
+        }
+        None
     })
 }
 

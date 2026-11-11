@@ -7,7 +7,8 @@
 //! so a later `GetForm` reports exactly what this call left behind. An id that names no
 //! form anywhere is refused with the modelled `ResourceNotFoundException` (404) and an
 //! id a DIFFERENT app environment owns with the modelled `InvalidParameterException`
-//! (400).
+//! (400), as is a patch whose `sectionalElements` carry a `type`, `level` or
+//! `orientation` outside the values the model documents for them.
 //!
 //! ## Shape of an operation
 //!
@@ -164,6 +165,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let patch = input.updated_form;
+
+        // The same documented-value-set rule `CreateForm` enforces, over the one
+        // map an update can replace: `SectionalElement$type`, `$level` and
+        // `$orientation` target plain `String`/`Integer` shapes while the model
+        // spells out the values they admit, so a patch carrying anything else is
+        // refused with the modelled `InvalidParameterException` rather than
+        // merged. Checked before the target is resolved, exactly as
+        // `UpdateComponent` checks its payload rule first.
+        if let Some(refusal) = patch.sectional_elements.as_ref().and_then(|elements| {
+            crate::state::invalid_sectional_element_value("updatedForm", elements)
+        }) {
+            return Err(UpdateFormErrorModeled::InvalidParameterException(refusal).into());
+        }
+
         let mut store = state.lock();
 
         // The target is resolved before anything is merged, and the two ways it
