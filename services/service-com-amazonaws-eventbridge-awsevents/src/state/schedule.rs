@@ -272,6 +272,17 @@ impl Schedule {
     }
 }
 
+/// Whether `expression` states a schedule this service fires a rule on.
+///
+/// The one reading of a `ScheduleExpression`'s grammar: `PutRule` refuses an expression
+/// this answers `false` for ([`super::request_validation::schedule_expression_violation`]),
+/// so a stored rule's expression is always one [`Schedule::parse`] reads, and the clock
+/// never has to guess a cadence for a rule that was admitted on looser terms than it
+/// fires on.
+pub fn states_a_schedule(expression: &str) -> bool {
+    Schedule::parse(expression).is_some()
+}
+
 /// The period a `rate(...)` body states, or `None` when it states none.
 ///
 /// "rate(value unit) […] value: a positive number. unit: the unit of time — minute, minutes,
@@ -307,20 +318,33 @@ fn rate(body: &str) -> Option<Duration> {
 /// minute-resolution expression, which the `cron` crate reads in its seven-field form
 /// (seconds first), so a literal `0` seconds field is prepended. A `?` ("no specific value")
 /// in the day-of-month or day-of-week field is the same statement as `*` in the grammar that
-/// crate parses.
+/// crate parses, and ONE of those two fields has to carry it: the two name the same days from
+/// different sides, so an expression specifying both states no single cadence.
 fn cron(body: &str) -> Option<::cron::Schedule> {
     /// The fields the service documents, and so the count a body must carry.
     const CRON_FIELDS: usize = 6;
     /// The indexes of the day-of-month and day-of-week fields, the two `?` is a statement in.
     const NO_SPECIFIC_VALUE_FIELDS: [usize; 2] = [2, 4];
+    /// The field value stating "no specific value", which one of those two must carry.
+    const NO_SPECIFIC_VALUE: &str = "?";
 
     let fields: Vec<&str> = body.split_whitespace().collect();
     if fields.len() != CRON_FIELDS {
         return None;
     }
+    // "You can't specify the Day-of-month and Day-of-week fields in the same cron
+    // expression. If you specify a value (or a *) in one of the fields, you must use a ? in
+    // the other" (the schedule-expression reference of this service): an expression that
+    // specifies both names two cadences, so it states none.
+    if NO_SPECIFIC_VALUE_FIELDS
+        .iter()
+        .all(|index| fields.get(*index) != Some(&NO_SPECIFIC_VALUE))
+    {
+        return None;
+    }
     let normalised: Vec<&str> = ::std::iter::once("0")
         .chain(fields.iter().enumerate().map(|(index, field)| {
-            if *field == "?" && NO_SPECIFIC_VALUE_FIELDS.contains(&index) {
+            if *field == NO_SPECIFIC_VALUE && NO_SPECIFIC_VALUE_FIELDS.contains(&index) {
                 "*"
             } else {
                 *field
@@ -577,15 +601,24 @@ mod tests {
     }
 
     /// A six-field cron expression names its own instants, including with the `?` the service
-    /// documents for "no specific value".
+    /// documents for "no specific value" — and states none when a field is missing, when a
+    /// field carries a value nothing reads, or when the day-of-month and day-of-week fields
+    /// are both specified.
     #[test]
     fn a_cron_expression_names_the_instants_it_states() {
         let cases: &[(&str, &str, bool)] = &[
             ("every day at 20:00", "cron(0 20 * * ? *)", true),
+            ("a field with a leading zero", "cron(05 23 27 * ? *)", true),
             ("the first of every month", "cron(0 8 1 * ? *)", true),
             ("every weekday", "cron(0 18 ? * MON-FRI *)", true),
             ("five fields only", "cron(0 20 * * ?)", false),
+            ("seven fields", "cron(0 20 * * ? * *)", false),
             ("a field nothing parses", "cron(0 20 * * QQ *)", false),
+            ("a minute past the hour", "cron(60 20 * * ? *)", false),
+            ("an hour past the day", "cron(0 24 * * ? *)", false),
+            ("a day-of-month past the month", "cron(0 20 32 * ? *)", false),
+            ("both day fields specified", "cron(0 20 1 * MON *)", false),
+            ("both day fields wildcarded", "cron(0 20 * * * *)", false),
         ];
         for (case, expression, readable) in cases {
             let parsed = Schedule::parse(expression);

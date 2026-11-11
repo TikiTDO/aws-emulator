@@ -38,7 +38,7 @@ const MAX_PATTERN_DEPTH: usize = 32;
 /// `InvalidEventPatternException` carries, whichever operation was given the
 /// pattern. A caller therefore never restates the opening itself — the
 /// message this module answers with is already the whole one.
-const INVALID_PATTERN: &str = "Event pattern is not valid. Reason:";
+pub(super) const INVALID_PATTERN: &str = "Event pattern is not valid. Reason:";
 
 /// A term object names ONE match type, so one carrying several names no
 /// single one; this is the reason EventBridge gives for it.
@@ -97,6 +97,33 @@ pub enum Validator {
     /// The checker `TestEventPattern` answers from, which stores nothing.
     Checker,
 }
+
+/// The most characters the event pattern of a RULE may carry.
+///
+/// A rule's event pattern is bounded by the service's pattern quota, which counts
+/// the pattern's characters AS SUBMITTED — the whitespace between its tokens
+/// included, since the bound is on the text and not on a normalisation of it. The
+/// modelled `@length` on `EventPattern` is looser (0..4096) and is what the
+/// boundary validator enforces, so the quota itself is charged by
+/// [`length_violation`], where a rule is written.
+pub const MAX_RULE_PATTERN_CHARS: usize = 2048;
+
+/// Why `pattern` is too long for a rule to carry, or `None` when it is within
+/// the quota.
+///
+/// What comes back is the WHOLE message of the `InvalidEventPatternException` a
+/// caller answers with, like every other refusal of this module ([`parse`]): the
+/// opening ([`INVALID_PATTERN`]) and then the reason. The reason states the
+/// CONDITION and nothing of the submitted text — a pattern past the bound is as
+/// long as the request, and there is no position in it to report the way a
+/// reader's refusal has one ([`Refusal::message`]).
+pub fn length_violation(pattern: &str) -> Option<String> {
+    (pattern.chars().count() > MAX_RULE_PATTERN_CHARS)
+        .then(|| format!("{INVALID_PATTERN} {PATTERN_TOO_LONG}"))
+}
+
+/// The reason a pattern past [`MAX_RULE_PATTERN_CHARS`] is refused for.
+const PATTERN_TOO_LONG: &str = "Event pattern is too long.";
 
 /// Parse `pattern` as the pattern COMPILER reads it — the validator every
 /// operation that stores a pattern, and routing itself, goes through.

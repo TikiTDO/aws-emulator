@@ -3811,8 +3811,14 @@ pub fn parse_tagged_resource(arn: &str, request_region: &str) -> Result<TaggedRe
 /// All-or-nothing: the bound is charged against the merged set before anything
 /// is written, so a refusal leaves the resource carrying exactly the tags it
 /// carried before.
+/// A key in the namespace reserved for Amazon Web Services' own tags is refused
+/// here too ([`request_validation::reserved_tag_key_violation`]), so no tag write
+/// of this service can set one.
 pub fn merge_tags(stored: &mut Vec<Tag>, submitted: Vec<Tag>) -> Result<(), String> {
     bound_tag_count(submitted.len())?;
+    if let Some(reason) = request_validation::reserved_tag_key_violation(&submitted) {
+        return Err(reason);
+    }
     let mut merged = stored.clone();
     let mut positions: BTreeMap<String, usize> = merged
         .iter()
@@ -4228,31 +4234,6 @@ pub fn log_config_violation(config: &LogConfig) -> Option<String> {
         .map(|(member, _, _)| required_member_violation(&format!("LogConfig.{member}")))
 }
 
-/// Why a `ScheduleExpression` is not one EventBridge accepts, or `None` when it
-/// is.
-///
-/// A schedule expression is a rate or a cron expression — "The scheduling
-/// expression. For example, `cron(0 20 * * ? *)` or `rate(5 minutes)`"
-/// (`PutRule`'s `ScheduleExpression`) — so anything that is not one of those two
-/// forms is refused rather than stored and silently never fired.
-///
-/// The refusal names the PARAMETER and stops there: EventBridge discloses
-/// nothing about what is wrong with a schedule expression it will not take — not
-/// the text submitted, not which of the two forms was expected — so the message
-/// is the subject clause alone, with no reason after it
-/// ([`parameter_not_valid`]).
-pub fn schedule_expression_violation(expression: &str) -> Option<String> {
-    let trimmed = expression.trim();
-    let body = trimmed
-        .strip_prefix("rate(")
-        .or_else(|| trimmed.strip_prefix("cron("))
-        .and_then(|rest| rest.strip_suffix(')'));
-    match body {
-        Some(body) if !body.trim().is_empty() => None,
-        _ => Some(parameter_not_valid("ScheduleExpression")),
-    }
-}
-
 /// Whether `value` is a well-formed ARN: the six colon-separated fields
 /// `arn:<partition>:<service>:<region>:<account>:<resource>`, with a partition,
 /// a service and a resource.
@@ -4331,9 +4312,18 @@ pub fn target_arn_violation(target: &Target) -> Option<String> {
     .into_iter()
     .flatten()
     .find(|value| !is_arn(value))
-    .map(|value| {
-        format!("Parameter {value} is not valid. Reason: Provided Arn is not in correct format.")
-    })
+    .map(invalid_arn_violation)
+}
+
+/// What a refusal states for an ARN-valued member holding text that is not an
+/// ARN: the value that was rejected and the form that was expected.
+///
+/// Stated once, so every member of this service that has to hold an ARN is
+/// refused in the same words — the ones [`target_arn_violation`] answers for a
+/// target's own members and [`request_validation::dead_letter_arn_violation`]
+/// for a dead-letter destination that names no service at all.
+pub fn invalid_arn_violation(value: &str) -> String {
+    format!("Parameter {value} is not valid. Reason: Provided Arn is not in correct format.")
 }
 
 /// Why one published event entry names no event, or `None` when it names one.
@@ -4383,9 +4373,9 @@ pub fn parameter_violation(member: &str, reason: &str) -> String {
 ///
 /// Some refusals of this service state only this — the member the request got
 /// wrong, with no reason clause — because the service itself discloses no reason
-/// for them ([`schedule_expression_violation`]). The two forms share their
-/// opening, so a caller that looks for the member it has to change finds it in
-/// the same place either way.
+/// for them ([`request_validation::schedule_expression_violation`]). The two
+/// forms share their opening, so a caller that looks for the member it has to
+/// change finds it in the same place either way.
 pub fn parameter_not_valid(member: &str) -> String {
     format!("Parameter {member} is not valid.")
 }
@@ -4988,6 +4978,11 @@ pub mod oauth;
 /// every target invocation begins with, and the one that decides a handover
 /// whose own API call never gets made.
 pub mod role_assumption;
+
+/// The submitted VALUES this service refuses: the reserved namespaces, the
+/// service a referenced resource has to belong to, and the members another
+/// member makes required — each stated once, for every operation that writes it.
+pub mod request_validation;
 
 
 

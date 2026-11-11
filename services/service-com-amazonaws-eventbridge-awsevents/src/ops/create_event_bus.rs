@@ -185,6 +185,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(crate::scaffolded::Scaffolded::validation(reason));
         }
 
+        // A dead-letter destination is an Amazon SQS queue and nothing else, so an
+        // ARN naming another service's resource is refused here rather than stored
+        // as a destination EventBridge could never write an undeliverable event to.
+        // The same check `UpdateEventBus` makes, so both writers of a bus's
+        // dead-letter configuration admit exactly the same destinations.
+        if let Some(reason) = input
+            .dead_letter_config
+            .as_ref()
+            .and_then(crate::state::request_validation::dead_letter_arn_violation)
+        {
+            return Err(crate::scaffolded::Scaffolded::validation(reason));
+        }
+
         let region = crate::state::request_region(ctx.parts());
         let created = ::std::time::SystemTime::now();
         // The request's own tag count is charged BEFORE the store lock is taken, for
@@ -228,16 +241,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                      match the name of the partner event source it is matched to, {source:?}.",
                 )));
             }
+        } else if let Some(reason) =
+            crate::state::request_validation::reserved_bus_name_violation(&input.name)
+        {
+            // The reserved namespace is not this account's to name a bus in
+            // either, and the partner event bus — the one name in it a customer
+            // creates — is created by naming its SOURCE above rather than by
+            // naming the bus (`crate::state::request_validation`). Judged before
+            // the character rule below, because a name in the reserved namespace
+            // is one no custom bus may carry however it is spelled.
+            return Err(crate::scaffolded::Scaffolded::validation(reason));
         } else if input.name.contains('/') {
             // "Custom event bus names can't contain the / character, but you can
             // use the / character in partner event bus names" (this operation's
             // `Name`). A partner event bus is the one named by `EventSourceName`,
             // so without it a `/` is a name no bus this call can create may carry.
-            return Err(crate::scaffolded::Scaffolded::validation(format!(
-                "Parameter Name is not valid. Reason: {:?} contains the / character, which \
-                 only a partner event bus name may.",
-                input.name
-            )));
+            return Err(crate::scaffolded::Scaffolded::validation(
+                "Event bus name must not contain '/'.",
+            ));
         }
 
         // The name is the bus's identity WITHIN the Region the call was signed

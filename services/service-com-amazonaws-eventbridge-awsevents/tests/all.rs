@@ -159,6 +159,8 @@ mod scheduled_rule_firing;
 mod state_machine_execution_naming;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/submitted_value_refusals.rs"]
+mod submitted_value_refusals;
 #[path = "all/target_delivery.rs"]
 mod target_delivery;
 #[path = "all/target_dispatch.rs"]

@@ -427,7 +427,15 @@ async fn a_target_that_is_not_a_queue_is_recorded_and_not_invented_for() {
     ];
     let mut targets: Vec<Value> = vec![json!({ "Id": "queue", "Arn": queue_arn.clone() })];
     for (index, arn) in others.iter().enumerate() {
-        targets.push(json!({ "Id": format!("other-{index}"), "Arn": arn }));
+        let mut target = json!({ "Id": format!("other-{index}"), "Arn": arn });
+        // A target EventBridge invokes AS the role it names has to name one, so the
+        // state machine among these rows carries a `RoleArn`; the function, the
+        // topic and the log group are invoked under their own resource-based
+        // policies and need none.
+        if arn.contains(":states:") {
+            target["RoleArn"] = json!(format!("arn:aws:iam::{account}:role/events-invoke"));
+        }
+        targets.push(target);
     }
     given_rule(
         &emulator,

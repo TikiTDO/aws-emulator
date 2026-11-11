@@ -261,6 +261,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         if let Some(pattern) = event_pattern.as_deref() {
+            // The pattern's SIZE is charged before it is read: the bound is on
+            // the text the request carried, so a pattern past it is refused
+            // whatever it would have compiled to, and the rule keeps the
+            // pattern it had.
+            if let Some(reason) = crate::state::event_pattern::length_violation(pattern) {
+                return Err(PutRuleErrorModeled::InvalidEventPatternException(
+                    InvalidEventPatternException {
+                        message: Some(reason),
+                    },
+                )
+                .into());
+            }
             // The reason `event_pattern::parse` answers with is ALREADY the
             // whole message ("Event pattern is not valid. Reason: …"), so it is
             // carried as it stands: restating the opening here would answer a
@@ -275,11 +287,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
-        if let Some(reason) = schedule_expression
-            .as_deref()
-            .and_then(crate::state::schedule_expression_violation)
-        {
-            return Err(crate::scaffolded::Scaffolded::validation(reason));
+        if let Some(expression) = schedule_expression.as_deref() {
+            if let Some(reason) =
+                crate::state::request_validation::schedule_expression_violation(expression)
+            {
+                return Err(crate::scaffolded::Scaffolded::validation(reason));
+            }
+            // A scheduled rule is fired by EventBridge itself, and only on the
+            // account's default event bus, so a schedule asked for on any other
+            // bus is refused rather than stored as a rule nothing would ever
+            // trigger (`crate::state::request_validation`).
+            if let Some(reason) =
+                crate::state::request_validation::schedule_expression_bus_violation(&bus_name)
+            {
+                return Err(crate::scaffolded::Scaffolded::validation(reason));
+            }
         }
 
         // `RuleState` is a modelled enum, but the boundary validator does not

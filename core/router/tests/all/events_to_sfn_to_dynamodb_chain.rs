@@ -421,7 +421,16 @@ async fn an_event_no_rule_matches_reaches_nothing() {
         &json!({
             "Rule": "unmatched-rule",
             "EventBusName": "chain-bus",
-            "Targets": [{ "Id": "to-state-machine", "Arn": machine }]
+            // EventBridge starts a state machine AS the role the target names, so
+            // `PutTargets` requires one ("for EC2 instances, Kinesis Data Streams,
+            // Step Functions state machines and API Gateway APIs, EventBridge
+            // relies on IAM roles that you specify in the RoleARN argument in
+            // PutTargets"), as the matched-rule rows above also name.
+            "Targets": [{
+                "Id": "to-state-machine",
+                "Arn": machine,
+                "RoleArn": format!("arn:aws:iam::{ACCOUNT}:role/EventsInvokeStates"),
+            }]
         }),
     )
     .await;

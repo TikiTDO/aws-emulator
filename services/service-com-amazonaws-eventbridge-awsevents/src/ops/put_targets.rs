@@ -253,6 +253,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         {
             return Err(crate::scaffolded::Scaffolded::validation(violation));
         }
+        // What each target asks for BESIDE the form of its ARNs: the role
+        // EventBridge has to assume to invoke a target of its kind at all, the
+        // service its dead-letter destination belongs to, and the JSON paths it
+        // reshapes its input with (`crate::state::request_validation`). Each is a
+        // property of one target and none of them is modelled, so the request is
+        // refused in its own order and as a WHOLE: a rule carrying a target
+        // EventBridge could never invoke would report back a healthy rule that
+        // delivers nothing.
+        if let Some(violation) = input
+            .targets
+            .iter()
+            .find_map(crate::state::request_validation::target_violation)
+        {
+            return Err(crate::scaffolded::Scaffolded::validation(violation));
+        }
 
         // The rule is resolved AGAIN for the write, now that the request's own
         // members have been judged — through the one resolver, so the refusal is

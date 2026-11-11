@@ -197,6 +197,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(crate::scaffolded::Scaffolded::validation(reason));
         }
 
+        // A dead-letter destination is an Amazon SQS queue and nothing else, so an
+        // ARN naming another service's resource is refused here rather than stored
+        // as a destination EventBridge could never write an undeliverable event to.
+        // The same check `CreateEventBus` makes, so both writers of a bus's
+        // dead-letter configuration admit exactly the same destinations.
+        if let Some(reason) = input
+            .dead_letter_config
+            .as_ref()
+            .and_then(crate::state::request_validation::dead_letter_arn_violation)
+        {
+            return Err(crate::scaffolded::Scaffolded::validation(reason));
+        }
+
         let Some(bus) = store.bus_mut(&region, &bus_name) else {
             return Err(UpdateEventBusErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {

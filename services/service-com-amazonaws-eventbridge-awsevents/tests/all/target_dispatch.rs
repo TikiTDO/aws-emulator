@@ -566,12 +566,19 @@ async fn a_matched_event_is_invoked_on_every_target_kind() {
     for kind in [Kind::Queue, Kind::Topic, Kind::StateMachine] {
         let emulator = emulator();
         let (target_arn, observe) = given_target(&emulator, kind).await;
-        given_rule(
-            &emulator,
-            "dispatch",
-            json!([{ "Id": "t1", "Arn": target_arn }]),
-        )
-        .await;
+        let mut target = json!({ "Id": "t1", "Arn": target_arn });
+        // A state machine is invoked AS the role the target names ("for EC2
+        // instances, Kinesis Data Streams, Step Functions state machines and API
+        // Gateway APIs, EventBridge relies on IAM roles that you specify in the
+        // RoleARN argument in PutTargets"), so that row names one; a queue and a
+        // topic are invoked under their own resource-based policies.
+        if kind == Kind::StateMachine {
+            target["RoleArn"] = json!(format!(
+                "arn:aws:iam::{}:role/events-invoke",
+                engine::emulator_account_id()
+            ));
+        }
+        given_rule(&emulator, "dispatch", json!([target])).await;
 
         let event_id = publish(&emulator).await;
 

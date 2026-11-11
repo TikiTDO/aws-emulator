@@ -2358,6 +2358,11 @@ const RESOURCE_POLICY_ARN_NAMESPACES: [&str; 4] = [
 /// and it is the service, not the shape of the resource, that says whether a
 /// `RoleArn` governs the invocation at all. An ARN naming no service at all
 /// shows nothing, so no role governs it.
+///
+/// This is about a DELIVERY, which assumes the role a target names wherever one
+/// is named. Which targets must NAME one is a narrower question, answered from
+/// the classes `PutTargets` enumerates
+/// ([`crate::state::request_validation`]).
 fn invoked_under_target_role(arn: &str) -> bool {
     ::service_common::arn::vendor(arn)
         .is_some_and(|vendor| !RESOURCE_POLICY_ARN_NAMESPACES.contains(&vendor))

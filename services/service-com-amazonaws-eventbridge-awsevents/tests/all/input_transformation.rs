@@ -337,17 +337,22 @@ async fn an_input_transformer_delivers_its_rendered_template() {
     }
 }
 
-/// A path form this emulator does not EVALUATE is a delivery that does not
-/// happen: the target receives nothing and the handover says the path was not
-/// understood, rather than the target being handed a payload built as if the path
-/// had merely selected nothing.
+/// A path form this emulator does not EVALUATE is one `PutTargets` refuses: the
+/// target is never stored, so no delivery is ever built from a path nobody
+/// evaluated.
 ///
-/// The rows differ along the selector that puts the path outside the bounded
-/// reader: a wildcard member, a descendant, a union, a filter, a negative index,
-/// a step, and text that is no path at all — asserted for both members a target
-/// reshapes with.
+/// "When you specify `InputPath` or `InputTransformer`, you must use JSON dot
+/// notation, not bracket notation" (`PutTargets`), and `InputPathsMap` is a map
+/// "where each value is a valid JSON path" — so a path outside the supported
+/// subset is a bad request rather than a target that silently delivers nothing.
+///
+/// The rows differ along the selector that puts the path outside the supported
+/// subset: a wildcard member, a descendant, a union, a filter, a negative index,
+/// a step, bracket notation for a member, and text that is no path at all —
+/// asserted for both members a target reshapes with, and checked to leave the
+/// rule's targets as they were.
 #[tokio::test]
-async fn a_path_this_emulator_does_not_evaluate_refuses_the_delivery() {
+async fn a_path_this_emulator_does_not_evaluate_is_refused_when_the_target_is_configured() {
     let rows = [
         ("a wildcard member", "$.detail.*"),
         ("a descendant", "$..orderId"),
@@ -355,6 +360,7 @@ async fn a_path_this_emulator_does_not_evaluate_refuses_the_delivery() {
         ("a filter", "$.detail.items[?@=='first']"),
         ("a negative index", "$.detail.items[-1]"),
         ("a slice with a step", "$.detail.items[0:2:1]"),
+        ("a member in bracket notation", "$['detail']['orderId']"),
         ("text that is not rooted at the event", "detail.orderId"),
     ];
 
@@ -372,21 +378,57 @@ async fn a_path_this_emulator_does_not_evaluate_refuses_the_delivery() {
             ),
         ] {
             let case = format!("{case} as {member}");
-            let (bodies, outcome) = handed_over(&case, configuration).await;
-            assert!(
-                bodies.is_empty(),
-                "case {case:?}: expected no delivery at all, got {bodies:?}"
-            );
-            match &outcome {
-                InvocationOutcome::NotAttempted(reason) => assert!(
-                    reason.contains(path),
-                    "case {case:?}: expected the recorded reason to name {path}, got {reason:?}"
-                ),
-                other => panic!(
-                    "case {case:?}: expected the handover to be recorded as not attempted, \
-                     got {other:?}"
-                ),
+            let emulator = emulator();
+            let (_, arn) = given_queue(&emulator, "transformed").await;
+            // The rule keeps a target it already carries, so the refusal below is
+            // read against a target list that must not change.
+            crate::target_dispatch::given_rule(
+                &emulator,
+                "transform",
+                json!([{ "Id": "kept", "Arn": arn }]),
+            )
+            .await;
+
+            let mut target = json!({ "Id": "t1", "Arn": arn });
+            for (name, value) in configuration.as_object().cloned().unwrap_or_default() {
+                target[name] = value;
             }
+            let (status, body) = events(
+                &emulator,
+                "PutTargets",
+                &json!({ "Rule": "transform", "Targets": [target] }),
+            )
+            .await;
+            assert_eq!(
+                status, 400,
+                "case {case:?}: expected the configuration to be refused, got {status} {body}"
+            );
+            let message = body["message"].as_str().unwrap_or_default();
+            assert_eq!(
+                message, "InputPath for target t1 is invalid.",
+                "case {case:?}: expected the invalid-path refusal naming the target, got \
+                 {message:?}"
+            );
+
+            let (status, listed) = events(
+                &emulator,
+                "ListTargetsByRule",
+                &json!({ "Rule": "transform" }),
+            )
+            .await;
+            assert_eq!(status, 200, "case {case:?}: ListTargetsByRule {status} {listed}");
+            let ids: Vec<String> = listed["Targets"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .map(|stored| stored["Id"].as_str().unwrap_or_default().to_string())
+                .collect();
+            assert_eq!(
+                ids,
+                vec!["kept".to_string()],
+                "case {case:?}: a refused request leaves the rule's targets alone, got {ids:?}"
+            );
         }
     }
 }
