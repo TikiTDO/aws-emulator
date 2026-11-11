@@ -3350,6 +3350,12 @@ fn list(
     depth: usize,
     budget: &mut Budget,
 ) -> Option<Vec<String>> {
+    // A `Fn::GetAtt` naming an attribute the owning service publishes as one value carrying
+    // the whole list is a list of values, which is what the functions reading one here are
+    // documented to be used on ([`attribute_items`]).
+    if let Some(items) = attribute_items(value, scope, depth, budget) {
+        return Some(items);
+    }
     match evaluate(value, scope, depth, budget)? {
         Resolved::List(items) => Some(items),
         // A function that produced one string where a list was expected is not a list:
@@ -3429,31 +3435,16 @@ fn is_list_type(declared_type: Option<&str>) -> bool {
 /// functions that read one (`Fn::Join`, `Fn::Select`, `Fn::Length`) read it the same way
 /// they read a list-typed parameter's `Ref` — the elements are carried one per indexed key
 /// ([`return_values::list_attribute`]), and a path naming one index reads that element on its
-/// own through the dotted notation above.
+/// own through the dotted notation above. An attribute the owning service publishes as ONE
+/// value carrying the whole list is the other carrier, and [`attribute_items`] is where the
+/// functions read its entries.
 fn attribute(
     argument: &Value,
     scope: &Scope<'_>,
     depth: usize,
     budget: &mut Budget,
 ) -> Option<Resolved> {
-    let (logical_id, attribute) = match argument {
-        Value::Array(parts) if parts.len() >= 2 => {
-            let logical_id = text(&parts[0], scope, depth + 1, budget)?;
-            // "Fn::GetAtt … attributeName … For attributes that return a list, use
-            // dotted notation": every part past the first names one attribute path.
-            let mut path = Vec::with_capacity(parts.len() - 1);
-            for part in &parts[1..] {
-                path.push(text(part, scope, depth + 1, budget)?);
-            }
-            (logical_id, path.join("."))
-        }
-        // The YAML short form spells both halves as one dotted string.
-        Value::String(dotted) => {
-            let (logical_id, attribute) = dotted.split_once('.')?;
-            (logical_id.to_string(), attribute.to_string())
-        }
-        _ => return None,
-    };
+    let (logical_id, attribute) = attribute_path(argument, scope, depth, budget)?;
     let attributes = &scope.resources.get(&logical_id)?.attributes;
     if let Some(value) = attributes.get(&attribute) {
         return Some(Resolved::Text(value.clone()));
@@ -3465,6 +3456,78 @@ fn attribute(
         .filter(|elements| elements.len() <= MAX_RESOLVED_LIST_LEN)
         .map(Resolved::List)
 }
+
+/// The resource and the attribute path one `Fn::GetAtt` argument names, each half evaluated.
+fn attribute_path(
+    argument: &Value,
+    scope: &Scope<'_>,
+    depth: usize,
+    budget: &mut Budget,
+) -> Option<(String, String)> {
+    match argument {
+        Value::Array(parts) if parts.len() >= 2 => {
+            let logical_id = text(&parts[0], scope, depth + 1, budget)?;
+            // "Fn::GetAtt … attributeName … For attributes that return a list, use
+            // dotted notation": every part past the first names one attribute path.
+            let mut path = Vec::with_capacity(parts.len() - 1);
+            for part in &parts[1..] {
+                path.push(text(part, scope, depth + 1, budget)?);
+            }
+            Some((logical_id, path.join(".")))
+        }
+        // The YAML short form spells both halves as one dotted string.
+        Value::String(dotted) => {
+            let (logical_id, attribute) = dotted.split_once('.')?;
+            Some((logical_id.to_string(), attribute.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// The ENTRIES of a list-valued attribute an expression reads, where the owning service
+/// publishes that attribute as ONE value carrying the whole list
+/// ([`published_list_attribute_names`]).
+///
+/// A type publishes some of its return values as a list — a load balancer's `SecurityGroups`,
+/// a target group's `LoadBalancerArns` — and CloudFormation's own `Fn::GetAtt` documentation
+/// says what a template does with one: "for attributes that return a list, use `Fn::Select`".
+/// Where the elements are carried one per indexed key, [`attribute`] already answers the list
+/// itself; where the attribute is the whole list as one value, this is where the functions
+/// that read a list read its entries, while an expression that wants ONE value reads that
+/// value as it stands. The entries are the value split on the separator a list of values is
+/// written with, and the EMPTY value is the empty list — which a target group no load balancer
+/// routes to really has.
+fn attribute_items(
+    value: &Value,
+    scope: &Scope<'_>,
+    depth: usize,
+    budget: &mut Budget,
+) -> Option<Vec<String>> {
+    let members = value.as_object()?;
+    if members.len() != 1 {
+        return None;
+    }
+    let argument = members.get(FN_GET_ATT)?;
+    let (logical_id, attribute) = attribute_path(argument, scope, depth, budget)?;
+    let resource = scope.resources.get(&logical_id)?;
+    if !published_list_attribute_names(&resource.resource_type).contains(&attribute.as_str()) {
+        return None;
+    }
+    let carried = resource.attributes.get(&attribute)?;
+    if carried.is_empty() {
+        return Some(Vec::new());
+    }
+    let items: Vec<String> = carried
+        .split(LIST_ATTRIBUTE_SEPARATOR)
+        .map(ToString::to_string)
+        .collect();
+    (items.len() <= MAX_RESOLVED_LIST_LEN).then_some(items)
+}
+
+/// The separator a list-valued attribute published as ONE value writes its entries with,
+/// which is also the one a list of values takes wherever one string has to carry it
+/// ([`attribute_items`]).
+const LIST_ATTRIBUTE_SEPARATOR: char = ',';
 
 /// `{"Fn::Sub": "<string>"}` or `{"Fn::Sub": ["<string>", {"<var>": <value>}]}`.
 ///

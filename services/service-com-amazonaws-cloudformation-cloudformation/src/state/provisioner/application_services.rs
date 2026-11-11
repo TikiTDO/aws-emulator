@@ -3799,7 +3799,7 @@ pub(super) fn declared_ip_set_descriptors(properties: &Value) -> Vec<Value> {
 /// physical id, which before the create IS that computed name. Shared by every arm in that
 /// position (an AWS WAF Classic regional IPSet, an Amazon Managed Grafana workspace), so
 /// the create of one cannot read the declared name differently from the create of another.
-pub(super) fn declared_name(resource: &StoredResource) -> String {
+pub(crate) fn declared_name(resource: &StoredResource) -> String {
     resource
         .attributes
         .get("Name")

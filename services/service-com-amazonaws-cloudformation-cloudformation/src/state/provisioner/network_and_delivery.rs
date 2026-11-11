@@ -1707,7 +1707,12 @@ pub(super) fn vector_bucket_of(arn: &str) -> Option<String> {
 
 /// The RESOURCE portion of an ARN: everything past the fifth `:`, which is where every ARN
 /// puts the resource it names.
-pub(super) fn arn_resource(arn: &str) -> Option<&str> {
+///
+/// Visible to the whole crate because more than one provisioner reads one: a resource's
+/// published FULL NAME is the resource portion of its own ARN
+/// ([`crate::state::provisioning::elastic_load_balancing`]), so the two cannot come to read
+/// an ARN differently.
+pub(crate) fn arn_resource(arn: &str) -> Option<&str> {
     let mut fields = arn.splitn(6, ':');
     let (Some("arn"), Some(_partition), Some(_service), Some(_region), Some(_account)) = (
         fields.next(),

@@ -36,6 +36,16 @@
 //! mount, so the rows here name their cluster rather than declaring one; the cluster as a
 //! resource of the same template is
 //! `core/router/tests/all/cloudformation_provisions_container_platform_resources.rs`.
+//!
+//! The load balancers, target groups, listeners and rules the rows declare are CREATED in
+//! Elastic Load Balancing itself, so every identifier asserted here is the one that service
+//! minted and each row declares the VPC and the subnets its load balancer is placed in — a
+//! placement that service resolves against Amazon EC2 before it creates anything. That is
+//! also why the host a load balancer publishes is asserted as an ADDRESS a client can dial
+//! for the APPLICATION family, whose traffic this emulator serves — the `DNSName` is then the
+//! `host:port` of the listener it opened for the load balancer — and as the name that family
+//! publishes for the others, which it serves no traffic for
+//! (`my-nlb-1234567890abcdef.elb.us-west-2.amazonaws.com`).
 
 use std::collections::BTreeMap;
 
@@ -54,10 +64,26 @@ use service_com_amazonaws_cloudformation_cloudformation::state::status;
 /// `targetgroup/my-targets/73e2d6bc24d8a067`).
 const ELBV2_ID_DIGITS: usize = 16;
 
-/// How many characters a load balancer's DNS name carries after its name: the SAME
-/// service-assigned id its ARN carries, which is the form the service that owns a load
-/// balancer mints.
-const ELBV2_DNS_LABEL_DIGITS: usize = ELBV2_ID_DIGITS;
+/// The network declaration every row's load balancer is placed in: a VPC and two subnets of
+/// it, in two Availability Zones, since Elastic Load Balancing resolves a placement against
+/// Amazon EC2 and an Application Load Balancer needs subnets in at least two zones.
+const NETWORK: &str = r#"  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: us-east-1a
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: us-east-1b
+"#;
 
 /// How many characters the unique segment of a generated physical name carries
 /// (`<stack name>-<logical id>-<unique id>`).
@@ -72,11 +98,6 @@ fn elb_head() -> String {
 /// What an Amazon ECS ARN carries before its resource path.
 fn ecs_head() -> String {
     format!("arn:aws:ecs:{REGION}:{ACCOUNT_ID}:")
-}
-
-/// The suffix a load balancer's DNS name ends in, under the Region it lives in.
-fn dns_suffix() -> String {
-    format!(".{REGION}.elb.amazonaws.com")
 }
 
 /// What one declared output must carry.
@@ -104,6 +125,12 @@ struct Expect {
     /// Whether the assigned run is CloudFormation's generated name segment (uppercase)
     /// rather than an id Elastic Load Balancing assigned (lowercase).
     generated: bool,
+    /// Whether the whole value is an ADDRESS a client on this machine can dial — the
+    /// `host:port` of the listener the emulator opened for a load balancer, which is what an
+    /// APPLICATION load balancer publishes as its `DNSName` because this emulator serves
+    /// that family's traffic. Nothing else about such a value is fixed: the port is the one
+    /// the socket was given.
+    address: bool,
     tail: String,
 }
 
@@ -160,6 +187,9 @@ fn embedding_with_id(head: impl Into<String>, from: &'static str, digits: usize)
 /// Whether `actual` is the value `expected` describes, against the other outputs of the
 /// same stack.
 fn holds(expected: &Expect, actual: &str, values: &BTreeMap<String, String>) -> bool {
+    if expected.address {
+        return actual.parse::<std::net::SocketAddr>().is_ok();
+    }
     let Some(mut rest) = actual.strip_prefix(&expected.head) else {
         return false;
     };
@@ -196,6 +226,9 @@ fn holds(expected: &Expect, actual: &str, values: &BTreeMap<String, String>) -> 
 
 /// The form `expected` describes, for an assertion message.
 fn described(expected: &Expect, values: &BTreeMap<String, String>) -> String {
+    if expected.address {
+        return "the host:port of the listener the emulator opened for it".to_string();
+    }
     let embedded = expected
         .embeds
         .map(|key| match values.get(key) {
@@ -249,16 +282,17 @@ fn cases() -> Vec<Case> {
             case: "an application load balancer, its target group, listener and rule, \
                    every one named by the template",
             stack_name: "alb-routing",
-            template: r#"Resources:
-  Alb:
+            template: format!(
+                r#"Resources:
+{NETWORK}  Alb:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Name: probe-alb
       Type: application
       Scheme: internet-facing
       Subnets:
-        - subnet-00000000000000001
-        - subnet-00000000000000002
+        - !Ref SubnetA
+        - !Ref SubnetB
   Tg:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -266,7 +300,7 @@ fn cases() -> Vec<Case> {
       Port: 80
       Protocol: HTTP
       TargetType: ip
-      VpcId: vpc-00000000000000001
+      VpcId: !Ref Vpc
   Listener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -318,7 +352,7 @@ Outputs:
   RuleIsDefault:
     Value: !GetAtt Rule.IsDefault
 "#
-            .to_string(),
+            ),
             expected: vec![
                 ("AlbName", exact("probe-alb")),
                 ("AlbFullName", with_id("app/probe-alb/", ELBV2_ID_DIGITS)),
@@ -328,13 +362,10 @@ Outputs:
                 ("AlbArn", embedding(format!("{elb}loadbalancer/"), "AlbFullName")),
                 (
                     "AlbDns",
-                    // The DNS name carries the SAME service-assigned id as the ARN: one
-                    // load balancer, one id, however a client reaches it.
+                    // The host an Application Load Balancer publishes is the address the
+                    // emulator serves it at, which is what a client dials.
                     Expect {
-                        head: "probe-alb-".to_string(),
-                        embeds: Some("AlbFullName"),
-                        embeds_after: "/probe-alb/",
-                        tail: dns_suffix(),
+                        address: true,
                         ..Expect::default()
                     },
                 ),
@@ -397,12 +428,17 @@ Outputs:
             case: "a network and a gateway load balancer the template does not name",
             stack_name: "unnamed-lbs",
             template: r#"{"Resources":{
+                   "Vpc":{"Type":"AWS::EC2::VPC",
+                     "Properties":{"CidrBlock":"10.1.0.0/16"}},
+                   "Subnet":{"Type":"AWS::EC2::Subnet",
+                     "Properties":{"VpcId":{"Ref":"Vpc"},"CidrBlock":"10.1.1.0/24",
+                       "AvailabilityZone":"us-east-1a"}},
                    "Nlb":{"Type":"AWS::ElasticLoadBalancingV2::LoadBalancer",
                      "Properties":{"Type":"network","Scheme":"internal",
-                       "Subnets":["subnet-00000000000000001"]}},
+                       "Subnets":[{"Ref":"Subnet"}]}},
                    "Glb":{"Type":"AWS::ElasticLoadBalancingV2::LoadBalancer",
                      "Properties":{"Type":"gateway",
-                       "Subnets":["subnet-00000000000000001"]}}},
+                       "Subnets":[{"Ref":"Subnet"}]}}},
                  "Outputs":{
                    "NlbName":{"Value":{"Fn::GetAtt":["Nlb","LoadBalancerName"]}},
                    "NlbFullName":{"Value":{"Fn::GetAtt":["Nlb","LoadBalancerFullName"]}},
@@ -428,15 +464,19 @@ Outputs:
                     "NlbConventionalArn",
                     embedding(format!("{elb}loadbalancer/"), "NlbFullName"),
                 ),
-                // "The DNS name of an internal load balancer begins with internal-".
+                // The host a NETWORK load balancer publishes is the name that family's own
+                // guide publishes — its name, the very hexadecimal id its ARN carries, and
+                // the `elb`-first host of its Region, with the scheme stated nowhere in it.
+                // This emulator serves the traffic of the APPLICATION family, and publishes
+                // an address only for the family it serves ([`Expect::address`]).
                 (
                     "NlbDns",
                     Expect {
-                        head: "internal-".to_string(),
+                        head: String::new(),
                         embeds: Some("NlbName"),
                         separator: "-",
-                        digits: ELBV2_DNS_LABEL_DIGITS,
-                        tail: dns_suffix(),
+                        digits: ELBV2_ID_DIGITS,
+                        tail: format!(".elb.{REGION}.amazonaws.com"),
                         ..Expect::default()
                     },
                 ),
@@ -474,7 +514,7 @@ Outputs:
     Type: String
     Default: web-cluster
 Resources:
-  LogGroup:
+{NETWORK}  LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/ecs/${{App}}"
@@ -501,14 +541,15 @@ Resources:
     Properties:
       Name: !Sub "${{App}}-alb"
       Subnets:
-        - subnet-00000000000000001
+        - !Ref SubnetA
+        - !Ref SubnetB
   Tg:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       Name: !Sub "${{App}}-tg"
       Port: 80
       Protocol: HTTP
-      VpcId: vpc-00000000000000001
+      VpcId: !Ref Vpc
   Listener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -605,10 +646,7 @@ Outputs:
                 (
                     "LoadBalancerDnsName",
                     Expect {
-                        head: "web-alb-".to_string(),
-                        embeds: Some("LoadBalancerFullName"),
-                        embeds_after: "/web-alb/",
-                        tail: dns_suffix(),
+                        address: true,
                         ..Expect::default()
                     },
                 ),

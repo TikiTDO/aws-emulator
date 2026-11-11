@@ -14,9 +14,9 @@
 //! The rows differ along what the rule generalises over: whether the template NAMES the
 //! cluster or leaves the name to CloudFormation, which cluster properties it declares
 //! (settings, tags, neither), and whether other container-platform resources are declared
-//! beside it — a registry, a target group and a load balancer, none of which this
-//! emulator creates in its owning service and all of which the stack still reports the
-//! documented identifiers of.
+//! beside it — a registry, and the network, target group and load balancer an ECS service
+//! runs behind, every one of which this emulator creates in the service that owns it and
+//! whose documented identifiers the stack reports.
 //!
 //! Deleting the stack deletes the cluster again: the last case drives that, because a
 //! resource a stack created and no longer records must not be left behind in the service
@@ -64,6 +64,24 @@ fn build_router() -> MultiServiceRouter {
     // rest or that resource's create is refused and the stack fails.
     router.register_service(
         service_com_amazonaws_ecr_amazonec2containerregistry_v20150921::EmulatedService::new(
+            Arc::clone(&engine),
+        ),
+    );
+    // Amazon EC2 and both generations of Elastic Load Balancing, for the VPC, the subnets,
+    // the target group and the load balancer one row declares beside the cluster: the stack
+    // really creates each of them there, and the CLASSIC service is the front door that
+    // routes an ELBv2 envelope to the ELBv2 model (the two share one endpoint and one
+    // signing name), so both are mounted exactly as `core/router/src/lib.rs` mounts them.
+    router.register_service(service_com_amazonaws_ec2_amazonec2::EmulatedService::new(
+        Arc::clone(&engine),
+    ));
+    router.register_service(
+        service_com_amazonaws_elasticloadbalancingv2_elasticloadbalancing_v10::EmulatedService::new(
+            Arc::clone(&engine),
+        ),
+    );
+    router.register_service(
+        service_com_amazonaws_elasticloadbalancing_elasticloadbalancing_v7::EmulatedService::new(
             engine,
         ),
     );
@@ -260,6 +278,22 @@ const ROWS: &[Row] = &[
             "    Type: AWS::ECR::Repository\n",
             "    Properties:\n",
             "      RepositoryName: warehouse-images\n",
+            "  Vpc:\n",
+            "    Type: AWS::EC2::VPC\n",
+            "    Properties:\n",
+            "      CidrBlock: 10.7.0.0/16\n",
+            "  SubnetA:\n",
+            "    Type: AWS::EC2::Subnet\n",
+            "    Properties:\n",
+            "      VpcId: !Ref Vpc\n",
+            "      CidrBlock: 10.7.1.0/24\n",
+            "      AvailabilityZone: us-east-1a\n",
+            "  SubnetB:\n",
+            "    Type: AWS::EC2::Subnet\n",
+            "    Properties:\n",
+            "      VpcId: !Ref Vpc\n",
+            "      CidrBlock: 10.7.2.0/24\n",
+            "      AvailabilityZone: us-east-1b\n",
             "  TargetGroup:\n",
             "    Type: AWS::ElasticLoadBalancingV2::TargetGroup\n",
             "    Properties:\n",
@@ -267,13 +301,14 @@ const ROWS: &[Row] = &[
             "      Port: 80\n",
             "      Protocol: HTTP\n",
             "      TargetType: ip\n",
-            "      VpcId: vpc-0123456789abcdef0\n",
+            "      VpcId: !Ref Vpc\n",
             "  LoadBalancer:\n",
             "    Type: AWS::ElasticLoadBalancingV2::LoadBalancer\n",
             "    Properties:\n",
             "      Name: warehouse-alb\n",
             "      Subnets:\n",
-            "        - subnet-0123456789abcdef0\n",
+            "        - !Ref SubnetA\n",
+            "        - !Ref SubnetB\n",
             "Outputs:\n",
             "  ClusterName:\n",
             "    Value: !Ref Cluster\n",

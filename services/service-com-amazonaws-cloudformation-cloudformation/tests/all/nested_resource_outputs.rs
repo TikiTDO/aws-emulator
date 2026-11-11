@@ -24,6 +24,13 @@
 //! the template: `AWS::ECS::Cluster` is created in Amazon ECS, which a crate-local suite
 //! cannot mount, so it lives in
 //! `core/router/tests/all/cloudformation_provisions_container_platform_resources.rs`.
+//!
+//! The load balancers these rows declare are CREATED in Elastic Load Balancing itself, which
+//! resolves their placement against Amazon EC2, so each row declares the VPC and the subnets
+//! its load balancer is placed in. What a NESTED resource's identity is when its declaration
+//! names no parent at all is therefore not a deployment this suite can drive any more — such
+//! a listener names no load balancer, which the owning service refuses — and is held to by the
+//! naming rules' own suite (`state::template`'s tests).
 
 use std::collections::BTreeMap;
 
@@ -150,12 +157,34 @@ fn nested_prefix(parent: &str, from: &str, to: &str) -> Option<String> {
         .then(|| format!("{}/", parent.replacen(&marker, &format!(":{to}/"), 1)))
 }
 
+/// The network a row's load balancer is placed in: a VPC and two subnets of it, in two
+/// Availability Zones, since Elastic Load Balancing resolves a placement against Amazon EC2
+/// and an Application Load Balancer needs subnets in at least two zones.
+const NETWORK: &str = concat!(
+    "  Vpc:\n",
+    "    Type: AWS::EC2::VPC\n",
+    "    Properties:\n",
+    "      CidrBlock: 10.0.0.0/16\n",
+    "  SubnetA:\n",
+    "    Type: AWS::EC2::Subnet\n",
+    "    Properties:\n",
+    "      VpcId: !Ref Vpc\n",
+    "      CidrBlock: 10.0.1.0/24\n",
+    "      AvailabilityZone: us-east-1a\n",
+    "  SubnetB:\n",
+    "    Type: AWS::EC2::Subnet\n",
+    "    Properties:\n",
+    "      VpcId: !Ref Vpc\n",
+    "      CidrBlock: 10.0.2.0/24\n",
+    "      AvailabilityZone: us-east-1b\n",
+);
+
 /// One row: a template, the parameters the create supplies, and what each of its declared
 /// outputs must carry.
 struct Case {
     case: &'static str,
     stack_name: &'static str,
-    template: &'static str,
+    template: String,
     parameters: Vec<(String, String)>,
     expected: Vec<(&'static str, Expect)>,
 }
@@ -187,55 +216,73 @@ fn cases() -> Vec<Case> {
             // or an `Fn::GetAtt` of a created resource, so every one must carry a value.
             case: "yaml short form: a listener and a rule under an application load balancer",
             stack_name: "ecs-elb-chain",
-            template: concat!(
+            template: [
                 "Resources:\n",
-                "  Alb:\n",
-                "    Type: AWS::ElasticLoadBalancingV2::LoadBalancer\n",
-                "    Properties:\n",
-                "      Name: chain-alb\n",
-                "      Scheme: internet-facing\n",
-                "  TargetGroup:\n",
-                "    Type: AWS::ElasticLoadBalancingV2::TargetGroup\n",
-                "    Properties:\n",
-                "      Name: chain-tg\n",
-                "      Port: 80\n",
-                "      Protocol: HTTP\n",
-                "      TargetType: ip\n",
-                "  Listener:\n",
-                "    Type: AWS::ElasticLoadBalancingV2::Listener\n",
-                "    Properties:\n",
-                "      LoadBalancerArn: !Ref Alb\n",
-                "      Port: 80\n",
-                "      Protocol: HTTP\n",
-                "  Rule:\n",
-                "    Type: AWS::ElasticLoadBalancingV2::ListenerRule\n",
-                "    Properties:\n",
-                "      ListenerArn: !Ref Listener\n",
-                "      Priority: 10\n",
-                "  Service:\n",
-                "    Type: AWS::ECS::Service\n",
-                "    Properties:\n",
-                "      ServiceName: chain-service\n",
-                "      Cluster: chain-cluster\n",
-                "      DesiredCount: 1\n",
-                "Outputs:\n",
-                "  AlbRef:\n",
-                "    Value: !Ref Alb\n",
-                "  ListenerRef:\n",
-                "    Value: !Ref Listener\n",
-                "  ListenerArn:\n",
-                "    Value: !GetAtt Listener.ListenerArn\n",
-                "  RuleRef:\n",
-                "    Value: !Ref Rule\n",
-                "  RuleArn:\n",
-                "    Value: !GetAtt Rule.RuleArn\n",
-                "  RuleIsDefault:\n",
-                "    Value: !GetAtt Rule.IsDefault\n",
-                "  ServiceRef:\n",
-                "    Value: !Ref Service\n",
-                "  ServiceName:\n",
-                "    Value: !GetAtt Service.Name\n",
-            ),
+                NETWORK,
+                concat!(
+                    "  Alb:\n",
+                    "    Type: AWS::ElasticLoadBalancingV2::LoadBalancer\n",
+                    "    Properties:\n",
+                    "      Name: chain-alb\n",
+                    "      Scheme: internet-facing\n",
+                    "      Subnets:\n",
+                    "        - !Ref SubnetA\n",
+                    "        - !Ref SubnetB\n",
+                    "  TargetGroup:\n",
+                    "    Type: AWS::ElasticLoadBalancingV2::TargetGroup\n",
+                    "    Properties:\n",
+                    "      Name: chain-tg\n",
+                    "      Port: 80\n",
+                    "      Protocol: HTTP\n",
+                    "      TargetType: ip\n",
+                    "      VpcId: !Ref Vpc\n",
+                    "  Listener:\n",
+                    "    Type: AWS::ElasticLoadBalancingV2::Listener\n",
+                    "    Properties:\n",
+                    "      LoadBalancerArn: !Ref Alb\n",
+                    "      Port: 80\n",
+                    "      Protocol: HTTP\n",
+                    "      DefaultActions:\n",
+                    "        - Type: forward\n",
+                    "          TargetGroupArn: !Ref TargetGroup\n",
+                    "  Rule:\n",
+                    "    Type: AWS::ElasticLoadBalancingV2::ListenerRule\n",
+                    "    Properties:\n",
+                    "      ListenerArn: !Ref Listener\n",
+                    "      Priority: 10\n",
+                    "      Conditions:\n",
+                    "        - Field: path-pattern\n",
+                    "          Values:\n",
+                    "            - /api/*\n",
+                    "      Actions:\n",
+                    "        - Type: forward\n",
+                    "          TargetGroupArn: !Ref TargetGroup\n",
+                    "  Service:\n",
+                    "    Type: AWS::ECS::Service\n",
+                    "    Properties:\n",
+                    "      ServiceName: chain-service\n",
+                    "      Cluster: chain-cluster\n",
+                    "      DesiredCount: 1\n",
+                    "Outputs:\n",
+                    "  AlbRef:\n",
+                    "    Value: !Ref Alb\n",
+                    "  ListenerRef:\n",
+                    "    Value: !Ref Listener\n",
+                    "  ListenerArn:\n",
+                    "    Value: !GetAtt Listener.ListenerArn\n",
+                    "  RuleRef:\n",
+                    "    Value: !Ref Rule\n",
+                    "  RuleArn:\n",
+                    "    Value: !GetAtt Rule.RuleArn\n",
+                    "  RuleIsDefault:\n",
+                    "    Value: !GetAtt Rule.IsDefault\n",
+                    "  ServiceRef:\n",
+                    "    Value: !Ref Service\n",
+                    "  ServiceName:\n",
+                    "    Value: !GetAtt Service.Name\n",
+                ),
+            ]
+            .concat(),
             parameters: Vec::new(),
             expected: vec![
                 (
@@ -299,11 +346,22 @@ fn cases() -> Vec<Case> {
             case: "json long form: a listener under a network load balancer, a cluster by arn",
             stack_name: "ecs-elb-json",
             template: r#"{"Resources":{
+                 "Vpc":{"Type":"AWS::EC2::VPC",
+                   "Properties":{"CidrBlock":"10.2.0.0/16"}},
+                 "Subnet":{"Type":"AWS::EC2::Subnet",
+                   "Properties":{"VpcId":{"Ref":"Vpc"},"CidrBlock":"10.2.1.0/24",
+                     "AvailabilityZone":"us-east-1a"}},
                  "Nlb":{"Type":"AWS::ElasticLoadBalancingV2::LoadBalancer",
-                   "Properties":{"Name":"json-nlb","Type":"network","Scheme":"internal"}},
+                   "Properties":{"Name":"json-nlb","Type":"network","Scheme":"internal",
+                     "Subnets":[{"Ref":"Subnet"}]}},
+                 "NlbTargets":{"Type":"AWS::ElasticLoadBalancingV2::TargetGroup",
+                   "Properties":{"Name":"json-nlb-tg","Port":5000,"Protocol":"TCP",
+                     "TargetType":"ip","VpcId":{"Ref":"Vpc"}}},
                  "Listener":{"Type":"AWS::ElasticLoadBalancingV2::Listener",
                    "Properties":{"LoadBalancerArn":{"Ref":"Nlb"},"Port":5000,
-                     "Protocol":"TCP"}},
+                     "Protocol":"TCP",
+                     "DefaultActions":[{"Type":"forward",
+                       "TargetGroupArn":{"Ref":"NlbTargets"}}]}},
                  "ByArn":{"Type":"AWS::ECS::Service",
                    "Properties":{"ServiceName":"by-arn-service",
                      "Cluster":"arn:aws:ecs:us-east-1:000000000000:cluster/by-arn-cluster"}},
@@ -314,7 +372,8 @@ fn cases() -> Vec<Case> {
                  "ListenerRef":{"Value":{"Fn::GetAtt":["Listener","ListenerArn"]}},
                  "ByArnRef":{"Value":{"Ref":"ByArn"}},
                  "SoloRef":{"Value":{"Ref":"Solo"}},
-                 "SoloStatus":{"Value":{"Fn::GetAtt":["Solo","Status"]}}}}"#,
+                 "SoloStatus":{"Value":{"Fn::GetAtt":["Solo","Status"]}}}}"#
+            .to_string(),
             parameters: Vec::new(),
             expected: vec![
                 (
@@ -349,12 +408,9 @@ fn cases() -> Vec<Case> {
             ],
         },
         Case {
-            // The cluster named by a template PARAMETER, an UNNAMED service (whose name
-            // CloudFormation generates), and the two ways a nested resource can have no
-            // parent to nest in: a declaration that names none at all, and one naming a
-            // value that is not an Elastic Load Balancing ARN. Neither is turned into an
-            // ARN — the resource keeps CloudFormation's own generated identity.
-            case: "a cluster by parameter, an unnamed service, and a listener with no parent",
+            // The cluster named by a template PARAMETER and an UNNAMED service, whose name
+            // CloudFormation generates.
+            case: "a cluster by parameter and an unnamed service",
             stack_name: "ecs-elb-edges",
             template: concat!(
                 "Parameters:\n",
@@ -370,33 +426,13 @@ fn cases() -> Vec<Case> {
                 "    Type: AWS::ECS::Service\n",
                 "    Properties:\n",
                 "      Cluster: !Ref ClusterName\n",
-                "  Orphan:\n",
-                "    Type: AWS::ElasticLoadBalancingV2::Listener\n",
-                "    Properties:\n",
-                "      Port: 80\n",
-                "      Protocol: HTTP\n",
-                "  NotAnArn:\n",
-                "    Type: AWS::ElasticLoadBalancingV2::Listener\n",
-                "    Properties:\n",
-                "      LoadBalancerArn: my-load-balancer\n",
-                "  Rule:\n",
-                "    Type: AWS::ElasticLoadBalancingV2::ListenerRule\n",
-                "    Properties:\n",
-                "      ListenerArn: !Ref Orphan\n",
                 "Outputs:\n",
                 "  ParameterisedRef:\n",
                 "    Value: !Ref Parameterised\n",
                 "  UnnamedName:\n",
                 "    Value: !GetAtt Unnamed.Name\n",
-                "  OrphanRef:\n",
-                "    Value: !Ref Orphan\n",
-                "  NotAnArnRef:\n",
-                "    Value: !Ref NotAnArn\n",
-                "  RuleRef:\n",
-                "    Value: !Ref Rule\n",
-                "  RuleIsDefault:\n",
-                "    Value: !GetAtt Rule.IsDefault\n",
-            ),
+            )
+            .to_string(),
             parameters: params(&[("ClusterName", "parameterised-cluster")]),
             expected: vec![
                 (
@@ -411,25 +447,6 @@ fn cases() -> Vec<Case> {
                         prefix: "ecs-elb-edges-Unnamed-".to_string(),
                     },
                 ),
-                (
-                    "OrphanRef",
-                    Expect::Generated {
-                        prefix: "ecs-elb-edges-Orphan-".to_string(),
-                    },
-                ),
-                (
-                    "NotAnArnRef",
-                    Expect::Generated {
-                        prefix: "ecs-elb-edges-NotAnArn-".to_string(),
-                    },
-                ),
-                (
-                    "RuleRef",
-                    Expect::Generated {
-                        prefix: "ecs-elb-edges-Rule-".to_string(),
-                    },
-                ),
-                ("RuleIsDefault", Expect::Exact("false".to_string())),
             ],
         },
     ]
@@ -450,7 +467,7 @@ async fn outputs_built_from_another_resources_identity_carry_their_resolved_valu
 
     for case in cases() {
         let (status_code, body) =
-            create_stack(&router, case.stack_name, case.template, &case.parameters).await;
+            create_stack(&router, case.stack_name, &case.template, &case.parameters).await;
         assert_eq!(
             status_code, 200,
             "case {:?}: expected CreateStack to succeed, got {status_code} {body}",
@@ -503,32 +520,55 @@ async fn outputs_built_from_another_resources_identity_carry_their_resolved_valu
 #[tokio::test]
 async fn nested_listener_identifiers_are_unique_per_resource_and_stable() {
     let router = router();
-    let template = concat!(
+    let template = [
         "Resources:\n",
-        "  Alb:\n",
-        "    Type: AWS::ElasticLoadBalancingV2::LoadBalancer\n",
-        "    Properties:\n",
-        "      Name: twin-alb\n",
-        "  First:\n",
-        "    Type: AWS::ElasticLoadBalancingV2::Listener\n",
-        "    Properties:\n",
-        "      LoadBalancerArn: !Ref Alb\n",
-        "      Port: 80\n",
-        "  Second:\n",
-        "    Type: AWS::ElasticLoadBalancingV2::Listener\n",
-        "    Properties:\n",
-        "      LoadBalancerArn: !Ref Alb\n",
-        "      Port: 443\n",
-        "Outputs:\n",
-        "  AlbRef:\n",
-        "    Value: !Ref Alb\n",
-        "  FirstArn:\n",
-        "    Value: !GetAtt First.ListenerArn\n",
-        "  SecondArn:\n",
-        "    Value: !GetAtt Second.ListenerArn\n",
-    );
+        NETWORK,
+        concat!(
+            "  Alb:\n",
+            "    Type: AWS::ElasticLoadBalancingV2::LoadBalancer\n",
+            "    Properties:\n",
+            "      Name: twin-alb\n",
+            "      Subnets:\n",
+            "        - !Ref SubnetA\n",
+            "        - !Ref SubnetB\n",
+            "  Targets:\n",
+            "    Type: AWS::ElasticLoadBalancingV2::TargetGroup\n",
+            "    Properties:\n",
+            "      Name: twin-tg\n",
+            "      Port: 80\n",
+            "      Protocol: HTTP\n",
+            "      TargetType: ip\n",
+            "      VpcId: !Ref Vpc\n",
+            "  First:\n",
+            "    Type: AWS::ElasticLoadBalancingV2::Listener\n",
+            "    Properties:\n",
+            "      LoadBalancerArn: !Ref Alb\n",
+            "      Port: 80\n",
+            "      Protocol: HTTP\n",
+            "      DefaultActions:\n",
+            "        - Type: forward\n",
+            "          TargetGroupArn: !Ref Targets\n",
+            "  Second:\n",
+            "    Type: AWS::ElasticLoadBalancingV2::Listener\n",
+            "    Properties:\n",
+            "      LoadBalancerArn: !Ref Alb\n",
+            "      Port: 8080\n",
+            "      Protocol: HTTP\n",
+            "      DefaultActions:\n",
+            "        - Type: forward\n",
+            "          TargetGroupArn: !Ref Targets\n",
+            "Outputs:\n",
+            "  AlbRef:\n",
+            "    Value: !Ref Alb\n",
+            "  FirstArn:\n",
+            "    Value: !GetAtt First.ListenerArn\n",
+            "  SecondArn:\n",
+            "    Value: !GetAtt Second.ListenerArn\n",
+        ),
+    ]
+    .concat();
     let case = "two listeners under one load balancer";
-    let (status_code, body) = create_stack(&router, "elb-two-listeners", template, &[]).await;
+    let (status_code, body) = create_stack(&router, "elb-two-listeners", &template, &[]).await;
     assert_eq!(
         status_code, 200,
         "case {case:?}: expected CreateStack to succeed, got {status_code} {body}"

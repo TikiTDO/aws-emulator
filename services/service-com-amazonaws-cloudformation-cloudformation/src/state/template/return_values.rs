@@ -807,17 +807,19 @@ pub(super) fn return_values(
             attributes.insert("TaskDefinitionArn".to_string(), arn.clone());
             (arn, attributes)
         }
-        // "Ref returns the ARN of the load balancer"; Fn::GetAtt: DNSName,
-        // LoadBalancerFullName, LoadBalancerName (CanonicalHostedZoneID is a value AWS
-        // allocated per Region — nothing computes it — and SecurityGroups is list-valued,
-        // so neither is carried).
+        // "Ref returns the ARN of the load balancer"; Fn::GetAtt: CanonicalHostedZoneID,
+        // DNSName, LoadBalancerFullName, LoadBalancerName, SecurityGroups.
         //
-        // Both the ARN and the DNS name carry an id Elastic Load Balancing ASSIGNS
-        // (`.../loadbalancer/app/<name>/<id>`, `<name>-<id>.<region>.elb.amazonaws.com`,
-        // prefixed `internal-` for an internal scheme), in the same 16-character form that
-        // service mints, and the ARN's type segment is the one its own ARNs carry: `app`
-        // for an Application Load Balancer, `net` for a Network one, `gwy` for a Gateway
-        // one.
+        // This is the type `super::provisioning` creates in Elastic Load Balancing itself, so
+        // the ARN a stack's output names is one that service really holds a load balancer
+        // for, and the values only IT can produce stand in until its create has answered:
+        // the hosted zone it publishes for the Region and the family, and the groups in front
+        // of the load balancer — which for an Application Load Balancer a declaration names
+        // none for are the default security group of its VPC. The ARN and the DNS name carry
+        // an id that service ASSIGNS (`.../loadbalancer/app/<name>/<id>`,
+        // `<name>-<id>.<region>.elb.amazonaws.com`, prefixed `internal-` for an internal
+        // scheme), which is why those too are the create's to report and the values computed
+        // here are only what a declaration is resolved against until then.
         ELB_LOAD_BALANCER => {
             let id = service_assigned_label(ELB_LOAD_BALANCER_ID_SALT, name, ELB_ID_HEX_DIGITS);
             let type_code = load_balancer_type_code(properties, scope, budget);
@@ -829,11 +831,19 @@ pub(super) fn return_values(
                 == Some(ELB_SCHEME_INTERNAL);
             let prefix = if internal { "internal-" } else { "" };
             attributes.insert(
+                "CanonicalHostedZoneID".to_string(),
+                service_assigned_document(name, "CanonicalHostedZoneID"),
+            );
+            attributes.insert(
                 "DNSName".to_string(),
                 format!("{prefix}{name}-{id}.{region}.elb.{URL_SUFFIX}"),
             );
             attributes.insert("LoadBalancerFullName".to_string(), path.clone());
             attributes.insert("LoadBalancerName".to_string(), name.to_string());
+            attributes.insert(
+                "SecurityGroups".to_string(),
+                service_assigned_document(name, "SecurityGroups"),
+            );
             (
                 ::emulator_server::emulator_arn(
                     "elasticloadbalancing",
@@ -843,15 +853,21 @@ pub(super) fn return_values(
                 attributes,
             )
         }
-        // "Ref returns the ARN of the target group"; Fn::GetAtt: TargetGroupArn,
-        // TargetGroupFullName, TargetGroupName (LoadBalancerArns is list-valued, so it is
-        // not carried). The full name is the ARN's own resource path,
-        // `targetgroup/<name>/<id>`, with the same service-assigned id form.
+        // "Ref returns the ARN of the target group"; Fn::GetAtt: LoadBalancerArns,
+        // TargetGroupArn, TargetGroupFullName, TargetGroupName. The full name is the ARN's own
+        // resource path, `targetgroup/<name>/<id>`, with the same service-assigned id form,
+        // and `LoadBalancerArns` — "the ARN of the load balancer that routes traffic to this
+        // target group" — is a value only Elastic Load Balancing can produce, so it stands in
+        // until that service has answered for the group `super::provisioning` creates there.
         ELB_TARGET_GROUP => {
             let id = service_assigned_label(ELB_TARGET_GROUP_ID_SALT, name, ELB_ID_HEX_DIGITS);
             let path = format!("targetgroup/{name}/{id}");
             let arn =
                 ::emulator_server::emulator_arn("elasticloadbalancing", region, &path);
+            attributes.insert(
+                "LoadBalancerArns".to_string(),
+                service_assigned_document(name, "LoadBalancerArns"),
+            );
             attributes.insert("TargetGroupArn".to_string(), arn.clone());
             attributes.insert("TargetGroupFullName".to_string(), path);
             attributes.insert("TargetGroupName".to_string(), name.to_string());
@@ -1827,8 +1843,19 @@ pub fn published_attribute_names(resource_type: &str) -> &'static [&'static str]
         BATCH_JOB_QUEUE => &["JobQueueArn"],
         BATCH_SERVICE_ENVIRONMENT => &["ServiceEnvironmentArn"],
         ECS_TASK_DEFINITION => &["TaskDefinitionArn"],
-        ELB_LOAD_BALANCER => &["DNSName", "LoadBalancerFullName", "LoadBalancerName"],
-        ELB_TARGET_GROUP => &["TargetGroupArn", "TargetGroupFullName", "TargetGroupName"],
+        ELB_LOAD_BALANCER => &[
+            "CanonicalHostedZoneID",
+            "DNSName",
+            "LoadBalancerFullName",
+            "LoadBalancerName",
+            "SecurityGroups",
+        ],
+        ELB_TARGET_GROUP => &[
+            "LoadBalancerArns",
+            "TargetGroupArn",
+            "TargetGroupFullName",
+            "TargetGroupName",
+        ],
         "AWS::RDS::DBCluster" => &[
             "DBClusterArn",
             "DBClusterResourceId",
@@ -1927,6 +1954,27 @@ pub fn published_attribute_names(resource_type: &str) -> &'static [&'static str]
         STEP_FUNCTIONS_ACTIVITY => &["Arn", "Name"],
         STEP_FUNCTIONS_STATE_MACHINE => &["Arn", "Name"],
         SCHEDULER_SCHEDULE_GROUP | SCHEDULER_SCHEDULE => &["Arn"],
+        _ => &[],
+    }
+}
+
+/// Which of the attributes a type publishes are LIST-valued: a load balancer's
+/// `SecurityGroups` ("the IDs of the security groups for the load balancer") and a target
+/// group's `LoadBalancerArns` ("the Amazon Resource Name (ARN) of the load balancer that
+/// routes traffic to this target group"), each a list in the owning service's own model
+/// (`smithy_query(query="shape",shape="LoadBalancer")` /
+/// `shape="TargetGroup"`).
+///
+/// Such an attribute carries its entries as ONE value — the resource's record holds a string
+/// per attribute — so a template that wants a single entry of it reads the entries with
+/// `Fn::Select`, which is what that function's own documentation says of these attributes:
+/// "for attributes that return a list, use `Fn::Select`". This is the catalogue that reading
+/// is keyed on ([`super::attribute_items`]); a type with no entry publishes no list-valued
+/// return value, so every attribute of it is the one value it reads as.
+pub fn published_list_attribute_names(resource_type: &str) -> &'static [&'static str] {
+    match resource_type {
+        ELB_LOAD_BALANCER => &["SecurityGroups"],
+        ELB_TARGET_GROUP => &["LoadBalancerArns"],
         _ => &[],
     }
 }
@@ -2245,6 +2293,18 @@ pub fn identity_is_service_assigned(resource_type: &str) -> bool {
         // `DescribeStackResource` reports as the resource's `PhysicalResourceId`, and the
         // handle every call on the child stack takes.
         || resource_type == crate::state::STACK_RESOURCE_TYPE
+        // The four Elastic Load Balancing v2 types are four more: `CreateLoadBalancer`,
+        // `CreateTargetGroup`, `CreateListener` and `CreateRule` take no identifier at all,
+        // each answers an ARN carrying a 16-character identifier that service MINTED, and
+        // every one of those types' `Ref` returns that ARN — the `Name` a load balancer or a
+        // target group declares is only what the resource is called, and a listener and a rule
+        // declare no name at all. So the identity in force is the one the create answered
+        // ([`crate::state::provisioning::elastic_load_balancing`]), and the ARN computed here
+        // is the stand-in a declaration is resolved against until then.
+        || resource_type == ELB_LOAD_BALANCER
+        || resource_type == ELB_TARGET_GROUP
+        || resource_type == ELB_LISTENER
+        || resource_type == ELB_LISTENER_RULE
 }
 
 /// The type of an IAM access key: the long-term credential of an IAM user, under the
@@ -3990,8 +4050,8 @@ fn lambda_function_arn(
 /// An Elastic Load Balancing v2 listener's and listener rule's resource types. Each one's
 /// published identifier NESTS inside its parent's ARN, which is what [`nested_elb_arn`]
 /// builds and why [`identity_depends_on_another_resource`] names them.
-pub(super) const ELB_LISTENER: &str = "AWS::ElasticLoadBalancingV2::Listener";
-pub(super) const ELB_LISTENER_RULE: &str = "AWS::ElasticLoadBalancingV2::ListenerRule";
+pub const ELB_LISTENER: &str = "AWS::ElasticLoadBalancingV2::Listener";
+pub const ELB_LISTENER_RULE: &str = "AWS::ElasticLoadBalancingV2::ListenerRule";
 
 /// The salts a listener's and a rule's assigned ids are derived under, beside the load
 /// balancer's and the target group's (see [`service_assigned_label`]).

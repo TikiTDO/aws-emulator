@@ -217,6 +217,11 @@ pub(super) mod dynamodb_table;
 /// ([`ec2_instance`]).
 mod ec2_instance;
 mod ec2_vpc_network;
+/// The four `AWS::ElasticLoadBalancingV2::*` types a stack declares — the load balancer, the
+/// target group traffic is routed to, the listener on the load balancer and the rule that
+/// routes a request: created in Elastic Load Balancing itself
+/// ([`elastic_load_balancing`]).
+pub(super) mod elastic_load_balancing;
 mod iam_policy;
 /// `AWS::IoT::Authorizer`: the custom authorizer a stack declares, created in AWS IoT
 /// itself ([`iot_authorizer`]).
@@ -752,6 +757,11 @@ pub(super) enum Owner {
     /// association that puts a key in a plan. Which of them it is travels with the owner, as
     /// it does for the Amazon EC2 types above.
     ApiGatewayRestApi(apigateway_rest_api::Kind),
+    /// One of the four `AWS::ElasticLoadBalancingV2::*` types [`elastic_load_balancing`]
+    /// creates in Elastic Load Balancing: the load balancer, a target group, a listener on
+    /// the load balancer and a rule of that listener. Which of them it is travels with the
+    /// owner, as it does for the types above.
+    ElasticLoadBalancing(elastic_load_balancing::Kind),
     /// One of the four `AWS::AppConfig::*` types [`appconfig_resources`] creates in AWS
     /// AppConfig: the application, an environment of it, a configuration profile of it and the
     /// deployment strategy a rollout follows. Which of them it is travels with the owner, as
@@ -823,6 +833,9 @@ pub(super) fn owner_for(resource_type: &str) -> Option<Owner> {
     }
     if let Some(kind) = appconfig_resources::kind_of(resource_type) {
         return Some(Owner::AppConfigResource(kind));
+    }
+    if let Some(kind) = elastic_load_balancing::kind_of(resource_type) {
+        return Some(Owner::ElasticLoadBalancing(kind));
     }
     provisioner_for(resource_type).map(Owner::Builtin)
 }

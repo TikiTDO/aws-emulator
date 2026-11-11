@@ -1097,6 +1097,28 @@ fn task_definition_arn(family: &str) -> String {
     format!("arn:aws:ecs:{REGION}:{ACCOUNT_ID}:task-definition/{family}:1")
 }
 
+/// The network the load balancers of these rows are placed in: a VPC and two subnets of it,
+/// in two Availability Zones, since Elastic Load Balancing resolves a placement against
+/// Amazon EC2 and an Application Load Balancer needs subnets in at least two zones.
+const NETWORK: &str = concat!(
+    "  Vpc:\n",
+    "    Type: AWS::EC2::VPC\n",
+    "    Properties:\n",
+    "      CidrBlock: 10.3.0.0/16\n",
+    "  SubnetA:\n",
+    "    Type: AWS::EC2::Subnet\n",
+    "    Properties:\n",
+    "      VpcId: !Ref Vpc\n",
+    "      CidrBlock: 10.3.1.0/24\n",
+    "      AvailabilityZone: us-east-1a\n",
+    "  SubnetB:\n",
+    "    Type: AWS::EC2::Subnet\n",
+    "    Properties:\n",
+    "      VpcId: !Ref Vpc\n",
+    "      CidrBlock: 10.3.2.0/24\n",
+    "      AvailabilityZone: us-east-1b\n",
+);
+
 /// Whether `value` is the 16 lowercase hexadecimal characters Elastic Load Balancing
 /// assigns a load balancer or a target group as its id
 /// (`.../app/my-load-balancer/50dc6c495c0c9188`).
@@ -1127,13 +1149,24 @@ fn is_load_balancer_arn(value: &str, type_code: &str, name: &str) -> bool {
         .is_some_and(is_elb_id)
 }
 
-/// Whether `value` is the DNS name of the load balancer named `name`:
-/// `<name>-<id>.<region>.elb.amazonaws.com`, prefixed `internal-` for an internal one.
-fn is_dns_name(value: &str, name: &str, internal: bool) -> bool {
-    let prefix = if internal { "internal-" } else { "" };
+/// Whether `value` is an address a client on this machine can DIAL: the `host:port` of a
+/// listener this emulator opened for the load balancer, which is what an APPLICATION load
+/// balancer publishes as its `DNSName` — "the public DNS name of the load balancer" is the
+/// address a client reaches it at, and this emulator serves that family's traffic itself.
+fn is_published_address(value: &str) -> bool {
+    value.parse::<std::net::SocketAddr>().is_ok()
+}
+
+/// Whether `value` is the host a NETWORK load balancer named `name` publishes: that family's
+/// guide puts the `elb` label ahead of the Region and the id beside the name is the very
+/// hexadecimal one its ARN carries
+/// (`my-network-load-balancer-1234567890abcdef.elb.us-west-2.amazonaws.com`), with the scheme
+/// stated nowhere in it. The emulator serves no traffic for that family, so it publishes the
+/// name rather than an address.
+fn is_network_dns_name(value: &str, name: &str) -> bool {
     value
-        .strip_prefix(&format!("{prefix}{name}-"))
-        .and_then(|rest| rest.strip_suffix(&format!(".{REGION}.elb.amazonaws.com")))
+        .strip_prefix(&format!("{name}-"))
+        .and_then(|rest| rest.strip_suffix(&format!(".elb.{REGION}.amazonaws.com")))
         .is_some_and(is_elb_id)
 }
 
@@ -1163,11 +1196,15 @@ fn cases() -> Vec<Case> {
             // deploy helper reads.
             case: "yaml, a named ecr + ecs + elbv2 application stack",
             stack_name: "shop-platform",
-            template: concat!(
-                "Parameters:\n",
-                "  AppName:\n",
-                "    Type: String\n",
-                "Resources:\n",
+            template: [
+                concat!(
+                    "Parameters:\n",
+                    "  AppName:\n",
+                    "    Type: String\n",
+                    "Resources:\n",
+                ),
+                NETWORK,
+                concat!(
                 "  AppRepository:\n",
                 "    Type: AWS::ECR::Repository\n",
                 "    Properties:\n",
@@ -1180,7 +1217,7 @@ fn cases() -> Vec<Case> {
                 "      Port: 80\n",
                 "      Protocol: HTTP\n",
                 "      TargetType: ip\n",
-                "      VpcId: vpc-0123456789abcdef0\n",
+                "      VpcId: !Ref Vpc\n",
                 "  LoadBalancer:\n",
                 "    Type: AWS::ElasticLoadBalancingV2::LoadBalancer\n",
                 "    Properties:\n",
@@ -1188,8 +1225,8 @@ fn cases() -> Vec<Case> {
                 "      Scheme: internet-facing\n",
                 "      Type: application\n",
                 "      Subnets:\n",
-                "        - subnet-0123456789abcdef0\n",
-                "        - subnet-abcdef0123456789a\n",
+                "        - !Ref SubnetA\n",
+                "        - !Ref SubnetB\n",
                 "  TaskDefinition:\n",
                 "    Type: AWS::ECS::TaskDefinition\n",
                 "    Properties:\n",
@@ -1222,8 +1259,9 @@ fn cases() -> Vec<Case> {
                 "    Value: !GetAtt LoadBalancer.LoadBalancerFullName\n",
                 "  ContainerImage:\n",
                 "    Value: !Sub \"${AppRepository.RepositoryUri}:v1\"\n",
-            )
-            .to_string(),
+                ),
+            ]
+            .concat(),
             parameters: params(&[("AppName", "shop")]),
             expected: vec![
                 value("RepositoryUri", repository_uri("shop-images")),
@@ -1247,8 +1285,8 @@ fn cases() -> Vec<Case> {
                 ),
                 form(
                     "LoadBalancerDnsName",
-                    "shop-alb-<id>.us-east-1.elb.amazonaws.com",
-                    |value| is_dns_name(value, "shop-alb", false),
+                    "the host:port of the listener the emulator opened for the load balancer",
+                    is_published_address,
                 ),
                 form("LoadBalancerFullName", "app/shop-alb/<id>", |value| {
                     is_load_balancer_full_name(value, "app", "shop-alb")
@@ -1262,20 +1300,23 @@ fn cases() -> Vec<Case> {
         Case {
             // The same class with the variables flipped: the JSON spelling with long-form
             // intrinsics, an INTERNAL NETWORK load balancer (whose published ARN segment
-            // is `net` and whose DNS name carries the `internal-` prefix), and no resource
-            // named by the template — so each takes CloudFormation's generated
-            // `<stack>-<logical id>-<unique id>` name, which is what the identifiers are
-            // then built on.
+            // is `net`), and no resource named by the template — so each takes
+            // CloudFormation's generated `<stack>-<logical id>-<unique id>` name, which is
+            // what the identifiers are then built on.
             case: "json, an internal network load balancer and unnamed resources",
             stack_name: "warehouse",
             template: r#"{"Resources":{
+                 "Vpc":{"Type":"AWS::EC2::VPC","Properties":{"CidrBlock":"10.4.0.0/16"}},
+                 "SubnetA":{"Type":"AWS::EC2::Subnet","Properties":{
+                   "VpcId":{"Ref":"Vpc"},"CidrBlock":"10.4.1.0/24",
+                   "AvailabilityZone":"us-east-1a"}},
                  "Balancer":{"Type":"AWS::ElasticLoadBalancingV2::LoadBalancer","Properties":{
                    "Name":"warehouse-internal",
                    "Scheme":"internal","Type":"network",
-                   "Subnets":["subnet-0123456789abcdef0"]}},
+                   "Subnets":[{"Ref":"SubnetA"}]}},
                  "Group":{"Type":"AWS::ElasticLoadBalancingV2::TargetGroup","Properties":{
                    "Name":"warehouse-tg","Port":8080,"Protocol":"TCP","TargetType":"ip",
-                   "VpcId":"vpc-0123456789abcdef0"}},
+                   "VpcId":{"Ref":"Vpc"}}},
                  "Registry":{"Type":"AWS::ECR::Repository"},
                  "Task":{"Type":"AWS::ECS::TaskDefinition","Properties":{
                    "Cpu":"512","Memory":"1024","NetworkMode":"awsvpc",
@@ -1299,8 +1340,8 @@ fn cases() -> Vec<Case> {
                 ),
                 form(
                     "LoadBalancerDnsName",
-                    "internal-warehouse-internal-<id>.us-east-1.elb.amazonaws.com",
-                    |value| is_dns_name(value, "warehouse-internal", true),
+                    "warehouse-internal-<id>.elb.us-east-1.amazonaws.com",
+                    |value| is_network_dns_name(value, "warehouse-internal"),
                 ),
                 value("LoadBalancerName", "warehouse-internal".to_string()),
                 form(
@@ -1426,18 +1467,24 @@ fn reported_value(case: &str, outputs: &[WireOutput], key: &str) -> String {
 async fn an_assigned_identifier_is_unique_per_resource_and_stable() {
     let router = router();
     let case = "two load balancers and two target groups in one stack";
-    let template = concat!(
+    let template = [
         "Resources:\n",
+        NETWORK,
+        concat!(
         "  FirstBalancer:\n",
         "    Type: AWS::ElasticLoadBalancingV2::LoadBalancer\n",
         "    Properties:\n",
         "      Name: shared-name\n",
-        "      Subnets: [subnet-0123456789abcdef0]\n",
+        "      Subnets:\n",
+        "        - !Ref SubnetA\n",
+        "        - !Ref SubnetB\n",
         "  SecondBalancer:\n",
         "    Type: AWS::ElasticLoadBalancingV2::LoadBalancer\n",
         "    Properties:\n",
         "      Name: second-alb\n",
-        "      Subnets: [subnet-0123456789abcdef0]\n",
+        "      Subnets:\n",
+        "        - !Ref SubnetA\n",
+        "        - !Ref SubnetB\n",
         "  FirstGroup:\n",
         // The same NAME as the first load balancer: Elastic Load Balancing keeps the two
         // name spaces apart, and the ids it assigns them are still distinct.
@@ -1446,14 +1493,14 @@ async fn an_assigned_identifier_is_unique_per_resource_and_stable() {
         "      Name: shared-name\n",
         "      Port: 80\n",
         "      Protocol: HTTP\n",
-        "      VpcId: vpc-0123456789abcdef0\n",
+        "      VpcId: !Ref Vpc\n",
         "  SecondGroup:\n",
         "    Type: AWS::ElasticLoadBalancingV2::TargetGroup\n",
         "    Properties:\n",
         "      Name: second-tg\n",
         "      Port: 80\n",
         "      Protocol: HTTP\n",
-        "      VpcId: vpc-0123456789abcdef0\n",
+        "      VpcId: !Ref Vpc\n",
         "Outputs:\n",
         "  FirstBalancer:\n",
         "    Value: !Ref FirstBalancer\n",
@@ -1463,8 +1510,10 @@ async fn an_assigned_identifier_is_unique_per_resource_and_stable() {
         "    Value: !Ref FirstGroup\n",
         "  SecondGroup:\n",
         "    Value: !Ref SecondGroup\n",
-    );
-    let (status, body) = create_stack(&router, "identity-stack", template, &[]).await;
+        ),
+    ]
+    .concat();
+    let (status, body) = create_stack(&router, "identity-stack", &template, &[]).await;
     assert_eq!(
         status, 200,
         "case {case:?}: expected CreateStack to answer 200, got {status} {body}"

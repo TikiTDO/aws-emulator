@@ -522,13 +522,84 @@ pub(crate) fn xml_entry_map(document: &str, parent: &str) -> ::serde_json::Map<S
     }
 }
 
+/// The ENTRIES of one LIST member of an awsQuery answer: the text of each `<member>` element
+/// directly inside the first `<parent>`, in document order, with their entities decoded.
+///
+/// [`xml_elements`] reads every element of a name ANYWHERE in the document, which folds two
+/// lists of the same answer into one — a load balancer reports both its `SecurityGroups` and
+/// its `AvailabilityZones` as `<member>` lists — so a reader of ONE of them is scoped to that
+/// member's own element: the walk starts at its start tag and stops at its end tag, and only
+/// an entry opened at its own depth is one of its entries, so a `<member>` nested deeper
+/// cannot be mistaken for one. A list the answer does not carry, and one it carries empty,
+/// are both the empty list, which is what that service reported.
+pub(crate) fn xml_member_list(document: &str, parent: &str) -> Vec<String> {
+    use ::quick_xml::events::Event;
+
+    const MEMBER: &[u8] = b"member";
+
+    let mut reader = ::quick_xml::Reader::from_str(document);
+    reader.config_mut().trim_text(false);
+    let mut entries = Vec::new();
+    let mut inside = false;
+    // How many elements are open BELOW `parent`: an entry opens at 0, and only one read at
+    // that level is an entry of this list.
+    let mut depth = 0usize;
+    let mut reading: Option<String> = None;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(start)) => {
+                let name = start.local_name();
+                if !inside {
+                    inside = name.as_ref() == parent.as_bytes();
+                    continue;
+                }
+                if depth == 0 && name.as_ref() == MEMBER {
+                    reading = Some(String::new());
+                }
+                depth += 1;
+            }
+            Ok(Event::Text(found)) if reading.is_some() => {
+                if let Some(held) = reading.as_mut() {
+                    held.push_str(&found.xml10_content().unwrap_or_default());
+                }
+            }
+            Ok(Event::GeneralRef(reference)) if reading.is_some() => {
+                if let Some(held) = reading.as_mut() {
+                    held.push_str(&referenced_text(&reference));
+                }
+            }
+            Ok(Event::Empty(empty)) if inside && depth == 0 => {
+                if empty.local_name().as_ref() == MEMBER {
+                    entries.push(String::new());
+                }
+            }
+            Ok(Event::End(end)) => {
+                if !inside {
+                    continue;
+                }
+                if depth == 0 && end.local_name().as_ref() == parent.as_bytes() {
+                    return entries;
+                }
+                depth = depth.saturating_sub(1);
+                if depth == 0 && end.local_name().as_ref() == MEMBER {
+                    if let Some(held) = reading.take() {
+                        entries.push(held);
+                    }
+                }
+            }
+            Ok(Event::Eof) | Err(_) => return entries,
+            Ok(_) => {}
+        }
+    }
+}
+
 /// Each DIRECT child element of `parent` that holds TEXT, as the JSON object the rest of
 /// this module compares: one entry per such element, keyed by its own name.
 ///
 /// This is how an awsQuery answer carries a resource's scalar members — Amazon RDS reports
 /// a DB instance as `<DBInstance><DBInstanceClass>db.t3.micro</DBInstanceClass>…` — so it
 /// is the reader for a service whose answer is a STRUCTURE rather than the entry map
-/// [`xml_entry_map`] reads.
+/// [`xml_entry_map`] reads, beside [`xml_member_list`] for one that is a LIST.
 ///
 /// Only the first `parent` element, and only its own children: the walk starts at that
 /// element's start tag and stops at its end tag, so a second structure elsewhere in the

@@ -199,6 +199,26 @@ pub fn router_with_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>)
             &engine,
         )),
     );
+    // Elastic Load Balancing, for the `AWS::ElasticLoadBalancingV2::LoadBalancer`,
+    // `::TargetGroup`, `::Listener` and `::ListenerRule` a stack really creates there, so a
+    // suite that deploys a load balancer reads it — and its target group, listener and rule —
+    // back through that service's own wire, by the ARNs the stack publishes.
+    //
+    // BOTH generations are mounted, exactly as `core/router/src/lib.rs` mounts them: the two
+    // models share one endpoint and one signing name, and the CLASSIC service is the front
+    // door that owns that routing key — it serves the ELBv2 model's operations for an
+    // envelope naming the ELBv2 API version, which is the only way an ELBv2 call is routed
+    // at all.
+    router.register_service(
+        service_com_amazonaws_elasticloadbalancingv2_elasticloadbalancing_v10::EmulatedService::new(
+            Arc::clone(&engine),
+        ),
+    );
+    router.register_service(
+        service_com_amazonaws_elasticloadbalancing_elasticloadbalancing_v7::EmulatedService::new(
+            Arc::clone(&engine),
+        ),
+    );
     (router, engine)
 }
 
