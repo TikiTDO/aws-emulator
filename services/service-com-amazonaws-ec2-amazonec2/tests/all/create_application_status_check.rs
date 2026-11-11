@@ -345,11 +345,12 @@ fn cases(subnets: &[String], group: &str) -> Vec<Case> {
                 port: text("1"),
                 // "Default: /".
                 path: text("/"),
-                // AWS publishes no default for these three, so an unnamed one is reported by
-                // nobody rather than invented.
-                device_index: None,
-                ip_version: None,
-                ip_scope: None,
+                // The device every instance has, and the version and scope of the address a
+                // health check reaches it on: the documented defaults for the three members
+                // the request left out.
+                device_index: text("0"),
+                ip_version: text(IP_VERSION_ENUM_VALUES[0]),
+                ip_scope: text(IP_SCOPE_ENUM_VALUES[0]),
                 // "Interval is 60 seconds, Timeout is 6 seconds, FailureThreshold is 2,
                 // SuccessThreshold is 2, StatusCodeMatcher is 200,
                 // InitializationGracePeriodSeconds is 300 seconds."
@@ -437,7 +438,7 @@ fn cases(subnets: &[String], group: &str) -> Vec<Case> {
                 path: text("/status"),
                 device_index: text("0"),
                 ip_version: text(IP_VERSION_ENUM_VALUES[0]),
-                ip_scope: None,
+                ip_scope: text(IP_SCOPE_ENUM_VALUES[0]),
                 interval: text("60"),
                 timeout: text(&timeout_min.to_string()),
                 failure_threshold: text("1"),
@@ -458,9 +459,9 @@ fn cases(subnets: &[String], group: &str) -> Vec<Case> {
                 protocol: text(NETWORK_PROTOCOL_ENUM_VALUES[1]),
                 port: text("443"),
                 path: text("/"),
-                device_index: None,
-                ip_version: None,
-                ip_scope: None,
+                device_index: text("0"),
+                ip_version: text(IP_VERSION_ENUM_VALUES[0]),
+                ip_scope: text(IP_SCOPE_ENUM_VALUES[0]),
                 interval: text("60"),
                 timeout: text("6"),
                 failure_threshold: text("2"),
@@ -495,9 +496,9 @@ fn cases(subnets: &[String], group: &str) -> Vec<Case> {
                 protocol: text(NETWORK_PROTOCOL_ENUM_VALUES[0]),
                 port: text("80"),
                 path: text("/"),
-                device_index: None,
-                ip_version: None,
-                ip_scope: None,
+                device_index: text("0"),
+                ip_version: text(IP_VERSION_ENUM_VALUES[0]),
+                ip_scope: text(IP_SCOPE_ENUM_VALUES[0]),
                 interval: text("60"),
                 timeout: text("6"),
                 failure_threshold: text("2"),

@@ -1268,18 +1268,35 @@ impl<'a> InstanceTypeName<'a> {
     /// names one by one ([`ENCRYPTING_INSTANCE_FAMILIES`]) and the high-memory family it
     /// names as a whole ([`HIGH_MEMORY_ROOT`]).
     ///
+    /// The Graviton ladder reaches that version of the Nitro System one generation later
+    /// than the Intel and AMD families do ([`FIRST_ENCRYPTING_GRAVITON_GENERATION`]): a
+    /// Graviton2 type is a sixth-generation type on the version before it. Its
+    /// network-optimized (`n`) sizes are the exception the same page makes for them — they
+    /// carry the newer network card, which is what does the encrypting — so the delay is
+    /// for the Graviton families WITHOUT that letter.
+    ///
     /// A family carrying no generation at all (`u-6tb1`, whose digits state a memory
     /// size) is answered by those names alone, the way [`Self::nitro`] answers the
     /// facts it cannot read off a generation.
     pub fn encrypts_in_transit(&self) -> bool {
+        let first = if self.graviton() && !self.has_attribute('n') {
+            FIRST_ENCRYPTING_GRAVITON_GENERATION
+        } else {
+            FIRST_ENCRYPTING_INSTANCE_GENERATION
+        };
         ENCRYPTING_INSTANCE_FAMILIES.contains(&self.family)
             || self.root == HIGH_MEMORY_ROOT
             || (self.nitro()
                 && self
                     .generation
-                    .is_some_and(|generation| generation >= FIRST_ENCRYPTING_INSTANCE_GENERATION))
+                    .is_some_and(|generation| generation >= first))
     }
 }
+
+/// The first Graviton generation whose types encrypt traffic in transit: the Graviton3
+/// families, the seventh generation of their ladder — see
+/// [`InstanceTypeName::encrypts_in_transit`].
+pub const FIRST_ENCRYPTING_GRAVITON_GENERATION: u32 = 7;
 
 /// The first generation that runs on the AWS Nitro System: the fifth generation of each
 /// family moved onto it wholesale.
@@ -1719,12 +1736,28 @@ pub(super) fn has_instance_storage(name: &InstanceTypeName<'_>) -> bool {
         || (name.root == "p" && name.generation.is_some_and(|generation| generation >= 5))
 }
 
-/// The local instance storage, in GB per `large` unit of size, of the family `name`
-/// belongs to — the published instance store size of that family's `large` size
-/// ("Instance store volumes"), applied to the size ladder the same way the memory ratio
-/// is.
-pub(super) fn instance_storage_gb_per_size_unit(name: &InstanceTypeName<'_>) -> u64 {
-    match name.root {
+/// The GB of local instance storage one `large` unit of size carries, in QUARTERS of a GB,
+/// for the family `name` belongs to — the published instance store size of that family's
+/// `large` size ("Instance store volumes"), applied to the size ladder the same way the
+/// memory ratio is.
+///
+/// The unit is a quarter of a GB because the ratio of the `d` families from
+/// [`FIRST_LARGE_NVME_STORAGE_GENERATION`] on is not a whole number of GB: their local
+/// device is 118.75 GB per `large` unit (59.375 GB per vCPU), which is what makes that
+/// family's published ladder 59, 118, 237, 950 and 1,900 GB.
+pub(super) fn instance_storage_gb_quarters_per_size_unit(name: &InstanceTypeName<'_>) -> u64 {
+    // The `d` capability letter on a family that is not storage optimized: from the sixth
+    // generation on, those families carry one local NVMe device per two vCPUs of 118.75 GB,
+    // where the fifth-generation `d` families carry 75 GB.
+    if name.has_attribute('d')
+        && !LOCAL_STORAGE_ROOTS.contains(&name.root)
+        && name
+            .generation
+            .is_some_and(|generation| generation >= FIRST_LARGE_NVME_STORAGE_GENERATION)
+    {
+        return LARGE_NVME_STORAGE_GB_QUARTERS_PER_SIZE_UNIT;
+    }
+    4 * match name.root {
         "c" => 50,
         "x" => 118,
         "g" | "gr" => 125,
@@ -1740,6 +1773,14 @@ pub(super) fn instance_storage_gb_per_size_unit(name: &InstanceTypeName<'_>) -> 
         _ => 75,
     }
 }
+
+/// The first generation whose `d` families carry the larger local NVMe device: the sixth,
+/// where `m5d.large`'s 75 GB device becomes `m6gd.large`'s 118 GB one ("Instance store
+/// volumes").
+pub(super) const FIRST_LARGE_NVME_STORAGE_GENERATION: u32 = 6;
+
+/// That device's size per `large` unit of size, in quarters of a GB: 118.75 GB.
+pub(super) const LARGE_NVME_STORAGE_GB_QUARTERS_PER_SIZE_UNIT: u64 = 475;
 
 /// Is this instance type's instance store NVMe?
 ///
@@ -1860,8 +1901,8 @@ pub(super) fn instance_storage_facts(
     if !has_instance_storage(name) {
         return None;
     }
-    let total_gb = (instance_storage_gb_per_size_unit(name) * u64::from(sixteenths)
-        / u64::from(SIZE_UNIT))
+    let total_gb = (instance_storage_gb_quarters_per_size_unit(name) * u64::from(sixteenths)
+        / (4 * u64::from(SIZE_UNIT)))
     .max(1);
     // AWS presents an instance store as equal-sized devices, each at most
     // [`MAX_INSTANCE_STORE_DISK_GB`], so a bigger store is more devices rather than a
@@ -2256,6 +2297,246 @@ pub(super) fn supported_boot_modes(architecture: &str, nitro: bool) -> Vec<Strin
     vec!["legacy-bios".to_string()]
 }
 
+/// The instance types AWS publishes MORE than one network card for, each with the number of
+/// cards it carries: the EC2 User Guide's "Instance types with multiple network cards"
+/// table. Every other instance type carries ONE card, which is what
+/// [`network_card_count`] answers.
+///
+/// The count is a property of the whole instance rather than of its family's ladder — only
+/// the size that has the whole host's cards carries more than one — so the entries name full
+/// instance types, not families.
+pub(super) const MULTI_NETWORK_CARD_TYPES: [(&str, i32); 14] = [
+    ("c6in.32xlarge", 2),
+    ("c6in.metal", 2),
+    ("dl1.24xlarge", 4),
+    ("m6idn.32xlarge", 2),
+    ("m6in.32xlarge", 2),
+    ("p4d.24xlarge", 4),
+    ("p4de.24xlarge", 4),
+    ("p5.48xlarge", 32),
+    ("p5e.48xlarge", 32),
+    ("p5en.48xlarge", 16),
+    ("r6idn.32xlarge", 2),
+    ("r6in.32xlarge", 2),
+    ("trn1.32xlarge", 8),
+    ("trn1n.32xlarge", 16),
+];
+
+/// How many physical network cards `instance_type` has — "the maximum number of physical
+/// network cards that can be allocated to the instance"
+/// (`NetworkInfo$MaximumNetworkCards`).
+///
+/// Every instance has at least one network card, its interfaces being attached to one; the
+/// types AWS publishes several for are [`MULTI_NETWORK_CARD_TYPES`].
+pub(super) fn network_card_count(instance_type: &str) -> i32 {
+    MULTI_NETWORK_CARD_TYPES
+        .iter()
+        .find(|(named, _)| *named == instance_type)
+        .map_or(1, |(_, cards)| *cards)
+}
+
+/// The index of the card an instance's interfaces are attached to unless the request names
+/// another: "the index of the default network card, starting at 0"
+/// (`NetworkInfo$DefaultNetworkCardIndex`). The first card is the default on every type.
+pub(super) const DEFAULT_NETWORK_CARD_INDEX: i32 = 0;
+
+/// The network bandwidth, in Gbps, of the whole host a general purpose, compute optimized or
+/// memory optimized family's largest virtualized size has — the figure the "Network
+/// performance" column of that size's row publishes in the EC2 User Guide's "Instance types"
+/// chapter.
+pub(super) const HOST_NETWORK_GBPS: i64 = 25;
+
+/// The host bandwidth of a family built for the network: the `n` capability letter is
+/// "network and EBS optimized" (the naming conventions), and the accelerated families carry
+/// the same class of adapter for their collective traffic.
+pub(super) const NETWORK_OPTIMIZED_HOST_GBPS: i64 = 100;
+
+/// The bandwidth, in Gbps, a size below its host's full share can BURST to: the ceiling the
+/// published table reports those sizes as "Up to" — never above the host's own figure.
+pub(super) const BURST_NETWORK_GBPS: i64 = 10;
+
+/// The hundredths in one Gbps, the unit the bandwidth derivation counts in so that a share
+/// like 12.5 Gbps is exact without floating point.
+const CENTI_GBPS: i64 = 100;
+
+/// The host network bandwidth, in Gbps, of the family `name` belongs to.
+pub(super) fn host_network_gbps(name: &InstanceTypeName<'_>) -> i64 {
+    let accelerated = matches!(name.root, "p" | "trn" | "dl" | "inf") || name.root == HPC_ROOT;
+    if name.has_attribute('n') || accelerated {
+        return NETWORK_OPTIMIZED_HOST_GBPS;
+    }
+    HOST_NETWORK_GBPS
+}
+
+/// The baseline and peak network bandwidth of one size, in hundredths of a Gbps.
+///
+/// A size's baseline is its SHARE of its host's bandwidth — the instance's share of the host
+/// is what every other per-size figure of this module is derived from — and a size whose
+/// share is below the burst ceiling ([`BURST_NETWORK_GBPS`]) can reach that ceiling instead,
+/// which is the "Up to" the published table reports those rows as. The largest virtualized
+/// size has the whole host, so its baseline IS its peak.
+pub(super) fn network_bandwidth_centi_gbps(
+    name: &InstanceTypeName<'_>,
+    sixteenths: u32,
+) -> (i64, i64) {
+    let host = host_network_gbps(name).saturating_mul(CENTI_GBPS);
+    let largest = largest_virtualized_sixteenths(name.family)
+        .unwrap_or(sixteenths)
+        .max(1);
+    let baseline = (host.saturating_mul(i64::from(sixteenths)) / i64::from(largest))
+        .clamp(1, host);
+    let burst = BURST_NETWORK_GBPS.saturating_mul(CENTI_GBPS).min(host);
+    (baseline, baseline.max(burst))
+}
+
+/// `centi` hundredths of a Gbps as the published tables write the figure: a whole number of
+/// Gigabit without a fraction, and a fraction to the digits it needs (`12.5`).
+pub(super) fn gigabit_figure(centi: i64) -> String {
+    let whole = centi / CENTI_GBPS;
+    match centi % CENTI_GBPS {
+        0 => whole.to_string(),
+        tenths if tenths % 10 == 0 => format!("{whole}.{}", tenths / 10),
+        hundredths => format!("{whole}.{hundredths:02}"),
+    }
+}
+
+/// "The network performance" (`NetworkInfo$NetworkPerformance`) of one size, in the form the
+/// published table writes it: the size's own figure in Gigabit, or `Up to` its burst ceiling
+/// where the size bursts above its baseline share.
+pub(super) fn network_performance(baseline_centi: i64, peak_centi: i64) -> String {
+    if peak_centi > baseline_centi {
+        return format!("Up to {} Gigabit", gigabit_figure(peak_centi));
+    }
+    format!("{} Gigabit", gigabit_figure(baseline_centi))
+}
+
+/// The network cards of one instance type, as `NetworkInfo$NetworkCards` reports them.
+///
+/// The cards of one instance are identical, so each gets an equal share of the host's
+/// bandwidth and of the interfaces the type can attach, and the figures a card reports are
+/// the ones the type itself reports divided by the number of cards. `interface_types` names
+/// what may be attached to a card: an ordinary network interface, plus the Elastic Fabric
+/// Adapter on a type that is offered one.
+pub(super) fn network_cards(
+    name: &InstanceTypeName<'_>,
+    sixteenths: u32,
+    cards: i32,
+    maximum_network_interfaces: i32,
+    efa_interfaces: i32,
+) -> Vec<NetworkCardInfo> {
+    let (baseline, peak) = network_bandwidth_centi_gbps(name, sixteenths);
+    let count = i64::from(cards.max(1));
+    let per_card_baseline = (baseline / count).max(1);
+    let per_card_peak = (peak / count).max(per_card_baseline);
+    let interfaces_per_card = (maximum_network_interfaces / cards.max(1)).max(1);
+    let mut interface_types = vec!["interface".to_string()];
+    if efa_interfaces > 0 {
+        interface_types.push("efa".to_string());
+    }
+    (0..cards.max(1))
+        .map(|index| NetworkCardInfo {
+            network_card_index: Some(index),
+            network_performance: Some(network_performance(per_card_baseline, per_card_peak)),
+            maximum_network_interfaces: Some(interfaces_per_card),
+            additional_flexible_network_interfaces: None,
+            baseline_bandwidth_in_gbps: Some(per_card_baseline as f64 / CENTI_GBPS as f64),
+            peak_bandwidth_in_gbps: Some(per_card_peak as f64 / CENTI_GBPS as f64),
+            default_ena_queue_count_per_interface: None,
+            maximum_ena_queue_count: None,
+            maximum_ena_queue_count_per_interface: None,
+            interface_types: Some(interface_types.clone()),
+        })
+        .collect()
+}
+
+/// The generation of the Nitro System's own features that arrives with the seventh
+/// generation of a family: the local Precision Time Protocol hardware clock
+/// (`InstanceTypeInfo$PhcSupport`), a configurable number of ENA queues
+/// (`NetworkInfo$FlexibleEnaQueuesSupport`) and interface attachments from a secondary
+/// network (`NetworkInfo$SecondaryNetworkSupported`) are features of that hardware
+/// generation, so the families whose ladder has not reached it do not have them.
+pub(super) const FIRST_NITRO_CLOCK_GENERATION: u32 = 7;
+
+/// The generation from which ENA Express — "Amazon Web Services Scalable Reliable Datagram
+/// (SRD) technology" (`NetworkInfo$EnaSrdSupported`) — is offered: the sixth generation,
+/// the one whose adapter carries it.
+pub(super) const FIRST_ENA_SRD_GENERATION: u32 = 6;
+
+/// Whether a Nitro feature that arrives with generation `first` reaches `name`.
+///
+/// A bare metal size has no Nitro hypervisor between the caller and the hardware, so the
+/// features the hypervisor provides are not offered on it; a family carrying no generation
+/// at all is answered `false`, the way every other generation-gated fact of this module
+/// answers it.
+pub(super) fn has_nitro_feature(name: &InstanceTypeName<'_>, first: u32) -> bool {
+    name.nitro()
+        && !name.bare_metal()
+        && name
+            .generation
+            .is_some_and(|generation| generation >= first)
+}
+
+/// The sustained clock speed of the processor, in GHz — "the speed of the processor, in GHz"
+/// (`ProcessorInfo$SustainedClockSpeedInGhz`).
+///
+/// The processor follows from the family's manufacturer and generation
+/// ([`processor_manufacturer`]), and each processor's sustained (all-core turbo) frequency is
+/// the one the EC2 User Guide's "Instance types" chapter publishes for the families built on
+/// it: AWS Graviton at 2.5, 2.6 and 2.8 GHz for its second, third and fourth designs, the
+/// Intel Xeon generations at 2.4, 3.1, 3.5 and 3.2 GHz, and the AMD EPYC ones at 2.5, 3.6
+/// and 3.7 GHz. An Apple silicon Mac publishes no such figure, so none is reported for it.
+pub(super) fn sustained_clock_speed_ghz(
+    manufacturer: &str,
+    name: &InstanceTypeName<'_>,
+) -> Option<f64> {
+    let generation = name.generation.unwrap_or_default();
+    let ghz = match manufacturer {
+        "Apple" => return None,
+        "AWS" => match generation {
+            ..=5 => 2.3,
+            6 => 2.5,
+            7 => 2.6,
+            _ => 2.8,
+        },
+        "AMD" => match generation {
+            ..=5 => 2.5,
+            6 => 3.6,
+            _ => 3.7,
+        },
+        // Intel, including the Intel Mac host.
+        _ => match generation {
+            ..=4 => 2.4,
+            5 => 3.1,
+            6 => 3.5,
+            _ => 3.2,
+        },
+    };
+    Some(ghz)
+}
+
+/// The attachments a Nitro instance holds that are not EBS volumes and that it always has:
+/// its primary network interface, which every instance is launched with.
+///
+/// "Instance store volumes and attached network interfaces count toward this limit" (EC2
+/// User Guide, "Instance volume limits"), so the EBS volumes a Nitro type can hold are its
+/// shared total ([`NITRO_ATTACHMENT_LIMIT`]) less the attachments it already has: that
+/// interface, and the devices of its instance store.
+pub(super) const NITRO_RESERVED_ATTACHMENTS: i32 = 1;
+
+/// How many EBS volumes one instance type can hold attached —
+/// `EbsInfo$MaximumEbsAttachments`.
+///
+/// A Nitro type shares ONE pool of attachments between its EBS volumes, its network
+/// interfaces and its instance store devices, so the volumes it can take are that pool less
+/// the attachments the instance already has ([`NITRO_RESERVED_ATTACHMENTS`] and its instance
+/// store); a pre-Nitro type has a limit of its own for EBS volumes alone.
+pub(super) fn maximum_ebs_attachments(nitro: bool, instance_store_disks: i32) -> i32 {
+    if !nitro {
+        return XEN_EBS_VOLUME_LIMIT;
+    }
+    (NITRO_ATTACHMENT_LIMIT - NITRO_RESERVED_ATTACHMENTS - instance_store_disks).max(1)
+}
+
 /// Everything `DescribeInstanceTypes` reports about `instance_type`, or `None` when it
 /// is not one of the offered types ([`offered_instance_types`]).
 ///
@@ -2266,12 +2547,10 @@ pub(super) fn supported_boot_modes(architecture: &str, nitro: bool) -> Vec<Strin
 /// therefore report one instance type identically.
 ///
 /// The members this leaves absent are the per-type figures AWS publishes as HARDWARE
-/// data that neither the model nor the name yields — the processor's clock speed, the
-/// EBS-optimized bandwidth/throughput/IOPS table, the Gigabit network performance
-/// string, the network CARD count (AWS names the multi-card types individually, and the
-/// naming conventions say nothing about them), and the GPU, FPGA, inference, media and
-/// Neuron device inventories. An absent member is reported absent rather than invented,
-/// and a filter naming one therefore selects nothing.
+/// data that neither the model nor the name yields — the GPU, FPGA, inference, media and
+/// Neuron device inventories, and the configurable bandwidth weightings. An absent member
+/// is reported absent rather than invented, and a filter naming one therefore selects
+/// nothing.
 pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
     let name = InstanceTypeName::parse(instance_type)?;
     let record = instance_type_record(instance_type)?;
@@ -2288,6 +2567,20 @@ pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
     let ipv6_supported = modern;
     let efa_interfaces = efa_interfaces(&name, sixteenths);
     let (tcp_established, udp, udp_stream) = CONNECTION_TRACKING_TIMEOUTS;
+    // The network cards the instance has, and the bandwidth its size's share of the host
+    // carries: every member the model publishes about the instance's network is derived from
+    // those two facts, so the type's own figures and its per-card ones cannot disagree.
+    let cards = network_card_count(instance_type);
+    let (baseline_centi, peak_centi) = network_bandwidth_centi_gbps(&name, sixteenths);
+    let instance_store_disks = record
+        .instance_storage
+        .map_or(0, |storage| storage.disk_count);
+    // The features the Nitro hypervisor provides, each from the generation that introduced
+    // it, reported as the enum member or flag its own member takes.
+    let nitro_clock = has_nitro_feature(&name, FIRST_NITRO_CLOCK_GENERATION);
+    let supported_or_not = |supported: bool| {
+        if supported { "supported" } else { "unsupported" }.to_string()
+    };
 
     Some(InstanceTypeInfo {
         instance_type: Some(record.instance_type.clone()),
@@ -2306,7 +2599,10 @@ pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
                 instance_type,
                 &record.architecture,
             )),
-            sustained_clock_speed_in_ghz: None,
+            sustained_clock_speed_in_ghz: sustained_clock_speed_ghz(
+                processor_manufacturer(&name, &record.architecture),
+                &name,
+            ),
             supported_features: Some(processor_features(&name)),
             manufacturer: Some(processor_manufacturer(&name, &record.architecture).to_string()),
         }),
@@ -2345,11 +2641,7 @@ pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
                 )
                 .to_string(),
             ),
-            maximum_ebs_attachments: Some(if nitro {
-                NITRO_ATTACHMENT_LIMIT
-            } else {
-                XEN_EBS_VOLUME_LIMIT
-            }),
+            maximum_ebs_attachments: Some(maximum_ebs_attachments(nitro, instance_store_disks)),
             // A Nitro instance's attachments are shared between its EBS volumes, its
             // network interfaces and its instance store devices; a Xen instance's EBS
             // volumes have a limit of their own.
@@ -2358,20 +2650,22 @@ pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
             ebs_cards: None,
         }),
         network_info: Some(NetworkInfo {
-            network_performance: None,
+            // "The network performance": the instance's share of its host's bandwidth, or
+            // the ceiling a size below that share bursts to.
+            network_performance: Some(network_performance(baseline_centi, peak_centi)),
             maximum_network_interfaces: Some(record.maximum_network_interfaces),
-            // How many network CARDS a type carries is per-type hardware data the name
-            // does not yield: AWS publishes a multi-card count only for a named set of
-            // accelerated and high-bandwidth types (and that set grows with each family),
-            // while the naming conventions say nothing about it. Claiming one card for
-            // every type would therefore answer a filter on
-            // `network-info.maximum-network-cards` confidently wrongly for exactly those
-            // types, so the count — and with it the index of the default card and the card
-            // inventory — is reported ABSENT, the way every other figure this module
-            // cannot derive is.
-            maximum_network_cards: None,
-            default_network_card_index: None,
-            network_cards: None,
+            // Every instance has at least one physical network card, its interfaces being
+            // attached to one, and the first card is the default; the types AWS publishes
+            // several for are named in [`MULTI_NETWORK_CARD_TYPES`].
+            maximum_network_cards: Some(cards),
+            default_network_card_index: Some(DEFAULT_NETWORK_CARD_INDEX),
+            network_cards: Some(network_cards(
+                &name,
+                sixteenths,
+                cards,
+                record.maximum_network_interfaces,
+                efa_interfaces,
+            )),
             ipv4_addresses_per_interface: Some(record.ipv4_addresses_per_interface),
             ipv6_addresses_per_interface: ipv6_supported
                 .then_some(record.ipv4_addresses_per_interface),
@@ -2388,9 +2682,14 @@ pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
             // which instances of a VPC cannot encrypt — cannot answer differently for one
             // instance type.
             encryption_in_transit_supported: Some(name.encrypts_in_transit()),
-            ena_srd_supported: None,
+            // "Indicates whether the instance type supports ENA Express"
+            // (`$EnaSrdSupported`), the adapter feature the sixth generation introduced.
+            ena_srd_supported: Some(has_nitro_feature(&name, FIRST_ENA_SRD_GENERATION)),
             bandwidth_weightings: None,
-            flexible_ena_queues_support: None,
+            // "Indicates whether changing the number of ENA queues is supported"
+            // (`$FlexibleEnaQueuesSupport`), reported as the enum member it is for every
+            // type rather than only for the types that have it.
+            flexible_ena_queues_support: Some(supported_or_not(nitro_clock)),
             connection_tracking_configuration: nitro.then_some(
                 DefaultConnectionTrackingConfiguration {
                     default_tcp_established_timeout: Some(tcp_established),
@@ -2398,9 +2697,15 @@ pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
                     default_udp_stream_timeout: Some(udp_stream),
                 },
             ),
-            secondary_network_supported: None,
-            maximum_secondary_network_interfaces: None,
-            ipv4_addresses_per_secondary_interface: None,
+            // "Indicates whether secondary interface attachments from secondary network
+            // are supported" (`$SecondaryNetworkSupported`). A type that supports them
+            // takes them on the same adapter as its primary interfaces, so the secondary
+            // limits are the primary ones; a type that does not reports neither.
+            secondary_network_supported: Some(nitro_clock),
+            maximum_secondary_network_interfaces: nitro_clock
+                .then_some(record.maximum_network_interfaces),
+            ipv4_addresses_per_secondary_interface: nitro_clock
+                .then_some(record.ipv4_addresses_per_interface),
         }),
         gpu_info: None,
         fpga_info: None,
@@ -2432,14 +2737,24 @@ pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
             }
             .to_string(),
         ),
-        nitro_tpm_support: Some(if nitro { "supported" } else { "unsupported" }.to_string()),
-        nitro_tpm_info: nitro.then(|| NitroTpmInfo {
+        // NitroTPM is a virtual device the Nitro hypervisor presents to the guest, so a
+        // bare metal instance — which has no hypervisor under it, and reports none
+        // ([`InstanceTypeInfo$Hypervisor`] above) — does not have one.
+        nitro_tpm_support: Some(supported_or_not(nitro && !record.bare_metal)),
+        nitro_tpm_info: (nitro && !record.bare_metal).then(|| NitroTpmInfo {
             supported_versions: Some(vec![NITRO_TPM_VERSION.to_string()]),
         }),
         media_accelerator_info: None,
         neuron_info: None,
-        phc_support: None,
-        reboot_migration_support: None,
+        // "Indicates whether a local Precision Time Protocol (PTP) hardware clock (PHC) is
+        // supported" (`$PhcSupport`): a clock of the Nitro hardware generation named by
+        // [`FIRST_NITRO_CLOCK_GENERATION`].
+        phc_support: Some(supported_or_not(nitro_clock)),
+        // "Indicates whether reboot migration during a user-initiated reboot is supported"
+        // (`$RebootMigrationSupport`): the migration moves a running instance to another
+        // host, which is the hypervisor's to do, so every Nitro type but a bare metal one
+        // supports it.
+        reboot_migration_support: Some(supported_or_not(nitro && !record.bare_metal)),
         // Every type of the catalog is offered in every Region this emulator serves,
         // which is what [`instance_type_offerings`] reports too.
         supported_in_region: Some(true),

@@ -288,7 +288,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     // refusal about the resource rather than about the id, so it is
                     // `UnsupportedOperation` and not the not-found every unresolvable id
                     // earns.
-                    if state::service_prefix_lists_in_region(&region)
+                    if state::managed_prefix_lists_in_region(&region)
                         .iter()
                         .any(|published| published.prefix_list_id == input.prefix_list_id)
                     {

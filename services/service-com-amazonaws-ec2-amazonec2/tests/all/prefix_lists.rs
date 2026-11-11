@@ -35,7 +35,7 @@
 
 use smithy_server_runtime::MultiServiceRouter;
 
-use super::ec2_query::{element, elements, filters, indexed, owned, unescaped};
+use super::ec2_query::{element, elements, filters, indexed, unescaped};
 
 /// The `Filters` form fields for entries whose values are built at run time (a derived id
 /// or name a previous call reported), on top of the harness's `filters` builder.
@@ -51,14 +51,23 @@ fn owned_filters(entries: &[(&str, Vec<String>)]) -> Vec<(String, String)> {
     filters(&rows)
 }
 
-/// The services a Region publishes an Amazon Web Services service prefix list for.
+/// The services a Region publishes an Amazon Web Services service prefix list for, as
+/// `DescribePrefixLists` reports them.
 ///
-/// The same catalog the handler derives from, and from the same source: the services
-/// reachable through a gateway VPC endpoint, which is what "available Amazon Web
-/// Services services in a prefix list format" (`DescribePrefixLists`) names — Amazon
-/// DynamoDB and Amazon S3 (Amazon VPC User Guide, "Gateway endpoints"). Written out here
-/// so the handler's own catalog cannot drift from it unnoticed.
-const SERVICES: [&str; 2] = ["dynamodb", "s3"];
+/// The same catalog the handler derives from, and from the same source: the Amazon S3 and
+/// Amazon DynamoDB service family, which is what "available Amazon Web Services services
+/// in a prefix list format" (`DescribePrefixLists`) names — Amazon DynamoDB, Amazon S3 and
+/// Amazon S3 Express One Zone — each with the IPv6 list AWS publishes beside its IPv4 one,
+/// under the `ipv6` label the Amazon VPC User Guide's "AWS-managed prefix lists" page
+/// gives it. Written out here so the handler's own catalog cannot drift from it unnoticed.
+const SERVICES: [&str; 6] = [
+    "dynamodb",
+    "ipv6.dynamodb",
+    "ipv6.s3",
+    "ipv6.s3express",
+    "s3",
+    "s3express",
+];
 
 /// The emulator the tests drive, as [`super::ec2_query::emulator`] builds it. This
 /// operation reports facts of a Region and stores nothing, so the engine handle it hands
@@ -156,12 +165,16 @@ fn id_is_well_formed(id: &str) -> bool {
     })
 }
 
-/// Is `cidr` an IPv4 block of the range this emulator derives a prefix list's ranges
-/// from: a `/21` of `198.18.0.0/15`, aligned on its own prefix length?
+/// Is `cidr` a block of the ranges this emulator derives a prefix list's ranges from: a
+/// `/21` of `198.18.0.0/15`, aligned on its own prefix length, or a `/48` of the IPv6
+/// documentation range `2001:db8::/32`?
 fn cidr_is_well_formed(cidr: &str) -> bool {
     let Some((address, length)) = cidr.split_once('/') else {
         return false;
     };
+    if address.contains(':') {
+        return length == "48" && address.starts_with("2001:db8:");
+    }
     let octets: Vec<u32> = address
         .split('.')
         .filter_map(|octet| octet.parse::<u32>().ok())
@@ -314,7 +327,7 @@ async fn prefix_list_ids_select_the_lists_they_name() {
         (
             "both ids",
             vec![first.id.as_str(), second.id.as_str()],
-            published.iter().map(|list| list.name.clone()).collect(),
+            vec![first.name.clone(), second.name.clone()],
         ),
     ];
 
@@ -405,6 +418,7 @@ async fn filters_are_anded_and_their_values_ored() {
     let published = prefix_lists("catalog", &catalog);
     let dynamodb = format!("com.amazonaws.{region}.dynamodb");
     let s3 = format!("com.amazonaws.{region}.s3");
+    let ipv6_s3 = format!("com.amazonaws.{region}.ipv6.s3");
     let all = expected_names(region);
     let dynamodb_id = published
         .iter()
@@ -421,7 +435,7 @@ async fn filters_are_anded_and_their_values_ored() {
         (
             "prefix-list-name two values are ORed",
             vec![("prefix-list-name", vec![s3.clone(), dynamodb.clone()])],
-            all.clone(),
+            vec![dynamodb.clone(), s3.clone()],
         ),
         (
             "prefix-list-name trailing *",
@@ -429,14 +443,16 @@ async fn filters_are_anded_and_their_values_ored() {
             all.clone(),
         ),
         (
+            // Both the service's own list and the IPv6 list published beside it end in
+            // the service's label, so a leading `*` selects the pair.
             "prefix-list-name leading *",
             vec![("prefix-list-name", vec!["*.s3".to_string()])],
-            vec![s3.clone()],
+            vec![ipv6_s3.clone(), s3.clone()],
         ),
         (
             "prefix-list-name ? is one character",
             vec![("prefix-list-name", vec!["*.s?".to_string()])],
-            vec![s3.clone()],
+            vec![ipv6_s3.clone(), s3.clone()],
         ),
         (
             "prefix-list-name ? needs a character",
@@ -803,7 +819,7 @@ async fn a_region_of_any_shape_reports_one_list_per_service() {
     assert_eq!(status, 200, "case \"local\": expected 200, got {status} {body}");
     assert_eq!(
         list_names("local", &body),
-        owned(&["com.amazonaws.local.dynamodb", "com.amazonaws.local.s3"]),
+        expected_names("local"),
         "case \"local\": expected one prefix list per service, got {body}"
     );
 }

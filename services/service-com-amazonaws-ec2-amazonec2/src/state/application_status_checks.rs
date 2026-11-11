@@ -113,6 +113,28 @@ pub const DEFAULT_APPLICATION_STATUS_CHECK_STATUS_CODE_MATCHER: &str = "200";
 /// "InitializationGracePeriodSeconds is 300 seconds" (`CreateApplicationStatusCheck`).
 pub const DEFAULT_APPLICATION_STATUS_CHECK_GRACE_PERIOD_SECONDS: i32 = 300;
 
+/// The network device index a request naming none gets: "The index of the network device to
+/// use for the health check. The value must be greater than or equal to 0"
+/// (`CreateApplicationStatusCheckRequest$DeviceIndex`).
+///
+/// The least value that member admits is also the device every instance has — the primary
+/// network interface sits at device index 0 — so a check that names no device is configured
+/// against that interface, which is a value the created check REPORTS
+/// (`ApplicationStatusCheckResponseObject$DeviceIndex`) rather than a member left absent.
+pub const DEFAULT_APPLICATION_STATUS_CHECK_DEVICE_INDEX: i32 = 0;
+
+/// The IP version a request naming none gets: "The IP version to use for the health check.
+/// Valid values: `ipv4` and `ipv6`" (`CreateApplicationStatusCheckRequest$IpVersion`), of
+/// which `ipv4` is the one every instance's primary interface has — an IPv6 address being an
+/// option of a dual-stack subnet.
+pub const DEFAULT_APPLICATION_STATUS_CHECK_IP_VERSION: &str = "ipv4";
+
+/// The IP scope a request naming none gets: "The IP scope to use for the health check. Valid
+/// value: `private`" (`CreateApplicationStatusCheckRequest$IpScope`) — the member's ONE
+/// documented value, which is also the only member of `IpScopeEnum`
+/// ([`crate::ops::types::IP_SCOPE_ENUM_VALUES`]).
+pub const DEFAULT_APPLICATION_STATUS_CHECK_IP_SCOPE: &str = "private";
+
 /// The longest status code matcher a check may carry: "Maximum length: 64 characters"
 /// (`CreateApplicationStatusCheckRequest$StatusCodeMatcher`). The member is a plain `String`
 /// with no modelled `@length`, so this is the only place that published bound is enforced.

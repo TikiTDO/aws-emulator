@@ -1066,33 +1066,30 @@ async fn an_undocumented_filter_is_refused() {
 }
 
 /// A filter naming a member this emulator reports ABSENT selects nothing, rather than
-/// everything.
+/// everything — and a filter naming one it REPORTS selects exactly the types carrying the
+/// value asked for.
 ///
-/// The per-type figures AWS publishes as hardware data — the processor's clock speed, the
-/// EBS-optimized performance table, the Gigabit network-performance string, the network
-/// CARD count (AWS names its multi-card types individually, so the name does not yield
-/// it), bandwidth weightings and reboot migration — are reported absent rather
-/// than invented, and EC2's rule for a filter on an attribute a resource does not carry
-/// is that it matches no value. So each of these documented filters is accepted and
-/// answers an empty set, which is what pins the choice: the filter is not refused (it is
-/// a documented name) and it cannot read as "every type matches".
+/// The accelerator inventories and the configurable bandwidth weightings are per-type
+/// hardware data neither the model nor the name yields, so they are reported absent rather
+/// than invented, and EC2's rule for a filter on an attribute a resource does not carry is
+/// that it matches no value: each such filter is accepted (it is a documented name) and
+/// answers an empty set. The members whose value DOES follow from the type's name — its
+/// network cards and their performance, its processor's clock speed, its Nitro features and
+/// the EBS attachments its pool leaves it — are reported, so the second half of the table
+/// asserts the same filters select the type that reports the value and only it.
 #[tokio::test]
 async fn a_filter_on_a_member_reported_absent_selects_nothing() {
     let (router, _engine) = super::ec2_query::emulator();
-    let cases: [(&str, &str, &str); 6] = [
-        ("the clock speed", "processor-info.sustained-clock-speed-in-ghz", "2.5"),
-        ("the network performance", "network-info.network-performance", "25 Gigabit"),
-        ("the network card count", "network-info.maximum-network-cards", "1"),
-        (
-            "an EBS-optimized figure",
-            "ebs-info.ebs-optimized-info.baseline-iops",
-            "3600",
-        ),
+    let absent: [(&str, &str, &str); 2] = [
         ("bandwidth weightings", "network-info.bandwidth-weightings", "default"),
-        ("reboot migration", "reboot-migration-support", "supported"),
+        (
+            "an EBS-optimized figure no type carries",
+            "ebs-info.ebs-optimized-info.baseline-iops",
+            "7",
+        ),
     ];
 
-    for (case, name, value) in cases {
+    for (case, name, value) in absent {
         let (status, body) = describe(&router, "us-east-1", &filters(&[(name, &[value])])).await;
         assert_eq!(
             status, 200,
@@ -1104,6 +1101,72 @@ async fn a_filter_on_a_member_reported_absent_selects_nothing() {
             "case {case:?}: {name} compares against no value, so it selects nothing, \
              got {} types",
             items.len()
+        );
+    }
+
+    // The rows differ along the member filtered on and the kind of value it carries: a
+    // Gigabit string, a card count, a clock speed, a Nitro feature's enum member and an
+    // attachment count.
+    let reported: [(&str, &str, &str, &str); 5] = [
+        (
+            "the network performance",
+            "network-info.network-performance",
+            "Up to 10 Gigabit",
+            "m6gd.4xlarge",
+        ),
+        (
+            "the network card count",
+            "network-info.maximum-network-cards",
+            "4",
+            "p4d.24xlarge",
+        ),
+        (
+            "the clock speed",
+            "processor-info.sustained-clock-speed-in-ghz",
+            "2.6",
+            "m7g.xlarge",
+        ),
+        (
+            "reboot migration",
+            "reboot-migration-support",
+            "supported",
+            "m5.large",
+        ),
+        (
+            "the EBS attachments",
+            "ebs-info.maximum-ebs-attachments",
+            "27",
+            "m5.large",
+        ),
+    ];
+
+    for (case, name, value, instance_type) in reported {
+        let mut params = filters(&[(name, &[value])]);
+        params.extend(named(instance_type));
+        let (status, body) = describe(&router, "us-east-1", &params).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: {name} is a documented filter, got {status} {body}"
+        );
+        assert_eq!(
+            type_items(&body).len(),
+            1,
+            "case {case:?}: {instance_type} reports {name} {value:?}, so the filter selects \
+             it, got {body}"
+        );
+
+        // The same filter with a value the type does not carry selects nothing, so the
+        // match is on the value rather than on the member being present.
+        let mut params = filters(&[(name, &["an-impossible-value"])]);
+        params.extend(named(instance_type));
+        let (status, body) = describe(&router, "us-east-1", &params).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: got {status} {body}"
+        );
+        assert!(
+            type_items(&body).is_empty(),
+            "case {case:?}: {instance_type} does not carry that value, got {body}"
         );
     }
 }

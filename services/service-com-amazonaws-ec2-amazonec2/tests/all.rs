@@ -608,6 +608,11 @@ mod create_transit_gateway_route_table_announcement;
 // for the reason this file's header note gives: both are contended regions where a
 #[path = "all/reboot_instances.rs"]
 mod reboot_instances;
+// The modelled members of the reference read paths: a Region's published geography, the
+// members an instance type's name yields, the addressing a created application status check
+// reports, what a published prefix list carries, and selecting an endpoint service by name.
+#[path = "all/read_path_modeled_members.rs"]
+mod read_path_modeled_members;
 #[path = "all/ec2_query_error_envelope.rs"]
 mod ec2_query_error_envelope;
 // The same envelope rule, driven over seven further operations and the four refusal kinds

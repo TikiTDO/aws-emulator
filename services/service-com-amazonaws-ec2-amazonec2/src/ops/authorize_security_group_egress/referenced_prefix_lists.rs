@@ -30,7 +30,7 @@
 use crate::ops::types::IpPermission;
 use crate::scaffolded::Scaffolded;
 use crate::state::{
-    invalid_prefix_list_id_not_found, service_prefix_lists_in_region,
+    invalid_prefix_list_id_not_found, managed_prefix_lists_in_region,
     ComAmazonawsEc2Amazonec2State,
 };
 
@@ -47,7 +47,7 @@ pub fn refuse_unknown_prefix_lists<E>(
     region: &str,
     permissions: &[IpPermission],
 ) -> Result<(), Scaffolded<E>> {
-    let published = service_prefix_lists_in_region(region);
+    let published = managed_prefix_lists_in_region(region);
     for permission in permissions {
         for entry in permission.prefix_list_ids.iter().flatten() {
             let prefix_list_id = entry.prefix_list_id.as_deref().unwrap_or_default();

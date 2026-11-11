@@ -242,16 +242,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store.materialize_due_transitions();
 
         // "Describes your managed prefix lists and any Amazon Web Services-managed prefix
-        // lists": the account's stored lists, and the ones the Region publishes for its
-        // services — the SAME derivation `DescribePrefixLists` reports, so one published
-        // list has one id whichever operation is asked.
+        // lists": the account's stored lists, and every list the Region publishes — the
+        // superset [`crate::state::managed_prefix_lists_in_region`] holds, of which the
+        // gateway services `DescribePrefixLists` reports are a part, so one published list
+        // has one id whichever operation is asked.
         let mut candidates: Vec<ManagedPrefixList> = store
             .managed_prefix_lists
             .values()
             .map(|record| record.view.clone())
             .collect();
         candidates.extend(
-            state::service_prefix_lists_in_region(&region)
+            state::managed_prefix_lists_in_region(&region)
                 .iter()
                 .map(|published| published.to_managed_prefix_list(&region)),
         );

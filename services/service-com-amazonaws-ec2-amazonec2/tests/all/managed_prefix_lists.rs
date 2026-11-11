@@ -833,15 +833,15 @@ fn clone_case(case: &CreateCase) -> CreateCase {
 // DescribeManagedPrefixLists: what the caller can see
 // ---------------------------------------------------------------------------
 
-/// The ids `DescribePrefixLists` reports for the prefix lists `region` publishes, sorted.
+/// The ids of every prefix list Amazon Web Services publishes in `region`, sorted.
 ///
-/// The id half of [`published_names_and_ids`], so this suite reads the legacy projection in
-/// one place and the two readers cannot drift on what they assert about that call.
-async fn published_ids(router: &MultiServiceRouter, region: &str) -> Vec<String> {
-    let mut ids: Vec<String> = published_names_and_ids(router, region)
-        .await
+/// Read off the catalog the handler projects, because `DescribeManagedPrefixLists` reports
+/// EVERY published list while [`published_ids`] below is the gateway-service subset of them
+/// `DescribePrefixLists` reports.
+fn all_published_ids(region: &str) -> Vec<String> {
+    let mut ids: Vec<String> = ec2::state::managed_prefix_lists_in_region(region)
         .into_iter()
-        .map(|(_, id)| id)
+        .map(|list| list.prefix_list_id)
         .collect();
     ids.sort();
     ids
@@ -864,8 +864,8 @@ async fn a_fresh_account_sees_the_published_lists_and_reading_changes_nothing() 
     reported.sort();
     assert_eq!(
         reported,
-        published_ids(&router, REGION).await,
-        "fresh account: expected exactly the ids DescribePrefixLists reports, got {body}"
+        all_published_ids(REGION),
+        "fresh account: expected exactly the ids the Region's catalog publishes, got {body}"
     );
     assert!(
         !reported.is_empty(),
@@ -915,8 +915,8 @@ async fn a_fresh_account_sees_the_published_lists_and_reading_changes_nothing() 
     elsewhere_ids.sort();
     assert_eq!(
         elsewhere_ids,
-        published_ids(&router, OTHER_REGION).await,
-        "another Region: expected exactly the ids DescribePrefixLists reports there, \
+        all_published_ids(OTHER_REGION),
+        "another Region: expected exactly the ids its own catalog publishes, \
          got {elsewhere}"
     );
     assert_ne!(
@@ -959,7 +959,7 @@ async fn the_ids_filters_and_page_size_narrow_what_is_reported() {
             member(&body, "prefixListId").expect("a created prefix list has an id"),
         ));
     }
-    let published = published_ids(&router, REGION).await;
+    let published = all_published_ids(REGION);
     let own_ids: Vec<String> = own.iter().map(|(_, id)| id.clone()).collect();
 
     // `PrefixListIds` reports the lists it names, whether the account's own or a published

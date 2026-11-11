@@ -187,7 +187,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             APPLICATION_STATUS_CHECK_ID_PREFIX, APPLICATION_STATUS_CHECK_INTERVAL_SECONDS,
             APPLICATION_STATUS_CHECK_TAGGABLE_RESOURCE, APPLICATION_STATUS_CHECK_TIMEOUT_RANGE,
             DEFAULT_APPLICATION_STATUS_CHECK_FAILURE_THRESHOLD,
+            DEFAULT_APPLICATION_STATUS_CHECK_DEVICE_INDEX,
             DEFAULT_APPLICATION_STATUS_CHECK_GRACE_PERIOD_SECONDS,
+            DEFAULT_APPLICATION_STATUS_CHECK_IP_SCOPE,
+            DEFAULT_APPLICATION_STATUS_CHECK_IP_VERSION,
             DEFAULT_APPLICATION_STATUS_CHECK_PATH,
             DEFAULT_APPLICATION_STATUS_CHECK_STATUS_CODE_MATCHER,
             DEFAULT_APPLICATION_STATUS_CHECK_SUCCESS_THRESHOLD,
@@ -298,16 +301,33 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "The index of the network device to use for the health check. The value must be
         // greater than or equal to 0" (`$DeviceIndex`), a plain `Integer` with no modelled
-        // `@range`. A request naming none leaves the member absent: AWS publishes no default
-        // for it, so none is invented.
-        if let Some(device_index) = input.device_index {
-            if device_index < 0 {
-                return Err(Scaffolded::invalid_parameter_value(format!(
-                    "Invalid value '{device_index}' for deviceIndex. It must be greater than or \
-                     equal to 0"
-                )));
-            }
+        // `@range`, so this is the only place that published bound is enforced. A request
+        // naming none gets the device every instance has
+        // ([`DEFAULT_APPLICATION_STATUS_CHECK_DEVICE_INDEX`]), which the created check reports
+        // like every other member whose value the request left to the service.
+        let device_index = input
+            .device_index
+            .unwrap_or(DEFAULT_APPLICATION_STATUS_CHECK_DEVICE_INDEX);
+        if device_index < 0 {
+            return Err(Scaffolded::invalid_parameter_value(format!(
+                "Invalid value '{device_index}' for deviceIndex. It must be greater than or \
+                 equal to 0"
+            )));
         }
+
+        // "The IP version to use for the health check. Valid values: ipv4 and ipv6"
+        // (`$IpVersion`) and "The IP scope to use for the health check. Valid value: private"
+        // (`$IpScope`): the modelled enums have already refused any other spelling, so the
+        // only choice left here is what an absent member means — the version and scope of the
+        // address a health check reaches an instance on by default.
+        let ip_version = input
+            .ip_version
+            .clone()
+            .unwrap_or_else(|| DEFAULT_APPLICATION_STATUS_CHECK_IP_VERSION.to_string());
+        let ip_scope = input
+            .ip_scope
+            .clone()
+            .unwrap_or_else(|| DEFAULT_APPLICATION_STATUS_CHECK_IP_SCOPE.to_string());
 
         // "Specify a comma-separated list of individual status codes or ranges, for example,
         // 200,202,300-399. For a range, the first value must be less than the second value.
@@ -422,9 +442,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             protocol: Some(input.protocol.clone()),
             port: Some(input.port),
             path: Some(path),
-            device_index: input.device_index,
-            ip_version: input.ip_version.clone(),
-            ip_scope: input.ip_scope.clone(),
+            device_index: Some(device_index),
+            ip_version: Some(ip_version),
+            ip_scope: Some(ip_scope),
             interval: Some(interval),
             timeout: Some(timeout),
             failure_threshold: Some(failure_threshold),

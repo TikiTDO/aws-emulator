@@ -74,6 +74,75 @@ pub const REGIONS_ENABLED_BY_DEFAULT: [&str; 17] = [
     "us-west-2",
 ];
 
+/// The geography of each Region of this emulator's Region catalog: the country or area the
+/// Region's infrastructure sits in, as AWS publishes it per Region in the "Regions and
+/// Availability Zones" table of the AWS global infrastructure documentation, in the form
+/// `Region$Geography` gives ("The name of the geography, for example, `United States of
+/// America`" — `RegionGeography$Name`).
+///
+/// A geography is a FACT of a Region, like its endpoint and its opt-in status: no EC2
+/// operation sets one, and two calls asking about one Region answer the same geography. The
+/// table is keyed by Region code and covers every entry of the catalog
+/// [`regions_in_partition_of`] narrows (`emulator_telemetry::policy::KNOWN_REGIONS`), so a
+/// Region this emulator reports is never reported without its geography; a Region code the
+/// catalog does not hold — the one a request may be signed for — carries no published
+/// geography, and [`region_geography`] answers `None` for it rather than inventing one.
+pub(super) const REGION_GEOGRAPHIES: [(&str, &str); 44] = [
+    ("af-south-1", "South Africa"),
+    ("ap-east-1", "Hong Kong"),
+    ("ap-east-2", "Taiwan"),
+    ("ap-northeast-1", "Japan"),
+    ("ap-northeast-2", "South Korea"),
+    ("ap-northeast-3", "Japan"),
+    ("ap-south-1", "India"),
+    ("ap-south-2", "India"),
+    ("ap-southeast-1", "Singapore"),
+    ("ap-southeast-2", "Australia"),
+    ("ap-southeast-3", "Indonesia"),
+    ("ap-southeast-4", "Australia"),
+    ("ap-southeast-5", "Malaysia"),
+    ("ap-southeast-6", "New Zealand"),
+    ("ap-southeast-7", "Thailand"),
+    ("ca-central-1", "Canada"),
+    ("ca-west-1", "Canada"),
+    ("cn-north-1", "China"),
+    ("cn-northwest-1", "China"),
+    ("eu-central-1", "Germany"),
+    ("eu-central-2", "Switzerland"),
+    ("eu-isoe-west-1", "United Kingdom"),
+    ("eu-north-1", "Sweden"),
+    ("eu-south-1", "Italy"),
+    ("eu-south-2", "Spain"),
+    ("eu-west-1", "Ireland"),
+    ("eu-west-2", "United Kingdom"),
+    ("eu-west-3", "France"),
+    ("il-central-1", "Israel"),
+    ("me-central-1", "United Arab Emirates"),
+    ("me-south-1", "Bahrain"),
+    ("mx-central-1", "Mexico"),
+    ("sa-east-1", "Brazil"),
+    ("us-east-1", "United States of America"),
+    ("us-east-2", "United States of America"),
+    ("us-gov-east-1", "United States of America"),
+    ("us-gov-west-1", "United States of America"),
+    ("us-iso-east-1", "United States of America"),
+    ("us-iso-west-1", "United States of America"),
+    ("us-isob-east-1", "United States of America"),
+    ("us-isof-east-1", "United States of America"),
+    ("us-isof-south-1", "United States of America"),
+    ("us-west-1", "United States of America"),
+    ("us-west-2", "United States of America"),
+];
+
+/// The geography AWS publishes for `region` ([`REGION_GEOGRAPHIES`]), or `None` for a Region
+/// code the catalog does not hold.
+pub fn region_geography(region: &str) -> Option<&'static str> {
+    REGION_GEOGRAPHIES
+        .iter()
+        .find(|(code, _)| *code == region)
+        .map(|(_, geography)| *geography)
+}
+
 /// `Region$OptInStatus` for a Region the account has opted in to — one of the three
 /// values the member's own doc lists ("The possible values are `opt-in-not-required`,
 /// `opted-in`, and `not-opted-in`").
@@ -242,16 +311,21 @@ pub struct RegionRecord {
 impl RegionRecord {
     /// This Region as the modelled `Region` shape.
     ///
-    /// `Geography` is absent because the geography of a Region ("for example, `United
-    /// States of America`") is display data AWS publishes per Region that neither the
-    /// model nor the request yields — reported absent rather than invented, the same way
-    /// [`AvailabilityZoneRecord::to_availability_zone`] leaves a zone's geography out.
+    /// `Geography` is "the geography information for the Region. The geography is returned as
+    /// a list" (`Region$Geography`), which is the country or area AWS publishes for the Region
+    /// ([`region_geography`]) — a fact of the Region, so it is reported as the one-item list
+    /// the member is, and a Region code the catalog publishes no geography for reports the
+    /// member absent rather than an invented name.
     pub fn to_region(&self) -> Region {
         Region {
             region_name: Some(self.region_name.clone()),
             endpoint: Some(self.endpoint.clone()),
             opt_in_status: Some(self.opt_in_status.to_string()),
-            geography: None,
+            geography: region_geography(&self.region_name).map(|geography| {
+                vec![RegionGeography {
+                    name: Some(geography.to_string()),
+                }]
+            }),
         }
     }
 

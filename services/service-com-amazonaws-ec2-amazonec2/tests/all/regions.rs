@@ -101,31 +101,33 @@ struct RegionItem {
     elements: Vec<String>,
 }
 
-/// Every Region in an ec2Query `DescribeRegions` body, sorted. Each Region is one
-/// `<item>` of the `<regionInfo>` list — and the list's first element carries an `xmlns`
-/// attribute, so the opening tag is read up to its `>`.
+/// Every Region in an ec2Query `DescribeRegions` body, sorted.
+///
+/// Each Region is one `<item>` of the `<regionInfo>` list, and a Region's own
+/// `<geographySet>` holds `<item>` elements of its own, so the reading goes through
+/// `roxmltree` — a Region is an element that has a `<regionName>` child — rather than
+/// splitting the text on an opening tag.
 fn regions(case: &str, body: &str) -> Vec<RegionItem> {
-    let list = element(body, "regionInfo").unwrap_or_default();
-    let mut found: Vec<RegionItem> = list
-        .split("<item")
-        .skip(1)
-        .map(|rest| {
-            let after_tag = rest.split_once('>').map(|(_, rest)| rest).unwrap_or(rest);
-            let item = after_tag.split("</item>").next().unwrap_or_default();
+    let parsed = super::wire::document(case, body);
+    let mut found: Vec<RegionItem> = parsed
+        .descendants()
+        .filter(|node| {
+            node.is_element() && super::wire::child(*node, "regionName").is_some()
+        })
+        .map(|node| {
             let member = |name: &str| {
-                element(item, name)
-                    .unwrap_or_else(|| panic!("case {case:?}: no <{name}> in Region {item:?}"))
+                super::wire::child_text(node, name)
+                    .unwrap_or_else(|| panic!("case {case:?}: no <{name}> in a Region"))
             };
             RegionItem {
                 name: member("regionName"),
                 // `Region$Endpoint` is on the wire as `regionEndpoint`.
                 endpoint: member("regionEndpoint"),
                 opt_in_status: member("optInStatus"),
-                elements: item
-                    .split('<')
-                    .filter_map(|fragment| fragment.split('>').next())
-                    .filter(|tag| !tag.is_empty() && !tag.starts_with('/'))
-                    .map(ToString::to_string)
+                elements: node
+                    .descendants()
+                    .filter(|inner| inner.is_element() && *inner != node)
+                    .map(|inner| inner.tag_name().name().to_string())
                     .collect(),
             }
         })
@@ -194,18 +196,27 @@ async fn a_commercial_call_reports_the_regions_enabled_by_default() {
                 region.opt_in_status, "opt-in-not-required",
                 "case {signed:?}: a Region enabled by default needs no opt-in, got {region:?}"
             );
-            // The geography of a Region is display data neither the model nor the
-            // request yields, so it is absent rather than invented — asserted over
-            // every element name the item carries, so the check cannot pass just
-            // because the list serialises under a name this test did not guess.
+            // A Region reports its status, its geography, its name and its endpoint and
+            // nothing else — asserted over every element name the item carries, so the
+            // check cannot pass just because a list serialises under a name this test did
+            // not guess. The geography's own `<item>`/`<name>` elements are dropped: the
+            // geography's VALUE is asserted in `read_path_modeled_members.rs`, over every Region.
+            let members: Vec<String> = region
+                .elements
+                .iter()
+                .filter(|tag| *tag != "item" && *tag != "name")
+                .cloned()
+                .collect();
             assert_eq!(
-                region.elements,
+                members,
                 vec![
                     "optInStatus".to_string(),
+                    "geographySet".to_string(),
                     "regionName".to_string(),
                     "regionEndpoint".to_string(),
                 ],
-                "case {signed:?}: a Region reports only its status, name and endpoint, got {region:?}"
+                "case {signed:?}: a Region reports only its status, geography, name and \
+                 endpoint, got {region:?}"
             );
         }
     }

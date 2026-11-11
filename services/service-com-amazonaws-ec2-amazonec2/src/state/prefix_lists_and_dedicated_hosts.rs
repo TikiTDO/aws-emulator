@@ -248,15 +248,21 @@ impl ComAmazonawsEc2Amazonec2State {
     /// see them — or `None` when no prefix list that caller can see carries that id.
     ///
     /// The two sources are the ones a report of a prefix list has: the lists the ACCOUNT
-    /// created ([`Self::managed_prefix_lists`]) and the ones the REGION publishes for its
-    /// services ([`service_prefix_lists_in_region`]) — the same pair
-    /// `DescribeManagedPrefixLists` reports, so one id names one list whichever operation is
-    /// asked, and the entries of a published list are read off that one derivation rather
-    /// than spelled a second time here.
+    /// created ([`Self::managed_prefix_lists`]) and the ones the REGION publishes
+    /// ([`managed_prefix_lists_in_region`]) — the same pair `DescribeManagedPrefixLists`
+    /// reports, so one id names one list whichever operation is asked, and the entries of a
+    /// published list are read off that one derivation rather than spelled a second time
+    /// here.
     ///
-    /// A published list is settled and has never been revised, so its entries belong to
-    /// [`FIRST_PREFIX_LIST_VERSION`], the version `to_managed_prefix_list` reports for it; a
-    /// stored list's belong to the version its record carries.
+    /// A published list has never been revised, so the entries it has are the ones it was
+    /// published with: they are reported as [`FIRST_PREFIX_LIST_VERSION`], the version
+    /// `GetManagedPrefixListEntries` version-scopes its answer by
+    /// (`GetManagedPrefixListEntriesRequest$TargetVersion`) — which is a property of the
+    /// ENTRY SET rather than a member of the list, and is why
+    /// [`ServicePrefixList::to_managed_prefix_list`] reports no `Version` on the list
+    /// itself: nothing revises a list Amazon Web Services publishes, so the list has no
+    /// revision count to report. A stored list's entries belong to the version its record
+    /// carries.
     pub fn visible_prefix_list_entries(
         &self,
         region: &str,
@@ -268,7 +274,7 @@ impl ComAmazonawsEc2Amazonec2State {
                 entries: record.entries.clone(),
             });
         }
-        service_prefix_lists_in_region(region)
+        managed_prefix_lists_in_region(region)
             .into_iter()
             .find(|published| published.prefix_list_id == prefix_list_id)
             .map(|published| PrefixListEntriesView {
@@ -349,16 +355,20 @@ impl ServicePrefixList {
     /// This prefix list as the modelled `ManagedPrefixList` shape
     /// `DescribeManagedPrefixLists` reports, for `region`.
     ///
-    /// The members that are facts of the list itself are read off it: its id, its name, the
-    /// ranges' address family, and how many entries it holds, which is also the most it holds
-    /// ("The maximum number of entries for the prefix list",
-    /// `ManagedPrefixList$MaxEntries`) — nothing adds an entry to a list the account does not
-    /// own. Its owner is Amazon Web Services rather than the account
+    /// The members that are facts of the list itself are read off it: its id, its name and the
+    /// ranges' address family. Its owner is Amazon Web Services rather than the account
     /// ([`AWS_MANAGED_PREFIX_LIST_OWNER`]), so its ARN carries the service's account segment
     /// too ([`aws_owned_arn`]) and not the account the request is signed for; it carries no
     /// tag, because an account tags only its own resources, and it is settled: a list a
     /// Region publishes has no creation still in progress, so its state is
-    /// [`PREFIX_LIST_STATE_CREATE_COMPLETE`] and its version the first.
+    /// [`PREFIX_LIST_STATE_CREATE_COMPLETE`].
+    ///
+    /// `MaxEntries` and `Version` are ABSENT, because both are facts of a list an ACCOUNT
+    /// created: the maximum is "the maximum number of entries for the prefix list" the
+    /// creating request chose (`CreateManagedPrefixListRequest$MaxEntries`), and the version
+    /// counts the revisions `ModifyManagedPrefixList` makes. Nothing adds an entry to a list
+    /// Amazon Web Services publishes and nothing revises one, so neither member has a value
+    /// to report rather than one derived from the entries the list happens to carry today.
     pub fn to_managed_prefix_list(&self, region: &str) -> crate::ops::types::ManagedPrefixList {
         crate::ops::types::ManagedPrefixList {
             prefix_list_id: Some(self.prefix_list_id.clone()),
@@ -384,8 +394,8 @@ impl ServicePrefixList {
                 &format!("{RESOURCE_TYPE_PREFIX_LIST}/{}", self.prefix_list_id),
             )),
             prefix_list_name: Some(self.prefix_list_name.clone()),
-            max_entries: Some(i32::try_from(self.cidrs.len()).unwrap_or(i32::MAX)),
-            version: Some(FIRST_PREFIX_LIST_VERSION),
+            max_entries: None,
+            version: None,
             tags: Some(Vec::new()),
             owner_id: Some(AWS_MANAGED_PREFIX_LIST_OWNER.to_string()),
             ipam_prefix_list_resolver_target_id: None,
@@ -401,19 +411,46 @@ impl ServicePrefixList {
 /// `DescribeManagedPrefixLists` selects those lists by.
 pub const AWS_MANAGED_PREFIX_LIST_OWNER: &str = "AWS";
 
-/// The services an Amazon Web Services service prefix list is published for in every Region.
+/// The prefix lists Amazon Web Services publishes in every Region: each list's service
+/// label, whether its ranges are IPv6, and whether it is one of the lists the LEGACY report
+/// `DescribePrefixLists` carries.
 ///
-/// `DescribePrefixLists` "describes available Amazon Web Services services in a prefix list
-/// format, which includes the prefix list name and prefix list ID of the service and the IP
-/// address range for the service" (the operation's own doc), so what it reports is one prefix
-/// list per service that HAS one — the services reachable through a gateway VPC endpoint,
-/// Amazon DynamoDB and Amazon S3 (Amazon VPC User Guide, "Gateway endpoints": "You can create
-/// a gateway endpoint ... Amazon S3, Amazon DynamoDB") — which is why this catalog names
-/// services rather than reading a store.
+/// These are the "Amazon Web Services-managed prefix lists" `DescribeManagedPrefixLists`
+/// reports beside the account's own — the set the Amazon VPC User Guide's "AWS-managed
+/// prefix lists" page publishes: the two gateway services and Amazon S3 Express One Zone,
+/// Amazon CloudFront's origin-facing ranges, AWS Ground Station's downlink ranges, the Amazon
+/// Route 53 health checkers, Amazon VPC Lattice and Amazon EC2 Instance Connect — with the
+/// IPv6 list each service that publishes one has, named with the `ipv6` label the guide gives
+/// it.
 ///
-/// Each entry is the service component of the list's name, spelled the way a gateway
-/// endpoint's service name spells it: `com.amazonaws.<region>.<service>`.
-pub(super) const AWS_SERVICE_PREFIX_LIST_SERVICES: [&str; 2] = ["dynamodb", "s3"];
+/// The third flag is what separates the two reports of a prefix list: `DescribePrefixLists`
+/// "describes available Amazon Web Services services in a prefix list format" (its own doc),
+/// which is the Amazon S3 and Amazon DynamoDB service family — the services whose ranges a
+/// ROUTE TABLE names, each with its IPv6 list — while `DescribeManagedPrefixLists` reports
+/// every list of this catalog. A list AWS publishes for any other service is therefore
+/// reported by the second and not by the first. The flag says which lists that legacy report
+/// carries and nothing about the endpoint TYPES a service is reachable through, which is
+/// [`AWS_ENDPOINT_SERVICES`]'s own column.
+///
+/// Each label is the service component of the list's name, spelled the way an endpoint
+/// service name spells it: `com.amazonaws.<region>.<label>`.
+pub(super) const AWS_MANAGED_PREFIX_LIST_SERVICES: [(&str, bool, bool); 15] = [
+    ("cloudfront.origin-facing", false, false),
+    ("dynamodb", false, true),
+    ("ec2-instance-connect", false, false),
+    ("groundstation", false, false),
+    ("ipv6.cloudfront.origin-facing", true, false),
+    ("ipv6.dynamodb", true, true),
+    ("ipv6.groundstation", true, false),
+    ("ipv6.route53-healthchecks", true, false),
+    ("ipv6.s3", true, true),
+    ("ipv6.s3express", true, true),
+    ("ipv6.vpc-lattice", true, false),
+    ("route53-healthchecks", false, false),
+    ("s3", false, true),
+    ("s3express", false, true),
+    ("vpc-lattice", false, false),
+];
 
 /// The first address of the range every derived prefix list CIDR is carved out of:
 /// `198.18.0.0/15`, which IANA reserves for benchmarking (RFC 2544) and no real service
@@ -427,18 +464,23 @@ pub(super) const BENCHMARK_RANGE_PREFIX_LENGTH: u32 = 15;
 /// range.
 pub(super) const PREFIX_LIST_BLOCK_PREFIX_LENGTH: u32 = 21;
 
-/// The Amazon Web Services service prefix lists Region `region` publishes, in
-/// `PrefixListName` order — the order a `NextToken` walk of `DescribePrefixLists` resumes in,
-/// and unique by construction, one name per service of [`AWS_SERVICE_PREFIX_LIST_SERVICES`].
-pub fn service_prefix_lists_in_region(region: &str) -> Vec<ServicePrefixList> {
-    let mut lists: Vec<ServicePrefixList> = AWS_SERVICE_PREFIX_LIST_SERVICES
+/// Every prefix list Amazon Web Services publishes in Region `region`, in `PrefixListName`
+/// order — the order a `NextToken` walk of `DescribeManagedPrefixLists` resumes in, and
+/// unique by construction, one name per entry of [`AWS_MANAGED_PREFIX_LIST_SERVICES`].
+///
+/// This is the set `DescribeManagedPrefixLists` reports, and the one a security group rule or
+/// a route may reference; [`service_prefix_lists_in_region`] is the gateway-service subset of
+/// it that `DescribePrefixLists` reports. Both read the same entries, so one list's id, name
+/// and ranges are the same whichever report reaches it.
+pub fn managed_prefix_lists_in_region(region: &str) -> Vec<ServicePrefixList> {
+    let mut lists: Vec<ServicePrefixList> = AWS_MANAGED_PREFIX_LIST_SERVICES
         .iter()
         .enumerate()
-        .map(|(index, service)| {
+        .map(|(index, (service, ipv6, _))| {
             let prefix_list_name = format!("com.amazonaws.{region}.{service}");
             ServicePrefixList {
                 prefix_list_id: service_prefix_list_id(&prefix_list_name),
-                cidrs: service_prefix_list_cidrs(u32::try_from(index).unwrap_or(0)),
+                cidrs: service_prefix_list_cidrs(u32::try_from(index).unwrap_or(0), *ipv6),
                 prefix_list_name,
             }
         })
@@ -454,6 +496,25 @@ pub fn service_prefix_lists_in_region(region: &str) -> Vec<ServicePrefixList> {
         "two prefix lists of one Region must not share an id"
     );
     lists
+}
+
+/// The Amazon Web Services SERVICE prefix lists Region `region` publishes — the Amazon S3
+/// and Amazon DynamoDB service family of [`AWS_MANAGED_PREFIX_LIST_SERVICES`], which is what
+/// `DescribePrefixLists` reports — in `PrefixListName` order.
+pub fn service_prefix_lists_in_region(region: &str) -> Vec<ServicePrefixList> {
+    let legacy: Vec<&str> = AWS_MANAGED_PREFIX_LIST_SERVICES
+        .iter()
+        .filter(|(_, _, legacy)| *legacy)
+        .map(|(service, _, _)| *service)
+        .collect();
+    managed_prefix_lists_in_region(region)
+        .into_iter()
+        .filter(|list| {
+            legacy.iter().any(|service| {
+                list.prefix_list_name == format!("com.amazonaws.{region}.{service}")
+            })
+        })
+        .collect()
 }
 
 /// The id of the service prefix list named `prefix_list_name`.
@@ -472,20 +533,25 @@ pub(super) fn service_prefix_list_id(prefix_list_name: &str) -> String {
     )
 }
 
-/// The IP address ranges this emulator reports for service number `service_index` of
-/// [`AWS_SERVICE_PREFIX_LIST_SERVICES`].
+/// The IP address ranges this emulator reports for prefix list number `service_index` of
+/// [`AWS_MANAGED_PREFIX_LIST_SERVICES`], as an IPv6 range when `ipv6` says the list carries
+/// one.
 ///
 /// AWS publishes a service's real ranges per Region in its `ip-ranges.json` feed, which
 /// neither this service's model nor a request carries and this emulator holds no copy of. So a
 /// range reported here is DERIVED, and it is derived from the one thing a prefix list is scoped
 /// to within a Region — the service: one `/21` block of `198.18.0.0/15`, the range IANA
-/// reserves for benchmarking (RFC 2544), so a range this emulator reports can never be read as
-/// an address a real Amazon Web Services service answers on. Indexing the block by the service
-/// alone is what the two properties this derivation claims need, and no more: every read of one
-/// Region's list reports the same range, and two services of one Region never share a block.
-/// Two Regions DO report the same ranges for one service — the real ranges are the feed's,
-/// which this emulator does not hold, so nothing here distinguishes Regions by address.
-pub(super) fn service_prefix_list_cidrs(service_index: u32) -> Vec<String> {
+/// reserves for benchmarking (RFC 2544), or one `/48` block of `2001:db8::/32`, the range
+/// reserved for documentation (RFC 3849) — so a range this emulator reports can never be read
+/// as an address a real Amazon Web Services service answers on. Indexing the block by the
+/// service alone is what the two properties this derivation claims need, and no more: every
+/// read of one Region's list reports the same range, and two lists of one Region never share a
+/// block. Two Regions DO report the same ranges for one service — the real ranges are the
+/// feed's, which this emulator does not hold, so nothing here distinguishes Regions by address.
+pub(super) fn service_prefix_list_cidrs(service_index: u32, ipv6: bool) -> Vec<String> {
+    if ipv6 {
+        return vec![format!("2001:db8:{service_index:x}::/48")];
+    }
     // How many blocks of [`PREFIX_LIST_BLOCK_PREFIX_LENGTH`] the reserved range holds. A
     // catalog larger than that would have nothing left to stay inside, so the block number
     // wraps — a derivation that keeps answering an address in the reserved range rather than a
@@ -493,7 +559,7 @@ pub(super) fn service_prefix_list_cidrs(service_index: u32) -> Vec<String> {
     // where two services would otherwise come to share a block.
     let blocks = 1u32 << (PREFIX_LIST_BLOCK_PREFIX_LENGTH - BENCHMARK_RANGE_PREFIX_LENGTH);
     debug_assert!(
-        u32::try_from(AWS_SERVICE_PREFIX_LIST_SERVICES.len()).unwrap_or(u32::MAX) <= blocks,
+        u32::try_from(AWS_MANAGED_PREFIX_LIST_SERVICES.len()).unwrap_or(u32::MAX) <= blocks,
         "the prefix list catalog must fit the blocks the reserved range holds"
     );
     let block = service_index % blocks;
@@ -1606,6 +1672,14 @@ pub const PARTNER_ENDPOINT_SERVICE_LABEL: &str = "vpce.";
 /// [`parse_endpoint_service_name`] and both appear in the Region's catalog.
 pub const AWS_API_ENDPOINT_SERVICE_PREFIX: &str = "aws.api.";
 
+/// The third prefix an endpoint service name of Amazon Web Services takes:
+/// `api.aws.<region>.<service>`, the form the services published under the `api.aws` label
+/// are called by (the Amazon Keyspaces streams endpoint service,
+/// `api.aws.<region>.cassandra-streams`, is one). Read by
+/// [`parse_endpoint_service_name`] like the other two, so a name of this family resolves to
+/// the service of the Region its name carries.
+pub const API_AWS_ENDPOINT_SERVICE_PREFIX: &str = "api.aws.";
+
 /// The DNS suffix of the endpoint-specific names an interface endpoint answers on, under
 /// which the Region's own label sits (`<endpoint>.<service>.<region>.vpce.amazonaws.com`).
 pub const ENDPOINT_DNS_SUFFIX: &str = "vpce.amazonaws.com";
@@ -1700,10 +1774,12 @@ pub struct EndpointServiceName {
 ///
 /// A service name is `com.amazonaws.<region>.<service>`,
 /// `com.amazonaws.vpce.<region>.<service>` for one a partner offers, or
-/// `aws.api.<region>.<service>` for one published under the `aws.api` label — the forms the
+/// `aws.api.<region>.<service>` / `api.aws.<region>.<service>` for one published under the
+/// `aws.api` or `api.aws` label — the forms the
 /// `ServiceName` doc's own examples take ([`AWS_ENDPOINT_SERVICE_PREFIX`],
-/// [`PARTNER_ENDPOINT_SERVICE_LABEL`]) plus the one the `aws.api` family takes
-/// ([`AWS_API_ENDPOINT_SERVICE_PREFIX`]). The Region label has to be a Region name
+/// [`PARTNER_ENDPOINT_SERVICE_LABEL`]) plus the ones those two families take
+/// ([`AWS_API_ENDPOINT_SERVICE_PREFIX`], [`API_AWS_ENDPOINT_SERVICE_PREFIX`]). The Region
+/// label has to be a Region name
 /// ([`region_name_is_well_formed`]) and the service label a non-empty run of the characters
 /// a DNS label of a service name is made of, since both end up in the DNS names the
 /// endpoint answers on. The ONE reading of a service name, so every operation that resolves
@@ -1714,7 +1790,9 @@ pub fn parse_endpoint_service_name(service_name: &str) -> Option<EndpointService
         Some(within_amazon) => within_amazon
             .strip_prefix(PARTNER_ENDPOINT_SERVICE_LABEL)
             .unwrap_or(within_amazon),
-        None => service_name.strip_prefix(AWS_API_ENDPOINT_SERVICE_PREFIX)?,
+        None => service_name
+            .strip_prefix(AWS_API_ENDPOINT_SERVICE_PREFIX)
+            .or_else(|| service_name.strip_prefix(API_AWS_ENDPOINT_SERVICE_PREFIX))?,
     };
     let (region, service) = within_region.split_once('.')?;
     if !region_name_is_well_formed(region) {
@@ -1801,24 +1879,69 @@ pub(super) const GATEWAY_AND_INTERFACE: &[&str] = &[VPC_ENDPOINT_TYPE_GATEWAY, V
 /// The source is the Amazon Web Services PrivateLink User Guide's own list of the services
 /// that integrate with PrivateLink, taking each service's endpoint service label and the kind
 /// of endpoint it is reached through; the two gateway services are the ones the guide's
-/// "Gateway endpoints" page names (Amazon S3 and Amazon DynamoDB), which is the same pair
-/// [`AWS_SERVICE_PREFIX_LIST_SERVICES`] publishes a prefix list for. Sorted by label, which
+/// "Gateway endpoints" page names (Amazon S3 and Amazon DynamoDB). Sorted by label, which
 /// [`endpoint_services_in_region`] relies on for the order it reports in.
 ///
 /// Every Region offers every entry: which Regions a given service has reached is a fact of
 /// that service's own rollout, which neither this model nor a request carries and this
 /// emulator holds no copy of, so nothing here distinguishes Regions by catalog.
-pub(super) const AWS_ENDPOINT_SERVICES: [AwsEndpointService; 47] = [
+pub(super) const AWS_ENDPOINT_SERVICES: &[AwsEndpointService] = &[
+    AwsEndpointService { label: "access-analyzer", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "account", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "acm-pca", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "airflow.api", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "airflow.env", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "airflow.ops", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "amplify", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "aps", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "aps-workspaces", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "appconfig", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "appconfigdata", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "application-autoscaling", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "appmesh-envoy-management", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "apprunner", types: INTERFACE_ONLY },
     AwsEndpointService { label: "appstream.api", types: INTERFACE_ONLY },
     AwsEndpointService { label: "appstream.streaming", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "appsync-api", types: INTERFACE_ONLY },
     AwsEndpointService { label: "athena", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "auditmanager", types: INTERFACE_ONLY },
     AwsEndpointService { label: "autoscaling", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "autoscaling-plans", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "backup", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "batch", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "bedrock", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "bedrock-agent", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "bedrock-agent-runtime", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "bedrock-runtime", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "braket", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "cassandra", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "clouddirectory", types: INTERFACE_ONLY },
     AwsEndpointService { label: "cloudformation", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "cloudhsmv2", types: INTERFACE_ONLY },
     AwsEndpointService { label: "cloudtrail", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "codeartifact.api", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "codeartifact.repositories", types: INTERFACE_ONLY },
     AwsEndpointService { label: "codebuild", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "codecommit", types: INTERFACE_ONLY },
     AwsEndpointService { label: "codedeploy", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "codedeploy-commands-secure", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "codeguru-profiler", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "codeguru-reviewer", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "codepipeline", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "cognito-identity", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "cognito-idp", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "comprehend", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "comprehendmedical", types: INTERFACE_ONLY },
     AwsEndpointService { label: "config", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "databrew", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "dataexchange", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "datasync", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "datazone", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "dms", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "drs", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "ds", types: INTERFACE_ONLY },
     AwsEndpointService { label: "dynamodb", types: GATEWAY_ONLY },
+    AwsEndpointService { label: "ebs", types: INTERFACE_ONLY },
     AwsEndpointService { label: "ec2", types: INTERFACE_ONLY },
     AwsEndpointService { label: "ec2messages", types: INTERFACE_ONLY },
     AwsEndpointService { label: "ecr.api", types: INTERFACE_ONLY },
@@ -1826,40 +1949,93 @@ pub(super) const AWS_ENDPOINT_SERVICES: [AwsEndpointService; 47] = [
     AwsEndpointService { label: "ecs", types: INTERFACE_ONLY },
     AwsEndpointService { label: "ecs-agent", types: INTERFACE_ONLY },
     AwsEndpointService { label: "ecs-telemetry", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "eks", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "eks-auth", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "elasticache", types: INTERFACE_ONLY },
     AwsEndpointService { label: "elasticbeanstalk", types: INTERFACE_ONLY },
     AwsEndpointService { label: "elasticfilesystem", types: INTERFACE_ONLY },
     AwsEndpointService { label: "elasticloadbalancing", types: INTERFACE_ONLY },
     AwsEndpointService { label: "elasticmapreduce", types: INTERFACE_ONLY },
     AwsEndpointService { label: "email-smtp", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "emr-containers", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "emr-serverless", types: INTERFACE_ONLY },
     AwsEndpointService { label: "events", types: INTERFACE_ONLY },
     AwsEndpointService { label: "execute-api", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "finspace", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "fsx", types: INTERFACE_ONLY },
     AwsEndpointService { label: "git-codecommit", types: INTERFACE_ONLY },
     AwsEndpointService { label: "glue", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "grafana", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "greengrass", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "groundstation", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "guardduty-data", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "healthlake", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "identitystore", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "inspector2", types: INTERFACE_ONLY },
     AwsEndpointService { label: "iot.data", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "iotsitewise.api", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "kendra", types: INTERFACE_ONLY },
     AwsEndpointService { label: "kinesis-firehose", types: INTERFACE_ONLY },
     AwsEndpointService { label: "kinesis-streams", types: INTERFACE_ONLY },
     AwsEndpointService { label: "kms", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "lakeformation", types: INTERFACE_ONLY },
     AwsEndpointService { label: "lambda", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "license-manager", types: INTERFACE_ONLY },
     AwsEndpointService { label: "logs", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "macie2", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "memory-db", types: INTERFACE_ONLY },
     AwsEndpointService { label: "monitoring", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "personalize", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "pinpoint", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "polly", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "profile", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "qldb.session", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "quicksight", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "ram", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "rbin", types: INTERFACE_ONLY },
     AwsEndpointService { label: "rds", types: INTERFACE_ONLY },
     AwsEndpointService { label: "rds-data", types: INTERFACE_ONLY },
     AwsEndpointService { label: "redshift", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "redshift-data", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "rekognition", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "resource-groups", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "route53resolver", types: INTERFACE_ONLY },
     AwsEndpointService { label: "s3", types: GATEWAY_AND_INTERFACE },
+    AwsEndpointService { label: "s3express", types: INTERFACE_ONLY },
     AwsEndpointService { label: "sagemaker.api", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "sagemaker.runtime", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "scheduler", types: INTERFACE_ONLY },
     AwsEndpointService { label: "secretsmanager", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "securityhub", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "serverlessrepo", types: INTERFACE_ONLY },
     AwsEndpointService { label: "servicecatalog", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "servicediscovery", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "snow-device-management", types: INTERFACE_ONLY },
     AwsEndpointService { label: "sns", types: INTERFACE_ONLY },
     AwsEndpointService { label: "sqs", types: INTERFACE_ONLY },
     AwsEndpointService { label: "ssm", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "ssm-contacts", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "ssm-incidents", types: INTERFACE_ONLY },
     AwsEndpointService { label: "ssmmessages", types: INTERFACE_ONLY },
     AwsEndpointService { label: "states", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "storagegateway", types: INTERFACE_ONLY },
     AwsEndpointService { label: "sts", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "swf", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "synthetics", types: INTERFACE_ONLY },
     // The DEDICATED regional service a CloudWatch Logs syslog ingestion endpoint is created
     // to, which the PrivateLink guide publishes beside the plain `logs` API service: the two
     // are different services, and only an endpoint to this one carries syslog data into a log
     // group.
     AwsEndpointService { label: "syslog-logs", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "textract", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "timestream", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "transcribe", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "transfer", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "translate", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "waf-regional", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "wisdom", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "workspaces", types: INTERFACE_ONLY },
+    AwsEndpointService { label: "xray", types: INTERFACE_ONLY },
 ];
 
 /// The endpoint services Amazon Web Services offers in every Region under the `aws.api`
@@ -1875,8 +2051,20 @@ pub(super) const AWS_ENDPOINT_SERVICES: [AwsEndpointService; 47] = [
 /// the service's identity and an invented one would name a service no Region offers. The
 /// PARSE ([`parse_endpoint_service_name`]) is over the whole family, so an endpoint to a
 /// member this catalogue does not list is still created to the service its name names.
-pub(super) const AWS_API_ENDPOINT_SERVICES: [AwsEndpointService; 1] =
-    [AwsEndpointService { label: "emr-service-cell01", types: INTERFACE_ONLY }];
+pub(super) const AWS_API_ENDPOINT_SERVICES: &[AwsEndpointService] =
+    &[AwsEndpointService { label: "emr-service-cell01", types: INTERFACE_ONLY }];
+
+/// The endpoint services Amazon Web Services offers in every Region under the `api.aws`
+/// label ([`API_AWS_ENDPOINT_SERVICE_PREFIX`]).
+///
+/// Amazon Keyspaces publishes the change-data-capture streams of its Apache Cassandra-
+/// compatible tables as one: a client reaches them through an interface endpoint to
+/// `api.aws.<region>.cassandra-streams`, beside the table API's own
+/// `com.amazonaws.<region>.cassandra`. Read and reported exactly like the other two
+/// families, so a name of this one is never refused as a value that is no service name.
+/// Sorted by label, the way [`AWS_ENDPOINT_SERVICES`] is.
+pub(super) const API_AWS_ENDPOINT_SERVICES: &[AwsEndpointService] =
+    &[AwsEndpointService { label: "cassandra-streams", types: INTERFACE_ONLY }];
 
 /// One endpoint service a caller can create a VPC endpoint to, whichever of the two sources it
 /// came from: a service of the Region's catalog, or one of the account's own stored service
@@ -1979,8 +2167,8 @@ impl EndpointServiceRecord {
 
 /// The endpoint services Amazon Web Services offers in Region `region`, in `ServiceName`
 /// order — the order a `NextToken` walk of `DescribeVpcEndpointServices` resumes in, and
-/// unique by construction, one name per entry of [`AWS_ENDPOINT_SERVICES`] and of
-/// [`AWS_API_ENDPOINT_SERVICES`].
+/// unique by construction, one name per entry of [`AWS_ENDPOINT_SERVICES`], of
+/// [`AWS_API_ENDPOINT_SERVICES`] and of [`API_AWS_ENDPOINT_SERVICES`].
 ///
 /// Every reported value is derived from the Region and the entry: the zones come from
 /// [`availability_zones_in_region`], so the service is available in exactly the zones the
@@ -2056,11 +2244,21 @@ pub fn endpoint_services_in_region(region: &str) -> Vec<EndpointServiceRecord> {
             payer_responsibility: Some(PAYER_RESPONSIBILITY_SERVICE_OWNER.to_string()),
             private_dns_name_verification_state: (interface && publishes_public_name)
                 .then(|| DNS_NAME_STATE_VERIFIED.to_string()),
-            // The one address type an endpoint to this service can be created with: this
-            // slice's subnets carry an IPv4 range only, so an endpoint network interface
-            // has an IPv4 address and the endpoint's DNS records are IPv4 records
-            // ([`DNS_RECORD_IP_TYPE_IPV4`]).
-            supported_ip_address_types: vec![IP_ADDRESS_TYPE_IPV4.to_string()],
+            // "The supported IP address types" (`ServiceDetail$SupportedIpAddressTypes`) is
+            // about what the SERVICE answers on. An interface endpoint service answers on
+            // both IPv4 and IPv6, the interface endpoint's own addresses being what an
+            // endpoint of either type is created with; a gateway service is reached through
+            // its route-table entry, which is an IPv4 prefix list
+            // ([`service_prefix_lists_in_region`] publishes the IPv6 list separately, under
+            // its own name).
+            supported_ip_address_types: if interface {
+                vec![
+                    IP_ADDRESS_TYPE_IPV4.to_string(),
+                    IP_ADDRESS_TYPE_IPV6.to_string(),
+                ]
+            } else {
+                vec![IP_ADDRESS_TYPE_IPV4.to_string()]
+            },
             // Nobody can tag a service Amazon Web Services offers, there being no resource
             // of the account to tag.
             tags: Vec::new(),
@@ -2073,6 +2271,11 @@ pub fn endpoint_services_in_region(region: &str) -> Vec<EndpointServiceRecord> {
             AWS_API_ENDPOINT_SERVICES
                 .iter()
                 .map(|service| record_of(AWS_API_ENDPOINT_SERVICE_PREFIX, service)),
+        )
+        .chain(
+            API_AWS_ENDPOINT_SERVICES
+                .iter()
+                .map(|service| record_of(API_AWS_ENDPOINT_SERVICE_PREFIX, service)),
         )
         .collect();
     // The report is in `ServiceName` order whichever prefix a service's name sits under,

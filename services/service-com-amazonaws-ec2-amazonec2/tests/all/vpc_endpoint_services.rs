@@ -355,11 +355,18 @@ async fn each_catalogued_service_is_reported_for_the_region_asked_about() {
                 "case {case:?}: expected the one PayerResponsibility member, got {:?}",
                 service.payer_responsibility
             );
+            // "The supported IP address types" is about what the SERVICE answers on: an
+            // interface endpoint service answers on both IPv4 and IPv6, while a service
+            // reached only through a gateway endpoint is reached through its route-table
+            // entry, which is an IPv4 prefix list.
+            let expected_ip_types = if row.types.contains(&"Interface") {
+                vec!["ipv4".to_string(), "ipv6".to_string()]
+            } else {
+                vec!["ipv4".to_string()]
+            };
             assert_eq!(
-                service.ip_address_types,
-                vec!["ipv4".to_string()],
-                "case {case:?}: expected the address type an endpoint here can be created \
-                 with, got {:?}",
+                service.ip_address_types, expected_ip_types,
+                "case {case:?}: expected the address types {expected_ip_types:?}, got {:?}",
                 service.ip_address_types
             );
             assert!(
@@ -534,6 +541,7 @@ async fn a_regions_report_is_stable_and_its_services_are_distinct() {
         let expected_prefixes = [
             format!("com.amazonaws.{REGION}."),
             format!("aws.api.{REGION}."),
+            format!("api.aws.{REGION}."),
         ];
         assert!(
             expected_prefixes
@@ -712,11 +720,13 @@ async fn service_regions_selects_the_regions_asked_about() {
             "case {case:?}: expected the services of {wanted:?}, got {regions:?}"
         );
         for service in &services {
-            // A name of either published family carries the Region hosting the service:
-            // `com.amazonaws.<region>.<label>` and `aws.api.<region>.<label>`.
+            // A name of any published family carries the Region hosting the service:
+            // `com.amazonaws.<region>.<label>`, `aws.api.<region>.<label>` and
+            // `api.aws.<region>.<label>`.
             let prefixes = [
                 format!("com.amazonaws.{}.", service.region),
                 format!("aws.api.{}.", service.region),
+                format!("api.aws.{}.", service.region),
             ];
             assert!(
                 prefixes
@@ -838,8 +848,19 @@ fn filter_cases() -> Vec<FilterCase> {
             expected: None,
         },
         FilterCase {
+            // Every interface endpoint service answers on IPv6 too, so the type selects
+            // every service but the ones reachable only through a gateway endpoint: ANDing
+            // it with `service-type` leaves the one service reachable BOTH ways.
+            case: "an address type only the interface services support",
+            entries: vec![
+                ("supported-ip-address-types", &["ipv6"]),
+                ("service-type", &["Gateway"]),
+            ],
+            expected: Some(vec!["com.amazonaws.us-east-1.s3"]),
+        },
+        FilterCase {
             case: "an address type no service here supports",
-            entries: vec![("supported-ip-address-types", &["ipv6"])],
+            entries: vec![("supported-ip-address-types", &["dualstack"])],
             expected: Some(Vec::new()),
         },
         FilterCase {
