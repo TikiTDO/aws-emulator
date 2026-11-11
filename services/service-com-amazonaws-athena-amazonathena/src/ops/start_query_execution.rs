@@ -412,9 +412,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             },
         };
 
-        state
-            .lock()
-            .complete_query_execution(&id, completion, SystemTime::now());
+        // What the run produced is first RECORDED on the execution, and then SAVED: Athena
+        // stores the results of a query that ran under the output location this submission
+        // resolved, so the object a later `GetQueryExecution` names is written by the same
+        // call that ran the statement rather than left for a client to find missing. The
+        // registry's guard is released before the object store's is taken, so no two
+        // stores are ever held at once.
+        let results = {
+            let mut store = state.lock();
+            store.complete_query_execution(&id, completion, SystemTime::now());
+            store
+                .query_execution(&id)
+                .map(crate::state::query_results::result_objects)
+                .unwrap_or_default()
+        };
+        crate::state::query_results::write(&*self.engine, results);
 
         Ok(StartQueryExecutionOutput {
             query_execution_id: Some(id),

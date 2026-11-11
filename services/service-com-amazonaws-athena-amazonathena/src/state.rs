@@ -49,6 +49,9 @@ pub mod query_engine;
 /// What a submitted statement means to the AWS Glue Data Catalog, and how it is run.
 pub mod catalog_sql;
 
+/// The objects a completed run saves its results to, under the resolved output location.
+pub mod query_results;
+
 /// The notebooks a Spark enabled workgroup holds, and the ipynb content of each.
 mod notebooks;
 pub use notebooks::*;
@@ -1179,7 +1182,7 @@ impl QueryExecutionRecord {
     /// Whether this execution's statement writes its result as the engine's TEXT output:
     /// the statements Athena classifies as DDL and UTILITY return no result set, and what
     /// their run produces is the text the engine wrote about the task.
-    fn writes_text_output(&self) -> bool {
+    pub(crate) fn writes_text_output(&self) -> bool {
         matches!(
             self.statement_type.as_deref(),
             Some(query_engine::STATEMENT_TYPE_DDL) | Some(query_engine::STATEMENT_TYPE_UTILITY)
@@ -1198,6 +1201,17 @@ impl QueryExecutionRecord {
         if self.cancelled_at.is_some() || !self.is_terminal_at(now) {
             return None;
         }
+        self.result_object_uri()
+    }
+
+    /// The key of the result object this execution's statement writes, as the `s3://` URI
+    /// of the configured results directory with that object under it — the ONE place that
+    /// key is formed, so the object a read NAMES ([`Self::result_object_at`]) and the
+    /// object a completed run SAVES ([`query_results::result_objects`]) are the same key.
+    ///
+    /// `None` for text that parses as no statement at all, and for a submission that
+    /// resolved no results location: neither addresses an object.
+    pub(crate) fn result_object_uri(&self) -> Option<String> {
         let suffix = match self.statement_type.as_deref()? {
             query_engine::STATEMENT_TYPE_DML => RESULT_OBJECT_ROWS_SUFFIX,
             query_engine::STATEMENT_TYPE_DDL | query_engine::STATEMENT_TYPE_UTILITY => {
