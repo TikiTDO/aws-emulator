@@ -39,10 +39,10 @@ use std::time::{Instant, SystemTime};
 use serde_json::{json, Value};
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::state::{
     service_state, ExportTask, ExportTaskStatus, Graph, GraphConfiguration, GraphData, GraphStatus,
-    ImportTask, ImportTaskStatus, PrivateGraphEndpoint, PrivateGraphEndpointStatus, Snapshot,
-    SnapshotStatus, ARN_NAMESPACE, DEFAULT_REPLICA_COUNT, GRAPH_SOFTWARE_BUILD_NUMBER,
+    ImportLoad, ImportTask, ImportTaskStatus, PrivateGraphEndpoint, PrivateGraphEndpointStatus,
+    Snapshot, SnapshotStatus, ARN_NAMESPACE, DEFAULT_REPLICA_COUNT, GRAPH_SOFTWARE_BUILD_NUMBER,
     MAX_EXPORT_TASKS, MAX_GRAPHS, MAX_IMPORT_TASKS, MAX_PRIVATE_GRAPH_ENDPOINTS, MAX_SNAPSHOTS,
-    SERVICE_OWNED_KMS_KEY,
+    SERVICE_OWNED_KMS_KEY, SOURCE_UNREADABLE_REASON,
 };
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
@@ -419,7 +419,14 @@ fn fill_to(engine: &Arc<engine::InMemoryEngine>, which: Store, graph_id: &str, u
                     status: ImportTaskStatus::Initializing,
                     status_reason: None,
                     attempt_number: 1,
-                    pending: None,
+                    // A filler record: nothing read a source for it, so it loads
+                    // nothing and stops where it is.
+                    load: ImportLoad::unread(SOURCE_UNREADABLE_REASON),
+                    delivered: false,
+                    start_time: SystemTime::now(),
+                    started_at: Instant::now(),
+                    stopped_progress: None,
+                    settles_at: None,
                 });
             }
             Store::ExportTasks => {

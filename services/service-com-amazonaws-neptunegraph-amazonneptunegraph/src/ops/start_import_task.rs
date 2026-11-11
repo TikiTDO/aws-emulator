@@ -15,14 +15,17 @@
 //! state"): an import needs a serving graph, and it fills that graph rather than
 //! merging into the data it already holds.
 //!
-//! ## Why an accepted task stops FAILED
+//! ## What an accepted task does
 //!
-//! Nothing in this emulator reads the task's `source`: there is no bulk loader, and
-//! no outbound connection to the location the request names. A task may therefore
-//! never report a stage, a count or a `SUCCEEDED` status for a load nothing
-//! performed, so the clock settles every accepted task into the modelled `FAILED`
-//! status carrying `crate::state::IMPORT_NOT_RUN_REASON`, which says exactly that.
-//! Until then the task is in flight and `CancelImportTask` can stop it.
+//! The data the request names is read out of the account's own object store through
+//! the emulator's in-process Amazon S3 ([`crate::state::read_import_source`]), in the
+//! `format` the request asked for, and the elements it holds are written into the
+//! target graph when the run's span is over — so a task reports `SUCCEEDED`, and the
+//! counts in its `importTaskDetails`, only for data the graph really holds afterwards.
+//! A task whose source could not be read, and one whose data carried an error
+//! `failOnError` left it no choice about, stops in the modelled `FAILED` status
+//! carrying what the run met; until the run is over the task is in flight and
+//! `CancelImportTask` can stop it.
 //!
 //! ## Shape of an operation
 //!
@@ -264,74 +267,39 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let region = crate::state::request_region(ctx);
+
+        // The store-dependent refusals are taken with the lock held — and taken AGAIN
+        // after the source has been read, because the store is only this handler's for
+        // the span of a lock. Taken HERE too so a request that is refused never reads a
+        // byte of the location it named.
+        {
+            let (mut store, now) = crate::state::locked_store_now(&state);
+            gate_import(&mut store, &input.graph_identifier, &region, now)?;
+        }
+
+        // The TASK's own work, with no lock held: the data its `source` names, read out
+        // of this account's own object store. What the read establishes is the task's
+        // own outcome — the elements it loads, the counts over them and the status its
+        // run ends in — never a refusal of this request.
+        let load = crate::state::read_import_source(
+            ctx,
+            &region,
+            &input.source,
+            input.format.as_deref(),
+            input.import_options.as_ref(),
+            // `failOnError` defaults to true: "if set to true, the default, or if
+            // omitted, the import operation halts immediately when an error is
+            // encountered" (`crate::state::DEFAULT_FAIL_ON_ERROR`, stated once beside
+            // the load it decides the fate of).
+            input.fail_on_error.unwrap_or(crate::state::DEFAULT_FAIL_ON_ERROR),
+        )
+        .await;
+
         let (mut store, now) = crate::state::locked_store_now(&state);
-
-        // Data is imported INTO a graph, so the graph has to exist IN THE REGION this
-        // request was signed for — a graph of another Region is not visible here. The
-        // lookup settles the transitions the clock already made due first, so a graph
-        // whose provisioning has come due can accept an import.
-        let Some(graph) = store.settled_graph(&input.graph_identifier, &region, now) else {
-            return Err(StartImportTaskErrorModeled::ResourceNotFoundException(
-                crate::state::graph_not_found(&input.graph_identifier),
-            )
-            .into());
-        };
-        let graph_id = graph.id.clone();
-        let graph_status = graph.status;
-        let graph_is_empty = graph.data.is_empty();
-
-        // The store is shared and grows by one task per call, and a task is never
-        // reclaimed, so it has a ceiling (`crate::state::MAX_IMPORT_TASKS`). Checked
-        // before the graph's status, as every other minting handler here checks the store
-        // it grows, so a store with no room left is reported as the full store it is,
-        // whatever the graph is doing: no status the graph could reach would make room
-        // for this record. This operation models no quota error, so reaching the ceiling
-        // is reported with the `ConflictException` it does model, by the one builder
-        // every full-store refusal in this crate reaches
-        // (`crate::state::store_ceiling_conflict`): the request conflicts with what the
-        // store already holds.
-        if store.import_tasks.len() >= crate::state::MAX_IMPORT_TASKS {
-            return Err(StartImportTaskErrorModeled::ConflictException(
-                crate::state::store_ceiling_conflict(
-                    "import tasks",
-                    crate::state::MAX_IMPORT_TASKS,
-                ),
-            )
-            .into());
-        }
-
-        // "The graph needs to be empty and in the AVAILABLE state" — the STATUS half of
-        // that sentence: a bulk load writes through the graph's serving data plane, which
-        // is the same precondition `UpdateGraph` states. The wording is the service's one
-        // precondition
-        // refusal (`crate::state::graph_status_precondition_conflict`), so this half
-        // reads as the sibling of the emptiness half below rather than as a second
-        // grammar, and it fronts no identifier: the graph was addressed by one the
-        // caller sent.
-        if graph_status != crate::state::GraphStatus::Available {
-            return Err(StartImportTaskErrorModeled::ConflictException(
-                crate::state::graph_status_precondition_conflict(
-                    "start the import task",
-                    graph_status,
-                ),
-            )
-            .into());
-        }
-
-        // The EMPTINESS half of the same sentence, decided on the data the stored graph
-        // actually holds: a bulk load fills the graph rather than merging into what is
-        // there, so a graph holding any node or edge cannot take one. That data is the
-        // data `GetGraphSummary` reports, `ResetGraph` empties and a restore brings a
-        // graph up holding, so the refusal fires however the graph came to hold it. The
-        // wording is the service's one precondition refusal for it
-        // (`crate::state::graph_not_empty_conflict`), and nothing is persisted: no task
-        // is minted and the graph's status is left where it was.
-        if !graph_is_empty {
-            return Err(StartImportTaskErrorModeled::ConflictException(
-                crate::state::graph_not_empty_conflict(),
-            )
-            .into());
-        }
+        // The same decisions again: a graph deleted, taken out of service or written to,
+        // or a store filled, while the source was being read is answered exactly as it
+        // would have been before the read — nothing has been persisted yet.
+        let graph_id = gate_import(&mut store, &input.graph_identifier, &region, now)?;
 
         let id = store.next_import_task_id();
         let mut task = crate::state::ImportTask {
@@ -344,39 +312,35 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             format: input.format,
             parquet_type: input.parquet_type,
             blank_node_handling: input.blank_node_handling,
-            // `failOnError` defaults to true: "if set to true, the default, or if
-            // omitted, the import operation halts immediately when an error is
-            // encountered" (the modelled `GetImportTask` doc for `importOptions`).
-            fail_on_error: input.fail_on_error.unwrap_or(true),
+            // `failOnError` defaults to true, stated once in
+            // `crate::state::DEFAULT_FAIL_ON_ERROR`.
+            fail_on_error: input.fail_on_error.unwrap_or(crate::state::DEFAULT_FAIL_ON_ERROR),
             role_arn: input.role_arn,
             import_options: input.import_options,
             status: crate::state::ImportTaskStatus::Initializing,
             status_reason: None,
             // The task is run once and nothing retries it.
             attempt_number: 1,
-            pending: None,
+            // What reading the source established, measured once, above.
+            load,
+            // The elements it read are written into the graph when the run completes.
+            delivered: false,
+            start_time: ::std::time::SystemTime::now(),
+            started_at: now,
+            stopped_progress: None,
+            settles_at: None,
         };
-        // The load has not begun when the call returns, and nothing here can perform
-        // it, so the clock owes the task the modelled FAILED status a fixed span later
-        // — long enough that a caller acting straight after this call still sees the
-        // task in flight, and can cancel it.
-        task.begin_transition(
-            crate::state::ImportTaskStatus::Initializing,
-            crate::state::ImportTaskStatus::Failed,
-            Some(crate::state::IMPORT_NOT_RUN_REASON.to_string()),
-            now,
-        );
+        // The load has not begun when the call returns, so the task reports the
+        // modelled INITIALIZING status and the clock owes it the stages of its run —
+        // long enough that a caller acting straight after this call still sees the task
+        // in flight, and can cancel it.
+        task.begin_run(now);
 
         // An import takes the TARGET GRAPH through IMPORTING (a modelled `GraphStatus`
-        // value); the clock owes the move back to AVAILABLE the same span later, so a
-        // caller that reads the graph straight after this call still sees the transient
-        // status.
+        // value) for as long as the run lasts, so the clock owes the move back to
+        // AVAILABLE at the instant the load lands in it.
         if let Some(graph) = store.graphs.get_mut(&graph_id) {
-            graph.begin_transition(
-                crate::state::GraphStatus::Importing,
-                crate::state::GraphStatus::Available,
-                now,
-            );
+            graph.begin_import(now);
         }
 
         // Report the record that was stored, so this response cannot drift from what a
@@ -385,6 +349,80 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store.insert_import_task(task);
         Ok(output)
     }
+}
+
+/// `Ok` with the id of the graph this import loads into, or the refusal the request
+/// earns from what the store holds.
+///
+/// Stated once because it is taken TWICE — before the source is read and again before
+/// the task is persisted — so neither taking can drift from the other, and a request
+/// refused after the read is refused exactly as it would have been before it.
+fn gate_import(
+    store: &mut crate::state::ComAmazonawsNeptunegraphAmazonneptunegraphState,
+    graph_identifier: &str,
+    region: &str,
+    now: ::std::time::Instant,
+) -> Result<String, StartImportTaskError> {
+    // Data is imported INTO a graph, so the graph has to exist IN THE REGION this
+    // request was signed for — a graph of another Region is not visible here. The
+    // lookup settles the transitions the clock already made due first, so a graph whose
+    // provisioning has come due can accept an import.
+    let Some(graph) = store.settled_graph(graph_identifier, region, now) else {
+        return Err(StartImportTaskErrorModeled::ResourceNotFoundException(
+            crate::state::graph_not_found(graph_identifier),
+        )
+        .into());
+    };
+    let graph_id = graph.id.clone();
+    let graph_status = graph.status;
+    let graph_is_empty = graph.data.is_empty();
+
+    // The store is shared and grows by one task per call, and a task is never
+    // reclaimed, so it has a ceiling (`crate::state::MAX_IMPORT_TASKS`). Checked before
+    // the graph's status, as every other minting handler here checks the store it grows,
+    // so a store with no room left is reported as the full store it is, whatever the
+    // graph is doing: no status the graph could reach would make room for this record.
+    // This operation models no quota error, so reaching the ceiling is reported with the
+    // `ConflictException` it does model, by the one builder every full-store refusal in
+    // this crate reaches (`crate::state::store_ceiling_conflict`): the request conflicts
+    // with what the store already holds.
+    if store.import_tasks.len() >= crate::state::MAX_IMPORT_TASKS {
+        return Err(StartImportTaskErrorModeled::ConflictException(
+            crate::state::store_ceiling_conflict("import tasks", crate::state::MAX_IMPORT_TASKS),
+        )
+        .into());
+    }
+
+    // "The graph needs to be empty and in the AVAILABLE state" — the STATUS half of
+    // that sentence: a bulk load writes through the graph's serving data plane, which is
+    // the same precondition `UpdateGraph` states. The wording is the service's one
+    // precondition refusal (`crate::state::graph_status_precondition_conflict`), so this
+    // half reads as the sibling of the emptiness half below rather than as a second
+    // grammar, and it fronts no identifier: the graph was addressed by one the caller
+    // sent.
+    if graph_status != crate::state::GraphStatus::Available {
+        return Err(StartImportTaskErrorModeled::ConflictException(
+            crate::state::graph_status_precondition_conflict("start the import task", graph_status),
+        )
+        .into());
+    }
+
+    // The EMPTINESS half of the same sentence, decided on the data the stored graph
+    // actually holds: a bulk load fills the graph rather than merging into what is
+    // there, so a graph holding any node or edge cannot take one. That data is the data
+    // `GetGraphSummary` reports, `ResetGraph` empties, a restore brings a graph up
+    // holding and an earlier import wrote, so the refusal fires however the graph came
+    // to hold it. The wording is the service's one precondition refusal for it
+    // (`crate::state::graph_not_empty_conflict`), and nothing is persisted: no task is
+    // minted and the graph's status is left where it was.
+    if !graph_is_empty {
+        return Err(
+            StartImportTaskErrorModeled::ConflictException(crate::state::graph_not_empty_conflict())
+                .into(),
+        );
+    }
+
+    Ok(graph_id)
 }
 
 /// The role `StartImportTask` asks this service to assume, and the channel its denial

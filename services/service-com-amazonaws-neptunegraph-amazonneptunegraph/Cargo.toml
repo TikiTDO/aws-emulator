@@ -31,6 +31,21 @@ service-common = { path = "../common" }
 # `sts:GetCallerIdentity` reports for the same credentials, so this service reads STS's
 # OWN resolution rather than keeping a second answer to that question.
 service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# An accepted import task reads the data its `source` names out of this emulator's own
+# Amazon S3 (`src/state/import_load.rs`), over the in-process callback into this same
+# emulator: no network client feature is enabled, because the transport is the
+# emulator's own.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# Reads the two delimited bulk-load formats (the Gremlin CSV and openCypher load
+# formats) an import task's objects are written in.
+csv = "1.3"
+# Reads the columnar (PARQUET) bulk-load format. No compression codec beyond the
+# format's own default is enabled.
+parquet = { version = "60", default-features = false, features = ["snap"] }
+# Parses the RDF N-Triples bulk-load format, and reads the terms (IRIs, blank nodes
+# and typed literals) a triple carries.
+oxttl = "0.2"
+oxrdf = "0.3"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -38,6 +53,11 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+# The import-run suite mounts Amazon S3 beside this service on ONE engine, exactly as
+# the assembled router mounts them, and stages the objects a load reads through that
+# service's OWN `PutObject` — so what an import reads is what Amazon S3 really holds.
+# DEV-ONLY outside the tests below.
+service-com-amazonaws-s3-amazons3 = { workspace = true }
 # The pass-role denial test asks `sts:GetCallerIdentity` itself what principal a
 # credential speaks for, so STS is mounted beside this service, and the IAM store holds
 # the users whose long-term keys the rows present.

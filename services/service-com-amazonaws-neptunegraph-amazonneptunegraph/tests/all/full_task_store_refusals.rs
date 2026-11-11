@@ -35,8 +35,9 @@ use std::time::{Instant, SystemTime};
 
 use serde_json::{json, Value};
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::state::{
-    service_state, ExportTask, ExportTaskStatus, ImportTask, ImportTaskStatus, ARN_NAMESPACE,
-    MAX_EXPORT_TASKS, MAX_IMPORT_TASKS, PROVISIONING_SPAN,
+    service_state, ExportTask, ExportTaskStatus, ImportLoad, ImportTask, ImportTaskStatus,
+    ARN_NAMESPACE, MAX_EXPORT_TASKS, MAX_IMPORT_TASKS, PROVISIONING_SPAN,
+    SOURCE_UNREADABLE_REASON,
 };
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
@@ -301,7 +302,14 @@ fn fill_to(engine: &Arc<engine::InMemoryEngine>, store: TaskStore, graph_id: &st
                     status: ImportTaskStatus::Initializing,
                     status_reason: None,
                     attempt_number: 1,
-                    pending: None,
+                    // A filler record: nothing read a source for it, so it loads
+                    // nothing and stops where it is.
+                    load: ImportLoad::unread(SOURCE_UNREADABLE_REASON),
+                    delivered: false,
+                    start_time: SystemTime::now(),
+                    started_at: Instant::now(),
+                    stopped_progress: None,
+                    settles_at: None,
                 });
             }
         }

@@ -196,6 +196,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
-        Ok(Self::Output::from(task))
+        Ok(task.get_output(now))
     }
 }

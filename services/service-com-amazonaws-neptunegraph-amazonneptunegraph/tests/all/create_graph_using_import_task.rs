@@ -17,10 +17,11 @@
 //!   rather than being it, so the graph's `provisionedMemory` is the floor of the range
 //!   the request allows — and the documented 128 m-NCUs when the request bounds it
 //!   neither way.
-//! * The import itself is the same (absent) load `StartImportTask` would run, so the
-//!   clock stops the task in the modelled `FAILED` status with a reason that says
-//!   nothing read the source, and the graph this call provisioned comes into service
-//!   empty.
+//! * The import itself is the same load `StartImportTask` runs, so with no object
+//!   store mounted beside this service the source cannot be read: the clock stops the
+//!   task in the modelled `FAILED` status carrying what the run met, and the graph this
+//!   call provisioned comes into service empty. What a task that DOES read its source
+//!   loads is the sibling suite `import_task_run`.
 //! * A request the model cannot refuse at the boundary is refused here as a
 //!   `ValidationException` (400): a `graphName` outside the pattern whose negative
 //!   lookahead no boundary regex compiles, a blank or oversized `source`, an `NTRIPLES`
@@ -581,14 +582,15 @@ async fn create_graph_using_import_task_persists_both_records_and_reads_them_bac
     }
 }
 
-/// Nothing reads the task's source, so the clock stops it in the modelled `FAILED`
-/// status with a reason that says so — and the graph the call provisioned comes into
-/// service, empty, rather than claiming a load that did not happen.
+/// A source no object store holds cannot be read, so the clock stops the task in the
+/// modelled `FAILED` status with a reason that says what the run met — and the graph
+/// the call provisioned comes into service, empty, rather than claiming a load that did
+/// not happen.
 #[tokio::test]
 async fn the_import_a_create_starts_stops_failed_and_the_graph_comes_into_service() {
     let router = emulator();
 
-    // (case, graphName, format, source) — the outcome depends on none of them.
+    // (case, graphName, format, source) — no object store holds any of them.
     let cases = [
         (
             "CSV from an S3 prefix",

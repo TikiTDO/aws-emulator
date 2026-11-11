@@ -206,16 +206,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // Cancellation is ACCEPTED, not completed: the modelled status of a cancelled
-        // task is CANCELLING ("Status is CANCELLING when the import task is
-        // cancelled"), and the clock owes the move to CANCELLED a fixed span later
-        // (`crate::state::PROVISIONING_SPAN`), so a caller that reads the task straight
-        // after this call still sees it winding down.
-        task.begin_transition(
-            crate::state::ImportTaskStatus::Cancelling,
-            crate::state::ImportTaskStatus::Cancelled,
-            Some(crate::state::IMPORT_CANCELLED_REASON.to_string()),
-            now,
-        );
+        // task is CANCELLING ("Because you cancelled the import task, cancellation is
+        // in progress"), and the clock owes the move to CANCELLED a fixed span later
+        // (`crate::state::CANCELLATION_SPAN`), so a caller that reads the task straight
+        // after this call still sees it winding down. The elements the load had read
+        // are released: a cancelled load writes nothing.
+        task.begin_cancellation(now);
         let graph_id = task.graph_id.clone();
         // Report the record that was stored, so this response cannot drift from what a
         // later GetImportTask answers.

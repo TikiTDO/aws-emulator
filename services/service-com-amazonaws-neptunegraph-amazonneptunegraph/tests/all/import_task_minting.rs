@@ -411,12 +411,28 @@ async fn repeating_the_read_never_changes_the_task_a_later_caller_sees() {
             "case read {round}: reading a task must not count as an attempt, got {}",
             read["attemptNumber"]
         );
+        // A read reports the run; it never advances it. The details carry the status
+        // the task is in, and no count of work this load did not do.
+        let details = &read["importTaskDetails"];
         assert_eq!(
-            read["importTaskDetails"],
-            Value::Null,
-            "case read {round}: no load ran, so a read must report no details, got {}",
-            read["importTaskDetails"]
+            details["status"], read["status"],
+            "case read {round}: the details report the status the task is in, expected {}, \
+             got {}",
+            read["status"], details["status"]
         );
+        for member in [
+            "progressPercentage",
+            "statementCount",
+            "dictionaryEntryCount",
+            "errorCount",
+        ] {
+            assert_eq!(
+                details[member],
+                json!(0),
+                "case read {round}: this task loaded nothing, so {member} is 0, got {}",
+                details[member]
+            );
+        }
         tokio::time::sleep(PROVISIONING_SPAN / 8).await;
     }
 

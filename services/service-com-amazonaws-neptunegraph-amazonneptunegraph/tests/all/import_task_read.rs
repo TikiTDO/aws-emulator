@@ -93,6 +93,24 @@ async fn get_import(router: &MultiServiceRouter, task_id: &str) -> (u16, Value) 
     call(router, "GET", &format!("/importtasks/{task_id}"), None).await
 }
 
+/// One read of a task with the one member that is a LIVE measurement removed, so two
+/// reads of a settled record can be compared for equality.
+///
+/// `ImportTaskDetails$timeElapsedSeconds` is "Seconds elapsed since the import task
+/// started" (`smithy_query(query="shape",shape="ImportTaskDetails")`), so it keeps
+/// rising with the clock on a record nothing has changed — which is what makes it the
+/// one member two reads of the same stored record may differ in.
+fn settled_record(body: &Value) -> Value {
+    let mut stripped = body.clone();
+    if let Some(details) = stripped
+        .get_mut("importTaskDetails")
+        .and_then(Value::as_object_mut)
+    {
+        details.remove("timeElapsedSeconds");
+    }
+    stripped
+}
+
 /// `DELETE /importtasks/{taskIdentifier}` — the wire form of `CancelImportTask`.
 async fn cancel_import(router: &MultiServiceRouter, task_id: &str) -> (u16, Value) {
     call(router, "DELETE", &format!("/importtasks/{task_id}"), None).await
@@ -316,7 +334,8 @@ async fn an_import_task_is_served_by_its_own_id_once_its_graph_is_gone() {
              {in_flight_status}: {in_flight}"
         );
         assert_eq!(
-            in_flight, before,
+            settled_record(&in_flight),
+            settled_record(&before),
             "case {case:?}: an accepted delete of the graph must not change the task \
              record, expected {before}, got {in_flight}"
         );
@@ -344,7 +363,8 @@ async fn an_import_task_is_served_by_its_own_id_once_its_graph_is_gone() {
              {after_status}: {after}"
         );
         assert_eq!(
-            after, before,
+            settled_record(&after),
+            settled_record(&before),
             "case {case:?}: the record must survive the graph it names, expected \
              {before}, got {after}"
         );
@@ -364,7 +384,8 @@ async fn an_import_task_is_served_by_its_own_id_once_its_graph_is_gone() {
              {again_status}: {again}"
         );
         assert_eq!(
-            again, before,
+            settled_record(&again),
+            settled_record(&before),
             "case {case:?}: repeating the read must answer the same record, expected \
              {before}, got {again}"
         );
@@ -380,7 +401,8 @@ async fn an_import_task_is_served_by_its_own_id_once_its_graph_is_gone() {
                  got {status}: {record}"
             );
             assert_eq!(
-                record, *earlier_record,
+                settled_record(&record),
+                settled_record(earlier_record),
                 "case {case:?}: the task of case {earlier_case:?} must still answer its \
                  own record, expected {earlier_record}, got {record}"
             );

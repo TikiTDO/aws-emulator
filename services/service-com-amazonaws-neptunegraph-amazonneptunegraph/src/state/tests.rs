@@ -1837,6 +1837,10 @@ fn every_stored_status_is_a_modelled_enum_value() {
     }
     for status in [
         ImportTaskStatus::Initializing,
+        ImportTaskStatus::AnalyzingData,
+        ImportTaskStatus::Importing,
+        ImportTaskStatus::RollingBack,
+        ImportTaskStatus::Succeeded,
         ImportTaskStatus::Cancelling,
         ImportTaskStatus::Cancelled,
         ImportTaskStatus::Failed,
@@ -1865,70 +1869,148 @@ fn minted_import_task_ids_match_the_modelled_pattern_and_are_unique() {
     }
 }
 
-/// An import task's pending transition is owed at a FUTURE instant, carries the
-/// reason the settled status reports, and is applied exactly once — over a row
-/// per transition this slice owes a task.
+/// An import task's run walks the stages of a load and then stops where the load it
+/// read ends: a task whose source was read analyses and imports its data and
+/// `SUCCEEDED`s, one whose load met an error it could not skip releases what it read
+/// and `FAILED`s, one whose source was never read stops without reporting a stage, and
+/// a cancelled one settles into `CANCELLED`. Each status is owed at a FUTURE instant
+/// and applied exactly once.
 #[test]
-fn a_pending_import_task_transition_settles_only_once_it_is_due() {
-    // (case, the transient status, the status it settles into, its reason)
-    let cases: Vec<(&str, ImportTaskStatus, ImportTaskStatus, Option<&str>)> = vec![
+fn an_import_task_settles_through_the_stages_of_the_run_it_read() {
+    // (case, the load the task read, the statuses it goes through in order)
+    let cases: Vec<(&str, ImportLoad, Vec<ImportTaskStatus>)> = vec![
         (
-            "an accepted task nothing loads",
-            ImportTaskStatus::Initializing,
-            ImportTaskStatus::Failed,
-            Some(IMPORT_NOT_RUN_REASON),
+            "a load that read its source and met no error",
+            sample_import_load(None, 0),
+            vec![
+                ImportTaskStatus::AnalyzingData,
+                ImportTaskStatus::Importing,
+                ImportTaskStatus::Succeeded,
+            ],
         ),
         (
-            "a cancelled task",
-            ImportTaskStatus::Cancelling,
-            ImportTaskStatus::Cancelled,
-            Some(IMPORT_CANCELLED_REASON),
+            "a load that halted on an error it could not skip",
+            sample_import_load(Some("the load halted"), 1),
+            vec![
+                ImportTaskStatus::AnalyzingData,
+                ImportTaskStatus::Importing,
+                ImportTaskStatus::RollingBack,
+                ImportTaskStatus::Failed,
+            ],
         ),
         (
-            "a transition that carries no reason",
-            ImportTaskStatus::Cancelling,
-            ImportTaskStatus::Cancelled,
-            None,
+            "a load whose source could not be read",
+            ImportLoad::unread(SOURCE_UNREADABLE_REASON),
+            vec![ImportTaskStatus::Failed],
         ),
     ];
-    for (case, transient, settled, reason) in cases {
+    for (case, load, stages) in cases {
         let now = Instant::now();
         let mut task = sample_import_task("t-0123456789", "g-0123456789");
-        task.begin_transition(transient, settled, reason.map(str::to_string), now);
+        let expected_reason = load.failure_reason.clone();
+        task.load = load;
+        task.begin_run(now);
 
         task.settle(now);
         assert_eq!(
-            task.status, transient,
-            "case {case:?} not-yet-due: expected {transient:?}, got {:?}",
+            task.status,
+            ImportTaskStatus::Initializing,
+            "case {case:?} not-yet-due: expected INITIALIZING, got {:?}",
             task.status
         );
 
-        task.settle(now + PROVISIONING_SPAN);
+        for (phase, expected) in stages.iter().enumerate() {
+            // Every stage of a run lasts one span, so the n-th falls due n spans in.
+            let at = now + IMPORT_TASK_SPAN * u32::try_from(phase + 1).expect("a small phase");
+            task.settle(at);
+            assert_eq!(
+                task.status, *expected,
+                "case {case:?} after {} span(s): expected {expected:?}, got {:?}",
+                phase + 1,
+                task.status
+            );
+        }
+
         assert_eq!(
-            task.status, settled,
-            "case {case:?} due: expected {settled:?}, got {:?}",
-            task.status
-        );
-        assert_eq!(
-            task.status_reason.as_deref(),
-            reason,
-            "case {case:?} due: expected statusReason {reason:?}, got {:?}",
+            task.status_reason,
+            if task.status == ImportTaskStatus::Failed {
+                expected_reason
+            } else {
+                None
+            },
+            "case {case:?}: a run that loaded its data has nothing to explain and one that \
+             stopped reports why, got {:?}",
             task.status_reason
         );
         assert!(
-            task.pending.is_none(),
-            "case {case:?} due: the settled transition must be cleared"
+            task.settles_at.is_none(),
+            "case {case:?}: a task that has stopped is owed nothing more"
+        );
+
+        // A read long after the run reports the status it would have reached, never a
+        // stage it had already left.
+        let last = *stages.last().expect("every run has a terminal status");
+        task.settle(now + IMPORT_TASK_SPAN * 40);
+        assert_eq!(
+            task.status, last,
+            "case {case:?} read late: expected {last:?}, got {:?}",
+            task.status
         );
     }
 }
 
-/// Only a task whose import is in flight can be cancelled, and only a stopped one
+/// A cancelled task winds down into `CANCELLED` carrying the reason that status
+/// reports, and the elements its load had read are released rather than written.
+#[test]
+fn a_cancelled_import_task_settles_into_cancelled_and_loads_nothing() {
+    let now = Instant::now();
+    let mut task = sample_import_task("t-0123456789", "g-0123456789");
+    task.load = sample_import_load(None, 0);
+    task.begin_run(now);
+    task.settle(now + IMPORT_TASK_SPAN);
+    let cancelled_at = now + IMPORT_TASK_SPAN;
+    task.begin_cancellation(cancelled_at);
+
+    assert_eq!(
+        task.status,
+        ImportTaskStatus::Cancelling,
+        "case an accepted cancellation: expected CANCELLING, got {:?}",
+        task.status
+    );
+    assert!(
+        task.load.data.nodes.is_empty() && task.load.data.edges.is_empty(),
+        "case an accepted cancellation: a cancelled load writes nothing, so it holds no \
+         element, got {} node(s) and {} edge(s)",
+        task.load.data.nodes.len(),
+        task.load.data.edges.len()
+    );
+
+    task.settle(cancelled_at + CANCELLATION_SPAN);
+    assert_eq!(
+        task.status,
+        ImportTaskStatus::Cancelled,
+        "case a cancellation that has come due: expected CANCELLED, got {:?}",
+        task.status
+    );
+    assert_eq!(
+        task.status_reason.as_deref(),
+        Some(IMPORT_CANCELLED_REASON),
+        "case a cancellation that has come due: expected the cancellation reason, got {:?}",
+        task.status_reason
+    );
+}
+
+/// Only a task whose load is in flight can be cancelled, and only a stopped one
 /// is terminal — one row per status this slice stores.
 #[test]
 fn cancellability_is_decided_by_the_stored_status() {
     // (status, cancellable, terminal)
     for (status, cancellable, terminal) in [
         (ImportTaskStatus::Initializing, true, false),
+        (ImportTaskStatus::AnalyzingData, true, false),
+        (ImportTaskStatus::Importing, true, false),
+        (ImportTaskStatus::RollingBack, false, false),
+        (ImportTaskStatus::Succeeded, false, true),
         (ImportTaskStatus::Cancelling, false, false),
         (ImportTaskStatus::Cancelled, false, true),
         (ImportTaskStatus::Failed, false, true),
@@ -1943,6 +2025,24 @@ fn cancellability_is_decided_by_the_stored_status() {
             actual_terminal, terminal,
             "case {status:?}: expected terminal={terminal}, got {actual_terminal}"
         );
+    }
+}
+
+/// A load that read its source, carrying `errors` errors and failing for `failure`.
+fn sample_import_load(failure: Option<&str>, errors: i32) -> ImportLoad {
+    ImportLoad {
+        data: ImportedData {
+            nodes: [("n1".to_string(), GraphNode::default())]
+                .into_iter()
+                .collect(),
+            edges: BTreeMap::new(),
+        },
+        statement_count: 0,
+        dictionary_entry_count: 1,
+        error_count: errors,
+        error_details: failure.map(str::to_string),
+        source_read: true,
+        failure_reason: failure.map(str::to_string),
     }
 }
 
@@ -1963,7 +2063,12 @@ fn sample_import_task(id: &str, graph_id: &str) -> ImportTask {
         status: ImportTaskStatus::Initializing,
         status_reason: None,
         attempt_number: 1,
-        pending: None,
+        load: ImportLoad::unread(SOURCE_UNREADABLE_REASON),
+        delivered: false,
+        start_time: SystemTime::UNIX_EPOCH,
+        started_at: Instant::now(),
+        stopped_progress: None,
+        settles_at: None,
     }
 }
 

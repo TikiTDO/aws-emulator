@@ -544,6 +544,21 @@ impl Graph {
         self.pending = Some(PendingTransition::owed(settled, now));
     }
 
+    /// Report the modelled `IMPORTING` status for as long as the import task accepted
+    /// at `now` runs, and come back `AVAILABLE` when that load lands.
+    ///
+    /// The span is the task's own ([`IMPORT_RUN_SPAN`]), not the provisioning one, so
+    /// the graph is serving again exactly when it holds what the load wrote: a graph
+    /// that reported `AVAILABLE` while its only load was still running would claim to
+    /// be ready before it held the data.
+    pub fn begin_import(&mut self, now: Instant) {
+        self.status = GraphStatus::Importing;
+        self.pending = Some(PendingTransition {
+            settled_status: GraphStatus::Available,
+            due: now + IMPORT_RUN_SPAN,
+        });
+    }
+
     /// Report `DELETING` now and complete the deletion [`DELETION_SPAN`] after `now`.
     ///
     /// Any status change that was still outstanding is dropped: the graph is on its way
@@ -710,26 +725,56 @@ impl Snapshot {
     }
 }
 
+/// How long each PHASE of an import task's run lasts: the span after which the clock
+/// owes the task the next status of its progression.
+///
+/// The real service loads for as long as the data takes; this emulator picks a span
+/// inside the emulator-wide 250ms..750ms band for a transition the clock owes, so a
+/// caller that reads the task straight after starting it still observes the transient
+/// `INITIALIZING` status — and can cancel it — while one that polls the task to
+/// completion sees the stages of the run before its terminal status. No handler ever
+/// sleeps for it: the due instant is stored and compared on read.
+pub const IMPORT_TASK_SPAN: Duration = Duration::from_millis(500);
+
+/// How long the whole run of an accepted import task takes: its three phases
+/// (`INITIALIZING`, `ANALYZING_DATA`, `IMPORTING`) at [`IMPORT_TASK_SPAN`] each.
+///
+/// It is the span the load's WRITE into the graph falls due after, so the graph it
+/// loads reports `IMPORTING` for exactly as long as the task's run lasts and comes
+/// back `AVAILABLE` holding what the load wrote.
+pub const IMPORT_RUN_SPAN: Duration = IMPORT_TASK_SPAN.saturating_mul(3);
+
 /// The lifecycle statuses this slice of the emulator puts an import task into.
 ///
 /// Every variant's wire form is one of the modelled `ImportTaskStatus` values
-/// (`crate::ops::types::IMPORT_TASK_STATUS_VALUES`). The values that report a STAGE
-/// of a running bulk load (`ANALYZING_DATA`, `EXPORTING`, `IMPORTING`,
-/// `REPROVISIONING`, `ROLLING_BACK`, `SUCCEEDED`) are deliberately never produced:
-/// nothing in this emulator reads a task's `source`, so no task may report a stage —
-/// or a success — of a load nothing performed. An accepted task therefore stops in
-/// the modelled `FAILED` status carrying [`IMPORT_NOT_RUN_REASON`], and `DELETED`
-/// joins this enum with the operation that would produce it.
+/// (`crate::ops::types::IMPORT_TASK_STATUS_VALUES`). Three of those values are
+/// deliberately never produced, each because the condition that would produce it does
+/// not arise here: `EXPORTING` (an import reads a source and writes a graph rather than
+/// exporting anything), `REPROVISIONING` (the capacity a graph of this emulator is
+/// provisioned with is never outgrown by a load, which is bounded far below it by
+/// [`MAX_NODES_PER_GRAPH`] and [`MAX_EDGES_PER_GRAPH`]), and `DELETED` (no operation of
+/// this service deletes an import task).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportTaskStatus {
-    /// `StartImportTask` has accepted the task; it has not stopped yet.
+    /// `StartImportTask` has accepted the task; the run has not begun.
     Initializing,
+    /// The data the source held is being analysed — "The data is being analyzed to
+    /// determine the optimal infrastructure configuration for the new graph"
+    /// (`smithy_query(query="doc",shape="GetImportTaskOutput",member="status")`).
+    AnalyzingData,
+    /// The data is being loaded into the graph.
+    Importing,
+    /// The load met an error it could not skip, so what it had read is being released
+    /// rather than left half-loaded.
+    RollingBack,
+    /// The run is over: every element the source held was loaded.
+    Succeeded,
+    /// The run stopped without loading the data.
+    Failed,
     /// `CancelImportTask` has accepted the cancellation; the task is winding down.
     Cancelling,
     /// The task stopped because it was cancelled.
     Cancelled,
-    /// The task stopped without importing the data.
-    Failed,
 }
 
 impl ImportTaskStatus {
@@ -737,45 +782,50 @@ impl ImportTaskStatus {
     pub const fn as_wire(self) -> &'static str {
         match self {
             Self::Initializing => "INITIALIZING",
+            Self::AnalyzingData => "ANALYZING_DATA",
+            Self::Importing => "IMPORTING",
+            Self::RollingBack => "ROLLING_BACK",
+            Self::Succeeded => "SUCCEEDED",
+            Self::Failed => "FAILED",
             Self::Cancelling => "CANCELLING",
             Self::Cancelled => "CANCELLED",
-            Self::Failed => "FAILED",
         }
     }
 
     /// Whether this is a TERMINAL status: the task has stopped, so the clock owes it
     /// nothing more and its outcome can no longer change.
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Cancelled | Self::Failed)
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
     }
 
-    /// Whether a task in this status can still be cancelled: only one whose import is
-    /// in flight. A task that has stopped has no work left to stop, and one already
-    /// `CANCELLING` is stopping already — each is a conflict rather than a second
-    /// cancellation.
+    /// Whether a task in this status can still be cancelled: only one whose load has
+    /// not finished — a task waiting to start, analysing its data, or loading it. A
+    /// task that has stopped has no work left to stop, one that is rolling back has
+    /// already stopped loading, and one already `CANCELLING` is stopping already —
+    /// each is a conflict rather than a second cancellation.
     pub const fn is_cancellable(self) -> bool {
-        matches!(self, Self::Initializing)
+        matches!(self, Self::Initializing | Self::AnalyzingData | Self::Importing)
+    }
+
+    /// How long a task stays in this status before the status it settles into falls
+    /// due. `None` for a terminal status, which settles into nothing.
+    ///
+    /// Holding the span beside the status is what keeps one timeline for the whole
+    /// run: each phase's due instant is the previous one's plus this span, so a task
+    /// read long after it started lands on the status it would have reached.
+    pub const fn settles_in(self) -> Option<Duration> {
+        match self {
+            Self::Initializing | Self::AnalyzingData | Self::Importing | Self::RollingBack => {
+                Some(IMPORT_TASK_SPAN)
+            }
+            Self::Cancelling => Some(CANCELLATION_SPAN),
+            Self::Succeeded | Self::Failed | Self::Cancelled => None,
+        }
     }
 }
 
-/// A status change the clock owes an import task: the status it lands in, the reason
-/// that status carries, and the instant from which it is due.
-///
-/// The reason travels with the target because a task's `statusReason` is a property
-/// of the status it settles into — why the load stopped — and the two must never be
-/// read apart.
-#[derive(Debug, Clone)]
-pub struct ImportTaskTransition {
-    /// The status the task takes once this transition falls due.
-    pub settled_status: ImportTaskStatus,
-    /// The `statusReason` the settled status carries, if any.
-    pub settled_reason: Option<String>,
-    /// The instant from which the transition is due.
-    pub due: Instant,
-}
-
-/// One stored import task: every member `GetImportTask` reports, plus the status
-/// change the clock still owes it, if any.
+/// One stored import task: every member `GetImportTask` reports, what reading its
+/// source established, and the instant at which the next status of its run is due.
 ///
 /// A task is a resource in its own right — it is read by its own `t-` id and outlives
 /// the load it describes — so it is stored beside the graphs rather than inside the
@@ -803,9 +853,30 @@ pub struct ImportTask {
     /// nothing in this emulator retries a task, so the stored count is what
     /// `GetImportTask` reports rather than a number invented per read.
     pub attempt_number: i32,
-    /// The status change the clock owes this task, and when it falls due. `None` once
-    /// there is nothing outstanding.
-    pub pending: Option<ImportTaskTransition>,
+    /// What reading this task's source established: the elements the load writes and
+    /// the counts over the run ([`read_import_source`]). Measured ONCE, when the task
+    /// was accepted, so nothing a later caller does changes what this task reports.
+    pub load: ImportLoad,
+    /// Whether the load's elements have been written into the graph. The write falls
+    /// due [`IMPORT_RUN_SPAN`] after the task was accepted and happens exactly once
+    /// ([`ComAmazonawsNeptunegraphAmazonneptunegraphState::materialise_import_loads`]).
+    pub delivered: bool,
+    /// When the task was accepted: what `ImportTaskDetails$startTime` reports.
+    pub start_time: SystemTime,
+    /// The monotonic counterpart of [`Self::start_time`], which
+    /// `ImportTaskDetails$timeElapsedSeconds` and the run's progress are measured
+    /// from.
+    pub started_at: Instant,
+    /// The `progressPercentage` the run had reached when it stopped short.
+    ///
+    /// `None` for a run that completed: only a run that was stopped — by a
+    /// cancellation, or by an error it could not skip — has a progress that stays
+    /// where it was, and the share of a run still in flight is derived from the clock
+    /// instead ([`Self::progress_percentage`]).
+    pub stopped_progress: Option<i32>,
+    /// When the next status of this task's run falls due. `None` once there is nothing
+    /// outstanding.
+    pub settles_at: Option<Instant>,
 }
 
 impl ImportTask {
@@ -815,40 +886,199 @@ impl ImportTask {
         self.region == region
     }
 
-    /// Materialise the transition the clock has already made due.
+    /// The status the clock owes this task next, if any.
     ///
-    /// The same one write a reporting operation may make as [`Graph::settle`]: the
-    /// task would have reached this status at its `due` instant whether or not
-    /// anybody read it, so applying it on read is bookkeeping rather than a state
-    /// change caused by the read.
-    pub fn settle(&mut self, now: Instant) {
-        let Some(pending) = self.pending.as_ref() else {
-            return;
-        };
-        if now >= pending.due {
-            self.status = pending.settled_status;
-            self.status_reason = pending.settled_reason.clone();
-            self.pending = None;
+    /// The STAGES are the same for every accepted task — a load is analysed and then
+    /// imported — and what differs is where it ends: a task whose source could not be
+    /// read has no data to analyse, so it stops where it is, and one whose load met an
+    /// error it could not skip releases what it read before it stops. Both answers are
+    /// properties of the run that was measured when the task was accepted
+    /// ([`Self::load`]), never of the instant a caller reads it.
+    fn next_status(&self) -> Option<ImportTaskStatus> {
+        match self.status {
+            ImportTaskStatus::Initializing => Some(if self.load.source_read {
+                ImportTaskStatus::AnalyzingData
+            } else {
+                ImportTaskStatus::Failed
+            }),
+            ImportTaskStatus::AnalyzingData => Some(ImportTaskStatus::Importing),
+            ImportTaskStatus::Importing => Some(if self.load.failure_reason.is_some() {
+                ImportTaskStatus::RollingBack
+            } else {
+                ImportTaskStatus::Succeeded
+            }),
+            ImportTaskStatus::RollingBack => Some(ImportTaskStatus::Failed),
+            ImportTaskStatus::Cancelling => Some(ImportTaskStatus::Cancelled),
+            ImportTaskStatus::Succeeded
+            | ImportTaskStatus::Failed
+            | ImportTaskStatus::Cancelled => None,
         }
     }
 
-    /// Report `transient` now and settle into `settled` (with `reason`)
-    /// [`PROVISIONING_SPAN`] after `now`: the shape of every import-task transition
-    /// an operation accepts, so a caller that reads the task straight after the call
-    /// still observes the transient status.
-    pub fn begin_transition(
-        &mut self,
-        transient: ImportTaskStatus,
-        settled: ImportTaskStatus,
-        reason: Option<String>,
-        now: Instant,
-    ) {
-        self.status = transient;
-        self.pending = Some(ImportTaskTransition {
-            settled_status: settled,
-            settled_reason: reason,
-            due: now + PROVISIONING_SPAN,
-        });
+    /// The `statusReason` `status` carries on this task — why the run stopped. A run
+    /// that is still going, and one that loaded its data, carries none: there is
+    /// nothing to explain.
+    fn reason_for(&self, status: ImportTaskStatus) -> Option<String> {
+        match status {
+            ImportTaskStatus::Failed => self.load.failure_reason.clone(),
+            ImportTaskStatus::Cancelled => Some(IMPORT_CANCELLED_REASON.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Materialise the statuses the clock has already made due.
+    ///
+    /// The same one write a reporting operation may make as [`Graph::settle`]: the
+    /// task would have reached these statuses at these instants whether or not anybody
+    /// read it, so applying them on read is bookkeeping rather than a state change
+    /// caused by the read. Every status the clock owed by `now` is applied, not just
+    /// the next one: a task first read long after it started reports the status it
+    /// would have reached, never a phase it had already left.
+    pub fn settle(&mut self, now: Instant) {
+        while let Some(due) = self.settles_at {
+            if now < due {
+                return;
+            }
+            match self.next_status() {
+                Some(settled) => {
+                    // A run that stops short keeps the progress it had reached at the
+                    // instant it stopped, which is this one.
+                    if settled == ImportTaskStatus::Failed {
+                        self.stopped_progress = Some(self.progress_percentage(due));
+                    }
+                    self.status = settled;
+                    self.status_reason = self.reason_for(settled);
+                    self.settles_at = settled.settles_in().map(|span| due + span);
+                }
+                None => self.settles_at = None,
+            }
+        }
+    }
+
+    /// Start this task's run at `now`: it reports `INITIALIZING` and the clock owes it
+    /// the next phase [`IMPORT_TASK_SPAN`] later, so a caller acting straight after
+    /// the call that accepted it still sees the run in flight.
+    pub fn begin_run(&mut self, now: Instant) {
+        self.status = ImportTaskStatus::Initializing;
+        self.status_reason = None;
+        self.started_at = now;
+        self.settles_at = ImportTaskStatus::Initializing
+            .settles_in()
+            .map(|span| now + span);
+    }
+
+    /// Accept a cancellation of this task: it reports the modelled `CANCELLING` status
+    /// now ("Because you cancelled the import task, cancellation is in progress") and
+    /// the clock owes the move to `CANCELLED` [`CANCELLATION_SPAN`] later, so a caller
+    /// that reads the task straight after cancelling it still sees it winding down.
+    ///
+    /// The progress the run had reached is kept as it was at this instant: a stopped
+    /// run does no more work, so its share of the work done stops rising here. The
+    /// elements it had read are dropped — a cancelled load writes nothing, so the
+    /// graph is left as empty as the task found it.
+    pub fn begin_cancellation(&mut self, now: Instant) {
+        self.stopped_progress = Some(self.progress_percentage(now));
+        self.load.data = ImportedData::default();
+        self.status = ImportTaskStatus::Cancelling;
+        self.status_reason = None;
+        self.settles_at = ImportTaskStatus::Cancelling
+            .settles_in()
+            .map(|span| now + span);
+    }
+
+    /// When the load's write into the graph falls due, on the wall clock the graph's
+    /// statistics are stamped with: the instant the task was accepted plus the span
+    /// its run takes. Derived from the stored record rather than read off a clock, so
+    /// the data and the status land at one instant.
+    pub fn load_landed_at(&self) -> SystemTime {
+        self.start_time
+            .checked_add(IMPORT_RUN_SPAN)
+            .unwrap_or(self.start_time)
+    }
+
+    /// How long the task has been running, in whole seconds: what
+    /// `ImportTaskDetails$timeElapsedSeconds` reports.
+    pub fn elapsed_seconds(&self, now: Instant) -> i64 {
+        i64::try_from(now.saturating_duration_since(self.started_at).as_secs())
+            .unwrap_or(i64::MAX)
+    }
+
+    /// The share of this task's work that is done, as of `now`: what
+    /// `ImportTaskDetails$progressPercentage` reports.
+    ///
+    /// The work is the RUN, so a task that has not begun reports none of it done, a
+    /// run in flight reports the share of [`IMPORT_RUN_SPAN`] that has elapsed — short
+    /// of the whole ([`MAX_IN_FLIGHT_PROGRESS_PERCENTAGE`]), because it has not
+    /// finished — and a completed run reports the whole of it. A run that stopped
+    /// short reports where it had got to.
+    pub fn progress_percentage(&self, now: Instant) -> i32 {
+        match self.status {
+            ImportTaskStatus::Initializing => 0,
+            ImportTaskStatus::AnalyzingData
+            | ImportTaskStatus::Importing
+            | ImportTaskStatus::RollingBack => {
+                in_flight_progress(now.saturating_duration_since(self.started_at), IMPORT_RUN_SPAN)
+            }
+            ImportTaskStatus::Succeeded => COMPLETE_PROGRESS_PERCENTAGE,
+            ImportTaskStatus::Failed
+            | ImportTaskStatus::Cancelling
+            | ImportTaskStatus::Cancelled => self.stopped_progress.unwrap_or(0),
+        }
+    }
+
+    /// The task's `ImportTaskDetails`, as of `now`.
+    ///
+    /// The statement and dictionary-entry counts are of the data the load has WRITTEN,
+    /// so they are reported once its write has landed and are zero before that: a run
+    /// still in flight, and one that stopped without loading anything, has written no
+    /// statement. The error count is of what the run MET, so it is reported once the
+    /// run has stopped on its own account — which is also when `errorDetails` says
+    /// what the first of those errors was.
+    pub fn details(&self, now: Instant) -> crate::ops::types::ImportTaskDetails {
+        let wrote = self.delivered;
+        let stopped_on_its_own = matches!(
+            self.status,
+            ImportTaskStatus::Succeeded | ImportTaskStatus::Failed
+        );
+        crate::ops::types::ImportTaskDetails {
+            status: self.status.as_wire().to_string(),
+            start_time: ::aws_smithy_types::DateTime::from(self.start_time),
+            time_elapsed_seconds: self.elapsed_seconds(now),
+            progress_percentage: self.progress_percentage(now),
+            error_count: if stopped_on_its_own {
+                self.load.error_count
+            } else {
+                0
+            },
+            error_details: stopped_on_its_own
+                .then(|| self.load.error_details.clone())
+                .flatten(),
+            statement_count: if wrote { self.load.statement_count } else { 0 },
+            dictionary_entry_count: if wrote {
+                self.load.dictionary_entry_count
+            } else {
+                0
+            },
+        }
+    }
+
+    /// This task as `GetImportTask`'s output, as of `now`: the stored record plus the
+    /// details derived from the clock, so that read cannot drift from what
+    /// `StartImportTask` reported.
+    pub fn get_output(&self, now: Instant) -> crate::ops::types::GetImportTaskOutput {
+        crate::ops::types::GetImportTaskOutput {
+            graph_id: Some(self.graph_id.clone()),
+            task_id: self.id.clone(),
+            source: self.source.clone(),
+            format: self.format.clone(),
+            parquet_type: self.parquet_type.clone(),
+            role_arn: self.role_arn.clone(),
+            status: self.status.as_wire().to_string(),
+            import_options: self.import_options.clone(),
+            import_task_details: Some(self.details(now)),
+            attempt_number: Some(self.attempt_number),
+            status_reason: self.status_reason.clone(),
+        }
     }
 }
 
@@ -872,6 +1102,21 @@ pub const COMPLETE_PROGRESS_PERCENTAGE: i32 = 100;
 /// that has not finished has not done all of its work, so it stays below
 /// [`COMPLETE_PROGRESS_PERCENTAGE`] however late into its span a read falls.
 pub const MAX_IN_FLIGHT_PROGRESS_PERCENTAGE: i32 = 99;
+
+/// The `progressPercentage` a run in flight reports: the share of `over` that `elapsed`
+/// covers, short of the whole ([`MAX_IN_FLIGHT_PROGRESS_PERCENTAGE`]) because a run that
+/// has not finished has not done all of its work.
+///
+/// ONE function because an import and an export report the same thing about their own
+/// span, so neither can drift from the other: each hands over the span its run takes and
+/// how much of it has elapsed.
+pub fn in_flight_progress(elapsed: Duration, over: Duration) -> i32 {
+    // Scaled by 100, the whole of the work ([`COMPLETE_PROGRESS_PERCENTAGE`]).
+    let share = elapsed.as_millis().saturating_mul(100) / over.as_millis().max(1);
+    i32::try_from(share)
+        .unwrap_or(MAX_IN_FLIGHT_PROGRESS_PERCENTAGE)
+        .clamp(0, MAX_IN_FLIGHT_PROGRESS_PERCENTAGE)
+}
 
 /// The `statusReason` of an export task that stopped because it was cancelled.
 pub const EXPORT_CANCELLED_REASON: &str =
@@ -1093,13 +1338,10 @@ impl ExportTask {
             ExportTaskStatus::Exporting => {
                 // The run begins one span after the task was accepted, which is when
                 // `INITIALIZING` falls due for `EXPORTING`.
-                let elapsed = now.saturating_duration_since(self.started_at + EXPORT_TASK_SPAN);
-                // Scaled by 100, the whole of the work ([`COMPLETE_PROGRESS_PERCENTAGE`]).
-                let share = elapsed.as_millis().saturating_mul(100)
-                    / EXPORT_TASK_SPAN.as_millis().max(1);
-                i32::try_from(share)
-                    .unwrap_or(MAX_IN_FLIGHT_PROGRESS_PERCENTAGE)
-                    .clamp(0, MAX_IN_FLIGHT_PROGRESS_PERCENTAGE)
+                in_flight_progress(
+                    now.saturating_duration_since(self.started_at + EXPORT_TASK_SPAN),
+                    EXPORT_TASK_SPAN,
+                )
             }
             ExportTaskStatus::Succeeded => COMPLETE_PROGRESS_PERCENTAGE,
             ExportTaskStatus::Cancelling | ExportTaskStatus::Cancelled => {
@@ -1221,8 +1463,9 @@ pub const UNBOUNDED_IMPORT_PROVISIONED_MEMORY: i32 = 128;
 /// member="maxProvisionedMemory")`). So the chosen value is the FLOOR of the range the
 /// request allows — the supplied minimum, or [`DEFAULT_MIN_PROVISIONED_MEMORY`] when
 /// only a maximum is given — because what would push it above that floor is the size of
-/// the imported data, and [`IMPORT_NOT_RUN_REASON`] says no data is ever imported here.
-/// With neither bound supplied the documented [`UNBOUNDED_IMPORT_PROVISIONED_MEMORY`]
+/// the imported data, and the data one load of this emulator reads is bounded far below
+/// what that floor serves ([`MAX_NODES_PER_GRAPH`], [`MAX_EDGES_PER_GRAPH`]). With
+/// neither bound supplied the documented [`UNBOUNDED_IMPORT_PROVISIONED_MEMORY`]
 /// stands.
 pub fn import_provisioned_memory(min: Option<i32>, max: Option<i32>) -> i32 {
     match (min, max) {
@@ -1340,9 +1583,15 @@ impl Query {
     /// (`smithy_query(query="operation",operation="ExecuteQuery")`).
     ///
     /// Measured from the query's ADMISSION, which is where its timeout starts running.
+    /// The request chooses the span, so the instant is computed with checked arithmetic
+    /// and a timeout no clock can reach keeps the documented one: a value a caller sends
+    /// may not panic the handler that reads it.
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.times_out_at = self.submitted_at + timeout;
+        self.times_out_at = self
+            .submitted_at
+            .checked_add(timeout)
+            .unwrap_or(self.times_out_at);
         self
     }
 
@@ -2079,6 +2328,10 @@ impl ComAmazonawsNeptunegraphAmazonneptunegraphState {
         now: Instant,
     ) -> Option<&mut Graph> {
         self.reap_deleted_graphs(now);
+        // A graph whose import has come due holds what that load wrote, so the write
+        // is materialised before the graph is read: the data landed at that instant
+        // whether or not anybody read the graph.
+        self.materialise_import_loads(now);
         let graph = self.graphs.get_mut(id)?;
         if !graph.is_in(region) {
             return None;
@@ -2138,13 +2391,79 @@ impl ComAmazonawsNeptunegraphAmazonneptunegraphState {
             graph.settle(now);
         }
         self.materialise_snapshots(now);
-        for task in self.import_tasks.values_mut() {
-            task.settle(now);
-        }
+        self.materialise_import_loads(now);
         for task in self.export_tasks.values_mut() {
             task.settle(now);
         }
         self.materialise_private_endpoints(now);
+    }
+
+    /// Materialise every import-task status the clock has already made due, and write
+    /// the data of each load whose write has come with it.
+    ///
+    /// The same one write a reporting operation may make as [`Graph::settle`]: the
+    /// task reached that status, and its load landed in the graph, at those instants
+    /// whether or not anybody called — so applying them on read is bookkeeping rather
+    /// than a state change caused by the read. The load is delivered exactly once
+    /// ([`ImportTask::delivered`]) and in the Region of the task that read it, so a
+    /// caller of another Region neither sees nor delays it.
+    ///
+    /// The elements are stored through the graph's OWN writers, which is where an
+    /// accepted openCypher write puts a graph's data, so an imported element and a
+    /// written one are the same kind of record. The load was bounded against the
+    /// graph's ceilings when it was read and the graph it loads is empty and
+    /// `IMPORTING` until the write lands, so a refusal here is the backstop for a
+    /// graph something else wrote to meanwhile: it is counted as an error of the run
+    /// rather than dropped silently.
+    pub fn materialise_import_loads(&mut self, now: Instant) {
+        for task in self.import_tasks.values_mut() {
+            task.settle(now);
+        }
+        let due: Vec<(String, String, ImportedData, SystemTime)> = self
+            .import_tasks
+            .values_mut()
+            .filter(|task| task.status == ImportTaskStatus::Succeeded && !task.delivered)
+            .map(|task| {
+                task.delivered = true;
+                (
+                    task.id.clone(),
+                    task.graph_id.clone(),
+                    ::std::mem::take(&mut task.load.data),
+                    task.load_landed_at(),
+                )
+            })
+            .collect();
+        for (task_id, graph_id, data, as_of) in due {
+            let mut refused: Vec<String> = Vec::new();
+            if let Some(graph) = self.graphs.get_mut(&graph_id) {
+                for (id, node) in data.nodes {
+                    if let Err(reason) = graph.data.insert_node(&id, node, as_of) {
+                        refused.push(reason);
+                    }
+                }
+                for (id, edge) in data.edges {
+                    if let Err(reason) = graph.data.insert_edge(&id, edge, as_of) {
+                        refused.push(reason);
+                    }
+                }
+            } else {
+                // The graph was deleted while its load ran, so there is nothing left
+                // to load into: the elements are released with it.
+                refused.push("The graph the import task loads was deleted.".to_string());
+            }
+            if refused.is_empty() {
+                continue;
+            }
+            if let Some(task) = self.import_tasks.get_mut(&task_id) {
+                task.load.error_count = task
+                    .load
+                    .error_count
+                    .saturating_add(i32::try_from(refused.len()).unwrap_or(i32::MAX));
+                if task.load.error_details.is_none() {
+                    task.load.error_details = refused.into_iter().next();
+                }
+            }
+        }
     }
 
     /// The graphs `region` holds, in graph-id order, resuming after `after_id` when a
@@ -2249,11 +2568,15 @@ impl ComAmazonawsNeptunegraphAmazonneptunegraphState {
         region: &str,
         now: Instant,
     ) -> Option<&mut ImportTask> {
+        // The statuses the clock owes every task, and the loads whose write it has
+        // made due, are materialised together: a task that reports a completed load
+        // and a graph that does not hold it would be one record contradicting the
+        // other.
+        self.materialise_import_loads(now);
         let task = self.import_tasks.get_mut(id)?;
         if !task.is_in(region) {
             return None;
         }
-        task.settle(now);
         Some(task)
     }
 
@@ -2505,16 +2828,6 @@ pub fn import_source_requirement(source: &str) -> Option<String> {
 /// The prefix the service reserves for import- and export-task ids, from the modelled
 /// `TaskId` pattern `^t-[a-z0-9]{10}$`.
 pub const TASK_ID_PREFIX: &str = "t-";
-
-/// The `statusReason` of an import task that stopped `FAILED` because nothing read
-/// its source.
-///
-/// This emulator has no bulk loader: no component reads a task's `source`, so an
-/// accepted import can never load data. Rather than report a stage, a count or a
-/// `SUCCEEDED` status for a load nothing performed, the clock settles every accepted
-/// task into the modelled `FAILED` status carrying this reason, which says exactly
-/// that.
-pub const IMPORT_NOT_RUN_REASON: &str = "This emulator runs no bulk data load: no import engine read the task's source, so the task stopped without importing data.";
 
 /// The `statusReason` of an import task that stopped because it was cancelled.
 pub const IMPORT_CANCELLED_REASON: &str =
@@ -4060,7 +4373,11 @@ snapshot_record_output!(
 
 /// The `*Output` shapes that carry a whole import-task record differ only in the
 /// members they add, so the members they SHARE are rendered by one macro rather than
-/// one hand-copied field list per operation, which could drift apart.
+/// one hand-copied field list per operation, which could drift apart. The listing
+/// projection (`ImportTaskSummary`) is rendered here too, so a listed task cannot drift
+/// from what a single-task read answers; `GetImportTaskOutput` is built by
+/// [`ImportTask::get_output`] instead, because it also carries the `importTaskDetails`
+/// that are derived from the clock.
 ///
 /// Each entry names the binding the stored record is reached through, because macro
 /// hygiene puts a binding the macro itself introduces out of reach of the extra
@@ -4098,16 +4415,6 @@ import_task_record_output!(
     // created named by the shared `graphId` member.
     CreateGraphUsingImportTaskOutput(task) {
         import_options: task.import_options.clone(),
-    },
-    // `GetImportTaskOutput` is the only projection that reports the task's progress.
-    // `importTaskDetails` stays ABSENT: it carries the statement, dictionary-entry
-    // and error counts of a load, and nothing in this emulator ran one, so there are
-    // no counts to report (see `IMPORT_NOT_RUN_REASON`).
-    GetImportTaskOutput(task) {
-        import_options: task.import_options.clone(),
-        import_task_details: None,
-        attempt_number: Some(task.attempt_number),
-        status_reason: task.status_reason.clone(),
     },
 );
 
@@ -4260,3 +4567,9 @@ pub fn locked_store_now(
 
 #[cfg(test)]
 mod tests;
+
+mod import_formats;
+mod import_load;
+
+pub use import_formats::*;
+pub use import_load::*;

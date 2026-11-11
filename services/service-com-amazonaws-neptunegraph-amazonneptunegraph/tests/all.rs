@@ -73,6 +73,8 @@ mod import_task_listing;
 mod import_task_minting;
 #[path = "all/import_task_read.rs"]
 mod import_task_read;
+#[path = "all/import_task_run.rs"]
+mod import_task_run;
 #[path = "all/listing_paging_rule.rs"]
 mod listing_paging_rule;
 #[path = "all/minted_snapshot_name_rule.rs"]

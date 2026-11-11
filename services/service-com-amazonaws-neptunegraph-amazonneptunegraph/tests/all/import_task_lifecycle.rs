@@ -12,9 +12,10 @@
 //!   loads into, the source, format, parquet type, role and options the request
 //!   chose, and the modelled `INITIALIZING` status. The graph reports `IMPORTING`
 //!   while the task runs.
-//! * Nothing in this emulator reads a task's source, so an accepted task stops in the
-//!   modelled `FAILED` status carrying a reason that says so — never a stage or a
-//!   `SUCCEEDED` status for a load nothing performed.
+//! * An accepted task's run is the load its source holds: with no object store
+//!   mounted beside this service the source cannot be read, so the task stops in the
+//!   modelled `FAILED` status carrying what the run met, and loads nothing. What a
+//!   task that DOES read its source reports is the sibling suite `import_task_run`.
 //! * `CancelImportTask` is accepted only while a task's import is still in flight: it
 //!   reports `CANCELLING`, the clock settles the task to `CANCELLED`, and the graph
 //!   stops importing. A task that has already stopped, or is already cancelling, is
@@ -371,15 +372,32 @@ async fn start_import_task_persists_the_record_and_reads_it_back() {
             "case {case:?}: a task nothing retries has been attempted once, got {}",
             read["attemptNumber"]
         );
+        // The run has not written anything when the call returns, so the details of it
+        // report none of the load's work done — and never a count of work nothing did.
+        let details = &read["importTaskDetails"];
         assert_eq!(
-            read["importTaskDetails"],
-            Value::Null,
-            "case {case:?}: no load ran, so there are no details to report, got {}",
-            read["importTaskDetails"]
+            details["status"],
+            json!("INITIALIZING"),
+            "case {case:?}: the details report the status the task is in, got {}",
+            details["status"]
         );
+        for member in [
+            "progressPercentage",
+            "statementCount",
+            "dictionaryEntryCount",
+            "errorCount",
+        ] {
+            assert_eq!(
+                details[member],
+                json!(0),
+                "case {case:?}: nothing has been loaded yet, so {member} is 0, got {}",
+                details[member]
+            );
+        }
 
-        // Nothing read the source, so the task stops FAILED with a reason that says
-        // so — never SUCCEEDED, and never a stage of a load nothing performed.
+        // There is no object store mounted beside this service, so the source cannot be
+        // read: the task stops FAILED with a reason that says what the run met — never
+        // SUCCEEDED, and never a count of a load nothing performed.
         let stopped = wait_until_task_status(&router, &task_id, "FAILED").await;
         let reason = stopped["statusReason"].as_str().unwrap_or_default();
         assert!(

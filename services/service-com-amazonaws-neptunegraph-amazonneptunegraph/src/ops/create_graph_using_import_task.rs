@@ -330,61 +330,35 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let region = crate::state::request_region(ctx);
+
+        // The store-dependent refusals are taken with the lock held — and taken AGAIN
+        // after the source has been read, because the store is only this handler's for
+        // the span of a lock. Taken HERE too so a request that is refused never reads a
+        // byte of the location it named.
+        {
+            let (mut store, now) = crate::state::locked_store_now(&state);
+            gate_create(&mut store, &input.graph_name, &region, now)?;
+        }
+
+        // The TASK's own work, with no lock held: the data its `source` names, read out
+        // of this account's own object store. What the read establishes is the task's
+        // own outcome — the elements it loads, the counts over them and the status its
+        // run ends in — never a refusal of this request.
+        let load = crate::state::read_import_source(
+            ctx,
+            &region,
+            &input.source,
+            input.format.as_deref(),
+            input.import_options.as_ref(),
+            input.fail_on_error.unwrap_or(DEFAULT_FAIL_ON_ERROR),
+        )
+        .await;
+
         let (mut store, now) = crate::state::locked_store_now(&state);
-
-        // The names a graph reserves are released when its deletion completes, so the
-        // deletions the clock has already made due are materialised before the name is
-        // looked up.
-        store.reap_deleted_graphs(now);
-
-        // `graphName` is unique per account PER REGION, exactly as it is for
-        // `CreateGraph`: a second graph by the same name conflicts only with a stored
-        // graph of the SAME Region. The refusal is worded from the requested name alone
-        // by the one builder every name-uniqueness check in this service reaches
-        // (`crate::state::graph_name_conflict`), so it discloses nothing about the
-        // graph that holds the name.
-        if store.graph_id_named(&input.graph_name, &region).is_some() {
-            return Err(CreateGraphUsingImportTaskErrorModeled::ConflictException(
-                crate::state::graph_name_conflict(&input.graph_name),
-            )
-            .into());
-        }
-
-        // This call grows BOTH stores by one record, and each has a ceiling
-        // (`crate::state::MAX_GRAPHS`, `crate::state::MAX_IMPORT_TASKS`). Reaching
-        // either is the condition the model's `ServiceQuotaExceededException` (402)
-        // describes, so neither record is minted unless both have room. Each refusal is
-        // worded by the one builder every full-store refusal in this crate reaches
-        // (`crate::state::store_ceiling_quota_exceeded`), so the graph store reads here
-        // exactly as it does from `CreateGraph`, and the import-task store exactly as it
-        // does from `StartImportTask`.
-        for (reached, records, ceiling, resource_type) in [
-            (
-                store.graphs.len() >= crate::state::MAX_GRAPHS,
-                "graphs",
-                crate::state::MAX_GRAPHS,
-                "Graph",
-            ),
-            (
-                store.import_tasks.len() >= crate::state::MAX_IMPORT_TASKS,
-                "import tasks",
-                crate::state::MAX_IMPORT_TASKS,
-                "ImportTask",
-            ),
-        ] {
-            if reached {
-                return Err(
-                    CreateGraphUsingImportTaskErrorModeled::ServiceQuotaExceededException(
-                        crate::state::store_ceiling_quota_exceeded(
-                            records,
-                            ceiling,
-                            resource_type,
-                        ),
-                    )
-                    .into(),
-                );
-            }
-        }
+        // The same decisions again: a name taken, or either store filled, while the
+        // source was being read is answered exactly as it would have been before the
+        // read — nothing has been persisted yet.
+        gate_create(&mut store, &input.graph_name, &region, now)?;
 
         let graph_id = store.next_graph_id();
         let create_time = ::std::time::SystemTime::now();
@@ -406,14 +380,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // The graph is provisioned AND loaded by this one call, so it reports the
             // modelled IMPORTING status while the task it started is in flight — the
             // same status `StartImportTask` puts a graph into — and the clock owes it
-            // AVAILABLE a span later. The import itself is what fails here (see the
-            // task below): a graph this emulator provisioned is a real control-plane
-            // record, so it comes into service empty rather than claiming data.
+            // AVAILABLE at the instant that load lands in it, so it is serving again
+            // exactly when it holds what the load wrote.
             status: crate::state::GraphStatus::Importing,
-            pending: Some(crate::state::PendingTransition::owed(
-                crate::state::GraphStatus::Available,
-                now,
-            )),
+            pending: Some(crate::state::PendingTransition {
+                settled_status: crate::state::GraphStatus::Available,
+                due: now + crate::state::IMPORT_RUN_SPAN,
+            }),
             status_reason: None,
             create_time,
             // Neither memory member IS the provisioned memory: they bound the value the
@@ -447,9 +420,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             tags: input.tags.unwrap_or_default().into_iter().collect(),
             // Nothing has deleted this graph.
             deletes_at: None,
-            // The graph comes into service EMPTY: the import this call starts reads
-            // nothing, so no node or edge is ever written to it, and the statistics
-            // over that empty data are the ones the graph came up with.
+            // The graph comes up EMPTY and takes the data the import this call starts
+            // read when that load lands in it; the statistics over that empty data are
+            // the ones the graph came up with.
             data: crate::state::GraphData::empty(create_time),
         };
 
@@ -475,19 +448,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             status_reason: None,
             // The task is run once and nothing retries it.
             attempt_number: FIRST_ATTEMPT,
-            pending: None,
+            // What reading the source established, measured once, above.
+            load,
+            // The elements it read are written into the graph when the run completes.
+            delivered: false,
+            start_time: create_time,
+            started_at: now,
+            stopped_progress: None,
+            settles_at: None,
         };
-        // The load has not begun when the call returns, and nothing here can perform
-        // it, so the clock owes the task the modelled FAILED status a fixed span later,
-        // carrying `crate::state::IMPORT_NOT_RUN_REASON` — exactly what an import
-        // `StartImportTask` accepts is owed, because the same (absent) loader would have
-        // to run it.
-        task.begin_transition(
-            crate::state::ImportTaskStatus::Initializing,
-            crate::state::ImportTaskStatus::Failed,
-            Some(crate::state::IMPORT_NOT_RUN_REASON.to_string()),
-            now,
-        );
+        // The load has not begun when the call returns, so the task reports the
+        // modelled INITIALIZING status and the clock owes it the stages of its run —
+        // exactly what an import `StartImportTask` accepts is owed, because the same
+        // loader runs it.
+        task.begin_run(now);
 
         // Report the records that were stored, so this response cannot drift from what
         // a later GetImportTask or GetGraph answers.
@@ -525,13 +499,80 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>
 /// nothing in this emulator retries a task.
 const FIRST_ATTEMPT: i32 = 1;
 
+/// `Ok` when this call may mint its graph and its task, or the refusal the request
+/// earns from what the store holds.
+///
+/// Stated once because it is taken TWICE — before the source is read and again before
+/// the records are persisted — so neither taking can drift from the other, and a
+/// request refused after the read is refused exactly as it would have been before it.
+fn gate_create(
+    store: &mut crate::state::ComAmazonawsNeptunegraphAmazonneptunegraphState,
+    graph_name: &str,
+    region: &str,
+    now: ::std::time::Instant,
+) -> Result<(), CreateGraphUsingImportTaskError> {
+    // The names a graph reserves are released when its deletion completes, so the
+    // deletions the clock has already made due are materialised before the name is
+    // looked up.
+    store.reap_deleted_graphs(now);
+
+    // `graphName` is unique per account PER REGION, exactly as it is for `CreateGraph`:
+    // a second graph by the same name conflicts only with a stored graph of the SAME
+    // Region. The refusal is worded from the requested name alone by the one builder
+    // every name-uniqueness check in this service reaches
+    // (`crate::state::graph_name_conflict`), so it discloses nothing about the graph
+    // that holds the name.
+    if store.graph_id_named(graph_name, region).is_some() {
+        return Err(CreateGraphUsingImportTaskErrorModeled::ConflictException(
+            crate::state::graph_name_conflict(graph_name),
+        )
+        .into());
+    }
+
+    // This call grows BOTH stores by one record, and each has a ceiling
+    // (`crate::state::MAX_GRAPHS`, `crate::state::MAX_IMPORT_TASKS`). Reaching either is
+    // the condition the model's `ServiceQuotaExceededException` (402) describes, so
+    // neither record is minted unless both have room. Each refusal is worded by the one
+    // builder every full-store refusal in this crate reaches
+    // (`crate::state::store_ceiling_quota_exceeded`), so the graph store reads here
+    // exactly as it does from `CreateGraph`, and the import-task store exactly as it
+    // does from `StartImportTask`.
+    for (reached, records, ceiling, resource_type) in [
+        (
+            store.graphs.len() >= crate::state::MAX_GRAPHS,
+            "graphs",
+            crate::state::MAX_GRAPHS,
+            "Graph",
+        ),
+        (
+            store.import_tasks.len() >= crate::state::MAX_IMPORT_TASKS,
+            "import tasks",
+            crate::state::MAX_IMPORT_TASKS,
+            "ImportTask",
+        ),
+    ] {
+        if reached {
+            return Err(
+                CreateGraphUsingImportTaskErrorModeled::ServiceQuotaExceededException(
+                    crate::state::store_ceiling_quota_exceeded(records, ceiling, resource_type),
+                )
+                .into(),
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Whether an import halts on the first error when `failOnError` is not supplied.
 ///
 /// From the documentation of the import options: the import halts "if set to true, the
 /// default, or if omitted"
 /// (`smithy_query(query="doc",shape="CreateGraphUsingImportTaskInput",
-/// member="importOptions")`).
-const DEFAULT_FAIL_ON_ERROR: bool = true;
+/// member="importOptions")`). The value itself is `crate::state`'s, stated once beside
+/// the load it decides the fate of, so this operation and `StartImportTask` cannot drift
+/// into different defaults.
+const DEFAULT_FAIL_ON_ERROR: bool = crate::state::DEFAULT_FAIL_ON_ERROR;
 
 /// The modelled `GraphName` pattern, exactly as the model spells it
 /// (`smithy_query(query="shape",shape="GraphName")`): the expression a refusal reports,
