@@ -98,6 +98,9 @@ pub struct Domain {
     /// The index templates this domain holds, keyed by their name — unique on the domain,
     /// so the name IS the key. See [`IndexTemplate`].
     pub index_templates: BTreeMap<String, IndexTemplate>,
+    /// The COMPONENT templates this domain holds, keyed by their name — unique on the
+    /// domain, so the name IS the key. See [`ComponentTemplate`].
+    pub component_templates: BTreeMap<String, ComponentTemplate>,
     /// The cluster-wide settings this domain's cluster holds, as its own settings API
     /// wrote them. See [`ClusterSettings`].
     pub cluster_settings: ClusterSettings,
@@ -238,9 +241,17 @@ impl Domain {
     ///
     /// Of two templates of equal priority matching one name the earlier name in
     /// configuration order wins, so the answer does not depend on iteration luck.
+    ///
+    /// A composable template is COMPOSED first: each component template its `composed_of`
+    /// names contributes its own mappings and settings, in the order the template names
+    /// them, and the template's own section is merged on top — so the index carries what
+    /// the whole composition declares. The composition is read where the index is minted
+    /// rather than where the template was written, which is what makes a component
+    /// template written later apply to an index created after it.
     #[must_use]
-    pub fn templated_schema(&self, index_name: &str) -> Option<&::aws_smithy_types::Document> {
-        self.index_templates
+    pub fn templated_schema(&self, index_name: &str) -> Option<::aws_smithy_types::Document> {
+        let template = self
+            .index_templates
             .values()
             .filter(|template| {
                 template.index_patterns.iter().any(|pattern| {
@@ -252,8 +263,90 @@ impl Domain {
                 // a `BTreeMap` iterates by name, so the first matching name wins.
                 Some(best) if best.priority >= template.priority => Some(best),
                 _ => Some(template),
+            })?;
+        let mut composed: Option<::aws_smithy_types::Document> = None;
+        for component in template
+            .composed_of
+            .iter()
+            .filter_map(|name| self.component_templates.get(name))
+        {
+            composed = Some(match &composed {
+                Some(base) => merged_index_schema(base, &component.schema),
+                None => component.schema.clone(),
+            });
+        }
+        Some(match &composed {
+            Some(base) => merged_index_schema(base, &template.schema),
+            None => template.schema.clone(),
+        })
+    }
+
+    /// The indexes the request-level name `named` resolves to: the index of that name, the
+    /// indexes an ALIAS of that name points at, or — for a name carrying a wildcard, and
+    /// for `_all` — every index whose own name or an alias of it the pattern matches.
+    ///
+    /// ONE resolution for every route that reads documents, because an alias is "a virtual
+    /// index name": a read addressed to one reads the indexes it names, and a name nothing
+    /// resolves answers nothing so the caller is told the index is missing rather than
+    /// being answered an empty result.
+    #[must_use]
+    pub fn resolved_indexes(&self, named: &str) -> BTreeSet<String> {
+        let mut resolved = BTreeSet::new();
+        if named == ALL_INDEXES || named.contains('*') || named.contains('?') {
+            let pattern = if named == ALL_INDEXES { "*" } else { named };
+            for index in self.indexes.values() {
+                let matched = |name: &str| {
+                    ::service_common::iam_authorization::wildcard_match(pattern, name, true)
+                };
+                if matched(&index.index_name) || index.aliases.keys().any(|alias| matched(alias)) {
+                    resolved.insert(index.index_name.clone());
+                }
+            }
+            return resolved;
+        }
+        if self.indexes.contains_key(named) {
+            resolved.insert(named.to_string());
+            return resolved;
+        }
+        for index in self.indexes.values() {
+            if index.aliases.contains_key(named) {
+                resolved.insert(index.index_name.clone());
+            }
+        }
+        resolved
+    }
+
+    /// The index a WRITE addressed to `named` lands in: the index of that name, or the one
+    /// index an alias of that name is the write index of.
+    ///
+    /// "If an alias points to multiple indexes, you must define one of them as the write
+    /// index": an alias that names exactly one index is writable through, one that names
+    /// several is writable only through the index its action marked `is_write_index`, and
+    /// `Err` carries the names it points at when no single index can take the write.
+    pub fn write_index(&self, named: &str) -> Result<String, Vec<String>> {
+        if self.indexes.contains_key(named) {
+            return Ok(named.to_string());
+        }
+        let pointed: Vec<&Index> = self
+            .indexes
+            .values()
+            .filter(|index| index.aliases.contains_key(named))
+            .collect();
+        let write_indexes: Vec<&Index> = pointed
+            .iter()
+            .copied()
+            .filter(|index| {
+                index.aliases.get(named).and_then(|alias| alias.is_write_index) == Some(true)
             })
-            .map(|template| &template.schema)
+            .collect();
+        match (write_indexes.as_slice(), pointed.as_slice()) {
+            ([only], _) => Ok(only.index_name.clone()),
+            ([], [only]) => Ok(only.index_name.clone()),
+            _ => Err(pointed
+                .iter()
+                .map(|index| index.index_name.clone())
+                .collect()),
+        }
     }
 
     /// Record that `option` was set by a call at `now`: mint its first revision, or

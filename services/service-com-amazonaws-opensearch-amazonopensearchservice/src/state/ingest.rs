@@ -95,7 +95,24 @@ pub struct IndexedDocument {
     /// The document's `_version`: 1 for the write that created it, one more for each
     /// later write to the same id, which is how the engine numbers a document's versions.
     pub version: u64,
+    /// The document's `_seq_no`: "the sequence number assigned to the document for the
+    /// indexing operation", taken from the index's own counter
+    /// ([`super::Index::next_seq_no`]) by the write that last changed it. A reader feeds
+    /// it back as `if_seq_no` to write only if the document has not moved since.
+    pub seq_no: u64,
+    /// The document's `_primary_term`: the term of the primary shard that took that
+    /// write. One run of a cluster takes every write in one term and nothing here
+    /// re-elects a primary, so this stays at [`PRIMARY_TERM`].
+    pub primary_term: u64,
 }
+
+/// The `_primary_term` every write of this cluster is taken in.
+///
+/// "The primary term is a monotonically increasing number that increases each time a
+/// primary shard is assigned to a different node": one run of this emulator's cluster
+/// takes every write in one term, so every document reports the term the cluster started
+/// in — the same reasoning the index-management plugin's own writes are numbered by.
+pub const PRIMARY_TERM: u64 = 1;
 
 /// One document to write, with everything the three decisions above read.
 #[derive(Debug, Clone, Copy)]
@@ -230,7 +247,7 @@ pub fn index_into(
         .indexes
         .get(write.index_name)
         .map(|index| index.schema.clone())
-        .or_else(|| domain.templated_schema(write.index_name).cloned());
+        .or_else(|| domain.templated_schema(write.index_name));
     if let Some(schema) = &mappings {
         accepted_by_mappings(schema, &document, write.document_id.unwrap_or_default())?;
     }
@@ -484,6 +501,8 @@ fn index_for<'d>(
         .entry(index_name.to_string())
         .or_insert_with(|| Index {
             index_name: index_name.to_string(),
+            aliases: ::std::collections::BTreeMap::new(),
+            next_seq_no: 0,
             // Nothing named this index's mappings unless a template did, in which case
             // the index is created carrying them, exactly as a `CreateIndex` with that
             // schema would have left it.
@@ -541,6 +560,10 @@ fn store_document(
             ),
         });
     }
+    // Every write takes the next sequence number of the index it lands in, whether it
+    // created the document or replaced one, which is what makes the pair a reader feeds
+    // back as `if_seq_no`/`if_primary_term` move with each write.
+    let seq_no = index.take_seq_no();
     index.documents.insert(
         id.clone(),
         IndexedDocument {
@@ -548,6 +571,8 @@ fn store_document(
             source,
             indexed_at: write.now,
             version: existing.unwrap_or(0).saturating_add(1),
+            seq_no,
+            primary_term: PRIMARY_TERM,
         },
     );
     Ok(Indexed {

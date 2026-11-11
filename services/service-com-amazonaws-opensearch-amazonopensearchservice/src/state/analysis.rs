@@ -664,6 +664,11 @@ const ANALYZED_FIELD_TYPES: [&str; 3] = ["text", "match_only_text", "search_as_y
 /// list their top-level fields under.
 const MAPPING_PROPERTIES: &str = MAPPING_CONTAINERS[0];
 
+/// The member a mapping lists a field's MULTI-FIELDS under: the second of the containers
+/// this crate names ([`MAPPING_CONTAINERS`]). A field under it is another indexing of the
+/// field above it rather than a member of the document.
+const MAPPING_MULTI_FIELDS: &str = MAPPING_CONTAINERS[1];
+
 /// The analyzers, filters and tokenizers an index's `analysis` settings DEFINE, plus its
 /// field mappings — everything a chain for one of its fields is built from.
 ///
@@ -863,6 +868,45 @@ impl IndexAnalysis {
                 .find_map(|container| mapped.get(container))?;
         }
         None
+    }
+
+    /// The path in a document's SOURCE the field `field` takes its values from.
+    ///
+    /// A MULTI-FIELD is "a way to index the same field in different ways": `title.raw`
+    /// names a second indexing OF `title` and not a member of it, so its values are the
+    /// parent field's own — while a field of an OBJECT field (`author.name`) is a member
+    /// and keeps its own path. A path the mappings do not map at all is its own path, since
+    /// a dynamically mapped field is a member of the document.
+    #[must_use]
+    pub fn source_field(&self, field: &str) -> String {
+        let Some(mut properties) = self.mappings.get(MAPPING_PROPERTIES) else {
+            return field.to_string();
+        };
+        let mut path: Vec<&str> = Vec::new();
+        let mut segments = field.split('.').peekable();
+        while let Some(segment) = segments.next() {
+            let Some(mapped) = properties.get(segment) else {
+                return field.to_string();
+            };
+            path.push(segment);
+            if segments.peek().is_none() {
+                break;
+            }
+            // An object field's own members are members of the document too, so the path
+            // continues through them.
+            if let Some(members) = mapped.get(MAPPING_PROPERTIES) {
+                properties = members;
+                continue;
+            }
+            // A multi-field of this field holds THIS field's value, so the path stops here.
+            let multi = mapped.get(MAPPING_MULTI_FIELDS);
+            if multi.is_some_and(|fields| segments.peek().is_some_and(|next| fields.get(next).is_some()))
+            {
+                return path.join(".");
+            }
+            return field.to_string();
+        }
+        path.join(".")
     }
 
     /// Whether the field `field` holds its value WHOLE rather than analyzing it — a

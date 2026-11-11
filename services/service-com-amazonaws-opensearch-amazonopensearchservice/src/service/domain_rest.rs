@@ -70,15 +70,23 @@
 //!    permitted every action this surface names.
 //!
 //! The REST surface served is the one this emulator can answer out of persisted state:
-//! the cluster banner and health, the cluster's nodes and its own settings, an index's
-//! create/read/delete, its own settings read and updated, a document write, read and
-//! delete, a count and a search over a bounded query vocabulary ([`selector`]) whose
-//! `match` is evaluated over the terms the
+//! The REST surface served is the one this emulator can answer out of persisted state:
+//! the cluster banner and health, the cluster's nodes and its own settings, the compact
+//! listings of its indexes and nodes ([`cat`]), an index's create/read/delete, its own
+//! settings read and updated ([`index_settings`]) and its mappings read and added to
+//! ([`index_mapping`]), the aliases that stand for it ([`aliases`]), a document write, read
+//! and delete — each numbered with the revision a conditional write is taken against — the
+//! newline-delimited stream of them the bulk API takes ([`bulk`]), a count and a search over
+//! a bounded query vocabulary ([`selector`]) whose `match` is evaluated over the terms the
 //! field's own analysis chain produces, the tokens a text produces through that chain
-//! ([`analyze`]), index templates, ingest pipelines (declared, simulated and applied to a
-//! write that names one), the index-management plugin's policy API, and the security
-//! plugin's role and role-mapping API. A path outside it is answered the way the engine
-//! answers a path no handler is registered for, rather than with an invented body.
+//! ([`analyze`]), index templates and the component templates they are composed of
+//! ([`component_templates`]), ingest pipelines (declared, simulated and applied to a write
+//! that names one), the index-management plugin's policy API, and the security plugin's
+//! role and role-mapping API.
+//!
+//! A path outside it is answered the way the engine answers a path no handler is registered
+//! for, rather than with an invented body — including a RESERVED path ([`reserved`]), which
+//! names an API of the engine and is never read as an index name.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
@@ -108,9 +116,27 @@ mod pipeline;
 /// The analyze API: the tokens a text produces through the chain a request resolves.
 mod analyze;
 
+/// The BULK API: the newline-delimited action/source stream a client loads documents with,
+/// and the per-item answer each action earns.
+mod bulk;
+
+/// The ALIAS API: the alias actions a client points a virtual index name with.
+mod aliases;
+
 /// The index-settings API: the settings one index holds, and the update that changes the
 /// dynamic ones.
 mod index_settings;
+
+/// The index-mapping API: the field mappings one index holds, and the update that adds to
+/// them.
+mod index_mapping;
+
+/// The `_cat` APIs: the compact listings of a cluster's indexes and nodes.
+mod cat;
+
+/// The COMPONENT TEMPLATE API: the building blocks a composable index template is
+/// composed of.
+mod component_templates;
 
 /// The most bytes one data-plane request body is read as JSON.
 ///
@@ -214,6 +240,9 @@ const INVALID_INDEX_NAME_EXCEPTION: &str = "invalid_index_name_exception";
 /// The engine's error type for a write that may not replace a document the index already
 /// holds.
 const VERSION_CONFLICT_ENGINE_EXCEPTION: &str = "version_conflict_engine_exception";
+
+/// The engine's error type for an UPDATE of a document the index does not hold.
+const DOCUMENT_MISSING_EXCEPTION: &str = "document_missing_exception";
 
 /// The most documents ONE simulate request runs a pipeline over.
 ///
@@ -699,27 +728,36 @@ fn named_patterns(named: &str) -> Result<Vec<&str>, Box<RtResponse>> {
 }
 
 /// The indexes of `domain` ONE pattern names: every index a wildcard pattern or `_all`
-/// matches ([`matched_index`]), or the one index a plain name carries — and the engine's own
-/// not-found for a name no index of the domain carries.
+/// matches, every index an ALIAS of that name points at, or the one index a plain name
+/// carries — and the engine's own not-found for a name no index and no alias of the domain
+/// carries.
 ///
 /// The ONE reading of what a pattern names, so every route that takes one — a search, a
-/// count, the index-settings API — resolves it alike.
+/// count, the index-settings and index-mapping APIs, a refresh, the cluster health and the
+/// `_cat` listings — resolves it alike, through the one alias-aware resolution the domain
+/// record owns ([`state::Domain::resolved_indexes`]).
 fn matched_indexes<'a>(
     domain: &'a Domain,
     pattern: &str,
 ) -> Result<Vec<&'a str>, Box<RtResponse>> {
-    if pattern == "_all" || pattern.contains('*') || pattern.contains('?') {
-        return Ok(domain
-            .indexes
-            .keys()
-            .filter(|name| matched_index(pattern, name))
-            .map(String::as_str)
-            .collect());
+    let resolved = domain.resolved_indexes(pattern);
+    if resolved.is_empty() {
+        // A wildcard that matches no index selects none, which is what the engine answers
+        // it with; a plain name nothing of the domain carries is the missing index it
+        // names.
+        if pattern == state::ALL_INDEXES || pattern.contains('*') || pattern.contains('?') {
+            return Ok(Vec::new());
+        }
+        return Err(Box::new(index_not_found(pattern)));
     }
-    match domain.indexes.get_key_value(pattern) {
-        Some((name, _)) => Ok(vec![name.as_str()]),
-        None => Err(Box::new(index_not_found(pattern))),
-    }
+    // The names are answered as the store's own, in its order, so a resolution through an
+    // alias and one through an index name report the same indexes in the same sequence.
+    Ok(domain
+        .indexes
+        .keys()
+        .filter(|name| resolved.contains(name.as_str()))
+        .map(String::as_str)
+        .collect())
 }
 
 /// The indexes `named` names, in the store's own order and de-duplicated: one index by its
@@ -910,6 +948,49 @@ fn serve_resolved(
             _ => wrong_method(request, "GET"),
         },
         ["_cluster", "settings"] => cluster_settings_request(domain, request),
+        // The BULK API, and its index-scoped form: the reserved segment names it before
+        // any arm below could read it as an index name.
+        ["_bulk"] => bulk::bulk_request(domain, request, None, now),
+        [index, "_bulk"] if !reserved(index) => {
+            bulk::bulk_request(domain, request, Some(index), now)
+        }
+        // The alias actions, and the per-index spellings of the same.
+        ["_aliases"] => aliases::alias_actions(domain, request),
+        ["_alias"] => aliases::index_alias_request(domain, request, None, None),
+        ["_alias", alias] => aliases::index_alias_request(domain, request, None, Some(alias)),
+        [index, "_alias"] if !reserved(index) => {
+            aliases::index_alias_request(domain, request, Some(index), None)
+        }
+        [index, "_alias", alias] if !reserved(index) => {
+            aliases::index_alias_request(domain, request, Some(index), Some(alias))
+        }
+        // An index's own settings and mappings, for every index and for one. The third
+        // segment of a settings read is the setting-name filter it narrows the report with.
+        ["_settings"] => index_settings::index_settings_request(domain, request, None, None),
+        ["_settings", filter] => {
+            index_settings::index_settings_request(domain, request, None, Some(filter))
+        }
+        [index, "_settings"] if !reserved(index) => {
+            index_settings::index_settings_request(domain, request, Some(index), None)
+        }
+        [index, "_settings", filter] if !reserved(index) => {
+            index_settings::index_settings_request(domain, request, Some(index), Some(filter))
+        }
+        ["_mapping"] => index_mapping::index_mapping_request(domain, request, None),
+        [index, "_mapping"] if !reserved(index) => {
+            index_mapping::index_mapping_request(domain, request, Some(index))
+        }
+        // The compact listings.
+        ["_cat", "indices"] => cat::indices(domain, request, None),
+        ["_cat", "indices", index] => cat::indices(domain, request, Some(index)),
+        ["_cat", "nodes"] => cat::nodes(domain, request),
+        // The component templates a composable index template is composed of.
+        ["_component_template"] => {
+            component_templates::component_template_request(domain, request, None)
+        }
+        ["_component_template", name] => {
+            component_templates::component_template_request(domain, request, Some(name))
+        }
         ["_ingest", "pipeline"] => match request.method {
             "GET" => guarded(domain, request, fgac::ACTION_GET_PIPELINE, |domain| {
                 ok(&pipeline_view(domain, None))
@@ -940,13 +1021,8 @@ fn serve_resolved(
         // analysis settings. Both arms come before the single- and two-segment arms below,
         // so neither reserved name is read as an index.
         ["_analyze"] => analyze::analyze_request(domain, request, None, files),
-        [index, "_analyze"] => analyze::analyze_request(domain, request, Some(index), files),
-        // The settings of the indexes a request names, and of every index the cluster
-        // holds where it names none. Both arms come before the index arms below, so the
-        // reserved name is never read as an index.
-        ["_settings"] => index_settings::index_settings_request(domain, request, None),
-        [index, "_settings"] => {
-            index_settings::index_settings_request(domain, request, Some(index))
+        [index, "_analyze"] if !reserved(index) => {
+            analyze::analyze_request(domain, request, Some(index), files)
         }
         // A refresh with no index named is the whole cluster's, and this arm comes before
         // the single-segment one below so the reserved name is never read as an index.
@@ -956,27 +1032,35 @@ fn serve_resolved(
             }),
             _ => wrong_method(request, "GET, POST"),
         },
-        [index] => index_request(domain, request, index),
+        // The index-level routes. Each is guarded by [`reserved`]: a first segment that
+        // begins with the reserved prefix names an API of the engine's own and never an
+        // index, so a reserved path this surface does not serve is answered as an unserved
+        // path rather than as a request about an index no cluster could hold.
+        [index] if !reserved(index) => index_request(domain, request, index),
         // `_doc` upserts; `_create` must NOT overwrite, and neither must a `_doc` write
         // whose `op_type` asks for a create.
-        [index, "_doc"] => document_write(domain, request, index, None, Creates::Upsert, now),
-        [index, "_doc", id] => document_request(domain, request, index, id, requested_op_type(request), now),
-        [index, "_create", id] => {
+        [index, "_doc"] if !reserved(index) => {
+            document_write(domain, request, index, None, Creates::Upsert, now)
+        }
+        [index, "_doc", id] if !reserved(index) => {
+            document_request(domain, request, index, id, requested_op_type(request), now)
+        }
+        [index, "_create", id] if !reserved(index) => {
             document_request(domain, request, index, id, Creates::Only, now)
         }
-        [index, "_count"] => match request.method {
+        [index, "_count"] if !reserved(index) => match request.method {
             "GET" | "POST" => guarded(domain, request, fgac::ACTION_COUNT, |domain| {
                 count(domain, request, index, across, files)
             }),
             _ => wrong_method(request, "GET, POST"),
         },
-        [index, "_search"] => match request.method {
+        [index, "_search"] if !reserved(index) => match request.method {
             "GET" | "POST" => guarded(domain, request, fgac::ACTION_SEARCH, |domain| {
                 search(domain, request, index, across, files)
             }),
             _ => wrong_method(request, "GET, POST"),
         },
-        [index, "_refresh"] => match request.method {
+        [index, "_refresh"] if !reserved(index) => match request.method {
             "GET" | "POST" => guarded(domain, request, fgac::ACTION_REFRESH, |domain| {
                 refresh(domain, request, Some(index))
             }),
@@ -994,6 +1078,247 @@ enum Creates {
     /// `_create`, and `_doc` with `op_type=create`: a write to an id the index already
     /// holds is REFUSED rather than replacing the document.
     Only,
+}
+
+/// Whether `segment` is a RESERVED first path segment of the engine's REST surface rather
+/// than an index name.
+///
+/// An index name may not begin with the reserved prefix
+/// ([`state::RESERVED_SEGMENT_PREFIX`], which `IndexName`'s own pattern forbids as a first
+/// character), so a first segment that does names an API — served above, or served by
+/// nothing. Every index-level route is guarded by this, which is what keeps a reserved
+/// endpoint this surface does not serve from being answered as a request about an index:
+/// the refusal then states that the path has no handler instead of listing the methods
+/// some other route takes.
+fn reserved(segment: &str) -> bool {
+    // `_all` is the one reserved name that IS an index selector — it names every index of
+    // the cluster — so it is not an API name and the index-level routes take it.
+    segment.starts_with(state::RESERVED_SEGMENT_PREFIX) && segment != state::ALL_INDEXES
+}
+
+/// What a refusal of ONE write is, apart from how it is rendered: the status, the engine's
+/// error type and the reason.
+///
+/// Held as a value because the same condition is answered two ways — as the whole answer
+/// to a single document write, and as ONE item's error inside a bulk answer, which is 200
+/// however its items fared — so neither can word a condition the other words differently.
+#[derive(Debug, Clone)]
+pub(super) struct Refusal {
+    status: u16,
+    error_type: String,
+    reason: String,
+}
+
+impl Refusal {
+    /// This refusal as the whole answer to one request.
+    fn response(&self) -> RtResponse {
+        error(self.status, &self.error_type, &self.reason)
+    }
+
+    /// The status a bulk item carrying this refusal reports.
+    pub(super) fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// This refusal as the `error` object of one bulk item.
+    pub(super) fn item_error(&self) -> Value {
+        json!({ "type": self.error_type, "reason": self.reason })
+    }
+
+    /// A write this emulator's own bounds, or a member the request did not carry, refuses.
+    pub(super) fn of_illegal_argument(reason: &str) -> Self {
+        Self {
+            status: 400,
+            error_type: ingest::ILLEGAL_ARGUMENT_EXCEPTION.to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    /// A document these bytes are not: the engine's own parse failure for a source it
+    /// could not read as one document.
+    pub(super) fn of_mapper_parsing(reason: &str) -> Self {
+        Self {
+            status: 400,
+            error_type: ingest::MAPPER_PARSING_EXCEPTION.to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    /// An update of a document the index does not hold, which the engine refuses rather
+    /// than creating one for it.
+    pub(super) fn of_document_missing(id: &str) -> Self {
+        Self {
+            status: 404,
+            error_type: DOCUMENT_MISSING_EXCEPTION.to_string(),
+            reason: format!("[{id}]: document missing"),
+        }
+    }
+
+    /// An index the cluster does not hold.
+    pub(super) fn of_index_not_found(index_name: &str) -> Self {
+        Self {
+            status: 404,
+            error_type: ingest::INDEX_NOT_FOUND_EXCEPTION.to_string(),
+            reason: format!("no such index [{index_name}]"),
+        }
+    }
+
+    /// The refusal the one data-plane write path answered with, in this form.
+    pub(super) fn of_write(refusal: &ingest::WriteRefusal) -> Self {        match refusal {
+            ingest::WriteRefusal::Unavailable { message } => Self {
+                status: 503,
+                error_type: "cluster_block_exception".to_string(),
+                reason: message.clone(),
+            },
+            ingest::WriteRefusal::Rejected {
+                error_type,
+                message,
+            } => Self {
+                status: match *error_type {
+                    ingest::SECURITY_EXCEPTION => 403,
+                    // An index the cluster does not hold is a missing resource, not a
+                    // malformed request.
+                    ingest::INDEX_NOT_FOUND_EXCEPTION => 404,
+                    _ => 400,
+                },
+                error_type: (*error_type).to_string(),
+                reason: message.clone(),
+            },
+        }
+    }
+}
+
+/// The REVISION a conditional write is taken against: the `if_seq_no`/`if_primary_term`
+/// pair "used to prevent concurrent modification", which a client takes from the answer to
+/// the write or the read it based its change on.
+///
+/// Both are read together, as the engine takes them: a request naming one without the
+/// other names no revision to compare against.
+fn conditional_revision(
+    if_seq_no: Option<u64>,
+    if_primary_term: Option<u64>,
+) -> Option<(u64, u64)> {
+    Some((if_seq_no?, if_primary_term?))
+}
+
+/// The conditional revision the query string of a single document write names.
+fn requested_revision(request: &Request<'_>) -> Option<(u64, u64)> {
+    conditional_revision(
+        request.parameter("if_seq_no").and_then(|v| v.parse().ok()),
+        request
+            .parameter("if_primary_term")
+            .and_then(|v| v.parse().ok()),
+    )
+}
+
+/// Why a write to `id` may not be taken, or `None` when it may: the two conditions a write
+/// is held to BEFORE the document is stored.
+///
+/// `Creates::Only` is the one `_create` and `op_type=create` ask for — a write to an id the
+/// index already holds is refused rather than replacing the document — and `conditional` is
+/// the compare-and-set a client performs with the `_seq_no`/`_primary_term` pair it read:
+/// the write proceeds only while the document is still at that revision, which is what
+/// makes exactly one of two concurrent writers win.
+fn write_conflict(
+    domain: &Domain,
+    index_name: &str,
+    id: Option<&str>,
+    creates: Creates,
+    conditional: Option<(u64, u64)>,
+) -> Option<Refusal> {
+    let addressed = id.filter(|id| !id.is_empty());
+    let held = addressed
+        .and_then(|id| domain.indexes.get(index_name)?.documents.get(id))
+        .cloned();
+    let id = addressed.unwrap_or_default();
+    if creates == Creates::Only {
+        if let Some(held) = &held {
+            return Some(Refusal {
+                status: 409,
+                error_type: VERSION_CONFLICT_ENGINE_EXCEPTION.to_string(),
+                reason: format!(
+                    "[{id}]: version conflict, document already exists (current version [{}])",
+                    held.version
+                ),
+            });
+        }
+    }
+    let (seq_no, primary_term) = conditional?;
+    let required =
+        format!("[{id}]: version conflict, required seqNo [{seq_no}], primary term [{primary_term}].");
+    match held {
+        Some(held) if held.seq_no == seq_no && held.primary_term == primary_term => None,
+        Some(held) => Some(Refusal {
+            status: 409,
+            error_type: VERSION_CONFLICT_ENGINE_EXCEPTION.to_string(),
+            reason: format!(
+                "{required} current document has seqNo [{}] and primary term [{}]",
+                held.seq_no, held.primary_term
+            ),
+        }),
+        None => Some(Refusal {
+            status: 409,
+            error_type: VERSION_CONFLICT_ENGINE_EXCEPTION.to_string(),
+            reason: format!("{required} but no document was found"),
+        }),
+    }
+}
+
+/// Run every processor the ingest pipeline `id` declares over `source`, in the order the
+/// pipeline declares them — the preprocessing a write naming a pipeline asks for.
+///
+/// The ONE application of a pipeline to a document on its way in, so a single write and a
+/// bulk item are preprocessed by the same processors and refused by the same sentences. A
+/// pipeline the cluster does not hold, or a processor that cannot act on this document,
+/// refuses the write rather than storing the document unprocessed.
+fn apply_pipeline(domain: &Domain, id: &str, source: &mut Value) -> Result<(), Refusal> {
+    let Some(pipeline) = domain.ingest_pipelines.get(id) else {
+        return Err(Refusal {
+            status: 404,
+            error_type: RESOURCE_NOT_FOUND_EXCEPTION.to_string(),
+            reason: format!("pipeline [{id}] is missing"),
+        });
+    };
+    let failed = |failed: pipeline::ProcessorError| Refusal {
+        status: 400,
+        error_type: failed.error_type.to_string(),
+        reason: failed.reason,
+    };
+    let processors = pipeline::parse(&pipeline.definition).map_err(failed)?;
+    for processor in &processors {
+        processor.apply(source).map_err(failed)?;
+    }
+    Ok(())
+}
+
+/// How many DATA nodes the domain's cluster has, which is what decides how many copies of
+/// a shard can be assigned: one node holds at most one copy of a shard.
+fn data_nodes(domain: &Domain) -> i32 {
+    domain.cluster_config.instance_count.unwrap_or(1).max(1)
+}
+
+/// How many of an index's `copies` replica copies per shard the cluster can ASSIGN: a
+/// replica needs a node other than the one holding its primary, so the primary's node
+/// leaves `data_nodes - 1` nodes for them and a copy past that has nowhere to go.
+///
+/// The ONE arithmetic every reader of the cluster's allocation uses — the cluster health,
+/// an index's `_cat` row, a write's `_shards` and a refresh's — so no two of them can
+/// report one index's allocation differently.
+fn assigned_replicas(copies: i64, data_nodes: i32) -> i64 {
+    copies.min(i64::from(data_nodes).saturating_sub(1).max(0))
+}
+
+/// The health `unassigned` unassigned shard copies leave the indexes they belong to in:
+/// `yellow` while a copy has nowhere to go, `green` with every copy assigned.
+///
+/// A primary is always assignable here — there is always a data node to hold it — so no
+/// index of this cluster is `red`.
+fn health_of(unassigned: i64) -> &'static str {
+    if unassigned > 0 {
+        "yellow"
+    } else {
+        "green"
+    }
 }
 
 /// What `op_type` asks of a `_doc` write: `create` is the one value that forbids a
@@ -1102,9 +1427,12 @@ fn stable_uuid(seed: &str) -> String {
 /// cluster configuration and the indexes the request is about: every index the domain
 /// holds, or the ONE the path names.
 ///
-/// A shard copy needs a node of its own, so a replica of an index on a single-node cluster
-/// is unassigned and the cluster is `yellow` — which is the health such a domain really
-/// reports. With every copy assigned it is `green`.
+/// A shard copy needs a node of its own, so an index asking for more replica copies than
+/// the cluster has nodes to put them on leaves copies unassigned and the cluster is
+/// `yellow` — which is the health such a domain really reports. With every copy assigned
+/// it is `green`. Lowering the replica count to what the topology can hold is what turns
+/// it green again, which is why the arithmetic is the one shared
+/// [`assigned_replicas`] and not a test for a single node.
 ///
 /// `wait_for_status` is the one wait this emulator can answer without waiting: the cluster
 /// is already settled, so the status it has is the status it will have — a request asking
@@ -1117,12 +1445,18 @@ fn cluster_health(
 ) -> RtResponse {
     let named: Vec<&state::Index> = match index_name {
         None => domain.indexes.values().collect(),
-        Some(name) => match domain.indexes.get(name) {
-            Some(index) => vec![index],
-            None => return index_not_found(name),
-        },
+        Some(name) => {
+            let resolved = domain.resolved_indexes(name);
+            if resolved.is_empty() {
+                return index_not_found(name);
+            }
+            resolved
+                .iter()
+                .filter_map(|name| domain.indexes.get(name))
+                .collect()
+        }
     };
-    let data_nodes = domain.cluster_config.instance_count.unwrap_or(1).max(1);
+    let data_nodes = data_nodes(domain);
     let master_nodes = if domain.cluster_config.dedicated_master_enabled == Some(true) {
         domain.cluster_config.dedicated_master_count.unwrap_or(0)
     } else {
@@ -1130,24 +1464,27 @@ fn cluster_health(
     };
     let mut primaries = 0_i64;
     let mut replicas = 0_i64;
+    let mut assignable = 0_i64;
     for index in named {
         // Both come from the index's own settings, which a caller wrote, so both are
         // clamped before they are multiplied out.
-        let shards = setting_number(&index.schema, "number_of_shards")
+        let shards = setting_number(&index.schema, NUMBER_OF_SHARDS)
             .unwrap_or(1)
             .clamp(1, MAX_SHARDS_PER_INDEX);
-        let copies = setting_number(&index.schema, "number_of_replicas")
+        let copies = setting_number(&index.schema, NUMBER_OF_REPLICAS)
             .unwrap_or(1)
             .clamp(0, MAX_SHARDS_PER_INDEX);
         primaries = primaries.saturating_add(shards);
         replicas = replicas.saturating_add(shards.saturating_mul(copies));
+        assignable = assignable
+            .saturating_add(shards.saturating_mul(assigned_replicas(copies, data_nodes)));
     }
-    // Each replica needs a node other than the one holding its primary.
-    let assignable_replicas = if data_nodes > 1 { replicas } else { 0 };
-    let unassigned = replicas.saturating_sub(assignable_replicas);
-    let active = primaries.saturating_add(assignable_replicas);
+    // Each replica copy needs a node other than the one holding its primary, so the
+    // copies past what the topology can hold are the unassigned ones.
+    let unassigned = replicas.saturating_sub(assignable);
+    let active = primaries.saturating_add(assignable);
     let total = primaries.saturating_add(replicas);
-    let status = if unassigned > 0 { "yellow" } else { "green" };
+    let status = health_of(unassigned);
     let timed_out = request
         .parameter("wait_for_status")
         .as_deref()
@@ -1946,6 +2283,14 @@ fn setting_number(schema: &::aws_smithy_types::Document, name: &str) -> Option<i
         .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
 }
 
+/// The setting naming how many primary shards an index has, and the one naming how many
+/// replica copies of each — the two the shard arithmetic reads ([`setting_number`]), named
+/// once so no reader of the cluster's allocation spells them for itself.
+const NUMBER_OF_SHARDS: &str = "number_of_shards";
+
+/// See [`NUMBER_OF_SHARDS`].
+const NUMBER_OF_REPLICAS: &str = "number_of_replicas";
+
 /// A `PUT`, `GET`, `HEAD` or `DELETE` on an index itself.
 fn index_request(domain: &mut Domain, request: &Request<'_>, index_name: &str) -> RtResponse {
     match request.method {
@@ -2026,7 +2371,7 @@ fn create_index(domain: &mut Domain, request: &Request<'_>, index_name: &str) ->
     // created": a matching template's schema is what the index starts from, and what the
     // create itself names is merged onto it, so an explicit section wins over the
     // template's.
-    let templated = domain.templated_schema(index_name).cloned();
+    let templated = domain.templated_schema(index_name);
     let schema = match templated {
         Some(base) => state::merged_index_schema(&base, &state::document_from_json(&requested)),
         None => state::document_from_json(&requested),
@@ -2053,6 +2398,11 @@ fn create_index(domain: &mut Domain, request: &Request<'_>, index_name: &str) ->
             index_name: index_name.to_string(),
             schema,
             documents: BTreeMap::new(),
+            // "aliases: the aliases the index is created with": an alias the create
+            // declares points at the index from the moment it exists, exactly as one the
+            // alias-actions API adds later does.
+            aliases: aliases::declared(requested.get("aliases")),
+            next_seq_no: 0,
         },
     );
     // An index the cluster did not hold before is a change to the cluster's own state,
@@ -2093,11 +2443,13 @@ fn read_index(domain: &Domain, request: &Request<'_>, index_name: &str) -> RtRes
     let mappings = schema.get("mappings").cloned().unwrap_or_else(|| json!({}));
     ok(&json!({
         index_name: {
-            "aliases": {},
+            "aliases": aliases::reported(index),
             "mappings": mappings,
+            // The index's settings as its own settings API reports them, so two reads of
+            // one index cannot report its configuration differently.
             "settings": {
                 state::SETTINGS_INDEX_SECTION:
-                    index_settings::settings_view(domain, index, request),
+                    index_settings::settings_view(domain, index, request, None),
             },
         }
     }))
@@ -2115,23 +2467,51 @@ fn document_request(
     match request.method {
         "PUT" | "POST" => document_write(domain, request, index_name, Some(id), creates, now),
         "GET" => guarded(domain, request, fgac::ACTION_GET_DOCUMENT, |domain| {
-            read_document(domain, index_name, id)
+            // A read addressed to an alias reads the index that alias names.
+            let held = read_index_name(domain, index_name, id);
+            read_document(domain, held.as_deref().unwrap_or(index_name), id)
         }),
         "DELETE" => guarded(domain, request, fgac::ACTION_DELETE_DOCUMENT, |domain| {
+            let index_name = read_index_name(domain, index_name, id)
+                .unwrap_or_else(|| index_name.to_string());
+            let index_name = index_name.as_str();
+            // A delete is a write like any other: it is held to the same conditional
+            // compare-and-set, and it takes a sequence number of its own, which is what
+            // lets a client tell a delete it made from one someone else made.
+            if let Some(refusal) = write_conflict(
+                domain,
+                index_name,
+                Some(id),
+                Creates::Upsert,
+                requested_revision(request),
+            ) {
+                return refusal.response();
+            }
             let copies = write_shards(domain, index_name);
             let Some(index) = domain.indexes.get_mut(index_name) else {
                 return index_not_found(index_name);
             };
-            let removed = index.documents.remove(id).is_some();
-            let result = if removed { "deleted" } else { "not_found" };
-            let status = if removed { 200 } else { 404 };
+            let removed = index.documents.remove(id);
+            let version = removed
+                .as_ref()
+                .map_or(1, |document| document.version.saturating_add(1));
+            let seq_no = index.take_seq_no();
+            let result = if removed.is_some() {
+                "deleted"
+            } else {
+                "not_found"
+            };
+            let status = if removed.is_some() { 200 } else { 404 };
             rendered(
                 status,
                 &json!({
                     "_index": index_name,
                     "_id": id,
+                    "_version": version,
                     "result": result,
                     "_shards": copies,
+                    "_seq_no": seq_no,
+                    "_primary_term": ingest::PRIMARY_TERM,
                 }),
             )
         }),
@@ -2140,6 +2520,10 @@ fn document_request(
 }
 
 /// One document, as a `GET /{index}/_doc/{id}` reports it.
+///
+/// The `_seq_no`/`_primary_term` pair is reported beside the version because it is what a
+/// client feeds back as `if_seq_no`/`if_primary_term` to change the document only while it
+/// is still the one that was read.
 fn read_document(domain: &Domain, index_name: &str, id: &str) -> RtResponse {
     let Some(index) = domain.indexes.get(index_name) else {
         return index_not_found(index_name);
@@ -2149,6 +2533,8 @@ fn read_document(domain: &Domain, index_name: &str, id: &str) -> RtResponse {
             "_index": index_name,
             "_id": id,
             "_version": document.version,
+            "_seq_no": document.seq_no,
+            "_primary_term": document.primary_term,
             "found": true,
             "_source": document.source,
         })),
@@ -2172,25 +2558,24 @@ fn document_write(
     if !matches!(request.method, "POST" | "PUT") {
         return wrong_method(request, "POST, PUT");
     }
-    // A write that may not replace is refused when the index already holds the id, with
-    // the version the document is at — what makes `_create` (and `op_type=create`) a
-    // create rather than an upsert.
-    if creates == Creates::Only {
-        if let Some(version) = id
-            .filter(|id| !id.is_empty())
-            .and_then(|id| domain.indexes.get(index_name)?.documents.get(id))
-            .map(|document| document.version)
-        {
-            let id = id.unwrap_or_default();
-            return error(
-                409,
-                VERSION_CONFLICT_ENGINE_EXCEPTION,
-                &format!(
-                    "[{id}]: version conflict, document already exists (current version \
-                     [{version}])"
-                ),
-            );
-        }
+    // A write addressed to an ALIAS lands in the index that alias is the write index of,
+    // which is what makes a write alias the address a producer keeps while the index
+    // behind it is rotated.
+    let index_name = match write_index(domain, index_name) {
+        Ok(index_name) => index_name,
+        Err(refusal) => return refusal.response(),
+    };
+    let index_name = index_name.as_str();
+    // The two conditions a write is held to before anything is stored: the create-only
+    // one `_create` asks for, and the compare-and-set a conditional write performs.
+    if let Some(refusal) = write_conflict(
+        domain,
+        index_name,
+        id,
+        creates,
+        requested_revision(request),
+    ) {
+        return refusal.response();
     }
     let address = domain.arn.clone();
     // "pipeline: The pipeline ID for preprocessing documents": a write naming one is
@@ -2218,12 +2603,10 @@ fn document_write(
     // the wire is judged exactly as a producer's delivery is.
     match ingest::index_into(domain, &write, request.identity) {
         Ok(indexed) => {
-            let version = domain
-                .indexes
-                .get(&indexed.index_name)
-                .and_then(|index| index.documents.get(&indexed.document_id))
-                .map_or(1, |document| document.version);
-            let created = version == 1;
+            let Some(written) = written_document(domain, &indexed) else {
+                return unreadable_write(&indexed).response();
+            };
+            let created = written.version == 1;
             // The write really happened, and how long it took is what the index's own
             // indexing slow-log threshold is compared against.
             request.record_served(
@@ -2240,9 +2623,11 @@ fn document_write(
                 &json!({
                     "_index": indexed.index_name,
                     "_id": indexed.document_id,
-                    "_version": version,
+                    "_version": written.version,
                     "result": if created { "created" } else { "updated" },
                     "_shards": write_shards(domain, &indexed.index_name),
+                    "_seq_no": written.seq_no,
+                    "_primary_term": written.primary_term,
                 }),
             )
         }
@@ -2257,6 +2642,83 @@ fn document_write(
     }
 }
 
+/// The document a write LANDED as, read back out of the index it landed in: the revision
+/// the write left it at, which is what the answer reports.
+///
+/// Read from the store rather than carried out of the write path, because the store is
+/// where the document's revision lives: an answer computed from anything else could report
+/// a revision the index does not hold. `None` is a store that does not hold what the write
+/// path reported storing — a state nothing here can produce — and is answered as the
+/// failure it is rather than with an invented revision.
+fn written_document(domain: &Domain, indexed: &ingest::Indexed) -> Option<ingest::IndexedDocument> {
+    domain
+        .indexes
+        .get(&indexed.index_name)
+        .and_then(|index| index.documents.get(&indexed.document_id))
+        .cloned()
+}
+
+/// The refusal for a write the store took and a read back could not find: nothing can be
+/// reported about a document the cluster does not hold, so the failure is stated instead of
+/// a revision being made up for it.
+fn unreadable_write(indexed: &ingest::Indexed) -> Refusal {
+    ::tracing::error!(
+        index = %indexed.index_name,
+        document = %indexed.document_id,
+        "a document the data-plane write path stored could not be read back"
+    );
+    Refusal {
+        status: 500,
+        error_type: ILLEGAL_STATE_EXCEPTION.to_string(),
+        reason: format!(
+            "[{}]: the document was not readable in index [{}] after it was written",
+            indexed.document_id, indexed.index_name
+        ),
+    }
+}
+
+/// The engine's error type for a cluster state its own code holds to be impossible.
+const ILLEGAL_STATE_EXCEPTION: &str = "illegal_state_exception";
+
+/// The index a write addressed to `named` LANDS in: the index of that name — which a write
+/// may create — or the one index an alias of that name is writable through.
+///
+/// The ONE resolution every write goes through, so a document written to a write alias and
+/// one written to the index behind it land in the same place. A name no index carries and no
+/// alias points at is the index the write creates, which is what `action.auto_create_index`
+/// decides inside the write path itself.
+fn write_index(domain: &Domain, named: &str) -> Result<String, Refusal> {
+    match domain.write_index(named) {
+        Ok(index_name) => Ok(index_name),
+        // Nothing of that name exists yet: the write names the index it would create.
+        Err(pointed) if pointed.is_empty() => Ok(named.to_string()),
+        // Several indexes carry the alias and none of them is its write index, so the
+        // write has no one place to land.
+        Err(_) => Err(Refusal::of_illegal_argument(&format!(
+            "no write index is defined for alias [{named}]. The write index may be explicitly \
+             disabled using is_write_index=false or the alias points to multiple indices \
+             without one being designated as a write index"
+        ))),
+    }
+}
+
+/// The index a READ of one document addressed to `named` reads: the index of that name, or
+/// the index an alias of that name points at that holds the document — the first of them
+/// in name order where several do, since a read of an alias reads the indexes it names.
+fn read_index_name(domain: &Domain, named: &str, id: &str) -> Option<String> {
+    let resolved = domain.resolved_indexes(named);
+    resolved
+        .iter()
+        .find(|name| {
+            domain
+                .indexes
+                .get(*name)
+                .is_some_and(|index| index.documents.contains_key(id))
+        })
+        .or_else(|| resolved.iter().next())
+        .cloned()
+}
+
 /// The document bytes a write naming an ingest PIPELINE stores: the request's own source
 /// with every processor that pipeline declares applied, in the order it declares them.
 fn processed_source(
@@ -2264,11 +2726,6 @@ fn processed_source(
     request: &Request<'_>,
     id: &str,
 ) -> Result<Vec<u8>, Box<RtResponse>> {
-    let Some(pipeline) = domain.ingest_pipelines.get(id) else {
-        return Err(Box::new(pipeline_missing(id)));
-    };
-    let processors = pipeline::parse(&pipeline.definition)
-        .map_err(|failed| Box::new(error(400, failed.error_type, &failed.reason)))?;
     let mut source = match request.json() {
         Ok(Some(source)) if source.is_object() => source,
         Ok(_) => {
@@ -2280,11 +2737,8 @@ fn processed_source(
         }
         Err(refusal) => return Err(refusal),
     };
-    for processor in &processors {
-        processor
-            .apply(&mut source)
-            .map_err(|failed| Box::new(error(400, failed.error_type, &failed.reason)))?;
-    }
+    apply_pipeline(domain, id, &mut source)
+        .map_err(|refusal| Box::new(refusal.response()))?;
     ::serde_json::to_vec(&source).map_err(|failed| {
         Box::new(error(
             400,
@@ -2296,17 +2750,16 @@ fn processed_source(
 
 /// The `_shards` summary a write answers with, computed from the index's own replica
 /// setting and the domain's node count: every copy the cluster asked for is `total`, and
-/// the ones a node can hold — the primary, plus the replicas only a second node can carry
-/// — are `successful`.
+/// the ones a node can hold — the primary, plus the replicas the other nodes can carry —
+/// are `successful`.
 fn write_shards(domain: &Domain, index_name: &str) -> Value {
     let copies = domain
         .indexes
         .get(index_name)
-        .and_then(|index| setting_number(&index.schema, "number_of_replicas"))
+        .and_then(|index| setting_number(&index.schema, NUMBER_OF_REPLICAS))
         .unwrap_or(1)
         .clamp(0, MAX_SHARDS_PER_INDEX);
-    let data_nodes = domain.cluster_config.instance_count.unwrap_or(1).max(1);
-    let assigned = if data_nodes > 1 { copies } else { 0 };
+    let assigned = assigned_replicas(copies, data_nodes(domain));
     json!({
         "total": copies.saturating_add(1),
         "successful": assigned.saturating_add(1),
@@ -2326,27 +2779,33 @@ fn write_shards(domain: &Domain, index_name: &str) -> Value {
 fn refresh(domain: &Domain, request: &Request<'_>, index_name: Option<&str>) -> RtResponse {
     let named: Vec<&state::Index> = match index_name {
         None => domain.indexes.values().collect(),
-        Some(name) => match domain.indexes.get(name) {
-            Some(index) => vec![index],
-            None => return index_not_found(name),
-        },
+        Some(name) => {
+            let resolved = domain.resolved_indexes(name);
+            if resolved.is_empty() {
+                return index_not_found(name);
+            }
+            resolved
+                .iter()
+                .filter_map(|name| domain.indexes.get(name))
+                .collect()
+        }
     };
     let _ = request;
-    let data_nodes = domain.cluster_config.instance_count.unwrap_or(1).max(1);
+    let nodes = data_nodes(domain);
     let mut total = 0_i64;
     let mut successful = 0_i64;
     for index in named {
         // Both come from the index's own settings, which a caller wrote, so both are
         // clamped before they are multiplied out.
-        let shards = setting_number(&index.schema, "number_of_shards")
+        let shards = setting_number(&index.schema, NUMBER_OF_SHARDS)
             .unwrap_or(1)
             .clamp(1, MAX_SHARDS_PER_INDEX);
-        let copies = setting_number(&index.schema, "number_of_replicas")
+        let copies = setting_number(&index.schema, NUMBER_OF_REPLICAS)
             .unwrap_or(1)
             .clamp(0, MAX_SHARDS_PER_INDEX);
-        // A replica copy needs a node other than the one holding its primary, so on a
-        // single-node cluster only the primaries are refreshed.
-        let assigned = if data_nodes > 1 { copies } else { 0 };
+        // A replica copy needs a node other than the one holding its primary, so only the
+        // copies the cluster's other nodes can carry are refreshed.
+        let assigned = assigned_replicas(copies, nodes);
         total = total.saturating_add(shards.saturating_mul(copies.saturating_add(1)));
         successful = successful.saturating_add(shards.saturating_mul(assigned.saturating_add(1)));
     }
@@ -2491,7 +2950,7 @@ fn selected_documents(
     let patterns = named_patterns(index_name)?;
     // A `BTreeSet` of names, so an index named twice is scanned once and the order is the
     // store's own: two reads of one domain report the same documents in the same order.
-    let mut named = ::std::collections::BTreeSet::new();
+    let mut named: BTreeSet<&str> = BTreeSet::new();
     // The remote patterns, de-duplicated the same way, and resolved against what the
     // remote clusters answered rather than against this domain's own indexes.
     let mut remote = BTreeSet::new();
@@ -2539,8 +2998,8 @@ fn selected_documents(
     // id order — so one query over a local and a remote index reports a stable sequence.
     // Each index's documents are judged by THAT index's own analysis chain, which is what
     // its own settings and mappings compose.
-    for name in named {
-        let Some(index) = domain.indexes.get(name) else {
+    for name in &named {
+        let Some(index) = domain.indexes.get(*name) else {
             continue;
         };
         let terms = Terms::of(Some(&index.schema), files, &analyzed, &budget)?;
@@ -2649,6 +3108,10 @@ impl Scan {
 /// another chain: the request is refused with what could not be built, exactly as the
 /// analyze API refuses it.
 struct Terms<'a> {
+    /// What the index being scanned MAPS, which is what decides where a field takes its
+    /// values from ([`state::analysis::IndexAnalysis::source_field`]) and whether they are
+    /// analyzed at all.
+    analysis: state::analysis::IndexAnalysis,
     /// The field -> the name of the chain the DOCUMENT's text went through.
     indexing: BTreeMap<String, String>,
     /// The chains those names stand for, each built once.
@@ -2733,11 +3196,18 @@ impl<'a> Terms<'a> {
             }
         }
         Ok(Self {
+            analysis,
             indexing,
             chains,
             queries,
             spent,
         })
+    }
+
+    /// The path in a document's source the field `field` takes its values from: its own,
+    /// or — for a MULTI-FIELD — the field it is another indexing of.
+    fn source_field(&self, field: &str) -> String {
+        self.analysis.source_field(field)
     }
 
     /// The terms the QUERY's text produces for `field`, analyzed once when this index's
@@ -2842,9 +3312,11 @@ impl Selector {
     fn matches(&self, id: &str, source: &Value, terms: &Terms) -> bool {
         match self {
             Self::All => true,
-            Self::Equals { field, values } => field_values(source, field)
-                .iter()
-                .any(|held| values.iter().any(|wanted| wanted == held)),
+            Self::Equals { field, values } => {
+                field_values(source, &terms.source_field(field))
+                    .iter()
+                    .any(|held| values.iter().any(|wanted| wanted == held))
+            }
             Self::Analyzed {
                 field,
                 text,
@@ -2852,15 +3324,16 @@ impl Selector {
             } => {
                 // A field the index holds its values WHOLE for is not analyzed, so the
                 // clause is the equality a `term` on it would be.
+                let held_at = terms.source_field(field);
                 let Some(wanted) = terms.query(field, text) else {
-                    return field_values(source, field).contains(text);
+                    return field_values(source, &held_at).contains(text);
                 };
                 if wanted.is_empty() {
                     // Every term of the query was dropped by the chain — a text of nothing
                     // but stop words — so there is no term left for a document to carry.
                     return false;
                 }
-                field_values(source, field).iter().any(|held| {
+                field_values(source, &held_at).iter().any(|held| {
                     let held = terms.document(field, held).unwrap_or_default();
                     if *phrase {
                         held.windows(wanted.len()).any(|run| run == wanted)
@@ -3200,6 +3673,39 @@ fn write_template(
         .get(if legacy { "order" } else { "priority" })
         .and_then(Value::as_i64)
         .unwrap_or(0);
+    // "Multiple index templates may not match during index creation": two COMPOSABLE
+    // templates whose patterns overlap at the same priority leave the cluster unable to
+    // say which one an index would be created from, so the write is refused rather than
+    // stored. A legacy template composes with its peers instead of displacing them, which
+    // is why the rule is the composable form's.
+    if !legacy {
+        if let Some(refusal) = equal_priority_overlap(domain, name, &index_patterns, priority) {
+            return refusal;
+        }
+    }
+    // "composed_of: an ordered list of component template names": the components an index
+    // created from this template carries, resolved where the index is minted.
+    let composed_of: Vec<String> = definition
+        .get("composed_of")
+        .and_then(Value::as_array)
+        .map(|named| {
+            named
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(missing) = composed_of
+        .iter()
+        .find(|named| !domain.component_templates.contains_key(*named))
+    {
+        return error(
+            400,
+            ingest::ILLEGAL_ARGUMENT_EXCEPTION,
+            &format!("index template [{name}] specifies component templates [{missing}] that do not exist"),
+        );
+    }
     let schema = state::document_from_json(&Value::Object(schema));
     let values = state::index_schema_values(&schema);
     if values > state::INDEX_SCHEMA_QUOTA {
@@ -3215,11 +3721,68 @@ fn write_template(
             name: name.to_string(),
             index_patterns,
             priority,
+            composed_of,
             schema,
             definition,
         },
     );
     ok(&json!({ "acknowledged": true }))
+}
+
+/// The refusal a composable template earns when another template of the SAME priority
+/// already matches an index name it would match, or `None` when none does.
+///
+/// Two such templates leave index creation with no template to prefer — the priority is
+/// what decides between matching templates — so the engine refuses the second one, naming
+/// the templates it overlaps and the patterns each carries.
+fn equal_priority_overlap(
+    domain: &Domain,
+    name: &str,
+    index_patterns: &[String],
+    priority: i64,
+) -> Option<RtResponse> {
+    let overlaps: Vec<&IndexTemplate> = domain
+        .index_templates
+        .values()
+        .filter(|held| held.name != name && held.priority == priority)
+        .filter(|held| {
+            held.index_patterns.iter().any(|theirs| {
+                index_patterns.iter().any(|ours| overlapping(ours, theirs))
+            })
+        })
+        .collect();
+    if overlaps.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = overlaps.iter().map(|held| held.name.as_str()).collect();
+    let patterns: Vec<String> = overlaps
+        .iter()
+        .map(|held| format!("{} => [{}]", held.name, held.index_patterns.join(", ")))
+        .collect();
+    Some(error(
+        400,
+        ingest::ILLEGAL_ARGUMENT_EXCEPTION,
+        &format!(
+            "index template [{name}] has index patterns [{}] matching patterns from existing \
+             templates [{}] with patterns ({}) that have the same priority [{priority}], \
+             multiple index templates may not match during index creation, please use a \
+             different priority",
+            index_patterns.join(", "),
+            names.join(","),
+            patterns.join(",")
+        ),
+    ))
+}
+
+/// Whether two index patterns can match ONE index name: the same pattern, or one whose
+/// wildcards cover the other.
+///
+/// Read both ways round, since either may be the one carrying the wildcards, and through
+/// the same wildcard matching every other pattern of this crate is read by — so an overlap
+/// is decided by the matching rule itself rather than by a second reading of `*` and `?`.
+fn overlapping(left: &str, right: &str) -> bool {
+    ::service_common::iam_authorization::wildcard_match(left, right, true)
+        || ::service_common::iam_authorization::wildcard_match(right, left, true)
 }
 
 /// A request on the security plugin's role API.

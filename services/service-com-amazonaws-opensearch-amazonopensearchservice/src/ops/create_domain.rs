@@ -530,8 +530,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             security_roles: BTreeMap::new(),
             security_role_mappings: BTreeMap::new(),
             // A new domain holds no index template either; the domain's own template API
-            // is what writes one.
+            // is what writes one, and no component template for one to be composed of.
             index_templates: BTreeMap::new(),
+            component_templates: BTreeMap::new(),
             // A new domain's cluster holds no setting of its own, no ingest pipeline and no
             // index-management policy: the cluster's own settings, pipeline and policy APIs
             // are what write them.

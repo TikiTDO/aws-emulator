@@ -43,17 +43,20 @@ struct Row {
 
 /// The table. Every row is sent as the whole body of one `PUT /{index}/_settings`, and the
 /// rows apply in order, so a later row reads the settings the earlier ones left.
+///
+/// Every expectation is the setting's TEXT, whatever JSON type the body wrote it as: the
+/// engine holds a setting as text and the settings API reports it so.
 fn rows() -> Vec<Row> {
     vec![
         Row {
             case: "a flat dotted name carrying the index prefix",
             body: json!({ "index.number_of_replicas": 2 }),
-            reported: vec![("number_of_replicas", Some(json!(2)))],
+            reported: vec![("number_of_replicas", Some(json!("2")))],
         },
         Row {
             case: "the same setting without the index prefix",
             body: json!({ "number_of_replicas": 3 }),
-            reported: vec![("number_of_replicas", Some(json!(3)))],
+            reported: vec![("number_of_replicas", Some(json!("3")))],
         },
         Row {
             case: "a nested section under index",
@@ -61,13 +64,13 @@ fn rows() -> Vec<Row> {
             reported: vec![
                 ("refresh_interval", Some(json!("30s"))),
                 // A setting the body does not name is left exactly as it was.
-                ("number_of_replicas", Some(json!(3))),
+                ("number_of_replicas", Some(json!("3"))),
             ],
         },
         Row {
             case: "a boolean setting",
             body: json!({ "index": { "blocks": { "read_only": true } } }),
-            reported: vec![("blocks.read_only", Some(json!(true)))],
+            reported: vec![("blocks.read_only", Some(json!("true")))],
         },
         Row {
             case: "the slow-log thresholds, written as deeply nested sections",
@@ -112,8 +115,8 @@ fn rows() -> Vec<Row> {
                 "refresh_interval": "60s",
             }),
             reported: vec![
-                ("number_of_replicas", Some(json!(1))),
-                ("max_result_window", Some(json!(5000))),
+                ("number_of_replicas", Some(json!("1"))),
+                ("max_result_window", Some(json!("5000"))),
                 ("refresh_interval", Some(json!("60s"))),
             ],
         },
@@ -123,13 +126,13 @@ fn rows() -> Vec<Row> {
             reported: vec![
                 ("refresh_interval", None),
                 // The reset takes out the setting it names and nothing beside it.
-                ("number_of_replicas", Some(json!(1))),
+                ("number_of_replicas", Some(json!("1"))),
             ],
         },
         Row {
             case: "a body naming no setting at all",
             body: json!({}),
-            reported: vec![("number_of_replicas", Some(json!(1)))],
+            reported: vec![("number_of_replicas", Some(json!("1")))],
         },
     ]
 }
@@ -252,7 +255,7 @@ async fn an_index_settings_put_writes_the_dynamic_settings_and_the_get_reports_t
         // have, and so is the name the cluster fills in itself.
         assert_eq!(
             setting(&held, "number_of_shards"),
-            Some(json!(2)),
+            Some(json!("2")),
             "case {case}: expected the created shard count to survive the update, got {held:?}"
         );
         assert_eq!(
@@ -283,7 +286,7 @@ async fn an_index_settings_put_writes_the_dynamic_settings_and_the_get_reports_t
     .await;
     assert_eq!(
         index.body[INDEX]["settings"]["index"]["number_of_replicas"],
-        json!(1),
+        json!("1"),
         "case \"GET /{INDEX}\": expected the settings the update left, got {:?}",
         index.body
     );
@@ -522,13 +525,13 @@ async fn a_setting_only_a_create_may_choose_is_refused_on_an_index_that_exists()
                 // carried beside the static one.
                 assert_eq!(
                     setting(&held, "number_of_shards"),
-                    Some(json!(2)),
+                    Some(json!("2")),
                     "case {}: expected the shard count to be unchanged, got {held:?}",
                     row.case
                 );
                 assert_ne!(
                     setting(&held, "number_of_replicas"),
-                    Some(json!(2)),
+                    Some(json!("2")),
                     "case {}: a refused update must store none of its settings, got {held:?}",
                     row.case
                 );

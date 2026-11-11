@@ -111,6 +111,8 @@ mod domain_maintenance;
 mod domain_nodes;
 #[path = "all/domain_package_listing_cursor.rs"]
 mod domain_package_listing_cursor;
+#[path = "all/domain_rest_bulk_and_index_apis.rs"]
+mod domain_rest_bulk_and_index_apis;
 #[path = "all/domain_rest_data_plane.rs"]
 mod domain_rest_data_plane;
 #[path = "all/domain_server_defaults.rs"]

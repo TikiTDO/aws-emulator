@@ -314,6 +314,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // A fresh index holds no document: the data-plane write into it is what
                 // puts one there (`crate::state::ingest`).
                 documents: ::std::collections::BTreeMap::new(),
+                // And no alias points at it until an alias action makes one.
+                aliases: ::std::collections::BTreeMap::new(),
+                next_seq_no: 0,
             },
         );
 

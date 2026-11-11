@@ -33,7 +33,7 @@ use super::{
 ///
 /// Each name is the setting's own name below `index.`, which is the form a request's names
 /// are canonicalised to ([`crate::state::index_setting_name`]).
-const STATIC_INDEX_SETTINGS: [&str; 7] = [
+const STATIC_INDEX_SETTINGS: [&str; 9] = [
     "number_of_shards",
     "number_of_routing_shards",
     "routing_partition_size",
@@ -41,6 +41,10 @@ const STATIC_INDEX_SETTINGS: [&str; 7] = [
     "shard.check_on_startup",
     "sort.field",
     "sort.order",
+    "store.type",
+    // The analysis chain is built when the index is created, so the whole section — every
+    // analyzer, tokenizer and filter under it — may only change on a closed index.
+    "analysis",
 ];
 
 /// The two members the cluster fills in itself for every index, which a settings report
@@ -51,18 +55,36 @@ const PROVIDED_NAME: &str = "provided_name";
 /// The second of them ([`PROVIDED_NAME`]).
 const UUID: &str = "uuid";
 
+/// One setting's value as a report carries it: the TEXT it is held as.
+///
+/// "Settings are returned as strings": the engine keeps a setting as the text it was
+/// written with however a request spelled it, so a number and a boolean are reported as
+/// their own spelling and a list as the list of its texts.
+fn as_text(value: Value) -> Value {
+    match value {
+        Value::String(_) | Value::Null | Value::Object(_) => value,
+        Value::Array(elements) => Value::Array(elements.into_iter().map(as_text).collect()),
+        other => json!(other.to_string()),
+    }
+}
+
 /// `GET`/`PUT /{index}/_settings`, and the same addressed to the whole cluster.
 ///
 /// `named` is the index patterns the path named, where it named any: a request that names
 /// none is about every index the cluster holds, which is what `/_settings` addresses.
+///
+/// `filter` is the setting-name filter a READ may narrow the report with
+/// (`GET /{index}/_settings/{filter}`): the comma-separated names, each of which may carry
+/// the `*` and `?` wildcards, of the settings to report.
 pub(super) fn index_settings_request(
     domain: &mut Domain,
     request: &Request<'_>,
     named: Option<&str>,
+    filter: Option<&str>,
 ) -> RtResponse {
     match request.method {
-        "GET" => guarded(domain, request, fgac::ACTION_GET_INDEX_SETTINGS, |domain| {
-            reported(domain, request, named)
+        "GET" | "HEAD" => guarded(domain, request, fgac::ACTION_GET_INDEX_SETTINGS, |domain| {
+            reported(domain, request, named, filter)
         }),
         "PUT" => guarded(
             domain,
@@ -70,13 +92,18 @@ pub(super) fn index_settings_request(
             fgac::ACTION_UPDATE_INDEX_SETTINGS,
             |domain| updated(domain, request, named),
         ),
-        _ => wrong_method(request, "GET, PUT"),
+        _ => wrong_method(request, "GET, HEAD, PUT"),
     }
 }
 
 /// The settings each index the request names holds, as the engine reports them: one entry
 /// per index, each carrying its settings under the `index` section they are named below.
-fn reported(domain: &Domain, request: &Request<'_>, named: Option<&str>) -> RtResponse {
+fn reported(
+    domain: &Domain,
+    request: &Request<'_>,
+    named: Option<&str>,
+    filter: Option<&str>,
+) -> RtResponse {
     let indexes = match resolved_indexes(domain, named) {
         Ok(indexes) => indexes,
         Err(refusal) => return *refusal,
@@ -90,7 +117,8 @@ fn reported(domain: &Domain, request: &Request<'_>, named: Option<&str>) -> RtRe
             name.to_string(),
             json!({
                 state::SCHEMA_SETTINGS: {
-                    state::SETTINGS_INDEX_SECTION: settings_view(domain, index, request),
+                    state::SETTINGS_INDEX_SECTION:
+                        settings_view(domain, index, request, filter),
                 }
             }),
         );
@@ -102,10 +130,15 @@ fn reported(domain: &Domain, request: &Request<'_>, named: Option<&str>) -> RtRe
 /// members the cluster fills in itself, in the EXPANDED sections their dotted names name —
 /// or flat for a request asking for `flat_settings`, which is the one reporting rule the
 /// cluster's own settings are reported by ([`reported_settings`]).
+///
+/// `filter` narrows the report to the names it admits. A setting is named either bare or
+/// with the `index.` prefix its full name carries, so a filter is matched against both
+/// spellings — which is what lets `index.number_of_*` select the shard counts.
 pub(super) fn settings_view(
     domain: &Domain,
     index: &state::Index,
     request: &Request<'_>,
+    filter: Option<&str>,
 ) -> Value {
     let held = state::index_settings(&index.schema);
     let mut flattened: Vec<WrittenSetting> = Vec::new();
@@ -117,13 +150,25 @@ pub(super) fn settings_view(
     }
     let mut settings: Vec<(&str, Value)> = flattened
         .iter()
-        .filter_map(|(name, value)| value.clone().map(|value| (name.as_str(), value)))
+        .filter_map(|(name, value)| value.clone().map(|value| (name.as_str(), as_text(value))))
         .collect();
     settings.push((PROVIDED_NAME, json!(index.index_name)));
     settings.push((
         UUID,
         json!(stable_uuid(&format!("{}/{}", domain.arn, index.index_name))),
     ));
+    if let Some(filter) = filter {
+        let patterns: Vec<&str> = filter.split(',').filter(|name| !name.is_empty()).collect();
+        settings.retain(|(name, _)| {
+            patterns.iter().any(|pattern| {
+                let matched = |value: &str| {
+                    ::service_common::iam_authorization::wildcard_match(pattern, value, true)
+                };
+                matched(name)
+                    || matched(&format!("{}.{name}", state::SETTINGS_INDEX_SECTION))
+            })
+        });
+    }
     reported_settings(settings, request)
 }
 
@@ -239,7 +284,7 @@ fn non_dynamic_refusal(
     let refused: Vec<String> = updates
         .iter()
         .map(|(name, _)| name)
-        .filter(|name| STATIC_INDEX_SETTINGS.contains(&name.as_str()))
+        .filter(|name| is_static(name))
         .map(|name| format!("{}.{name}", state::SETTINGS_INDEX_SECTION))
         .collect();
     if refused.is_empty() {
@@ -258,4 +303,15 @@ fn non_dynamic_refusal(
             open.join(", ")
         ),
     ))
+}
+
+/// Whether `name` names a setting only a create may choose: one of
+/// [`STATIC_INDEX_SETTINGS`], or a setting NESTED under one of them — every analyzer,
+/// tokenizer and filter under `analysis` is part of the section the index was built with,
+/// so each is as settled as the section itself.
+fn is_static(name: &str) -> bool {
+    STATIC_INDEX_SETTINGS.iter().any(|settled| {
+        name == *settled
+            || (name.starts_with(settled) && name.as_bytes().get(settled.len()) == Some(&b'.'))
+    })
 }

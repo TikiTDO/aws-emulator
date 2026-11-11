@@ -185,6 +185,15 @@ impl Emulator {
         }
     }
 
+    /// The same dispatch, answering the body as the BYTES it was served as — for a surface
+    /// whose answer is not JSON, which [`Self::dispatch`] can only report as absent.
+    pub(crate) async fn dispatch_bytes(&self, request: http::Request<Bytes>) -> (u16, String) {
+        let response = self.router.dispatch(request).await;
+        let status = response.status().as_u16();
+        let bytes = response.into_body();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     pub(crate) async fn create(&self, body: Value) -> Answer {
         self.call("POST", &format!("{PREFIX}/opensearch/domain"), Some(body))
             .await

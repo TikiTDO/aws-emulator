@@ -19,6 +19,19 @@ pub const INDEX_STATUS_CREATED: &str = "CREATED";
 /// from growing this process's state without end.
 pub const INDEX_QUOTA: usize = 100;
 
+/// The reserved name a request addresses EVERY index of the cluster by, which is what a
+/// read naming it resolves to ([`Domain::resolved_indexes`]).
+pub const ALL_INDEXES: &str = "_all";
+
+/// The character a RESERVED top-level path segment of the engine's REST surface begins
+/// with — `_bulk`, `_search`, `_cat`, … — which no index name may begin with
+/// ([`INDEX_NAME_FORBIDDEN_FIRST`]).
+///
+/// What keeps a reserved endpoint from being read as an index name: a first segment
+/// carrying it names an API, so a request on one the surface does not serve is answered as
+/// an unserved path rather than as a request about an index nothing could hold.
+pub const RESERVED_SEGMENT_PREFIX: char = '_';
+
 /// `IndexName`'s `@pattern`, as the model declares it
 /// (`smithy_query(query="shape",shape="IndexName")`) — the expression a refusal of a
 /// name outside it quotes, so the clause names the rule the model carries rather than a
@@ -87,6 +100,76 @@ pub struct Index {
     /// write into an index, and bounded by [`ingest::INDEX_DOCUMENT_QUOTA`]; deleting
     /// the index or its domain releases them.
     pub documents: BTreeMap<String, ingest::IndexedDocument>,
+    /// The aliases that point at this index, keyed by the alias name — an alias points at
+    /// one index at most once, so the alias's name IS the key. Written by the alias
+    /// actions API and reported beside the index's mappings and settings; deleting the
+    /// index releases its aliases with it.
+    pub aliases: BTreeMap<String, IndexAlias>,
+    /// The `_seq_no` the NEXT write into this index takes.
+    ///
+    /// "The sequence number assigned to the document for the indexing operation":
+    /// every write to an index — an index, an update or a delete — takes the next number
+    /// of the shard it lands on, counted from 0, and a reader feeds the pair back as
+    /// `if_seq_no`/`if_primary_term` to write only if the document has not moved since.
+    /// Counted per index, which is the one shard this emulator keeps a document on.
+    pub next_seq_no: u64,
+}
+
+impl Index {
+    /// The `_seq_no` this write takes, moving the index's counter on: every write to an
+    /// index takes the next number, so two writes never report one sequence number and a
+    /// conditional write can tell the document it read from the one it would replace.
+    pub fn take_seq_no(&mut self) -> u64 {
+        let taken = self.next_seq_no;
+        self.next_seq_no = self.next_seq_no.saturating_add(1);
+        taken
+    }
+
+    /// The `_seq_no` and `_primary_term` of the document `id`, or `None` where the index
+    /// holds no such document — the pair a conditional write is checked against.
+    #[must_use]
+    pub fn document_revision(&self, id: &str) -> Option<(u64, u64)> {
+        self.documents
+            .get(id)
+            .map(|document| (document.seq_no, document.primary_term))
+    }
+}
+
+/// One ALIAS of an index: "a virtual index name that can point to one or more indexes".
+///
+/// Held on the index the alias points AT, because that is what the alias is a name for:
+/// the index's own record carries it, so deleting the index takes its aliases with it and
+/// no second map can disagree about which indexes an alias names.
+#[derive(Debug, Clone)]
+pub struct IndexAlias {
+    /// The alias's own name, which is how a request addresses it.
+    pub alias: String,
+    /// `is_write_index`: whether a write addressed to the alias lands in THIS index.
+    /// `None` where the action named none, which is what makes a single-index alias
+    /// writable and a multi-index one not.
+    pub is_write_index: Option<bool>,
+    /// The alias action's own members as they were written (`filter`, `routing`, …),
+    /// which the alias API reports back.
+    pub definition: ::serde_json::Value,
+}
+
+/// One COMPONENT TEMPLATE of a domain: "a building block for constructing index templates
+/// that specifies index mappings, settings, and aliases".
+///
+/// A component template configures no index by itself; an index template REFERENCES it
+/// through `composed_of`, and the index that template creates carries what the components
+/// it names declare, with the template's own section merged on top
+/// ([`Domain::templated_schema`]).
+#[derive(Debug, Clone)]
+pub struct ComponentTemplate {
+    /// The component's name — unique on the domain, so the name IS the key.
+    pub name: String,
+    /// The index configuration it declares, in the same `{"mappings": …, "settings": …}`
+    /// form a schema is stored in ([`Index::schema`]).
+    pub schema: ::aws_smithy_types::Document,
+    /// The component document as it was written, which the component template API reports
+    /// back.
+    pub definition: ::serde_json::Value,
 }
 
 /// One index TEMPLATE of a domain: the schema every index whose name matches one of its
@@ -106,6 +189,11 @@ pub struct IndexTemplate {
     /// `priority`: of two templates matching one index name the HIGHER priority wins, and
     /// a template naming none has priority 0.
     pub priority: i64,
+    /// `composed_of`: the component templates this one is built from, in the order it
+    /// names them — "the component templates are merged in the order specified", so a
+    /// later component's section wins over an earlier one's, and the template's own
+    /// section wins over all of them ([`Domain::templated_schema`]).
+    pub composed_of: Vec<String>,
     /// The schema an index this template applies to is created with, in the same
     /// `{"mappings": …, "settings": …}` form a schema is stored in
     /// ([`Index::schema`]), so a templated index and one a client created carry one shape.

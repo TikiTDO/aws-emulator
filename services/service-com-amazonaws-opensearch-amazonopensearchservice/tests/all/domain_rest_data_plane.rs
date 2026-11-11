@@ -192,6 +192,19 @@ pub(crate) async fn dispatch_rest(
     body: Option<Value>,
 ) -> Answer {
     let payload = body.map(|value| value.to_string()).unwrap_or_default();
+    rest_payload(emulator, access_key_id, host, method, path, payload).await
+}
+
+/// The same request carrying a body that is not one JSON document — the newline-delimited
+/// stream the bulk API takes, say — as the bytes the client sent.
+pub(crate) async fn rest_payload(
+    emulator: &Emulator,
+    access_key_id: &str,
+    host: &str,
+    method: &str,
+    path: &str,
+    payload: String,
+) -> Answer {
     let request = http::Request::builder()
         .method(method)
         .uri(path)

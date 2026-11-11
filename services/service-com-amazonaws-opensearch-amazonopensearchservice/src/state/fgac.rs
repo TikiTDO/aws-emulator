@@ -67,6 +67,38 @@ pub const ACTION_DELETE_ISM_POLICY: &str = "cluster:admin/opendistro/ism/policy/
 /// The action a write of one document asks for.
 pub const ACTION_INDEX_DOCUMENT: &str = "indices:data/write/index";
 
+/// The action a BULK write asks for — the one action the bulk API itself is registered
+/// under, beside the per-item action each of its items asks for.
+pub const ACTION_BULK: &str = "indices:data/write/bulk";
+
+/// The action adding or removing an alias asks for.
+pub const ACTION_ALIASES: &str = "indices:admin/aliases";
+
+/// The action reading an index's aliases asks for.
+pub const ACTION_GET_ALIASES: &str = "indices:admin/aliases/get";
+
+/// The action reading an index's own settings asks for.
+pub const ACTION_GET_SETTINGS: &str = "indices:monitor/settings/get";
+
+/// The action updating an index's settings asks for.
+pub const ACTION_UPDATE_SETTINGS: &str = "indices:admin/settings/update";
+
+/// The action reading an index's field mappings asks for.
+pub const ACTION_GET_MAPPING: &str = "indices:admin/mappings/get";
+
+/// The action adding to those mappings asks for.
+pub const ACTION_PUT_MAPPING: &str = "indices:admin/mapping/put";
+
+/// The action the index listing of the `_cat` APIs asks for — the index statistics those
+/// rows report.
+pub const ACTION_INDICES_STATS: &str = "indices:monitor/stats";
+
+/// The action writing a component template asks for.
+pub const ACTION_PUT_COMPONENT_TEMPLATE: &str = "cluster:admin/component_template/put";
+
+/// The action reading one asks for.
+pub const ACTION_GET_COMPONENT_TEMPLATE: &str = "cluster:admin/component_template/get";
+
 /// The action a search asks for.
 pub const ACTION_SEARCH: &str = "indices:data/read/search";
 
