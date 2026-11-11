@@ -475,6 +475,13 @@ impl<Eng: Send + Sync + 'static> InvokeWithResponseStream<Eng> {
                 &region,
                 &resolved_config,
             )),
+            // What this invocation is metered by once it has run: the time the run took and
+            // the failure it came to (`crate::state::metrics`).
+            metrics: Some(crate::state::InvocationMetrics::new(
+                &*self.engine,
+                &function_name,
+                &resource,
+            )),
         };
         let kms_key_arn = resolved_config.kms_key_arn.clone();
             (
@@ -497,8 +504,16 @@ impl<Eng: Send + Sync + 'static> InvokeWithResponseStream<Eng> {
         // apply to the function as a whole" (`PutFunctionConcurrency`). The slot is held
         // until this invocation is answered, and the admission decides which kind of
         // environment serves it (`crate::state::execution_slot`).
-        let admitted = crate::state::admit_invocation(&state, &function_name, &qualifier, now)
-            .map_err(throttled)?;
+        // A request the pool had no room for is answered the modelled 429 and metered as one
+        // request the service throttled, exactly as on `Invoke` (`crate::state::metrics`).
+        let admitted = match crate::state::admit_invocation(&state, &function_name, &qualifier, now)
+        {
+            Ok(admitted) => admitted,
+            Err(refused) => {
+                crate::state::publish_throttle(&*self.engine, &function_name, &resource);
+                return Err(throttled(refused));
+            }
+        };
         invocation.initialization_type = admitted.initialization_type;
         let _slot = admitted.slot;
         // The invocation this call runs is the one its answer names, exactly as on `Invoke`.

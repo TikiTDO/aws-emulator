@@ -445,6 +445,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     &region,
                     &resolved_config,
                 )),
+                // What the run this delivery makes is metered by once it has run, carried on
+                // the invocation because the run happens off the response path
+                // (`crate::state::metrics`).
+                metrics: Some(crate::state::InvocationMetrics::new(
+                    &*self.engine,
+                    &function_name,
+                    &resource,
+                )),
             };
             record.queue_async_invocation(&version, &request_id, input.invoke_args, now);
             Some(invocation)

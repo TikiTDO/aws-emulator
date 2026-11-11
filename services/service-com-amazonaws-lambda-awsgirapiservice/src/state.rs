@@ -233,7 +233,7 @@ pub use capacity_provider::{
 /// handler still names a poller as `crate::state::…`.
 pub mod event_source_poller;
 pub mod metrics;
-pub use metrics::{invoked_resource, publish_invocation};
+pub use metrics::{invoked_resource, publish_invocation, publish_throttle, InvocationMetrics};
 pub mod sqs_poller;
 pub use sqs_poller::{batch_is_due, drive_sqs_pollers, poll_due, PollSession, POLL_INTERVAL};
 

@@ -433,6 +433,15 @@ pub struct Invocation {
     /// in which case the run's log is still its answer's log tail and simply reaches no log
     /// group.
     pub logs: Option<LogTarget>,
+    /// The AWS/Lambda series this invocation is metered on once it has RUN — what its run
+    /// took, and the failure it came to ([`super::metrics::InvocationMetrics`]) — or `None`
+    /// for a run metered nowhere.
+    ///
+    /// It is carried by the invocation rather than read at each caller, so that every path
+    /// that runs a handler meters the run the same way: a synchronous call, an event
+    /// delivered off the response path, a response-streaming call and a function URL
+    /// request alike.
+    pub metrics: Option<super::metrics::InvocationMetrics>,
 }
 
 /// Why an invocation ran nothing at all.
@@ -557,6 +566,10 @@ pub async fn run_invocation(invocation: Invocation) -> Result<Invoked, Unrunnabl
             "as many runs of this emulator are outstanding past their budget as it keeps \
              threads for, so this invocation was throttled rather than started"
         );
+        // The caller is told its request was throttled, so the request is metered as one
+        // the service throttled (`super::metrics`), exactly as an invocation the function's
+        // own concurrency pool had no room for is.
+        throttled_request(&invocation);
         return Err(Unrunnable::Overloaded(
             super::execution_slot::THROTTLED_INVOCATION_MESSAGE.to_string(),
         ));
@@ -655,6 +668,7 @@ pub async fn run_invocation(invocation: Invocation) -> Result<Invoked, Unrunnabl
             "the engine memory this emulator runs handlers in did not come free inside the \
              caller's own wait, so this invocation was throttled rather than started"
         );
+        throttled_request(&invocation);
         Unrunnable::Overloaded(super::execution_slot::THROTTLED_INVOCATION_MESSAGE.to_string())
     })?
     .map_err(|error| Unrunnable::Internal(format!("the run memory is gone: {error}")))?;
@@ -771,6 +785,14 @@ pub async fn run_invocation(invocation: Invocation) -> Result<Invoked, Unrunnabl
     };
 
     let invoked = answered(finished, &request_id, &reported, budget, engine, started);
+    // What the invocation itself is metered by, once it has run: the time this run took and
+    // the failure it came to, on the series Lambda publishes about its own invocations
+    // (`super::metrics`). Published off the answer — a metric is not part of what the caller
+    // is told — and for a run that HAPPENED alone: a request that ran nothing measured no
+    // duration and came to no function error.
+    if let Some(metrics) = reported.metrics.as_ref() {
+        metrics.publish_outcome(invoked.duration, invoked.function_error.is_some());
+    }
     // What X-Ray records for this invocation, where the invocation is one it records: the
     // two segments a Lambda invocation produces ([`trace_context`]), submitted through the
     // same seam the handler's own datagrams are. Reporting a trace is NOT part of answering
@@ -807,6 +829,17 @@ pub async fn run_invocation(invocation: Invocation) -> Result<Invoked, Unrunnabl
         .await;
     }
     Ok(invoked)
+}
+
+/// Meter `invocation` as one request the service THROTTLED: the one `Throttles` datapoint a
+/// request answered `TooManyRequestsException` is counted by ([`super::metrics`]).
+///
+/// A throttled request never reached the function, so it is metered here and by none of the
+/// series that measure a run.
+fn throttled_request(invocation: &Invocation) {
+    if let Some(metrics) = invocation.metrics.as_ref() {
+        metrics.publish_throttle();
+    }
 }
 
 /// Marks a run's thread as FINISHED on every exit of that thread, including an unwind out
@@ -1439,6 +1472,7 @@ mod tests {
             initialization_type: crate::state::execution_slot::INITIALIZATION_TYPE_ON_DEMAND,
             aws: None,
             logs: None,
+            metrics: None,
         }
     }
 

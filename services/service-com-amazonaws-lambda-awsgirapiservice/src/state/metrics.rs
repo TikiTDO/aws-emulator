@@ -32,7 +32,9 @@
 //! What a series is identified by and what one observation of it is are this module's
 //! ([`series`], [`observation`], [`append`]), so every metric this service publishes —
 //! the per-function ones here, the invocations Lambda admits to a function
-//! ([`publish_invocation`]), the invocations Lambda's recursive-loop guardrail drops
+//! ([`publish_invocation`]), what each of those invocations came to once it had run
+//! ([`InvocationMetrics`]), the requests Lambda throttled ([`publish_throttle`]), the
+//! invocations Lambda's recursive-loop guardrail drops
 //! ([`super::recursion`]) and the account-level concurrency metering in
 //! [`super::concurrency_metering`] — reaches the store the same way and carries the same
 //! resolution. An account-level series carries NO dimension: "a metric is uniquely defined
@@ -166,9 +168,12 @@ pub const DELETED_EVENT_COUNT_METRIC: &str = "DeletedEventCount";
 /// nothing under any other.
 pub const ITERATOR_AGE_METRIC: &str = "IteratorAge";
 
+/// The `StandardUnit` a span of time carries: `Milliseconds`.
+pub const MILLISECONDS_UNIT: &str = "Milliseconds";
+
 /// The unit that age carries: it is a span of milliseconds, which CloudWatch's
 /// `StandardUnit` spells `Milliseconds`.
-pub const ITERATOR_AGE_UNIT: &str = "Milliseconds";
+pub const ITERATOR_AGE_UNIT: &str = MILLISECONDS_UNIT;
 
 /// How many invocations of a function Lambda performed: the series a client reads to learn
 /// that a function is being called at all.
@@ -186,6 +191,42 @@ pub const ITERATOR_AGE_UNIT: &str = "Milliseconds";
 /// summing a window over the series gets the invocations of that window and a function
 /// nobody invoked has no datapoint at all rather than a zero.
 pub const INVOCATIONS_METRIC: &str = "Invocations";
+
+/// How long one invocation's own run took: the series a client reads to learn how long the
+/// function spends on an event.
+///
+/// The name is the one Lambda's own series carries in [`METRIC_NAMESPACE`]: `Duration`,
+/// "the amount of time that your function code spends processing an event", measured in
+/// [`MILLISECONDS_UNIT`] — so one observation is published per invocation that RAN, carrying
+/// the time that invocation's own run took, and a reader laying periods over the series gets
+/// the average, the slowest and the fastest run of each period. An invocation that ran
+/// nothing — one the service refused before the function was reached — measured no time and
+/// publishes no datapoint.
+pub const DURATION_METRIC: &str = "Duration";
+
+/// How many invocations came to a FUNCTION ERROR: the series a client builds an error-rate
+/// alarm on.
+///
+/// The name is the one Lambda's own series carries in [`METRIC_NAMESPACE`]: `Errors`, "the
+/// number of invocations that result in a function error", which are "exceptions thrown by
+/// your code and exceptions thrown by the Lambda runtime" — so one observation of 1 is
+/// published per invocation whose run reported a `FunctionError`, in [`COUNT_UNIT`], and an
+/// invocation that returned normally publishes none. A request Lambda refused before the
+/// function was reached is no invocation of it and is counted here no more than it is in
+/// [`INVOCATIONS_METRIC`].
+pub const ERRORS_METRIC: &str = "Errors";
+
+/// How many invocation REQUESTS were throttled: the series a client reads to learn that a
+/// function is being called faster than its concurrency allows.
+///
+/// The name is the one Lambda's own series carries in [`METRIC_NAMESPACE`]: `Throttles`, "the
+/// number of invocation requests that are throttled" — the requests answered
+/// `TooManyRequestsException` because "running the function would cause you to exceed a
+/// concurrency limit at either the account level […] or function level" (`Invoke`). One
+/// observation of 1 is published per throttled request, in [`COUNT_UNIT`]; a throttled
+/// request never reached the function, so it is counted here INSTEAD of in
+/// [`INVOCATIONS_METRIC`].
+pub const THROTTLES_METRIC: &str = "Throttles";
 
 /// How many invocation REQUESTS Lambda dropped because it detected the function being
 /// invoked as part of a recursive loop and the function's recursive loop detection
@@ -359,12 +400,86 @@ pub fn publish_invocation<Eng: Send + Sync + 'static>(
     FunctionMetrics::new(cloudwatch_state(engine)).publish_invocation(function_name, resource);
 }
 
+/// Publish the ONE datapoint an invocation request Lambda THROTTLED is metered by: a count of
+/// 1 on the [`THROTTLES_METRIC`] series of the function and of the resource the refused
+/// request addressed.
+///
+/// It reaches the same store, under the same conditions, as [`publish_invocation`].
+pub fn publish_throttle<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    function_name: &str,
+    resource: &str,
+) {
+    FunctionMetrics::new(cloudwatch_state(engine)).publish_throttle(function_name, resource);
+}
+
+/// The AWS/Lambda series ONE invocation is metered on once it has RUN, held by the invocation
+/// itself so that every path that runs a handler meters it the same way — a synchronous call,
+/// a queued event delivered off the response path, a response-streaming call and a function
+/// URL request alike.
+///
+/// It holds no measurement of its own: what it carries is where the datapoints go and which
+/// series they identify, and every observation is a datapoint in the CloudWatch store.
+#[derive(Clone, Debug)]
+pub struct InvocationMetrics {
+    /// Where the datapoints go.
+    publisher: FunctionMetrics,
+    /// The function the invocation ran on.
+    function_name: String,
+    /// The resource the invocation addressed, as [`RESOURCE_DIMENSION`] names it.
+    resource: String,
+}
+
+impl InvocationMetrics {
+    /// The series an invocation of `function_name` addressed at `resource`
+    /// ([`invoked_resource`]) is metered on, publishing into the CloudWatch store of the
+    /// SAME engine.
+    #[must_use]
+    pub fn new<Eng: Send + Sync + 'static>(
+        engine: &Eng,
+        function_name: &str,
+        resource: &str,
+    ) -> Self {
+        Self {
+            publisher: FunctionMetrics::new(cloudwatch_state(engine)),
+            function_name: function_name.to_string(),
+            resource: resource.to_string(),
+        }
+    }
+
+    /// Publish what this invocation's finished run came to: the time it took
+    /// ([`DURATION_METRIC`]), and — for a run that reported a `FunctionError` — the one
+    /// failure it came to ([`ERRORS_METRIC`]).
+    ///
+    /// Both are published per invocation rather than accumulated here, so a reader laying
+    /// periods over either series gets the runs of each period and a period in which the
+    /// function failed nothing holds no error datapoint at all.
+    pub fn publish_outcome(&self, duration: ::std::time::Duration, errored: bool) {
+        self.publisher.publish_duration(
+            &self.function_name,
+            &self.resource,
+            duration.as_secs_f64() * 1000.0,
+        );
+        if errored {
+            self.publisher
+                .publish_error(&self.function_name, &self.resource);
+        }
+    }
+
+    /// Publish that this invocation request was THROTTLED ([`THROTTLES_METRIC`]).
+    pub fn publish_throttle(&self) {
+        self.publisher
+            .publish_throttle(&self.function_name, &self.resource);
+    }
+}
+
 /// The publisher of the metrics Lambda publishes about its own work — on the function a
 /// batch is handed to and on the event source mapping that polled it — held by the poller
 /// doing that work.
 ///
 /// It holds no counts of its own: every observation is a datapoint in the CloudWatch
 /// store, never a second copy kept here.
+#[derive(Clone)]
 pub struct FunctionMetrics {
     /// The store the datapoints are appended to, or `None` when the engine carries no
     /// CloudWatch.
@@ -408,20 +523,41 @@ impl FunctionMetrics {
     /// each must carry the invocations it is of. Both observations are taken at the same
     /// instant, so a window sums the same count over either.
     pub fn publish_invocation(&self, function_name: &str, resource: &str) {
-        let at_secs = cloudwatch::now_secs();
-        for dimensions in [
-            function_dimensions(function_name),
-            resource_dimensions(function_name, resource),
-        ] {
-            self.publish_series(
-                INVOCATIONS_METRIC,
-                dimensions,
-                1.0,
-                COUNT_UNIT,
-                at_secs,
-                function_name,
-            );
-        }
+        self.publish_both(
+            INVOCATIONS_METRIC,
+            function_name,
+            resource,
+            1.0,
+            COUNT_UNIT,
+        );
+    }
+
+    /// Publish how long ONE finished run of `function_name`, addressed as `resource`, took:
+    /// a single observation of [`DURATION_METRIC`] in [`MILLISECONDS_UNIT`].
+    ///
+    /// Published on both of the dimension sets the invocation belongs to, for the reason
+    /// [`Self::publish_invocation`] is: a reader asking for the function's durations and one
+    /// asking for an alias's are asking for two different series.
+    pub fn publish_duration(&self, function_name: &str, resource: &str, millis: f64) {
+        self.publish_both(
+            DURATION_METRIC,
+            function_name,
+            resource,
+            millis,
+            MILLISECONDS_UNIT,
+        );
+    }
+
+    /// Publish that ONE invocation of `function_name`, addressed as `resource`, came to a
+    /// function error: a single observation of [`ERRORS_METRIC`].
+    pub fn publish_error(&self, function_name: &str, resource: &str) {
+        self.publish_both(ERRORS_METRIC, function_name, resource, 1.0, COUNT_UNIT);
+    }
+
+    /// Publish that ONE invocation request for `function_name`, addressed at `resource`, was
+    /// throttled: a single observation of [`THROTTLES_METRIC`].
+    pub fn publish_throttle(&self, function_name: &str, resource: &str) {
+        self.publish_both(THROTTLES_METRIC, function_name, resource, 1.0, COUNT_UNIT);
     }
 
     /// Publish that ONE invocation of the function `function_name` names was dropped by
@@ -494,6 +630,26 @@ impl FunctionMetrics {
             cloudwatch::now_secs(),
             function_name,
         );
+    }
+
+    /// Append one observation of `metric` on BOTH of the dimension sets an invocation
+    /// belongs to — the function's own and the invoked resource's — at one instant, so a
+    /// window reads the same measurement over either.
+    fn publish_both(
+        &self,
+        metric: &str,
+        function_name: &str,
+        resource: &str,
+        value: f64,
+        unit: &str,
+    ) {
+        let at_secs = cloudwatch::now_secs();
+        for dimensions in [
+            function_dimensions(function_name),
+            resource_dimensions(function_name, resource),
+        ] {
+            self.publish_series(metric, dimensions, value, unit, at_secs, function_name);
+        }
     }
 
     /// Append one observation of the series `metric` and `dimensions` identify, taken at

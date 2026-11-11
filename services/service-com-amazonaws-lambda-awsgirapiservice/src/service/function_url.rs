@@ -335,6 +335,13 @@ impl<Eng: Send + Sync + 'static> FunctionUrlPlane<Eng> {
                     "a function URL request found the function's concurrency pool full, so \
                      nothing ran"
                 );
+                // Answered the throttle, so metered as one request the service throttled,
+                // exactly as on `Invoke` (`crate::state::metrics`).
+                crate::state::publish_throttle(
+                    &*self.engine,
+                    &prepared.invocation.function_name,
+                    &prepared.resource,
+                );
                 return plane_error(THROTTLED_STATUS, &throttled.message);
             }
             None => None,
@@ -542,6 +549,14 @@ impl<Eng: Send + Sync + 'static> FunctionUrlPlane<Eng> {
                 &*self.engine,
                 &record.region,
                 &resolved_config,
+            )),
+            // What this invocation is metered by once it has run, exactly as on `Invoke`:
+            // the time the run took and the failure it came to
+            // (`crate::state::metrics`).
+            metrics: Some(crate::state::InvocationMetrics::new(
+                &*self.engine,
+                &function_name,
+                &crate::state::invoked_resource(&function_name, &version),
             )),
         };
         Ok(Prepared {

@@ -38,6 +38,10 @@
 //!   as, in both directions, and `bytes` a handler passes are encoded to it. A `datetime`
 //!   a handler passes for a timestamp member travels as the seconds since the epoch that
 //!   same protocol carries a timestamp as, whether or not it carries a zone of its own.
+//! * A client is built with the CONFIGURATION the SDK's own `botocore.config.Config`
+//!   carries, whose options and defaults are the SDK's: the Region it names is the one the
+//!   client's calls are made in, and an option name the SDK does not have is refused the way
+//!   the SDK refuses it.
 //! * A member of an ANSWER that carries an object's own bytes — `GetObject`'s `Body` — is
 //!   handed over as `botocore.response.StreamingBody`, the stream the SDK's own client
 //!   answers with, so a handler reads it with `read()`; which members those are is named by
@@ -64,6 +68,7 @@ pub fn runtime_modules() -> Vec<PackageModule> {
     [
         ("botocore/__init__.py", BOTOCORE_SOURCE),
         ("botocore/exceptions.py", BOTOCORE_EXCEPTIONS_SOURCE),
+        ("botocore/config.py", BOTOCORE_CONFIG_SOURCE),
         ("botocore/response.py", BOTOCORE_RESPONSE_SOURCE),
         ("botocore/credentials.py", BOTOCORE_CREDENTIALS_SOURCE),
         ("botocore/awsrequest.py", BOTOCORE_AWSREQUEST_SOURCE),
@@ -174,6 +179,154 @@ class ClientError(Exception):
         )
         self.response = error_response
         self.operation_name = operation_name
+
+
+class InvalidRetryConfigurationError(BotoCoreError):
+    fmt = (
+        'Cannot provide retry configuration for "{retry_config_option}". '
+        "Valid retry configuration options are: {valid_options}"
+    )
+
+
+class InvalidMaxRetryAttemptsError(InvalidRetryConfigurationError):
+    fmt = (
+        'Value provided to "max_attempts": {provided_max_attempts} must be an integer '
+        "greater than or equal to {min_value}."
+    )
+
+
+class InvalidRetryModeError(InvalidRetryConfigurationError):
+    fmt = (
+        'Invalid value provided to "mode": "{provided_retry_mode}" must be one of: '
+        "{valid_modes}"
+    )
+"#;
+
+/// `botocore.config`: the client configuration a handler builds a client with.
+///
+/// The managed runtimes' SDK carries this module, and a handler that wants a call made
+/// differently from the default — a region of its own, no retry at all, a timeout — passes
+/// `botocore.config.Config(...)` to the client it builds. What it holds is the SDK's own
+/// option set, in the SDK's own order, so a value passed positionally lands on the option
+/// botocore binds it to and an option name the SDK does not have is refused the way the SDK
+/// refuses it. Each option's default is the SDK's own.
+///
+/// The CALL itself is the host's ([`super::aws_api`]), which makes one attempt into this
+/// process over an in-memory seam: there is no connection to time out and no attempt to
+/// repeat, so the options bearing on transport are carried and reported rather than acted
+/// on. The one option that decides where a call goes — the region — IS acted on by the
+/// client built with it.
+const BOTOCORE_CONFIG_SOURCE: &str = r#"
+"""The configuration one client is built with."""
+
+from botocore.exceptions import (
+    InvalidMaxRetryAttemptsError,
+    InvalidRetryConfigurationError,
+    InvalidRetryModeError,
+)
+
+# The retry members a `retries` configuration may carry, and the modes it may name
+# (`Config(retries={"max_attempts": 3, "mode": "standard"})`).
+_RETRY_OPTIONS = ("total_max_attempts", "max_attempts", "mode")
+_RETRY_MODES = ("legacy", "standard", "adaptive")
+
+
+class Config:
+    """A client's configuration, as `botocore.config.Config` holds one.
+
+    The options are the SDK's own, in the SDK's own order: a positional argument lands on
+    the option that order binds it to, and a name this set does not hold is a `TypeError`.
+    """
+
+    OPTION_DEFAULTS = {
+        "region_name": None,
+        "signature_version": None,
+        "user_agent": None,
+        "user_agent_extra": None,
+        "user_agent_appid": None,
+        "connect_timeout": 60,
+        "read_timeout": 60,
+        "parameter_validation": True,
+        "max_pool_connections": 10,
+        "proxies": None,
+        "proxies_config": None,
+        "s3": None,
+        "retries": None,
+        "client_cert": None,
+        "inject_host_prefix": True,
+        "endpoint_discovery_enabled": None,
+        "use_dualstack_endpoint": None,
+        "use_fips_endpoint": None,
+        "ignore_configured_endpoint_urls": None,
+        "defaults_mode": None,
+        "tcp_keepalive": None,
+        "request_min_compression_size_bytes": None,
+        "disable_request_compression": None,
+        "client_context_params": None,
+        "sigv4a_signing_region_set": None,
+        "request_checksum_calculation": None,
+        "response_checksum_validation": None,
+        "account_id_endpoint_mode": None,
+    }
+
+    def __init__(self, *args, **kwargs):
+        self._user_provided_options = self._record_user_provided_options(args, kwargs)
+        options = dict(self.OPTION_DEFAULTS)
+        options.update(self._user_provided_options)
+        for option, value in options.items():
+            setattr(self, option, value)
+        self._validate_retry_configuration(self.retries)
+
+    def _record_user_provided_options(self, args, kwargs):
+        option_order = list(self.OPTION_DEFAULTS)
+        provided = {}
+        for key, value in kwargs.items():
+            if key not in self.OPTION_DEFAULTS:
+                raise TypeError("Got unexpected keyword argument %r" % (key,))
+            provided[key] = value
+        if len(args) > len(option_order):
+            raise TypeError(
+                "Takes at most %s arguments (%s given)" % (len(option_order), len(args))
+            )
+        for index, argument in enumerate(args):
+            option = option_order[index]
+            if option in provided:
+                raise TypeError("Got multiple values for keyword argument %r" % (option,))
+            provided[option] = argument
+        return provided
+
+    def _validate_retry_configuration(self, retries):
+        if not retries:
+            return
+        for key, value in retries.items():
+            if key not in _RETRY_OPTIONS:
+                raise InvalidRetryConfigurationError(
+                    retry_config_option=key,
+                    valid_options=", ".join(_RETRY_OPTIONS),
+                )
+            if key == "max_attempts" and value < 0:
+                raise InvalidMaxRetryAttemptsError(
+                    provided_max_attempts=value, min_value=0
+                )
+            if key == "total_max_attempts" and value < 1:
+                raise InvalidMaxRetryAttemptsError(
+                    provided_max_attempts=value, min_value=1
+                )
+            if key == "mode" and value not in _RETRY_MODES:
+                raise InvalidRetryModeError(
+                    provided_retry_mode=value, valid_modes=", ".join(_RETRY_MODES)
+                )
+
+    def merge(self, other_config):
+        """This configuration with `other_config`'s own options over it.
+
+        "Any options not provided by the user in the other config object will be the
+        options this object holds", so what the caller of either one set wins in the order
+        they are merged, and an option neither set keeps its default.
+        """
+        options = dict(self._user_provided_options)
+        options.update(other_config._user_provided_options)
+        return Config(**options)
 "#;
 
 /// `botocore.response`: the body of an answer that carries BYTES rather than text.
@@ -386,6 +539,7 @@ const BOTOCORE_CLIENT_SOURCE: &str = r##"
 import base64
 import json
 
+from botocore.config import Config
 from botocore.exceptions import (
     ClientError,
     ParamValidationError,
@@ -543,10 +697,13 @@ class _ClientExceptions:
 class _ClientMeta:
     """`client.meta`: what the client was built for."""
 
-    def __init__(self, service_name, region_name, endpoint_url):
+    def __init__(self, service_name, region_name, endpoint_url, config=None):
         self.service_model = _ServiceModel(service_name)
         self.region_name = region_name
         self.endpoint_url = endpoint_url
+        # `client.meta.config`: the configuration this client was built with, which is where
+        # a handler reads back what it asked for.
+        self.config = config if config is not None else Config(region_name=region_name)
 
 
 class _ServiceModel:
@@ -558,12 +715,17 @@ class _ServiceModel:
 class Client:
     """A client for one service in one Region."""
 
-    def __init__(self, service_name, region_name=None, **_ignored):
+    def __init__(self, service_name, region_name=None, config=None, **_ignored):
         import os
 
         self._service_name = service_name
+        # Which Region the calls of this client are made in: the one the caller named, else
+        # the one its `Config` carries ("The region to use in instantiating the client"),
+        # else the Region the invocation itself runs in.
+        self._config = config
         self._region_name = (
             region_name
+            or getattr(config, "region_name", None)
             or os.environ.get("AWS_REGION")
             or os.environ.get("AWS_DEFAULT_REGION")
             or ""
@@ -573,7 +735,9 @@ class Client:
             self._region_name,
         )
         self.exceptions = _ClientExceptions(service_name)
-        self.meta = _ClientMeta(service_name, self._region_name, self._endpoint_url)
+        self.meta = _ClientMeta(
+            service_name, self._region_name, self._endpoint_url, self._config
+        )
 
     def __getattr__(self, name):
         if name.startswith("_"):
@@ -797,7 +961,14 @@ class Session:
         )
 
     def client(self, service_name, region_name=None, **kwargs):
-        return Client(service_name, region_name=region_name or self.region_name, **kwargs)
+        # The Region a client calls in, in the order the SDK resolves it: the one this call
+        # named, else the one the client's own `Config` carries, else the session's.
+        configured = getattr(kwargs.get("config"), "region_name", None)
+        return Client(
+            service_name,
+            region_name=region_name or configured or self.region_name,
+            **kwargs,
+        )
 
     def get_credentials(self):
         """The handle on this invocation's credentials.

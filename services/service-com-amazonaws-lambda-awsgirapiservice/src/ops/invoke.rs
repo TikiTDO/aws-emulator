@@ -737,6 +737,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         &region,
                         &resolved_config,
                     )),
+                    // What the run this delivery makes is metered by once it has run,
+                    // carried on the invocation because the run happens off the response
+                    // path (`crate::state::metrics`).
+                    metrics: Some(crate::state::InvocationMetrics::new(
+                        &*self.engine,
+                        &function_name,
+                        &resource,
+                    )),
                 };
                 record.queue_async_invocation(&version, &invocation.request_id, payload, now);
                 invocation
@@ -795,8 +803,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // held until this invocation is done, whatever it comes to
         // (`crate::state::execution_slot`). The admission also decides which kind of
         // execution environment serves it, which the run reports to the handler.
-        let admitted = crate::state::admit_invocation(&state, &function_name, &version, now)
-            .map_err(throttled)?;
+        // A request the pool had no room for is answered the modelled 429 and metered as
+        // one request the service throttled, which is what a client reads to learn that its
+        // calls are arriving faster than the function's concurrency allows
+        // (`crate::state::metrics`).
+        let admitted = match crate::state::admit_invocation(&state, &function_name, &version, now)
+        {
+            Ok(admitted) => admitted,
+            Err(refused) => {
+                crate::state::publish_throttle(&*self.engine, &function_name, &resource);
+                return Err(throttled(refused));
+            }
+        };
         let invocation = crate::state::Invocation {
             function_name: function_name.clone(),
             executed_version: executed_version.clone(),
@@ -849,6 +867,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 &*self.engine,
                 &region,
                 &resolved_config,
+            )),
+            // What this invocation is metered by once it has run: the time the run took and
+            // the failure it came to (`crate::state::metrics`).
+            metrics: Some(crate::state::InvocationMetrics::new(
+                &*self.engine,
+                &function_name,
+                &resource,
             )),
         };
             (

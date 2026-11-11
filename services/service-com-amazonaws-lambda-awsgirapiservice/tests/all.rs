@@ -255,6 +255,8 @@ mod handler_step_functions_sdk;
 mod handler_s3_object_access;
 #[path = "all/handler_s3_prefix_deny_precedence.rs"]
 mod handler_s3_prefix_deny_precedence;
+#[path = "all/handler_sdk_client_config.rs"]
+mod handler_sdk_client_config;
 #[path = "all/handler_sdk_error_classes.rs"]
 mod handler_sdk_error_classes;
 #[path = "all/handler_sdk_idempotency_token.rs"]
@@ -277,6 +279,8 @@ mod invocation_log_delivery;
 mod invocation_log_delivery_grant_carrier;
 #[path = "all/invocation_log_group_search.rs"]
 mod invocation_log_group_search;
+#[path = "all/invocation_outcome_series.rs"]
+mod invocation_outcome_series;
 #[path = "all/invocation_refusal_diagnostics.rs"]
 mod invocation_refusal_diagnostics;
 #[path = "all/invocation_run_capacity.rs"]
