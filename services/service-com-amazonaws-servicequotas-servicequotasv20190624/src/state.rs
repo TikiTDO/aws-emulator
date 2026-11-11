@@ -3455,10 +3455,14 @@ fn seed_quota_catalog() -> Vec<CatalogService> {
         ),
         service(
             "dms",
-            "AWS Database Migration Service",
+            "AWS Database Migration Service (AWS DMS)",
             dms_quotas(),
         ),
-        service("docdb", "Amazon DocumentDB", docdb_quotas()),
+        service(
+            "docdb",
+            "Amazon DocumentDB (with MongoDB compatibility)",
+            docdb_quotas(),
+        ),
         service("ds", "AWS Directory Service", ds_quotas()),
         service("dynamodb", "Amazon DynamoDB", dynamodb_quotas()),
         service(
@@ -4179,7 +4183,7 @@ const SEED_SERVICE_CATALOG: &[(&str, &str)] = &[
     ("directconnect", "AWS Direct Connect"),
     ("discovery", "AWS Application Discovery Service"),
     ("dlm", "Amazon Data Lifecycle Manager"),
-    ("dms", "AWS Database Migration Service"),
+    ("dms", "AWS Database Migration Service (AWS DMS)"),
     ("docdb", "Amazon DocumentDB (with MongoDB compatibility)"),
     ("docdb-elastic", "Amazon DocumentDB Elastic Clusters"),
     ("drs", "AWS Elastic Disaster Recovery"),

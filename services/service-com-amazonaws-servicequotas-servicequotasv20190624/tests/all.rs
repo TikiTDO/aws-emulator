@@ -83,6 +83,8 @@ mod pagination_token_scope;
 mod published_default_quota_codes;
 #[path = "all/published_quota_codes.rs"]
 mod published_quota_codes;
+#[path = "all/published_row_class_wording.rs"]
+mod published_row_class_wording;
 #[path = "all/quota_plane_rule.rs"]
 mod quota_plane_rule;
 #[path = "all/quota_request_template.rs"]
