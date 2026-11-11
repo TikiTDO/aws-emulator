@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ResetAuthorizersCache
-//! IMPLEMENTED: answers 204 for a stage of an HTTP api this service holds, and the modelled
-//! 404 for an `ApiId`, a `StageName` or a stage whose api carries no authorizer cache at all.
+//! IMPLEMENTED: answers the 200 API Gateway answers a flush with — no content, and the
+//! length of that nothing stated — for a stage of an HTTP api this service holds, and the
+//! modelled 404 for an `ApiId`, a `StageName` or a stage whose api carries no authorizer
+//! cache at all.
 //!
 //! ## What a reset removes
 //!
@@ -18,7 +20,7 @@
 //! A `JWT` authorizer's token is evaluated per request and never cached, here or at AWS:
 //! `AuthorizerResultTtlInSeconds` is a `REQUEST` authorizer's member, so a reset changes
 //! nothing about a JWT-gated route. The call is idempotent — a second reset finds the
-//! entries already gone and answers the same 204.
+//! entries already gone and answers exactly what the first did.
 //!
 //! What IS computed from persisted state is the refusal: the `ApiId` and the `StageName`
 //! address a stage of an api, and a label that resolves to nothing is the modelled
@@ -179,7 +181,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     const NAME: &'static str = "ResetAuthorizersCache";
     const INPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::RESET_AUTHORIZERS_CACHE_INPUT_SCHEMA;
     const OUTPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = RESET_AUTHORIZERS_CACHE_OUTPUT_SCHEMA;
-    const SUCCESS_STATUS: u16 = 204u16;
+    const SUCCESS_STATUS: u16 = crate::state::FLUSHED_CACHE_OK_STATUS;
 
     async fn handle(
         &self,
@@ -236,8 +238,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The stage exists, so every decision its authorizers have cached is taken away:
         // "Resets all authorizer cache entries on a stage", after which the next request to
         // a route of this stage is decided by its authorizer's function again rather than
-        // by what that function answered before. The modelled empty output at 204, and
-        // idempotent — a second call removes nothing and answers the same.
+        // by what that function answered before. The modelled empty output, at the status
+        // API Gateway answers a flush with rather than the model's `code: 204` — see
+        // [`crate::state::wire_status`] — and idempotent: a second call removes nothing and
+        // answers the same.
         let removed = store
             .authorizer_cache
             .clear_stage(&input.api_id, &input.stage_name);

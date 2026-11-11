@@ -10,15 +10,20 @@
 //! `ApiId` the account holds no api under, a `StageName` that api holds no stage under, or a
 //! stage of an api whose `ProtocolType` is not `HTTP`, since the cache is "Supported only
 //! for HTTP APIs" and so exists on no other kind of api. A request whose three resources all
-//! resolve answers the modelled `204` with no body, however often it is repeated and
-//! whatever the stage held.** Emptying the cache is not a change to the stage RESOURCE, so
-//! the stage a later `GetStage` reports is byte-for-byte the one that was there before.
+//! resolve is answered `200 OK` — the status API Gateway answers this flush with — carrying
+//! no content and stating the length of that nothing (`content-length: 0`), however often it
+//! is repeated and whatever the stage held.** Emptying the cache is not a change to the
+//! stage RESOURCE, so the stage a later `GetStage` reports is byte-for-byte the one that was
+//! there before.
 //!
-//! Errors and statuses from the model: `smithy_query(query="operation",
+//! Errors and the modelled status from the model: `smithy_query(query="operation",
 //! operation="ResetAuthorizersCache")` — `NotFoundException` `httpError` 404,
-//! `TooManyRequestsException` 429, success `code: 204` over `smithy.api#Unit`; the protocol
-//! restriction is that operation's own documentation ("Resets all authorizer cache entries
-//! on a stage. Supported only for HTTP APIs").
+//! `TooManyRequestsException` 429, success `code: 204` over `smithy.api#Unit`; the status the
+//! service really answers a flush with is `crate::state::FLUSHED_CACHE_OK_STATUS`, and the
+//! suite that pins it beside every other status this service answers is
+//! `mutating_success_status.rs`. The protocol restriction is that operation's own
+//! documentation ("Resets all authorizer cache entries on a stage. Supported only for HTTP
+//! APIs").
 //!
 //! The rows span what the rule generalises over: the FORM of the stage name (the reserved
 //! `$default` that serves an api's root, and named stages), whether the api carries an
@@ -34,8 +39,9 @@ use smithy_server_runtime::MultiServiceRouter;
 use crate::api_lifecycle::{as_str, call, call_reading_headers, emulator, error_code};
 use crate::empty_answer_framing::{content_length, NO_CONTENT_LENGTH};
 
-/// The modelled success status of this operation.
-const NO_CONTENT_STATUS: u16 = 204;
+/// The status this operation is answered with: the one API Gateway puts on the wire for a
+/// flush, which is not the `code: 204` the model declares for it.
+const FLUSHED_STATUS: u16 = 200;
 
 /// The `ProtocolType` whose stages carry an authorizer cache at all.
 const HTTP_PROTOCOL: &str = "HTTP";
@@ -192,7 +198,7 @@ async fn read_stage(emulator: &MultiServiceRouter, case: &str, api_id: &str, sta
 }
 
 #[tokio::test]
-async fn a_resolved_api_and_stage_answer_an_empty_204_and_leave_the_stage_alone() {
+async fn a_resolved_api_and_stage_answer_an_empty_framed_200_and_leave_the_stage_alone() {
     let emulator = emulator();
 
     for (index, row) in served_rows().into_iter().enumerate() {
@@ -212,7 +218,7 @@ async fn a_resolved_api_and_stage_answer_an_empty_204_and_leave_the_stage_alone(
         let before = read_stage(&emulator, case, &api_id, row.stage_name).await;
 
         // Repeating the call changes nothing about the answer: the stage holds the empty
-        // cache this asks for after the first call, and AWS answers 204 either way.
+        // cache this asks for after the first call, and AWS answers the same either way.
         for round in 0..3 {
             let (status, headers, body) = call_reading_headers(
                 &emulator,
@@ -222,8 +228,8 @@ async fn a_resolved_api_and_stage_answer_an_empty_204_and_leave_the_stage_alone(
             )
             .await;
             assert_eq!(
-                status, NO_CONTENT_STATUS,
-                "case {case:?} (round {round}): expected {NO_CONTENT_STATUS} from \
+                status, FLUSHED_STATUS,
+                "case {case:?} (round {round}): expected {FLUSHED_STATUS} from \
                  ResetAuthorizersCache, got {status} {body}"
             );
             assert_eq!(
@@ -379,8 +385,8 @@ async fn an_api_stage_or_cache_that_does_not_resolve_is_not_found() {
     ] {
         let (status, body) = call(&emulator, "DELETE", &cache_uri(api_id, stage_name), None).await;
         assert_eq!(
-            status, NO_CONTENT_STATUS,
-            "case {case:?}: expected {NO_CONTENT_STATUS}, got {status} {body}"
+            status, FLUSHED_STATUS,
+            "case {case:?}: expected {FLUSHED_STATUS}, got {status} {body}"
         );
     }
 }

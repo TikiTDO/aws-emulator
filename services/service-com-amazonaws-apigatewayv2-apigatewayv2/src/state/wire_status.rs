@@ -32,6 +32,18 @@ pub const REWRITTEN_RESOURCE_STATUS: u16 = 201;
 /// `code: 201`.
 pub const WRITTEN_RESOURCE_OK_STATUS: u16 = 200;
 
+/// `200 OK`, the status a call that FLUSHES data held for a resource — rather than removing
+/// a resource or a member of one — is answered with: `ResetAuthorizersCache`
+/// (`DELETE /v2/apis/{ApiId}/stages/{StageName}/cache/authorizers`), modelled `code: 204`.
+/// Nothing the stage is configured with is gone afterwards, only the decisions its
+/// authorizers had already returned, and `200` is what tells a caller the flush was carried
+/// out: the answer has no members at all, so the status line is the only signal it carries,
+/// and a `204` would let an intermediary that treats one as "no entity, no entity headers"
+/// present the same reply as a no-op. The answer still carries no content, and states the
+/// length of that nothing like every other empty answer of this service
+/// (`crate::service`'s framing seam).
+pub const FLUSHED_CACHE_OK_STATUS: u16 = 200;
+
 /// `202 Accepted`, the status a teardown that CONTINUES after the answer is answered with:
 /// `DeleteDomainName` (`DELETE /v2/domainnames/{DomainName}`), modelled `code: 204`. The
 /// domain's own record and the api mappings under it are gone when the call returns, while

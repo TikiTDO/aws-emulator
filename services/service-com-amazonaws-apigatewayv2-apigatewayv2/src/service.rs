@@ -107,8 +107,9 @@
 //! `content-length: 0` — rather than leaving the framing header off, so a client that
 //! closes the message out on an explicit zero length (or a proxy that re-frames it) reads
 //! the same message end the origin wrote. It holds whatever status such an answer carries:
-//! the `204 No Content` most of them are modelled with, and the `202 Accepted` the teardowns
-//! that continue after the answer are answered with ([`crate::state::wire_status`]).
+//! the `204 No Content` most of them are modelled with, the `202 Accepted` the teardowns
+//! that continue after the answer are answered with, and the `200 OK` the authorizer-cache
+//! flush is answered with ([`crate::state::wire_status`]).
 //!
 //! [`Service::override_protocol`] below therefore serves a protocol that is the model's own
 //! in every respect except one: a `204` this service answers carries no body, whatever a
@@ -118,12 +119,13 @@
 //! service passes through, rather than per operation. The three data planes above frame
 //! their own answers, which carry real content, and are not reached through this seam.
 //!
-//! CAVEAT: a client reached over HTTP/1.1 does not see the header, because the HTTP writer
-//! the vendored transport uses removes `content-length` from a `204` (RFC 9110 §15.3.5
-//! forbids a body there) — that writer is below anything this crate decides. What this
-//! service states is what the in-process front door (the inter-service callback path and
-//! the SDK connector, both of which serve `dispatch`'s response unchanged) delivers, and is
-//! pinned by `tests/all/empty_answer_framing.rs`.
+//! CAVEAT: a client reached over HTTP/1.1 does not see the header ON A `204`, because the
+//! HTTP writer the vendored transport uses removes `content-length` from one (RFC 9110
+//! §15.3.5 forbids a body there) — that writer is below anything this crate decides. At
+//! every other status, the `202` and the `200` above included, the header reaches the
+//! client. What this service states is what the in-process front door (the inter-service
+//! callback path and the SDK connector, both of which serve `dispatch`'s response unchanged)
+//! delivers, and is pinned by `tests/all/empty_answer_framing.rs`.
 
 mod data_plane;
 mod invoke;

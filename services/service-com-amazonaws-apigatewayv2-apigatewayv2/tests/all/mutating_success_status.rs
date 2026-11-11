@@ -10,16 +10,16 @@
 //! The rule these cases assert: **the success status of an operation is the status API
 //! Gateway answers it with, which for a handful of its writes is not the status the model's
 //! `@http` trait declares** — a PATCH that rewrites an api, a route or a route response is
-//! `201`, the two imports and the api-mapping create are `200`, and the custom domain
-//! teardown is `202 Accepted` — **while every other operation answers its modelled `code`;
-//! and an answer that carries no content states the length it has (`content-length: 0`)**,
-//! whatever that status is.
+//! `201`, the two imports and the api-mapping create are `200`, the flush of a stage's
+//! authorizer cache is `200`, and the custom domain teardown is `202 Accepted` — **while
+//! every other operation answers its modelled `code`; and an answer that carries no content
+//! states the length it has (`content-length: 0`)**, whatever that status is.
 //!
 //! The modelled codes each row is measured against come from the model itself
 //! (`smithy_query(query="operation", operation="UpdateApi,UpdateRoute,UpdateRouteResponse,\
-//! ImportApi,ReimportApi,CreateApiMapping,DeleteDomainName,DeleteApiMapping,DeleteRoute,\
-//! DeleteVpcLink")`), and the statuses that differ from them are single-homed in
-//! `crate::state::wire_status`.
+//! ImportApi,ReimportApi,CreateApiMapping,ResetAuthorizersCache,DeleteDomainName,\
+//! DeleteApiMapping,DeleteRoute,DeleteVpcLink")`), and the statuses that differ from them
+//! are single-homed in `crate::state::wire_status`.
 //!
 //! The rows span what the rule generalises over: the HTTP method (POST, PUT, PATCH, DELETE,
 //! GET), the resource family (an api, a child of an api, a child of a child, a custom domain
@@ -32,7 +32,9 @@
 //! in-process front door delivers unchanged. A client reached over HTTP/1.1 does not see it
 //! on a `204`: the HTTP writer the vendored transport uses removes `content-length` from a
 //! `204`, which is below anything this crate decides (see `crate::service` and
-//! `empty_answer_framing.rs`).
+//! `empty_answer_framing.rs`). At any other status an empty answer carries — the `202`
+//! teardown, the `200` cache flush — the header does reach the client, which the
+//! raw-socket case below pins.
 
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
@@ -383,6 +385,18 @@ fn rows(f: &Fixture) -> Vec<Row> {
             status: 200,
             empty: false,
         },
+        Row {
+            // A flush, not a teardown: nothing the stage is configured with is removed, only
+            // the decisions its authorizers had already returned. The answer has no members,
+            // so this status is the whole signal the flush was carried out.
+            case: "ResetAuthorizersCache, a flush of a stage's authorizer cache \
+                   (modelled 204)",
+            method: "DELETE",
+            uri: format!("/v2/apis/{api}/stages/{stage}/cache/authorizers"),
+            body: None,
+            status: 200,
+            empty: true,
+        },
         // The writes whose answer IS their modelled code: the same methods over the same
         // resource families.
         Row {
@@ -578,6 +592,19 @@ async fn on_the_wire_a_teardown_states_its_status_and_its_length() {
     }
 
     for (case, method, path, expected_status, framing) in [
+        (
+            // The recorded step this suite's flush row comes from, measured where the bytes
+            // are visible: a `200` with no content, whose stated zero length a client really
+            // reads (unlike a `204`'s, which the writer below removes).
+            "ResetAuthorizersCache, answered 200",
+            "DELETE",
+            format!(
+                "/v2/apis/{}/stages/{}/cache/authorizers",
+                fixture.api, fixture.stage
+            ),
+            "HTTP/1.1 200",
+            Framing::EmptyAndStated,
+        ),
         (
             "DeleteRoute, answered 204",
             "DELETE",

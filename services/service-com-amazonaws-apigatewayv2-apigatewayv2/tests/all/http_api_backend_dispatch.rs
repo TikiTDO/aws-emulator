@@ -1086,8 +1086,10 @@ async fn a_decision_is_cached_for_its_ttl_and_a_reset_takes_it_away() {
         None,
     )
     .await;
+    // The status API Gateway answers a flush with, not the model's `code: 204`
+    // (`crate::state::FLUSHED_CACHE_OK_STATUS`).
     assert_eq!(
-        status, 204,
+        status, 200,
         "case {case:?}: ResetAuthorizersCache answered {status} {reset}"
     );
     let after = send(

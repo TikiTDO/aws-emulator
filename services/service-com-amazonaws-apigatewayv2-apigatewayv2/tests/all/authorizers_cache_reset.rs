@@ -4,10 +4,12 @@
 //!
 //! "Resets all authorizer cache entries on a stage. Supported only for HTTP APIs."
 //! (`ResetAuthorizersCache`), `DELETE /v2/apis/{ApiId}/stages/{StageName}/cache/authorizers`,
-//! success 204, with `NotFoundException` (404) and `TooManyRequestsException` (429) as its
-//! only modelled errors. So the rules these cases assert:
+//! modelled `code: 204` but answered `200 OK` on the wire
+//! (`crate::state::FLUSHED_CACHE_OK_STATUS`), with `NotFoundException` (404) and
+//! `TooManyRequestsException` (429) as its only modelled errors. So the rules these cases
+//! assert:
 //!
-//! * a stage of an api this service holds is answered the modelled 204, with no body, and
+//! * a stage of an api this service holds is answered that `200`, with no body, and
 //!   the call is idempotent — the second reset of a stage answers exactly what the first
 //!   did;
 //! * the two path labels address a stage OF an api, so a label that resolves to nothing is
@@ -30,6 +32,10 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::api_lifecycle::{as_str, call, emulator, error_code};
+
+/// The status API Gateway answers a flush of a stage's authorizer cache with, which is not
+/// the `code: 204` the model declares for it.
+const FLUSHED_STATUS: u16 = 200;
 
 /// The stage that serves an api's root (`crate::state::DEFAULT_STAGE_NAME`).
 const DEFAULT_STAGE: &str = "$default";
@@ -82,7 +88,7 @@ async fn reset(emulator: &MultiServiceRouter, api_id: &str, stage_name: &str) ->
 }
 
 #[tokio::test]
-async fn resetting_the_cache_of_a_stage_answers_the_modelled_no_content_and_is_idempotent() {
+async fn resetting_the_cache_of_a_stage_answers_the_flush_status_and_is_idempotent() {
     let emulator = emulator();
 
     // (case, the stage name)
@@ -111,14 +117,15 @@ async fn resetting_the_cache_of_a_stage_answers_the_modelled_no_content_and_is_i
         for attempt in 1..=2 {
             let (status, body) = reset(&emulator, &api_id, &stage_name).await;
             assert_eq!(
-                status, 204,
-                "case {case:?} attempt {attempt}: expected the modelled 204, got {status} \
+                status, FLUSHED_STATUS,
+                "case {case:?} attempt {attempt}: expected {FLUSHED_STATUS}, got {status} \
                  with {body:?}"
             );
             assert_eq!(
                 body,
                 Value::Null,
-                "case {case:?} attempt {attempt}: expected no body at a 204, got {body:?}"
+                "case {case:?} attempt {attempt}: expected no body at a {FLUSHED_STATUS}, got \
+                 {body:?}"
             );
         }
 
@@ -202,7 +209,7 @@ async fn resetting_the_cache_of_a_stage_that_does_not_exist_is_the_modelled_not_
     // those rows named and not about this operation in general.
     let (status, body) = reset(&emulator, &api_id, "prod").await;
     assert_eq!(
-        status, 204,
+        status, FLUSHED_STATUS,
         "the stage the account holds must still be reset, got {status} with {body:?}"
     );
 }

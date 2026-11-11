@@ -37,7 +37,8 @@ pub mod wire_status;
 /// The statuses a mutating operation of this service answers where that is not its
 /// modelled `@http code` — see [`wire_status`], which says which operations each governs.
 pub use wire_status::{
-    ACCEPTED_TEARDOWN_STATUS, REWRITTEN_RESOURCE_STATUS, WRITTEN_RESOURCE_OK_STATUS,
+    ACCEPTED_TEARDOWN_STATUS, FLUSHED_CACHE_OK_STATUS, REWRITTEN_RESOURCE_STATUS,
+    WRITTEN_RESOURCE_OK_STATUS,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
