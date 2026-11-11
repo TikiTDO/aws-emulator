@@ -23,10 +23,16 @@ mod cloudformation_fifo_resource_generated_names;
 #[path = "all/cloudformation_stackset_status_change_events.rs"]
 mod cloudformation_stackset_status_change_events;
 // Declared here, in this same head region, for the reason the entry above records: what a
-// CodePipeline execution publishes onto the default event bus, and which rule's SQS target
-// receives it, spans four crates at once (CodePipeline, Amazon S3, EventBridge, Amazon SQS).
-#[path = "all/codepipeline_execution_state_changes_reach_a_queue_target.rs"]
-mod codepipeline_execution_state_changes_reach_a_queue_target;
+// `Condition`-gated `AWS::IAM::Policy` means for the stack's own function's read of the
+// stack's own secret, which spans CloudFormation, IAM, Secrets Manager, Lambda and STS at
+// once, so no single service's test target can ask it.
+#[path = "all/cloudformation_condition_gated_secrets_policy.rs"]
+mod cloudformation_condition_gated_secrets_policy;
+// Declared here, in this same head region, for the reason the entry above records: what
+// LAMBDA makes of an access point EFS minted, which neither crate's own test target can
+// ask, since the ARN has to cross from one service to the other.
+#[path = "all/efs_access_point_mounted_by_lambda.rs"]
+mod efs_access_point_mounted_by_lambda;
 // Declared here, in this same head region, for the reason the entry above records: what an
 // EventBridge rule hands a Lambda target and which function qualifier the target ARN
 // addresses, which spans EventBridge and Lambda at once.
@@ -630,13 +636,10 @@ mod sfn_lambda_task_invocation;
 mod sfn_integration_error_names;
 #[path = "all/sfn_parallel_branch_cancellation.rs"]
 mod sfn_parallel_branch_cancellation;
-// Declared beside the other Step Functions suites, for the reason the lines above give:
-// the execution role the calls of a run-a-job task are made as, which spans Step
-// Functions, IAM and Athena.
-#[path = "all/sfn_athena_run_a_job_sync.rs"]
-mod sfn_athena_run_a_job_sync;
 #[path = "all/cloudformation_sfn_fifo_queue_stack.rs"]
 mod cloudformation_sfn_fifo_queue_stack;
+#[path = "all/sfn_management_events.rs"]
+mod sfn_management_events;
 // Declared HERE, in the sorted list at its own name, rather than at the head or the tail
 // of this file: both of those are where every concurrently landing suite puts its line, so
 // a declaration there conflicts with all of them, while these neighbouring lines are
@@ -1322,17 +1325,19 @@ mod cloudformation_stack_update_redirects_a_schedule;
 // running handler, and the same key still served by bucket name.
 #[path = "all/s3_access_point_policy_denial.rs"]
 mod s3_access_point_policy_denial;
-// Declared here, in this same head region, for the reason the entry above records: what
-// LAMBDA makes of an access point EFS minted, which neither crate's own test target can
-// ask, since the ARN has to cross from one service to the other.
-#[path = "all/efs_access_point_mounted_by_lambda.rs"]
-mod efs_access_point_mounted_by_lambda;
-#[path = "all/sfn_management_events.rs"]
-mod sfn_management_events;
 // Declared here, in this same head region, for the reason the entry above records: the tags
 // a bucket a stack created carries, which CloudFormation stamps and Amazon S3 reports.
 #[path = "all/cloudformation_stamps_s3_bucket_stack_provenance.rs"]
 mod cloudformation_stamps_s3_bucket_stack_provenance;
+// CodePipeline execution publishes onto the default event bus, and which rule's SQS target
+// receives it, spans four crates at once (CodePipeline, Amazon S3, EventBridge, Amazon SQS).
+#[path = "all/codepipeline_execution_state_changes_reach_a_queue_target.rs"]
+mod codepipeline_execution_state_changes_reach_a_queue_target;
+// Declared beside the other Step Functions suites, for the reason the lines above give:
+// the execution role the calls of a run-a-job task are made as, which spans Step
+// Functions, IAM and Athena.
+#[path = "all/sfn_athena_run_a_job_sync.rs"]
+mod sfn_athena_run_a_job_sync;
 // Declared in the appended tail, which is where every new suite inserts its lines: the chain a
 // client's own PutLogEvents drives, from the log group's metric filters through the metric and
 // the alarm to the queue subscribed to the alarm's topic.
