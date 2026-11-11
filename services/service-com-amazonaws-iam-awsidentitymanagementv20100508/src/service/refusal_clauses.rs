@@ -199,6 +199,16 @@ fn absent_member_clause(violation: &Violation) -> Option<String> {
     without_the_value(violation)
 }
 
+/// Whether `path` names a member reached at the TOP of an operation's input, rather than a
+/// value nested inside one of its collections or structures.
+///
+/// A validation path spells nesting with `.`, so a single segment is a member of the input
+/// itself and anything longer is a value reached through it (`tagKeys.1.member` is one key of
+/// a list).
+fn names_a_top_level_member(path: &str) -> bool {
+    !path.contains('.')
+}
+
 /// The clause for a value outside its member's `@pattern`: the member and the expression,
 /// with the expression quoted as AWS publishes it and nothing of the value.
 ///
@@ -209,6 +219,9 @@ fn absent_member_clause(violation: &Violation) -> Option<String> {
 /// `tests/all/validation_error_clauses.rs` with `tests/all/range_refusal_wording.rs` the
 /// restated form over the input's own members).
 fn pattern_clause(violation: &Violation, pattern: &str) -> Option<String> {
+    if !names_a_top_level_member(&violation.path) {
+        return None;
+    }
     let stated = without_the_value(violation)?;
     // The value half is already gone, so the only occurrence left is the requirement's own
     // quoting of the expression.

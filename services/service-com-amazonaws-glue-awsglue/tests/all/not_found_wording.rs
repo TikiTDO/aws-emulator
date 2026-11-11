@@ -80,7 +80,7 @@ async fn assert_miss(
 
 /// Assert that `expected` is the whole refusal AND that it discloses nothing of the
 /// request — the half of the rule a sentence with no variable part carries.
-async fn assert_fixed_miss(
+pub(crate) async fn assert_fixed_miss(
     router: &MultiServiceRouter,
     case: &str,
     operation: &str,

@@ -47,11 +47,13 @@ const MAX_CREATE_NAME_LENGTH: usize = 128;
 /// (`smithy_query shape=Blueprint`, member `Status`).
 const STATUS_CREATING: &str = "CREATING";
 
-/// The role every run in this suite is started under.
-const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/GlueBlueprintRole";
+/// The role every run in this suite is started under, as `OrchestrationIAMRoleArn`'s pattern
+/// `^arn:aws[^:]*:iam::[0-9]*:role/.+$` requires. Shared, so one spelling serves every suite
+/// that starts a blueprint run.
+pub(crate) const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/GlueBlueprintRole";
 
 /// Delete the blueprint `name` and return the name the answer reports, if any.
-async fn delete(router: &MultiServiceRouter, name: &str) -> Option<String> {
+pub(crate) async fn delete(router: &MultiServiceRouter, name: &str) -> Option<String> {
     let deleted = ok(router, "DeleteBlueprint", &json!({ "Name": name })).await;
     deleted
         .get("Name")

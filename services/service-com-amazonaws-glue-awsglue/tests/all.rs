@@ -39,6 +39,8 @@ mod batch_table_version_deletion;
 mod batch_update_partition;
 #[path = "all/blueprint_deletion.rs"]
 mod blueprint_deletion;
+#[path = "all/blueprint_lifecycle_miss.rs"]
+mod blueprint_lifecycle_miss;
 #[path = "all/blueprint_listing.rs"]
 mod blueprint_listing;
 #[path = "all/blueprint_run_listing.rs"]
