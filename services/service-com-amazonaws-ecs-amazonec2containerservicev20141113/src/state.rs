@@ -235,6 +235,11 @@ pub use task_overrides::*;
 /// The whole in-memory store: every operation's reads and writes against the maps below.
 mod store;
 
+/// The deployment circuit breaker: the failed launches it counts for a rollout, the
+/// terminal `FAILED` it moves that rollout to, and the rollback it starts.
+mod circuit_breaker;
+pub use circuit_breaker::*;
+
 /// The Elastic Load Balancing v2 targets a load-balanced service's RUNNING tasks occupy,
 /// and the drain a stopped task's target leaves through.
 mod load_balancer_targets;
@@ -1533,6 +1538,13 @@ pub const ROLLOUT_IN_PROGRESS: &str = "IN_PROGRESS";
 /// "When the service reaches a steady state, the deployment transitions to a
 /// `COMPLETED` state."
 pub const ROLLOUT_COMPLETED: &str = "COMPLETED";
+/// `Deployment$rolloutState` of a rollout that will never hold them — the same doc: "If the
+/// service fails to reach a steady state and circuit breaker is turned on, the deployment
+/// transitions to a `FAILED` state. A deployment in `FAILED` state doesn't launch any new
+/// tasks." The third and last member of `DeploymentRolloutState`
+/// (`smithy_query(query="shape", shape="DeploymentRolloutState")` -> COMPLETED, FAILED,
+/// IN_PROGRESS).
+pub const ROLLOUT_FAILED: &str = "FAILED";
 
 /// `ServiceDeploymentBrief$status` while the rollout this deployment records is still
 /// under way — one of `ServiceDeploymentStatus`
@@ -1687,6 +1699,13 @@ pub const ROLLBACK_MONITORS_MONITORING: &str = "MONITORING";
 /// See [`ROLLBACK_MONITORS_DISABLED`]: a mechanism that was turned on and whose watch is
 /// over, because the rollout it was watching has ended.
 pub const ROLLBACK_MONITORS_MONITORING_COMPLETE: &str = "MONITORING_COMPLETE";
+
+/// See [`ROLLBACK_MONITORS_DISABLED`]: a mechanism that was turned on and FIRED — the
+/// remaining member of `ServiceDeploymentRollbackMonitorsStatus`
+/// (`smithy_query(query="shape", shape="ServiceDeploymentRollbackMonitorsStatus")` ->
+/// TRIGGERED, MONITORING, MONITORING_COMPLETE, DISABLED), reported by exactly the mechanism
+/// that failed the rollout it was watching.
+pub const ROLLBACK_MONITORS_TRIGGERED: &str = "TRIGGERED";
 
 /// The `ThresholdType` that uses the threshold configuration's `value` as the failure
 /// threshold itself: "For `COUNT`, Amazon ECS uses `value` directly as the threshold."

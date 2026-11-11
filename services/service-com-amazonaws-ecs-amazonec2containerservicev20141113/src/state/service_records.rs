@@ -90,6 +90,24 @@ pub struct ServiceRecord {
     /// deployment transitions to a COMPLETED state" — so a rollout is never COMPLETED in
     /// the same instant the call that started it answers; the CLOCK settles it.
     pub deployment_steady_due_at: Option<SystemTime>,
+    /// Why the current deployment's rollout FAILED, for a rollout the deployment circuit
+    /// breaker failed, and `None` for every other rollout.
+    ///
+    /// `Deployment$rolloutState`: "If the service fails to reach a steady state and circuit
+    /// breaker is turned on, the deployment transitions to a `FAILED` state" — a terminal
+    /// state, so the rollout owes no steady state once this is set (see
+    /// [`ComAmazonawsEcsAmazonec2containerservicev20141113State::advance_deployment_circuit_breakers`])
+    /// and the reason stored here is the `rolloutStateReason` it is reported with.
+    pub deployment_rollout_failure: Option<String>,
+    /// When the rollback the circuit breaker started on that failed rollout falls due, or
+    /// `None` for a rollout nothing is rolling back.
+    ///
+    /// `DeploymentCircuitBreaker$rollback`: "If rollback is on, when a service deployment
+    /// fails, the service is rolled back to the last deployment that completed
+    /// successfully" — the rollback FOLLOWS the failure, which is a span the CLOCK settles
+    /// ([`TRANSITION_SPAN`]), so a caller reading in between sees the rollout `FAILED`
+    /// before the service is taken back.
+    pub deployment_rollback_due_at: Option<SystemTime>,
     /// Whether the current deployment's rollout has reached its steady state at least
     /// once, and so whether that deployment has TAKEN OVER the service: the share of the
     /// service's desired count it is scaled to (`Deployment$scale`) follows from it.
@@ -162,6 +180,10 @@ pub struct SupersededDeployment {
     /// so the `rolloutState` it is reported with is the one it actually got to rather
     /// than one asserted now.
     pub rollout_completed: bool,
+    /// Why this rollout FAILED, for one the deployment circuit breaker failed before it was
+    /// superseded — the terminal `rolloutState` it keeps while the rollout that replaced it
+    /// takes the service over, and `None` for a rollout that did not fail.
+    pub rollout_failure: Option<String>,
     /// When the task set this deployment placed has been replaced, and so when the
     /// deployment stops being one of the service's: the clock-owed span of the stop the
     /// scheduler asked its tasks for ([`TRANSITION_SPAN`]), stored rather than slept on.
@@ -233,6 +255,21 @@ impl ServiceRecord {
         )
     }
 
+    /// Append `events` to this service's event stream, keeping only the latest of them.
+    ///
+    /// `Service$events`: "The event stream for your service. A maximum of 100 of the latest
+    /// events are displayed" — so only the latest are kept at all
+    /// ([`MAX_SERVICE_EVENTS`]), which is also what keeps a long-lived service's record from
+    /// growing without bound. The ONE place that trims the stream, so every writer of an
+    /// event trims it the same way.
+    pub fn record_events(&mut self, events: impl IntoIterator<Item = ServiceEventRecord>) {
+        self.events.extend(events);
+        if self.events.len() > MAX_SERVICE_EVENTS {
+            let first_kept = self.events.len() - MAX_SERVICE_EVENTS;
+            self.events.drain(..first_kept);
+        }
+    }
+
     /// Move the deployment this service currently reports as `PRIMARY` onto
     /// [`Self::superseded_deployments`], as the deployment a new one replaces.
     ///
@@ -256,11 +293,18 @@ impl ServiceRecord {
                 volume_configurations: self.volume_configurations.clone(),
                 vpc_lattice_configurations: self.vpc_lattice_configurations.clone(),
                 rollout_completed: self.deployment_rollout_completed,
+                // The terminal state the circuit breaker left that rollout in travels with
+                // it: the deployment the service reports as replaced is the one that
+                // failed, and the NEW rollout starts from no failure at all.
+                rollout_failure: self.deployment_rollout_failure.take(),
                 replaced_due_at: now + TRANSITION_SPAN,
             },
         );
         self.superseded_deployments
             .truncate(MAX_SUPERSEDED_DEPLOYMENTS);
+        // The rollback the circuit breaker owed the superseded rollout is not owed to the
+        // new one: whatever starts a new rollout decides where the service goes from here.
+        self.deployment_rollback_due_at = None;
     }
 }
 
@@ -355,6 +399,14 @@ pub struct ServiceDeploymentRecord {
     /// stopping under a request a caller already made is told apart from one that ended
     /// without anybody asking.
     pub stop_type: Option<String>,
+    /// Whether the DEPLOYMENT CIRCUIT BREAKER fired on this rollout.
+    ///
+    /// `ServiceDeploymentCircuitBreaker$status` is one of
+    /// `ServiceDeploymentRollbackMonitorsStatus`, whose [`ROLLBACK_MONITORS_TRIGGERED`] member
+    /// is what a breaker that FAILED the rollout it was watching reports — a different end
+    /// from the watch that ran its course over a rollout nothing went wrong with, so the
+    /// outcome is stored rather than guessed from the status.
+    pub circuit_breaker_triggered: bool,
 }
 
 /// One PAUSE lifecycle hook of a rollout, as the rollout reached it.

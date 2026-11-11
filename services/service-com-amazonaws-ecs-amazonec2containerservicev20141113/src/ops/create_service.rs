@@ -1048,6 +1048,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             },
             // A created service is not being drained away: nothing has deleted it.
             drain_due_at: None,
+            // Nothing has failed the rollout this create starts, and so nothing is rolling
+            // it back: the deployment circuit breaker has nothing counted against it yet.
+            deployment_rollout_failure: None,
+            deployment_rollback_due_at: None,
             // The rollout this create starts has not taken the service over yet, and the
             // service has reached no steady state: it is the create that starts the work.
             deployment_rollout_completed: false,

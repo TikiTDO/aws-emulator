@@ -659,6 +659,15 @@ pub fn drive_task_clock<Eng: Send + Sync + 'static>(
                 .unwrap_or_default()
                 .clamp(MIN_CLOCK_WAIT, MAX_CLOCK_WAIT);
             ::tokio::time::sleep(wait).await;
+            // The image fetch of a task the CLOCK placed — the scheduler's replacement for a
+            // task its service lost ([`super::service_steady_state`]) — which no call is
+            // there to attempt the pull for. Made with no guard of this store held, since
+            // that read takes the Amazon EC2 and Amazon ECR stores' locks
+            // ([`super::evaluate_image_pulls`]): both are lookups in those emulated services'
+            // own in-memory stores through the shared engine handle, so nothing is dialled,
+            // resolved or opened. Done BEFORE the clock materialises what is due, because the
+            // fetch happens where the task would otherwise start.
+            super::evaluate_image_pulls(&*engine);
             state.lock().advance_clock(SystemTime::now());
             // A task the clock has just started or stopped is one the load balancers its
             // service binds have to be brought in line with — the same side effect the door

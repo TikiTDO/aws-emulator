@@ -1416,16 +1416,27 @@ pub(super) fn deployment_alarms_view(
 pub(super) fn deployment_circuit_breaker_view(
     configuration: &DeploymentConfiguration,
     desired_count: i32,
+    failure_count: i32,
+    triggered: bool,
     finished: bool,
 ) -> ServiceDeploymentCircuitBreaker {
     let breaker = configuration.deployment_circuit_breaker.as_ref();
     let enabled = breaker.is_some_and(|breaker| breaker.enable);
     ServiceDeploymentCircuitBreaker {
-        status: Some(rollback_monitors_status(enabled, finished).to_string()),
+        // A breaker that FAILED the rollout it watched reports that it fired; one whose watch
+        // merely ran its course reports the end of the watch.
+        status: Some(
+            if triggered {
+                ROLLBACK_MONITORS_TRIGGERED
+            } else {
+                rollback_monitors_status(enabled, finished)
+            }
+            .to_string(),
+        ),
         // "The number of times the circuit breaker detected a service deployment failure":
-        // no task of a rollout fails to start here, which is the same true zero the
-        // deployment's own `failedTasks` reports.
-        failure_count: 0,
+        // the failed launches of this rollout, counted off the tasks it placed — and a true
+        // zero for a breaker that is watching a rollout that has lost none.
+        failure_count,
         // "The threshhold which determines that the service deployment failed" — a
         // threshold only a breaker that is watching the rollout has at all.
         threshold: if enabled {

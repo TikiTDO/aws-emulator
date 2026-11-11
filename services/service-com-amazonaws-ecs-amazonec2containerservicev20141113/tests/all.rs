@@ -63,6 +63,8 @@ mod daemons;
 mod default_capacity_provider_strategy_placement;
 #[path = "all/delete_attributes.rs"]
 mod delete_attributes;
+#[path = "all/deployment_circuit_breaker.rs"]
+mod deployment_circuit_breaker;
 #[path = "all/deployment_rollout_report_coupling.rs"]
 mod deployment_rollout_report_coupling;
 #[path = "all/describe_failure_identifiers.rs"]

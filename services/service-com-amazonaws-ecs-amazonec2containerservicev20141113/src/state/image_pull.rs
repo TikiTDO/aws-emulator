@@ -183,10 +183,13 @@ pub fn registry_host(image: &str) -> &str {
 /// Attempt the image fetch of every task that has just been launched, and record what it
 /// took and why it failed.
 ///
-/// Called by the operations that LAUNCH a task, with this service's guard dropped: the
-/// verdict is a question about the Amazon VPC networking the launch named and about what
-/// Amazon ECR serves the task's execution role, so each half is read out of that service's
-/// own store through the one shared engine, under that store's lock and no other.
+/// Called by the operations that LAUNCH a task, and by the clock pump for a task the CLOCK
+/// placed — the scheduler's replacement for a task a service lost
+/// ([`super::service_steady_state`]), which no call is there to attempt the pull for. Either
+/// way with this service's guard dropped: the verdict is a question about the Amazon VPC
+/// networking the launch named and about what Amazon ECR serves the task's execution role, so
+/// each half is read out of that service's own store through the one shared engine, under that
+/// store's lock and no other.
 ///
 /// Nothing is recorded for a fact this emulator does not hold — a subnet the Amazon EC2
 /// store does not hold is not evidence of a blocked path, and an engine carrying no Amazon
@@ -511,6 +514,30 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
 }
 
 impl TaskRecord {
+    /// Whether Amazon ECS could not launch this task's containers AT ALL, which is exactly
+    /// the stop [`Self::fail_launch`] records: a task stopped under
+    /// [`STOP_CODE_TASK_FAILED_TO_START`] never ran.
+    ///
+    /// Read off the stop code the stop carries rather than off the desired status, because a
+    /// task Amazon ECS marks for the stop a failed launch earns is on its way out like any
+    /// other stopping task — what tells it apart from one the scheduler asked to stop is WHY
+    /// it is stopping. This is the failure the deployment circuit breaker counts
+    /// ([`ComAmazonawsEcsAmazonec2containerservicev20141113State::deployment_launch_failures`])
+    /// and the one a deployment reports as a failed launch.
+    pub fn failed_to_launch(&self) -> bool {
+        self.stop_code.as_deref() == Some(STOP_CODE_TASK_FAILED_TO_START)
+    }
+
+    /// When that launch failed: the instant the stop it earned was recorded at
+    /// ([`Self::fail_launch`] stamps it as the task's `stoppingAt`), and `None` for a task
+    /// whose launch did not fail.
+    pub fn launch_failed_at(&self) -> Option<SystemTime> {
+        self.failed_to_launch()
+            .then(|| self.stopping_at.or(self.stopped_at))
+            .flatten()
+            .and_then(|at| SystemTime::try_from(at).ok())
+    }
+
     /// Stop this task because Amazon ECS could not launch its containers at all, as of
     /// `at`: the task never ran, so it gets no `startedAt`, its containers no exit code,
     /// and the stop carries [`STOP_CODE_TASK_FAILED_TO_START`] with `reason` as its

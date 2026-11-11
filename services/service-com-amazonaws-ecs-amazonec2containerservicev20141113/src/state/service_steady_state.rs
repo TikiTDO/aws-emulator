@@ -28,7 +28,9 @@
 //! pass that materialises a task's own transitions, and the same pass the clock pump drives
 //! between calls — and it places nothing a service does not want: a service that is not
 //! `ACTIVE`, one whose deployment controller is not the ECS one (its tasks come from a task
-//! set), and one that already holds the tasks it wants are all left exactly as they are.
+//! set), one whose rollout the deployment circuit breaker failed (`Deployment$rolloutState`:
+//! "A deployment in `FAILED` state doesn't launch any new tasks") and one that already holds
+//! the tasks it wants are all left exactly as they are.
 //!
 //! The placement itself is the scheduler's ordinary one
 //! ([`ComAmazonawsEcsAmazonec2containerservicev20141113State::scale_service`]): a
@@ -57,6 +59,13 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                 continue;
             };
             if !service.is_active() || !service.places_tasks() {
+                continue;
+            }
+            // `Deployment$rolloutState`: "A deployment in FAILED state doesn't launch any new
+            // tasks" — so a rollout the deployment circuit breaker failed
+            // ([`super::circuit_breaker`]) is the one service the scheduler places nothing
+            // for, however short of its desired count it is.
+            if service.deployment_rollout_failure.is_some() {
                 continue;
             }
             // The revision the service's CURRENT deployment places: a replacement runs what

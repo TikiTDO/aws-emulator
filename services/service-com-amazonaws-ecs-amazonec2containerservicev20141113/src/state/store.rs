@@ -216,6 +216,11 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                 }
             }
         }
+        // The deployment circuit breaker's own pass: it counts the launches the current
+        // rollout lost, replaces them while it tolerates them, and fails the rollout once it
+        // does not — before the rollout's record is advanced, so the rollback that failure
+        // starts is carried out by the same pass once it falls due.
+        self.advance_deployment_circuit_breakers(now);
         self.advance_service_deployments(now);
         self.settle_services(now);
         // The scheduler's steady-state work: a service that is short of the tasks its
@@ -327,13 +332,7 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                 // steady state at least once — neither of which a later rollout undoes.
                 service.deployment_rollout_completed = true;
                 service.reached_steady_state = true;
-                service.events.extend(events);
-                // "A maximum of 100 of the latest events are displayed", so only the
-                // latest are kept at all.
-                if service.events.len() > MAX_SERVICE_EVENTS {
-                    let first_kept = service.events.len() - MAX_SERVICE_EVENTS;
-                    service.events.drain(..first_kept);
-                }
+                service.record_events(events);
             }
             // The scheduler's confirmation that the deployment is stable, owed at the
             // instant the write that touched it put on the record: once it is due the
@@ -780,6 +779,8 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                 rollback: None,
                 stop_due_at: None,
                 stop_type: None,
+                // Nothing has fired the breaker on a rollout that is only now starting.
+                circuit_breaker_triggered: false,
             },
         );
         self.prune_service_deployments(&service_arn);
@@ -1180,13 +1181,8 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
     /// The previous revision is the one the rollout just before this one released
     /// (`ServiceDeployment$sourceServiceRevisions`: "the currently deployed workload
     /// configuration"), so a service's FIRST rollout has none and the rollback is refused.
-    ///
-    /// Putting that revision back means running it again: the scheduler replaces the task
-    /// set this rollout placed with one from the previous revision, which is a rollout of
-    /// its own and is recorded like any other ([`Self::start_service_deployment`]). The
-    /// rollout being undone keeps its own identity and ends in
-    /// [`SERVICE_DEPLOYMENT_ROLLBACK_SUCCESSFUL`], carrying the `rollback` that names the
-    /// revision which was deployed in its place.
+    /// What putting it back means is [`Self::roll_back_service_deployment_to`]'s, which the
+    /// deployment circuit breaker reaches with the rollout IT chose to put back.
     pub(super) fn roll_back_service_deployment(
         &mut self,
         arn: &str,
@@ -1202,6 +1198,26 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
             .previous_service_deployment(&record)
             .cloned()
             .ok_or(LifecycleHookRefusal::NoPreviousRevision)?;
+        self.roll_back_service_deployment_to(&record, &source, at, rollback_reason)
+    }
+
+    /// Roll `record` back to the revision `source` released — the rollback itself, whichever
+    /// rollout a caller or the deployment circuit breaker chose to put back.
+    ///
+    /// Putting that revision back means running it again: the scheduler replaces the task
+    /// set this rollout placed with one from `source`'s revision, which is a rollout of
+    /// its own and is recorded like any other ([`Self::start_service_deployment`]). The
+    /// rollout being undone keeps its own identity and ends in
+    /// [`SERVICE_DEPLOYMENT_ROLLBACK_SUCCESSFUL`], carrying the `rollback` that names the
+    /// revision which was deployed in its place.
+    pub(super) fn roll_back_service_deployment_to(
+        &mut self,
+        record: &ServiceDeploymentRecord,
+        source: &ServiceDeploymentRecord,
+        at: SystemTime,
+        rollback_reason: &str,
+    ) -> Result<(), LifecycleHookRefusal> {
+        let arn = record.arn.as_str();
         let definition = source
             .task_definition
             .as_ref()
@@ -1265,8 +1281,8 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
             record.rollback_due_at = Some(at + TRANSITION_SPAN);
             record.rollback = Some(Rollback {
                 // "The reason the rollback happened. For example, the circuit breaker
-                // initiated the rollback operation" — this one was asked for, by the call
-                // that asked for it.
+                // initiated the rollback operation" — whichever of them this rollback is,
+                // as the caller of this rollback states it.
                 reason: Some(rollback_reason.to_string()),
                 started_at: Some(timestamp),
                 service_revision_arn: Some(source.target_service_revision_arn.clone()),
@@ -1492,6 +1508,18 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                 // computed from, which is the service's own and not a count this
                 // deployment once asked for.
                 service.map_or(0, |service| service.desired_count),
+                // "The number of times the circuit breaker detected a service deploymeny
+                // failure": the launches THIS rollout lost, counted off its own tasks under
+                // the reset rule its own configuration set.
+                service.map_or(0, |service| {
+                    self.deployment_launch_failures(
+                        service,
+                        &record.deployment_id,
+                        circuit_breaker_resets_on_healthy_task(&record.deployment_configuration),
+                    )
+                    .count
+                }),
+                record.circuit_breaker_triggered,
                 finished,
             )),
             alarms: Some(deployment_alarms_view(
@@ -1914,6 +1942,15 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
             service.deployment_created_at,
             &generations,
         );
+        // What the deployment circuit breaker has counted for this rollout, whether or not
+        // one is watching it: `Deployment$failedTasks` is "the number of consecutively
+        // failed tasks in the deployment", which is the same count
+        // ([`Self::deployment_launch_failures`]).
+        let failures = Self::launch_failures_of(
+            &service_tasks,
+            &service.deployment_id,
+            circuit_breaker_resets_on_healthy_task(&service.deployment_configuration),
+        );
         let deployment = Deployment {
             id: Some(service.deployment_id.clone()),
             status: Some(DEPLOYMENT_PRIMARY.to_string()),
@@ -1921,9 +1958,11 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
             desired_count: service.desired_count,
             pending_count: tally.pending,
             running_count: tally.running,
-            // Nothing executes a container here, so no task of a deployment ever fails
-            // to start: the count is a true zero rather than an invented number.
-            failed_tasks: 0,
+            // "The number of consecutively failed tasks in the deployment. A task is
+            // considered a failure if the service scheduler can't launch the task, the task
+            // doesn't transition to a RUNNING state" — counted off the launches this rollout
+            // lost rather than asserted.
+            failed_tasks: failures.count,
             healthy_task_count: counters.healthy,
             failed_launch_task_count: counters.failed_launch,
             replaced_task_count: counters.replaced,
@@ -1957,18 +1996,26 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
             network_configuration: service.network_configuration.clone(),
             // "When a service deployment is started, it begins in an IN_PROGRESS state.
             // When the service reaches a steady state, the deployment transitions to a
-            // COMPLETED state" — the steady state is the clock-owed transition the
-            // record holds the due instant of, so a rollout the scheduler has not
-            // settled yet is IN_PROGRESS whatever the counts already say.
+            // COMPLETED state. If the service fails to reach a steady state and circuit
+            // breaker is turned on, the deployment transitions to a FAILED state" — the
+            // steady state is the clock-owed transition the record holds the due instant
+            // of, so a rollout the scheduler has not settled yet is IN_PROGRESS whatever
+            // the counts already say, and one the breaker failed carries the terminal
+            // state and the reason it failed for.
             rollout_state: Some(
-                if settled {
-                    ROLLOUT_COMPLETED
-                } else {
-                    ROLLOUT_IN_PROGRESS
+                match &service.deployment_rollout_failure {
+                    Some(_) => ROLLOUT_FAILED,
+                    None if settled => ROLLOUT_COMPLETED,
+                    None => ROLLOUT_IN_PROGRESS,
                 }
                 .to_string(),
             ),
-            rollout_state_reason: Some(rollout_state_reason(&service.deployment_id, settled)),
+            rollout_state_reason: Some(
+                service
+                    .deployment_rollout_failure
+                    .clone()
+                    .unwrap_or_else(|| rollout_state_reason(&service.deployment_id, settled)),
+            ),
             service_connect_configuration: service.service_connect_configuration.clone(),
             // A Service Connect resource is registered in Cloud Map, which this
             // emulator does not provision, so a deployment has none.
@@ -2198,8 +2245,14 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                 }
                 // A task the deployment lost while it still wanted it running is one that
                 // failed; one the scheduler asked to stop (scaled in, replaced, drained
-                // away with its service) is not.
-                if task.last_status == STATUS_STOPPED && task.desired_status == STATUS_RUNNING {
+                // away with its service) is not. A task Amazon ECS could not launch at all
+                // is marked for the stop it earns, so its desired status is the stop's and
+                // the stop CODE is what tells the two apart
+                // ([`TaskRecord::failed_to_launch`]).
+                if task.failed_to_launch()
+                    || (task.last_status == STATUS_STOPPED
+                        && task.desired_status == STATUS_RUNNING)
+                {
                     counters.total_failed += 1;
                     // And one that never reached RUNNING failed to LAUNCH.
                     if task.started_at.is_none() {
@@ -2248,6 +2301,11 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
         });
         let counters =
             Self::deployment_counters(service_tasks, &superseded.id, superseded.created_at, generations);
+        let failures = Self::launch_failures_of(
+            service_tasks,
+            &superseded.id,
+            circuit_breaker_resets_on_healthy_task(&service.deployment_configuration),
+        );
         Deployment {
             id: Some(superseded.id.clone()),
             status: Some(DEPLOYMENT_ACTIVE.to_string()),
@@ -2255,7 +2313,7 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
             desired_count: superseded.desired_count,
             pending_count: tally.pending,
             running_count: tally.running,
-            failed_tasks: 0,
+            failed_tasks: failures.count,
             healthy_task_count: counters.healthy,
             failed_launch_task_count: counters.failed_launch,
             replaced_task_count: counters.replaced,
@@ -2277,17 +2335,16 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
             platform_family: fargate.then(|| os_family_display(&os_family)),
             network_configuration: superseded.network_configuration.clone(),
             rollout_state: Some(
-                if superseded.rollout_completed {
-                    ROLLOUT_COMPLETED
-                } else {
-                    ROLLOUT_IN_PROGRESS
+                match &superseded.rollout_failure {
+                    Some(_) => ROLLOUT_FAILED,
+                    None if superseded.rollout_completed => ROLLOUT_COMPLETED,
+                    None => ROLLOUT_IN_PROGRESS,
                 }
                 .to_string(),
             ),
-            rollout_state_reason: Some(rollout_state_reason(
-                &superseded.id,
-                superseded.rollout_completed,
-            )),
+            rollout_state_reason: Some(superseded.rollout_failure.clone().unwrap_or_else(|| {
+                rollout_state_reason(&superseded.id, superseded.rollout_completed)
+            })),
             service_connect_configuration: superseded.service_connect_configuration.clone(),
             service_connect_resources: Some(Vec::new()),
             volume_configurations: Some(superseded.volume_configurations.clone()),
@@ -3209,13 +3266,7 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
         let Some(service) = self.services.get_mut(key) else {
             return;
         };
-        service.events.push(event);
-        // "A maximum of 100 of the latest events are displayed", so only the latest are
-        // kept at all.
-        if service.events.len() > MAX_SERVICE_EVENTS {
-            let first_kept = service.events.len() - MAX_SERVICE_EVENTS;
-            service.events.drain(..first_kept);
-        }
+        service.record_events([event]);
     }
 
     /// Place ONE task of `service`, `PENDING` with its start owed by the clock
