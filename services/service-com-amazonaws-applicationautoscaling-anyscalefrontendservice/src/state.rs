@@ -33,6 +33,10 @@ use crate::ops::types::{
 /// the resource it moves and the activity it records.
 pub mod policy_execution;
 
+/// Confirming a capacity movement's FULFILMENT in the service that owns the scaled
+/// resource, which is what ends the activity that recorded the movement.
+pub mod capacity_fulfilment;
+
 /// The Amazon Keyspaces table a `cassandra` scalable target names, resolved in the service
 /// that owns it.
 pub mod keyspaces_tables;
@@ -241,6 +245,19 @@ pub struct ScalingActivityRecord {
     /// reads it for: an activity that moved no capacity has none a later movement could
     /// displace, so it keeps the status it was recorded with.
     pub movement: bool,
+    /// Whether the service that OWNS the scaled resource has still to report the capacity
+    /// this movement set as IN EFFECT before the activity may reach its terminal status.
+    ///
+    /// Setting a capacity and that capacity taking effect are two things: this service does
+    /// the first and the owning service the second, which is what the activity's own message
+    /// says it is waiting for ([`awaiting_fulfilment_status_message`]). So while this is set
+    /// the activity is non-terminal however far past [`ACTIVITY_FULFILMENT`] the clock is,
+    /// and the pass that reads the owning service clears it
+    /// ([`capacity_fulfilment::settle_activity_fulfilments`]). It is set only for a namespace
+    /// whose owning service reports an in-effect capacity at all
+    /// ([`capacity_fulfilment::owner_confirms_fulfilment`]); for every other namespace the
+    /// span is the whole of the wait.
+    pub awaiting_owner: bool,
 }
 
 /// What one activity that is not a capacity movement says about itself:
@@ -378,10 +395,12 @@ impl ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState {
     /// Record the scaling activity for a capacity movement this service has just made on
     /// `target`, and answer its `ActivityId`.
     ///
-    /// The activity is non-terminal for [`ACTIVITY_FULFILMENT`] and `Successful`
-    /// afterwards: this service moved the capacity, so the movement is fulfilled — unless
-    /// a LATER movement of the same scalable target takes its capacity over first, which
-    /// is what [`Self::override_unfulfilled_activities`] resolves.
+    /// The activity is non-terminal for at least [`ACTIVITY_FULFILMENT`], and reaches
+    /// `Successful` once the capacity it set has taken effect: for a namespace whose owning
+    /// service reports that, when that service reports it
+    /// ([`capacity_fulfilment::settle_activity_fulfilments`]), and otherwise as soon as the
+    /// span has elapsed. Unless a LATER movement of the same scalable target takes its
+    /// capacity over first, which is what [`Self::override_unfulfilled_activities`] resolves.
     pub fn record_capacity_change(
         &mut self,
         target: &TargetKey,
@@ -420,6 +439,9 @@ impl ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState {
             details: None,
             not_scaled_reasons: Vec::new(),
             movement: true,
+            awaiting_owner: capacity_fulfilment::owner_confirms_fulfilment(
+                &target.service_namespace,
+            ),
         });
         // The emulator's own ceiling on the log: the oldest entries go first, exactly as
         // ageing out of the reported window would have dropped them.
@@ -475,9 +497,12 @@ impl ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState {
             if !activity.movement {
                 continue;
             }
-            if activity.fulfilled_at.is_none_or(|due| due <= at) {
+            // A movement still waiting on the owning service is not terminal however far
+            // past its own span the clock is, so it is one a later movement displaces.
+            if !activity.awaiting_owner && activity.fulfilled_at.is_none_or(|due| due <= at) {
                 break;
             }
+            activity.awaiting_owner = false;
             activity.fulfilled_at = Some(at);
             activity.terminal_status_code = ACTIVITY_OVERRIDDEN.to_string();
             activity.terminal_status_message = Some(movement_description(target, capacity));
@@ -525,6 +550,9 @@ impl ComAmazonawsApplicationautoscalingAnyscalefrontendserviceState {
             details: None,
             not_scaled_reasons: entry.not_scaled_reasons,
             movement: false,
+            // What this entry reports was decided by this service alone, so there is no
+            // owning service for it to wait on.
+            awaiting_owner: false,
         });
         self.trim_activity_log();
         activity_id
@@ -643,7 +671,7 @@ pub const MAX_SCALING_ACTIVITIES: usize = 10_000;
 /// specified namespace from the previous six weeks".
 pub const ACTIVITY_RETENTION: Duration = Duration::from_secs(6 * 7 * 24 * 60 * 60);
 
-/// How long after the call that starts it a scaling activity reaches its terminal
+/// The soonest after the call that starts it a scaling activity may reach its terminal
 /// status.
 ///
 /// CHOSEN, not documented: on AWS the fulfilment time is the target service's own. It is this
@@ -651,6 +679,12 @@ pub const ACTIVITY_RETENTION: Duration = Duration::from_secs(6 * 7 * 24 * 60 * 6
 /// straight after the call that moved capacity still observes the non-terminal activity — and
 /// one that POLLS the log, which is how a client watches a scaling activity, still catches
 /// that status between two reads rather than only ever seeing the terminal one.
+///
+/// It is the whole of the wait only for a movement nothing else can be read about. Where the
+/// service that owns the scaled resource reports whether the capacity has taken effect, the
+/// span is the floor and that report is what ends the activity
+/// ([`capacity_fulfilment::settle_activity_fulfilments`]), so a capacity the owning service
+/// never reaches is one its movement never reports as fulfilled.
 pub const ACTIVITY_FULFILMENT: Duration = Duration::from_secs(3);
 
 /// The non-terminal status a capacity movement carries until it is fulfilled, from the
@@ -1426,10 +1460,10 @@ pub fn capacity_bound_enforcement_cause(bound: CapacityBound, capacity: i32) -> 
 
 /// The `ScalingActivity` a `Describe` returns for a stored record, as of `now`.
 ///
-/// An activity whose fulfilment instant has not arrived yet is reported in its
-/// non-terminal status with no `EndTime`; from that instant on it reports the terminal
-/// status it was recorded with, and the `EndTime` is that instant — so the same record
-/// answers the same thing to every reader at the same clock reading.
+/// An activity that has not been fulfilled yet is reported in its non-terminal status with
+/// no `EndTime`; once it has been it reports the terminal status it was recorded with, and
+/// the `EndTime` is the instant of that fulfilment — so the same record answers the same
+/// thing to every reader at the same clock reading.
 ///
 /// Either way it carries a `StatusMessage` ("a simple message about the current status of the
 /// scaling activity") naming the capacity the movement set: an activity that has started is
@@ -1437,7 +1471,10 @@ pub fn capacity_bound_enforcement_cause(bound: CapacityBound, capacity: i32) -> 
 /// fulfilment of that capacity got — awaited while the change is on its way
 /// ([`awaiting_fulfilment_status_message`]), settled once it is terminal.
 pub fn scaling_activity_of(record: &ScalingActivityRecord, now: SystemTime) -> ScalingActivity {
-    let pending = record.fulfilled_at.filter(|due| *due > now);
+    // Non-terminal while the span it was given is still running, and while the service that
+    // owns the scaled resource has still to make the capacity take effect: a movement waits
+    // on both, and either one of them is enough to keep it in progress.
+    let pending = record.awaiting_owner || record.fulfilled_at.is_some_and(|due| due > now);
     ScalingActivity {
         activity_id: record.activity_id.clone(),
         service_namespace: record.target.service_namespace.clone(),
@@ -1446,20 +1483,23 @@ pub fn scaling_activity_of(record: &ScalingActivityRecord, now: SystemTime) -> S
         description: record.description.clone(),
         cause: record.cause.clone(),
         start_time: timestamp_of(record.start_time),
-        end_time: match pending {
-            Some(_) => None,
-            None => record.fulfilled_at.map(timestamp_of),
+        end_time: if pending {
+            None
+        } else {
+            record.fulfilled_at.map(timestamp_of)
         },
-        status_code: match pending {
-            Some(_) => ACTIVITY_IN_PROGRESS.to_string(),
-            None => record.terminal_status_code.clone(),
+        status_code: if pending {
+            ACTIVITY_IN_PROGRESS.to_string()
+        } else {
+            record.terminal_status_code.clone()
         },
-        status_message: match pending {
-            Some(_) => Some(awaiting_fulfilment_status_message(
+        status_message: if pending {
+            Some(awaiting_fulfilment_status_message(
                 &record.target,
                 record.capacity,
-            )),
-            None => record.terminal_status_message.clone(),
+            ))
+        } else {
+            record.terminal_status_message.clone()
         },
         details: record.details.clone(),
         // The member is "only available when IncludeNotScaledActivities is true" AND

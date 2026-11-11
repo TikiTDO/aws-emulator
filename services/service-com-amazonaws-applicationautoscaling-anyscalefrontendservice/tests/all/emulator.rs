@@ -198,13 +198,32 @@ impl Emulator {
         .await
     }
 
-    /// Create an ECS service of `desired_count` tasks in a cluster of its own, and answer the
-    /// `ResourceId` an `ecs:service:DesiredCount` scalable target names it by.
+    /// Create an ECS service of `desired_count` tasks in a cluster of its own, with ONE
+    /// container instance registered into that cluster, and answer the `ResourceId` an
+    /// `ecs:service:DesiredCount` scalable target names it by.
     ///
-    /// The cluster registers no container instance, so nothing is ever placed: what these
-    /// suites read back is the service's `desiredCount`, which is the capacity
-    /// `ecs:service:DesiredCount` scales ("The task count of an ECS service").
+    /// The cluster is given capacity because that is what lets the ECS scheduler PLACE the
+    /// tasks the service wants: a capacity movement this service performs is fulfilled when
+    /// the owning service reports the new count as running, so a cluster with nowhere to run a
+    /// task is an estate where no movement is ever fulfilled — which is what
+    /// [`Emulator::given_ecs_service_without_capacity`] is for.
     pub async fn given_ecs_service(
+        &self,
+        cluster: &str,
+        service: &str,
+        desired_count: i64,
+    ) -> String {
+        let resource_id = self
+            .given_ecs_service_without_capacity(cluster, service, desired_count)
+            .await;
+        self.given_container_instance(cluster).await;
+        resource_id
+    }
+
+    /// The same ECS service in a cluster with NO container instance registered: the estate
+    /// the EC2 launch type has nowhere to run a task on, so its `desiredCount` moves and its
+    /// `runningCount` never reaches it.
+    pub async fn given_ecs_service_without_capacity(
         &self,
         cluster: &str,
         service: &str,
@@ -250,6 +269,41 @@ impl Emulator {
             "case {service:?}: expected CreateService to answer 200, got {status} {body:?}"
         );
         format!("service/{cluster}/{service}")
+    }
+
+    /// Register ONE container instance into `cluster`, the way the ECS agent does: the EC2
+    /// instance identity document it reads off its own instance metadata, beside the
+    /// signature it presents with it.
+    ///
+    /// "The EC2 launch type runs your tasks on Amazon EC2 instances registered to your
+    /// cluster" — so this is what gives a cluster somewhere to run a task.
+    pub async fn given_container_instance(&self, cluster: &str) {
+        let identity_document = json!({
+            "instanceId": "i-0c0ffee0c0ffee0c0",
+            "region": REGION,
+            "accountId": ACCOUNT,
+            "imageId": "ami-0abcdef1234567890",
+            "instanceType": "m5.large",
+            "availabilityZone": format!("{REGION}a"),
+        })
+        .to_string();
+        let (status, body) = self
+            .call_ecs(
+                "RegisterContainerInstance",
+                json!({
+                    "cluster": cluster,
+                    "instanceIdentityDocument": identity_document,
+                    // What a signature IS of cannot be checked without the key that produced
+                    // it; this is base64 text of the length a 2048-bit signature has.
+                    "instanceIdentityDocumentSignature": "ZXhhbXBsZQ".repeat(35),
+                }),
+            )
+            .await;
+        assert_eq!(
+            status, 200,
+            "case {cluster:?}: expected RegisterContainerInstance to answer 200, \
+             got {status} {body:?}"
+        );
     }
 
     /// Call an IAM operation, the way a client asks for one: an awsQuery POST whose
@@ -336,6 +390,25 @@ impl Emulator {
         body["services"][0]["desiredCount"]
             .as_i64()
             .unwrap_or_else(|| panic!("case {service:?}: expected a desiredCount, got {body:?}"))
+    }
+
+    /// The `runningCount` ECS reports for one service, as `DescribeServices` answers it: "the
+    /// number of tasks in the cluster that are in the RUNNING state", which is the capacity
+    /// actually in effect for `ecs:service:DesiredCount`.
+    pub async fn ecs_running_count(&self, cluster: &str, service: &str) -> i64 {
+        let (status, body) = self
+            .call_ecs(
+                "DescribeServices",
+                json!({"cluster": cluster, "services": [service]}),
+            )
+            .await;
+        assert_eq!(
+            status, 200,
+            "case {service:?}: expected DescribeServices to answer 200, got {status} {body:?}"
+        );
+        body["services"][0]["runningCount"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("case {service:?}: expected a runningCount, got {body:?}"))
     }
 
     /// Create the CloudWatch alarm a step scaling policy is wired to: the policy's ARN is the

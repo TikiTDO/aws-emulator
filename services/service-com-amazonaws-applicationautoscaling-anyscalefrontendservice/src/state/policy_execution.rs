@@ -226,6 +226,10 @@ pub fn settle_policy_executions<Eng: Send + Sync + 'static>(engine: &Eng, region
     // A capacity movement another call made and the owning service has not been told about
     // yet goes first: it is older than anything this pass is about to perform.
     deliver_pending_capacity(engine, &state);
+    // Then the movements already delivered whose capacity the owning service has since made
+    // take effect: the activity each of them recorded ends at the instant that happened,
+    // which was owed by that service's clock and not by this call.
+    super::capacity_fulfilment::settle_activity_fulfilments(engine, region);
     // STEP 1, under this service's lock: which policies an alarm could be firing, and what
     // each of them has already been executed for.
     let candidates = { firing_candidates(&state.lock(), region) };
