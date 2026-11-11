@@ -33,7 +33,7 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use crate::event_source_mappings::{
     call_sqs, create_mapping, create_queue, create_timed_function, get_mapping, messages_held,
-    queue_message_counts, router_with_queues,
+    processing_result_within_budget, queue_message_counts, router_with_queues,
 };
 
 /// Several of the one-second visibility windows these queues hand a message over for: long
@@ -269,14 +269,17 @@ async fn no_message_is_consumed_on_a_report_no_invocation_produced() {
             row.bodies.len()
         );
         // And the mapping made the attempt: "the result of the event source mapping's last
-        // processing attempt" is reported, so the batch really was handed over.
-        let reading = get_mapping(&router, &uuid).await;
-        let result = reading.string("LastProcessingResult").unwrap_or_default();
+        // processing attempt" is reported, so the batch really was handed over. The report
+        // follows the invocation the batch was handed to, so it is waited for rather than
+        // read at one instant.
+        let result = processing_result_within_budget(&router, case, &uuid)
+            .await
+            .unwrap_or_default();
         assert!(
             !result.is_empty(),
             "case {case:?}: a mapping that handed a batch to its function must report what \
              that attempt came to, got {}",
-            reading.text()
+            get_mapping(&router, &uuid).await.text()
         );
     }
 }

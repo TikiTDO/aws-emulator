@@ -41,7 +41,8 @@ use crate::event_source_mapping_role_access::{
     allow, create_function_as, given_role, iam, logs_only, KINESIS_READS, QUEUE_READS,
 };
 use crate::event_source_mappings::{
-    call, call_sqs, create_mapping, create_queue, get_mapping, queue_message_counts, router_on,
+    call, call_sqs, create_mapping, create_queue, get_mapping, processing_result_within_budget,
+    queue_message_counts, router_on,
 };
 // The stream fixture and the Kinesis calls are the ones the shard-source suites already
 // publish, so every suite over that surface drives the same wire.
@@ -403,14 +404,17 @@ async fn a_queue_mapping_polls_only_while_its_execution_role_may_read_the_queue(
                  the message must be taken out of the queue, and it stayed visible: {:?}",
                 queue_message_counts(&router, case, &url).await
             );
-            let reading = get_mapping(&router, &uuid).await;
-            let result = reading.string("LastProcessingResult").unwrap_or_default();
+            // The batch leaving the queue is the attempt STARTING, so what the attempt came
+            // to is waited for rather than read at that instant.
+            let result = processing_result_within_budget(&router, case, &uuid)
+                .await
+                .unwrap_or_default();
             assert_eq!(
                 result, LAST_PROCESSING_RESULT_FUNCTION_CALL_FAILED,
                 "case {case:?}: nothing here runs a deployment package, so the attempt the \
                  pass made on the batch it polled must be reported as the unsuccessful one \
                  it was, got {result:?} in {}",
-                reading.text()
+                get_mapping(&router, &uuid).await.text()
             );
             continue;
         }
@@ -573,31 +577,5 @@ async fn a_stream_mapping_reads_only_while_its_execution_role_may_read_the_strea
             );
             tokio::time::sleep(LOOK_AGAIN).await;
         }
-    }
-}
-
-/// Wait until the mapping `uuid` names reports a `LastProcessingResult`, answering what it
-/// reported, or `None` when it never did.
-pub(crate) async fn processing_result_within_budget(
-    router: &MultiServiceRouter,
-    case: &str,
-    uuid: &str,
-) -> Option<String> {
-    let deadline = Instant::now() + BUDGET;
-    loop {
-        let reading = get_mapping(router, uuid).await;
-        if let Some(result) = reading.string("LastProcessingResult") {
-            return Some(result);
-        }
-        assert_eq!(
-            reading.status, 200,
-            "case {case:?}: expected GetEventSourceMapping to answer 200, got {} {}",
-            reading.status,
-            reading.text()
-        );
-        if Instant::now() >= deadline {
-            return None;
-        }
-        tokio::time::sleep(LOOK_AGAIN).await;
     }
 }

@@ -42,7 +42,8 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use crate::event_source_mappings::{
     call, call_sqs, create_mapping, create_queue, create_timed_function, get_mapping,
-    queue_attribute, router_with_queues, MAPPINGS_URI,
+    processing_result_within_budget, queue_attribute, router_with_queues, set_visibility_timeout,
+    MAPPINGS_URI,
 };
 
 /// The `State` a mapping reports once it is polling its event source.
@@ -65,23 +66,6 @@ const LOOK_AGAIN: Duration = Duration::from_millis(50);
 /// hold cut to that span has demonstrably lapsed, and short enough to be well inside the
 /// longer span the rule holds the batch for.
 const SLACK: Duration = Duration::from_millis(700);
-
-/// `SetQueueAttributes` of `VisibilityTimeout` on the queue `url` addresses.
-async fn set_visibility_timeout(router: &MultiServiceRouter, case: &str, url: &str, seconds: i64) {
-    let (status, answered) = call_sqs(
-        router,
-        "SetQueueAttributes",
-        &json!({
-            "QueueUrl": url,
-            "Attributes": { "VisibilityTimeout": seconds.to_string() },
-        }),
-    )
-    .await;
-    assert_eq!(
-        status, 200,
-        "case {case:?}: expected SetQueueAttributes to answer 200, got {status} {answered}"
-    );
-}
 
 /// The `(visible, in flight)` message counts the queue `url` addresses reports.
 async fn depths(
@@ -280,7 +264,12 @@ async fn a_polled_batch_stays_in_flight_for_as_long_as_its_attempt_may_last() {
             reading.status,
             reading.text()
         );
-        let result = reading.string("LastProcessingResult").unwrap_or_default();
+        // The batch going out of the queue is the attempt STARTING: what it came to is
+        // reported once the invocation it was handed to has been decided, so it is waited
+        // for rather than read at the instant the hold was probed at.
+        let result = processing_result_within_budget(&router, case, &uuid)
+            .await
+            .unwrap_or_default();
         assert_eq!(
             result, LAST_PROCESSING_RESULT_FUNCTION_CALL_FAILED,
             "case {case:?}: nothing here runs a deployment package, so the attempt this \

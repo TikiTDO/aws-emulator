@@ -41,12 +41,12 @@ use crate::event_source_mapping_role_access::{
     allow, create_function_as, given_role, logs_only, QUEUE_READS,
 };
 use crate::event_source_mappings::{
-    call_sqs, create_queue, get_mapping, queue_message_counts, send_message,
+    call_sqs, create_queue, get_mapping, processing_result_within_budget, queue_message_counts,
+    send_message,
 };
 use crate::event_source_poll_authorization::{
     emulator_with_queues, emulator_with_streams, given_enabled_mapping, polled_within_budget,
-    processing_result_within_budget, wait_until_active, BLOCKED_WINDOW, LOOK_AGAIN, SHARD_READS,
-    STATE_ENABLED,
+    wait_until_active, BLOCKED_WINDOW, LOOK_AGAIN, SHARD_READS, STATE_ENABLED,
 };
 use crate::kinesis_event_source_delivery::{given_stream, kinesis, put_records};
 

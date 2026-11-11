@@ -233,6 +233,8 @@ mod job_run_retries;
 mod job_runs;
 #[path = "all/job_script_execution.rs"]
 mod job_script_execution;
+#[path = "all/job_script_execution_wait.rs"]
+mod job_script_execution_wait;
 #[path = "all/job_updates.rs"]
 mod job_updates;
 #[path = "all/jobs.rs"]

@@ -67,7 +67,7 @@ const ROLE: &str = "arn:aws:iam::000000000000:role/service-role/lambda-exec";
 /// Enabling, Enabled, Disabling, Disabled, Updating, or Deleting."
 pub(crate) const STATE_CREATING: &str = "Creating";
 /// See [`STATE_CREATING`].
-const STATE_ENABLED: &str = "Enabled";
+pub(crate) const STATE_ENABLED: &str = "Enabled";
 /// See [`STATE_CREATING`].
 pub(crate) const STATE_DISABLED: &str = "Disabled";
 
@@ -505,6 +505,41 @@ pub(crate) async fn await_mapping_state(
     }
 }
 
+/// Wait until the mapping `uuid` names reports a `LastProcessingResult`, answering what it
+/// reported, or `None` when it never did inside [`CLOCK_BUDGET`].
+///
+/// A batch leaving its source is the START of a processing attempt, not the end of one: the
+/// mapping reports "the result of the event source mapping's last processing attempt" only
+/// once the invocation it handed the batch to has been decided, which is a span no caller
+/// controls. So a suite that has seen the batch go reads the result the same way it reads
+/// every other piece of work the mapping owes — by looking again until it is there.
+///
+/// THE ONE waiter for that member in these suites, so no row reads it once at an instant of
+/// its own choosing.
+pub(crate) async fn processing_result_within_budget(
+    router: &MultiServiceRouter,
+    case: &str,
+    uuid: &str,
+) -> Option<String> {
+    let deadline = Instant::now() + CLOCK_BUDGET;
+    loop {
+        let reading = get_mapping(router, uuid).await;
+        if let Some(result) = reading.string("LastProcessingResult") {
+            return Some(result);
+        }
+        assert_eq!(
+            reading.status, 200,
+            "case {case:?}: expected GetEventSourceMapping to answer 200, got {} {}",
+            reading.status,
+            reading.text()
+        );
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(LOOK_AGAIN).await;
+    }
+}
+
 /// `SendMessage` of `body` to the queue `url` addresses, carrying `group` as its
 /// `MessageGroupId` when there is one — which a FIFO queue requires and a standard queue
 /// takes no notice of.
@@ -622,6 +657,32 @@ pub(crate) const IN_FLIGHT_MESSAGES: &str = "ApproximateNumberOfMessagesNotVisib
 /// has not elapsed: "ApproximateNumberOfMessagesDelayed — the approximate number of
 /// messages in the queue that are delayed and not available for reading immediately".
 pub(crate) const DELAYED_MESSAGES: &str = "ApproximateNumberOfMessagesDelayed";
+
+/// `SetQueueAttributes` of `VisibilityTimeout` on the queue `url` addresses — how long one
+/// delivery of its messages hides them for, which a client may change at any time and which
+/// the suites over a mapping's hold on a batch set after the pair was wired.
+///
+/// THE ONE writer of that attribute in these suites.
+pub(crate) async fn set_visibility_timeout(
+    router: &MultiServiceRouter,
+    case: &str,
+    url: &str,
+    seconds: i64,
+) {
+    let (status, answered) = call_sqs(
+        router,
+        "SetQueueAttributes",
+        &json!({
+            "QueueUrl": url,
+            "Attributes": { "VisibilityTimeout": seconds.to_string() },
+        }),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "case {case:?}: expected SetQueueAttributes to answer 200, got {status} {answered}"
+    );
+}
 
 /// The attributes `names` lists, from ONE `GetQueueAttributes` answer for the queue `url`
 /// addresses: the `Attributes` object exactly as the service reported it. The one call site

@@ -69,7 +69,7 @@ use ::aws_smithy_types::error::metadata::ProvideErrorMetadata;
 use ::service_com_amazonaws_lambda_awsgirapiservice::state::execution::package::PackageModule;
 use ::service_com_amazonaws_lambda_awsgirapiservice::state::execution::python;
 use ::service_com_amazonaws_lambda_awsgirapiservice::state::execution::{
-    function_sdk_access, AwsAccess,
+    function_sdk_access, AwsAccess, INIT_PHASE_LIMIT,
 };
 
 use super::*;
@@ -98,6 +98,26 @@ pub const JOB_SCRIPT_RUN_CEILING: Duration = Duration::from_secs(5);
 /// this, after which the run is reported on what the bound it ran past says rather than
 /// waiting for the thread.
 pub const JOB_SCRIPT_ABANDON_GRACE: Duration = Duration::from_secs(2);
+
+/// The longest the call that performs ONE execution waits for the thread that execution runs
+/// on, for a job whose `Timeout` is `timeout_minutes`.
+///
+/// What is waited for is the whole span the ENGINE may take, not the script's own ceiling
+/// alone: the execution environment the script runs in — the interpreter, the runtime and the
+/// import of the script's entry module — is built before a line of the script is read, and the
+/// engine bounds that phase on a span of its own ([`INIT_PHASE_LIMIT`]) rather than on the
+/// script's wall clock. A wait of the script's ceiling and the grace alone gives up on an
+/// execution whose script has not been reached yet, and reports the state a script TERMINATED
+/// for taking too long comes to rest in for one that ran past nothing — an outcome no
+/// execution produced. The grace ([`JOB_SCRIPT_ABANDON_GRACE`]) is still on top, because the
+/// engine's own stop lands at the next traced event.
+#[must_use]
+pub fn job_script_execution_wait(timeout_minutes: i32) -> Duration {
+    job_script_budget(timeout_minutes)
+        .wall_clock
+        .saturating_add(INIT_PHASE_LIMIT)
+        .saturating_add(JOB_SCRIPT_ABANDON_GRACE)
+}
 
 /// How many job scripts run at once in this process.
 ///
@@ -143,8 +163,8 @@ pub const MAX_JOB_SCRIPT_RUNS_PER_CALL: usize = 8;
 /// fits inside this span, the wait for an interpreter is narrowed to what is left of it
 /// ([`JOB_SCRIPT_PERMIT_WAIT`]), and no script in flight is ever cancelled — so a run is
 /// never left claimed by an execution nobody is waiting for, and the longest a call can be
-/// held is this span plus the grace one script is given to stop
-/// ([`JOB_SCRIPT_ABANDON_GRACE`]) rather than the product of the per-script ceiling and
+/// held is this span plus what the LAST execution it began is waited for
+/// ([`job_script_execution_wait`]) rather than the product of the per-script ceiling and
 /// [`MAX_JOB_SCRIPT_RUNS_PER_CALL`].
 pub const JOB_SCRIPT_CALL_CEILING: Duration = Duration::from_secs(10);
 
@@ -402,8 +422,9 @@ fn configured_timeout(timeout_minutes: i32) -> Duration {
 /// costs is bounded twice over — at most [`MAX_JOB_SCRIPT_RUNS_PER_CALL`] scripts, and a
 /// further one started only while a whole [`JOB_SCRIPT_RUN_CEILING`] still fits inside
 /// [`JOB_SCRIPT_CALL_CEILING`] — so a slow or looping script cannot hold the request that
-/// called this open beyond that span and the grace one script is given to stop, and the runs
-/// it did not reach stay owed rather than being reported as anything.
+/// called this open beyond that span and what the last execution it began is waited for
+/// ([`job_script_execution_wait`]), and the runs it did not reach stay owed rather than being
+/// reported as anything.
 ///
 /// A run that FAILED and still has retry budget owes the service a further attempt
 /// (`Job$MaxRetries`), which is recorded once that run has come to rest and performed by
@@ -493,8 +514,8 @@ pub async fn perform_owed_job_runs<Eng: ::std::marker::Send + ::std::marker::Syn
 ///
 /// `left_of_the_call` is what the CALL still has of [`JOB_SCRIPT_CALL_CEILING`], which caps
 /// the wait for a permit: the script's own ceiling plus that wait cannot then take the call
-/// past its own span, so the longest a request is held is that span plus the grace one
-/// script is given to stop.
+/// past its own span, so the longest a request is held is that span plus what the execution
+/// it began is waited for ([`job_script_execution_wait`]).
 async fn perform_job_script<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>(
     engine: &Eng,
     ctx: &smithy_server_runtime::OperationContext<'_>,
@@ -620,8 +641,9 @@ async fn read_script(
 /// Run `source` as the job's script, on a thread of its own, and answer what it came to.
 ///
 /// The interpreter is synchronous and CPU-bound, so it runs on a thread with a stack of its
-/// own rather than on the async runtime, and the caller's wait for it is bounded by the
-/// script's own budget plus [`JOB_SCRIPT_ABANDON_GRACE`].
+/// own rather than on the async runtime, and the caller's wait for it is bounded by
+/// [`job_script_execution_wait`] — the engine's whole span for this budget, the grace
+/// included.
 ///
 /// `permit` is this run's share of [`MAX_CONCURRENT_JOB_SCRIPT_RUNS`] and is MOVED into that
 /// thread, so it is given back when the thread ends — a run the caller has given up waiting
@@ -688,16 +710,14 @@ async fn run_script(
             "the thread the job script runs on could not be started: {error}"
         ));
     }
-    let wait = budget
-        .wall_clock
-        .saturating_add(JOB_SCRIPT_ABANDON_GRACE);
+    let wait = job_script_execution_wait(plan.timeout_minutes);
     match ::tokio::time::timeout(wait, receiver).await {
         Ok(Ok(finished)) => read_outcome(&finished.completion),
         Ok(Err(_)) => JobRunOutcome::EndedInError(
             "the thread the job script ran on ended without reporting".to_string(),
         ),
-        // The script is still going a grace period past its own budget: it is given up on,
-        // and what the run reports is the wall clock it ran past.
+        // The script is still going a grace period past the whole span the engine may take:
+        // it is given up on, and what the run reports is the wall clock it ran past.
         Err(_elapsed) => timed_out(),
     }
 }

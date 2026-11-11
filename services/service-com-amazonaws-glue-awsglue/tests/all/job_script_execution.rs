@@ -42,13 +42,13 @@ use crate::wire::{emulator_on, ok, REGION};
 
 /// The role a job runs as: "the name or Amazon Resource Name (ARN) of the IAM role
 /// associated with this job" (`CreateJob$Role`).
-const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/sim2real-glue-job-role";
+pub(crate) const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/sim2real-glue-job-role";
 
 /// The bucket the scripts and everything they write live in.
-const BUCKET: &str = "glue-job-script-suite";
+pub(crate) const BUCKET: &str = "glue-job-script-suite";
 
 /// The prefix the staged scripts live under.
-const SCRIPTS: &str = "scripts/";
+pub(crate) const SCRIPTS: &str = "scripts/";
 
 /// An emulator with Glue AND Amazon S3 mounted on one shared engine, plus the engine itself
 /// so a test can move the due instant a run's terminal state falls at.
@@ -56,7 +56,7 @@ const SCRIPTS: &str = "scripts/";
 /// Amazon S3 is mounted because a job run READS its script from it and a script WRITES
 /// through it: both travel over the emulator's own in-process callback, so the object a test
 /// stages is the script that runs, and the object the script writes is one a client can get.
-fn emulator_with_s3() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
+pub(crate) fn emulator_with_s3() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = emulator_on(Arc::clone(&engine));
     router.register_service(service_com_amazonaws_s3_amazons3::EmulatedService::new(
@@ -85,7 +85,7 @@ fn s3(router: &MultiServiceRouter) -> aws_sdk_s3::Client {
 }
 
 /// Create the suite's bucket.
-async fn create_bucket(router: &MultiServiceRouter) {
+pub(crate) async fn create_bucket(router: &MultiServiceRouter) {
     s3(router)
         .create_bucket()
         .bucket(BUCKET)
@@ -95,7 +95,7 @@ async fn create_bucket(router: &MultiServiceRouter) {
 }
 
 /// Stage `source` as the script object `key`, and answer the `s3://` location that names it.
-async fn stage_script(router: &MultiServiceRouter, key: &str, source: &str) -> String {
+pub(crate) async fn stage_script(router: &MultiServiceRouter, key: &str, source: &str) -> String {
     s3(router)
         .put_object()
         .bucket(BUCKET)
@@ -124,7 +124,7 @@ async fn object_body(router: &MultiServiceRouter, key: &str) -> Option<String> {
 
 /// Start a run of `job_name` with `arguments`, make the state the clock owes it due, and
 /// answer the `JobRun` `GetJobRun` then reports.
-async fn run_to_rest(
+pub(crate) async fn run_to_rest(
     router: &MultiServiceRouter,
     engine: &Arc<engine::InMemoryEngine>,
     job_name: &str,
