@@ -23,6 +23,8 @@ mod boundary_refusal_wording;
 mod document_content;
 #[path = "all/document_default_version.rs"]
 mod document_default_version;
+#[path = "all/document_listing.rs"]
+mod document_listing;
 #[path = "all/document_versions.rs"]
 mod document_versions;
 #[path = "all/cloud_connectors.rs"]

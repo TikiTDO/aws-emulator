@@ -44,7 +44,10 @@
 //! owned by Amazon. A read goes through [`ComAmazonawsSsmAmazonssmState::resolve_document`],
 //! which answers with the created document of that name or, failing that, the published
 //! one — derived from the catalogue's body by the same content reader, so a published
-//! document reports nothing a created one would not.
+//! document reports nothing a created one would not. `ListDocuments` reports exactly the
+//! documents those reads resolve — the created ones of a Region beside the published
+//! catalogue — narrowed by the filters a listing accepts and paged by document name
+//! ([`document_listing`]).
 //!
 //! The third is **Run Command** ([`commands`]): `SendCommand` resolves the document and
 //! the managed nodes a send names or describes, persists the command and one invocation
@@ -134,6 +137,10 @@ pub mod cloud_connectors;
 
 /// Rendering a persisted document's content in the `DocumentFormat` a read asks for.
 pub mod document_format;
+
+/// Which documents a listing of this account's SSM documents walks, the filters that
+/// narrow it, and the identity each one is reported by.
+pub mod document_listing;
 
 /// Whether a read may have a `SecureString`'s value decrypted for its caller, which is a
 /// decision the KMS key the value is sealed under makes rather than this service.

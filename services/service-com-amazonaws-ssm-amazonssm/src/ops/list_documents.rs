@@ -1,15 +1,25 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListDocuments
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListDocuments`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Report the SSM documents this account holds in a Region — the listing half of this
+//! service's document slice. This is the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListDocuments::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! "Returns all Systems Manager (SSM) documents in the current Amazon Web Services account
+//! and Amazon Web Services Region", which is every document a read of this service
+//! resolves there: the ones a caller created through the endpoint this request was signed
+//! for AND the ones Systems Manager publishes in every account
+//! ([`crate::state::PUBLISHED_DOCUMENTS`]). Each is reported once, by the identity of its
+//! DEFAULT version, from the one store in [`crate::state`]
+//! ([`crate::state::document_listing`]). Nothing it reports moves with the clock — a
+//! `DocumentIdentifier` carries no status — so a listing writes nothing: it reports what
+//! the store already holds.
+//!
+//! "You can limit the results of this request by using a filter": a filter narrows the
+//! listing by one attribute of a document, filters are ANDed and the values of one filter
+//! ORed, and a key naming no attribute of a document is refused as `InvalidFilterKey`. The
+//! page is bounded by `MaxResults` and resumed by `NextToken`, which is the NAME the next
+//! page starts at — so a token this service did not issue is refused as
+//! `InvalidNextToken`.
 //!
 //! ## Shape of an operation
 //!
@@ -156,18 +166,132 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListDocuments` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListDocumentsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        use crate::state::document_listing::{
+            invalid_owner_message, is_document_filter_key, is_document_name, is_document_owner,
+            list_documents_page_size, DocumentListingFilter, DOCUMENT_KEY_VALUES_FILTER_KEYS,
+            FILTER_KEY_OWNER, ONE_OWNER_PER_REQUEST, ONE_TAG_KEY_PER_REQUEST,
+        };
+        use crate::state::{invalid_filter_key_message, request_region, INVALID_NEXT_TOKEN};
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(ListDocumentsErrorModeled::InternalServerError(
+                InternalServerError {
+                    message: Some("the document store is unavailable".to_string()),
+                },
+            )
+            .into());
+        };
+
+        // Both filter members narrow the same walk, so a request carrying both is served
+        // the documents satisfying all of them.
+        let mut filters: Vec<DocumentListingFilter> = Vec::new();
+
+        // "This data type is deprecated. Instead, use DocumentKeyValuesFilter": the
+        // deprecated filter carries exactly one value, and its `key` is a modelled enum
+        // whose values the boundary walk has already refused anything outside — so this
+        // arm's key check is a backstop.
+        for filter in input.document_filter_list.as_deref().unwrap_or_default() {
+            if !DOCUMENT_FILTER_KEY_VALUES.contains(&filter.key.as_str()) {
+                return Err(crate::scaffolded::Scaffolded::invalid_filter_key(
+                    invalid_filter_key_message(&filter.key, DOCUMENT_FILTER_KEY_VALUES),
+                ));
+            }
+            filters.push(DocumentListingFilter::new(
+                filter.key.clone(),
+                vec![filter.value.clone()],
+            ));
+        }
+
+        // A `Filters` entry names one of the Amazon Web Services-provided keys or a tag
+        // ("To specify a custom key-value pair, use the format
+        // Key=tag:tagName,Values=valueName"); anything else names no attribute of a
+        // document, which is what `InvalidFilterKey` reports. The modelled member is
+        // optional, so an entry that names no key at all is refused the same way.
+        for filter in input.filters.as_deref().unwrap_or_default() {
+            let key = filter.key.as_deref().unwrap_or_default();
+            if !is_document_filter_key(key) {
+                return Err(crate::scaffolded::Scaffolded::invalid_filter_key(
+                    invalid_filter_key_message(key, DOCUMENT_KEY_VALUES_FILTER_KEYS),
+                ));
+            }
+            let values = filter.values.as_deref().unwrap_or_default();
+            if values.is_empty() {
+                return Err(crate::scaffolded::Scaffolded::validation(format!(
+                    "Filter key '{key}' carries no value to search for"
+                )));
+            }
+            filters.push(DocumentListingFilter::new(key, values.to_vec()));
+        }
+
+        // "Note that only one Owner can be specified in a request": one request selects
+        // one owner class, however many filter members name it, and each value it names has
+        // to BE one of the classes that doc publishes for the key — anything else names no
+        // owner, which is a value this listing cannot search on rather than an account that
+        // owns nothing.
+        let mut owners = 0usize;
+        for filter in filters.iter().filter(|filter| filter.key == FILTER_KEY_OWNER) {
+            for value in &filter.values {
+                if !is_document_owner(value) {
+                    return Err(crate::scaffolded::Scaffolded::validation(
+                        invalid_owner_message(value),
+                    ));
+                }
+                owners += 1;
+            }
+        }
+        if owners > 1 {
+            return Err(crate::scaffolded::Scaffolded::validation(
+                ONE_OWNER_PER_REQUEST,
+            ));
+        }
+
+        // "This API operation only supports filtering documents by using a single tag key
+        // and one or more tag values": two different tag keys cannot narrow one listing.
+        let mut tag_keys: Vec<&str> =
+            filters.iter().filter_map(|filter| filter.tag_key()).collect();
+        tag_keys.sort_unstable();
+        tag_keys.dedup();
+        if tag_keys.len() > 1 {
+            return Err(crate::scaffolded::Scaffolded::validation(
+                ONE_TAG_KEY_PER_REQUEST,
+            ));
+        }
+
+        let page_size = list_documents_page_size(input.max_results)
+            .map_err(crate::scaffolded::Scaffolded::validation)?;
+
+        // The token is the name of the document the next page starts at, so a token that
+        // is not a document name at all was not issued here.
+        let resume_from = match input.next_token.as_deref() {
+            None | Some("") => None,
+            Some(token) if is_document_name(token) => Some(token),
+            Some(_) => {
+                return Err(ListDocumentsErrorModeled::InvalidNextToken(
+                    InvalidNextToken {
+                        message: Some(INVALID_NEXT_TOKEN.to_string()),
+                    },
+                )
+                .into())
+            }
+        };
+
+        // A document is reached through the endpoint it was created against, which is the
+        // Region this request was signed for; the store is keyed by that Region and the
+        // document's name rather than by the credential the create was signed with, so
+        // this listing reports what any principal of the account created there, beside the
+        // catalogue Systems Manager publishes in every Region.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListDocuments"))
+        // Nothing this listing reports moves with the clock — a `DocumentIdentifier`
+        // carries no status — so it writes nothing at all: what it reports is what the
+        // store already holds.
+        let region = request_region(ctx.parts());
+        let page = state
+            .lock()
+            .list_documents(&region, &filters, resume_from, page_size);
+
+        Ok(ListDocumentsOutput {
+            document_identifiers: Some(page.identifiers),
+            next_token: page.next_token,
+        })
     }
 }
