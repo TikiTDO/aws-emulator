@@ -179,17 +179,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let Some(state) = crate::state::service_state(&*self.engine) else {
+        let Some(store) = crate::state::service_state(&*self.engine) else {
             return Err(store_unavailable());
         };
         // A stream belongs to the region of the table it follows, so an iterator into
         // another region's stream resolves to nothing here.
         let region = crate::state::request_region(ctx.parts());
 
-        let mut state = state.lock();
-        let Some(bookmark) = state.shard_iterator(&input.shard_iterator).cloned() else {
-            return Err(unknown_iterator());
+        // The `shardIterator` is opaque, so which stream this request addresses is the one
+        // the iterator BOOKMARKS — read first, because it is the resource the
+        // authorization decision below is about. A token this service never issued (or no
+        // longer holds a registration for) bookmarks no position at all: a permanent
+        // format failure in the request, not a resource that went missing.
+        let Some(bookmark) = store.lock().shard_iterator(&input.shard_iterator).cloned() else {
+            return Err(invalid_shard_iterator());
         };
+        // AWS decides authorization at the IAM layer, ahead of the service reading the
+        // stream, so this is the next thing the handler does: a caller whose permissions
+        // do not cover this action on this stream is handed no change record and is told
+        // nothing about the stream's state.
+        crate::service::authorization::authorize(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &bookmark.stream_arn,
+        )
+        .map_err(GetRecordsErrorModeled::AccessDeniedException)?;
+
+        let mut state = store.lock();
         // "Each shard iterator is valid for 15 minutes after creation." An iterator
         // past that is refused with the `ValidationExceptionType` the model declares
         // for it rather than served from a stale position.
@@ -200,10 +217,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
         let Some(stream) = state.stream_in(region.as_deref(), &bookmark.stream_arn) else {
-            return Err(no_such_stream(&bookmark.stream_arn));
+            return Err(not_found());
         };
         let Some(shard) = stream.shard(&bookmark.shard_id) else {
-            return Err(no_such_shard(&bookmark.shard_id, &bookmark.stream_arn));
+            return Err(not_found());
         };
 
         let captured = shard.records.len();
@@ -276,28 +293,19 @@ fn page_size(max_results: Option<i32>) -> usize {
     usize::try_from(requested).unwrap_or(1)
 }
 
-/// The modelled 404 for a `shardIterator` this service never issued.
-fn unknown_iterator() -> GetRecordsError {
-    GetRecordsErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
-        message: Some("the shard iterator was not issued by this service".to_string()),
-    })
-    .into()
+/// The modelled 400 for a `shardIterator` this service did not issue: it names no
+/// position, so the request can never succeed as sent.
+fn invalid_shard_iterator() -> GetRecordsError {
+    validation(
+        crate::service::refusals::INVALID_SHARD_ITERATOR,
+        "InvalidFormat",
+    )
 }
 
-/// The modelled 404 for an iterator whose stream no longer exists.
-fn no_such_stream(stream_arn: &str) -> GetRecordsError {
+/// The modelled 404 for a stream or shard this service no longer holds.
+fn not_found() -> GetRecordsError {
     GetRecordsErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
-        message: Some(format!("stream {stream_arn} does not exist")),
-    })
-    .into()
-}
-
-/// The modelled 404 for an iterator whose shard no longer exists.
-fn no_such_shard(shard_id: &str, stream_arn: &str) -> GetRecordsError {
-    GetRecordsErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
-        message: Some(format!(
-            "shard {shard_id} does not exist in stream {stream_arn}"
-        )),
+        message: Some(crate::service::refusals::RESOURCE_NOT_FOUND.to_string()),
     })
     .into()
 }

@@ -206,12 +206,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let Some(state) = crate::state::service_state(&*self.engine) else {
+        let Some(store) = crate::state::service_state(&*self.engine) else {
             return Err(store_unavailable());
         };
         // A stream belongs to the region of the table it follows, so a stream of
         // another region does not exist as far as this request is concerned.
         let region = crate::state::request_region(ctx.parts());
+
+        // AWS decides authorization at the IAM layer, ahead of the service looking at the
+        // stream the request named, so this is the first thing the handler does: a caller
+        // whose permissions do not cover this action on this stream reads neither its
+        // status nor its shards, and is told nothing about whether it exists. The resource
+        // is the ARN the REQUEST carries, not one resolved out of the store.
+        crate::service::authorization::authorize(&*self.engine, ctx, Self::NAME, &input.stream_arn)
+            .map_err(GetStreamErrorModeled::AccessDeniedException)?;
 
         let scope = PageScope::Shards {
             region: region.clone(),
@@ -222,7 +230,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }),
         };
 
-        let mut state = state.lock();
+        let mut state = store.lock();
         // A stream AWS has just created reports `ENABLING` and reaches `ENABLED` on
         // the clock alone, so settle what is already due before reporting the status.
         state.materialise_due_transitions(::std::time::SystemTime::now());
@@ -250,7 +258,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let Some(stream) = state.stream_in(region.as_deref(), &input.stream_arn) else {
-            return Err(no_such_stream(&input.stream_arn));
+            return Err(not_found());
         };
         let selected = select_shards(stream, input.shard_filter.as_ref())?;
         // The page starts just after the shard the previous page ended at, so a shard
@@ -325,13 +333,10 @@ fn select_shards<'s>(
     match filter.r#type.as_deref() {
         Some("CHILD_SHARDS") => {
             let Some(parent_id) = filter.shard_id.as_deref() else {
-                return Err(validation(
-                    "shardFilter.shardId is required when shardFilter.type is CHILD_SHARDS",
-                    "InvalidFormat",
-                ));
+                return Err(invalid_parameters());
             };
             if stream.shard(parent_id).is_none() {
-                return Err(no_such_shard(parent_id, &stream.stream_arn));
+                return Err(not_found());
             }
             Ok(stream
                 .shards
@@ -347,10 +352,7 @@ fn select_shards<'s>(
         // The model declares exactly one `ShardFilterType`, and the boundary refuses
         // any other value before this handler runs; a filter with no type at all names
         // no selection to make.
-        _ => Err(validation(
-            "shardFilter.type is required when shardFilter is specified",
-            "InvalidFormat",
-        )),
+        _ => Err(invalid_parameters()),
     }
 }
 
@@ -380,22 +382,20 @@ fn page_size(max_results: Option<i32>) -> usize {
     usize::try_from(requested).unwrap_or(1)
 }
 
-/// The modelled 404 for a stream ARN this service holds no stream for.
-fn no_such_stream(stream_arn: &str) -> GetStreamError {
+/// The modelled 404 for a stream or shard this service holds no record of.
+fn not_found() -> GetStreamError {
     GetStreamErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
-        message: Some(format!("stream {stream_arn} does not exist")),
+        message: Some(crate::service::refusals::RESOURCE_NOT_FOUND.to_string()),
     })
     .into()
 }
 
-/// The modelled 404 for a shard the stream does not hold.
-fn no_such_shard(shard_id: &str, stream_arn: &str) -> GetStreamError {
-    GetStreamErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
-        message: Some(format!(
-            "shard {shard_id} does not exist in stream {stream_arn}"
-        )),
-    })
-    .into()
+/// The modelled 400 for a request whose parameter values this operation does not accept.
+fn invalid_parameters() -> GetStreamError {
+    validation(
+        crate::service::refusals::INVALID_PARAMETER_VALUES,
+        "InvalidFormat",
+    )
 }
 
 /// The modelled 400 for a request this service refuses, carrying the

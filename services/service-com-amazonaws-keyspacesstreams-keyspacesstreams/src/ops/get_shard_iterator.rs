@@ -183,19 +183,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let Some(state) = crate::state::service_state(&*self.engine) else {
+        let Some(store) = crate::state::service_state(&*self.engine) else {
             return Err(store_unavailable());
         };
         // A stream belongs to the region of the table it follows, so a stream of
         // another region does not exist as far as this request is concerned.
         let region = crate::state::request_region(ctx.parts());
 
-        let mut state = state.lock();
+        // AWS decides authorization at the IAM layer, ahead of the service looking at the
+        // stream the request named, so this is the first thing the handler does: a caller
+        // whose permissions do not cover this action on this stream gets no iterator into
+        // it and is told nothing about whether it exists. The resource is the ARN the
+        // REQUEST carries, not one resolved out of the store.
+        crate::service::authorization::authorize(&*self.engine, ctx, Self::NAME, &input.stream_arn)
+            .map_err(GetShardIteratorErrorModeled::AccessDeniedException)?;
+
+        let mut state = store.lock();
         let Some(stream) = state.stream_in(region.as_deref(), &input.stream_arn) else {
-            return Err(no_such_stream(&input.stream_arn));
+            return Err(not_found());
         };
         let Some(shard) = stream.shard(&input.shard_id) else {
-            return Err(no_such_shard(&input.shard_id, &input.stream_arn));
+            return Err(not_found());
         };
         let next_index = resolve_position(
             shard,
@@ -230,29 +238,15 @@ fn resolve_position(
             // "Required if ShardIteratorType is AT_SEQUENCE_NUMBER or
             // AFTER_SEQUENCE_NUMBER." (the `sequenceNumber` input doc.)
             let Some(sequence_number) = sequence_number else {
-                return Err(validation(
-                    &format!(
-                        "sequenceNumber is required when shardIteratorType is {at_or_after}"
-                    ),
-                    "InvalidFormat",
-                ));
+                return Err(invalid_parameters("InvalidFormat"));
             };
+            // Which `ValidationExceptionType` the refusal carries is what distinguishes a
+            // sequence number the shard has already trimmed — a position a consumer can
+            // never reach again — from one it never held; the sentence itself is the same
+            // one every invalid parameter value gets.
             let located = shard.locate(sequence_number).map_err(|error| match error {
-                SequenceLookupError::Trimmed => validation(
-                    &format!(
-                        "sequenceNumber {sequence_number} is older than the oldest sequence number \
-                         shard {shard} retains",
-                        shard = shard.shard_id
-                    ),
-                    "TrimmedDataAccess",
-                ),
-                SequenceLookupError::NotInShard => validation(
-                    &format!(
-                        "sequenceNumber {sequence_number} is not a sequence number of shard {shard}",
-                        shard = shard.shard_id
-                    ),
-                    "InvalidFormat",
-                ),
+                SequenceLookupError::Trimmed => invalid_parameters("TrimmedDataAccess"),
+                SequenceLookupError::NotInShard => invalid_parameters("InvalidFormat"),
             })?;
             Ok(match (located, at_or_after) {
                 // The shard's own starting sequence number precedes every record it
@@ -264,29 +258,22 @@ fn resolve_position(
         }
         // The model declares no other `ShardIteratorType`, and the boundary refuses a
         // value outside the enum before this handler runs.
-        other => Err(validation(
-            &format!("shardIteratorType {other} is not a supported iterator type"),
-            "InvalidFormat",
-        )),
+        _ => Err(invalid_parameters("InvalidFormat")),
     }
 }
 
-/// The modelled 404 for a stream ARN this service holds no stream for.
-fn no_such_stream(stream_arn: &str) -> GetShardIteratorError {
+/// The modelled 404 for a stream or shard this service holds no record of.
+fn not_found() -> GetShardIteratorError {
     GetShardIteratorErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
-        message: Some(format!("stream {stream_arn} does not exist")),
+        message: Some(crate::service::refusals::RESOURCE_NOT_FOUND.to_string()),
     })
     .into()
 }
 
-/// The modelled 404 for a shard the stream does not hold.
-fn no_such_shard(shard_id: &str, stream_arn: &str) -> GetShardIteratorError {
-    GetShardIteratorErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
-        message: Some(format!(
-            "shard {shard_id} does not exist in stream {stream_arn}"
-        )),
-    })
-    .into()
+/// The modelled 400 for a request whose parameter values this operation does not accept,
+/// carrying the `ValidationExceptionType` that says which kind of refusal it is.
+fn invalid_parameters(error_code: &str) -> GetShardIteratorError {
+    validation(crate::service::refusals::INVALID_PARAMETER_VALUES, error_code)
 }
 
 /// The modelled 400 for a request this service refuses, carrying the

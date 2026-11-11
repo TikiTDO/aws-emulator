@@ -914,9 +914,9 @@ async fn refusals_use_the_modelled_errors() {
         (
             "GetRecords",
             json!({ "shardIterator": fabricated_iterator }),
-            404,
-            "ResourceNotFoundException",
-            None,
+            400,
+            "ValidationException",
+            Some("InvalidFormat"),
         ),
         (
             "ListStreams",
@@ -1131,13 +1131,19 @@ async fn the_registries_a_request_mints_into_are_bounded() {
     )
     .await;
     assert_eq!(
-        status, 404,
+        status, 400,
         "case evicted iterator: an iterator past the registry's cap must be refused, got \
          {status} {body}"
     );
     assert_eq!(
-        body["__type"], "ResourceNotFoundException",
-        "case evicted iterator: the refusal is a ResourceNotFoundException, got {body}"
+        body["__type"], "ValidationException",
+        "case evicted iterator: an iterator this service holds no registration for names no \
+         position, so the refusal is a ValidationException, got {body}"
+    );
+    assert_eq!(
+        body["errorCode"], "InvalidFormat",
+        "case evicted iterator: the refusal says the iterator is not one this service issued, \
+         got {body}"
     );
 
     // And the read loop still works after the eviction: a freshly minted iterator and

@@ -39,6 +39,20 @@
 //! table, and the default error renderers — lives in the generated `ServiceDefinition`
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
+//!
+//! ## This service's edited seams
+//!
+//! * [`authorization`] — the per-request IAM decision every operation takes before it
+//!   serves anything out of the stream store: `AccessDeniedException` is a service-common
+//!   error of this model, so every operation has to be able to answer it.
+//! * [`refusals`] — the fixed WORDS this service states each class of refusal with, held
+//!   in one place so two handlers cannot word one class differently.
+
+/// The per-request IAM decision every operation of this service takes before it reads the
+/// stream store.
+pub mod authorization;
+/// The fixed text this service words each class of refusal with.
+pub mod refusals;
 
 use smithy_server_runtime::{
     http, ErasedOperation, Refusal, Refused, Service,

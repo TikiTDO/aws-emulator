@@ -179,20 +179,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let Some(state) = crate::state::service_state(&*self.engine) else {
+        let Some(store) = crate::state::service_state(&*self.engine) else {
             return Err(store_unavailable());
         };
         // A stream belongs to the region of the table it follows, and a request reaches
         // one region's endpoint, so only that region's streams are visible here.
         let region = crate::state::request_region(ctx.parts());
 
+        // AWS decides authorization at the IAM layer, ahead of the service enumerating
+        // anything, so this is the first thing the handler does. This operation addresses
+        // no single stream: the resource is the SET its filters select, taken from the
+        // request alone, so a caller whose permissions do not cover this action on those
+        // streams learns nothing about which of them exist.
+        crate::service::authorization::authorize(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &crate::service::authorization::stream_set_resource(
+                ctx,
+                input.keyspace_name.as_deref(),
+                input.table_name.as_deref(),
+            ),
+        )
+        .map_err(ListStreamsErrorModeled::AccessDeniedException)?;
+
         // "tableName … Must be used together with keyspaceName." (the `tableName`
         // input doc) — a table name alone does not identify a table.
         if input.table_name.is_some() && input.keyspace_name.is_none() {
-            return Err(validation(
-                "tableName must be specified together with keyspaceName",
-                "InvalidFormat",
-            ));
+            return Err(invalid_parameters());
         }
 
         // The query this page belongs to. A `nextToken` resumes the query it was
@@ -202,7 +216,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             keyspace_name: input.keyspace_name.clone(),
             table_name: input.table_name.clone(),
         };
-        let mut state = state.lock();
+        let mut state = store.lock();
         let resume_after = match state.resolve_page_token(input.next_token.as_deref(), &scope) {
             Ok(resume_after) => resume_after,
             Err(PageTokenError::NotIssued) => {
@@ -299,6 +313,14 @@ fn page_size(max_results: Option<i32>) -> usize {
         .unwrap_or(DEFAULT_MAX_RESULTS)
         .clamp(1, DEFAULT_MAX_RESULTS);
     usize::try_from(requested).unwrap_or(1)
+}
+
+/// The modelled 400 for a request whose parameter values this operation does not accept.
+fn invalid_parameters() -> ListStreamsError {
+    validation(
+        crate::service::refusals::INVALID_PARAMETER_VALUES,
+        "InvalidFormat",
+    )
 }
 
 /// The modelled 400 for a request this service refuses, carrying the
