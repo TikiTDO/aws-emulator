@@ -28,7 +28,8 @@ use service_com_amazonaws_kafka_kafka::state::{
 };
 
 use crate::kafka_harness::{
-    pct, sleep_past_activation, sleep_past_update, Emulator, Reply, ACCOUNT, REGION,
+    assert_cluster_state_refusal, pct, sleep_past_activation, sleep_past_update, Emulator, Reply,
+    ACCOUNT, REGION,
 };
 
 /// The message Amazon MSK answers a request for a resource it does not hold with,
@@ -729,13 +730,10 @@ async fn a_cluster_that_is_not_active_takes_no_storage_update() {
         second.body
     );
     if started.elapsed() < CLUSTER_UPDATE_DELAY {
-        assert!(
-            second.body["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("UPDATING")),
-            "expected the refusal to name the cluster's UPDATING state, got {}",
-            second.body
-        );
+        // While the first operation is still in flight the cluster is UPDATING, so
+        // the refusal is the state one: the service words it in the one sentence
+        // that names the states a change IS accepted from.
+        assert_cluster_state_refusal(&second, "second update while the first is in flight");
     }
 
     // The update that WAS accepted still lands, unaffected by the refused one.

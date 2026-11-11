@@ -99,6 +99,8 @@ mod monitoring_update;
 mod node_listing;
 #[path = "all/placement_subnet_resolution.rs"]
 mod placement_subnet_resolution;
+#[path = "all/rebalancing_update.rs"]
+mod rebalancing_update;
 #[path = "all/reference_only_replicator.rs"]
 mod reference_only_replicator;
 #[path = "all/refusal_text_fidelity.rs"]
@@ -141,6 +143,8 @@ mod topic_lookup_miss_refusal;
 mod topic_partition_reporting;
 #[path = "all/topic_replication.rs"]
 mod topic_replication;
+#[path = "all/topic_update.rs"]
+mod topic_update;
 #[path = "all/version_catalog_consistency.rs"]
 mod version_catalog_consistency;
 #[path = "all/vpc_connection_admission.rs"]

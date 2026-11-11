@@ -259,15 +259,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into(),
             );
         }
-        if cluster.state != "ACTIVE" {
+        // A cluster reconfigures one change at a time, and one that is still being
+        // provisioned, deleted or updated has no settled configuration to update.
+        // Answered through the gate every update of this service shares, in the one
+        // sentence the service words that condition in.
+        if !crate::state::state_gate::cluster_accepts_change(&cluster.state) {
             return Err(
-                UpdateConnectivityErrorModeled::BadRequestException(BadRequestException {
-                    invalid_parameter: Some("ClusterArn".to_string()),
-                    message: Some(format!(
-                        "A cluster can be updated only while it is ACTIVE; this one is {}.",
-                        cluster.state
-                    )),
-                })
+                UpdateConnectivityErrorModeled::BadRequestException(
+                    crate::state::state_gate::cluster_not_in_accepted_state(),
+                )
                 .into(),
             );
         }

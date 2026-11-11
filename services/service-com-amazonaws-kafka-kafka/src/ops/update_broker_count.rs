@@ -233,16 +233,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // A cluster reconfigures one change at a time, and one that is still being
         // provisioned, deleted or updated has no settled configuration to update
-        // from. Worded as the sibling update operations word the same check, so the
-        // service says one thing about one condition.
-        if cluster_state != crate::state::CLUSTER_STATE_ACTIVE {
-            return Err(bad_request(
-                "ClusterArn",
-                format!(
-                    "The cluster is in the {cluster_state} state; it must be {} to be updated.",
-                    crate::state::CLUSTER_STATE_ACTIVE
-                ),
-            ));
+        // from. Answered through the gate every update of this service shares, in
+        // the one sentence the service words that condition in.
+        if !crate::state::state_gate::cluster_accepts_change(&cluster_state) {
+            return Err(UpdateBrokerCountErrorModeled::BadRequestException(
+                crate::state::state_gate::cluster_not_in_accepted_state(),
+            )
+            .into());
         }
         // The optimistic-concurrency check: the version the caller updates from must
         // be the one the cluster is actually at, so a stale version means the caller

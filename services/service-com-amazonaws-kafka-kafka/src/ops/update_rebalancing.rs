@@ -1,15 +1,35 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateRebalancing
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateRebalancing`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Starts an intelligent-rebalancing update on a provisioned cluster registered in
+//! [`crate::state::ComAmazonawsKafkaKafkaState`]: the cluster enters `UPDATING`
+//! with the returned cluster operation as its active one, and the submitted
+//! `Rebalancing` status becomes the cluster's own — together with a new cluster
+//! version — when the clock makes that operation due (see
+//! [`crate::state::Cluster::settle`]).
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateRebalancing::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The update is started through
+//! [`crate::state::ComAmazonawsKafkaKafkaState::start_rebalancing_update`], the
+//! one path every update of this service comes through, so the cluster operation
+//! this call answers with is filed in the registry and the cluster-operation
+//! readers resolve that ARN.
+//!
+//! The call is accepted only for a provisioned cluster this endpoint's region
+//! holds, that is in a state a change is accepted from
+//! ([`crate::state::state_gate`]), and whose stored version is the one the request
+//! names; every other case is refused with the modelled error for it and changes
+//! nothing.
+//!
+//! Authentication is NOT this handler's business: the emulator verifies every
+//! request signature centrally (see `AGENTS.md`), so the modelled
+//! `UnauthorizedException`/`ForbiddenException` are raised by that path and never
+//! constructed here. Resource-scoped AUTHORIZATION is: this call asks for an
+//! action on the cluster its `ClusterArn` names, and that decision is taken on the
+//! ARN as submitted, before anything is resolved
+//! ([`crate::state::authorization`]).
+//!
+//! The scaffold notes below describe the framework; they are kept because they
+//! document the seams this handler uses.
 //!
 //! ## Shape of an operation
 //!
@@ -154,18 +174,154 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateRebalancing` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateRebalancingErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateRebalancing"))
+        // Decided FIRST, on the ARN as submitted and from the request alone: the
+        // caller holds no resource-based policy over a cluster of another account,
+        // so such a request is refused rather than answered out of what this
+        // registry happens to hold under that ARN. See
+        // [`crate::state::authorization`].
+        crate::state::authorization::authorize_operation(Self::NAME, &input.cluster_arn)?;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                UpdateRebalancingErrorModeled::InternalServerErrorException(
+                    InternalServerErrorException {
+                        invalid_parameter: None,
+                        message: Some("the kafka service state is unavailable".to_string()),
+                    },
+                )
+                .into(),
+            );
+        };
+        let region = crate::state::request_region(ctx.parts());
+
+        // Request-only refusals first, so the registry lock below is held for the
+        // state-dependent work alone. A value that is not an MSK cluster ARN is a
+        // request this service cannot parse, which is the distinction every reader
+        // in this crate draws between `BadRequestException` and
+        // `NotFoundException`.
+        if !crate::state::is_cluster_arn(&input.cluster_arn) {
+            return Err(UpdateRebalancingErrorModeled::BadRequestException(
+                crate::state::malformed_arn(crate::state::CLUSTER_ARN_MEMBER),
+            )
+            .into());
+        }
+
+        // `Rebalancing` is required, but its `Status` is not, so a request can
+        // reach here carrying the shape and naming no status — which asks for no
+        // change and leaves nothing for the cluster operation it would mint to do.
+        // Refused as the same case is in `UpdateMonitoring` and `UpdateStorage`:
+        // answering a modelled client error is honest where minting an operation
+        // that changes nothing would not be. A status the model's enum does not
+        // carry never reaches here: that constraint is refused at the boundary,
+        // before this handler runs.
+        if input.rebalancing.status.is_none() {
+            return Err(bad_request(
+                REBALANCING_STATUS_PARAMETER,
+                "An UpdateRebalancing request must specify Rebalancing.Status.".to_string(),
+            ));
+        }
+
+        let now = std::time::SystemTime::now();
+        let mut state = state.lock();
+        // Resolved through the settling lookup every other operation uses, so the
+        // transitions the clock already owed this cluster — its own provisioning,
+        // and an earlier update of its own whose completion has come due — are
+        // materialised before this call judges its state and version. An ARN this
+        // endpoint's region holds no cluster for — absent, or belonging to another
+        // region — is a resource that does not exist here.
+        let Some(cluster) = state.settled_cluster_in(&region, &input.cluster_arn, now) else {
+            return Err(
+                UpdateRebalancingErrorModeled::NotFoundException(NotFoundException {
+                    // The member that named the resource, as the other readers of a
+                    // cluster ARN report it.
+                    invalid_parameter: Some(
+                        crate::state::state_gate::CLUSTER_ARN_PARAMETER.to_string(),
+                    ),
+                    message: Some(crate::state::RESOURCE_NOT_FOUND_MESSAGE.to_string()),
+                })
+                .into(),
+            );
+        };
+        // Copied out of the record: the checks below are followed by a write, so
+        // the borrow of the registry has to end here.
+        let cluster_arn = cluster.arn.clone();
+        let cluster_state = cluster.state.clone();
+        let current_version = cluster.current_version.clone();
+        let serverless = cluster.is_serverless();
+
+        // Intelligent rebalancing balances the partitions a cluster's BROKERS
+        // hold, and a serverless cluster has none of its own: the model carries no
+        // rebalancing member for that cluster kind at all.
+        if serverless {
+            return Err(bad_request(
+                crate::state::state_gate::CLUSTER_ARN_PARAMETER,
+                crate::state::PROVISIONED_ONLY_MESSAGE.to_string(),
+            ));
+        }
+
+        // A cluster takes one change at a time, and one that is still being
+        // provisioned, deleted or updated has no settled configuration to change.
+        // `UpdateRebalancing` models no conflict error, so this is the bad request
+        // it is — answered through the gate every update of this service shares,
+        // in the one sentence the service words that condition in.
+        if !crate::state::state_gate::cluster_accepts_change(&cluster_state) {
+            return Err(UpdateRebalancingErrorModeled::BadRequestException(
+                crate::state::state_gate::cluster_not_in_accepted_state(),
+            )
+            .into());
+        }
+        // The optimistic-concurrency check: the version the caller updates from
+        // must be the one the cluster is actually at, so a stale version means the
+        // caller has not seen the cluster's latest state.
+        if input.current_version != current_version {
+            return Err(bad_request(
+                crate::state::CURRENT_VERSION_MEMBER,
+                crate::state::CLUSTER_VERSION_NOT_CURRENT_MESSAGE.to_string(),
+            ));
+        }
+
+        // The registry starts the operation: it records what changes, moves the
+        // cluster to UPDATING, stores the instant the change comes due and files
+        // the cluster operation this call answers with, so the ARN below resolves
+        // for every cluster-operation reader.
+        let Some(operation_arn) =
+            state.start_rebalancing_update(&region, &cluster_arn, now, input.rebalancing)
+        else {
+            // Unreachable: the cluster was resolved above under the lock this call
+            // still holds, so the registry path finds the same record. Reported as
+            // a server fault rather than as a success that started nothing, which
+            // is how the sibling update operations answer the same case.
+            return Err(
+                UpdateRebalancingErrorModeled::InternalServerErrorException(
+                    InternalServerErrorException {
+                        invalid_parameter: None,
+                        message: Some(
+                            "the cluster vanished while its update was starting".to_string(),
+                        ),
+                    },
+                )
+                .into(),
+            );
+        };
+        Ok(UpdateRebalancingOutput {
+            // Both members come from the stored cluster, not from the request.
+            cluster_arn: Some(cluster_arn),
+            cluster_operation_arn: Some(operation_arn),
+        })
     }
+}
+
+/// The member a refusal of the submitted rebalancing status names as the
+/// parameter at fault: the request's own member path, as the model nests the
+/// status inside the `Rebalancing` shape.
+const REBALANCING_STATUS_PARAMETER: &str = "Rebalancing.Status";
+
+/// Refuse the request with the modeled `BadRequestException`, naming the member
+/// at fault and what was wrong with it — the caller has to fix the request from
+/// this text alone.
+fn bad_request(parameter: &str, message: String) -> UpdateRebalancingError {
+    UpdateRebalancingErrorModeled::BadRequestException(BadRequestException {
+        invalid_parameter: Some(parameter.to_string()),
+        message: Some(message),
+    })
+    .into()
 }

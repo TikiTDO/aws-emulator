@@ -35,8 +35,9 @@ use service_com_amazonaws_kafka_kafka::state::{
 };
 
 use crate::kafka_harness::{
-    assert_configuration_arn_resolves_to_nothing, pct, sleep_past_activation, sleep_past_update,
-    ClusterRequest, ConfigurationRequest, Emulator, Reply, ACCOUNT, REGION,
+    assert_cluster_state_refusal, assert_configuration_arn_resolves_to_nothing, pct,
+    sleep_past_activation, sleep_past_update, ClusterRequest, ConfigurationRequest, Emulator, Reply,
+    ACCOUNT, REGION,
 };
 
 /// `PUT /v1/clusters/{ClusterArn}/configuration` — the route this suite drives,
@@ -659,18 +660,9 @@ async fn a_stale_version_or_an_unupdatable_cluster_is_refused() {
         1,
     )
     .await;
-    assert_eq!(
-        (reply.status, reply.error_code()),
-        (400, "BadRequestException"),
-        "case creating: expected 400 BadRequestException, got {} {}",
-        reply.status,
-        reply.body
-    );
-    assert!(
-        reply.error_message().contains("CREATING"),
-        "case creating: the refusal must say which state the cluster is in, got {:?}",
-        reply.error_message()
-    );
+    // The refusal is about the STATE the cluster is in, which the service words in
+    // one sentence naming the states a change is accepted from.
+    assert_cluster_state_refusal(&reply, "creating");
     sleep_past_activation();
     assert_eq!(
         reported_configuration(&emulator, &creating).await,

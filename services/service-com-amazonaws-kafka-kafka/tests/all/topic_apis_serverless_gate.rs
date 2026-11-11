@@ -126,6 +126,18 @@ fn topic_calls() -> Vec<TopicCall> {
             format!("/topics/{}", pct("orders")),
             None,
         ),
+        TopicCall::new(
+            "UpdateTopic raising the partition count",
+            "PUT",
+            format!("/topics/{}", pct("orders")),
+            Some(json!({ "partitionCount": 24 })),
+        ),
+        TopicCall::new(
+            "UpdateTopic submitting configs",
+            "PUT",
+            format!("/topics/{}", pct("orders.v2")),
+            Some(json!({ "configs": "cmV0ZW50aW9uLm1zPTYwMDAwMA==" })),
+        ),
         TopicCall::new("ListTopics", "GET", "/topics".to_string(), None),
         TopicCall::new(
             "ListTopics with a page size and a filter",

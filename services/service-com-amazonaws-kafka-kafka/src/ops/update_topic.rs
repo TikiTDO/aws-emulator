@@ -1,15 +1,41 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateTopic
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateTopic`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Applies one change to a topic the addressed cluster holds, so every later
+//! reader of that topic sees it.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateTopic::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The cluster and the topic are resolved exactly as in `CreateTopic` /
+//! `DeleteTopic` / `DescribeTopic`:
+//!
+//! * a `ClusterArn` that is not shaped like an MSK cluster ARN is a
+//!   `BadRequestException`, and a `TopicName` Apache Kafka itself would refuse
+//!   (see [`crate::state::topic_name_error`]) likewise;
+//! * a well-formed `ClusterArn` this endpoint's region holds no cluster for is a
+//!   `NotFoundException` (HTTP 404) carrying the service's own not-found wording,
+//!   and so is a name that cluster holds no topic of;
+//! * a cluster whose `ClusterType` is serverless is refused with
+//!   [`crate::state::serverless_topic_apis_unsupported`]: the Topic Management
+//!   surface is not offered for that cluster kind.
+//!
+//! What the call may change is the topic's partition count and its topic-level
+//! configuration, so a request naming neither asks for nothing and is refused. A
+//! topic takes one change at a time ([`crate::state::state_gate`]), which is what
+//! decides two concurrent changes to one topic: the registry is held while the
+//! change is judged and applied, so the first is accepted and the second meets
+//! the `UPDATING` state it left behind.
+//!
+//! The number of partitions of a topic can only GROW: Apache Kafka adds
+//! partitions to a topic and never takes them away, so a count below the topic's
+//! own is refused, as is the count it already has. An accepted increase is held
+//! by the topic at once — Kafka creates the partitions as it admits the change —
+//! and the topic reports `UPDATING` until the clock owes it the end of the
+//! reassignment that follows
+//! ([`crate::state::ComAmazonawsKafkaKafkaState::start_topic_update`]), after
+//! which it is `ACTIVE` again.
+//!
+//! `Configs` is stored verbatim (the model types it as the Base64 string the
+//! caller supplied) and handed back by `DescribeTopic` unchanged; this emulator
+//! does not interpret topic-level Kafka configuration.
 //!
 //! ## Shape of an operation
 //!
@@ -167,18 +193,190 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateTopic` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateTopicErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateTopic"))
+        // Decided FIRST, on the ARN as submitted and from the request alone. A
+        // topic call reaches the cluster's Apache Kafka data plane, so the action
+        // it is authorized under is connecting to that cluster — and the caller
+        // holds no resource-based policy over a cluster of another account, so
+        // such a request is refused rather than answered out of what this
+        // registry happens to hold under that ARN. See
+        // [`crate::state::authorization`].
+        crate::state::authorization::authorize_action(
+            crate::state::authorization::CLUSTER_CONNECT_ACTION,
+            &input.cluster_arn,
+        )?;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(UpdateTopicErrorModeled::InternalServerErrorException(
+                InternalServerErrorException {
+                    invalid_parameter: None,
+                    message: Some("the kafka service state is unavailable".to_string()),
+                },
+            )
+            .into());
+        };
+        let region = crate::state::request_region(ctx.parts());
+
+        // Request-only checks first, so the registry mutex below is held for the
+        // state-dependent work alone.
+        if !crate::state::is_cluster_arn(&input.cluster_arn) {
+            return Err(UpdateTopicErrorModeled::BadRequestException(
+                crate::state::malformed_arn(crate::state::CLUSTER_ARN_MEMBER),
+            )
+            .into());
+        }
+        if let Some(reason) = crate::state::topic_name_error(&input.topic_name) {
+            return Err(
+                UpdateTopicErrorModeled::BadRequestException(BadRequestException {
+                    invalid_parameter: Some(
+                        crate::state::state_gate::TOPIC_NAME_PARAMETER.to_string(),
+                    ),
+                    message: Some(reason),
+                })
+                .into(),
+            );
+        }
+        // Both members this call can change are optional in the model, so a
+        // request carrying neither asks for no change at all and there is nothing
+        // for it to apply. Refusing it is CHOSEN, as the same case is in
+        // `UpdateStorage` and `UpdateMonitoring`: answering a modelled client
+        // error is honest where reporting a change nobody made would not be.
+        if input.partition_count.is_none() && input.configs.is_none() {
+            return Err(bad_request(
+                PARTITION_COUNT_PARAMETER,
+                "An UpdateTopic request must specify PartitionCount, Configs, or both."
+                    .to_string(),
+            ));
+        }
+
+        let now = std::time::SystemTime::now();
+        let mut state = state.lock();
+
+        // A topic belongs to ONE cluster, so a `ClusterArn` this endpoint's region
+        // holds no cluster for names a resource that is not there: reported as the
+        // 404 every other topic operation answers for it.
+        let Some(cluster) = state.cluster_in(&region, &input.cluster_arn) else {
+            return Err(
+                UpdateTopicErrorModeled::NotFoundException(NotFoundException {
+                    invalid_parameter: Some(
+                        crate::state::state_gate::CLUSTER_ARN_PARAMETER.to_string(),
+                    ),
+                    message: Some(crate::state::RESOURCE_NOT_FOUND_MESSAGE.to_string()),
+                })
+                .into(),
+            );
+        };
+
+        // The Topic Management surface applies to a cluster whose brokers this
+        // service manages for the caller, so a serverless one is refused on its
+        // KIND -- before the topic is looked up and before anything is changed, so
+        // the refusal leaves the registry exactly as it was.
+        if cluster.is_serverless() {
+            return Err(crate::state::serverless_topic_apis_unsupported());
+        }
+
+        // The topic as it stands at this instant, with the transitions the clock
+        // already owed it materialised. A name this cluster holds no topic of is
+        // the missing resource, reported with the same 404 every other topic
+        // operation answers: whether the name was never created, is carried onto
+        // this cluster by a replicator rather than held by it (such a topic is
+        // DERIVED from its source and changed there), or its removal has already
+        // fallen due makes no difference — this call has no record of this
+        // cluster's own to change.
+        let Some(topic) = state.settled_topic_in(&input.cluster_arn, &input.topic_name, now) else {
+            return Err(
+                UpdateTopicErrorModeled::NotFoundException(NotFoundException {
+                    invalid_parameter: Some(
+                        crate::state::state_gate::TOPIC_NAME_PARAMETER.to_string(),
+                    ),
+                    message: Some(crate::state::RESOURCE_NOT_FOUND_MESSAGE.to_string()),
+                })
+                .into(),
+            );
+        };
+        // Copied out of the record: the judgement below is followed by a write, so
+        // the borrow of the registry has to end here.
+        let topic_state = topic.state.clone();
+        let held_partitions = topic.partition_count;
+
+        // A topic whose creation, whose deletion or whose last accepted change is
+        // still in flight is not a topic a further change applies to. This is also
+        // what makes two concurrent changes to one topic ONE change: both are
+        // judged under this lock, so the second sees the `UPDATING` state the
+        // first left behind and is refused with the state the service words that
+        // condition in.
+        if !crate::state::state_gate::topic_accepts_change(&topic_state) {
+            return Err(UpdateTopicErrorModeled::BadRequestException(
+                crate::state::state_gate::topic_not_in_accepted_state(),
+            )
+            .into());
+        }
+
+        if let Some(wanted) = input.partition_count {
+            // Apache Kafka adds partitions to a topic and never removes them, so a
+            // request naming fewer than the topic holds — or the number it already
+            // holds, which is no change — describes a topic Kafka cannot produce.
+            // The counts in the message are the topic's own and the request's, as
+            // Kafka words this refusal.
+            if wanted < held_partitions {
+                return Err(bad_request(
+                    PARTITION_COUNT_PARAMETER,
+                    format!(
+                        "Topic currently has {held_partitions} partitions, which is higher than \
+                         the requested {wanted}."
+                    ),
+                ));
+            }
+            if wanted == held_partitions {
+                return Err(bad_request(
+                    PARTITION_COUNT_PARAMETER,
+                    format!("Topic already has {held_partitions} partitions."),
+                ));
+            }
+        }
+
+        // The registry applies the change: it writes the count and the
+        // configuration the request named, moves the topic to `UPDATING` and
+        // stores the instant the clock owes its return to `ACTIVE`.
+        let Some(topic) = state.start_topic_update(
+            &input.cluster_arn,
+            &input.topic_name,
+            input.partition_count,
+            input.configs,
+            now,
+        ) else {
+            // Unreachable: the topic was resolved above under the lock this call
+            // still holds, so the registry path finds the same record. Reported as
+            // the same absence that lookup reports rather than as a change nothing
+            // was applied to.
+            return Err(
+                UpdateTopicErrorModeled::NotFoundException(NotFoundException {
+                    invalid_parameter: Some(
+                        crate::state::state_gate::TOPIC_NAME_PARAMETER.to_string(),
+                    ),
+                    message: Some(crate::state::RESOURCE_NOT_FOUND_MESSAGE.to_string()),
+                })
+                .into(),
+            );
+        };
+        Ok(UpdateTopicOutput {
+            // Every member comes from the stored topic, not from the request.
+            topic_arn: Some(topic.arn.clone()),
+            topic_name: Some(topic.name.clone()),
+            status: Some(topic.state.clone()),
+        })
     }
+}
+
+/// The member a refusal of the submitted partition count names as the parameter
+/// at fault, as the model spells it on this request.
+const PARTITION_COUNT_PARAMETER: &str = "PartitionCount";
+
+/// Refuse the request with the modeled `BadRequestException`, naming the member
+/// at fault and what was wrong with it — the caller has to fix the request from
+/// this text alone.
+fn bad_request(parameter: &str, message: String) -> UpdateTopicError {
+    UpdateTopicErrorModeled::BadRequestException(BadRequestException {
+        invalid_parameter: Some(parameter.to_string()),
+        message: Some(message),
+    })
+    .into()
 }

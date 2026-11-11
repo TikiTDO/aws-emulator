@@ -904,6 +904,33 @@ impl ComAmazonawsKafkaKafkaState {
         )
     }
 
+    /// Start a rebalancing update: the intelligent-rebalancing status the
+    /// cluster runs its partition balancing under becomes the one the request
+    /// named once the clock owes the operation its completion.
+    pub fn start_rebalancing_update(
+        &mut self,
+        region: &str,
+        arn: &str,
+        now: SystemTime,
+        rebalancing: Rebalancing,
+    ) -> Option<String> {
+        self.start_cluster_operation(
+            region,
+            arn,
+            now,
+            OPERATION_TYPE_UPDATE_REBALANCING,
+            |cluster| {
+                let source_cluster_info = cluster.rebalancing_cluster_info();
+                let target_cluster_info = cluster.rebalancing_cluster_info_after(&rebalancing);
+                (
+                    source_cluster_info,
+                    target_cluster_info,
+                    ClusterChange::Rebalancing { rebalancing },
+                )
+            },
+        )
+    }
+
     /// File `operation` in the registry and in its own cluster's history, so the
     /// ARN a reader resolves and the history a cluster lists cannot drift apart.
     ///
@@ -1067,6 +1094,52 @@ impl ComAmazonawsKafkaKafkaState {
             topic.state = TOPIC_STATE_DELETING.to_string();
             topic.removal_due = Some(now + TOPIC_DELETION_DELAY);
         }
+        Some(topic)
+    }
+
+    /// Accept a CHANGE to the topic `name` of `cluster_arn`, handing back the
+    /// record as the caller must now see it: carrying the partition count and the
+    /// topic-level configuration the request named, `UPDATING`, with the instant
+    /// the clock owes its return to `ACTIVE` set.
+    ///
+    /// `partition_count` is the new total the request named, `None` where it named
+    /// none, which leaves the count as it is; `configs` is the configuration it
+    /// submitted, `None` leaving the stored one. Answers `None` when the cluster
+    /// holds no such topic — including one whose removal the clock already owed,
+    /// which [`Self::settled_topic_in`] materialises first.
+    ///
+    /// The ONE path a topic change comes through, which is what serializes two
+    /// concurrent ones: a caller holds this registry while it resolves the topic,
+    /// judges the change against the state the record is in and applies it, so of
+    /// two concurrent changes to one topic the second meets the state the first
+    /// left behind rather than the state both started from.
+    pub fn start_topic_update(
+        &mut self,
+        cluster_arn: &str,
+        name: &str,
+        partition_count: Option<i32>,
+        configs: Option<String>,
+        now: SystemTime,
+    ) -> Option<&Topic> {
+        self.settled_topic_in(cluster_arn, name, now)?;
+        let topic = self
+            .topics
+            .get_mut(&(cluster_arn.to_string(), name.to_string()))?;
+        // Apache Kafka adds the partitions as it admits the change, so the topic
+        // HOLDS the new total from the instant the call is accepted; what the
+        // `UPDATING` span below stands for is the broker-side reassignment that
+        // follows it.
+        if let Some(count) = partition_count {
+            topic.partition_count = count;
+        }
+        if configs.is_some() {
+            topic.configs = configs;
+        }
+        topic.state = TOPIC_STATE_UPDATING.to_string();
+        // The span a created topic takes to become `ACTIVE` is the span an
+        // updated one takes: the same clock-owed transition of the same record,
+        // materialised by [`Topic::settle`].
+        topic.active_due = now + TOPIC_ACTIVATION_DELAY;
         Some(topic)
     }
 

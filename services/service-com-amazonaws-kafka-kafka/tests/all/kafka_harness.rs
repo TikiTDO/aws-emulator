@@ -17,6 +17,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Map, Value};
+use service_com_amazonaws_kafka_kafka::state::state_gate::{
+    not_in_accepted_state_message, CLUSTER_ARN_PARAMETER,
+    CLUSTER_STATES_A_CHANGE_IS_ACCEPTED_FROM,
+};
 use service_com_amazonaws_kafka_kafka::state::{
     CHANNEL_ACTIVATION_DELAY, CHANNEL_UPDATE_DELAY, CLUSTER_ACTIVATION_DELAY, CLUSTER_UPDATE_DELAY,
     CONFIGURATION_ARN_NOT_FOUND_MESSAGE, CONFIGURATION_DELETION_DELAY,
@@ -861,10 +865,10 @@ pub fn assert_configuration_state_refusal(reply: &Reply, case: &str) {
         reply.status,
         reply.body
     );
-    let expected = format!(
-        "This operation is only valid for resources that are in one of the following states :[{}]",
-        CONFIGURATION_STATES_A_CHANGE_IS_ACCEPTED_FROM.join(", ")
-    );
+    // Built through the one sentence builder the service words this condition in,
+    // so the harness holds no second copy of it.
+    let expected =
+        not_in_accepted_state_message(&CONFIGURATION_STATES_A_CHANGE_IS_ACCEPTED_FROM);
     assert_eq!(
         reply.error_message(),
         expected,
@@ -875,6 +879,40 @@ pub fn assert_configuration_state_refusal(reply: &Reply, case: &str) {
         reply.at("/invalidParameter").as_str(),
         Some("Arn"),
         "case {case}: the refusal must name Arn as the parameter at fault, got {}",
+        reply.body
+    );
+}
+
+/// Assert `reply` is the refusal a call that CHANGES an MSK cluster answers when
+/// the cluster is not in a state that call is accepted from: HTTP 400
+/// `BadRequestException`, naming the cluster's own ARN member as the parameter at
+/// fault, and carrying the one sentence that names the set of states it IS
+/// accepted from — the same sentence the configuration family answers for its own
+/// resources (`assert_configuration_state_refusal`).
+///
+/// The expected sentence is built from the service's own accepted-state set, so a
+/// suite cannot assert a set the handlers do not gate on.
+pub fn assert_cluster_state_refusal(reply: &Reply, case: &str) {
+    assert_eq!(
+        (reply.status, reply.error_code()),
+        (400, "BadRequestException"),
+        "case {case}: expected 400 BadRequestException, got {} {}",
+        reply.status,
+        reply.body
+    );
+    let expected =
+        not_in_accepted_state_message(&CLUSTER_STATES_A_CHANGE_IS_ACCEPTED_FROM);
+    assert_eq!(
+        reply.error_message(),
+        expected,
+        "case {case}: expected the state-machine wording {expected:?}, got {:?}",
+        reply.error_message()
+    );
+    assert_eq!(
+        reply.at("/invalidParameter").as_str(),
+        Some(CLUSTER_ARN_PARAMETER),
+        "case {case}: the refusal must name {CLUSTER_ARN_PARAMETER} as the parameter at fault, \
+         got {}",
         reply.body
     );
 }

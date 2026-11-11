@@ -219,18 +219,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
-        // Only a cluster whose brokers are serving can take an update: one still
-        // being provisioned, or already applying a change, has no settled
-        // configuration to update from.
-        if cluster_state != crate::state::CLUSTER_STATE_ACTIVE {
+        // A cluster takes one change at a time, and one that is still being
+        // provisioned, deleted or updated has no settled configuration to update
+        // from. Answered through the gate every update of this service shares, in
+        // the one sentence the service words that condition in.
+        if !crate::state::state_gate::cluster_accepts_change(&cluster_state) {
             return Err(
-                UpdateClusterConfigurationErrorModeled::BadRequestException(BadRequestException {
-                    invalid_parameter: Some("ClusterArn".to_string()),
-                    message: Some(format!(
-                        "The cluster is in the {cluster_state} state; it must be {} to be updated.",
-                        crate::state::CLUSTER_STATE_ACTIVE
-                    )),
-                })
+                UpdateClusterConfigurationErrorModeled::BadRequestException(
+                    crate::state::state_gate::cluster_not_in_accepted_state(),
+                )
                 .into(),
             );
         }

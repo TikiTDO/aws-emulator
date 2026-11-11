@@ -46,12 +46,16 @@
 //! resource it still holds as a reference it cannot resolve.
 //!
 //! The topic registry lives beside it, keyed by (cluster ARN, topic name): a topic
-//! belongs to exactly one cluster, so `CreateTopic`, `DescribeTopic`, `ListTopics`
-//! and `DeleteTopic` all resolve the cluster first and then the topic, through
+//! belongs to exactly one cluster, so `CreateTopic`, `DescribeTopic`, `ListTopics`,
+//! `UpdateTopic` and `DeleteTopic` all resolve the cluster first and then the
+//! topic, through
 //! [`ComAmazonawsKafkaKafkaState::settled_topic_in`] (or
 //! [`ComAmazonawsKafkaKafkaState::topics_in`] for a listing) — the one
 //! accessor each, so every caller sees the transitions the clock already owed that
-//! topic. A cluster leaving the registry takes its topics with it, so no topic can
+//! topic. A change to a topic comes through
+//! [`ComAmazonawsKafkaKafkaState::start_topic_update`], the one write path, which
+//! is what serializes two concurrent changes to one topic.
+//! A cluster leaving the registry takes its topics with it, so no topic can
 //! outlive the cluster that holds it. Those operations serve a provisioned cluster
 //! only: each refuses a serverless one on its kind, in the same words, through
 //! [`serverless_topic_apis_unsupported`].
@@ -69,7 +73,7 @@
 //! A cluster's configuration also changes after creation: an update operation
 //! (`UpdateConnectivity`, `UpdateStorage`, `UpdateBrokerStorage`,
 //! `UpdateClusterKafkaVersion`, `UpdateClusterConfiguration`,
-//! `UpdateSecurity`, `UpdateBrokerCount`) records a
+//! `UpdateSecurity`, `UpdateBrokerCount`, `UpdateRebalancing`) records a
 //! [`PendingUpdate`] on the cluster, and [`Cluster::settle`] folds it into the
 //! record once the clock owes its completion — so one place decides what every
 //! reader then reports. The operation itself is kept in the cluster-operation
@@ -168,6 +172,12 @@ pub mod vpc_connection_admission;
 /// they are not held here — they are resolved, which is why that module sits beside
 /// this one rather than in it.
 pub mod scram_secret_admission;
+
+/// The state precondition a call that CHANGES a resource applies, and the one
+/// sentence the service refuses it with when the resource is in some other state.
+/// It is a function of the accepted-state set and nothing this module holds, which
+/// is why it sits beside this one.
+pub mod state_gate;
 
 /// The registry's own operations — every lookup, insertion and removal over the
 /// maps the state struct below holds. Its own file so this module keeps to the
@@ -281,6 +291,11 @@ pub const OPERATION_TYPE_UPDATE_SECURITY: &str = "UPDATE_SECURITY";
 
 /// The `OperationType` an `UpdateMonitoring` call records, in the same form.
 pub const OPERATION_TYPE_UPDATE_MONITORING: &str = "UPDATE_MONITORING";
+
+/// The `OperationType` an `UpdateRebalancing` call records, in the same form:
+/// the API's own name in SCREAMING_SNAKE_CASE, which is how every update above
+/// names the operation it files.
+pub const OPERATION_TYPE_UPDATE_REBALANCING: &str = "UPDATE_REBALANCING";
 
 /// The `OperationType` a `RebootBroker` call records.
 ///
@@ -521,11 +536,14 @@ pub const MAX_TOPICS_IN_REGISTRY: usize = MAX_TOPICS_PER_CLUSTER * 16;
 
 /// The `TopicState` values this emulator reports, spelled as the model's enum
 /// declares them. Named here so every topic operation reports the same
-/// spellings. (`UPDATING`, the model's fourth value, belongs to `UpdateTopic`,
-/// which is still a scaffold.)
+/// spellings.
 pub const TOPIC_STATE_CREATING: &str = "CREATING";
 /// The state of a topic the cluster has finished creating.
 pub const TOPIC_STATE_ACTIVE: &str = "ACTIVE";
+/// The state of a topic a change the service has accepted is being applied to —
+/// what `UpdateTopic` answers with and leaves the topic in until the clock owes
+/// the change its completion.
+pub const TOPIC_STATE_UPDATING: &str = "UPDATING";
 /// The state of a topic whose deletion has been accepted but not completed.
 pub const TOPIC_STATE_DELETING: &str = "DELETING";
 
@@ -1713,6 +1731,10 @@ pub enum ClusterChange {
         open_monitoring: Option<OpenMonitoringInfo>,
         logging_info: Option<LoggingInfo>,
     },
+    /// `UpdateRebalancing`: the intelligent-rebalancing status the cluster runs
+    /// its partition balancing under. The request always names one, so there is
+    /// nothing optional about this change.
+    Rebalancing { rebalancing: Rebalancing },
     /// `RebootBroker`: the broker nodes the request named are restarted. It
     /// carries no attribute, because a reboot changes none: the nodes come back
     /// under the same placement, endpoints and software, and this API reports no
@@ -1742,6 +1764,7 @@ impl ClusterChange {
             | Self::KafkaVersion { .. }
             | Self::Configuration { .. }
             | Self::Security { .. }
+            | Self::Rebalancing { .. }
             | Self::Monitoring { .. } => CLUSTER_STATE_UPDATING,
         }
     }
@@ -1766,6 +1789,7 @@ impl ClusterChange {
             | Self::KafkaVersion { .. }
             | Self::Configuration { .. }
             | Self::Security { .. }
+            | Self::Rebalancing { .. }
             | Self::Monitoring { .. } => true,
         }
     }
@@ -2063,10 +2087,9 @@ pub fn configuration_not_in_accepted_state(accepted: &[&str]) -> BadRequestExcep
         // The configuration the `Arn` names is what the call was refused on, as
         // the cluster refusals name the cluster's own ARN member.
         invalid_parameter: Some("Arn".to_string()),
-        message: Some(format!(
-            "This operation is only valid for resources that are in one of the following states :[{}]",
-            accepted.join(", ")
-        )),
+        // The one sentence the service words this condition in, whichever
+        // resource family met it ([`state_gate`]).
+        message: Some(state_gate::not_in_accepted_state_message(accepted)),
     }
 }
 
@@ -3010,8 +3033,9 @@ pub struct Topic {
     /// detect new topics covers this one, since such a flow replicates the topics
     /// its source cluster already held when the replicator was created.
     pub created_at: SystemTime,
-    /// The instant the clock owes this topic its `CREATING` -> `ACTIVE`
-    /// transition. Stored, never slept on.
+    /// The instant the clock owes this topic the `ACTIVE` state: the end of its
+    /// `CREATING` span, and then of the `UPDATING` span an accepted change leaves
+    /// it in. Stored, never slept on.
     pub active_due: SystemTime,
     /// Set by `DeleteTopic`: the instant the clock owes this topic's removal from
     /// the registry. `None` for a topic nobody has deleted.
@@ -3090,12 +3114,18 @@ impl Topic {
         self.removal_due.is_none_or(|due| now < due)
     }
 
-    /// Apply the `CREATING` -> `ACTIVE` transition once `now` has reached
-    /// [`Self::active_due`]. Idempotent, and a no-op for every other state: only a
+    /// Apply the transition to `ACTIVE` once `now` has reached
+    /// [`Self::active_due`] — out of `CREATING` for a topic the cluster is still
+    /// creating, and out of `UPDATING` for one an accepted change is still being
+    /// applied to. Idempotent, and a no-op for every other state: only a
     /// transition the clock already owed is materialised here. A topic that is
     /// `DELETING` never goes back to `ACTIVE`.
     pub fn settle(&mut self, now: SystemTime) {
-        if self.state == TOPIC_STATE_CREATING && now >= self.active_due {
+        if matches!(
+            self.state.as_str(),
+            TOPIC_STATE_CREATING | TOPIC_STATE_UPDATING
+        ) && now >= self.active_due
+        {
             self.state = TOPIC_STATE_ACTIVE.to_string();
         }
     }

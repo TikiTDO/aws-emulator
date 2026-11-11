@@ -687,6 +687,23 @@ impl Cluster {
         submitted.cloned().or_else(|| self.logging_info.clone())
     }
 
+    /// The intelligent-rebalancing status the cluster runs its partition
+    /// balancing under, as the `MutableClusterInfo` a cluster operation reports:
+    /// the one attribute an `UpdateRebalancing` call changes, so it is the only
+    /// one set — the same rule [`Self::storage_cluster_info`] follows. `None`
+    /// where the cluster was created without the setting at all.
+    pub fn rebalancing_cluster_info(&self) -> MutableClusterInfo {
+        rebalancing_cluster_info(self.rebalancing.clone())
+    }
+
+    /// The same attribute as a submitted rebalancing update leaves it: the
+    /// request always carries the whole `Rebalancing` shape, so it REPLACES the
+    /// cluster's own — which is what [`Self::apply_change`] then stores, so the
+    /// operation's target is what the cluster runs.
+    pub fn rebalancing_cluster_info_after(&self, submitted: &Rebalancing) -> MutableClusterInfo {
+        rebalancing_cluster_info(Some(submitted.clone()))
+    }
+
     /// Record `change` as the cluster's one in-flight operation and move the
     /// cluster to the state that change puts it in
     /// ([`ClusterChange::in_flight_state`]), handing back the ARN of the operation
@@ -804,6 +821,12 @@ impl Cluster {
                     self.open_monitoring = open;
                 }
                 self.logging_info = self.logging_info_after(logging_info.as_ref());
+            }
+            ClusterChange::Rebalancing { rebalancing } => {
+                // The request carries the whole `Rebalancing` shape, so the
+                // status it names becomes the cluster's own — which is what
+                // every reader of the cluster then reports.
+                self.rebalancing = Some(rebalancing);
             }
             // A reboot restarts the brokers and changes no stored attribute: the
             // nodes come back under the same placement, endpoints and software, so
@@ -1136,5 +1159,18 @@ impl Cluster {
             .as_ref()
             .and_then(|c| c.vpc_connectivity.as_ref())
             .and_then(|v| v.client_authentication.as_ref())
+    }
+}
+
+/// The intelligent-rebalancing status a cluster operation reports, as
+/// `MutableClusterInfo`.
+///
+/// `Rebalancing` is the only member an `UpdateRebalancing` call touches, so it is
+/// the only one set: an operation describes the attributes it changes, not the
+/// whole cluster — the same rule the other `MutableClusterInfo` views follow.
+fn rebalancing_cluster_info(rebalancing: Option<Rebalancing>) -> MutableClusterInfo {
+    MutableClusterInfo {
+        rebalancing,
+        ..MutableClusterInfo::default()
     }
 }
