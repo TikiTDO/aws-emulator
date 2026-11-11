@@ -110,6 +110,11 @@ mod kinesisvideo_discovered_data_plane;
 mod lambda_sqs_event_source_batching_window;
 #[path = "all/codebuild_service_role_trust.rs"]
 mod codebuild_service_role_trust;
+// Declared here, beside the suite above whose rule it shares: the role an app block
+// builder runs as is resolved against the ACCOUNT's IAM records, so the suite spans the
+// two services and belongs to neither crate's own test target.
+#[path = "all/appstream_app_block_builder_role_trust.rs"]
+mod appstream_app_block_builder_role_trust;
 #[path = "all/codebuild_artifacts_override_bucket.rs"]
 mod codebuild_artifacts_override_bucket;
 #[path = "all/cloudformation_ec2_cdk_vpc_estate.rs"]

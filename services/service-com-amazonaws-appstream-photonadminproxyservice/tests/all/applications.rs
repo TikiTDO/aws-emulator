@@ -1,0 +1,599 @@
+// SPDX-License-Identifier: CC0-1.0
+
+//! End-to-end tests for AppStream's application catalog over the wire.
+//!
+//! Every case drives the awsJson1_1 front door through the shared
+//! [`Emulator`](crate::stack_fleet_lifecycle::Emulator) harness, so what is exercised is
+//! the dispatch → deserialize → handle → serialize walk.
+//!
+//! The rules under test, each asserted over a TABLE of inputs rather than over one
+//! recorded request:
+//!
+//! * an application is created against an app block that EXISTS: an `AppBlockArn` that
+//!   addresses no app block this account holds is refused with
+//!   `ResourceNotFoundException` (404) carrying AWS's sentence for that class, and no
+//!   application is created for it — whatever else the request is well-formed about;
+//! * a create that passes that gate persists the application and reports it back from the
+//!   stored record, so a later `DescribeApplications` answers with the same ARN, launch
+//!   details and creation instant;
+//! * the name is allocated once: a second create of a name that exists is refused with
+//!   `ResourceAlreadyExistsException` (400) and changes nothing;
+//! * a read reports only stored applications, in a stable order, answers about exactly
+//!   the `Arns` it is asked about, and `MaxResults` sizes its page: following `NextToken`
+//!   walks every stored application exactly once;
+//! * the icon URL an application reports is a time-limited address of the S3 object the
+//!   create named, signed so that it leads back to this emulator.
+
+use serde_json::{json, Value};
+
+use crate::refusal_messages::{already_exists_sentence, not_found_sentence, refusal};
+use crate::stack_fleet_lifecycle::{assert_error, Emulator};
+
+/// The account every emulated resource belongs to.
+const ACCOUNT: &str = engine::EMULATOR_ACCOUNT_ID;
+
+/// The region the harness signs for, which is the region every ARN below carries.
+const REGION: &str = "us-east-1";
+
+/// The app block every row of the creation table is created against.
+const APP_BLOCK: &str = "catalog-block";
+
+/// The resource word AWS's `CreateApplication` refusal uses for the app block an
+/// application is created against, read from the crate so the test tracks the constant
+/// rather than a copy of its value.
+const APP_BLOCK_ARN_KIND: &str =
+    service_com_amazonaws_appstream_photonadminproxyservice::state::APP_BLOCK_ARN_KIND;
+
+/// The resource word AWS's refusals use for an application.
+const APPLICATION_KIND: &str =
+    service_com_amazonaws_appstream_photonadminproxyservice::state::APPLICATION_KIND;
+
+/// How long the icon URL stays valid, as the crate states it.
+const ICON_URL_VALIDITY_SECONDS: u64 =
+    service_com_amazonaws_appstream_photonadminproxyservice::state::ICON_URL_VALIDITY.as_secs();
+
+/// One row of the creation table: the members the request carries beside the app block.
+struct Row {
+    case: &'static str,
+    name: &'static str,
+    display_name: Option<&'static str>,
+    description: Option<&'static str>,
+    launch_path: &'static str,
+    launch_parameters: Option<&'static str>,
+    working_directory: Option<&'static str>,
+    /// Values of `PlatformType` (`PLATFORM_TYPE_VALUES` in `src/ops/types/shared_types.rs`).
+    platforms: &'static [&'static str],
+    /// `InstanceFamilies` is documented "Valid values are GENERAL_PURPOSE and GRAPHICS_G4".
+    instance_families: &'static [&'static str],
+    icon_key: &'static str,
+}
+
+/// The creation table. The rows differ along what the rule generalises over: which
+/// optional members the request carries, how many platforms and instance families it
+/// names, and the form of the launch path and the icon key.
+fn rows() -> Vec<Row> {
+    vec![
+        Row {
+            case: "the required members only",
+            name: "minimal",
+            display_name: None,
+            description: None,
+            launch_path: "C:\\Program Files\\App\\app.exe",
+            launch_parameters: None,
+            working_directory: None,
+            platforms: &["WINDOWS_SERVER_2019"],
+            instance_families: &["GENERAL_PURPOSE"],
+            icon_key: "icons/minimal.png",
+        },
+        Row {
+            case: "every optional member, several platforms",
+            name: "fully.described-01",
+            display_name: Some("Fully Described"),
+            description: Some("an application with every optional member"),
+            launch_path: "/opt/app/bin/app",
+            launch_parameters: Some("--kiosk --locale=en_GB"),
+            working_directory: Some("/opt/app"),
+            platforms: &["AMAZON_LINUX2", "WINDOWS_SERVER_2019"],
+            instance_families: &["GENERAL_PURPOSE", "GRAPHICS_G4"],
+            icon_key: "icons/nested/path with spaces/app.png",
+        },
+        Row {
+            case: "a graphics-only application",
+            name: "graphics_only",
+            display_name: Some("Graphics"),
+            description: None,
+            launch_path: "C:\\app.exe",
+            launch_parameters: None,
+            working_directory: Some("C:\\"),
+            platforms: &["WINDOWS_SERVER_2019"],
+            instance_families: &["GRAPHICS_G4"],
+            icon_key: "icon.svg",
+        },
+        Row {
+            case: "a display name but no description",
+            name: "named",
+            display_name: Some("Named"),
+            description: None,
+            launch_path: "/usr/bin/app",
+            launch_parameters: Some("-v"),
+            working_directory: None,
+            platforms: &["UBUNTU_PRO_2404"],
+            instance_families: &["GENERAL_PURPOSE"],
+            icon_key: "a.png",
+        },
+    ]
+}
+
+/// The `arn:aws:appstream:…:app-block/<name>` of an app block of this account.
+fn app_block_arn(name: &str) -> String {
+    format!("arn:aws:appstream:{REGION}:{ACCOUNT}:app-block/{name}")
+}
+
+/// The `arn:aws:appstream:…:application/<name>` of an application of this account.
+fn application_arn(name: &str) -> String {
+    format!("arn:aws:appstream:{REGION}:{ACCOUNT}:application/{name}")
+}
+
+/// Create the app block every application below is created against.
+async fn create_app_block(emulator: &Emulator, case: &str, name: &str) -> String {
+    let created = emulator
+        .ok(
+            case,
+            "CreateAppBlock",
+            json!({
+                "Name": name,
+                "SourceS3Location": { "S3Bucket": "app-packages", "S3Key": "block.vhd" },
+                "SetupScriptDetails": {
+                    "ScriptS3Location": { "S3Bucket": "app-packages", "S3Key": "setup.ps1" },
+                    "ExecutablePath": "setup.ps1",
+                    "TimeoutInSeconds": 60,
+                },
+            }),
+        )
+        .await;
+    created
+        .pointer("/AppBlock/Arn")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("case {case:?}: expected the app block's ARN, got {created}"))
+        .to_string()
+}
+
+/// The `CreateApplication` request a row asks for, against `app_block_arn`.
+fn create_request(row: &Row, app_block_arn: &str) -> Value {
+    let mut request = json!({
+        "Name": row.name,
+        "AppBlockArn": app_block_arn,
+        "IconS3Location": { "S3Bucket": "app-icons", "S3Key": row.icon_key },
+        "LaunchPath": row.launch_path,
+        "Platforms": row.platforms,
+        "InstanceFamilies": row.instance_families,
+    });
+    if let Some(display_name) = row.display_name {
+        request["DisplayName"] = json!(display_name);
+    }
+    if let Some(description) = row.description {
+        request["Description"] = json!(description);
+    }
+    if let Some(launch_parameters) = row.launch_parameters {
+        request["LaunchParameters"] = json!(launch_parameters);
+    }
+    if let Some(working_directory) = row.working_directory {
+        request["WorkingDirectory"] = json!(working_directory);
+    }
+    request
+}
+
+/// The application a row must be reported as, given the `CreatedTime` the create stamped
+/// and the icon URL it signed.
+fn expected_application(row: &Row, app_block_arn: &str, created: &Value) -> Value {
+    let mut expected = json!({
+        "Arn": application_arn(row.name),
+        "Name": row.name,
+        "AppBlockArn": app_block_arn,
+        "IconS3Location": { "S3Bucket": "app-icons", "S3Key": row.icon_key },
+        "LaunchPath": row.launch_path,
+        "Platforms": row.platforms,
+        "InstanceFamilies": row.instance_families,
+        "Enabled": true,
+        "CreatedTime": created.get("CreatedTime").cloned().unwrap_or(Value::Null),
+        "IconURL": created.get("IconURL").cloned().unwrap_or(Value::Null),
+    });
+    if let Some(display_name) = row.display_name {
+        expected["DisplayName"] = json!(display_name);
+    }
+    if let Some(description) = row.description {
+        expected["Description"] = json!(description);
+    }
+    if let Some(launch_parameters) = row.launch_parameters {
+        expected["LaunchParameters"] = json!(launch_parameters);
+    }
+    if let Some(working_directory) = row.working_directory {
+        expected["WorkingDirectory"] = json!(working_directory);
+    }
+    expected
+}
+
+/// The applications a `DescribeApplications` reports, and the token it carries.
+async fn describe(emulator: &Emulator, case: &str, request: Value) -> (Vec<Value>, Option<Value>) {
+    let payload = emulator.ok(case, "DescribeApplications", request).await;
+    let applications = payload
+        .get("Applications")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("case {case:?}: expected an Applications list, got {payload}"))
+        .clone();
+    (applications, payload.get("NextToken").cloned())
+}
+
+/// Every application of the account, in the order the read reports them.
+async fn catalog(emulator: &Emulator, case: &str) -> Vec<Value> {
+    let (applications, next_token) = describe(emulator, case, json!({})).await;
+    assert!(
+        next_token.is_none(),
+        "case {case:?}: the whole catalog fits in one page here, got {next_token:?}"
+    );
+    applications
+}
+
+// ---------------------------------------------------------------------------
+// Creating an application, and reading it back
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_created_application_is_reported_from_the_stored_record() {
+    for row in rows() {
+        let case = row.case;
+        let emulator = Emulator::new();
+        let app_block_arn = create_app_block(&emulator, case, APP_BLOCK).await;
+
+        let before = catalog(&emulator, case).await;
+        assert!(
+            before.is_empty(),
+            "case {case:?}: an account with no applications must report none, got {before:?}"
+        );
+
+        let created = emulator
+            .ok(case, "CreateApplication", create_request(&row, &app_block_arn))
+            .await;
+        let created = created
+            .get("Application")
+            .unwrap_or_else(|| panic!("case {case:?}: expected an Application, got {created}"))
+            .clone();
+        assert_eq!(
+            created,
+            expected_application(&row, &app_block_arn, &created),
+            "case {case:?}: the create must report the record it persisted, got {created}"
+        );
+
+        let applications = catalog(&emulator, case).await;
+        assert_eq!(
+            applications.len(),
+            1,
+            "case {case:?}: exactly the created application must be reported, got \
+             {applications:?}"
+        );
+        assert_eq!(
+            applications[0], created,
+            "case {case:?}: the read must render the same record the create returned, got {:?}",
+            applications[0]
+        );
+
+        // Reading again reports the same application: the first read changed nothing, and
+        // the creation instant belongs to the record rather than to the call that read it.
+        let again = catalog(&emulator, case).await;
+        assert_eq!(
+            again, applications,
+            "case {case:?}: a read must not change what a later caller sees, got {again:?}"
+        );
+
+        // The ARN the create minted is what the read is addressed by.
+        let (addressed, _) = describe(
+            &emulator,
+            case,
+            json!({ "Arns": [application_arn(row.name)] }),
+        )
+        .await;
+        assert_eq!(
+            addressed, applications,
+            "case {case:?}: the ARN the create reported must address that application, got \
+             {addressed:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_icon_url_is_a_time_limited_address_of_the_stored_icon() {
+    for row in rows() {
+        let case = row.case;
+        let emulator = Emulator::new();
+        let app_block_arn = create_app_block(&emulator, case, APP_BLOCK).await;
+        let created = emulator
+            .ok(case, "CreateApplication", create_request(&row, &app_block_arn))
+            .await;
+        let icon_url = created
+            .pointer("/Application/IconURL")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("case {case:?}: expected an IconURL, got {created}"))
+            .to_string();
+
+        assert!(
+            icon_url.contains("app-icons"),
+            "case {case:?}: the icon URL must address the bucket the create named, got \
+             {icon_url:?}"
+        );
+        assert!(
+            icon_url.contains("X-Amz-Signature="),
+            "case {case:?}: the icon URL must be signed so it leads back to this emulator, \
+             got {icon_url:?}"
+        );
+        assert!(
+            icon_url.contains(&format!("X-Amz-Expires={ICON_URL_VALIDITY_SECONDS}")),
+            "case {case:?}: the icon URL must be time-limited, got {icon_url:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The app-block gate
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn an_app_block_arn_that_addresses_no_app_block_is_not_found() {
+    // Rows: ARNs that pass the modelled `Arn` pattern and address no app block this
+    // account holds — a name nothing was created under, an app block of another account,
+    // one of another Region, another resource type of this service, and another service's
+    // resource altogether.
+    let emulator = Emulator::new();
+    let stored = create_app_block(&emulator, "setup", APP_BLOCK).await;
+    for (case, arn) in [
+        ("a name no app block was created under", app_block_arn("absent")),
+        (
+            "an app block of another account",
+            format!("arn:aws:appstream:{REGION}:210987654321:app-block/{APP_BLOCK}"),
+        ),
+        (
+            "an app block of another Region",
+            format!("arn:aws:appstream:eu-west-1:{ACCOUNT}:app-block/{APP_BLOCK}"),
+        ),
+        (
+            "another resource type of this service",
+            format!("arn:aws:appstream:{REGION}:{ACCOUNT}:fleet/{APP_BLOCK}"),
+        ),
+        (
+            "another service's resource",
+            format!("arn:aws:s3:::app-packages/{APP_BLOCK}"),
+        ),
+    ] {
+        let row = Row {
+            case,
+            name: "gated",
+            display_name: None,
+            description: None,
+            launch_path: "C:\\app.exe",
+            launch_parameters: None,
+            working_directory: None,
+            platforms: &["WINDOWS_SERVER_2019"],
+            instance_families: &["GENERAL_PURPOSE"],
+            icon_key: "icon.png",
+        };
+        let message = refusal(
+            &emulator,
+            case,
+            "CreateApplication",
+            create_request(&row, &arn),
+            404,
+            "ResourceNotFoundException",
+        )
+        .await;
+        assert_eq!(
+            message,
+            not_found_sentence(APP_BLOCK_ARN_KIND, &arn),
+            "case {case:?}: expected AWS's sentence for the app block the request named, \
+             got {message:?}"
+        );
+
+        // The refused create persisted nothing: no application exists, and the name is
+        // still free for a create against the app block that does exist.
+        let applications = catalog(&emulator, case).await;
+        assert!(
+            applications.is_empty(),
+            "case {case:?}: a refused create must persist nothing, got {applications:?}"
+        );
+    }
+
+    // The positive control: the same request against the app block that EXISTS succeeds.
+    let row = &rows()[0];
+    emulator
+        .ok("positive control", "CreateApplication", create_request(row, &stored))
+        .await;
+    assert_eq!(
+        catalog(&emulator, "positive control").await.len(),
+        1,
+        "case \"positive control\": a create against a stored app block must persist it"
+    );
+}
+
+#[tokio::test]
+async fn a_second_create_of_a_name_that_exists_already_exists() {
+    for row in rows() {
+        let case = row.case;
+        let emulator = Emulator::new();
+        let app_block_arn = create_app_block(&emulator, case, APP_BLOCK).await;
+        emulator
+            .ok(case, "CreateApplication", create_request(&row, &app_block_arn))
+            .await;
+        let first = catalog(&emulator, case).await;
+
+        let message = refusal(
+            &emulator,
+            case,
+            "CreateApplication",
+            create_request(&row, &app_block_arn),
+            400,
+            "ResourceAlreadyExistsException",
+        )
+        .await;
+        assert_eq!(
+            message,
+            already_exists_sentence(APPLICATION_KIND, row.name),
+            "case {case:?}: expected AWS's duplicate-name sentence, got {message:?}"
+        );
+
+        let after = catalog(&emulator, case).await;
+        assert_eq!(
+            after, first,
+            "case {case:?}: the refused create must leave the stored application exactly \
+             as it was, got {after:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reading the catalog
+// ---------------------------------------------------------------------------
+
+/// The application names the read cases create: enough records that every page size below
+/// cuts the collection somewhere.
+fn paged_names() -> Vec<String> {
+    (1..=7).map(|index| format!("app-{index:02}")).collect()
+}
+
+#[tokio::test]
+async fn following_next_token_reports_every_application_exactly_once() {
+    let emulator = Emulator::new();
+    let app_block_arn = create_app_block(&emulator, "setup", APP_BLOCK).await;
+    for name in paged_names() {
+        emulator
+            .ok(
+                "setup",
+                "CreateApplication",
+                json!({
+                    "Name": name,
+                    "AppBlockArn": app_block_arn,
+                    "IconS3Location": { "S3Bucket": "app-icons", "S3Key": "icon.png" },
+                    "LaunchPath": "C:\\app.exe",
+                    "Platforms": ["WINDOWS_SERVER_2019"],
+                    "InstanceFamilies": ["GENERAL_PURPOSE"],
+                }),
+            )
+            .await;
+    }
+    let mut expected = paged_names();
+    expected.sort();
+
+    // Rows: the page size the request asks for — sizes that cut the collection, one that
+    // holds it exactly, one larger than it, and a request that names no size at all.
+    for max_results in [Some(1_i64), Some(2), Some(3), Some(7), Some(50), None] {
+        let case = format!("MaxResults {max_results:?}");
+        let mut seen: Vec<String> = Vec::new();
+        let mut next_token: Option<Value> = None;
+        loop {
+            let mut request = json!({});
+            if let Some(max_results) = max_results {
+                request["MaxResults"] = json!(max_results);
+            }
+            if let Some(token) = &next_token {
+                request["NextToken"] = token.clone();
+            }
+            let (applications, token) = describe(&emulator, &case, request).await;
+            if let Some(max_results) = max_results {
+                assert!(
+                    i64::try_from(applications.len()).expect("a page fits in an i64") <= max_results,
+                    "case {case:?}: a page must hold at most {max_results} applications, got {}",
+                    applications.len()
+                );
+            }
+            seen.extend(applications.iter().map(|application| {
+                application
+                    .get("Name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("case {case:?}: expected a Name, got {application}"))
+                    .to_string()
+            }));
+            match token {
+                Some(token) => next_token = Some(token),
+                None => break,
+            }
+        }
+        assert_eq!(
+            seen, expected,
+            "case {case:?}: following NextToken must report every application exactly once, \
+             in a stable order, got {seen:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_read_the_catalog_cannot_answer_is_refused() {
+    let emulator = Emulator::new();
+    let app_block_arn = create_app_block(&emulator, "setup", APP_BLOCK).await;
+    emulator
+        .ok(
+            "setup",
+            "CreateApplication",
+            create_request(&rows()[0], &app_block_arn),
+        )
+        .await;
+
+    // Rows: ARNs that address no stored application. Each is refused with AWS's sentence
+    // for the resource the ARN names rather than answered with a short list.
+    for (case, arn) in [
+        ("a name nothing was created under", application_arn("absent")),
+        (
+            "an application of another account",
+            format!("arn:aws:appstream:{REGION}:210987654321:application/minimal"),
+        ),
+        (
+            "an application of another Region",
+            format!("arn:aws:appstream:eu-west-1:{ACCOUNT}:application/minimal"),
+        ),
+    ] {
+        let message = refusal(
+            &emulator,
+            case,
+            "DescribeApplications",
+            json!({ "Arns": [arn.clone()] }),
+            404,
+            "ResourceNotFoundException",
+        )
+        .await;
+        assert_eq!(
+            message,
+            not_found_sentence(APPLICATION_KIND, &arn[arn.rfind('/').expect("an ARN with a resource id") + 1..]),
+            "case {case:?}: expected AWS's sentence for the application the ARN names, got \
+             {message:?}"
+        );
+    }
+
+    // Rows: page sizes that cannot hold a record, and tokens this service never issued.
+    for max_results in [0_i64, -1] {
+        let case = format!("MaxResults {max_results}");
+        assert_error(
+            &emulator,
+            &case,
+            "DescribeApplications",
+            json!({ "MaxResults": max_results }),
+            400,
+            "ValidationException",
+        )
+        .await;
+    }
+    for token in ["minimal", "abc", "zzzz"] {
+        let case = format!("NextToken {token:?}");
+        assert_error(
+            &emulator,
+            &case,
+            "DescribeApplications",
+            json!({ "NextToken": token }),
+            400,
+            "ValidationException",
+        )
+        .await;
+    }
+
+    // Every refusal left the stored application readable.
+    assert_eq!(
+        catalog(&emulator, "after refusals").await.len(),
+        1,
+        "case \"after refusals\": the stored application must still be reported"
+    );
+}

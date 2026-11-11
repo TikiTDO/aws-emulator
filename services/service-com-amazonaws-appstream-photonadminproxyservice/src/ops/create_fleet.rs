@@ -296,6 +296,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // A fleet is created stopped: it starts streaming only once StartFleet runs,
             // so nothing is running, in use or available yet.
             state: crate::state::FLEET_STATE_CREATED.to_string(),
+            // A created fleet is stopped, which is terminal: nothing is owed until a
+            // `StartFleet` asks for its instances.
+            pending_state: None,
             desired_instances: compute_capacity.desired_instances.unwrap_or(0),
             desired_user_sessions: compute_capacity.desired_sessions,
             running: 0,

@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeApplications
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeApplications`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeApplications::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: reports the applications this service's store holds, rendered from the
+//! stored [`crate::state::ApplicationRecord`]s, a page at a time. A request that names
+//! `Arns` is answered about exactly those applications, and an ARN addressing none
+//! answers `ResourceNotFoundException` (HTTP 404).
 //!
 //! ## Shape of an operation
 //!
@@ -141,18 +136,68 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeApplications` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeApplicationsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeApplications"))
+        // The records one page carries, as [`crate::state::page_size`] decides it from
+        // the `MaxResults` the request asked for and this read's own page ceiling.
+        let page_size = crate::state::page_size(input.max_results, crate::state::DESCRIBE_PAGE_SIZE)
+            .map_err(crate::scaffolded::Scaffolded::validation)?;
+
+        // See `create_stack.rs` for why an engine without this service's store answers
+        // "not written for that engine" rather than a fabricated success.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            crate::scaffolded::Scaffolded::not_implemented("DescribeApplications")
+        })?;
+        // A read: the guard is only ever read through, so a Describe can never change
+        // what a later caller sees.
+        let state = state.lock();
+
+        // "The ARNs for the applications": a request that names none asks about every
+        // application this account holds, and one that names some asks about exactly
+        // those, so an ARN addressing no stored application is a resource that was not
+        // found.
+        let selected: ::std::collections::BTreeSet<String> = match &input.arns {
+            Some(arns) => {
+                let mut names = ::std::collections::BTreeSet::new();
+                for arn in arns {
+                    match state.application_by_arn(arn) {
+                        Some(record) => {
+                            names.insert(record.name.clone());
+                        }
+                        None => {
+                            return Err(
+                                DescribeApplicationsErrorModeled::ResourceNotFoundException(
+                                    ResourceNotFoundException {
+                                        message: Some(
+                                            crate::state::tagged_resource_not_found_message(arn),
+                                        ),
+                                    },
+                                )
+                                .into(),
+                            );
+                        }
+                    }
+                }
+                names
+            }
+            None => state.applications.keys().cloned().collect(),
+        };
+
+        let page = crate::state::paginate_sized(&selected, input.next_token.as_deref(), page_size)
+            .ok_or_else(|| {
+                crate::scaffolded::Scaffolded::validation(
+                    "NextToken is not a pagination token this service issued",
+                )
+            })?;
+        let signer = ctx.url_signer();
+        let applications: Vec<Application> = page
+            .names
+            .iter()
+            .filter_map(|name| state.applications.get(name))
+            .map(|record| record.to_application(&signer))
+            .collect();
+
+        Ok(DescribeApplicationsOutput {
+            applications: Some(applications),
+            next_token: page.next_token,
+        })
     }
 }

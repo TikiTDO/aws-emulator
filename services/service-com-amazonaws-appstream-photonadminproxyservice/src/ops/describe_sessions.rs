@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeSessions
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeSessions`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: reports the streaming sessions this service's store holds for one stack's
+//! fleet, rendered from the stored [`crate::state::SessionRecord`]s, a page at a time,
+//! narrowed by the `UserId` the request asks about. A request that names a user without
+//! naming the authentication type is refused with
+//! `InvalidParameterCombinationException` (HTTP 400).
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeSessions::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The operation models no not-found error, and a stack or a fleet this account holds
+//! nothing under hosts no streaming session, so a read that names one is answered with the
+//! sessions it holds — none — rather than with a refusal this operation does not model.
 //!
 //! ## Shape of an operation
 //!
@@ -152,20 +152,84 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeSessions` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeSessionsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeSessions"))
+        // "The user identifier (ID). If you specify a user ID, you must also specify the
+        // authentication type": a read narrowed to one user without the type that user's
+        // identity belongs to names no identity this service can look for.
+        if input.user_id.is_some() && input.authentication_type.is_none() {
+            return Err(
+                DescribeSessionsErrorModeled::InvalidParameterCombinationException(
+                    InvalidParameterCombinationException {
+                        message: Some(
+                            "AuthenticationType must be specified when UserId is specified"
+                                .to_string(),
+                        ),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // "The size of each page of results. The default value is 20 and the maximum
+        // value is 50": both numbers are AWS's, and a page outside them is not a size
+        // this read can answer with. The refusal is this crate's `ValidationException`
+        // rather than the modelled `InvalidParameterCombinationException`, which is "an
+        // incorrect combination of parameters, or a missing parameter": one member's
+        // value being outside its own range is neither.
+        let page_size = match input.limit {
+            Some(limit)
+                if !(1..=i32::try_from(crate::state::SESSION_PAGE_SIZE_MAX).unwrap_or(i32::MAX))
+                    .contains(&limit) =>
+            {
+                return Err(crate::scaffolded::Scaffolded::validation(format!(
+                    "Limit must be between 1 and {} sessions, was {limit}",
+                    crate::state::SESSION_PAGE_SIZE_MAX
+                )));
+            }
+            Some(limit) => usize::try_from(limit)
+                .unwrap_or(crate::state::SESSION_PAGE_SIZE_MAX)
+                .min(crate::state::SESSION_PAGE_SIZE_MAX),
+            None => crate::state::SESSION_PAGE_SIZE_DEFAULT,
+        };
+
+        // See `create_stack.rs` for why an engine without this service's store answers
+        // "not written for that engine" rather than a fabricated success.
+        let state = crate::state::service_state(&*self.engine)
+            .ok_or_else(|| crate::scaffolded::Scaffolded::not_implemented("DescribeSessions"))?;
+        // A read of the sessions' own state: the guard is written through ONLY to
+        // materialise what the clock has already made due — a session whose streaming URL
+        // stopped verifying before anybody connected to it is expired at that instant —
+        // so what this reports is what every later caller sees too.
+        let mut state = state.lock();
+        state.settle_session_states();
+
+        let filter = crate::state::SessionFilter {
+            stack_name: &input.stack_name,
+            fleet_name: &input.fleet_name,
+            user_id: input.user_id.as_deref(),
+            // "The default is to authenticate users using a streaming URL": a read that
+            // names no authentication type asks about the sessions a streaming URL
+            // authenticated, not about every session of the fleet.
+            authentication_type: Some(
+                input
+                    .authentication_type
+                    .as_deref()
+                    .unwrap_or(crate::state::SESSION_AUTHENTICATION_TYPE_API),
+            ),
+            instance_id: input.instance_id.as_deref(),
+        };
+        let page = state
+            .sessions_page(&filter, input.next_token.as_deref(), page_size)
+            .ok_or_else(|| {
+                crate::scaffolded::Scaffolded::validation(
+                    "NextToken is not a pagination token this service issued",
+                )
+            })?;
+
+        Ok(DescribeSessionsOutput {
+            sessions: Some(page.sessions),
+            next_token: page.next_token,
+        })
     }
 }

@@ -139,9 +139,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // "not written for that engine" rather than a fabricated success.
         let state = crate::state::service_state(&*self.engine)
             .ok_or_else(|| crate::scaffolded::Scaffolded::not_implemented("DescribeFleets"))?;
-        // A read: the guard is only ever read through, so a Describe can never change
-        // what a later caller sees.
-        let state = state.lock();
+        // A read of the fleets' own state: the guard is written through ONLY to
+        // materialise the state transitions the clock has already made due (a fleet a
+        // `StartFleet` asked for is streaming once its span has passed, whether or not
+        // anybody called), so what this reports is the state every later caller sees too.
+        let mut state = state.lock();
+        state.settle_fleet_states();
 
         let selected: ::std::collections::BTreeSet<String> = match &input.names {
             Some(names) => {

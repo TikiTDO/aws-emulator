@@ -3,16 +3,20 @@
 //! @op CreateUser
 //! IMPLEMENTED: allocates the `(AuthenticationType, UserName)` identity in the account's
 //! user pool by persisting a [`crate::state::UserRecord`], so a later `DescribeUsers`
-//! reports that user with the ARN, `CreatedTime` and names this call stored. A second
-//! create of an identity that already exists answers `ResourceAlreadyExistsException`
-//! (HTTP 400) and leaves the stored user untouched.
+//! reports that user with the ARN, `CreatedTime` and names this call stored. The create
+//! is IDEMPOTENT on that identity: a repeat that asks for nothing different about the user
+//! it names answers the same empty success and allocates the identity once — the lookup
+//! and the insert happen under one lock, so concurrent repeats all succeed and the pool
+//! still holds exactly one record for it — while a repeat naming an attribute whose value
+//! is not the stored one asks for a DIFFERENT user under a name that is taken and answers
+//! `ResourceAlreadyExistsException` (HTTP 400), leaving the stored user untouched.
 //!
 //! `MessageAction` selects what happens to the welcome email, which this emulator has no
 //! mail plane to send, so no email action is carried out or claimed for any value of it:
 //! the member is honoured only where it constrains the REQUEST — RESEND forbids naming
-//! the user's first or last name — and a request naming an identity that already exists
-//! is still refused, whichever action it asks for, because the identity is what a create
-//! allocates.
+//! the user's first or last name. RESEND is documented as re-sending the welcome email of
+//! a user that already exists, so a request carrying it reaches the idempotent path above
+//! rather than a refusal.
 //!
 //! ## Shape of an operation
 //!
@@ -129,6 +133,25 @@ impl From<CreateUserErrorModeled> for CreateUserError {
 /// documented rule forbids naming the user's first or last name in the same request.
 const MESSAGE_ACTION_RESEND: &str = "RESEND";
 
+/// Whether a create of an identity the pool already holds asks for a DIFFERENT user than
+/// the stored one: it names an attribute whose value is not the one the record carries.
+///
+/// A member the request omits asks nothing about that attribute, so it is not a
+/// difference — a repeat that carries only the identity, or that asks for the welcome
+/// email to be sent again, describes exactly the user that is already there. Only
+/// `FirstName` and `LastName` are compared, because they are the only attributes of a
+/// user a create carries: `MessageAction` asks for an email rather than for a stored
+/// value, and the authentication type and the user name ARE the identity this record was
+/// found under.
+fn conflicts_with_stored(input: &CreateUserInput, stored: &crate::state::UserRecord) -> bool {
+    [
+        (input.first_name.as_deref(), stored.first_name.as_deref()),
+        (input.last_name.as_deref(), stored.last_name.as_deref()),
+    ]
+    .into_iter()
+    .any(|(asked, held)| asked.is_some_and(|asked| Some(asked) != held))
+}
+
 /// The `CreateUser` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -214,14 +237,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Email addresses are case-sensitive, so the identity is the name exactly as the
         // request spells it, under the authentication type it names.
         let identity = (input.authentication_type.clone(), input.user_name.clone());
-        if state.users.contains_key(&identity) {
-            // The identity is already allocated, and a create cannot take it twice.
-            return Err(CreateUserErrorModeled::ResourceAlreadyExistsException(
-                ResourceAlreadyExistsException {
-                    message: Some(crate::state::USER_ALREADY_EXISTS_MESSAGE.to_string()),
-                },
-            )
-            .into());
+        if let Some(stored) = state.users.get(&identity) {
+            // The identity is already allocated. A repeat create that asks for nothing
+            // different about the user it names describes the user that is already
+            // there, so it is answered with the same empty success the first call got
+            // and allocates nothing a second time: the lookup and the insert happen
+            // under one lock, so concurrent repeats of one identity all succeed and the
+            // pool still holds exactly one record for it. A repeat that names an
+            // attribute differing from the stored one asks for a DIFFERENT user under a
+            // name that is taken, which is what the modelled already-exists refusal is
+            // for.
+            if conflicts_with_stored(&input, stored) {
+                return Err(CreateUserErrorModeled::ResourceAlreadyExistsException(
+                    ResourceAlreadyExistsException {
+                        message: Some(crate::state::USER_ALREADY_EXISTS_MESSAGE.to_string()),
+                    },
+                )
+                .into());
+            }
+            return Ok(CreateUserOutput {});
         }
 
         // The store must not grow per request without a ceiling, so a record past it is

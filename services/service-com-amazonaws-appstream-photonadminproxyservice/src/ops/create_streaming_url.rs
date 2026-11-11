@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateStreamingURL
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateStreamingURL`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateStreamingURL::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: resolves the stack and the fleet the request names, requires the fleet to
+//! be one of that stack's fleets and to be streaming — a fleet that is not running
+//! answers `OperationNotPermittedException` (HTTP 400) and issues no URL — and otherwise
+//! returns a time-limited URL that leads back to this emulator together with the instant
+//! it expires.
 //!
 //! ## Shape of an operation
 //!
@@ -158,18 +154,171 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateStreamingURL` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateStreamingURLErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateStreamingURL"))
+        // "The time that the streaming URL will be valid, in seconds. Specify a value
+        // between 1 and 604800 seconds. The default is 60 seconds": the member carries no
+        // modelled range, so the documented one is refused here, and a request that names
+        // no validity gets the documented default. The refusal is this crate's
+        // `ValidationException` rather than the modelled
+        // `InvalidParameterCombinationException`, which is "an incorrect combination of
+        // parameters, or a missing parameter": one member's value being outside its own
+        // range is neither.
+        let validity = input
+            .validity
+            .unwrap_or(crate::state::STREAMING_URL_DEFAULT_VALIDITY_SECONDS);
+        if !(crate::state::STREAMING_URL_MIN_VALIDITY_SECONDS
+            ..=crate::state::STREAMING_URL_MAX_VALIDITY_SECONDS)
+            .contains(&validity)
+        {
+            return Err(crate::scaffolded::Scaffolded::validation(
+                crate::state::streaming_url_validity_message(validity),
+            ));
+        }
+
+        // See `create_stack.rs` for why an engine without this service's store answers
+        // "not written for that engine" rather than a fabricated success.
+        let state = crate::state::service_state(&*self.engine)
+            .ok_or_else(|| crate::scaffolded::Scaffolded::not_implemented("CreateStreamingURL"))?;
+        let mut state = state.lock();
+        // A fleet an earlier `StartFleet` asked for is streaming once its span has
+        // passed, so the state this gate reads is the state the clock already decided.
+        state.settle_fleet_states();
+
+        if !state.stacks.contains_key(&input.stack_name) {
+            return Err(CreateStreamingURLErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: Some(crate::state::resource_not_found_message(
+                        crate::state::STACK_KIND,
+                        &input.stack_name,
+                    )),
+                },
+            )
+            .into());
+        }
+
+        // A streaming session runs on a fleet of the stack it is asked for, so the fleet
+        // this operation can reach is one the stack is associated with: a fleet this
+        // account holds but the stack is not associated with is not a fleet of that
+        // stack, and neither is a name no fleet is held under.
+        let associated = state
+            .fleet_stack_associations
+            .contains(&(input.fleet_name.clone(), input.stack_name.clone()));
+        let fleet = state
+            .fleets
+            .get(&input.fleet_name)
+            .filter(|_| associated)
+            .ok_or_else(|| {
+                CreateStreamingURLError::from(
+                    CreateStreamingURLErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException {
+                            message: Some(crate::state::resource_not_found_message(
+                                crate::state::FLEET_KIND,
+                                &input.fleet_name,
+                            )),
+                        },
+                    ),
+                )
+            })?;
+
+        // The state gate: a URL is issued against a fleet that is streaming, so a fleet
+        // in any other state is refused and nothing at all is issued.
+        if !fleet.is_running() {
+            return Err(
+                CreateStreamingURLErrorModeled::OperationNotPermittedException(
+                    OperationNotPermittedException {
+                        message: Some(crate::state::fleet_not_running_message(&input.fleet_name)),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // The URL the caller opens later has to lead back to THIS emulator, so it is
+        // signed by the emulator's own signer, for exactly as long as the request asked
+        // the URL to stay valid.
+        let max_user_duration = fleet.max_user_duration_in_seconds;
+        let path = format!(
+            "/{}/{}/{}/{}",
+            crate::state::STREAMING_SESSION_PATH_PREFIX,
+            input.stack_name,
+            input.fleet_name,
+            input.user_id
+        );
+        let mut signed = ::smithy_server_runtime::SignedUrlRequest::new(
+            ::http::Method::GET,
+            crate::state::SIGNING_NAME,
+            &path,
+        );
+        // "The name of the application to launch after the session starts" and "the
+        // session context" are what the session is opened with, so they travel in the URL
+        // the caller opens rather than being stored anywhere.
+        if let Some(application_id) = input.application_id.as_deref() {
+            signed = signed.query("ApplicationId", application_id);
+        }
+        if let Some(session_context) = input.session_context.as_deref() {
+            signed = signed.query("SessionContext", session_context);
+        }
+        let url = ctx
+            .url_signer()
+            .sign(
+                signed,
+                ::std::time::Duration::from_secs(validity.unsigned_abs()),
+            )
+            .map_err(|error| {
+                crate::scaffolded::Scaffolded::validation(format!(
+                    "no streaming URL can be issued for this request: {error}"
+                ))
+            })?;
+
+        // Issuing the URL dedicates the session it opens for that user: one session per
+        // `(stack, fleet, user)` identity, so a URL issued again for the same identity
+        // re-dedicates that session rather than adding a second one. Nobody has opened
+        // the URL yet, so the session is pending and no user is connected to it; it
+        // expires on the clock when the URL it was issued for stops verifying.
+        let start_time = crate::state::now();
+        let key = (
+            input.stack_name.clone(),
+            input.fleet_name.clone(),
+            input.user_id.clone(),
+        );
+        // The store must not grow per request without a ceiling: the room for a NEW
+        // session is taken from the sessions the clock has already expired first, and a
+        // store that is full even so refuses the request. A URL issued again for an
+        // identity the store already holds inserts nothing, so it is never refused.
+        if !state.sessions.contains_key(&key) && !state.session_room() {
+            return Err(
+                CreateStreamingURLErrorModeled::ResourceNotAvailableException(
+                    ResourceNotAvailableException {
+                        message: Some(crate::state::resource_not_available_message()),
+                    },
+                )
+                .into(),
+            );
+        }
+        let record = crate::state::SessionRecord {
+            id: crate::state::session_id(&key, start_time),
+            user_id: input.user_id.clone(),
+            stack_name: input.stack_name.clone(),
+            fleet_name: input.fleet_name.clone(),
+            state: crate::state::SESSION_STATE_PENDING.to_string(),
+            start_time,
+            // "The time when the streaming session is set to expire. This time is based
+            // on the `MaxUserDurationinSeconds` value", so a fleet that publishes no
+            // maximum user duration has none to report.
+            max_expiration_time: max_user_duration.map(|seconds| {
+                ::aws_smithy_types::DateTime::from_secs_f64(
+                    start_time.as_secs_f64() + f64::from(seconds),
+                )
+            }),
+            expires_at: ::std::time::Instant::now()
+                + ::std::time::Duration::from_secs(validity.unsigned_abs()),
+        };
+        state.sessions.insert(key, record);
+
+        Ok(CreateStreamingURLOutput {
+            streaming_url: Some(url.as_str().to_string()),
+            // "The elapsed time, in seconds after the Unix epoch, when this URL expires":
+            // the instant the URL itself stops verifying, not a second clock.
+            expires: Some(::aws_smithy_types::DateTime::from(url.expires_at())),
+        })
     }
 }

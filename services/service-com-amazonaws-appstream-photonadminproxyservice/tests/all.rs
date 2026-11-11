@@ -13,6 +13,8 @@
 mod app_block_builder;
 #[path = "all/app_blocks.rs"]
 mod app_blocks;
+#[path = "all/applications.rs"]
+mod applications;
 #[path = "all/associated_fleets.rs"]
 mod associated_fleets;
 #[path = "all/associated_stacks.rs"]
@@ -29,6 +31,8 @@ mod stack_registry;
 mod stack_theme;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/streaming_url.rs"]
+mod streaming_url;
 #[path = "all/update_stack.rs"]
 mod update_stack;
 #[path = "all/usage_report_subscription.rs"]

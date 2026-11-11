@@ -197,6 +197,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::scaffolded::Scaffolded::not_implemented("CreateAppBlockBuilder")
         })?;
         let region = crate::state::request_region(ctx.parts());
+
+        // "The Amazon Resource Name (ARN) of the IAM role to apply to the app block
+        // builder": the modelled pattern only says the value has the shape of an ARN, so
+        // whether this account holds a role under it that this service may assume is
+        // IAM's answer, and it is asked BEFORE anything is written — a request naming a
+        // role the service cannot assume creates nothing.
+        if let Some(role_arn) = input.iam_role_arn.as_deref() {
+            if ::service_common::iam_role::role_is_unassumable(
+                ctx,
+                &region,
+                role_arn,
+                crate::state::SERVICE_PRINCIPAL,
+            )
+            .await
+            {
+                return Err(CreateAppBlockBuilderErrorModeled::InvalidRoleException(
+                    InvalidRoleException {
+                        message: Some(crate::state::invalid_role_message(role_arn)),
+                    },
+                )
+                .into());
+            }
+        }
+
         let mut state = state.lock();
 
         // `Name` is "the unique name for the app block builder", so a name the account

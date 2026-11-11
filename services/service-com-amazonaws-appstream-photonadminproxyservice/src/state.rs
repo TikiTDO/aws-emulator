@@ -29,6 +29,22 @@
 //! name it is created with, and `DescribeAppBlocks` renders the stored records the ARNs it
 //! is asked about name back, a page at a time.
 //!
+//! Applications live here as well: `CreateApplication` resolves the app block the request
+//! names against the stored app blocks and then writes one [`ApplicationRecord`] under the
+//! name it allocates, and `DescribeApplications` renders the stored records back, a page
+//! at a time.
+//!
+//! A fleet's streaming state lives here too, with the transition the clock owes it:
+//! `StartFleet` moves the stored record to `STARTING` and records the instant from which
+//! `RUNNING` is due ([`PendingFleetState`]), `DescribeFleets` materialises what is already
+//! due before it reports ([`ComAmazonawsAppstreamPhotonadminproxyserviceState::settle_fleet_states`]),
+//! and `CreateStreamingURL` reads that same state as the gate on issuing a URL.
+//!
+//! Streaming sessions live here too: `CreateStreamingURL` dedicates one [`SessionRecord`]
+//! per `(stack, fleet, user)` identity it issues a URL for, that session is expired by the
+//! clock once the URL it was issued for stops verifying, and `DescribeSessions` renders
+//! the sessions of one stack's fleet back, a page at a time.
+//!
 //! The user pool lives here as well: `CreateUser` writes a [`UserRecord`] under the
 //! `(AuthenticationType, UserName)` identity it allocates, and `DescribeUsers` renders
 //! the stored records of one authentication type back, a page at a time.
@@ -60,9 +76,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ops::types::{
     AccessEndpoint, AgentAccessConfig, AppBlock, AppBlockBuilder, AppBlockBuilderStateChangeReason,
-    ApplicationSettingsResponse, ComputeCapacityStatus, ContentRedirection, DomainJoinInfo,
-    ErrorDetails, Fleet, FleetError, LastReportGenerationExecutionError, ResourceError, S3Location,
-    ScriptDetails, Stack, StackError,
+    Application, ApplicationSettingsResponse, ComputeCapacityStatus, ContentRedirection,
+    DomainJoinInfo, ErrorDetails, Fleet, FleetError, LastReportGenerationExecutionError,
+    ResourceError, S3Location, ScriptDetails, Session, Stack, StackError,
     StorageConnector, StreamingExperienceSettings, Theme, ThemeFooterLink, UsageReportSubscription,
     User, UserSetting, UserStackAssociation, UserStackAssociationError, VolumeConfig, VpcConfig,
 };
@@ -83,6 +99,25 @@ pub const DEFAULT_FLEET_TYPE: &str = "ON_DEMAND";
 /// starts streaming only once `StartFleet` runs, so this is a terminal status the clock
 /// owes no transition out of.
 pub const FLEET_STATE_CREATED: &str = "STOPPED";
+
+/// The `FleetState` a fleet carries while the instances `StartFleet` asked for are coming
+/// up, one of `FLEET_STATE_VALUES` (`ops/types/shared_types.rs`). It is not terminal: the
+/// clock owes the fleet [`FLEET_STATE_RUNNING`] once [`FLEET_START_SPAN`] has passed.
+pub const FLEET_STATE_STARTING: &str = "STARTING";
+
+/// The `FleetState` of a fleet whose instances are up and streaming, which is the state
+/// `CreateStreamingURL` requires of the stack's fleet.
+pub const FLEET_STATE_RUNNING: &str = "RUNNING";
+
+/// How long a fleet stays [`FLEET_STATE_STARTING`] before the clock owes it
+/// [`FLEET_STATE_RUNNING`].
+///
+/// AWS takes minutes to bring streaming instances up; the span here is the emulator's
+/// own, chosen so that a caller acting straight after `StartFleet` still observes the
+/// transient state and the refusals that go with it, without any caller having to wait
+/// minutes. Nothing sleeps for it: the due instant is stored on the fleet and the
+/// transition is applied the next time the fleet is read.
+pub const FLEET_START_SPAN: ::std::time::Duration = ::std::time::Duration::from_secs(3);
 
 /// The `AppBlockBuilderState` a freshly created app block builder carries.
 ///
@@ -151,6 +186,15 @@ pub const APP_BLOCK_BUILDER_KIND: &str = "appblockbuilder";
 /// The words AWS's refusal sentences use for an app block, the `<kind>` slot of
 /// [`resource_not_found_message`] and [`resource_already_exists_message`].
 pub const APP_BLOCK_KIND: &str = "app block";
+
+/// The words AWS's `CreateApplication` refusal uses for the app block an application is
+/// created against, where AWS capitalises the resource word and the `<name>` slot carries
+/// the ARN the request named: `The App block <ARN> for account <account id> does not
+/// exist.`
+pub const APP_BLOCK_ARN_KIND: &str = "App block";
+
+/// The word AWS's refusal sentences use for an application.
+pub const APPLICATION_KIND: &str = "application";
 
 /// The words AWS's refusal sentences use for a stack's custom branding theme.
 ///
@@ -288,6 +332,71 @@ pub fn stack_in_use_by_fleets_message(stack_name: &str) -> String {
     )
 }
 
+/// The service principal AppStream assumes a caller-supplied IAM role as, which is what a
+/// role's trust policy has to admit for the service to be able to use it.
+pub const SERVICE_PRINCIPAL: &str = "appstream.amazonaws.com";
+
+/// The signing name this service is addressed under (the model's `sigv4Name`,
+/// `appstream`), which is what a URL leading back to this service is signed as.
+pub const SIGNING_NAME: &str = "appstream";
+
+/// The path a streaming URL addresses, before the stack, fleet and user it was issued
+/// for: `/<prefix>/<stack>/<fleet>/<user id>`.
+pub const STREAMING_SESSION_PATH_PREFIX: &str = "streaming-sessions";
+
+/// How long a streaming URL stays valid when the request names no `Validity`.
+///
+/// `CreateStreamingURL.Validity` is documented "The time that the streaming URL will be
+/// valid, in seconds. Specify a value between 1 and 604800 seconds. The default is 60
+/// seconds", so this is AWS's own default rather than a span chosen here.
+pub const STREAMING_URL_DEFAULT_VALIDITY_SECONDS: i64 = 60;
+
+/// The shortest `Validity` that member's documentation allows ("between 1 and 604800
+/// seconds").
+pub const STREAMING_URL_MIN_VALIDITY_SECONDS: i64 = 1;
+
+/// The longest `Validity` that member's documentation allows ("between 1 and 604800
+/// seconds"), which is seven days.
+pub const STREAMING_URL_MAX_VALIDITY_SECONDS: i64 = 604_800;
+
+/// The sentence a request asking for a validity outside the documented range is refused
+/// with; its variable part is the value the request asked for.
+pub fn streaming_url_validity_message(validity: i64) -> String {
+    format!(
+        "Validity must be between {STREAMING_URL_MIN_VALIDITY_SECONDS} and \
+         {STREAMING_URL_MAX_VALIDITY_SECONDS} seconds, was {validity}"
+    )
+}
+
+/// AWS's `InvalidRoleException` sentence for an `IamRoleArn` the service cannot assume:
+/// the ARN is quoted in single quotes and the sentence carries no trailing period. The
+/// only variable part is the ARN the request asked for.
+pub fn invalid_role_message(role_arn: &str) -> String {
+    format!(
+        "WorkSpaces Applications encountered an error because your IAM role \
+         '{role_arn}' is invalid"
+    )
+}
+
+/// AWS's `ResourceNotAvailableException` sentence, as this service's model documents that
+/// error shape (`smithy_query(query="doc", shape="ResourceNotAvailableException")`: "The
+/// specified resource exists and is not in use, but isn't available."): the one wording a
+/// request refused because the resource it needs cannot serve it carries, naming the rule
+/// and nothing of the request.
+pub fn resource_not_available_message() -> String {
+    "The specified resource exists and is not in use, but isn't available.".to_string()
+}
+
+/// AWS's `OperationNotPermittedException` sentence for a streaming URL asked for against
+/// a fleet that is not streaming: it states the fleet's condition and the rule, with no
+/// trailing period. The only variable part is the fleet name the request asked for.
+pub fn fleet_not_running_message(fleet_name: &str) -> String {
+    format!(
+        "The fleet {fleet_name} is not running. The stack must have a running fleet \
+         to get a streaming URL"
+    )
+}
+
 /// How many tags ONE resource may carry.
 ///
 /// The model bounds a single `TagResource` request's `Tags` map and a single
@@ -319,6 +428,9 @@ pub const APP_BLOCK_BUILDER_ARN_RESOURCE_TYPE: &str = "app-block-builder";
 /// The ARN `resource-type` segment of an app block, the segment before the app block's
 /// name in `arn:aws:appstream:<region>:<account>:app-block/<name>`.
 pub const APP_BLOCK_ARN_RESOURCE_TYPE: &str = "app-block";
+
+/// The ARN `resource-type` segment of an application.
+pub const APPLICATION_ARN_RESOURCE_TYPE: &str = "application";
 
 /// The `<kind>` word a refusal uses for an ARN whose resource part carries no
 /// `<resource-type>/<resource-id>` to name a kind with.
@@ -359,6 +471,7 @@ pub fn tagged_resource_not_found_message(resource_arn: &str) -> String {
         FLEET_ARN_RESOURCE_TYPE => FLEET_KIND.to_string(),
         APP_BLOCK_BUILDER_ARN_RESOURCE_TYPE => APP_BLOCK_BUILDER_KIND.to_string(),
         APP_BLOCK_ARN_RESOURCE_TYPE => APP_BLOCK_KIND.to_string(),
+        APPLICATION_ARN_RESOURCE_TYPE => APPLICATION_KIND.to_string(),
         other => other.replace('-', " "),
     };
     resource_not_found_message(&kind, &resource_id)
@@ -403,6 +516,15 @@ pub fn app_block_arn(region: &str, name: &str) -> String {
         ARN_NAMESPACE,
         region,
         &format!("{APP_BLOCK_ARN_RESOURCE_TYPE}/{name}"),
+    )
+}
+
+/// `arn:aws:appstream:<region>:<account>:application/<name>`.
+pub fn application_arn(region: &str, name: &str) -> String {
+    ::emulator_server::emulator_arn(
+        ARN_NAMESPACE,
+        region,
+        &format!("{APPLICATION_ARN_RESOURCE_TYPE}/{name}"),
     )
 }
 
@@ -561,6 +683,10 @@ pub struct FleetRecord {
     pub image_arn: Option<String>,
     /// One of `FLEET_STATE_VALUES`; `STOPPED` for a freshly created fleet.
     pub state: String,
+    /// The state the clock owes this fleet, and the instant from which it is owed: what
+    /// `StartFleet` records so that a fleet reports `STARTING` until its instances are
+    /// up and `RUNNING` afterwards, without anything sleeping for the span.
+    pub pending_state: Option<PendingFleetState>,
     pub desired_instances: i32,
     pub desired_user_sessions: Option<i32>,
     pub running: i32,
@@ -588,7 +714,43 @@ pub struct FleetRecord {
     pub tags: BTreeMap<String, String>,
 }
 
+/// A fleet-state transition the clock owes: the state the fleet moves to, and the instant
+/// at which it is due.
+#[derive(Debug, Clone, Copy)]
+pub struct PendingFleetState {
+    pub state: &'static str,
+    pub due_at: ::std::time::Instant,
+}
+
 impl FleetRecord {
+    /// Apply the transition the clock owes this fleet, if `now` is past its due instant.
+    ///
+    /// This materialises a change the CLOCK already made due — the fleet would have
+    /// reached the state at that instant even if nobody had called — so a read may apply
+    /// it. Nothing else about the fleet changes, and once applied there is nothing owed.
+    pub fn settle_state(&mut self, now: ::std::time::Instant) {
+        let Some(pending) = self.pending_state else {
+            return;
+        };
+        if now < pending.due_at {
+            return;
+        }
+        self.state = pending.state.to_string();
+        self.pending_state = None;
+        // The instances the start asked for are up once the fleet is running, and none of
+        // them is serving a session yet.
+        if self.state == FLEET_STATE_RUNNING {
+            self.running = self.desired_instances;
+            self.available = self.desired_instances.saturating_sub(self.in_use);
+        }
+    }
+
+    /// Whether this fleet is streaming, which is what issuing a streaming URL against the
+    /// stack it is associated with requires of it.
+    pub fn is_running(&self) -> bool {
+        self.state == FLEET_STATE_RUNNING
+    }
+
     /// Render the stored record as the modelled `Fleet` every reader returns.
     pub fn to_fleet(&self) -> Fleet {
         Fleet {
@@ -800,6 +962,94 @@ impl AppBlockRecord {
     }
 }
 
+/// A persisted AppStream application: the launch details, icon and display name an
+/// Elastic fleet streams, bound to the app block that carries its binaries.
+#[derive(Debug, Clone)]
+pub struct ApplicationRecord {
+    pub arn: String,
+    pub name: String,
+    pub display_name: Option<String>,
+    pub description: Option<String>,
+    pub icon_s3_location: S3Location,
+    pub launch_path: String,
+    pub launch_parameters: Option<String>,
+    pub working_directory: Option<String>,
+    pub platforms: Vec<String>,
+    pub instance_families: Vec<String>,
+    /// The ARN of the app block the application's binaries live in — resolved against the
+    /// stored app blocks before the application was created, so it names one this
+    /// account held at that point.
+    pub app_block_arn: String,
+    pub created_time: ::aws_smithy_types::DateTime,
+    pub tags: BTreeMap<String, String>,
+}
+
+/// How long the icon URL an application reports stays valid.
+///
+/// `Application.IconURL` is "the URL for the application icon. This URL might be
+/// time-limited", and the model publishes no span for it, so this one is the emulator's
+/// own: long enough for a client to fetch the icon it was handed, short enough that the
+/// URL is time-limited as documented.
+pub const ICON_URL_VALIDITY: ::std::time::Duration = ::std::time::Duration::from_secs(3600);
+
+impl ApplicationRecord {
+    /// Render the stored record as the modelled `Application` every reader returns.
+    ///
+    /// The icon URL is signed per render rather than stored: it is a time-limited address
+    /// of the S3 object the create named, so it has to be minted against the clock of the
+    /// call that reports it.
+    pub fn to_application(&self, signer: &::smithy_server_runtime::UrlSigner) -> Application {
+        Application {
+            name: Some(self.name.clone()),
+            display_name: reported_text(self.display_name.as_deref()),
+            icon_url: icon_url(signer, &self.icon_s3_location),
+            launch_path: Some(self.launch_path.clone()),
+            launch_parameters: reported_text(self.launch_parameters.as_deref()),
+            // An application is created enabled; only a problem found while an image is
+            // built disables one.
+            enabled: Some(true),
+            // The additional attributes an image's own application catalog carries;
+            // an application created through this operation has none.
+            metadata: None,
+            working_directory: reported_text(self.working_directory.as_deref()),
+            description: reported_text(self.description.as_deref()),
+            arn: Some(self.arn.clone()),
+            app_block_arn: Some(self.app_block_arn.clone()),
+            icon_s3_location: Some(self.icon_s3_location.clone()),
+            platforms: reported(&self.platforms),
+            instance_families: reported(&self.instance_families),
+            created_time: Some(self.created_time),
+        }
+    }
+}
+
+/// The time-limited URL the application icon stored in S3 is fetched from, signed so that
+/// it leads back to this emulator's own S3 front door.
+///
+/// `None` when the stored location names no object to fetch: `S3Location.S3Key` is
+/// optional on the wire, and a location with no key addresses the bucket rather than an
+/// icon.
+fn icon_url(
+    signer: &::smithy_server_runtime::UrlSigner,
+    location: &S3Location,
+) -> Option<String> {
+    let key = location.s3_key.as_deref().filter(|key| !key.is_empty())?;
+    let path = format!("/{}/{key}", location.s3_bucket);
+    let request = ::smithy_server_runtime::SignedUrlRequest::new(
+        ::http::Method::GET,
+        S3_SIGNING_NAME,
+        &path,
+    );
+    signer
+        .sign(request, ICON_URL_VALIDITY)
+        .ok()
+        .map(|url| url.as_str().to_string())
+}
+
+/// The signing name of the service an application's icon is stored in, which is the
+/// service the icon URL addresses.
+const S3_SIGNING_NAME: &str = "s3";
+
 /// The account's usage report subscription: the daily usage reports it has enabled, and
 /// where they are written.
 ///
@@ -928,6 +1178,151 @@ impl UserStackAssociationFilter<'_> {
     }
 }
 
+/// The `SessionState` of a session a streaming URL has been issued for and nobody has
+/// connected to yet, one of `SESSION_STATE_VALUES` (`ops/types/shared_types.rs`):
+/// `User.Status`-style, the state's own documentation is "PENDING - The session is
+/// pending".
+pub const SESSION_STATE_PENDING: &str = "PENDING";
+
+/// The `SessionState` of a session whose streaming URL stopped verifying before anybody
+/// connected to it: "EXPIRED - The session is expired".
+pub const SESSION_STATE_EXPIRED: &str = "EXPIRED";
+
+/// The `SessionConnectionState` of a session no user is connected to, one of
+/// `SESSION_CONNECTION_STATE_VALUES`. A session a URL was issued for has nobody on it
+/// until a client opens that URL.
+pub const SESSION_CONNECTION_STATE_NOT_CONNECTED: &str = "NOT_CONNECTED";
+
+/// The `AuthenticationType` of a session a streaming URL authenticates: that member's
+/// documentation is "The user is authenticated using a streaming URL (API)".
+pub const SESSION_AUTHENTICATION_TYPE_API: &str = "API";
+
+/// How many sessions one `DescribeSessions` page carries when the request names no
+/// `Limit`, and the most one page carries at all: that member is documented "The size of
+/// each page of results. The default value is 20 and the maximum value is 50", and both
+/// numbers are AWS's.
+pub const SESSION_PAGE_SIZE_DEFAULT: usize = 20;
+pub const SESSION_PAGE_SIZE_MAX: usize = 50;
+
+/// The identity a streaming session is held under: the stack, the fleet and the user it
+/// was dedicated for. A user streams one session of a stack's fleet at a time, so a
+/// streaming URL issued again for the same identity re-dedicates that session rather than
+/// adding a second one.
+pub type SessionKey = (String, String, String);
+
+/// A streaming session a `CreateStreamingURL` dedicated for a user.
+#[derive(Debug, Clone)]
+pub struct SessionRecord {
+    pub id: String,
+    pub user_id: String,
+    pub stack_name: String,
+    pub fleet_name: String,
+    /// One of `SESSION_STATE_VALUES`: [`SESSION_STATE_PENDING`] until the URL the session
+    /// was dedicated for stops verifying.
+    pub state: String,
+    pub start_time: ::aws_smithy_types::DateTime,
+    /// "The time when the streaming session is set to expire. This time is based on the
+    /// `MaxUserDurationinSeconds` value" — so a fleet that publishes no maximum user
+    /// duration has no such time to report.
+    pub max_expiration_time: Option<::aws_smithy_types::DateTime>,
+    /// The instant the URL issued for this session stops verifying. A streaming URL is
+    /// temporary, so a session nobody connected to before its URL expired is expired
+    /// too — a transition the clock owes, like a starting fleet's.
+    pub expires_at: ::std::time::Instant,
+}
+
+impl SessionRecord {
+    /// The identity this session is held under.
+    pub fn key(&self) -> SessionKey {
+        (
+            self.stack_name.clone(),
+            self.fleet_name.clone(),
+            self.user_id.clone(),
+        )
+    }
+
+    /// Apply the transition the clock owes this session, if `now` is past the instant its
+    /// URL stops verifying. Nothing else about the session changes.
+    pub fn settle_state(&mut self, now: ::std::time::Instant) {
+        if self.state == SESSION_STATE_PENDING && now >= self.expires_at {
+            self.state = SESSION_STATE_EXPIRED.to_string();
+        }
+    }
+
+    /// Render the stored record as the modelled `Session` every reader returns.
+    pub fn to_session(&self) -> Session {
+        Session {
+            id: self.id.clone(),
+            user_id: self.user_id.clone(),
+            stack_name: self.stack_name.clone(),
+            fleet_name: self.fleet_name.clone(),
+            state: self.state.clone(),
+            // Nobody has opened the URL this session was dedicated for, so no user is
+            // connected to it.
+            connection_state: Some(SESSION_CONNECTION_STATE_NOT_CONNECTED.to_string()),
+            start_time: Some(self.start_time),
+            max_expiration_time: self.max_expiration_time,
+            authentication_type: Some(SESSION_AUTHENTICATION_TYPE_API.to_string()),
+            // A session nothing is streaming runs on no instance, so there is no
+            // interface to report an address of, no instance to name, and no drain status
+            // for one ("this only applies to multi-session fleets").
+            network_access_configuration: None,
+            instance_id: None,
+            instance_drain_status: None,
+        }
+    }
+}
+
+/// The opaque id a session is reported under.
+///
+/// `Session.Id` is "the identifier of the streaming session", an opaque value the service
+/// mints: this one is a digest of the identity the session was dedicated for and the
+/// instant it was dedicated at, so two sessions of one identity never share an id and the
+/// id carries nothing a caller could read a secret out of.
+pub fn session_id(key: &SessionKey, start_time: ::aws_smithy_types::DateTime) -> String {
+    let (stack_name, fleet_name, user_id) = key;
+    let digest = <::sha2::Sha256 as ::sha2::Digest>::digest(format!(
+        "appstream-session:{stack_name}:{fleet_name}:{user_id}:{}",
+        start_time.as_secs_f64()
+    ));
+    hex::encode(digest)
+}
+
+/// Which sessions a read reports. The stack and the fleet are required of the read, so
+/// they always narrow it; every member left `None` filters nothing.
+#[derive(Debug)]
+pub struct SessionFilter<'a> {
+    pub stack_name: &'a str,
+    pub fleet_name: &'a str,
+    pub user_id: Option<&'a str>,
+    pub authentication_type: Option<&'a str>,
+    pub instance_id: Option<&'a str>,
+}
+
+impl SessionFilter<'_> {
+    /// Whether the session stored under `key` is one this filter reports.
+    fn matches(&self, key: &SessionKey) -> bool {
+        let (stack_name, fleet_name, user_id) = key;
+        self.stack_name == stack_name
+            && self.fleet_name == fleet_name
+            && self.user_id.is_none_or(|asked| asked == user_id)
+            && self
+                .authentication_type
+                .is_none_or(|kind| kind == SESSION_AUTHENTICATION_TYPE_API)
+            // No session here is hosted on an instance, so a read narrowed to one names
+            // an instance no session of this account runs on and reports none.
+            && self.instance_id.is_none()
+    }
+}
+
+/// One page of a `DescribeSessions`: the sessions to render, and the opaque token that
+/// resumes after them.
+#[derive(Debug)]
+pub struct SessionPage {
+    pub sessions: Vec<Session>,
+    pub next_token: Option<String>,
+}
+
 /// Per-service state for com-amazonaws-appstream-photonadminproxyservice. A handler reaches it through [`service_state`].
 #[derive(Debug)]
 pub struct ComAmazonawsAppstreamPhotonadminproxyserviceState {
@@ -949,6 +1344,21 @@ pub struct ComAmazonawsAppstreamPhotonadminproxyserviceState {
     /// is also what a `DeleteAppBlock` names. `BTreeMap` so every page of a read walks a
     /// stable order.
     pub app_blocks: BTreeMap<String, AppBlockRecord>,
+    /// Applications by `Name` — the name a `CreateApplication` mints the resource under.
+    /// `BTreeMap` so every page of a read walks a stable order.
+    pub applications: BTreeMap<String, ApplicationRecord>,
+    /// Streaming sessions by [`SessionKey`] — one per user dedicated to one stack's
+    /// fleet, written by `CreateStreamingURL`. `BTreeMap` so every page of a read walks a
+    /// stable order, and so one stack-and-fleet's sessions form a contiguous range.
+    ///
+    /// Bounded by [`MAX_RECORDS_PER_STORE`], like every other store a request can grow:
+    /// the `UserId` a streaming URL is issued for is the caller's to choose and is not
+    /// drawn from `users`, so the identities are unbounded unless the store is capped.
+    /// `CreateStreamingURL` takes the room for a NEW session through
+    /// [`Self::session_room`], which first reclaims the sessions the clock has already
+    /// expired — nothing can stream from those — and refuses the request when the
+    /// store is full even so.
+    pub sessions: BTreeMap<SessionKey, SessionRecord>,
     /// Images by `Name` — the name a fleet or an image builder names an image by.
     ///
     /// SEEDED with the base images AWS publishes ([`seed_image_catalog`]), which no
@@ -986,6 +1396,8 @@ impl Default for ComAmazonawsAppstreamPhotonadminproxyserviceState {
             fleets: BTreeMap::new(),
             app_block_builders: BTreeMap::new(),
             app_blocks: BTreeMap::new(),
+            applications: BTreeMap::new(),
+            sessions: BTreeMap::new(),
             images: seed_image_catalog(),
             fleet_stack_associations: BTreeSet::new(),
             usage_report_subscription: None,
@@ -1029,6 +1441,98 @@ impl ComAmazonawsAppstreamPhotonadminproxyserviceState {
             .filter(|record| record.arn == arn)
     }
 
+    /// The application stored under the ARN asked about; `None` when this service holds
+    /// none under it.
+    ///
+    /// An application is addressed by ARN rather than by name on a read, the way an app
+    /// block is ([`Self::app_block_by_arn`]), and the stored ARN must match in full, so an
+    /// ARN naming another Region or account addresses no application here.
+    pub fn application_by_arn(&self, arn: &str) -> Option<&ApplicationRecord> {
+        let (resource_type, name) = arn_resource(arn);
+        (resource_type == APPLICATION_ARN_RESOURCE_TYPE)
+            .then(|| self.applications.get(&name))
+            .flatten()
+            .filter(|record| record.arn == arn)
+    }
+
+    /// Whether the store can take ONE more session, reclaiming the records the clock has
+    /// already expired if it has to.
+    ///
+    /// An expired session is one nobody can stream from: its streaming URL stopped
+    /// verifying before anybody opened it, so dropping it frees the room a live session
+    /// needs rather than losing anything a caller can still use. `false` means the store
+    /// is at [`MAX_RECORDS_PER_STORE`] with nothing expired to reclaim, and the request
+    /// asking for the room is refused.
+    pub fn session_room(&mut self) -> bool {
+        if self.sessions.len() < MAX_RECORDS_PER_STORE {
+            return true;
+        }
+        self.settle_session_states();
+        self.sessions
+            .retain(|_, session| session.state != SESSION_STATE_EXPIRED);
+        self.sessions.len() < MAX_RECORDS_PER_STORE
+    }
+
+    /// Apply every session-state transition the clock has already made due: a session
+    /// whose streaming URL stopped verifying before anybody connected to it is expired at
+    /// that instant, whether or not anybody calls again.
+    pub fn settle_session_states(&mut self) {
+        let now = ::std::time::Instant::now();
+        for session in self.sessions.values_mut() {
+            session.settle_state(now);
+        }
+    }
+
+    /// One page of the sessions `filter` reports: the sessions to render, and the token
+    /// that resumes after them. `None` means `next_token` is not a token this service
+    /// minted.
+    ///
+    /// The sessions are read straight from the stored map in key order, so a page renders
+    /// exactly the records the store holds — there is no second lookup that could miss
+    /// one — and following the token walks every matching session exactly once even when
+    /// sessions are dedicated between calls.
+    pub fn sessions_page(
+        &self,
+        filter: &SessionFilter<'_>,
+        next_token: Option<&str>,
+        page_size: usize,
+    ) -> Option<SessionPage> {
+        let resume_at = match next_token {
+            Some(token) => Some(decode_association_cursor(token)?),
+            None => None,
+        };
+        let mut remaining = self
+            .sessions
+            .iter()
+            .filter(|(key, _)| resume_at.as_ref().is_none_or(|from| *key >= from))
+            .filter(|(key, _)| filter.matches(key));
+        // A page holds at least one record, so following the token always advances.
+        let sessions: Vec<Session> = remaining
+            .by_ref()
+            .take(page_size.max(1))
+            .map(|(_, record)| record.to_session())
+            .collect();
+        Some(SessionPage {
+            next_token: remaining
+                .next()
+                .map(|(key, _)| encode_association_cursor(key)),
+            sessions,
+        })
+    }
+
+    /// Apply every fleet-state transition the clock has already made due.
+    ///
+    /// A fleet `StartFleet` asked for reaches `RUNNING` at an instant that call fixed, so
+    /// the transition is owed whether or not anybody calls again: materialising it here is
+    /// what makes a later read report the state the fleet is already in, and it changes
+    /// nothing the clock had not already decided.
+    pub fn settle_fleet_states(&mut self) {
+        let now = ::std::time::Instant::now();
+        for fleet in self.fleets.values_mut() {
+            fleet.settle_state(now);
+        }
+    }
+
     /// The tags the resource with this ARN carries, for reading; `None` when this
     /// service holds no resource under that ARN.
     ///
@@ -1057,6 +1561,11 @@ impl ComAmazonawsAppstreamPhotonadminproxyserviceState {
                 .map(|record| &record.tags),
             APP_BLOCK_ARN_RESOURCE_TYPE => self
                 .app_blocks
+                .get(&name)
+                .filter(|record| record.arn == resource_arn)
+                .map(|record| &record.tags),
+            APPLICATION_ARN_RESOURCE_TYPE => self
+                .applications
                 .get(&name)
                 .filter(|record| record.arn == resource_arn)
                 .map(|record| &record.tags),
@@ -1089,6 +1598,11 @@ impl ComAmazonawsAppstreamPhotonadminproxyserviceState {
                 .map(|record| &mut record.tags),
             APP_BLOCK_ARN_RESOURCE_TYPE => self
                 .app_blocks
+                .get_mut(&name)
+                .filter(|record| record.arn == resource_arn)
+                .map(|record| &mut record.tags),
+            APPLICATION_ARN_RESOURCE_TYPE => self
+                .applications
                 .get_mut(&name)
                 .filter(|record| record.arn == resource_arn)
                 .map(|record| &mut record.tags),
@@ -1234,11 +1748,15 @@ fn decode_cursor(token: &str) -> Option<String> {
     String::from_utf8(hex::decode(token).ok()?).ok()
 }
 
-/// The byte that joins the three parts of a user/stack association cursor.
+/// The byte that joins the three parts of a user/stack association cursor, and of a
+/// streaming-session cursor.
 ///
 /// A newline cannot appear in any of them: `Username`'s pattern admits only letters,
 /// marks, symbols, numbers and punctuation, and a stored stack's name only
 /// `[a-zA-Z0-9_.-]`, so the joined form parses back to exactly the key it was built from.
+/// The same holds for a session's key: a session is dedicated only for a STORED stack and
+/// fleet, whose names carry that pattern, and for a `UserId` whose own pattern is
+/// `^[\w+=,.@-]*$`.
 const ASSOCIATION_CURSOR_SEPARATOR: char = '\n';
 
 /// Encode a user/stack association cursor: the key of the first record of the next page,

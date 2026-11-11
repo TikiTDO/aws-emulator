@@ -10,6 +10,9 @@ build = "build.rs"
 engine = { workspace = true }
 # Hex codec for the opaque pagination cursor a Describe's `NextToken` carries.
 hex = { workspace = true }
+# The shared reading of a caller-supplied IAM role ARN, and the in-process hop IAM is
+# asked about it over.
+service-common = { path = "../common" }
 # Digest behind the unique identifier the usage-report log bucket's name carries.
 sha2 = { workspace = true }
 smithy-macros = { workspace = true }
