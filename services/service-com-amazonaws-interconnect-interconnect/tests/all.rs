@@ -97,3 +97,5 @@ mod tag_resource;
 mod tag_set_has_one_representation;
 #[path = "all/update_connection_idempotent_retry.rs"]
 mod update_connection_idempotent_retry;
+#[path = "all/update_settles_back_into_the_state_it_came_from.rs"]
+mod update_settles_back_into_the_state_it_came_from;

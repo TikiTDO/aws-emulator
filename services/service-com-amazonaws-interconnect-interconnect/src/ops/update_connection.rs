@@ -212,12 +212,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        // The state the connection settles into: the one a pending transition is
-        // already owed, or its current state. A bandwidth change below moves it to
-        // `updating` and hands it back to the clock, so re-reading the settled state
-        // (rather than the reported one) keeps a second change from pinning it in
-        // `updating` for good.
-        let settled = crate::state::ComAmazonawsInterconnectInterconnectState::settled_state(stored);
         let environment_id = stored.connection.environment_id.clone();
 
         // A new bandwidth is allocated on the SAME environment, so it is held to
@@ -256,15 +250,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
         if let Some(bandwidth) = input.bandwidth.clone() {
             if bandwidth != stored.connection.bandwidth {
-                stored.connection.bandwidth = bandwidth.clone();
-                // "updating: the connection is being updated" — re-provisioning the
-                // circuit is not instantaneous, so the connection reports `updating`
-                // and the clock settles it back into the state it came from.
-                stored.connection.state = crate::state::UPDATING_CONNECTION_STATE.to_string();
-                stored.pending_transition = Some(crate::state::PendingTransition {
-                    due: now + crate::state::PROVISIONING_SPAN,
-                    state: settled,
-                });
+                // Re-provisioning the circuit is not instantaneous, so the change is
+                // written by the one writer of what it does to the record
+                // (`crate::state::apply_bandwidth_change`): the connection reports the
+                // transient `updating` state and the clock settles it back into the
+                // state this call found it in. The change re-provisions a circuit and
+                // decides nothing else, so it never carries the connection on along the
+                // provisioning progression — the state it came from is the state it
+                // comes back to, and the clock re-arms whatever that state owes.
+                crate::state::apply_bandwidth_change(stored, bandwidth, now);
             }
         }
 

@@ -431,15 +431,6 @@ impl ComAmazonawsInterconnectInterconnectState {
             .retain(|_, created| connections.contains_key(&created.connection_id));
     }
 
-    /// The state a connection settles into once its pending transition fires —
-    /// its current state when nothing is pending.
-    pub fn settled_state(stored: &StoredConnection) -> String {
-        stored
-            .pending_transition
-            .as_ref()
-            .map_or_else(|| stored.connection.state.clone(), |p| p.state.clone())
-    }
-
     /// The stored connection `identifier` names IN `region`, which is the only
     /// connection a request signed for that Region can reach by identifier.
     ///
@@ -1680,6 +1671,29 @@ pub fn apply_acceptance(
     stored.proposal_accepted = true;
     stored.connection.state = ACCEPTED_CONNECTION_STATE.to_string();
     stored.pending_transition = owed_progression(ACCEPTED_CONNECTION_STATE, now);
+}
+
+/// Apply a new bandwidth to a connection: the ONE writer of what a re-provisioning
+/// change does to the record.
+///
+/// "updating: the connection is being updated" — re-provisioning the circuit is not
+/// instantaneous, so the connection reports that transient state and the clock settles
+/// it back into the state it was IN when the change was applied, which is the state the
+/// change found it in and not the one the clock had still to carry it to. A bandwidth
+/// change re-provisions a circuit and decides nothing else: only an acceptance enters
+/// the accepted state ("pending: the connection has been accepted…"), so a connection
+/// whose proposal is still awaiting one comes back awaiting it, and whatever the
+/// restored state owes ([`owed_progression`]) is re-armed from the instant it is
+/// restored. The due instant is stored and materialised by whichever call comes next;
+/// nothing ever waits for it.
+pub fn apply_bandwidth_change(stored: &mut StoredConnection, bandwidth: String, now: Instant) {
+    let came_from = stored.connection.state.clone();
+    stored.connection.bandwidth = bandwidth;
+    stored.connection.state = UPDATING_CONNECTION_STATE.to_string();
+    stored.pending_transition = Some(PendingTransition {
+        due: now + PROVISIONING_SPAN,
+        state: came_from,
+    });
 }
 
 /// Whether accepting `connection`'s proposal with `attach_point`, `description` and
