@@ -289,6 +289,8 @@ mod resource_member_projection;
 mod resource_tags;
 #[path = "all/scratch_aurora_truth.rs"]
 mod scratch_aurora_truth;
+#[path = "all/serverless_v2_capacity_range.rs"]
+mod serverless_v2_capacity_range;
 #[path = "all/sibling_control_plane_clusters.rs"]
 mod sibling_control_plane_clusters;
 // Declared because the build enforces that every file under `tests/all/` is: the suite this
