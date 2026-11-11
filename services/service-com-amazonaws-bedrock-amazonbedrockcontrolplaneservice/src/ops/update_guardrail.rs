@@ -249,11 +249,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             version: guardrail.draft.version.clone(),
             updated_at: crate::state::date_time(guardrail.draft.updated_at),
         };
+        // The DRAFT this update replaced is a revision inference can APPLY, so the
+        // guardrail is published again with the policies it now holds.
+        let published = guardrail.clone();
 
         if previous_name != input.name {
             store.guardrail_names.remove(&previous_name);
             store.guardrail_names.insert(input.name, id);
         }
+
+        drop(store);
+        crate::state::publish_guardrail_to_inference(&*self.engine, &published);
 
         Ok(output)
     }

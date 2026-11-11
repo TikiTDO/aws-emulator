@@ -285,7 +285,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let stored = store
             .guardrails
             .get(&id)
-            .expect("the guardrail just inserted under this id");
+            .expect("the guardrail just inserted under this id")
+            .clone();
+        // The guardrail's revisions are what the inference plane applies, so the
+        // record is published there with no store of this service held.
+        drop(store);
+        crate::state::publish_guardrail_to_inference(&*self.engine, &stored);
         Ok(CreateGuardrailOutput {
             guardrail_id: stored.id.clone(),
             guardrail_arn: stored.arn.clone(),

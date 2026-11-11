@@ -376,6 +376,73 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             input.messages.as_ref(),
             turn,
         );
+        // The guardrail the REQUEST named, evaluated by the very stage
+        // `ApplyGuardrail` evaluates the same policies with, so the two surfaces
+        // cannot disagree about what this guardrail does to this text. A request
+        // naming a guardrail revision this account does not hold, or one whose
+        // guardrail needs grounding material it carries none of, names no guardrail
+        // this turn can be guarded by.
+        let guardrail = crate::state::guardrail_evaluation::converse_guardrail(
+            &*self.engine,
+            input
+                .guardrail_config
+                .as_ref()
+                .and_then(|config| config.guardrail_identifier.as_deref()),
+            input
+                .guardrail_config
+                .as_ref()
+                .and_then(|config| config.guardrail_version.as_deref()),
+            input
+                .guardrail_config
+                .as_ref()
+                .map_or("", |config| config.trace.as_str()),
+            input.system.as_ref(),
+            input.messages.as_ref(),
+        )
+        .map_err(validation)?;
+        // The policies are synchronous, CPU-bound work over caller-supplied text, so
+        // they run off the async worker and under the one budget every surface that
+        // runs these recognizers waits for.
+        let (turn, guardrail_trace) = match guardrail {
+            None => (turn, None),
+            Some(guardrail) => {
+                match ::tokio::time::timeout(
+                    crate::state::guardrail_checks::EVALUATION_TIME_BUDGET,
+                    ::tokio::task::spawn_blocking(move || {
+                        crate::state::guardrail_evaluation::guard_turn(guardrail, turn)
+                    }),
+                )
+                .await
+                {
+                    Ok(Ok(guarded)) => guarded,
+                    // The guardrail did not answer, so there is no turn to serve: a
+                    // turn served unguarded would be one this request asked to be
+                    // guarded.
+                    Ok(Err(error)) => {
+                        return Err(ConverseErrorModeled::InternalServerException(
+                            InternalServerException {
+                                message: Some(format!(
+                                    "the guardrail evaluation did not complete: {error}"
+                                )),
+                            },
+                        )
+                        .into())
+                    }
+                    Err(_) => {
+                        return Err(ConverseErrorModeled::InternalServerException(
+                            InternalServerException {
+                                message: Some(format!(
+                                    "the guardrail evaluation did not complete within {} seconds",
+                                    crate::state::guardrail_checks::EVALUATION_TIME_BUDGET
+                                        .as_secs()
+                                )),
+                            },
+                        )
+                        .into())
+                    }
+                }
+            }
+        };
 
         let logged = crate::state::InvocationLogEntry {
             model_id: model.model_id.clone(),
@@ -406,7 +473,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             usage: turn.usage(),
             metrics: ConverseMetrics { latency_ms },
             additional_model_response_fields: None,
-            trace: None,
+            // The guardrail's own assessments, reported only where the request asked
+            // for the trace.
+            trace: guardrail_trace.map(|guardrail| ConverseTrace {
+                guardrail: Some(guardrail),
+                prompt_router: None,
+            }),
             performance_config: input.performance_config.clone(),
             service_tier: input.service_tier.clone(),
         })

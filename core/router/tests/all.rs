@@ -17,6 +17,12 @@
 // else appends to.
 #[path = "all/cloudformation_fifo_resource_generated_names.rs"]
 mod cloudformation_fifo_resource_generated_names;
+// Declared here, in this same head region, for the reason the entry above records: a
+// guardrail the Amazon Bedrock control plane creates and the Bedrock Runtime data plane
+// applies spans those two crates at once, so neither crate's own test target can see
+// both sides of it.
+#[path = "all/bedrock_guardrail_applied_across_planes.rs"]
+mod bedrock_guardrail_applied_across_planes;
 // Declared here, in this same head region, for the reason the entry above records: the
 // StackSet status-change events a stack set's lifecycle publishes onto the default event
 // bus, which span CloudFormation, EventBridge, Amazon SQS and Systems Manager at once.

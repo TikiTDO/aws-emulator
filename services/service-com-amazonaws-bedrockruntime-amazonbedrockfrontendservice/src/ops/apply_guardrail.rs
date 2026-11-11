@@ -1,15 +1,21 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ApplyGuardrail
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ApplyGuardrail`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED. The guardrail REVISION the request names — by either spelling of the
+//! identifier and by the version — is resolved out of the guardrails the Bedrock
+//! control plane published into this plane's store
+//! ([`crate::state::guardrail_registry`]), and the submitted content is evaluated
+//! against every policy that revision configures
+//! ([`crate::state::guardrail_evaluation`]): a request naming a revision this account
+//! does not hold is refused 400 `ValidationException` — the identifier it carries
+//! names no guardrail of this account — and one whose guardrail configures contextual
+//! grounding without carrying the material that policy scores against is refused the
+//! same way.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ApplyGuardrail::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The call REPORTS what the guardrail does to the content and changes nothing: the
+//! action, the per-policy assessment cut to the requested output scope, the text the
+//! guardrail answers with, the text units each policy read and the coverage of the
+//! submission are all computed from the request and the stored revision.
 //!
 //! ## Shape of an operation
 //!
@@ -109,6 +115,8 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+use crate::state::guardrail_checks::EVALUATION_TIME_BUDGET;
+use crate::state::{guardrail_evaluation, guardrail_registry};
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -184,18 +192,121 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ApplyGuardrail` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ApplyGuardrailErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ApplyGuardrail"))
+        let _ = ctx;
+        let validation = |message: String| -> ApplyGuardrailError {
+            ApplyGuardrailErrorModeled::ValidationException(ValidationException {
+                message: Some(message),
+            })
+            .into()
+        };
+        if crate::state::service_state(&*self.engine).is_none() {
+            return Err(ApplyGuardrailErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("the Bedrock Runtime emulator has no state store".to_string()),
+                },
+            )
+            .into());
+        }
+
+        // The revision this request applies, out of what the control plane published:
+        // a guardrail this account does not hold, or a version it never cut, is a
+        // resource this call cannot apply.
+        let Some(resolved) = guardrail_registry::resolve(
+            &*self.engine,
+            &input.guardrail_identifier,
+            &input.guardrail_version,
+        ) else {
+            return Err(validation(
+                guardrail_registry::GUARDRAIL_NOT_FOUND.to_string(),
+            ));
+        };
+
+        // Which side of an invocation the submitted content is, and how much of the
+        // evaluation the caller asked to be told.
+        let input_side = input.source == guardrail_evaluation::CONTENT_SOURCE_INPUT;
+        let full_scope = input
+            .output_scope
+            .as_deref()
+            .is_some_and(|scope| scope == guardrail_evaluation::OUTPUT_SCOPE_FULL);
+
+        let content = guardrail_evaluation::submitted_content(&input.content);
+
+        // A contextual grounding policy SCORES the guarded content against the
+        // material the request carries for it, so a request that configures that
+        // policy and carries none of that material asks for a score of nothing.
+        if let Some(message) =
+            guardrail_evaluation::missing_grounding_material(&resolved.policies, &content)
+        {
+            return Err(validation(message));
+        }
+
+        // The recognizers are linear in the submitted text and are read against every
+        // policy entry the revision configures, so BOTH factors of that work are
+        // bounded before any of them is started: a request past either ceiling is
+        // refused rather than occupying a blocking-pool slot for as long as its body
+        // is.
+        let characters = content.characters();
+        if characters > crate::state::guardrail_checks::MAX_SUBMITTED_CHARACTERS {
+            return Err(validation(
+                crate::state::guardrail_checks::too_much_text_message(characters),
+            ));
+        }
+        if input.content.len() > crate::state::guardrail_checks::MAX_SUBMITTED_BLOCKS {
+            return Err(validation(
+                crate::state::guardrail_checks::too_many_blocks_message(input.content.len()),
+            ));
+        }
+
+        // The policies are synchronous, CPU-bound work over caller-supplied text and
+        // have no await of their own, so they run on the blocking pool: the worker
+        // serving this request is released while they do, and the wait is bounded.
+        let verdict = match ::tokio::time::timeout(
+            EVALUATION_TIME_BUDGET,
+            ::tokio::task::spawn_blocking(move || {
+                guardrail_evaluation::apply(&resolved, &content, input_side, full_scope)
+            }),
+        )
+        .await
+        {
+            Ok(Ok(verdict)) => verdict,
+            // Nothing was evaluated, so there is no verdict to report: the service's
+            // own server error says so rather than an action nothing decided.
+            Ok(Err(error)) => {
+                return Err(ApplyGuardrailErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: Some(format!(
+                            "the guardrail evaluation did not complete: {error}"
+                        )),
+                    },
+                )
+                .into())
+            }
+            Err(_) => {
+                return Err(ApplyGuardrailErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: Some(format!(
+                            "the guardrail evaluation did not complete within {} seconds",
+                            EVALUATION_TIME_BUDGET.as_secs()
+                        )),
+                    },
+                )
+                .into())
+            }
+        };
+
+        Ok(ApplyGuardrailOutput {
+            action: verdict.action.to_string(),
+            action_reason: verdict.action_reason,
+            // ONE assessment: this call applies one guardrail revision to one
+            // submission, so there is one verdict to report.
+            assessments: vec![verdict.assessment],
+            outputs: verdict
+                .outputs
+                .into_iter()
+                .map(|text| GuardrailOutputContent { text: Some(text) })
+                .collect(),
+            usage: verdict.usage,
+            guardrail_coverage: Some(verdict.coverage),
+        })
     }
 }

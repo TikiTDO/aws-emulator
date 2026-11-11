@@ -192,6 +192,12 @@ use std::time::{Duration, SystemTime};
 /// invocation surfaces read.
 use ::service_com_amazonaws_bedrockruntime_amazonbedrockfrontendservice::state::enforced_guardrail as runtime_guardrail;
 
+/// The INFERENCE plane's registry of the guardrails it can APPLY: the one home of
+/// the evaluable part of each guardrail revision, which this control plane writes on
+/// every request that changes one ([`guardrail_publication`]) and the
+/// `ApplyGuardrail` and Converse surfaces read.
+use ::service_com_amazonaws_bedrockruntime_amazonbedrockfrontendservice::state::guardrail_registry as runtime_registry;
+
 use crate::ops::types::{
     AdvancedPromptOptimizationInputConfig, AdvancedPromptOptimizationOutputConfig,
     AutomatedReasoningPolicyDefinition, AutomatedReasoningPolicyTestCase,
@@ -296,6 +302,11 @@ pub use records::*;
 /// pass-role denials a create answers.
 mod enforcement;
 pub use enforcement::*;
+
+/// The projection of a stored guardrail onto the policies the inference plane applies,
+/// written across on every request that changes one.
+mod guardrail_publication;
+pub use guardrail_publication::*;
 
 /// The store itself: the state struct a handler reaches through [`service_state`], and the
 /// tag writes made through it.

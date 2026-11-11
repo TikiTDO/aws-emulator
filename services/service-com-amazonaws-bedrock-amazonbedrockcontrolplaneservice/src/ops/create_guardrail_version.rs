@@ -217,6 +217,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             guardrail.version_tokens.insert(key, number);
         }
 
+        // The version this cut minted is a revision inference can APPLY, so the
+        // guardrail is published to the inference plane with it, with no store of this
+        // service held.
+        let published = guardrail.clone();
+        drop(store);
+        crate::state::publish_guardrail_to_inference(&*self.engine, &published);
+
         Ok(CreateGuardrailVersionOutput {
             guardrail_id: id,
             version,

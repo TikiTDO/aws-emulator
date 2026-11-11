@@ -225,7 +225,7 @@ impl ManagedWordList {
 }
 
 /// Whether a policy entry with this action and enabled flag BLOCKS on that side.
-fn blocks(action: Option<&str>, enabled: Option<bool>) -> bool {
+pub(super) fn blocks(action: Option<&str>, enabled: Option<bool>) -> bool {
     enabled.unwrap_or(true) && action.is_none_or(|action| action == WORD_ACTION_BLOCK)
 }
 
@@ -290,7 +290,7 @@ impl ContentFilter {
 /// category at one of the three levels the content-filter check reports
 /// ([`super::guardrail_checks`]), so each strength is the lowest of those levels
 /// it blocks.
-fn blocking_severity(strength: &str) -> Option<f64> {
+pub(super) fn blocking_severity(strength: &str) -> Option<f64> {
     use super::guardrail_checks::{MILD_SEVERITY, MODERATE_SEVERITY, SEVERE_SEVERITY};
 
     match strength {
@@ -386,28 +386,8 @@ impl EnforcedGuardrail {
     /// ([`Self::budgeted`]), so the two policies evaluate the same bounded text
     /// and a request cannot grow the work by the number of policies configured.
     fn intervention<'a>(&self, texts: impl IntoIterator<Item = &'a str>, input: bool) -> bool {
-        let pieces = Self::budgeted(texts);
+        let pieces = super::guardrail_checks::budgeted_texts(texts);
         self.blocked(&pieces, input) || self.filtered(&pieces, input)
-    }
-
-    /// The pieces of text one evaluation reads, cut to the ceiling this stage
-    /// reads at.
-    ///
-    /// The characters are charged over every piece of the request together and at
-    /// least one per piece, so neither the length of the text nor the number of
-    /// pieces it arrives in can grow the work one invocation does.
-    fn budgeted<'a>(texts: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-        let mut budget = super::guardrail_checks::MAX_SUBMITTED_CHARACTERS;
-        let mut pieces: Vec<String> = Vec::new();
-        for piece in texts {
-            if budget == 0 {
-                break;
-            }
-            let guarded: String = piece.chars().take(budget).collect();
-            budget = budget.saturating_sub(guarded.chars().count().max(1));
-            pieces.push(guarded);
-        }
-        pieces
     }
 
     /// Whether a category the content policy filters on this side is placed in
@@ -422,11 +402,6 @@ impl EnforcedGuardrail {
     /// the strongest severity any of its families was placed at, since the filter
     /// is configured for the category as a whole.
     fn filtered(&self, pieces: &[String], input: bool) -> bool {
-        use super::guardrail_checks::{
-            evaluate, CheckedText, RequestedChecks, CONTENT_FILTER_RESULT_ORDER,
-            PROMPT_ATTACK_RESULT_ORDER,
-        };
-
         let configured: Vec<(&str, f64)> = self
             .content_filters
             .iter()
@@ -435,72 +410,25 @@ impl EnforcedGuardrail {
                 Some((filter.category.as_str(), least))
             })
             .collect();
-        if configured.is_empty() || pieces.is_empty() {
-            return false;
-        }
-        let named = |category: &str| configured.iter().any(|(named, _)| *named == category);
-        let categories: ::std::collections::BTreeSet<String> = CONTENT_FILTER_RESULT_ORDER
-            .into_iter()
-            .filter(|category| named(category))
-            .map(str::to_string)
-            .collect();
-        let attacks: ::std::collections::BTreeSet<String> = match named(FILTER_PROMPT_ATTACK) {
-            true => PROMPT_ATTACK_RESULT_ORDER
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            false => ::std::collections::BTreeSet::new(),
-        };
-        let requested = RequestedChecks {
-            content_filter: (!categories.is_empty()).then_some(categories),
-            prompt_attack: (!attacks.is_empty()).then_some(attacks),
-            sensitive_information: None,
-        };
-        let texts: Vec<CheckedText> = pieces
-            .iter()
-            .enumerate()
-            .map(|(index, text)| CheckedText {
-                message_index: index,
-                content_index: 0,
-                text: text.clone(),
-            })
-            .collect();
-        let placed = evaluate(&requested, &texts);
-        let attack_severity = placed
-            .prompt_attack
-            .unwrap_or_default()
-            .into_iter()
-            .map(|finding| finding.severity_score)
-            .max_by(f64::total_cmp);
+        let categories: Vec<&str> = configured.iter().map(|(category, _)| *category).collect();
+        // ONE reading of what the engine placed, shared with the guardrail a request
+        // applies ([`super::guardrail_evaluation::category_severities`]), so the two
+        // guardrail paths cannot place a category differently in the same text.
+        let placed = super::guardrail_evaluation::category_severities(&categories, pieces);
         configured.into_iter().any(|(category, least)| {
-            let severity = match category == FILTER_PROMPT_ATTACK {
-                true => attack_severity,
-                false => placed
-                    .content_filter
-                    .as_ref()
-                    .and_then(|findings| {
-                        findings
-                            .iter()
-                            .find(|finding| finding.category == category)
-                            .map(|finding| finding.severity_score)
-                    }),
-            };
-            severity.is_some_and(|severity| severity > 0.0 && severity >= least)
+            placed
+                .get(category)
+                .is_some_and(|severity| *severity > 0.0 && *severity >= least)
         })
     }
 
     /// Whether any word the policy blocks on this side occurs in `pieces`.
     ///
-    /// A configured word matches as a WORD: a match whose neighbours are
-    /// alphanumeric is part of a longer word and is not the word that was
-    /// configured. Matching ignores case, each side of it folded once — the words
-    /// when the enforcement was installed, the text here. A managed word list is
+    /// A configured word matches as a WORD, however it is capitalised, through the
+    /// ONE word matcher both guardrail paths scan with
+    /// ([`super::guardrail_evaluation::matched_words`]). A managed word list is
     /// matched by the recognizer for the list it names rather than by text this
     /// emulator would have to carry a copy of.
-    ///
-    /// Every word the policy blocks on this side goes into ONE pattern, matched by
-    /// the linear-time engine this crate already matches untrusted text with, so
-    /// the text is scanned once however many words are configured.
     fn blocked(&self, pieces: &[String], input: bool) -> bool {
         let side = |blocks_input: bool, blocks_output: bool| {
             if input {
@@ -518,63 +446,26 @@ impl EnforcedGuardrail {
         let profanity = self.managed_word_lists.iter().any(|list| {
             list.kind == MANAGED_WORDS_PROFANITY && side(list.blocks_input, list.blocks_output)
         });
-        let matcher = match needles.is_empty() {
-            true => None,
-            false => {
-                // ONE pattern over every word the policy blocks on this side, each
-                // word ESCAPED so a word's own characters are never read as pattern
-                // syntax. The word-boundary rule is applied to the match rather than
-                // written into the pattern, because a configured phrase may begin or
-                // end with punctuation of its own.
-                let pattern = needles
-                    .iter()
-                    .map(|needle| ::regex::escape(needle))
-                    .collect::<Vec<String>>()
-                    .join("|");
-                match ::regex::Regex::new(&pattern) {
-                    Ok(matcher) => Some(matcher),
-                    // The word list is bounded in count and in bytes when it is
-                    // installed, so there is no configuration this is reachable for;
-                    // it is reported where a developer can see it rather than failing
-                    // an invocation that was otherwise servable.
-                    Err(error) => {
-                        ::tracing::warn!(
-                            %error,
-                            words = needles.len(),
-                            "the enforced guardrail's word policy could not be compiled"
-                        );
-                        None
-                    }
-                }
-            }
-        };
-        if matcher.is_none() && !profanity {
+        // One match is all this answer needs: the enforcement blocks on any word it
+        // configures, so the scan stops at the first.
+        if !super::guardrail_evaluation::matched_words(&needles, pieces, 1).is_empty() {
+            return true;
+        }
+        if !profanity {
             return false;
         }
-
-        // The pieces this evaluation reads are already cut to the ceiling this
-        // stage reads at ([`Self::budgeted`]).
-        for guarded in pieces {
-            let lowercase = guarded.to_lowercase();
-            if matcher.as_ref().is_some_and(|matcher| {
-                matcher
-                    .find_iter(&lowercase)
-                    .any(|found| is_whole_word(&lowercase, found.start(), found.end()))
-            }) {
-                return true;
-            }
-            if profanity && Censor::from_str(guarded).analyze().is(Type::PROFANE) {
-                return true;
-            }
-        }
-        false
+        // The pieces this evaluation reads are already cut to the ceiling this stage
+        // reads at ([`super::guardrail_checks::budgeted_texts`]).
+        pieces
+            .iter()
+            .any(|guarded| Censor::from_str(guarded).analyze().is(Type::PROFANE))
     }
 }
 
 /// Whether the match spanning `start..end` of `haystack` is a word of its own:
 /// a neighbouring alphanumeric character makes it part of a longer word, which is
 /// not the word the policy configured.
-fn is_whole_word(haystack: &str, start: usize, end: usize) -> bool {
+pub(super) fn is_whole_word(haystack: &str, start: usize, end: usize) -> bool {
     let before = haystack.get(..start).and_then(|text| text.chars().next_back());
     let after = haystack.get(end..).and_then(|text| text.chars().next());
     !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)

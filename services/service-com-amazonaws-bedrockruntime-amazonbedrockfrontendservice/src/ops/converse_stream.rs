@@ -131,7 +131,11 @@ impl<Eng: Send + Sync + 'static> ConverseStream<Eng> {
     /// The whole request: validate it against the model and the rules the Converse
     /// APIs state, serve the turn, record it in the inference log, and frame the
     /// turn as the event stream.
-    fn respond(
+    ///
+    /// `async` for one reason: the guardrail stage is CPU-bound work over
+    /// caller-supplied text, so it is awaited off the async worker exactly as
+    /// `Converse` and `ApplyGuardrail` await it.
+    async fn respond(
         &self,
         protocol: &dyn ServerHttpProtocol,
         req: &Request,
@@ -219,6 +223,61 @@ impl<Eng: Send + Sync + 'static> ConverseStream<Eng> {
             input.messages.as_ref(),
             turn,
         );
+        // The guardrail the REQUEST named, evaluated by the one stage `Converse` and
+        // `ApplyGuardrail` evaluate the same policies with. A request naming a
+        // guardrail revision this account does not hold, or one whose guardrail needs
+        // grounding material it carries none of, names no guardrail this turn can be
+        // guarded by.
+        let guardrail = crate::state::guardrail_evaluation::converse_guardrail(
+            &*self.engine,
+            input
+                .guardrail_config
+                .as_ref()
+                .and_then(|config| config.guardrail_identifier.as_deref()),
+            input
+                .guardrail_config
+                .as_ref()
+                .and_then(|config| config.guardrail_version.as_deref()),
+            input
+                .guardrail_config
+                .as_ref()
+                .map_or("", |config| config.trace.as_str()),
+            input.system.as_ref(),
+            input.messages.as_ref(),
+        )
+        .map_err(validation)?;
+        // The policies are synchronous, CPU-bound work over caller-supplied text, so
+        // they run off the async worker and under the one budget every surface that
+        // runs these recognizers waits for.
+        let (turn, guardrail_trace) = match guardrail {
+            None => (turn, None),
+            Some(guardrail) => {
+                let answered = ::tokio::time::timeout(
+                    crate::state::guardrail_checks::EVALUATION_TIME_BUDGET,
+                    ::tokio::task::spawn_blocking(move || {
+                        crate::state::guardrail_evaluation::guard_turn(guardrail, turn)
+                    }),
+                )
+                .await;
+                match answered {
+                    Ok(Ok(guarded)) => guarded,
+                    // The guardrail did not answer, so there is no turn to stream: a
+                    // turn streamed unguarded would be one this request asked to be
+                    // guarded.
+                    Ok(Err(error)) => {
+                        return Err(internal(format!(
+                            "the guardrail evaluation did not complete: {error}"
+                        )))
+                    }
+                    Err(_) => {
+                        return Err(internal(format!(
+                            "the guardrail evaluation did not complete within {} seconds",
+                            crate::state::guardrail_checks::EVALUATION_TIME_BUDGET.as_secs()
+                        )))
+                    }
+                }
+            }
+        };
 
         let logged = crate::state::InvocationLogEntry {
             model_id: model.model_id.clone(),
@@ -333,7 +392,12 @@ impl<Eng: Send + Sync + 'static> ConverseStream<Eng> {
             &ConverseStreamMetadataEvent {
                 usage: turn.usage(),
                 metrics: ConverseStreamMetrics { latency_ms },
-                trace: None,
+                // The guardrail's own assessments, reported only where the request
+                // asked for the trace.
+                trace: guardrail_trace.map(|guardrail| ConverseStreamTrace {
+                    guardrail: Some(guardrail),
+                    prompt_router: None,
+                }),
                 performance_config: input.performance_config.clone(),
                 service_tier: input.service_tier.clone(),
             },
@@ -375,7 +439,7 @@ impl<Eng: Send + Sync + 'static> service_common::event_stream::EventStreamOperat
     ) -> BoxFuture<'r, Response> {
         Box::pin(async move {
             let protocol = svc.definition().protocol();
-            let response = match self.respond(protocol, req) {
+            let response = match self.respond(protocol, req).await {
                 Ok(response) => response,
                 Err(error) => error_response(protocol, &error),
             };

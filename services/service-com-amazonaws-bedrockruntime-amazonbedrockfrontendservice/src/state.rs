@@ -62,6 +62,14 @@ pub mod guardrail_checks;
 /// invocation is evaluated against it.
 pub mod enforced_guardrail;
 
+/// The guardrail revisions this plane can apply, as the control plane published
+/// them.
+pub mod guardrail_registry;
+
+/// Applying a guardrail revision to submitted content, and what the evaluation
+/// reports.
+pub mod guardrail_evaluation;
+
 /// The generation stage every inference surface answers from: the assistant text
 /// a turn serves, which says plainly that no language model ran.
 pub mod generation;
@@ -168,6 +176,12 @@ pub struct ComAmazonawsBedrockruntimeAmazonbedrockfrontendserviceState {
     /// is what leaves an invocation unguarded unless its own request asks for a
     /// guardrail.
     pub enforced_guardrail: Option<enforced_guardrail::EnforcedGuardrail>,
+    /// The guardrails this plane can APPLY, keyed by `guardrailId`, as the Bedrock
+    /// control plane published each one's revisions
+    /// ([`guardrail_registry`]). A guardrail this account does not hold is
+    /// absent, which is what makes a request naming one answer that it was not
+    /// found.
+    pub guardrails: BTreeMap<String, guardrail_registry::PublishedGuardrail>,
     /// Monotonic counter mixed into every id this service mints (an async
     /// invocation's, a tool request's).
     pub next_id: u64,
@@ -187,6 +201,7 @@ impl Default for ComAmazonawsBedrockruntimeAmazonbedrockfrontendserviceState {
             guardrail_check_evaluations: VecDeque::new(),
             prompt_cache: BTreeMap::new(),
             enforced_guardrail: None,
+            guardrails: BTreeMap::new(),
             next_id: 0,
         }
     }

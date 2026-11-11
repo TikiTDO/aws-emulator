@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/account_enforced_guardrail.rs"]
 mod account_enforced_guardrail;
+#[path = "all/apply_guardrail.rs"]
+mod apply_guardrail;
 #[path = "all/async_invoke_model_contract.rs"]
 mod async_invoke_model_contract;
 #[path = "all/bedrock_cloudwatch_request_metrics.rs"]

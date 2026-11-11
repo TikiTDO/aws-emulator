@@ -87,18 +87,7 @@
 use super::types::*;
 
 use crate::state::guardrail_checks;
-
-/// How long a caller waits for the checks to answer before the request is failed.
-///
-/// Orders of magnitude above what evaluating a conversation at the size ceiling
-/// costs, so it never fires for a request the recognizers are simply working
-/// through. It bounds what the CALLER waits for, not the work: a blocking task
-/// cannot be cancelled from outside, so when the budget fires the evaluation runs to
-/// its natural end and releases its blocking-pool slot then. What bounds the WORK is
-/// the refusal below of a request carrying more than
-/// [`guardrail_checks::MAX_SUBMITTED_CHARACTERS`] of text, applied before any
-/// analysis starts.
-const EVALUATION_TIME_BUDGET: ::std::time::Duration = ::std::time::Duration::from_secs(5);
+use crate::state::guardrail_checks::EVALUATION_TIME_BUDGET;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the

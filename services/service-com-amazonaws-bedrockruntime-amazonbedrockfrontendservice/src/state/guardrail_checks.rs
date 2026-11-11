@@ -96,6 +96,71 @@ pub const CHARACTERS_PER_TEXT_UNIT: usize = 1000;
 /// carry more blocks than characters.
 pub const MAX_SUBMITTED_CHARACTERS: usize = 25 * CHARACTERS_PER_TEXT_UNIT;
 
+/// How long a caller waits for an evaluation to answer before the request is failed.
+///
+/// Orders of magnitude above what evaluating text at the size ceiling costs, so it
+/// never fires for a request the recognizers are simply working through. It bounds
+/// what the CALLER waits for, not the work: a blocking task cannot be cancelled from
+/// outside, so when the budget fires the evaluation runs to its natural end and
+/// releases its blocking-pool slot then. What bounds the WORK is the refusal of a
+/// request carrying more than [`MAX_SUBMITTED_CHARACTERS`] of text, applied before
+/// any analysis starts.
+///
+/// ONE budget for every surface that runs these recognizers — the inline checks and
+/// the guardrail a request applies — because the work is the same recognizers over
+/// text this same ceiling bounds: neither surface can hold a blocking-pool slot for
+/// longer than the other.
+pub const EVALUATION_TIME_BUDGET: ::std::time::Duration = ::std::time::Duration::from_secs(5);
+
+/// The most pieces of submitted text one evaluation reads.
+///
+/// The EMULATOR's bound beside [`MAX_SUBMITTED_CHARACTERS`], and the other half of
+/// what makes the work a request can ask for FINITE: every configured policy entry is
+/// read against every piece, so the work is the PRODUCT of the piece count and the
+/// configuration, and bounding the characters alone does not bound it — a request can
+/// carry thousands of empty or one-character pieces. It is far above any submission a
+/// client makes (a conversation, or the content blocks of one apply call), and the
+/// pieces past it are not read ([`budgeted_texts`]); the surface that takes the
+/// pieces as its own submission refuses a request past it outright
+/// ([`too_many_blocks_message`]).
+pub const MAX_SUBMITTED_BLOCKS: usize = 1_000;
+
+/// The service's message for a request carrying more pieces of text than one
+/// evaluation reads.
+///
+/// Both numbers come from the request and from the bound it broke, never from a
+/// recorded run.
+#[must_use]
+pub fn too_many_blocks_message(blocks: usize) -> String {
+    format!(
+        "The request carries {blocks} content blocks, which exceeds the maximum of \
+         {MAX_SUBMITTED_BLOCKS} content blocks for one request."
+    )
+}
+
+/// The pieces of text one evaluation reads, cut to the ceilings it reads at
+/// ([`MAX_SUBMITTED_CHARACTERS`] and [`MAX_SUBMITTED_BLOCKS`]).
+///
+/// The characters are charged over every piece together and at least one per piece,
+/// and the pieces are counted, so neither the length of the text, nor the number of
+/// pieces it arrives in, nor the two together can grow the work one request does.
+/// Every stage that evaluates text it did not first refuse for being too long reads
+/// it through this.
+#[must_use]
+pub fn budgeted_texts<'a>(texts: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut budget = MAX_SUBMITTED_CHARACTERS;
+    let mut pieces: Vec<String> = Vec::new();
+    for piece in texts {
+        if budget == 0 || pieces.len() >= MAX_SUBMITTED_BLOCKS {
+            break;
+        }
+        let guarded: String = piece.chars().take(budget).collect();
+        budget = budget.saturating_sub(guarded.chars().count().max(1));
+        pieces.push(guarded);
+    }
+    pieces
+}
+
 /// The service's message for a request carrying more text than one evaluation reads.
 ///
 /// Both numbers come from the request and from the bound it broke, never from a

@@ -162,6 +162,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 if guardrail.remove_version(number).is_none() {
                     return Err(not_found().into());
                 }
+                // The guardrail stands, with one revision fewer: it is published
+                // again so the version that is gone applies to nothing.
+                let published = guardrail.clone();
+                drop(store);
+                crate::state::publish_guardrail_to_inference(&*self.engine, &published);
             }
             None => {
                 let Some(removed) = store.guardrails.remove(&id) else {
@@ -172,6 +177,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // with the record.
                 store.guardrail_names.remove(&removed.name);
                 store.create_tokens.retain(|_, minted| *minted != removed.id);
+                // A guardrail that is gone applies to nothing, so it is withdrawn from
+                // the inference plane with no store of this service held.
+                drop(store);
+                crate::state::withdraw_guardrail_from_inference(&*self.engine, &removed.id);
             }
         }
 
