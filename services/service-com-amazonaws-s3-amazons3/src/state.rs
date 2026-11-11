@@ -1055,13 +1055,19 @@ pub const TAG_REJECTION_STATUS: u16 = 400;
 /// before the reservation so the key the refusal NAMES is one within those bounds.
 ///
 /// The reservation is the one rule of the set that depends on WHO stated the key: a tag in
-/// that namespace is AWS's own, so a requester may not write one, while the AWS services that
-/// own such a tag set it from inside AWS through no public API ([`TagKeyOrigin`]). Every other
-/// restriction here is the set's own and holds whichever path it arrived on.
+/// that namespace is AWS's own, so a requester may not ADD or UPDATE one, while the AWS
+/// services that own such a tag set it from inside AWS through no public API
+/// ([`TagKeyOrigin`]). A requester's set that carries such a key with the value the resource
+/// ALREADY holds for it neither adds nor updates it — which is why `in_force`, the tag set
+/// this one replaces, is part of the rule: a read-modify-write of a resource AWS has tagged
+/// itself states those tags back unchanged, and refusing it would leave such a resource's
+/// own tags unwritable. Every other restriction here is the set's own and holds whichever
+/// path it arrived on.
 pub fn validate_tag_set(
     tags: &[ResourceTag],
     limits: TagSetLimits,
     origin: TagKeyOrigin,
+    in_force: &[ResourceTag],
 ) -> Result<(), TagSetRejection> {
     // A restriction on the SET names no tag; one a single tag breaks carries that tag, so
     // the error document can name it.
@@ -1101,9 +1107,13 @@ pub fn validate_tag_set(
             );
         }
         // Judged after the key's own bounds, so the key this refusal names in the error
-        // document is one those bounds admit — and only for a key a REQUESTER stated, since
-        // the namespace is AWS's to write in.
-        if origin == TagKeyOrigin::Caller && tag.key.starts_with(RESERVED_TAG_KEY_PREFIX) {
+        // document is one those bounds admit — and only for a key a REQUESTER states, since
+        // the namespace is AWS's to write in, and only where stating it would ADD or UPDATE
+        // the tag: a key already in force with this very value is neither.
+        if origin == TagKeyOrigin::Caller
+            && tag.key.starts_with(RESERVED_TAG_KEY_PREFIX)
+            && !carries_tag_unchanged(in_force, tag)
+        {
             return refuse_tag(
                 TagSetRejectionCause::ReservedKeyPrefix {
                     key: tag.key.clone(),
@@ -1142,6 +1152,22 @@ pub fn validate_tag_set(
     Ok(())
 }
 
+/// Whether `tag` is already in force with exactly this value, so a set that carries it
+/// leaves it as it is.
+///
+/// What the reservation on [`RESERVED_TAG_KEY_PREFIX`] forbids a requester is adding a tag
+/// in that namespace and updating one; a value identical to the one in force does neither.
+///
+/// It decides what a set the request CARRIES may hold, and nothing about a key the set
+/// omits: whether replacing a tag set with one that leaves out a key in that namespace is
+/// the deletion the reservation also forbids is a separate rule of this surface, which this
+/// emulator has no recorded answer for and which no caller here states.
+fn carries_tag_unchanged(in_force: &[ResourceTag], tag: &ResourceTag) -> bool {
+    in_force
+        .iter()
+        .any(|held| held.key == tag.key && held.value == tag.value)
+}
+
 /// The tag set a write's `x-amz-tagging` header names, or which published restriction it
 /// breaks — the ONE seam a handler uses, so no handler can store a header-delivered tag
 /// set the limits would have refused.
@@ -1165,6 +1191,7 @@ pub fn tag_set_from_header(
     header: &str,
     limits: TagSetLimits,
     origin: TagKeyOrigin,
+    in_force: &[ResourceTag],
 ) -> Result<Vec<ResourceTag>, TagSetRejection> {
     let pairs = header.split('&').filter(|pair| !pair.is_empty()).count();
     if pairs > limits.max_tags {
@@ -1179,7 +1206,7 @@ pub fn tag_set_from_header(
             .into_iter()
             .map(|(key, value)| ResourceTag { key, value })
             .collect();
-    validate_tag_set(&tags, limits, origin)?;
+    validate_tag_set(&tags, limits, origin, in_force)?;
     Ok(tags)
 }
 

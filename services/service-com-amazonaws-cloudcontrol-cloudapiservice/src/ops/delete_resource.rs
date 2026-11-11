@@ -308,33 +308,38 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // while another operation is still running against this identifier is refused
         // rather than racing it — naming the resource under contention and the request
         // that holds it.
+        //
+        // Asked BEFORE the resource is resolved, so a request already running against an
+        // identifier nothing has provisioned yet — a create still in flight — is reported
+        // as the contention it is rather than as a resource that cannot be found.
         if let Some(holding) = store.in_flight_request(&input.type_name, &input.identifier) {
-            let message =
-                crate::state::concurrent_operation_message(&input.identifier, Some(holding));
-            return Err(DeleteResourceErrorModeled::ConcurrentOperationException(
-                ConcurrentOperationException {
-                    message: Some(message),
-                },
-            )
-            .into());
+            return Err(contention(&input.identifier, holding));
         }
-        if store
-            .resolve(&native, &region, &input.type_name, &input.identifier)
-            .is_none()
-        {
+        let Some(resolved) = store.resolve(&native, &region, &input.type_name, &input.identifier)
+        else {
             // A not-found is the OWNING handler's verdict, so the refusal carries that
             // handler's whole answer: its diagnostic, the handler error code it failed
             // with and the token of the invocation that failed.
             return Err(DeleteResourceErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
                     message: Some(crate::state::resource_not_found_refusal(
-                        &native,
                         &input.type_name,
                         &input.identifier,
                     )),
                 },
             )
             .into());
+        };
+        // And asked again under the identifier the RESOURCE answers to: a type whose
+        // owning service assigns that identifier resolves more than one reference to one
+        // resource, and the operation already running on it was recorded under that one
+        // identifier ([`crate::state::ComAmazonawsCloudcontrolCloudapiserviceState::in_flight_request_on_either`]).
+        if let Some((contended, holding)) = store.in_flight_request_on_either(
+            &input.type_name,
+            &input.identifier,
+            &resolved.identifier,
+        ) {
+            return Err(contention(contended, holding));
         }
 
         let Some(request_token) = store.allocate_request_token() else {
@@ -351,7 +356,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let record = crate::state::RequestRecord::accepted(
             request_token.clone(),
             input.type_name.clone(),
-            Some(input.identifier.clone()),
+            // The request is recorded against the resource's OWN primary identifier, so the
+            // event it reports names the resource the way every other answer does.
+            Some(resolved.identifier),
             crate::state::OPERATION_DELETE,
             now,
             crate::state::ResourceEffect::Delete {
@@ -387,4 +394,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             progress_event: Some(progress_event),
         })
     }
+}
+
+/// The modelled refusal for a resource another operation is already acting on, naming the
+/// identifier the guard matched it under and the request that holds it.
+fn contention(identifier: &str, holding_request: &str) -> DeleteResourceError {
+    DeleteResourceErrorModeled::ConcurrentOperationException(ConcurrentOperationException {
+        message: Some(crate::state::concurrent_operation_message(
+            identifier,
+            Some(holding_request),
+        )),
+    })
+    .into()
 }

@@ -14,10 +14,13 @@
 //! So a control-plane call that reached an address this store announced for a plane
 //! ([`super::super::state::published_plane`]) reached an endpoint that binds no operation
 //! for its path, and is answered as such: this family's front-door envelope for a request
-//! it can name no operation for ([`super::unknown_operation`]), with no operation run, no
-//! member reported and nothing in the store touched. Every other address — the endpoint
-//! the client is already talking to, this service's published regional host — keeps
-//! serving the whole control surface.
+//! it can name no operation for ([`super::unknown_operation::unknown_operation_response`]),
+//! with no operation run, no member reported and nothing in the store touched. That is the
+//! envelope for a path the family DOES bind on an endpoint that does not bind it; a path no
+//! route of the family binds at all is the 404 of
+//! [`super::unknown_operation::unrouted_path_response`] instead. Every other address — the
+//! endpoint the client is already talking to, this service's published regional host —
+//! keeps serving the whole control surface.
 
 use ::aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse};
 use ::smithy_server_runtime::{BoxFuture, ErasedOperation, OperationContext, Service};
@@ -64,13 +67,18 @@ impl ErasedOperation for UnroutedOnDataPlaneAddress {
     }
 }
 
-/// The front door's own answer to a path it binds no operation for: no operation was
-/// identified to name one for, so there is no member and no value to report.
+/// The front door's own answer to a request for a control route that reached an address
+/// this service announced for a data plane: no operation was identified to name a member or
+/// a value for.
 ///
-/// The wording is this family's one wording for an unroutable request
-/// ([`super::unknown_operation::unknown_operation_response`]) — the same answer the ingest
-/// plane gives a `/putMedia`, and the read plane a `/getMedia`, that reached an address
-/// that does not route it.
+/// The wording is this family's envelope for a request it ACCEPTED on a route of the family
+/// and could then name no operation for
+/// ([`super::unknown_operation::unknown_operation_response`]) — which is what a control
+/// route asked for at the wrong address of this emulator is: the path is one this family
+/// binds, on an endpoint that does not bind it. A path NO route of the family binds at all
+/// is the other answer, the 404 of
+/// [`super::unknown_operation::unrouted_path_response`] — which is what the ingest route
+/// (`/putMedia`, bound at the write plane's address alone) answers everywhere else.
 fn unrouted_address_response() -> RtResponse {
     super::unknown_operation::unknown_operation_response()
 }

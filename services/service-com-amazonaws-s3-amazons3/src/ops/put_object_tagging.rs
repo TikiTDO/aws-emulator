@@ -275,6 +275,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutObjectTagging<
             Some(true) => {}
         }
 
+        // The tag set this one REPLACES, read off the object the request addressed: a tag in
+        // the namespace AWS keeps for itself that the object already carries with this very
+        // value is neither added nor updated by this request.
+        let in_force: Vec<crate::state::ResourceTag> = store
+            .bucket(&input.bucket)
+            .and_then(|bucket| bucket.object(&input.key))
+            .map(|object| object.tags.clone())
+            .unwrap_or_default();
+
         // Validated BEFORE anything is written, so a refused tag set leaves the object's
         // current tags exactly as they were, and against the OBJECT's own published
         // limits — "Amazon S3 limits the maximum number of tags to 10 tags per object"
@@ -287,13 +296,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutObjectTagging<
         // on.
         //
         // One of those restrictions depends on WHO stated the key: a tag in the namespace
-        // AWS keeps for itself is AWS's own, so a requester may not write one, while the
-        // services that own such a tag set it from inside AWS over the in-process path
-        // ([`crate::state::tag_key_origin`]).
+        // AWS keeps for itself is AWS's own, so a requester may neither add nor update one,
+        // while the services that own such a tag set it from inside AWS over the in-process
+        // path ([`crate::state::tag_key_origin`]).
         if let Err(rejection) = crate::state::validate_tag_set(
             &tags,
             crate::state::OBJECT_TAG_SET_LIMITS,
             crate::state::tag_key_origin(ctx),
+            &in_force,
         ) {
             return Err(crate::scaffolded::Scaffolded::tag_set(&rejection));
         }

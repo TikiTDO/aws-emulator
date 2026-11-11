@@ -8,15 +8,16 @@
 //!
 //! * `ApplyPendingMaintenanceAction` acts on the resource its `ResourceIdentifier` names,
 //!   and an identifier that resolves to no resource of the account is answered by the CLASS
-//!   of resource it names: an ARN naming a DB CLUSTER gets the operation's modelled
-//!   `ResourceNotFoundFault` (HTTP 404) carrying the fixed text `Resource not found: ` and
-//!   the cluster identifier that ARN names, while every other identifier — a DB instance
-//!   ARN, an ARN of another resource type or vendor, a value that is no ARN at all — is
-//!   refused on the MEMBER: HTTP 400 `InvalidParameterValue`, carrying the fixed text
-//!   `Unknown resource: ` and the identifier the request supplied, as it supplied it. The
-//!   identifier RESOLVES when it is the ARN a DB cluster or a DB instance of the request's
-//!   region reports for itself, which is what the rows below vary: the resource kind, the
-//!   ARN's account, region and resource type, and a value that is no ARN at all.
+//!   of resource it names: an ARN naming a resource KIND this front door owns — a DB
+//!   instance or a DB cluster — gets the operation's modelled `ResourceNotFoundFault`
+//!   (HTTP 404) carrying the fixed text `Resource not found: ` and the identifier that ARN
+//!   names, while a value naming no such resource at all — an ARN of another resource type
+//!   or vendor, a value that is no ARN at all — is refused on the MEMBER: HTTP 400
+//!   `InvalidParameterValue`, carrying the fixed text `Unknown resource: ` and the
+//!   identifier the request supplied, as it supplied it. The identifier RESOLVES when it is
+//!   the ARN a DB cluster or a DB instance of the request's region reports for itself, which
+//!   is what the rows below vary: the resource kind, the ARN's account, region and resource
+//!   type, and a value that is no ARN at all.
 //! * `CreateDBSnapshot` refuses a source DB instance that is not in the `available` state
 //!   with `InvalidDBInstanceState` (HTTP 400) and the sentence the service words for that
 //!   class, whatever stage of its lifecycle the instance is in.
@@ -125,7 +126,7 @@ async fn an_unknown_maintenance_action_resource_is_refused_by_the_class_of_resou
     // not publish, which pins that the identifier is decided FIRST. Each row's refusal must
     // name the identifier its class names, so the rows are the message's one variable part.
     //
-    // (case, the identifier, ApplyAction, OptInType, the cluster the 404 names — `None` for
+    // (case, the identifier, ApplyAction, OptInType, the resource the 404 names — `None` for
     // the rows refused on the member)
     let rows: &[(&str, String, &str, &str, Option<&str>)] = &[
         (
@@ -133,7 +134,7 @@ async fn an_unknown_maintenance_action_resource_is_refused_by_the_class_of_resou
             instance_arn("emu-maint-guard-absent"),
             "system-update",
             "immediate",
-            None,
+            Some("emu-maint-guard-absent"),
         ),
         (
             "a DB cluster ARN for a cluster that was never created",
@@ -168,14 +169,14 @@ async fn an_unknown_maintenance_action_resource_is_refused_by_the_class_of_resou
             format!("arn:aws:rds:{REGION}:210987654321:db:emu-maint-guard-instance"),
             "system-update",
             "immediate",
-            None,
+            Some("emu-maint-guard-instance"),
         ),
         (
             "the stored instance's ARN in another region",
             "arn:aws:rds:eu-west-1:000000000000:db:emu-maint-guard-instance".to_string(),
             "db-upgrade",
             "immediate",
-            None,
+            Some("emu-maint-guard-instance"),
         ),
         (
             "the stored cluster's ARN in another region",
@@ -196,18 +197,18 @@ async fn an_unknown_maintenance_action_resource_is_refused_by_the_class_of_resou
             instance_arn("emu-maint-guard-absent-too"),
             "reboot-now",
             "immediate",
-            None,
+            Some("emu-maint-guard-absent-too"),
         ),
     ];
 
-    for (case, resource, action, opt_in, absent_cluster) in rows {
-        let (expected_status, expected_code, expected_message) = match absent_cluster {
-            // The resource kind the ARN names is a DB cluster, so the answer is the fault
-            // the model declares for a resource id that was not found.
-            Some(cluster) => (
+    for (case, resource, action, opt_in, absent_resource) in rows {
+        let (expected_status, expected_code, expected_message) = match absent_resource {
+            // The resource kind the ARN names is one this front door owns, so the answer is
+            // the fault the model declares for a resource id that was not found.
+            Some(named) => (
                 404,
                 RESOURCE_NOT_FOUND_FAULT,
-                format!("{RESOURCE_NOT_FOUND}{cluster}"),
+                format!("{RESOURCE_NOT_FOUND}{named}"),
             ),
             // Everything else is a value the member does not accept, and the refusal names
             // the identifier the REQUEST carried, so a caller that logs the message still

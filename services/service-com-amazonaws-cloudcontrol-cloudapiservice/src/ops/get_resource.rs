@@ -264,7 +264,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(GetResourceErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
                     message: Some(crate::state::resource_not_found_refusal(
-                        &native,
                         &input.type_name,
                         &input.identifier,
                     )),

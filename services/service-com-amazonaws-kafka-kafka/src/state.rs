@@ -862,20 +862,20 @@ pub const KAFKA_VERSION_VARIANT_TIERED: &str = "tiered";
 /// still a valid SOURCE version — a cluster already running it can be upgraded
 /// away from it — but never a target.
 ///
-/// A row is a version together with the status published FOR THAT ROW, which is
-/// not the same as one status per version: the catalog publishes two of its
-/// versions TWICE, each row carrying its own status (`3.9.x` and `4.2.x.kraft`,
-/// each with one `ACTIVE` and one `DEPRECATED` row). Whatever distinguishes the
-/// two rows of such a version is not part of this API's `{version, status}`
-/// projection, so on the wire they differ only in that status, and
-/// `ListKafkaVersions` serves the published rows rather than folding them,
-/// because a folded catalog drops a row a client reads.
+/// A row is a version together with the status the service publishes for it, and
+/// the catalog publishes each version it knows about EXACTLY ONCE: the API's
+/// `{version, status}` projection carries nothing that could tell two rows of one
+/// version apart, so a second row of the same version would only contradict the
+/// first — a client keying the listing by version (the natural way to ask "is
+/// this version still offered?") would read whichever row happened to come last.
+/// One row per version is therefore the published shape, and the status on that
+/// row is the version's lifecycle status.
 ///
 /// Everything that asks a QUESTION about a version — rather than publishing the
 /// catalog — reads these rows through [`kafka_version_status`] (a version the
-/// catalog publishes any `ACTIVE` row for is one the service still offers) and
+/// catalog publishes an `ACTIVE` row for is one the service still offers) and
 /// [`catalogued_kafka_versions`] (each published version once, in published
-/// order), so a repeated row never doubles an answer about the version itself.
+/// order).
 ///
 /// This is the one catalog: `GetCompatibleKafkaVersions` derives its matrix from
 /// it, so nothing has to keep a second copy of the version list in step.
@@ -912,10 +912,8 @@ pub const KAFKA_VERSION_CATALOG: &[KafkaVersionEntry] = &[
     KafkaVersionEntry { version: "3.8.link", status: KAFKA_VERSION_DEPRECATED },
     KafkaVersionEntry { version: "3.9.x", status: KAFKA_VERSION_ACTIVE },
     KafkaVersionEntry { version: "3.9.x.kraft", status: KAFKA_VERSION_ACTIVE },
-    KafkaVersionEntry { version: "3.9.x", status: KAFKA_VERSION_DEPRECATED },
     KafkaVersionEntry { version: "4.0.x.kraft", status: KAFKA_VERSION_ACTIVE },
     KafkaVersionEntry { version: "4.1.x.kraft", status: KAFKA_VERSION_ACTIVE },
-    KafkaVersionEntry { version: "4.2.x.kraft", status: KAFKA_VERSION_DEPRECATED },
     KafkaVersionEntry { version: "4.2.x.kraft", status: KAFKA_VERSION_ACTIVE },
 ];
 
@@ -925,8 +923,7 @@ pub const KAFKA_VERSION_CATALOG: &[KafkaVersionEntry] = &[
 /// This is the version SET every version-aware answer is computed over — the
 /// compatibility matrix's sources and targets, the create and update gates and
 /// the valid-value lists their refusals carry — because a question about a
-/// version is about the version, not about the row it was read from, and the
-/// catalog publishes two of its versions under more than one row
+/// version is about the version, not about the row it was read from
 /// ([`KAFKA_VERSION_CATALOG`]).
 ///
 /// A derived CONSTANT of that catalog, so it is computed once rather than on
@@ -1080,12 +1077,11 @@ pub fn kafka_version_release(version: &str) -> Vec<u32> {
 }
 
 /// Where `version` sits in [`KAFKA_VERSION_CATALOG`], or `None` when MSK knows
-/// no such version — the FIRST row the catalog publishes for it, which is the
+/// no such version — the row the catalog publishes for it, which is the
 /// membership lookup every version gate reads.
 ///
-/// A pagination token does NOT resolve through this: the catalog publishes two of
-/// its versions under more than one row, so a version string names a version and
-/// not a row, and a page resumes after a row
+/// A pagination token does NOT resolve through this: a version string names a
+/// version and not a position, and a page resumes after a row
 /// ([`decode_kafka_version_page_token`]).
 pub fn kafka_version_index(version: &str) -> Option<usize> {
     KAFKA_VERSION_CATALOG
@@ -1096,21 +1092,15 @@ pub fn kafka_version_index(version: &str) -> Option<usize> {
 /// The support status the catalog publishes for `version`, or `None` when MSK
 /// knows no such version.
 ///
-/// Where the catalog publishes more than one row for a version, the OFFERED
-/// status wins: a version the service still offers under any published row is a
-/// version it still offers, so a create may name it and an upgrade may target it.
+/// The catalog publishes one row per version ([`KAFKA_VERSION_CATALOG`]), so
+/// this is that row's status: a version whose published status is
+/// [`KAFKA_VERSION_ACTIVE`] is one the service still offers, so a create may name
+/// it and an upgrade may target it.
 pub fn kafka_version_status(version: &str) -> Option<&'static str> {
-    let mut published = None;
-    for entry in KAFKA_VERSION_CATALOG
+    KAFKA_VERSION_CATALOG
         .iter()
-        .filter(|entry| entry.version == version)
-    {
-        if entry.status == KAFKA_VERSION_ACTIVE {
-            return Some(KAFKA_VERSION_ACTIVE);
-        }
-        published = published.or(Some(entry.status));
-    }
-    published
+        .find(|entry| entry.version == version)
+        .map(|entry| entry.status)
 }
 
 /// The sentence Amazon MSK answers a request naming an Apache Kafka version it
@@ -1138,8 +1128,7 @@ pub fn unsupported_kafka_version_message(rejected: &str) -> String {
 }
 
 /// Whether the service still OFFERS `version`: whether the catalog publishes it
-/// and the status it publishes for it ([`kafka_version_status`], the offered one
-/// where the catalog publishes more than one row for the version) is
+/// and the status it publishes for it ([`kafka_version_status`]) is
 /// [`KAFKA_VERSION_ACTIVE`]. This is what makes a version an upgrade target and
 /// what a deprecation check reads.
 pub fn is_offered_kafka_version(version: &str) -> bool {

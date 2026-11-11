@@ -11,14 +11,15 @@
 //! Control API reports as not found.
 //!
 //! Queues are held one namespace per Region ("One namespace per region" in that service's
-//! own state module), so every answer here is about the Region the call was made in: a url
-//! resolves to that Region's queue of the name it carries, exactly as the owning service
-//! resolves a `QueueUrl` a request supplies.
+//! own state module), so every answer here is about the Region the call was made in: a
+//! reference resolves to that Region's queue of the name it carries, exactly as the owning
+//! service resolves a `QueueUrl` a request supplies ([`queue_name`]).
 //!
 //! The resource model is the type's registry schema. Catalog source: the `AWS::SQS::Queue`
 //! resource provider schema's `properties`, whose `primaryIdentifier` is
-//! `/properties/QueueUrl` and whose `readOnlyProperties` are `/properties/Arn` and
-//! `/properties/QueueUrl`:
+//! `/properties/QueueUrl`, whose `additionalIdentifiers` are `/properties/Arn` and
+//! `/properties/QueueName` (the three references [`queue_name`] resolves), and whose
+//! `readOnlyProperties` are `/properties/Arn` and `/properties/QueueUrl`:
 //!
 //! * `QueueName`, the queue's name, which its url and its ARN are built from;
 //! * every property that IS one of the queue's own attributes, named identically on both
@@ -147,7 +148,10 @@ impl NativeResourceProvider for QueueProvider {
         // The name a queue is created under is the OWNING service's to accept, so nothing
         // is created here under a name that service's own API would refuse.
         let arn = sqs::queue_arn(region, &name);
-        let desired = DesiredModel::read(&name, &arn, identifier, properties)?;
+        // The url the queue will answer to, whichever way the reference that reached this
+        // call spelled it: the owning service assigns it from the Region and the name.
+        let url = sqs::queue_url(region, &name);
+        let desired = DesiredModel::read(&name, &arn, &url, properties)?;
         let fifo = desired.designates_fifo();
         if let Some(why) = sqs::queue_name_refusal(&name, fifo) {
             return Err(NativeRefusal::Invalid(why));
@@ -253,9 +257,10 @@ impl NativeResourceProvider for QueueProvider {
         }
         // Removed through the owning store's own removal, so the queue goes with every
         // message and handle it held and its NAME stays unavailable for as long as that
-        // service keeps a deleted name deferred.
+        // service keeps a deleted name deferred. Addressed by the url that service assigned
+        // the queue, which is what it resolves a removal by.
         store
-            .remove_queue_by_url(region, identifier, at)
+            .remove_queue_by_url(region, &sqs::queue_url(region, &name), at)
             .map(|_| ())
             .ok_or(NativeRefusal::NotFound)
     }
@@ -306,23 +311,46 @@ fn redrive_refusal(
         })
 }
 
-/// The name of the queue `identifier` names in `region`, or `None` for a value that is no
-/// primary identifier of this type.
+/// The name of the queue `identifier` names in `region`, or `None` for a value that names
+/// no queue of this type at all.
 ///
-/// A primary identifier of this type is the queue's url as Amazon SQS assigns it — the one
-/// built from the Region, this emulator's account and the queue's name — so that is the
-/// only value a resource of this type answers to: anything else names no queue, which is
-/// what a read of it reports as not found.
+/// The references a resource of this type answers to are the ones the type's schema
+/// DECLARES: its `primaryIdentifier` `/properties/QueueUrl` — the url Amazon SQS assigns,
+/// built from the Region, this emulator's account and the queue's name — and its
+/// `additionalIdentifiers`, `/properties/Arn` and `/properties/QueueName`. Each is resolved
+/// to the one queue it names, and whichever of them addressed it, every answer reports the
+/// queue's own assigned url.
+///
+/// A value that is none of the three — a url or an ARN of another account or Region, a url
+/// whose path is empty, a name no queue carries — names no queue, which is what a read of
+/// it reports as not found.
 fn queue_name(region: &str, identifier: &str) -> Option<String> {
-    let name = sqs::queue_name_from_url(identifier)?;
-    (sqs::queue_url(region, name) == identifier).then(|| name.to_string())
+    // The url: resolved by the `/<accountId>/<QueueName>` path the owning service resolves
+    // one by ([`sqs::queue_name_from_url`]), then held to the url THIS Region assigns.
+    if let Some(name) = sqs::queue_name_from_url(identifier)
+        .filter(|name| sqs::queue_url(region, name) == identifier)
+    {
+        return Some(name.to_string());
+    }
+    // The ARN, which the owning service builds from the same Region, account and name.
+    if let Some(name) = identifier
+        .rsplit_once(':')
+        .map(|(_, name)| name)
+        .filter(|name| !name.is_empty() && sqs::queue_arn(region, name) == identifier)
+    {
+        return Some(name.to_string());
+    }
+    // And the name itself, which carries none of the separators either of the two above
+    // is built with.
+    (!identifier.is_empty() && !identifier.contains([':', '/'])).then(|| identifier.to_string())
 }
 
 /// How a refusal states what the type's primary identifier has to be, for a create whose
-/// identifier is not one.
+/// identifier names no queue.
 fn queue_url_requirement() -> String {
     format!(
-        "must be the url of a queue of this account in the form {}",
+        "must be the url of a queue of this account in the form {}, or the queue's ARN or \
+         name",
         sqs::queue_url("<region>", "<QueueName>")
     )
 }

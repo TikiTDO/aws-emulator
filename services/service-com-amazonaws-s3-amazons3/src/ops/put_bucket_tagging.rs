@@ -254,6 +254,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(bucket) = store.bucket_mut(&input.bucket) else {
             return Err(PutBucketTaggingErrorModeled::NoSuchBucket(NoSuchBucket {}).into());
         };
+        // The tag set this one REPLACES: a tag in the namespace AWS keeps for itself that
+        // the bucket already carries with this very value is neither added nor updated by
+        // this request.
+        let in_force: Vec<crate::state::ResourceTag> = bucket.tags().to_vec();
 
         // Validated BEFORE anything is written, so a refused tag set leaves the bucket's
         // current tags exactly as they were, and against the BUCKET's own published
@@ -265,13 +269,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // unmodelled channel carrying the code a client branches on.
         //
         // One of those restrictions depends on WHO stated the key: a tag in the namespace
-        // AWS keeps for itself is AWS's own, so a requester may not write one, while the
-        // services that own such a tag set it from inside AWS over the in-process path
-        // ([`crate::state::tag_key_origin`]).
+        // AWS keeps for itself is AWS's own, so a requester may neither add nor update one,
+        // while the services that own such a tag set it from inside AWS over the in-process
+        // path ([`crate::state::tag_key_origin`]).
         if let Err(rejection) = crate::state::validate_tag_set(
             &tags,
             crate::state::BUCKET_TAG_SET_LIMITS,
             origin,
+            &in_force,
         ) {
             return Err(crate::scaffolded::Scaffolded::tag_set(&rejection));
         }

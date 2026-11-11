@@ -997,6 +997,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CopyObject<Eng> {
                     header,
                     crate::state::OBJECT_TAG_SET_LIMITS,
                     crate::state::tag_key_origin(ctx),
+                    // The destination's tag set is stated whole by this copy, so there is
+                    // no set in force for it to leave a reserved key as it is.
+                    &[],
                 ) {
                     Ok(tags) => tags,
                     Err(rejection) => {

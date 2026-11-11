@@ -10,12 +10,11 @@
 //! to \"READ\"" — so `POST /putMedia` is served at the origin
 //! `GetDataEndpoint(APIName=PUT_MEDIA)` hands a producer. Every OTHER address of this
 //! emulator — the control-plane front door the discovery call itself arrived on, and the
-//! read plane's own origin — binds no operation for that path, so it answers the front
-//! door's reply to a request it can name no operation for (HTTP 400 with the
-//! `Output`/`Version` envelope carrying the unknown-operation `__type` and "Unable to
-//! determine operation name", and no error-type header, since no operation was identified
-//! to name one for) and ingests nothing: the stream's archive stays empty, while the
-//! identical bytes sent to the announced write origin persist exactly one fragment.
+//! read plane's own origin — hosts no API at that path at all, so it answers the 404 an
+//! endpoint gives a path it binds no ROUTE for, whose whole body is the bare element
+//! naming the unknown-operation class and which carries no error-type header, and ingests
+//! nothing: the stream's archive stays empty, while the identical bytes sent to the
+//! announced write origin persist exactly one fragment.
 //!
 //! The table's rows differ in the ADDRESS the producer sent the identical request to: the
 //! announced write origin, the announced read origin, and three forms of this emulator's
@@ -287,9 +286,9 @@ const ROWS: &[Row] = &[
 ];
 
 /// RULE: `POST /putMedia` is served at the origin announced for the write plane; at every
-/// other address of this emulator the path is bound to no operation, so it is answered
-/// with the front door's unknown-operation envelope (HTTP 400) and no error-type header,
-/// and nothing is ingested.
+/// other address of this emulator that path is bound to no route at all, so it is answered
+/// with the 404 an endpoint gives such a path — the bare unknown-operation element as the
+/// whole body, and no error-type header — and nothing is ingested.
 #[tokio::test]
 async fn the_ingest_route_is_served_only_at_the_origin_announced_for_the_write_plane() {
     let harness = Harness::new();
@@ -361,22 +360,28 @@ async fn the_ingest_route_is_served_only_at_the_origin_announced_for_the_write_p
         } else {
             assert_eq!(
                 status(&response),
-                400,
+                404,
                 "case {case:?} ({authority}): expected the unrouted-path refusal, got {} {}",
                 status(&response),
                 text(&response)
             );
             assert_eq!(
-                json(&response),
-                crate::read_plane_addressing::unknown_operation_envelope(),
-                "case {case:?} ({authority}): expected the front door's unknown-operation \
-                 envelope as the whole body, got {:?}",
-                text(&response)
-            );
-            assert!(
-                response.headers().get("x-amzn-errortype").is_none(),
+                response
+                    .headers()
+                    .get("x-amzn-errortype")
+                    .and_then(|value| value.to_str().ok()),
+                None,
                 "case {case:?} ({authority}): an unrouted path names no error type, got {:?}",
                 response.headers().get("x-amzn-errortype")
+            );
+            assert_eq!(
+                text(&response).trim(),
+                // Written out as the wire carries it rather than read off the code under
+                // test, so a drift away from this body must fail here.
+                "<UnknownOperationException/>",
+                "case {case:?} ({authority}): expected the bare unknown-operation element as \
+                 the whole body, got {:?}",
+                text(&response)
             );
             assert_eq!(
                 archived, 0,

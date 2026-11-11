@@ -142,10 +142,9 @@ pub(crate) fn assert_handler_not_found(
 
 /// Cloud Control's own generic not-found diagnostic, for a type whose handler states one.
 ///
-/// The resource is named as the request addressed it, which is what this emulator's
-/// registry can say about a type whose `primaryIdentifier` it does not hold; a type whose
-/// primary identifier it DOES know is named by it
-/// ([`rendered_identifier`]).
+/// The resource is named by its PRIMARY IDENTIFIER: a type whose `primaryIdentifier` names
+/// one property is addressed by that property's value, so the sentence carries that value
+/// as the request and every answer spell it.
 pub(crate) fn generic_not_found(type_name: &str, identifier: &str) -> String {
     format!("Resource of type '{type_name}' with identifier '{identifier}' was not found.")
 }
@@ -154,14 +153,6 @@ pub(crate) fn generic_not_found(type_name: &str, identifier: &str) -> String {
 /// same way ([`generic_not_found`]).
 pub(crate) fn generic_already_exists(type_name: &str, identifier: &str) -> String {
     format!("Resource of type '{type_name}' with identifier '{identifier}' already exists.")
-}
-
-/// How the CloudFormation registry renders a resource's PRIMARY IDENTIFIER: a JSON object
-/// mapping the type's `primaryIdentifier` pointer into its schema to the value the resource
-/// holds there — which is how a diagnostic names a resource of a type whose primary
-/// identifier this emulator knows.
-pub(crate) fn rendered_identifier(identifier_property: &str, identifier: &str) -> String {
-    format!("{{\"/properties/{identifier_property}\":\"{identifier}\"}}")
 }
 
 #[tokio::test]

@@ -152,10 +152,9 @@ async fn the_catalog_is_reported_with_every_version_and_its_support_status() {
     // Guide's "Supported Apache Kafka versions" list, and the rows the service
     // itself publishes) — entries of several SHAPES (three numbers, a fourth
     // component, the `.tiered` and `.link` spellings, the `.x` patch name and the
-    // `.kraft` metadata-mode lines), both support statuses, and the two versions
-    // the catalog publishes under TWO rows, so the table spans the class rather
-    // than one example. Each row is the statuses published for that version, in
-    // published order.
+    // `.kraft` metadata-mode lines) and both support statuses, so the table spans
+    // the class rather than one example. Each row is the statuses published for
+    // that version: exactly one, since a version is published once.
     let expected: &[(&str, &[&str])] = &[
         ("1.1.1", &["DEPRECATED"]),
         ("2.4.1.1", &["DEPRECATED"]),
@@ -168,11 +167,11 @@ async fn the_catalog_is_reported_with_every_version_and_its_support_status() {
         ("3.7.x", &["ACTIVE"]),
         ("3.7.x.kraft", &["ACTIVE"]),
         ("3.8.link", &["DEPRECATED"]),
-        ("3.9.x", &["ACTIVE", "DEPRECATED"]),
+        ("3.9.x", &["ACTIVE"]),
         ("3.9.x.kraft", &["ACTIVE"]),
         ("4.0.x.kraft", &["ACTIVE"]),
         ("4.1.x.kraft", &["ACTIVE"]),
-        ("4.2.x.kraft", &["DEPRECATED", "ACTIVE"]),
+        ("4.2.x.kraft", &["ACTIVE"]),
     ];
     for (version, statuses) in expected {
         let reported: Vec<&str> = versions
@@ -213,20 +212,18 @@ async fn the_catalog_is_reported_with_every_version_and_its_support_status() {
     }
 
     // Every reported entry is well formed: a modelled status value, a non-empty
-    // version, and no ROW published twice — a version may carry more than one row
-    // (one per status the catalog publishes for it), but never the same row twice,
-    // so no entry of the catalog is reported redundantly.
-    let mut rows: Vec<(&str, &str)> = versions
-        .iter()
-        .map(|(name, status)| (name.as_str(), status.as_str()))
-        .collect();
-    let total = rows.len();
-    rows.sort_unstable();
-    rows.dedup();
+    // version, and no VERSION published twice — the published `{version, status}`
+    // projection carries nothing that could tell two rows of one version apart, so
+    // a second row would only contradict the first for a client keying the listing
+    // by version.
+    let mut names: Vec<&str> = versions.iter().map(|(name, _)| name.as_str()).collect();
+    let total = names.len();
+    names.sort_unstable();
+    names.dedup();
     assert_eq!(
-        rows.len(),
+        names.len(),
         total,
-        "the catalog must not report the same row twice, got {versions:?}"
+        "the catalog must publish each version exactly once, got {versions:?}"
     );
     for (name, status) in &versions {
         assert!(

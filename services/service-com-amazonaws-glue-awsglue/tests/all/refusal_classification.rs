@@ -391,16 +391,17 @@ async fn a_catalog_name_the_surface_forbids_earns_the_catalogs_own_sentence() {
             "case {case}: unexpected wording for {name:?}"
         );
 
-        // A catalog id no catalog could ever be stored under is a MALFORMED request on the
-        // read path too, not a miss: the constraint envelope answers it.
+        // The same value as a catalog ID is an ADDRESS, not a name the surface accepts:
+        // the read resolves it against the store and reports the entity it does not hold,
+        // rather than judging the id against the name grammar.
         let (status, body) = call(&router, "GetCatalog", &json!({ "CatalogId": name })).await;
         assert_eq!(
             status, 400,
             "case {case}: expected 400 reading {name:?}, got {status} with {body}"
         );
         assert!(
-            error_code(&body).ends_with("ValidationException"),
-            "case {case}: expected ValidationException reading {name:?}, got {} in {body}",
+            error_code(&body).ends_with("EntityNotFoundException"),
+            "case {case}: expected EntityNotFoundException reading {name:?}, got {} in {body}",
             error_code(&body)
         );
     }

@@ -221,8 +221,10 @@ enum StoreVerdict {
     /// verdict passed once per request rather than a value held in bulk.
     Replay(Box<ProgressEvent>, String),
     /// Nothing the store holds refuses the request: this is the resource model the patch
-    /// applies to, and the property that model carries the primary identifier in.
-    Update(::serde_json::Value, String),
+    /// applies to, the property that model carries the primary identifier in, and the
+    /// primary identifier the resource itself answers to — which is the one the request is
+    /// recorded under, whatever reference the request addressed the resource by.
+    Update(::serde_json::Value, String, String),
 }
 
 /// Judge an update against everything this service's OWN store answers: the idempotent
@@ -269,6 +271,10 @@ fn judge_against_store(
     // A resource is acted on by one operation at a time: a patch applied to a model
     // another running operation is about to replace would be lost, so the second
     // operation is refused rather than racing it.
+    //
+    // Asked BEFORE the resource is resolved, so a request already running against an
+    // identifier nothing has provisioned yet — a create still in flight — is reported as
+    // the contention it is rather than as a resource that cannot be found.
     if let Some(holding) = store.in_flight_request(&input.type_name, &input.identifier) {
         return Err(concurrent_operation(&input.identifier, Some(holding)));
     }
@@ -280,7 +286,6 @@ fn judge_against_store(
         return Err(UpdateResourceErrorModeled::ResourceNotFoundException(
             ResourceNotFoundException {
                 message: Some(crate::state::resource_not_found_refusal(
-                    native,
                     &input.type_name,
                     &input.identifier,
                 )),
@@ -288,9 +293,20 @@ fn judge_against_store(
         )
         .into());
     };
+    // And again under the identifier the RESOURCE answers to: a type whose owning service
+    // assigns that identifier resolves more than one reference to one resource, and the
+    // operation already running on it was recorded under that one identifier.
+    if let Some((contended, holding)) = store.in_flight_request_on_either(
+        &input.type_name,
+        &input.identifier,
+        &resolved.identifier,
+    ) {
+        return Err(concurrent_operation(contended, Some(holding)));
+    }
     Ok(StoreVerdict::Update(
         resolved.properties,
         resolved.identifier_property,
+        resolved.identifier,
     ))
 }
 
@@ -310,14 +326,26 @@ fn overlapping_operation(
     input: &UpdateResourceInput,
     base: &::serde_json::Value,
 ) -> Option<UpdateResourceError> {
-    let holding = store
-        .in_flight_request(&input.type_name, &input.identifier)
-        .map(str::to_string);
-    let moved = store
-        .resolve(native, region, &input.type_name, &input.identifier)
-        .is_none_or(|resolved| &resolved.properties != base);
-    (holding.is_some() || moved)
-        .then(|| concurrent_operation(&input.identifier, holding.as_deref()))
+    let resolved = store.resolve(native, region, &input.type_name, &input.identifier);
+    // The guard is asked under the reference the request carried AND under the identifier
+    // the resource itself answers to, for the reason `in_flight_request_on_either` states.
+    let holding = match resolved.as_ref() {
+        Some(resolved) => store
+            .in_flight_request_on_either(
+                &input.type_name,
+                &input.identifier,
+                &resolved.identifier,
+            )
+            .map(|(contended, holding)| (contended.to_string(), holding.to_string())),
+        None => store
+            .in_flight_request(&input.type_name, &input.identifier)
+            .map(|holding| (input.identifier.clone(), holding.to_string())),
+    };
+    let moved = resolved.is_none_or(|resolved| &resolved.properties != base);
+    match &holding {
+        Some((contended, holding)) => Some(concurrent_operation(contended, Some(holding))),
+        None => moved.then(|| concurrent_operation(&input.identifier, None)),
+    }
 }
 
 /// The modelled refusal for a resource another operation is already acting on, naming
@@ -413,7 +441,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Everything this service's own store answers is judged first, under a lock that
         // is DROPPED before the patch below — so no caller waits on the store while
         // another caller's patch is computed.
-        let (base, identifier_property) = {
+        let (base, identifier_property, identifier) = {
             let mut store = state.lock();
             store.materialise_due(::std::time::SystemTime::now(), &native);
             match judge_against_store(&store, &native, &region, &input, &fingerprint)? {
@@ -430,8 +458,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         progress_event: Some(*progress_event),
                     });
                 }
-                StoreVerdict::Update(properties, identifier_property) => {
-                    (properties, identifier_property)
+                StoreVerdict::Update(properties, identifier_property, identifier) => {
+                    (properties, identifier_property, identifier)
                 }
             }
         };
@@ -483,12 +511,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // A patch that does not NAME the primary identifier can still change it — the
         // whole model can be replaced at the empty pointer — so the invariant is checked
         // on the model the patch left behind too: a resource never answers to an
-        // identifier other than the one it is stored under.
+        // identifier other than the one it is stored under, which is the identifier the
+        // resource itself carries rather than the reference the request addressed it by.
         if patched
             .get(&identifier_property)
             .and_then(crate::state::identifier_text)
             .as_deref()
-            != Some(input.identifier.as_str())
+            != Some(identifier.as_str())
         {
             return Err(not_updatable(&[identifier_property.as_str()]));
         }
@@ -512,7 +541,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     progress_event: Some(*progress_event),
                 });
             }
-            StoreVerdict::Update(properties, _) if properties != base => {
+            StoreVerdict::Update(properties, ..) if properties != base => {
                 // The model the patch was computed against is no longer the model the
                 // store holds, so applying it would discard whatever changed it: an
                 // operation overlapped this one, which is the contention refusal — the
@@ -533,7 +562,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let record = crate::state::RequestRecord::accepted(
             request_token.clone(),
             input.type_name.clone(),
-            Some(input.identifier.clone()),
+            // The request is recorded against the resource's OWN primary identifier, so the
+            // event it reports names the resource the way every other answer does.
+            Some(identifier),
             crate::state::OPERATION_UPDATE,
             now,
             crate::state::ResourceEffect::Update {

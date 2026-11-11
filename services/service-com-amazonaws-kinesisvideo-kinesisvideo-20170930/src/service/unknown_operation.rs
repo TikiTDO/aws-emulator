@@ -17,24 +17,26 @@
 //! not to any Kinesis Video model, which is why no model declares it and why no
 //! `x-amzn-errortype` names a shape of this service's.
 //!
-//! # Why ONE wording serves every address
+//! # The two answers, and which request earns which
 //!
 //! This emulator answers the whole family at the endpoint a client is talking to, and the
 //! addresses `GetDataEndpoint` announces for a stream's planes are the SAME front door on
-//! ports of their own ([`super::super::state::data_plane_serving`]). So each of these is
-//! one endpoint answering a path it binds no operation for, and each is answered alike:
+//! ports of their own ([`super::super::state::data_plane_serving`]). Two things can then be
+//! wrong with a request, and the family answers them differently:
 //!
-//! - a request this service claimed that names no modelled operation of it
-//!   ([`super::EmulatedService::override_routing_error`]);
-//! - a control call that reached an address announced for a data plane
-//!   ([`super::data_plane_address`]);
-//! - a media call that reached an address that does not serve ITS plane — the
-//!   control-plane front door the discovery call was made to, or the other plane's
-//!   address.
+//! - the front door MATCHED a route of this family and could name no operation in it — a
+//!   request this service claimed that names no modelled operation of it
+//!   ([`super::EmulatedService::override_routing_error`]), and a control call that reached
+//!   an address announced for a data plane ([`super::data_plane_address`]): the envelope
+//!   above, with [`UNKNOWN_OPERATION_STATUS`];
+//! - the endpoint binds NO route for the path at all — the ingest route `/putMedia`, bound
+//!   at the write plane's announced address alone, asked for at any other address of this
+//!   emulator: [`unrouted_path_response`], the 404 whose whole body is
+//!   [`UNROUTED_PATH_BODY`].
 //!
-//! The reply is served both as a plain response (the routing-error seam, which answers
-//! one) and as the [`ErasedOperation`] below (the `override_operation` seam, which names
-//! one), because a path bound to no operation here can be recognised in either seam
+//! The first reply is served both as a plain response (the routing-error seam, which
+//! answers one) and as the [`ErasedOperation`] below (the `override_operation` seam, which
+//! names one), because a path bound to no operation here can be recognised in either seam
 //! depending on whether the generated routing table could name a MODELLED operation for
 //! it. Both go through [`unknown_operation_response`], so the two cannot drift.
 
@@ -102,6 +104,41 @@ pub fn unknown_operation_response() -> RtResponse {
 /// media.
 #[derive(Debug, Clone, Copy)]
 pub struct UnknownOperation;
+
+/// The status an endpoint answers a path it ROUTES NOTHING FOR with: the request reached
+/// an endpoint that hosts no API at that path at all, which is a missing route rather than
+/// a request the front door read and could not name an operation in — so it is answered
+/// 404.
+///
+/// Distinct from [`UNKNOWN_OPERATION_STATUS`] on purpose: that status is what the front
+/// door answers a request it ACCEPTED on a route of this family and could then name no
+/// operation for.
+pub const UNROUTED_PATH_STATUS: u16 = 404;
+
+/// The whole body that answer carries: the bare element naming the fault's class, which is
+/// all a front door that matched no route at all says — there is no envelope, no operation,
+/// no path, no member and no value in it, and no `x-amzn-errortype` header either.
+pub const UNROUTED_PATH_BODY: &str = "<UnknownOperationException/>";
+
+/// The media type that one element is written in.
+const XML_CONTENT_TYPE: &str = "application/xml";
+
+/// What an endpoint of this family answers a path it binds NO route for: HTTP 404 whose
+/// whole body is [`UNROUTED_PATH_BODY`].
+///
+/// Nothing in it comes from the request: no route matched, so there is no operation, path,
+/// member or value to report.
+#[must_use]
+pub fn unrouted_path_response() -> RtResponse {
+    let mut response = RtResponse::new(
+        StatusCode::try_from(UNROUTED_PATH_STATUS).expect("the status is a constant of this module"),
+        SdkBody::from(UNROUTED_PATH_BODY),
+    );
+    response
+        .headers_mut()
+        .insert("content-type", XML_CONTENT_TYPE);
+    response
+}
 
 impl ErasedOperation for UnknownOperation {
     fn run<'r>(

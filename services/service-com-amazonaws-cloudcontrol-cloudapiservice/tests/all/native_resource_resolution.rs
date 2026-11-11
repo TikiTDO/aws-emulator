@@ -25,17 +25,14 @@ use super::emulator::{
     code, descriptions, message, properties_of, text, Emulator, STATUS_FAILED,
 };
 use super::refusal_wording::{
-    assert_handler_not_found, generic_already_exists, generic_not_found, rendered_identifier,
+    assert_handler_not_found, generic_already_exists, generic_not_found,
 };
 
 /// The not-found diagnostic the handler of a type whose primary identifier this emulator
-/// knows states: Cloud Control's own sentence, naming the resource by that identifier as
-/// the registry renders one.
-fn not_found_detail(type_name: &str, identifier_property: &str, identifier: &str) -> String {
-    generic_not_found(
-        type_name,
-        &rendered_identifier(identifier_property, identifier),
-    )
+/// knows states: Cloud Control's own sentence, naming the resource by the one value its
+/// single-property primary identifier is addressed by.
+fn not_found_detail(type_name: &str, identifier: &str) -> String {
+    generic_not_found(type_name, identifier)
 }
 
 /// The type whose resources live in the CloudWatch Logs service's own store.
@@ -236,7 +233,7 @@ async fn a_resource_the_owning_service_no_longer_holds_is_reported_as_not_found(
         let request_token = assert_handler_not_found(
             &message(&body),
             LOG_GROUP,
-            &not_found_detail(LOG_GROUP, "LogGroupName", &name),
+            &not_found_detail(LOG_GROUP, &name),
             case,
         );
         assert!(
@@ -336,7 +333,7 @@ async fn a_create_of_a_resource_the_owning_service_already_holds_is_the_owning_v
     );
     assert_eq!(
         text(&settled, "StatusMessage"),
-        generic_already_exists(LOG_GROUP, &rendered_identifier("LogGroupName", name)),
+        generic_already_exists(LOG_GROUP, name),
         "unexpected wording, got {settled:?}"
     );
     // The refused create left the group exactly as the owning service held it.
@@ -611,7 +608,7 @@ async fn a_second_type_of_the_same_owning_service_resolves_the_same_way() {
     assert_handler_not_found(
         &message(&body),
         DESTINATION,
-        &not_found_detail(DESTINATION, "DestinationName", native),
+        &not_found_detail(DESTINATION, native),
         "GetResource after the native delete",
     );
 

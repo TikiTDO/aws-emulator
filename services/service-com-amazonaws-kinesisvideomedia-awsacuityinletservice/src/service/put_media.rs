@@ -702,16 +702,18 @@ fn ingest_served_at<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest) -
 }
 
 /// What an address that does not route `/putMedia` answers a producer that sent one
-/// there: the refusal an endpoint gives a path it binds no operation for, since no
-/// operation was identified to name a member or a value for. Nothing is read from the
-/// request and nothing is ingested.
+/// there: HTTP 404, the answer an endpoint gives a path it binds NO ROUTE for
+/// ([`control_plane_front_door::unrouted_path_response`]) — the bare unknown-operation
+/// element as the whole body. Nothing is read from the request and nothing is ingested.
 ///
-/// The wording is this family's one wording for an unroutable request
-/// ([`control_plane_front_door::unknown_operation_response`]) — the same answer the read
-/// plane gives a `/getMedia`, and the control plane a control call, that reached an address
-/// which does not route it.
+/// The ingest route is bound at ONE address of this emulator — the one
+/// `GetDataEndpoint(APIName=PUT_MEDIA)` announces — so every other endpoint, the
+/// control-plane front door and the addresses announced for the read and archive planes
+/// among them, hosts no API at that path at all. That is a missing route rather than a
+/// request the front door read and could name no operation in, which is why it is answered
+/// neither with that envelope nor with its status.
 pub fn unrouted_address_response() -> RtResponse {
-    control_plane_front_door::unknown_operation_response()
+    control_plane_front_door::unrouted_path_response()
 }
 
 /// Whether the buffered request parts address the ingest plane: a `POST` whose first URI

@@ -808,9 +808,14 @@ fn requested_tags(
     if tags.is_empty() {
         return Ok(tags);
     }
-    if let Err(rejection) =
-        crate::state::validate_tag_set(&tags, crate::state::BUCKET_TAG_SET_LIMITS, origin)
-    {
+    if let Err(rejection) = crate::state::validate_tag_set(
+        &tags,
+        crate::state::BUCKET_TAG_SET_LIMITS,
+        origin,
+        // A create states the whole tag set of a bucket that does not exist yet, so there
+        // is no set in force for it to leave a reserved key as it is.
+        &[],
+    ) {
         return Err(crate::scaffolded::Scaffolded::tag_set(&rejection));
     }
     Ok(tags)

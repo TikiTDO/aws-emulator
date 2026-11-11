@@ -28,7 +28,9 @@
 //! Every assertion drives a real HTTP request through the router (the harness
 //! [`super::bucket_lifecycle`] owns), so what is pinned is the wire document.
 
-use service_com_amazonaws_s3_amazons3::state::{MAX_TAG_KEY_CHARS, RESERVED_TAG_KEY_PREFIX};
+use service_com_amazonaws_s3_amazons3::state::{
+    ComAmazonawsS3Amazons3State, ResourceTag, MAX_TAG_KEY_CHARS, RESERVED_TAG_KEY_PREFIX,
+};
 
 use super::bucket_lifecycle::router;
 use super::bucket_tagging::{get_bucket_tagging, put_bucket_tagging, tag, tag_set_of};
@@ -144,6 +146,166 @@ fn tagging_header(tags: &[(String, String)]) -> String {
         .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join("&")
+}
+
+/// One row of the system-tag table: the case, the tag set the request states, and the key
+/// the error document must name — `None` for a set the rule admits.
+type SystemTagRow = (&'static str, Vec<(String, String)>, Option<String>);
+
+#[tokio::test]
+async fn a_system_tag_already_in_force_may_be_stated_back_unchanged() {
+    // The reservation forbids a requester ADDING a tag in the reserved namespace and
+    // UPDATING one; a set that states a tag already in force with the same value does
+    // neither, which is what lets a client read a resource AWS tagged itself, edit its own
+    // tags and write the whole set back — the only way `PutBucketTagging`'s replacement
+    // semantics admit such an edit at all.
+    //
+    // The system tags are SEEDED through the store, because the in-process path AWS's own
+    // services write them on is not one a request can take.
+    let (router, engine) = super::bucket_lifecycle::router_with_engine();
+    let bucket_name = "system-tag-round-trip";
+    bucket(&router, bucket_name).await;
+    object(&router, bucket_name, "tagged.csv").await;
+
+    let prefix = RESERVED_TAG_KEY_PREFIX;
+    let stack_name = format!("{prefix}cloudformation:stack-name");
+    let logical_id = format!("{prefix}cloudformation:logical-id");
+    let in_force = vec![
+        tag(&stack_name, "a-stack"),
+        tag(&logical_id, "Bucket"),
+        tag("owner", "platform"),
+    ];
+    seed_tags(&engine, bucket_name, "tagged.csv", &in_force);
+
+    // The rows differ along what the requester's set does to the tags in force: states
+    // them all back unchanged, states them back with a tag of its own beside them, drops
+    // one of its own while keeping the system tags, states a system tag with ANOTHER value,
+    // and states a system tag the resource does not carry at all.
+    let rows: Vec<SystemTagRow> = vec![
+        ("every tag in force, unchanged", in_force.clone(), None),
+        (
+            "the system tags unchanged, with a new tag of the requester's own",
+            vec![
+                tag(&stack_name, "a-stack"),
+                tag(&logical_id, "Bucket"),
+                tag("owner", "platform"),
+                tag("cost-centre", "7"),
+            ],
+            None,
+        ),
+        (
+            "the system tags unchanged, with the requester's own tag dropped",
+            vec![tag(&stack_name, "a-stack"), tag(&logical_id, "Bucket")],
+            None,
+        ),
+        (
+            "a system tag in force stated with another value",
+            vec![tag(&stack_name, "another-stack"), tag("owner", "platform")],
+            Some(stack_name.clone()),
+        ),
+        (
+            "a system tag the resource does not carry",
+            vec![
+                tag(&format!("{prefix}autoscaling:groupName"), "group"),
+                tag("owner", "platform"),
+            ],
+            Some(format!("{prefix}autoscaling:groupName")),
+        ),
+    ];
+
+    for (case, tags, offending) in rows {
+        // Both tagging paths are judged by the one rule, so each row drives both.
+        seed_tags(&engine, bucket_name, "tagged.csv", &in_force);
+        let on_bucket = put_bucket_tagging(&router, bucket_name, &tags).await;
+        let on_object = put_object_tagging(&router, bucket_name, "tagged.csv", &tags).await;
+        for (call, answer, served, read) in [
+            (
+                "PutBucketTagging",
+                &on_bucket,
+                BUCKET_TAGGING_SERVED,
+                tag_set_of(&get_bucket_tagging(&router, bucket_name).await),
+            ),
+            (
+                "PutObjectTagging",
+                &on_object,
+                OBJECT_TAGGING_SERVED,
+                tag_set_of(&get_object_tagging(&router, bucket_name, "tagged.csv", "").await),
+            ),
+        ] {
+            match &offending {
+                None => {
+                    assert_eq!(
+                        answer.status, served,
+                        "case {case:?}/{call}: the rule admits this tag set, expected HTTP \
+                         {served}, got {} with body {:?}",
+                        answer.status,
+                        text(answer)
+                    );
+                    assert_eq!(
+                        read, tags,
+                        "case {case:?}/{call}: expected the stated tag set to be stored, got \
+                         {read:?}"
+                    );
+                }
+                Some(key) => {
+                    assert_eq!(
+                        answer.status, 400,
+                        "case {case:?}/{call}: expected HTTP 400, got {} with body {:?}",
+                        answer.status,
+                        text(answer)
+                    );
+                    assert_eq!(
+                        answer.error_code(),
+                        INVALID_TAG,
+                        "case {case:?}/{call}: expected the error code {INVALID_TAG:?}, got {:?}",
+                        answer.error_code()
+                    );
+                    assert_eq!(
+                        answer.element("TagKey").as_deref(),
+                        Some(key.as_str()),
+                        "case {case:?}/{call}: the error document must name the offending key, \
+                         got {:?}",
+                        answer.element("TagKey")
+                    );
+                    assert_eq!(
+                        read, in_force,
+                        "case {case:?}/{call}: a refused tag set must change nothing, got \
+                         {read:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Record `tags` as the tag set of both the bucket and the object, through the STORE the
+/// service reads — the in-process path AWS's own services write a reserved key on, which no
+/// request can take ([`super::bucket_lifecycle::router_with_engine`] hands the store over).
+fn seed_tags(
+    engine: &std::sync::Arc<engine::InMemoryEngine>,
+    bucket_name: &str,
+    key: &str,
+    tags: &[(String, String)],
+) {
+    let held: Vec<ResourceTag> = tags
+        .iter()
+        .map(|(tag_key, value)| ResourceTag {
+            key: tag_key.clone(),
+            value: value.clone(),
+        })
+        .collect();
+    let state = engine.state::<ComAmazonawsS3Amazons3State>();
+    let mut store = state.lock();
+    store
+        .bucket_mut(bucket_name)
+        .unwrap_or_else(|| panic!("the bucket {bucket_name:?} must be stored"))
+        .replace_tags(held.clone());
+    assert!(
+        store
+            .replace_object_tags(bucket_name, key, held)
+            .is_some(),
+        "the object {key:?} must be stored"
+    );
 }
 
 #[tokio::test]

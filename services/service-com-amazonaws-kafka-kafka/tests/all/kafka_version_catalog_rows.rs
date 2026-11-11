@@ -11,9 +11,9 @@
 //! about what `3.9.x.kraft` names):
 //!
 //! * the listing serves one entry per published ROW, so a page resumes after a
-//!   row rather than after a version string — checked at EVERY page boundary,
-//!   which is exhaustive over the boundaries a repeated version can straddle;
-//! * a version the catalog publishes any `ACTIVE` row for is a version the
+//!   row — checked at EVERY page boundary, which is exhaustive over the
+//!   boundaries a walk can stop at;
+//! * a version the catalog publishes an `ACTIVE` row for is a version the
 //!   service still offers, on every surface that answers about a version: the
 //!   upgrade matrix's targets and the valid-value list a create refusal carries;
 //! * the crossing from ZooKeeper mode to the KRaft line is offered at ONE
@@ -118,8 +118,8 @@ async fn matrix(emulator: &Emulator) -> Vec<(String, Vec<String>)> {
 
 /// RULE: the listing serves one entry per published ROW, and `NextToken` names
 /// the row a page stopped at — so resuming from ANY boundary reports exactly the
-/// rows that follow it, even where the boundary falls between two rows of the
-/// same version, and the pages of such a walk partition the catalog exactly once.
+/// rows that follow it, and the pages of such a walk partition the catalog
+/// exactly once.
 #[tokio::test]
 async fn a_page_resumes_after_a_row_at_every_boundary() {
     let emulator = Emulator::new();
@@ -128,8 +128,7 @@ async fn a_page_resumes_after_a_row_at_every_boundary() {
         whole.len() > 1,
         "the catalog must publish more than one row to page, got {whole:?}"
     );
-    // Exhaustive over the boundaries: every position a page can stop at, which
-    // includes both sides of each version the catalog publishes under two rows.
+    // Exhaustive over the boundaries: every position a page can stop at.
     for boundary in 1..=whole.len() {
         let first = list_versions(&emulator, &format!("?maxResults={boundary}")).await;
         assert_eq!(
@@ -164,8 +163,8 @@ async fn a_page_resumes_after_a_row_at_every_boundary() {
     }
 }
 
-/// RULE: a version the catalog publishes any `ACTIVE` row for is one the service
-/// still OFFERS, and one it publishes no `ACTIVE` row for is not — on every
+/// RULE: a version the catalog publishes an `ACTIVE` row for is one the service
+/// still OFFERS, and one it publishes a `DEPRECATED` row for is not — on every
 /// surface that answers about the version rather than about the catalog's rows:
 /// the upgrade matrix's target lists, and the valid-value list a create refusal
 /// carries, which names each offered version ONCE in published order.
@@ -174,12 +173,12 @@ async fn a_version_with_an_active_row_is_the_offered_version_set() {
     let emulator = Emulator::new();
     let catalog = published_rows(&emulator).await;
 
-    // The table spans the shapes a version's published rows can take: one
-    // `ACTIVE` row, one `DEPRECATED` row, and the two versions the catalog
-    // publishes under two rows — in either order. Hand-written from the published
-    // catalog (the Amazon MSK Developer Guide's "Supported Apache Kafka versions"
-    // list and the rows the service publishes), and including versions this
-    // suite's rules were not derived from (`2.3.1`, `3.1.1`, `3.6.0.1`).
+    // The table spans the shapes a published version can take: an `ACTIVE` row
+    // and a `DEPRECATED` row, across the version spellings the catalog uses.
+    // Hand-written from the published catalog (the Amazon MSK Developer Guide's
+    // "Supported Apache Kafka versions" list and the rows the service publishes),
+    // and including versions this suite's rules were not derived from (`2.3.1`,
+    // `3.1.1`, `3.6.0.1`).
     let expected_offered: &[(&str, bool)] = &[
         ("2.3.1", false),
         ("3.1.1", false),

@@ -163,18 +163,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let region = crate::state::request_region(ctx.parts());
         // The id names the catalog, and may name the account whose Data Catalog holds it;
-        // a bare name is a catalog of the account this endpoint serves.
+        // a bare name is a catalog of the account this endpoint serves. An id is RESOLVED
+        // against the store rather than measured against the catalog NAME grammar: that
+        // grammar is what a create's `Name` has to satisfy, and an id outside it simply
+        // addresses a catalog nothing was ever stored under, which is the miss below.
         let reference = crate::state::parse_catalog_reference(&input.catalog_id);
-        // An id whose catalog name is one the catalog grammar cannot spell is a MALFORMED
-        // REQUEST rather than a miss: no catalog could ever be stored under it. It is
-        // refused the way a value outside a modelled constraint is refused — the
-        // constraint envelope, before anything is looked up — and not reported as an
-        // entity that does not exist (`crate::state::messages::malformed_catalog_id`).
-        if !crate::state::is_catalog_name(&reference.name) {
-            return Err(crate::scaffolded::Scaffolded::validation(
-                crate::state::messages::malformed_catalog_id(&input.catalog_id),
-            ));
-        }
         // Authorization comes BEFORE the entity lookup: a catalog in another account's
         // Data Catalog is reachable on the real service only through that catalog's own
         // resource-based policy, and this store can hold no such grant, so the request is

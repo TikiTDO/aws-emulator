@@ -389,13 +389,11 @@ impl EffectFailure {
     /// The `StatusMessage` the record reports: the owning handler's own diagnostic for
     /// the resource the work was owed on. The handler error code is reported beside it in
     /// `ProgressEvent$ErrorCode`, so the message carries the detail alone.
-    fn status_message(&self, record: &RequestRecord, native: &NativeResources) -> String {
+    fn status_message(&self, record: &RequestRecord) -> String {
         let identifier = record.identifier.as_deref().unwrap_or_default();
         match self {
-            Self::ResourceGone => handler_not_found_detail(native, &record.type_name, identifier),
-            Self::ResourceExists => {
-                handler_already_exists_detail(native, &record.type_name, identifier)
-            }
+            Self::ResourceGone => handler_not_found_detail(&record.type_name, identifier),
+            Self::ResourceExists => handler_already_exists_detail(&record.type_name, identifier),
             Self::Owning { detail, .. } => detail.clone(),
         }
     }
@@ -481,7 +479,7 @@ impl ComAmazonawsCloudcontrolCloudapiserviceState {
                         // actually happened rather than a success nothing performed.
                         record.operation_status = STATUS_FAILED.to_string();
                         record.error_code = Some(failure.error_code().to_string());
-                        record.status_message = Some(failure.status_message(&record, native));
+                        record.status_message = Some(failure.status_message(&record));
                     }
                 }
             } else {
@@ -601,14 +599,25 @@ impl ComAmazonawsCloudcontrolCloudapiserviceState {
         identifier: &str,
     ) -> Option<ResolvedResource> {
         if let Some(provider) = native.provider(type_name) {
-            return provider
-                .read(region, identifier)
-                .map(|properties| ResolvedResource {
+            let identifier_property = provider.identifier_property();
+            return provider.read(region, identifier).map(|properties| {
+                // A resource is reported under the primary identifier it HOLDS, read off
+                // the model's own identifier property, rather than under the reference the
+                // request addressed it by: a type whose owning service ASSIGNS the
+                // identifier resolves more than one reference to one resource, and every
+                // answer about it names the one value it answers to.
+                let own = properties
+                    .get(identifier_property)
+                    .and_then(Value::as_str)
+                    .unwrap_or(identifier)
+                    .to_string();
+                ResolvedResource {
                     type_name: type_name.to_string(),
-                    identifier: identifier.to_string(),
-                    identifier_property: provider.identifier_property().to_string(),
+                    identifier: own,
+                    identifier_property: identifier_property.to_string(),
                     properties,
-                });
+                }
+            });
         }
         self.resources
             .get(&ResourceKey::new(type_name, identifier))
@@ -664,6 +673,12 @@ impl ComAmazonawsCloudcontrolCloudapiserviceState {
     /// makes a second operation on the same resource the modelled concurrent-operation
     /// refusal — and whose `RequestToken` is what that refusal names, so the caller can
     /// poll the operation that holds the resource.
+    ///
+    /// A request is recorded under the identifier the resource ANSWERS TO
+    /// ([`Self::resolve`]), which for a type whose owning service assigns that identifier
+    /// is not the only reference a caller can address the resource by — so a caller that
+    /// addressed it by another of its references asks this under both
+    /// ([`Self::in_flight_request_on_either`]).
     pub fn in_flight_request(&self, type_name: &str, identifier: &str) -> Option<&str> {
         self.requests
             .values()
@@ -673,6 +688,28 @@ impl ComAmazonawsCloudcontrolCloudapiserviceState {
                     && record.identifier.as_deref() == Some(identifier)
             })
             .map(|record| record.request_token.as_str())
+    }
+
+    /// The request still running against the resource a caller addressed as `reference`
+    /// and which itself answers to `identifier`, with the identifier the guard matched it
+    /// under.
+    ///
+    /// The guard that admits ONE operation at a time has to be asked under both: a type
+    /// whose owning service ASSIGNS the primary identifier resolves more than one
+    /// reference to one resource, the running operation was recorded under the one
+    /// identifier that resource answers to, and a second operation naming another of its
+    /// references would otherwise not see it at all.
+    pub fn in_flight_request_on_either<'a>(
+        &'a self,
+        type_name: &str,
+        reference: &'a str,
+        identifier: &'a str,
+    ) -> Option<(&'a str, &'a str)> {
+        if let Some(holding) = self.in_flight_request(type_name, reference) {
+            return Some((reference, holding));
+        }
+        self.in_flight_request(type_name, identifier)
+            .map(|holding| (identifier, holding))
     }
 
     /// The request `request_token` names, or `None` when this store holds none.
@@ -1619,59 +1656,24 @@ const HANDLER_ALREADY_EXISTS_DIAGNOSTICS: &[(&str, &str)] = &[(
 /// The status code an owning service reports for a resource that is not there.
 const HANDLER_NOT_FOUND_STATUS: u16 = 404;
 
-/// How a resource-provider exception names the resource it is about: the type's PRIMARY
-/// IDENTIFIER, rendered the way the CloudFormation registry renders one — a JSON object
-/// mapping the type's `primaryIdentifier` pointer into its schema to the value the
-/// resource holds there.
-///
-/// A request may address a resource by its primary identifier as a bare string, but what
-/// the handler holds is the identifier the type DECLARES, so that is what its diagnostics
-/// name: the one rule both the not-found and the already-exists diagnostic word the
-/// resource by.
-///
-/// Only for a type whose primary identifier this emulator's registry KNOWS — the property
-/// the owning service's provider declares. For any other type the identifier is named as
-/// the request spelled it: this registry holds no `primaryIdentifier` for it, and naming a
-/// pointer the type's schema may not declare would name a property its resources do not
-/// carry.
-pub fn rendered_primary_identifier(
-    native: &NativeResources,
-    type_name: &str,
-    identifier: &str,
-) -> String {
-    let Some(provider) = native.provider(type_name) else {
-        return identifier.to_string();
-    };
-    let pointer = format!("{PROPERTY_POINTER_PREFIX}{}", provider.identifier_property());
-    Value::Object(::serde_json::Map::from_iter([(
-        pointer,
-        Value::String(identifier.to_string()),
-    )]))
-    .to_string()
-}
-
 /// How every operation of this service words "a resource with the specified identifier
-/// can't be found", with the type the request named and the resource's primary identifier
-/// as the registry renders one ([`rendered_primary_identifier`]).
-pub fn resource_not_found_message(type_name: &str, rendered_identifier: &str) -> String {
-    format!(
-        "Resource of type '{type_name}' with identifier '{rendered_identifier}' was not found."
-    )
+/// can't be found", with the type the request named and the resource's PRIMARY IDENTIFIER
+/// as a resource of that type is addressed by it.
+///
+/// A type whose `primaryIdentifier` names ONE property is addressed — and so named here —
+/// by that property's value alone, which is the identifier a request carries and the one
+/// every answer of this service reports. (Only a COMPOSITE primary identifier, whose value
+/// no single string spells, is named as the registry's pointer map; every type this
+/// emulator stands behind declares one property.)
+pub fn resource_not_found_message(type_name: &str, identifier: &str) -> String {
+    format!("Resource of type '{type_name}' with identifier '{identifier}' was not found.")
 }
 
 /// The diagnostic the handler that owns `type_name` states for a resource it cannot
 /// find.
-pub fn handler_not_found_detail(
-    native: &NativeResources,
-    type_name: &str,
-    identifier: &str,
-) -> String {
-    owning_not_found_detail(type_name).unwrap_or_else(|| {
-        resource_not_found_message(
-            type_name,
-            &rendered_primary_identifier(native, type_name, identifier),
-        )
-    })
+pub fn handler_not_found_detail(type_name: &str, identifier: &str) -> String {
+    owning_not_found_detail(type_name)
+        .unwrap_or_else(|| resource_not_found_message(type_name, identifier))
 }
 
 /// The OWNING SERVICE's own diagnostic for a resource it cannot find, or `None` for a type
@@ -1696,32 +1698,20 @@ fn owning_not_found_detail(type_name: &str) -> Option<String> {
     })
 }
 
-/// How a create words "the resource with the name requested already exists", with the
-/// resource's primary identifier as the registry renders one
-/// ([`rendered_primary_identifier`]).
-pub fn already_exists_message(type_name: &str, rendered_identifier: &str) -> String {
-    format!(
-        "Resource of type '{type_name}' with identifier '{rendered_identifier}' already exists."
-    )
+/// How a create words "the resource with the name requested already exists", naming the
+/// resource the same way a not-found does ([`resource_not_found_message`]).
+pub fn already_exists_message(type_name: &str, identifier: &str) -> String {
+    format!("Resource of type '{type_name}' with identifier '{identifier}' already exists.")
 }
 
 /// The diagnostic the handler that owns `type_name` states for a create whose resource is
 /// already there.
-pub fn handler_already_exists_detail(
-    native: &NativeResources,
-    type_name: &str,
-    identifier: &str,
-) -> String {
+pub fn handler_already_exists_detail(type_name: &str, identifier: &str) -> String {
     HANDLER_ALREADY_EXISTS_DIAGNOSTICS
         .iter()
         .find(|(name, _)| *name == type_name)
         .map(|(_, sentence)| (*sentence).to_string())
-        .unwrap_or_else(|| {
-            already_exists_message(
-                type_name,
-                &rendered_primary_identifier(native, type_name, identifier),
-            )
-        })
+        .unwrap_or_else(|| already_exists_message(type_name, identifier))
 }
 
 /// How a SYNCHRONOUS refusal carries a handler verdict: the owning handler's own
@@ -1768,14 +1758,10 @@ pub fn handler_failure_message(
 /// The token is minted here because the handler invocation this refusal reports IS this
 /// call: nothing was accepted, so there is no resource operation request to poll and no
 /// record for the token to name.
-pub fn resource_not_found_refusal(
-    native: &NativeResources,
-    type_name: &str,
-    identifier: &str,
-) -> String {
+pub fn resource_not_found_refusal(type_name: &str, identifier: &str) -> String {
     handler_failure_message(
         type_name,
-        &handler_not_found_detail(native, type_name, identifier),
+        &handler_not_found_detail(type_name, identifier),
         HANDLER_ERROR_NOT_FOUND,
         &mint_token(),
     )

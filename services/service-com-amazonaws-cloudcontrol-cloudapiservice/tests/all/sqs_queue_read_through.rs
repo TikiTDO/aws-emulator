@@ -645,6 +645,158 @@ async fn a_queue_cloud_control_deletes_is_gone_from_the_owning_service() {
     }
 }
 
+/// RULE: a resource of this type is addressed by every reference the type's schema
+/// declares — its `primaryIdentifier` `/properties/QueueUrl`, the url the owning service
+/// assigned, and its `additionalIdentifiers` `/properties/Arn` and `/properties/QueueName`
+/// — each resolving to the one queue it names; whichever reference addressed it, every
+/// answer names the resource by the url it answers to.
+///
+/// The rows differ along the reference form (the assigned url, the ARN, the bare name) and
+/// are driven through every resource operation that addresses one: the read, the patch and
+/// the delete.
+#[tokio::test]
+async fn a_queue_is_addressed_by_its_url_and_by_its_name() {
+    let emulator = Emulator::with_sqs();
+    let patch = json!([{ "op": "add", "path": "/VisibilityTimeout", "value": 45 }]);
+
+    for (case, name, reference_of) in [
+        (
+            "the url the owning service assigned",
+            "addressed-by-url",
+            (|name: &str| queue_url(name)) as fn(&str) -> String,
+        ),
+        (
+            "the queue's own ARN",
+            "addressed-by-arn",
+            (|name: &str| queue_arn(name)) as fn(&str) -> String,
+        ),
+        (
+            "the queue's own name",
+            "addressed-by-name",
+            |name: &str| name.to_string(),
+        ),
+    ] {
+        let url = create_native(&emulator, name, &json!({})).await;
+        let reference = reference_of(name);
+
+        // The read resolves the queue and reports it under its own url.
+        let (status, body) = emulator.get(QUEUE, &reference).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: GetResource must resolve {reference:?}, got {status} with body \
+             {body:?}"
+        );
+        assert_eq!(
+            text(&body["ResourceDescription"], "Identifier"),
+            url,
+            "case {case:?}: expected the resource to be named by its own url, got {body:?}"
+        );
+        let reported = properties_of(&body["ResourceDescription"]);
+        assert_eq!(
+            reported["QueueUrl"],
+            json!(url),
+            "case {case:?}: the model must carry the url it answers to, got {reported:?}"
+        );
+
+        // The patch reaches the same queue: the owning service reports the new value.
+        let (status, body) = emulator.update(QUEUE, &reference, &patch, None).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: UpdateResource must accept {reference:?}, got {status} with body \
+             {body:?}"
+        );
+        let settled = emulator
+            .settled(&text(&progress(&body), "RequestToken"))
+            .await;
+        assert_eq!(
+            text(&settled, "OperationStatus"),
+            STATUS_SUCCESS,
+            "case {case:?}: the patch must succeed, got {settled:?}"
+        );
+        let carried = native_attribute(&emulator, &url, "VisibilityTimeout").await;
+        assert_eq!(
+            carried.as_deref(),
+            Some("45"),
+            "case {case:?}: expected Amazon SQS to report the patched value, got {carried:?}"
+        );
+
+        // And the delete removes it from the owning service, which no longer holds it.
+        emulator.delete_and_settle(QUEUE, &reference).await;
+        let (status, body) = emulator.get(QUEUE, &url).await;
+        assert_eq!(
+            status, 404,
+            "case {case:?}: the deleted queue must be gone, got {status} with body {body:?}"
+        );
+    }
+}
+
+/// RULE: the guard that admits ONE operation at a time is about the RESOURCE, not about
+/// the reference a caller addressed it by: an operation started under one of a queue's two
+/// references holds the queue against an operation that arrives under the other, which is
+/// the modelled `ConcurrentOperationException` (HTTP 409) naming the request that holds it.
+///
+/// The rows differ along which reference starts the operation and which one contends for
+/// it, and along which operation contends (an update, a delete).
+#[tokio::test]
+async fn an_operation_started_under_one_reference_holds_the_queue_against_the_other() {
+    let emulator = Emulator::with_sqs();
+    let patch = json!([{ "op": "add", "path": "/VisibilityTimeout", "value": 45 }]);
+
+    for (case, name, start_url_first) in [
+        ("started under the url, contended by the name", "held-by-url", true),
+        ("started under the name, contended by the url", "held-by-name", false),
+    ] {
+        let url = create_native(&emulator, name, &json!({})).await;
+        let (starts, contends) = match start_url_first {
+            true => (url.clone(), name.to_string()),
+            false => (name.to_string(), url.clone()),
+        };
+
+        // The patch is accepted and still running: nothing is settled yet.
+        let (status, body) = emulator.update(QUEUE, &starts, &patch, None).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: the first operation must be accepted, got {status} with body \
+             {body:?}"
+        );
+        let holding = text(&progress(&body), "RequestToken");
+
+        for (operation, (status, body)) in [
+            (
+                "UpdateResource",
+                emulator.update(QUEUE, &contends, &patch, None).await,
+            ),
+            ("DeleteResource", emulator.delete(QUEUE, &contends).await),
+        ] {
+            assert_eq!(
+                status, 409,
+                "case {case:?} ({operation}): expected the contention refusal for \
+                 {contends:?}, got {status} with body {body:?}"
+            );
+            assert!(
+                code(&body).contains("ConcurrentOperationException"),
+                "case {case:?} ({operation}): expected ConcurrentOperationException, got {:?}",
+                code(&body)
+            );
+            assert!(
+                message(&body).contains(&holding),
+                "case {case:?} ({operation}): the refusal must name the request that holds \
+                 the resource ({holding}), got {:?}",
+                message(&body)
+            );
+        }
+
+        // Once the holding operation has settled, the other reference is served again.
+        emulator.settled(&holding).await;
+        let (status, body) = emulator.get(QUEUE, &contends).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: the settled queue must read back under {contends:?}, got \
+             {status} with body {body:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn an_identifier_no_queue_answers_to_is_refused_as_not_found() {
     let emulator = Emulator::with_sqs();
@@ -653,9 +805,9 @@ async fn an_identifier_no_queue_answers_to_is_refused_as_not_found() {
     create_native(&emulator, "not-found-control", &json!({})).await;
 
     // The rows differ along what the identifier is: a well-formed url of this account and
-    // Region naming a queue nothing created, one naming a queue of another account, and a
-    // value that is no queue url at all — including the queue's NAME, which is not this
-    // type's primary identifier.
+    // Region naming a queue nothing created, one naming a queue of another account, an ARN
+    // of another account, a name no queue of this Region carries, and a value that is no
+    // reference of this type at all.
     let identifiers = [
         (
             "a well-formed url nothing created",
@@ -666,8 +818,12 @@ async fn an_identifier_no_queue_answers_to_is_refused_as_not_found() {
             "https://sqs.us-east-1.amazonaws.com/123456789012/not-found-control".to_string(),
         ),
         (
-            "the name of a queue that exists",
-            "not-found-control".to_string(),
+            "an ARN of another account",
+            "arn:aws:sqs:us-east-1:123456789012:not-found-control".to_string(),
+        ),
+        (
+            "the name of a queue nothing created",
+            "not-found-by-name".to_string(),
         ),
         ("a value that is no url at all", "not a url".to_string()),
     ];

@@ -469,6 +469,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     header,
                     crate::state::OBJECT_TAG_SET_LIMITS,
                     crate::state::tag_key_origin(ctx),
+                    // A write states the whole tag set of a NEW object, so there is no set
+                    // in force for it to leave a reserved key as it is.
+                    &[],
                 ) {
                     Ok(tags) => tags,
                     Err(rejection) => {

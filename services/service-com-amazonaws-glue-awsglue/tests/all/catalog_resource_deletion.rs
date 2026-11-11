@@ -303,6 +303,67 @@ async fn deleting_an_unknown_catalog_is_refused() {
     }
 }
 
+/// An id ADDRESSES a catalog, so it is resolved against the store and answered with the
+/// modelled `EntityNotFoundException` when nothing is stored under it — on both the delete
+/// and the read — even for an id outside the grammar a create's `Name` has to satisfy
+/// (`CatalogNameString`'s pattern, which forbids the three path separators and the `aws:`
+/// prefix). Such an id is an address like any other: `CatalogIdString` admits it, and the
+/// nested ids the Data Catalog itself publishes (`s3tablescatalog/<bucket>`) are spelled
+/// with exactly those characters.
+///
+/// The rows differ along which character takes the id outside the name grammar and where
+/// the id carries it, and along whether the id names this account explicitly.
+#[tokio::test]
+async fn an_id_outside_the_name_grammar_is_a_miss_and_not_a_malformed_request() {
+    let router = emulator();
+    create(&router, &create_request("stored-catalog", json!({}))).await;
+
+    for (case, catalog_id) in [
+        ("a dot inside the id", "my.catalog".to_string()),
+        ("a dot at the end", "catalog.".to_string()),
+        ("a dot at the start", ".catalog".to_string()),
+        (
+            "the nested form the Data Catalog publishes",
+            "s3tablescatalog/analytics".to_string(),
+        ),
+        ("a backslash", "my\\catalog".to_string()),
+        ("the reserved prefix", "aws:catalog".to_string()),
+        (
+            "this account and a nested name",
+            format!("{ACCOUNT_ID}:s3tablescatalog/analytics"),
+        ),
+    ] {
+        for (surface, (status, body)) in [
+            ("DeleteCatalog", delete(&router, &catalog_id).await),
+            ("GetCatalog", get(&router, &catalog_id).await),
+        ] {
+            assert_eq!(
+                status, 400,
+                "case {case} on {surface}: expected 400 for {catalog_id:?}, got {status} \
+                 with {body}"
+            );
+            assert!(
+                error_code(&body).contains("EntityNotFoundException"),
+                "case {case} on {surface}: expected EntityNotFoundException for \
+                 {catalog_id:?}, got {body}"
+            );
+            assert_eq!(
+                error_message(&body),
+                "Catalog not found.",
+                "case {case} on {surface}: expected the catalog miss wording for \
+                 {catalog_id:?}, got {body}"
+            );
+        }
+    }
+
+    // Nothing the refusals touched was removed: the stored catalog still reads back.
+    let (status, body) = get(&router, "stored-catalog").await;
+    assert_eq!(
+        status, 200,
+        "the refused calls must have removed nothing, got {status} with {body}"
+    );
+}
+
 /// A catalog in ANOTHER account's Data Catalog is refused as unauthorized rather than as
 /// a miss, before any lookup: it is reachable on the real service only through that
 /// catalog's own resource-based policy, and this store can hold no such grant. The rows
