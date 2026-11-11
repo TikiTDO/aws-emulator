@@ -5,16 +5,16 @@
 //! Reports the column statistics of ONE stored table: "retrieves table statistics of
 //! columns" — the `ColumnStatistics` [`crate::state`] holds for the columns the request
 //! names ([`crate::state::TableEntry::column_statistics`]), which are the statistics a
-//! column statistics task run generated from the data behind the table
-//! (`StartColumnStatisticsTaskRun`).
+//! write stored for a column (`UpdateColumnStatisticsForTable`) or a column statistics
+//! task run generated from the data behind the table (`StartColumnStatisticsTaskRun`).
 //!
 //! A reporting operation, so the only write it makes is the one the CLOCK already owed:
 //! the terminal status a column statistics task run was due at its own instant, whose
 //! settling is what publishes that run's statistics onto the table
 //! ([`crate::state::ComAmazonawsGlueAwsglueState::settle_due_column_statistics_task_runs`]).
-//! A column the table declares but nothing has generated statistics for is simply not in
-//! the answer; a name the table declares no column under is reported in `Errors`, "a column
-//! name that failed and the reason for failure".
+//! It is a PARTIAL-SUCCESS read: a requested column the catalog holds no statistics for
+//! does not fail the call but is reported in `Errors`, "a column name that failed and the
+//! reason for failure".
 //!
 //! ## Shape of an operation
 //!
@@ -203,35 +203,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // caller reads the answer against its own list. A name asked for twice is answered
         // twice: nothing of the request is rewritten here.
         //
-        // Which names the table declares a column under is read once, folded the way the
-        // catalog addresses a column name.
-        let declared: Vec<String> = crate::state::table_column_names(table)
-            .iter()
-            .map(|name| crate::state::fold_name(name))
-            .collect();
+        // This is a PARTIAL-SUCCESS read: a requested column the catalog holds statistics
+        // for is answered with them, and one it holds none for is named in `Errors`
+        // ([`crate::state::column_statistics_not_found_error`]) — so every requested column
+        // is accounted for in exactly one of the two lists, and the status stays 200 either
+        // way.
         let mut statistics: Vec<ColumnStatistics> = Vec::new();
         let mut errors: Vec<ColumnError> = Vec::new();
         for name in &input.column_names {
-            let folded = crate::state::fold_name(name);
-            if let Some(stored) = table.column_statistics.get(&folded) {
-                statistics.push(stored.clone());
-                continue;
+            match crate::state::stored_column_statistics(table, name) {
+                Some(stored) => statistics.push(stored.clone()),
+                None => errors.push(crate::state::column_statistics_not_found_error(name)),
             }
-            // A column the table HAS but nothing has generated statistics for has no
-            // entry and no failure either: there is nothing to retrieve for it yet.
-            if declared.contains(&folded) {
-                continue;
-            }
-            errors.push(ColumnError {
-                column_name: Some(name.clone()),
-                // Built the way every per-item failure of this catalog is, so the
-                // `__type` tag the Data Catalog writes onto a nested `ErrorDetail` is on
-                // this one too.
-                error: Some(crate::state::catalog_error_detail(
-                    COLUMN_NOT_FOUND_ERROR_CODE,
-                    crate::state::messages::column_not_found(name, &input.table_name),
-                )),
-            });
         }
 
         Ok(GetColumnStatisticsForTableOutput {
@@ -242,12 +225,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })
     }
 }
-
-/// The `ErrorDetail$ErrorCode` a requested name the table declares no column under is
-/// reported with: the service's own name for an entity that does not exist, which is the
-/// error class this operation models for a resource it cannot resolve
-/// (`EntityNotFoundException`, "a specified entity does not exist").
-const COLUMN_NOT_FOUND_ERROR_CODE: &str = "EntityNotFoundException";
 
 /// This operation's modelled miss: "A specified entity does not exist".
 fn not_found(message: String) -> GetColumnStatisticsForTableError {

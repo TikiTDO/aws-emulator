@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateColumnStatisticsForTable
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateColumnStatisticsForTable`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateColumnStatisticsForTable::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Stores the column statistics of ONE stored table: "creates or updates table statistics
+//! of columns" — each submitted `ColumnStatistics` is persisted against the resolved
+//! catalog, database, table and the column it names
+//! ([`crate::state::TableEntry::column_statistics`]), so a later read of that column
+//! (`GetColumnStatisticsForTable`) answers with exactly what was stored.
+//!
+//! A PARTIAL-SUCCESS write, like the read it feeds: an entry the catalog cannot store is
+//! reported in `Errors` (`ColumnStatisticsError`, "encapsulates a `ColumnStatistics` object
+//! that failed and the reason for failure") while the rest of the list is stored, and the
+//! status stays 200. The table itself is resolved first, because statistics are addressed
+//! THROUGH it: a database or a table the catalog does not hold is the operation's own
+//! modelled miss.
 //!
 //! ## Shape of an operation
 //!
@@ -152,20 +156,139 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateColumnStatisticsForTable` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateColumnStatisticsForTableErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateColumnStatisticsForTable"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                UpdateColumnStatisticsForTableErrorModeled::InternalServiceException(
+                    InternalServiceException {
+                        message: Some("the Glue Data Catalog store is unavailable".into()),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // This store holds only the Data Catalog of the account it serves, so a
+        // `CatalogId` of another account resolves to no catalog here and the write is the
+        // catalog's own miss below.
+        let catalog_id = crate::state::resolve_catalog_id(input.catalog_id.as_ref());
+        let mut store = state.lock();
+
+        // `DatabaseName`, `TableName` and `ColumnStatisticsList` are `@required`, and the
+        // list's `length 0..25` is refused at the boundary — so reaching here, the only
+        // question is what the catalog holds under those names.
+        let Some(database) = store.database_mut(&catalog_id, &input.database_name) else {
+            return Err(not_found(crate::state::messages::database_not_found(
+                &input.database_name,
+            )));
+        };
+        let Some(table) = database
+            .tables
+            .get_mut(&crate::state::fold_name(&input.table_name))
+        else {
+            // The miss the catalog's own table WRITES answer with: the statistics of a
+            // table are addressed through that table, and "the IAM permission required for
+            // this operation is UpdateTable".
+            return Err(not_found(crate::state::messages::table_not_found(
+                &input.table_name,
+            )));
+        };
+
+        // The list is walked in the order it was sent, so an entry naming a column an
+        // earlier entry already named supersedes it, exactly as a later call supersedes an
+        // earlier one. Every entry is either stored or reported; none is silently dropped.
+        let mut errors: Vec<ColumnStatisticsError> = Vec::new();
+        for stated in &input.column_statistics_list {
+            if let Some(member) =
+                crate::state::missing_statistics_data_member(&stated.statistics_data)
+            {
+                errors.push(refused(
+                    stated,
+                    UNUSABLE_STATISTICS_DATA_ERROR_CODE,
+                    crate::state::messages::column_statistics_data_member_missing(
+                        &stated.statistics_data.r#type,
+                        member,
+                    ),
+                ));
+                continue;
+            }
+            // The store is resident memory and this write is reachable by any caller, so
+            // the columns one table keeps statistics for are bounded: an entry for a
+            // further column is reported rather than inserted, while one the table already
+            // holds statistics for is replaced whatever the count.
+            if crate::state::column_statistics_at_capacity(table, &stated.column_name) {
+                errors.push(refused(
+                    stated,
+                    STATISTICS_LIMIT_ERROR_CODE,
+                    crate::state::messages::column_statistics_limit_exceeded(
+                        crate::state::MAX_COLUMN_STATISTICS_PER_TABLE,
+                    ),
+                ));
+                continue;
+            }
+            // Stored exactly as submitted — the column's name, its declared type, the
+            // instant the caller states the statistics were generated and the figures
+            // themselves — so a read answers with what this write recorded.
+            crate::state::store_column_statistics(table, stated.clone());
+        }
+
+        ::tracing::info!(
+            operation = "UpdateColumnStatisticsForTable",
+            catalog_id = %catalog_id,
+            database = %input.database_name,
+            table = %input.table_name,
+            stored = input.column_statistics_list.len() - errors.len(),
+            failed = errors.len(),
+            "stored the column statistics of a Data Catalog table"
+        );
+
+        Ok(UpdateColumnStatisticsForTableOutput {
+            // Always definite: an empty list is the answer that every submitted entry was
+            // stored.
+            errors: Some(errors),
+        })
     }
+}
+
+/// The `ErrorDetail$ErrorCode` an entry whose `StatisticsData` does not carry the figures
+/// its own `Type` names is reported with: of the errors this operation models, the one for
+/// a request the service will not accept (`InvalidInputException`, "the input provided was
+/// not valid") — such an entry states no statistics the catalog could store.
+const UNUSABLE_STATISTICS_DATA_ERROR_CODE: &str = "InvalidInputException";
+
+/// The `ErrorDetail$ErrorCode` an entry the store has no room for is reported with: this
+/// service's own name for a ceiling that was reached, the one its creates raise when a
+/// container is full (`ResourceNumberLimitExceededException`), reported per item here
+/// because this write reports every entry it could not store that way.
+const STATISTICS_LIMIT_ERROR_CODE: &str = "ResourceNumberLimitExceededException";
+
+/// One entry of the submitted list the catalog did not store, as `Errors` reports it.
+///
+/// "Encapsulates a `ColumnStatistics` object that failed and the reason for failure": the
+/// entry exactly as sent, so the caller can tell which of its entries this is about, and a
+/// detail built where every per-item failure of this catalog is built
+/// (`crate::state::catalog_error_detail`) so the `__type` tag the Data Catalog writes onto a
+/// nested `ErrorDetail` is on this one too.
+fn refused(
+    stated: &ColumnStatistics,
+    error_code: &str,
+    error_message: String,
+) -> ColumnStatisticsError {
+    ColumnStatisticsError {
+        column_statistics: Some(stated.clone()),
+        error: Some(crate::state::catalog_error_detail(
+            error_code,
+            error_message,
+        )),
+    }
+}
+
+/// This operation's modelled miss: "A specified entity does not exist".
+fn not_found(message: String) -> UpdateColumnStatisticsForTableError {
+    UpdateColumnStatisticsForTableErrorModeled::EntityNotFoundException(EntityNotFoundException {
+        message: Some(message),
+        from_federation_source: None,
+    })
+    .into()
 }

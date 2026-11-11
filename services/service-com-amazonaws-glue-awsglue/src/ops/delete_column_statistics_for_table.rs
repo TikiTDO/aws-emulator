@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteColumnStatisticsForTable
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteColumnStatisticsForTable`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteColumnStatisticsForTable::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Drops the statistics the catalog holds for ONE column of ONE stored table: the entry
+//! `UpdateColumnStatisticsForTable` stored, or a column statistics task run generated,
+//! against the resolved catalog, database, table and column
+//! ([`crate::state::TableEntry::column_statistics`]) — so a later read of that column
+//! (`GetColumnStatisticsForTable`) reports it in `Errors` again.
+//!
+//! This delete addresses ONE column (`ColumnName`, `@required`), so unlike the read it has
+//! no per-column channel: a column the catalog holds no statistics for is the operation's
+//! own modelled miss (`EntityNotFoundException`, "a specified entity does not exist" — the
+//! only error this operation models for a thing that does not resolve), worded with the
+//! sentence the read reports such a column with. That refusal is NOT recorded for this
+//! operation: what IS recorded is the read's wording, which is reused here rather than a
+//! second sentence being invented for one condition.
 //!
 //! ## Shape of an operation
 //!
@@ -149,20 +154,70 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteColumnStatisticsForTable` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteColumnStatisticsForTableErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteColumnStatisticsForTable"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                DeleteColumnStatisticsForTableErrorModeled::InternalServiceException(
+                    InternalServiceException {
+                        message: Some("the Glue Data Catalog store is unavailable".into()),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // This store holds only the Data Catalog of the account it serves, so a
+        // `CatalogId` of another account resolves to no catalog here and the delete is the
+        // catalog's own miss below.
+        let catalog_id = crate::state::resolve_catalog_id(input.catalog_id.as_ref());
+        let mut store = state.lock();
+
+        // Every addressing member is `@required` with `length 1..255`, so reaching here the
+        // only question is what the catalog holds under those names.
+        let Some(database) = store.database_mut(&catalog_id, &input.database_name) else {
+            return Err(not_found(crate::state::messages::database_not_found(
+                &input.database_name,
+            )));
+        };
+        let Some(table) = database
+            .tables
+            .get_mut(&crate::state::fold_name(&input.table_name))
+        else {
+            // The miss the catalog's own table WRITES answer with: the statistics of a
+            // table are addressed through that table, and "the IAM permission required for
+            // this operation is DeleteTable".
+            return Err(not_found(crate::state::messages::table_not_found(
+                &input.table_name,
+            )));
+        };
+
+        // Taking the entry out IS the delete; a table holding no statistics for that column
+        // held nothing to delete, so the catalog's own wording for a column without
+        // statistics is reported and the table is left exactly as it was.
+        if crate::state::remove_column_statistics(table, &input.column_name).is_none() {
+            return Err(not_found(
+                crate::state::messages::COLUMN_STATISTICS_NOT_FOUND.to_string(),
+            ));
+        }
+        ::tracing::info!(
+            operation = "DeleteColumnStatisticsForTable",
+            catalog_id = %catalog_id,
+            database = %input.database_name,
+            table = %input.table_name,
+            column = %input.column_name,
+            "deleted the column statistics of a Data Catalog table column"
+        );
+
+        Ok(DeleteColumnStatisticsForTableOutput {})
     }
+}
+
+/// This operation's modelled miss: "A specified entity does not exist".
+fn not_found(message: String) -> DeleteColumnStatisticsForTableError {
+    DeleteColumnStatisticsForTableErrorModeled::EntityNotFoundException(EntityNotFoundException {
+        message: Some(message),
+        from_federation_source: None,
+    })
+    .into()
 }

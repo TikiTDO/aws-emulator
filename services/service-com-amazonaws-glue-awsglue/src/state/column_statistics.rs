@@ -290,6 +290,76 @@ pub fn table_column_names(table: &TableEntry) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The statistics the catalog holds for ONE column of a stored table, or `None` when it
+/// holds none for that column.
+///
+/// ONE lookup, so every operation that addresses a column's statistics — the read, the
+/// write and the delete — resolves a column name the same way: folded, because the catalog
+/// addresses a column name without regard to case
+/// ([`TableEntry::column_statistics`]).
+pub fn stored_column_statistics<'a>(
+    table: &'a TableEntry,
+    column_name: &str,
+) -> Option<&'a ColumnStatistics> {
+    table.column_statistics.get(&fold_name(column_name))
+}
+
+/// Store `statistics` as the statistics of the column they name, replacing whatever the
+/// table held for that column: there is at most one entry per column
+/// ([`TableEntry::column_statistics`]), so a later write of the same column supersedes the
+/// earlier one.
+pub fn store_column_statistics(table: &mut TableEntry, statistics: ColumnStatistics) {
+    table
+        .column_statistics
+        .insert(fold_name(&statistics.column_name), statistics);
+}
+
+/// Whether storing statistics for this column would take the table past
+/// [`MAX_COLUMN_STATISTICS_PER_TABLE`].
+///
+/// Only a column the table holds NO statistics for yet can reach the ceiling: one it
+/// already holds is replaced rather than added, so a client that refreshes the statistics
+/// it stored is never refused.
+pub fn column_statistics_at_capacity(table: &TableEntry, column_name: &str) -> bool {
+    stored_column_statistics(table, column_name).is_none()
+        && table.column_statistics.len() >= MAX_COLUMN_STATISTICS_PER_TABLE
+}
+
+/// Take the statistics the catalog holds for one column of a stored table out of it,
+/// answering `None` when it held none — in which case nothing is removed.
+pub fn remove_column_statistics(
+    table: &mut TableEntry,
+    column_name: &str,
+) -> Option<ColumnStatistics> {
+    table.column_statistics.remove(&fold_name(column_name))
+}
+
+/// The `ErrorDetail$ErrorCode` the catalog reports a column it holds no statistics for
+/// under: the service's own name for an entity that does not exist, which is the error
+/// class every statistics operation models for a thing it cannot resolve
+/// (`EntityNotFoundException`, "a specified entity does not exist").
+pub const COLUMN_STATISTICS_NOT_FOUND_ERROR_CODE: &str = "EntityNotFoundException";
+
+/// The per-column failure a statistics read reports for a requested column the catalog
+/// holds no statistics for: the column's own name, and the detail that says why it was not
+/// satisfied ([`messages::COLUMN_STATISTICS_NOT_FOUND`]).
+///
+/// The read is a PARTIAL-SUCCESS operation — it answers the columns it could satisfy and
+/// names the rest in `Errors` — so this is how an unsatisfied column reaches the caller,
+/// built where every per-item failure of this catalog is built
+/// ([`catalog_error_detail`]) so the `__type` tag the Data Catalog writes onto a nested
+/// `ErrorDetail` is on this one too. `column_name` is the name the REQUEST asked for,
+/// spelled as it sent it.
+pub fn column_statistics_not_found_error(column_name: &str) -> ColumnError {
+    ColumnError {
+        column_name: Some(column_name.to_string()),
+        error: Some(catalog_error_detail(
+            COLUMN_STATISTICS_NOT_FOUND_ERROR_CODE,
+            messages::COLUMN_STATISTICS_NOT_FOUND.to_string(),
+        )),
+    }
+}
+
 /// `ColumnStatisticsTaskSettings$ScheduleType` of settings created with a `Schedule`: of
 /// the modelled `ScheduleType` (`CRON | AUTO`), the cron one, because the schedule those
 /// settings carry IS a cron expression ("A schedule for running the column statistics,

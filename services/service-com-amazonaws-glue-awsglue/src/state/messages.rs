@@ -1053,15 +1053,43 @@ pub fn column_statistics_task_run_not_found(run_id: &str) -> String {
     format!("Column statistics task run with id {run_id} does not exist")
 }
 
-/// A column statistics read (`GetColumnStatisticsForTable`) for a name the addressed
-/// table declares no column under: the `ErrorDetail$ErrorMessage` of that name's entry
-/// in `Errors`, "a column name that failed and the reason for failure".
+/// A column of a stored table the catalog holds NO statistics for: the
+/// `ErrorDetail$ErrorMessage` of that column's entry in a statistics read's `Errors`
+/// ("a column name that failed and the reason for failure"), and the `Message` of the
+/// miss an operation that addresses one single column answers with.
 ///
-/// NOT recorded: the sentence follows the per-resource template of the recorded misses
-/// above, built from the column the request asked for and the table it addressed —
-/// which are what the caller needs to tell a mistyped column from one the table has.
-pub fn column_not_found(column_name: &str, table_name: &str) -> String {
-    format!("Column {column_name} does not exist in table {table_name}.")
+/// RECORDED constant for the READ's per-column entry, and the whole sentence: it
+/// interpolates nothing — not the column, not the table, not the database — so the one
+/// string is the wording wherever the catalog reports that a column has no statistics. The
+/// column it is about travels in `ColumnError$ColumnName`, which is where the surface puts
+/// it.
+///
+/// The single-column DELETE's own refusal is NOT recorded: it has no per-column channel to
+/// report in, so it raises the modelled miss of an entity that does not exist, worded with
+/// this same sentence rather than a second one invented for it.
+pub const COLUMN_STATISTICS_NOT_FOUND: &str = "Statistics do not exist for this column";
+
+/// One entry of a column statistics write (`UpdateColumnStatisticsForTable`) whose
+/// `StatisticsData` does not carry the figures its own `Type` names: the
+/// `ErrorDetail$ErrorMessage` of that entry's place in `Errors`.
+///
+/// NOT recorded: the sentence states the stated type and the `ColumnStatisticsData`
+/// member that type's figures belong in — "only one data object should be set and
+/// indicated by the `Type` attribute" — which is what the caller has to send for the
+/// entry to be accepted. Both parts are read off the request.
+pub fn column_statistics_data_member_missing(statistics_type: &str, member: &str) -> String {
+    format!("ColumnStatisticsData of type {statistics_type} must carry {member}.")
+}
+
+/// A column statistics write for a column past the number of columns this store keeps
+/// statistics for ([`super::MAX_COLUMN_STATISTICS_PER_TABLE`]): the
+/// `ErrorDetail$ErrorMessage` of that entry's place in `Errors`.
+///
+/// NOT recorded, because the ceiling is this emulator's own capacity rather than an AWS
+/// quota: the sentence follows the wording of the other capacity refusals of this crate and
+/// states the ceiling that was reached.
+pub fn column_statistics_limit_exceeded(limit: usize) -> String {
+    format!("the table already holds the maximum of {limit} column statistics")
 }
 
 /// A column statistics task settings read (`GetColumnStatisticsTaskSettings`) for a

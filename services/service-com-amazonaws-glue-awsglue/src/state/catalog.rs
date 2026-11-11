@@ -653,10 +653,15 @@ pub struct TableEntry {
     /// case; the declared spelling travels inside the entry. Ordered, so a reader has one
     /// deterministic order.
     ///
-    /// Written when a column statistics task run SETTLES
+    /// Written by the statistics WRITE of a table (`UpdateColumnStatisticsForTable`, which
+    /// "creates or updates table statistics of columns"), and when a column statistics task
+    /// run SETTLES
     /// ([`ComAmazonawsGlueAwsglueState::settle_due_column_statistics_task_runs`]): the
-    /// statistics a table carries are the ones a run computed from the data behind it, so a
-    /// table nothing has run over carries none.
+    /// statistics a table carries are the ones a client stored for it or a run computed from
+    /// the data behind it, so a table neither has happened to carries none. Reached through
+    /// [`stored_column_statistics`], [`store_column_statistics`] and
+    /// [`remove_column_statistics`], so one keying rule serves every operation that
+    /// addresses them.
     pub column_statistics: BTreeMap<String, ColumnStatistics>,
     /// The TABLE OPTIMIZERS of this table — "an optimizer associated with a table"
     /// (`TableOptimizer`) — keyed by the `TableOptimizerType` each one is of.

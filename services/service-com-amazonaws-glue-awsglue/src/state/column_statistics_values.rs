@@ -80,6 +80,54 @@ pub fn column_statistics_type_of(column_type: &str) -> Option<&'static str> {
     }
 }
 
+/// The `ColumnStatisticsData` member the figures of `data` belong in and which `data` does
+/// NOT carry, as the model names that member — or `None` when the figures its own `Type`
+/// names are there.
+///
+/// "Contains the individual types of column statistics data. Only one data object should be
+/// set and indicated by the `Type` attribute" (`ColumnStatisticsData`), so the
+/// discriminator selects WHICH member has to carry the figures, and a structure whose
+/// selected member is absent states no statistics at all. `Type` is the modelled
+/// `ColumnStatisticsType`, which the request layer validates a submitted value against, so
+/// a value naming no member of the shape does not reach here.
+///
+/// ONE place that pairs a `ColumnStatisticsType` with its member, so a write that refuses
+/// an entry names the same member a reader would have read the figures out of.
+pub fn missing_statistics_data_member(data: &ColumnStatisticsData) -> Option<&'static str> {
+    let (member, stated) = match data.r#type.as_str() {
+        COLUMN_STATISTICS_TYPE_BOOLEAN => (
+            "BooleanColumnStatisticsData",
+            data.boolean_column_statistics_data.is_some(),
+        ),
+        COLUMN_STATISTICS_TYPE_DATE => (
+            "DateColumnStatisticsData",
+            data.date_column_statistics_data.is_some(),
+        ),
+        COLUMN_STATISTICS_TYPE_DECIMAL => (
+            "DecimalColumnStatisticsData",
+            data.decimal_column_statistics_data.is_some(),
+        ),
+        COLUMN_STATISTICS_TYPE_DOUBLE => (
+            "DoubleColumnStatisticsData",
+            data.double_column_statistics_data.is_some(),
+        ),
+        COLUMN_STATISTICS_TYPE_LONG => (
+            "LongColumnStatisticsData",
+            data.long_column_statistics_data.is_some(),
+        ),
+        COLUMN_STATISTICS_TYPE_STRING => (
+            "StringColumnStatisticsData",
+            data.string_column_statistics_data.is_some(),
+        ),
+        COLUMN_STATISTICS_TYPE_BINARY => (
+            "BinaryColumnStatisticsData",
+            data.binary_column_statistics_data.is_some(),
+        ),
+        _ => return None,
+    };
+    (!stated).then_some(member)
+}
+
 /// The statistics of ONE column, as a run computed them over the table's data.
 ///
 /// Held apart from the modelled `ColumnStatistics` because that shape carries

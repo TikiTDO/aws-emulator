@@ -34,6 +34,7 @@ use std::sync::Arc;
 use aws_smithy_types::date_time::Format;
 use aws_smithy_types::DateTime;
 use serde_json::{json, Value};
+use service_com_amazonaws_glue_awsglue::state::messages::COLUMN_STATISTICS_NOT_FOUND;
 use service_com_amazonaws_glue_awsglue::state::{
     column_statistics_task_run_unreadable_data, COLUMN_STATISTICS_TASK_RUN_NO_TABLE_LOCATION,
     COLUMN_STATISTICS_TASK_RUN_STATE_FAILED, COLUMN_STATISTICS_TASK_RUN_STATE_STARTING,
@@ -996,8 +997,9 @@ async fn a_later_run_replaces_the_statistics_of_the_columns_it_covers() {
 }
 
 /// Only the columns the run COVERS get statistics, and only the columns that HAVE them are
-/// reported: a column the run did not cover has none, and a name the table declares no
-/// column under is reported in `Errors`.
+/// reported: every other requested column — one the run did not cover as much as a name the
+/// table declares no column under — is reported in `Errors`, because the catalog holds no
+/// statistics for it.
 #[tokio::test]
 async fn statistics_cover_the_columns_the_run_named_and_errors_name_the_rest() {
     let (router, engine) = emulator_with_s3();
@@ -1052,27 +1054,27 @@ async fn statistics_cover_the_columns_the_run_named_and_errors_name_the_rest() {
         .get("Errors")
         .and_then(Value::as_array)
         .unwrap_or_else(|| panic!("the answer must carry an Errors list, got {answer}"));
+    let failed: Vec<&str> = errors
+        .iter()
+        .map(|entry| entry.get("ColumnName").and_then(Value::as_str).unwrap_or(""))
+        .collect();
     assert_eq!(
-        errors.len(),
-        1,
-        "case {:?}: the only failure is the name the table declares no column under, got {answer}",
+        failed,
+        vec!["extra", "never_declared"],
+        "case {:?}: every requested column the catalog holds no statistics for is reported, got \
+         {answer}",
         "a run over two of three columns"
     );
-    assert_eq!(
-        errors[0].get("ColumnName").and_then(Value::as_str),
-        Some("never_declared"),
-        "case {:?}: the failure names the column that failed, got {errors:?}",
-        "a run over two of three columns"
-    );
-    let detail = &errors[0]["Error"];
-    assert!(
-        detail
-            .get("ErrorMessage")
-            .and_then(Value::as_str)
-            .is_some_and(|message| message.contains("never_declared")),
-        "case {:?}: the failure says which column it is about, got {detail}",
-        "a run over two of three columns"
-    );
+    for entry in errors {
+        let detail = &entry["Error"];
+        assert_eq!(
+            detail.get("ErrorMessage").and_then(Value::as_str),
+            Some(COLUMN_STATISTICS_NOT_FOUND),
+            "case {:?}: a column with no statistics is reported with the catalog's own wording, \
+             got {detail}",
+            "a run over two of three columns"
+        );
+    }
 }
 
 /// What makes a run FAIL: data it could not read. Each row is a table whose location

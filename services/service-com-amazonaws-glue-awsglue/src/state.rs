@@ -324,7 +324,7 @@ use crate::ops::types::{
     CatalogPropertiesOutput,
     Classifier,
     BinaryColumnStatisticsData, BooleanColumnStatisticsData,
-    CodeGenConfigurationNode, Column, ColumnStatistics, ColumnStatisticsData,
+    CodeGenConfigurationNode, Column, ColumnError, ColumnStatistics, ColumnStatisticsData,
     ColumnStatisticsTaskRun, ColumnStatisticsTaskSettings,
     DateColumnStatisticsData, DecimalColumnStatisticsData, DecimalNumber,
     DoubleColumnStatisticsData, LongColumnStatisticsData, StringColumnStatisticsData,
@@ -410,6 +410,13 @@ pub const MAX_PARTITIONS_PER_TABLE: usize = 1_000;
 /// [`MAX_STORED_TABLES`], which on its own would still let a caller grow the store far
 /// past what one process should hold.
 pub const MAX_STORED_PARTITIONS: usize = 100_000;
+
+/// Ceiling on the COLUMNS of one table the store keeps statistics for, for the same
+/// reason as [`MAX_DATABASES_PER_CATALOG`]: a statistics write is reachable by any caller
+/// and addresses a column by name, so the number of statistics records one process will
+/// hold is bounded here. An entry for a further column is refused — per item, the way this
+/// write reports every entry it cannot store — rather than inserted.
+pub const MAX_COLUMN_STATISTICS_PER_TABLE: usize = 1_000;
 
 /// Ceiling on the versions of ONE table the store keeps archived, for the same reason
 /// as [`MAX_DATABASES_PER_CATALOG`]: every update archives the definition it replaces,
@@ -1322,8 +1329,8 @@ impl ComAmazonawsGlueAwsglueState {
                 continue;
             };
             for computed in &settled.statistics {
-                table.column_statistics.insert(
-                    fold_name(&computed.column_name),
+                store_column_statistics(
+                    table,
                     computed.to_column_statistics(settled.analyzed_at),
                 );
             }
