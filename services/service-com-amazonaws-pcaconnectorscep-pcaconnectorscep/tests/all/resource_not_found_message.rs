@@ -68,8 +68,9 @@ fn challenge_arn(connector_arn: &str, challenge_id: &str) -> String {
     format!("{connector_arn}/challenge/{challenge_id}")
 }
 
-/// Which operation a row drives. Every operation of this service that models
-/// `ResourceNotFoundException` and identifies its resource by ARN is here.
+/// Which operation a row drives. Every operation of this service that ANSWERS
+/// `ResourceNotFoundException` and identifies its resource by ARN is here, plus the two
+/// deletes the rows drive to make a record go away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
     GetConnector,
@@ -79,9 +80,6 @@ enum Op {
     GetChallengeMetadata,
     GetChallengePassword,
     DeleteChallenge,
-    ListTagsForResource,
-    TagResource,
-    UntagResource,
 }
 
 impl Op {
@@ -152,53 +150,29 @@ impl Op {
                 )
                 .await
             }
-            Self::ListTagsForResource => {
-                harness::call(router, REGION, "GET", &format!("/tags/{encoded}"), None).await
-            }
-            Self::TagResource => {
-                harness::call(
-                    router,
-                    REGION,
-                    "POST",
-                    &format!("/tags/{encoded}"),
-                    Some(json!({ "Tags": { "owner": "fixture" } })),
-                )
-                .await
-            }
-            Self::UntagResource => {
-                harness::call(
-                    router,
-                    REGION,
-                    "DELETE",
-                    &format!("/tags/{encoded}?tagKeys=owner"),
-                    None,
-                )
-                .await
-            }
         }
     }
 }
 
-/// Every operation a connector ARN can be handed to, with the `ResourceType` its 404 carries.
+/// Every operation a connector ARN can be handed to that ANSWERS this error, with the
+/// `ResourceType` its 404 carries.
+///
+/// `DeleteConnector` is not among them: its whole output is the modelled 202 "accepted", so
+/// an ARN that holds no connector is the end state it accepts rather than this error (see
+/// `connector_delete_not_found`). Neither are the three tagging operations: they are served
+/// by the resource-tagging layer, which reports an unresolvable ARN with its own error class
+/// (see `resource_tags`, `tag_resource` and `untag_resource`).
 const CONNECTOR_OPS: &[(Op, &str)] = &[
     (Op::GetConnector, RESOURCE_TYPE_CONNECTOR),
     (Op::ListChallengeMetadata, RESOURCE_TYPE_CONNECTOR),
-    (Op::DeleteConnector, RESOURCE_TYPE_CONNECTOR),
-    (Op::ListTagsForResource, RESOURCE_TYPE_CONNECTOR),
-    (Op::TagResource, RESOURCE_TYPE_CONNECTOR),
-    (Op::UntagResource, RESOURCE_TYPE_CONNECTOR),
     // The create names the input member it was handed, not the resource kind.
     (Op::CreateChallenge, MISSING_MEMBER_CONNECTOR_ARN),
 ];
 
-/// Every operation a challenge ARN can be handed to, likewise.
+/// Every operation a challenge ARN can be handed to that answers this error, likewise.
 const CHALLENGE_OPS: &[(Op, &str)] = &[
     (Op::GetChallengeMetadata, RESOURCE_TYPE_CHALLENGE),
     (Op::GetChallengePassword, RESOURCE_TYPE_CHALLENGE),
-    (Op::DeleteChallenge, RESOURCE_TYPE_CHALLENGE),
-    (Op::ListTagsForResource, RESOURCE_TYPE_CHALLENGE),
-    (Op::TagResource, RESOURCE_TYPE_CHALLENGE),
-    (Op::UntagResource, RESOURCE_TYPE_CHALLENGE),
 ];
 
 /// How the ARN under test came to name no record.

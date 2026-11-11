@@ -128,9 +128,12 @@ pub enum UntagResourceErrorModeled {
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
-/// (`crate::ops::untag_resource::UntagResourceError`). Wrapping the modeled enum is what
-/// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
-pub type UntagResourceError = crate::scaffolded::Scaffolded<UntagResourceErrorModeled>;
+/// (`crate::ops::untag_resource::UntagResourceError`). This is a tagging endpoint, so the
+/// channel is the shared [`crate::state::TaggingError`]: the scaffold wrapper (this
+/// operation's modelled errors, plus the `ValidationException` a handler needs for a refusal
+/// its model cannot express) and the tagging layer's own not-found refusal, which the model
+/// declares on no shape.
+pub type UntagResourceError = crate::state::TaggingError<UntagResourceErrorModeled>;
 
 /// Lets `?` and `.into()` lift a modeled failure into the error channel, so an
 /// implemented handler writes `Err(SomeModeledError.into())` rather than naming the
@@ -138,7 +141,7 @@ pub type UntagResourceError = crate::scaffolded::Scaffolded<UntagResourceErrorMo
 /// this operation is implemented.
 impl From<UntagResourceErrorModeled> for UntagResourceError {
     fn from(modeled: UntagResourceErrorModeled) -> Self {
-        crate::scaffolded::Scaffolded::Modeled(modeled)
+        Self::Scaffolded(crate::scaffolded::Scaffolded::Modeled(modeled))
     }
 }
 
@@ -214,9 +217,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // it, which goes with it — is a change to a record on its way out, so the removal is
         // refused for the status it is in instead of being answered as a success. A status
         // refusal is for a resource that EXISTS: an ARN this service holds no record under is
-        // the 404 below, so the owning connector's status is consulted only once the tag map
-        // is known to be there. The connector's own strings are cloned out, so the write below
-        // takes the store mutably with nothing borrowed from this lookup.
+        // the tagging layer's refusal below, so the owning connector's status is consulted
+        // only once the tag map is known to be there. The connector's own strings are cloned
+        // out, so the write below takes the store mutably with nothing borrowed from this
+        // lookup.
         let under_teardown = if store.tags_of(&region, &resource_arn).is_some() {
             store
                 .owning_connector(&region, &resource_arn)
@@ -234,7 +238,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // that map, because dropping a tag changes the record. It is also what answers a
         // `ResourceArn` this service holds no record under.
         let Some(mut target) = store.taggable_mut(&region, &resource_arn) else {
-            return Err(not_found(&resource_arn));
+            return Err(not_found());
         };
 
         // AWS tagging semantics: a tag is identified by its key alone, so each named key takes
@@ -286,19 +290,18 @@ fn invalid_state(resource_arn: &str, connector_arn: &str, status: &str) -> Untag
     .into()
 }
 
-/// This service holds no connector or challenge under this ARN — HTTP 404
-/// `ResourceNotFoundException`, whose own doc covers both the resource that is gone and the
-/// one "incorrectly specified". A call naming a deleted resource, or one whose owning
-/// connector's teardown has completed, lands here.
+/// This service holds no connector or challenge under this ARN.
+///
+/// A tagging endpoint answers that from the resource-tagging layer, with that layer's own
+/// error class rather than this service's `ResourceNotFoundException`
+/// ([`crate::state::TaggingError::not_found`]): one fixed sentence under the lower-case
+/// `message` member, naming no value of the request. A call naming a deleted resource, or one
+/// whose owning connector's teardown has completed, lands here.
 ///
 /// Reserved for an ARN that could name one of this service's resources: a value that is not
 /// such an ARN is refused by [`validation`] before any lookup.
-fn not_found(resource_arn: &str) -> UntagResourceError {
-    UntagResourceErrorModeled::ResourceNotFoundException(crate::state::resource_not_found(
-        crate::state::resource_type_of(resource_arn),
-        resource_arn,
-    ))
-    .into()
+fn not_found() -> UntagResourceError {
+    UntagResourceError::not_found()
 }
 
 /// The store is unreachable — a server-side fault, which this operation models as

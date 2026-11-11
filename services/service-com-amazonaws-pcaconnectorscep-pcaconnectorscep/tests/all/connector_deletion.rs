@@ -386,26 +386,20 @@ async fn delete_connector_is_accepted_and_the_teardown_is_observable() {
             );
         }
 
-        // Once the record is gone the ARN names nothing, so the delete is refused with the
-        // modelled 404 rather than accepted — and resurrects nothing.
+        // Once the record is gone the ARN names nothing, so the delete has nothing left to
+        // schedule: it is the same accepted 202 — and resurrects nothing.
         let after = delete_connector(&router, &arn).await;
         assert_eq!(
             (after.status, after.error_type.as_str()),
-            (404, "ResourceNotFoundException"),
-            "case {case_name:?}: a delete of a gone connector must answer 404, got {} / {:?}",
+            (202, ""),
+            "case {case_name:?}: a delete of a gone connector must answer 202, got {} / {:?}",
             after.status,
-            after.body
-        );
-        assert_eq!(
-            (&after.body["ResourceId"], &after.body["ResourceType"]),
-            (&json!(arn), &json!(state::RESOURCE_TYPE_CONNECTOR)),
-            "case {case_name:?}: the 404 must name the ARN and the resource kind, got {:?}",
             after.body
         );
         let still_gone = get_connector(&router, &arn).await;
         assert_eq!(
             still_gone.status, 404,
-            "case {case_name:?}: the refused delete must not recreate the connector, got {} / {:?}",
+            "case {case_name:?}: the accepted delete must not recreate the connector, got {} / {:?}",
             still_gone.status, still_gone.body
         );
     }

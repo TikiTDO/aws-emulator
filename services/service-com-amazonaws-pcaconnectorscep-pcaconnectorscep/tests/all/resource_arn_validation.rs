@@ -5,16 +5,20 @@
 //! The rule under test: `ResourceArn` is parsed BEFORE anything is looked up. A value that
 //! could not name a resource — not an ARN at all — and an ARN of THIS service that is not one
 //! of the resource-ARN forms it publishes are input-validation failures, refused with HTTP 400
-//! `ValidationException` in the same `N validation error(s) detected: Value '<value>' at
-//! '<member>' failed to satisfy constraint: <requirement>` envelope the request boundary uses
-//! for the patterned `ConnectorArn` / `ChallengeArn` labels. HTTP 404
-//! `ResourceNotFoundException` is left to a well-formed resource ARN that this service simply
-//! holds no record under — which includes an ARN of another service, because such a value does
-//! name a resource.
+//! `ValidationException` in the `N validation error(s) detected: Value '<value>' at '<member>'
+//! failed to satisfy constraint: <requirement>` envelope, naming the member and every
+//! requirement the value broke. The tagging layer's own
+//! not-found refusal is left to a well-formed resource ARN that this service simply holds no
+//! record under — which includes an ARN of another service, because such a value does name a
+//! resource.
 //!
 //! `ResourceArn` is modelled as a bare `String` with no `@pattern` and no `@length`
 //! (smithy_query operation=ListTagsForResource,TagResource), so nothing is refused for it at
-//! the request boundary and the handler is the only place the check can live.
+//! the request boundary and the handler is the only place the check can live. That also means
+//! nothing recorded shows how the service words its own check of this member, which is why
+//! this envelope — the tree's wording for the class — is what it keeps, where a value outside
+//! a `@pattern` the MODEL declares is worded as that refusal was recorded (see
+//! `model_pattern_refusal`).
 //!
 //! Every case drives the service the way a client does: one HTTP request per call, through the
 //! same `MultiServiceRouter` the emulator boots, and each refusable value is sent to BOTH
@@ -177,11 +181,11 @@ fn expected_message(value: &str, clauses: &[Clause]) -> String {
 enum Expected {
     /// 400 `ValidationException`, stating exactly these clauses.
     Refused(Vec<Clause>),
-    /// 404 `ResourceNotFoundException`, carrying this `ResourceType`: the value could name a
-    /// resource, and names none here. `ResourceType` is required and its own doc says it "can
-    /// be either `Connector` or `Challenge`", so the kind follows the ARN's own shape — the
-    /// challenge segment makes it a challenge, anything else a connector.
-    NotFound(&'static str),
+    /// The tagging layer's own not-found refusal: the value could name a resource of this
+    /// service, and names none here, so the tag subsystem reports it as the resource it could
+    /// not resolve ([`harness::assert_tagging_not_found`]) — one fixed sentence naming nothing
+    /// of the request.
+    NotFound,
 }
 
 /// One row: a `ResourceArn` and the answer the rule gives it.
@@ -200,11 +204,11 @@ fn refused(name: &'static str, arn: String, clauses: &[Clause]) -> Case {
     }
 }
 
-fn not_found(name: &'static str, arn: String, resource_type: &'static str) -> Case {
+fn not_found(name: &'static str, arn: String) -> Case {
     Case {
         name,
         arn,
-        expected: Expected::NotFound(resource_type),
+        expected: Expected::NotFound,
     }
 }
 
@@ -315,33 +319,27 @@ fn cases() -> Vec<Case> {
             format!("not-an-arn-{}", "x".repeat(400)),
             &[Clause::TooLong, Clause::Pattern],
         ),
-        // Well formed, and naming nothing here. `ResourceType` follows the ARN's own shape:
-        // the challenge segment makes it a challenge, anything else a connector.
-        not_found("at the published maximum length", at_max, "Connector"),
+        // Well formed, and naming nothing here.
+        not_found("at the published maximum length", at_max),
         not_found(
             "a connector ARN nothing was created under",
             good_connector.clone(),
-            "Connector",
         ),
         not_found(
             "a challenge ARN nothing was created under",
             challenge_arn(&good_connector, CHALLENGE_ID),
-            "Challenge",
         ),
         not_found(
             "a connector ARN in another partition",
             connector_arn("aws-us-gov", "us-gov-west-1", ACCOUNT, CONNECTOR_ID),
-            "Connector",
         ),
         not_found(
             "an ARN of another service entirely",
             format!("arn:aws:s3:{REGION}:{ACCOUNT}:bucket/not-a-scep-resource"),
-            "Connector",
         ),
         not_found(
             "an ARN of another service with no region or account",
             "arn:aws:s3:::not-a-scep-resource".to_string(),
-            "Connector",
         ),
     ]
 }
@@ -379,30 +377,10 @@ fn assert_row(case: &Case, operation: &str, answer: &Answer) {
                 );
             }
         }
-        Expected::NotFound(resource_type) => {
-            assert_eq!(
-                (answer.status, answer.error_type.as_str()),
-                (404, "ResourceNotFoundException"),
-                "case {:?} on {operation}: expected 404 ResourceNotFoundException for {:?}, got \
-                 {} / {:?}",
-                case.name,
-                case.arn,
-                answer.status,
-                answer.body
-            );
-            assert_eq!(
-                answer.body["ResourceId"].as_str(),
-                Some(case.arn.as_str()),
-                "case {:?} on {operation}: expected the requested ARN as ResourceId, got {:?}",
-                case.name,
-                answer.body
-            );
-            assert_eq!(
-                answer.body["ResourceType"].as_str(),
-                Some(*resource_type),
-                "case {:?} on {operation}: expected ResourceType {resource_type:?}, got {:?}",
-                case.name,
-                answer.body
+        Expected::NotFound => {
+            harness::assert_tagging_not_found(
+                answer,
+                &format!("{} on {operation}", case.name),
             );
         }
     }

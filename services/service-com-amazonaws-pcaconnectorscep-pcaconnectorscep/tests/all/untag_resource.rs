@@ -8,7 +8,8 @@
 //! answers the modelled HTTP 204 with an empty body, and what is left is what a later
 //! `ListTagsForResource` reports. Because a key that is not there drops nothing, the call is
 //! idempotent, as the model marks it. A request naming an ARN this service holds no record
-//! under answers 404 `ResourceNotFoundException`; a request naming something that is not a tag
+//! under answers the tagging layer's own refusal (400 `NotFoundException`, see
+//! [`harness::assert_tagging_not_found`]); a request naming something that is not a tag
 //! key answers 400 `ValidationException` and drops nothing.
 //!
 //! `TagKeys` is modelled as a `list<String>` bound to the `tagKeys` query parameter, with no
@@ -680,7 +681,7 @@ async fn untagging_one_resource_leaves_every_other_resource_alone() {
 async fn untagging_an_arn_this_service_holds_no_record_under_is_not_found() {
     let (router, engine) = new_router();
 
-    // A live connector, so the 404s below are about the ARN and not about an empty store.
+    // A live connector, so the refusals below are about the ARN and not about an empty store.
     let connector = active_connector(&router, &engine, &pairs(&[("keep", "me")])).await;
     let created = create_challenge(&router, json!({ "ConnectorArn": connector })).await;
     assert_eq!(
@@ -712,67 +713,40 @@ async fn untagging_an_arn_this_service_holds_no_record_under_is_not_found() {
     );
     harness::release_pending_if_owed(&engine, &connector);
 
-    for (name, arn, resource_type) in [
+    for (name, arn) in [
         (
             "connector ARN nothing was created under",
             never_created_connector.as_str(),
-            "Connector",
         ),
         (
             "challenge ARN nothing was created under",
             never_created_challenge.as_str(),
-            "Challenge",
         ),
         (
             // No challenge segment, so the ARN can only have been meant for a connector.
             "ARN of another service",
             foreign.as_str(),
-            "Connector",
         ),
         (
             "challenge of a live connector that was never created",
             unknown_challenge_of_a_live_connector.as_str(),
-            "Challenge",
         ),
         (
             "challenge whose connector's teardown has come due",
             challenge.as_str(),
-            "Challenge",
         ),
         (
             "connector whose teardown has come due",
             connector.as_str(),
-            "Connector",
         ),
     ] {
         let untagged = untag_resource(&router, arn, &owned(&["keep"])).await;
-        assert_eq!(
-            (untagged.status, untagged.error_type.as_str()),
-            (404, "ResourceNotFoundException"),
-            "case {name:?}: expected 404 ResourceNotFoundException, got {} / {:?}",
-            untagged.status,
-            untagged.body
-        );
-        assert_eq!(
-            untagged.body["ResourceId"].as_str(),
-            Some(arn),
-            "case {name:?}: expected the requested ARN as ResourceId, got {:?}",
-            untagged.body
-        );
-        assert_eq!(
-            untagged.body["ResourceType"].as_str(),
-            Some(resource_type),
-            "case {name:?}: expected ResourceType {resource_type:?}, got {:?}",
-            untagged.body
-        );
+        harness::assert_tagging_not_found(&untagged, name);
 
-        // A refused call creates nothing: the ARN still names no record.
+        // A refused call creates nothing: the ARN still names no record, and the listing of
+        // its tags is refused the same way.
         let listed = list_tags(&router, arn).await;
-        assert_eq!(
-            listed.status, 404,
-            "case {name:?}: a refused UntagResource must not create a record, got {} / {:?}",
-            listed.status, listed.body
-        );
+        harness::assert_tagging_not_found(&listed, name);
     }
 }
 
@@ -865,17 +839,11 @@ async fn untagging_a_resource_whose_teardown_was_accepted_is_refused_for_its_sta
              {before}, got {after}"
         );
 
-        // Once the teardown comes due the record is gone, so the same removal is the modelled
-        // 404 instead of the state refusal.
+        // Once the teardown comes due the record is gone, so the same removal is the tagging
+        // layer's not-found refusal instead of the state refusal.
         harness::release_pending(&engine, &connector);
         let gone = untag_resource(&router, &resource, &owned(&["keep"])).await;
-        assert_eq!(
-            (gone.status, gone.error_type.as_str()),
-            (404, "ResourceNotFoundException"),
-            "case {case_name:?}: expected 404 once the teardown has come due, got {} / {:?}",
-            gone.status,
-            gone.body
-        );
+        harness::assert_tagging_not_found(&gone, &case_name);
     }
 }
 

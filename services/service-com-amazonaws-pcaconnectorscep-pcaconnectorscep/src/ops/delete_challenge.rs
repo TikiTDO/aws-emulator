@@ -4,7 +4,9 @@
 //!
 //! Removes the challenge password from state, so the next `GetChallengePassword` answers
 //! 404 and the next `ListChallengeMetadata` no longer lists it. An ARN that names no stored
-//! challenge is itself a 404 `ResourceNotFoundException`.
+//! challenge — already deleted, never created, or one whose owning connector is gone — is the
+//! same 202 with nothing to remove: the end state the call asks for is the state already
+//! reached, so the delete is idempotent in its STATUS and not only in its effect.
 //!
 //! ## Shape of an operation
 //!
@@ -183,27 +185,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut store = state.lock();
         store.settle(now);
 
-        // The ARN has to name a stored challenge: `@idempotent` says a retry is SAFE to
-        // repeat (it removes the same record and nothing else), not that a call about a
-        // record that is not there is a success. A well-formed ARN holding no challenge in
-        // this Region — one already deleted, one never created, one whose owning connector is
-        // gone, or one naming another Region's challenge — is the only way this operation can
-        // reach its modelled `ResourceNotFoundException`.
-        if !store.remove_challenge(&region, &input.challenge_arn) {
-            return Err(not_found(&input.challenge_arn));
-        }
+        // An ARN naming no stored challenge in this Region — one already deleted, one never
+        // created, one whose owning connector is gone, or one naming another Region's
+        // challenge — is a NO-OP SUCCESS: this operation's whole output is the modelled 202
+        // "accepted", and what it accepts is that the challenge the ARN names is not there
+        // any more. There is nothing left to remove, so the call writes nothing and answers
+        // the same 202 as the first one — which is what a challenge cleanup that runs after
+        // its connector was deleted, taking its challenges with it, routinely does.
+        store.remove_challenge(&region, &input.challenge_arn);
         Ok(DeleteChallengeOutput)
     }
-}
-
-/// No challenge is stored under this ARN — HTTP 404 `ResourceNotFoundException`, carrying the
-/// ARN as `ResourceId` and the kind of resource it names as `ResourceType`.
-fn not_found(challenge_arn: &str) -> DeleteChallengeError {
-    DeleteChallengeErrorModeled::ResourceNotFoundException(crate::state::resource_not_found(
-        crate::state::RESOURCE_TYPE_CHALLENGE,
-        challenge_arn,
-    ))
-    .into()
 }
 
 /// The store is unreachable — a server-side fault, which this operation models as

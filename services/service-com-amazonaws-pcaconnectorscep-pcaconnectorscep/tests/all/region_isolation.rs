@@ -7,8 +7,10 @@
 //! (`ConnectorArn` / `ChallengeArn` carry a Region segment, smithy_query shape=ConnectorArn),
 //! which is the Region the create was signed for. A call signed for any other Region
 //! therefore neither lists nor resolves it: the listing omits it, and every operation that
-//! identifies it by ARN answers `ResourceNotFoundException` (HTTP 404) carrying that ARN as
-//! `ResourceId` and the kind of resource it names as `ResourceType` — and writes nothing.
+//! identifies it by ARN answers as though it did not exist — a read with
+//! `ResourceNotFoundException` (HTTP 404) carrying that ARN as `ResourceId` and the kind of
+//! resource it names as `ResourceType`, a tagging call with the tagging layer's own not-found
+//! refusal, a delete with the accepted no-op its 202 output is — and writes nothing.
 //!
 //! Every case drives the service the way a client does, one HTTP request per call through the
 //! same `MultiServiceRouter` the emulator boots, with the Region in the request's own SigV4
@@ -300,6 +302,21 @@ fn assert_not_found(answer: &Answer, case: &str, what: &str, arn: &str, resource
     );
 }
 
+/// Assert one answer is the accepted no-op a DELETE addressed at a Region that does not hold
+/// the resource gets: the modelled 202, because the end state it asks for — that resource not
+/// being here — is the state this Region is already in. That it changed nothing is asserted
+/// afterwards, through the Region that DOES hold the resource.
+fn assert_accepted(answer: &Answer, case: &str, what: &str, arn: &str) {
+    assert_eq!(
+        (answer.status, answer.error_type.as_str()),
+        (202, ""),
+        "case {case:?}: {what} on a Region that does not hold {arn:?} must answer the modelled \
+         202, got {} / {:?}",
+        answer.status,
+        answer.body
+    );
+}
+
 /// A listing reports the connectors of the Region it is signed for and no others.
 #[tokio::test]
 async fn a_connector_is_listed_only_through_the_region_it_was_created_in() {
@@ -327,8 +344,10 @@ async fn a_connector_is_listed_only_through_the_region_it_was_created_in() {
     }
 }
 
-/// Every operation that identifies a resource by ARN answers 404 when the Region it is signed
-/// for does not hold that resource — and changes nothing, so the owning Region still serves it.
+/// Every operation that identifies a resource by ARN answers for the Region it is signed for
+/// only: a read is 404, a tagging call is the tagging layer's own not-found refusal, a delete
+/// is the accepted no-op — and none of them changes anything, so the owning Region still
+/// serves the resource untouched.
 #[tokio::test]
 async fn every_operation_refuses_an_arn_of_another_region() {
     for row in ROWS {
@@ -390,26 +409,19 @@ async fn every_operation_refuses_an_arn_of_another_region() {
             &connector_arn,
             MISSING_MEMBER_CONNECTOR_ARN,
         );
-        assert_not_found(
+        harness::assert_tagging_not_found(
             &list_tags(&router, foreign, &connector_arn).await,
-            case,
-            "ListTagsForResource",
-            &connector_arn,
-            RESOURCE_TYPE_CONNECTOR,
+            &format!("{case}: ListTagsForResource"),
         );
-        assert_not_found(
+        harness::assert_tagging_not_found(
             &tag_resource(&router, foreign, &connector_arn, json!({ "owner": "foreign" })).await,
-            case,
-            "TagResource",
-            &connector_arn,
-            RESOURCE_TYPE_CONNECTOR,
+            &format!("{case}: TagResource"),
         );
-        assert_not_found(
+        assert_accepted(
             &delete_connector(&router, foreign, &connector_arn).await,
             case,
             "DeleteConnector",
             &connector_arn,
-            RESOURCE_TYPE_CONNECTOR,
         );
 
         // And every reader and writer of its challenges.
@@ -428,23 +440,19 @@ async fn every_operation_refuses_an_arn_of_another_region() {
                 challenge_arn,
                 RESOURCE_TYPE_CHALLENGE,
             );
-            assert_not_found(
+            harness::assert_tagging_not_found(
                 &list_tags(&router, foreign, challenge_arn).await,
-                case,
-                "ListTagsForResource (challenge)",
-                challenge_arn,
-                RESOURCE_TYPE_CHALLENGE,
+                &format!("{case}: ListTagsForResource (challenge)"),
             );
-            assert_not_found(
+            assert_accepted(
                 &delete_challenge(&router, foreign, challenge_arn).await,
                 case,
                 "DeleteChallenge",
                 challenge_arn,
-                RESOURCE_TYPE_CHALLENGE,
             );
         }
 
-        // None of those refusals touched the resource: the Region that holds it still does.
+        // None of those answers touched the resource: the Region that holds it still does.
         let read = get_connector(&router, row.home, &connector_arn).await;
         assert_eq!(
             read.status, 200,

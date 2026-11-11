@@ -63,7 +63,12 @@
 //!
 //! What is served on it — the private CA's own certificate for `GetCACert`, and an error
 //! for every SCEP operation this emulator does not implement — is documented in [`scep`].
+//! Every call this service makes into Amazon Web Services Private CA, on that plane and on
+//! the control plane alike, goes through [`private_ca`]; how it words a request its own model
+//! refused is in [`refusal`].
 
+pub mod private_ca;
+pub mod refusal;
 pub mod scep;
 
 use smithy_server_runtime::{
@@ -139,15 +144,11 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {
         // The centralized walk calls this on a framework-level refusal (an absent
         // required member, or a value outside a declared bound) to let this
-        // service reword it. Returning `None` keeps the framework's default
-        // wording. To state a refusal the way the emulated service states it,
-        // replace this body with a `match refusal { .. }` that returns
-        // `Some(Refused { code, message })` for the cases you reword and `None`
-        // for the rest. Replace BOTH the code and the message: a client branches
-        // on the code, so a message without its matching code is worse than
-        // leaving both alone.
-        let _ = refusal;
-        None
+        // service reword it. This service words a value that fell outside a modelled
+        // `@pattern` the way its own API does, and leaves every other refusal to the
+        // framework's conventional wording — see [`refusal`] for the rule and the
+        // evidence for it.
+        refusal::override_refusal(refusal)
     }
 
     fn override_routing_error(

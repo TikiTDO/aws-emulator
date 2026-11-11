@@ -12,6 +12,8 @@
 //!   through the same `MultiServiceRouter` the emulator boots, carrying the SigV4 credential
 //!   scope a handler reads the caller's Region out of, and what came back.
 //! * [`label`]: the `@httpLabel` percent-encoding rule.
+//! * [`assert_tagging_not_found`]: the refusal the tagging endpoints answer an ARN naming no
+//!   resource with, which is the tagging layer's own error class and not this service's.
 //! * [`set_pending_due`] and the four helpers over it: the clock move, so a case about a
 //!   transient status neither sleeps for the transition span nor races it.
 //!
@@ -179,6 +181,40 @@ pub async fn call_with_scope(
         error_type,
         raw,
         body,
+    }
+}
+
+/// Assert `answer` is the refusal the resource-tagging endpoints (`/tags/{ResourceArn}`, by
+/// method) answer an ARN that names no resource with.
+///
+/// Those three operations are served by the resource-tagging layer, which reports an ARN it
+/// resolves to nothing with its OWN error class rather than with this service's
+/// `ResourceNotFoundException`: HTTP 400, the `NotFoundException` error code, and a single
+/// lower-case `message` member carrying one fixed sentence — no ARN, and none of the service
+/// error's `Message` / `ResourceId` / `ResourceType` members. The three literals are the
+/// recorded wire values of that refusal, spelled here rather than read back out of the
+/// implementation.
+pub fn assert_tagging_not_found(answer: &Answer, case: &str) {
+    assert_eq!(
+        (answer.status, answer.error_type.as_str()),
+        (400, "NotFoundException"),
+        "case {case:?}: expected the tagging layer's 400 NotFoundException, got {} / {:?}",
+        answer.status,
+        answer.body
+    );
+    assert_eq!(
+        answer.body["message"].as_str(),
+        Some("Resource was not found"),
+        "case {case:?}: expected the fixed lower-case `message` of the tagging layer's \
+         refusal, got {:?}",
+        answer.body
+    );
+    for member in ["Message", "ResourceId", "ResourceType"] {
+        assert!(
+            answer.body.get(member).is_none(),
+            "case {case:?}: the tagging layer's refusal carries no {member:?} member, got {:?}",
+            answer.body
+        );
     }
 }
 

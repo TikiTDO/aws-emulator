@@ -23,6 +23,15 @@ use crate::ops::types::{
     MobileDeviceManagement, OpenIdConfiguration, ResourceNotFoundException,
 };
 
+/// The refusal the resource-tagging endpoints answer an ARN naming no resource with, which
+/// is the tagging layer's own error class rather than one of this service's.
+mod tagging_refusal;
+
+pub use tagging_refusal::{
+    TaggingError, TaggingNotFound, TAG_NOT_FOUND_ERROR_CODE, TAG_NOT_FOUND_MESSAGE,
+    TAG_NOT_FOUND_STATUS,
+};
+
 /// The signing name, endpoint prefix and ARN namespace of this service, from the model's
 /// `aws.auth#sigv4` / `aws.api#service` traits (all three are `pca-connector-scep`).
 pub const ARN_SERVICE: &str = "pca-connector-scep";
@@ -885,9 +894,15 @@ fn names_another_services_resource(value: &str) -> bool {
 /// The check and the wording are both the FRAMEWORK's: the constraint walk
 /// ([`aws_smithy_schema_server::constraints::validate`]) runs over the member schema above
 /// and renders one clause per constraint broken, length before pattern, in its
-/// `N validation error(s) detected` envelope with its own elision of the echoed value — so a
-/// string refused here is refused and worded exactly as the boundary refuses the same string
-/// on a patterned label.
+/// `N validation error(s) detected` envelope with its own elision of the echoed value.
+///
+/// That envelope is the conventional AWS one, and it is NOT the sentence this service states
+/// for a patterned label whose value fell outside its `@pattern`: that one is reworded from
+/// the refusal the model's own constraints produced
+/// ([`crate::service::refusal`]), on the strength of the recorded answer to such a request.
+/// There is no recorded answer for a `ResourceArn` this service cannot parse — the member
+/// carries no modelled constraint, so nothing observed says how the service words its own
+/// check of it — and this envelope is what the rest of the tree states for that class.
 pub fn resource_arn_rejection(resource_arn: &str) -> Option<String> {
     if names_another_services_resource(resource_arn) {
         return None;

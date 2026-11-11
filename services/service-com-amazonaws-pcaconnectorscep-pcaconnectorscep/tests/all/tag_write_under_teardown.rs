@@ -8,12 +8,13 @@
 //! 400 `ValidationException` with `Reason` `INVALID_STATE` and changes nothing, while every
 //! reporting call keeps answering for the same record. A connector that has NOT been accepted
 //! for teardown, `CREATING` included, is still writable, and once the teardown comes due the
-//! record is gone and the write is the modelled 404 instead.
+//! record is gone and the write is the tagging layer's own not-found refusal instead.
 //!
 //! `ValidationExceptionReason` carries `INVALID_STATE` for exactly a call a resource's status
-//! does not allow (smithy_query: shape ValidationExceptionReason), and
-//! `ResourceNotFoundException` (HTTP 404) is what a nonexistent resource answers
-//! (smithy_query: shape ResourceNotFoundException), so the two windows answer differently.
+//! does not allow (smithy_query: shape ValidationExceptionReason), while the tagging endpoints
+//! report an ARN that resolves to no resource with the tag subsystem's own 400
+//! `NotFoundException` ([`harness::assert_tagging_not_found`]), so the two windows answer
+//! differently.
 //!
 //! The rows differ along what the rule generalises over: which of the two taggable resource
 //! kinds the write names, the status the connector was in when its delete was accepted, how
@@ -407,23 +408,11 @@ async fn tagging_a_resource_whose_teardown_was_accepted_is_refused_for_its_state
             "case {name:?}: repeating the refused write must leave {expected:?}",
         );
 
-        // Once the teardown comes due the record is gone, so the same write is the modelled
-        // 404 instead of the state refusal.
+        // Once the teardown comes due the record is gone, so the same write is the tagging
+        // layer's not-found refusal instead of the state refusal.
         harness::release_pending(&engine, &connector);
         let gone = tag_resource(&router, &resource, case.add).await;
-        assert_eq!(
-            (gone.status, gone.error_type.as_str()),
-            (404, "ResourceNotFoundException"),
-            "case {name:?}: expected 404 once the teardown has come due, got {} / {:?}",
-            gone.status,
-            gone.body
-        );
-        assert_eq!(
-            gone.body["ResourceId"].as_str(),
-            Some(resource.as_str()),
-            "case {name:?}: expected the requested ARN as ResourceId, got {:?}",
-            gone.body
-        );
+        harness::assert_tagging_not_found(&gone, name);
     }
 }
 

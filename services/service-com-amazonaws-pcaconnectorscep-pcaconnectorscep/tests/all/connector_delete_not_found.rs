@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! `DeleteConnector` answers for the record its ARN names, not for the call being retried.
+//! `DeleteConnector` against an ARN that holds no connector.
 //!
-//! The rule under test: an operation of this service whose input identifies a resource by its
-//! ARN answers `ResourceNotFoundException` (HTTP 404) — carrying that ARN as `ResourceId` and
-//! the kind of resource it names as `ResourceType` — whenever no such record is stored at the
-//! instant of the call, and succeeds only when one is. `@idempotent` says a retry is safe to
-//! repeat, which constrains the EFFECT of the second call (it schedules the same teardown and
-//! nothing else), not the status of a call about a record that is not there.
+//! The rule under test: `DeleteConnector`'s whole output is the modelled 202 "accepted" with
+//! an empty body (smithy_query operation=DeleteConnector: output `Unit`, http code 202), and
+//! what it accepts is the END STATE "this connector is not there" — so an ARN holding no
+//! record is the same 202 as one holding a live connector, with nothing left to schedule.
+//! Deleting what is already gone is a no-op success, not a refusal, which is what lets a
+//! teardown delete what may already have been deleted and retry a delete whose answer it
+//! never saw.
 //!
 //! Every case drives the service the way a client does, one HTTP request per call through the
 //! same `MultiServiceRouter` the emulator boots. The table's rows differ along what the rule
@@ -28,10 +29,6 @@ const REGION: &str = "eu-west-2";
 
 /// The canonical emulator account id every ARN of this service carries.
 const ACCOUNT: &str = "000000000000";
-
-/// The `ResourceType` a connector's `ResourceNotFoundException` names, from the service's own
-/// vocabulary rather than respelled here.
-const RESOURCE_TYPE_CONNECTOR: &str = state::RESOURCE_TYPE_CONNECTOR;
 
 /// The status a connector carries while its teardown runs.
 const STATUS_DELETING: &str = state::STATUS_DELETING;
@@ -97,6 +94,23 @@ fn connector_arn(partition: &str, region: &str, connector_id: &str) -> String {
     format!("arn:{partition}:pca-connector-scep:{region}:{ACCOUNT}:connector/{connector_id}")
 }
 
+/// Assert `answer` is the accepted, empty-bodied success a delete answers: the modelled 202,
+/// no error code, and nothing in the body for a caller to read.
+fn assert_accepted(answer: &Answer, case: &str) {
+    assert_eq!(
+        (answer.status, answer.error_type.as_str()),
+        (202, ""),
+        "case {case:?}: expected the modelled 202 with no error, got {} / {:?}",
+        answer.status,
+        answer.body
+    );
+    assert!(
+        answer.raw.is_empty() || answer.body == json!({}),
+        "case {case:?}: expected an empty body, got {:?}",
+        String::from_utf8_lossy(&answer.raw)
+    );
+}
+
 /// How the ARN under test came to hold no connector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Missing {
@@ -121,15 +135,15 @@ struct MissingCase {
     region: &'static str,
     /// The connector uuid for the rows that build the ARN by hand.
     connector_id: &'static str,
-    /// How many OTHER connectors are stored when the call arrives, so the refusal cannot come
-    /// from an empty store.
+    /// How many OTHER connectors are stored when the call arrives, so the success cannot be
+    /// read as "the store was empty".
     siblings: usize,
 }
 
-/// The whole rule, row by row: every well-formed connector ARN that holds no record is a 404
-/// `ResourceNotFoundException` naming that ARN and the `Connector` resource type.
+/// The whole rule, row by row: every well-formed connector ARN that holds no record is the
+/// same accepted 202, writes nothing, and leaves every other connector alone.
 #[tokio::test]
-async fn delete_connector_refuses_an_arn_that_holds_no_connector() {
+async fn delete_connector_accepts_an_arn_that_holds_no_connector() {
     let cases = [
         MissingCase {
             name: "never created, empty store",
@@ -204,13 +218,7 @@ async fn delete_connector_refuses_an_arn_that_holds_no_connector() {
                     harness::hold_pending(&engine, &arn);
                 }
                 let accepted = delete_connector(&router, &arn).await;
-                assert_eq!(
-                    (accepted.status, accepted.error_type.as_str()),
-                    (202, ""),
-                    "case {name:?}: the first DeleteConnector must be accepted, got {} / {:?}",
-                    accepted.status,
-                    accepted.body
-                );
+                assert_accepted(&accepted, name);
                 // Let the clock make the teardown due: only then is the record gone.
                 harness::release_pending(&engine, &arn);
                 let read = get_connector(&router, &arn).await;
@@ -224,48 +232,24 @@ async fn delete_connector_refuses_an_arn_that_holds_no_connector() {
         };
 
         let answer = delete_connector(&router, &arn).await;
-        assert_eq!(
-            (answer.status, answer.error_type.as_str()),
-            (404, "ResourceNotFoundException"),
-            "case {name:?} on {arn:?}: expected 404 ResourceNotFoundException, got {} / {:?}",
-            answer.status,
-            answer.body
-        );
-        assert_eq!(
-            answer.body["ResourceId"],
-            json!(arn),
-            "case {name:?}: the refusal must name the ARN it was asked for, got {:?}",
-            answer.body
-        );
-        assert_eq!(
-            answer.body["ResourceType"],
-            json!(RESOURCE_TYPE_CONNECTOR),
-            "case {name:?}: expected ResourceType {RESOURCE_TYPE_CONNECTOR}, got {:?}",
-            answer.body
-        );
+        assert_accepted(&answer, name);
 
-        // The refusal changed nothing: it created no record, it left every sibling readable,
-        // and a second attempt answers exactly the same way, so the 404 reports the state
-        // rather than being a one-shot.
+        // The accepted no-op changed nothing: it created no record, it left every sibling
+        // readable, and a second attempt answers exactly the same way, so the 202 reports the
+        // end state rather than being a one-shot.
         let still_gone = get_connector(&router, &arn).await;
         assert_eq!(
             still_gone.status, 404,
-            "case {name:?}: the refused delete must not create a record, got {} / {:?}",
+            "case {name:?}: the accepted delete must not create a record, got {} / {:?}",
             still_gone.status, still_gone.body
         );
         let repeat = delete_connector(&router, &arn).await;
-        assert_eq!(
-            (repeat.status, repeat.error_type.as_str()),
-            (404, "ResourceNotFoundException"),
-            "case {name:?}: the refusal must be stable across calls, got {} / {:?}",
-            repeat.status,
-            repeat.body
-        );
+        assert_accepted(&repeat, name);
         for sibling in &siblings {
             let read = get_connector(&router, sibling).await;
             assert_eq!(
                 read.status, 200,
-                "case {name:?}: the refusal must leave sibling {sibling:?} readable, got {} / \
+                "case {name:?}: the delete must leave sibling {sibling:?} readable, got {} / \
                  {:?}",
                 read.status, read.body
             );
@@ -273,11 +257,11 @@ async fn delete_connector_refuses_an_arn_that_holds_no_connector() {
     }
 }
 
-/// The success side of the same rule: a delete of an ARN that DOES hold a record is accepted,
+/// The other side of the same rule: a delete of an ARN that DOES hold a record is accepted,
 /// stays accepted for as long as the record is there (the `@idempotent` retry), removes
-/// exactly that connector, and only then starts answering 404.
+/// exactly that connector, and keeps answering the same 202 once it is gone.
 #[tokio::test]
-async fn delete_connector_is_accepted_while_the_record_is_there() {
+async fn delete_connector_is_accepted_whether_or_not_the_record_is_there() {
     // Rows differ in how many connectors are stored and which of them is deleted: the first,
     // a middle one and the last.
     for (count, victim) in [(1usize, 0usize), (2, 1), (3, 1), (4, 0), (4, 3)] {
@@ -293,26 +277,13 @@ async fn delete_connector_is_accepted_while_the_record_is_there() {
 
         let doomed = arns[victim].clone();
         let accepted = delete_connector(&router, &doomed).await;
-        assert_eq!(
-            (accepted.status, accepted.error_type.as_str()),
-            (202, ""),
-            "case {case:?}: a delete of a stored connector must be accepted, got {} / {:?}",
-            accepted.status,
-            accepted.body
-        );
+        assert_accepted(&accepted, &case);
 
         // Pin the teardown window: while the record is still there the retry is accepted too,
         // and it reports the same status rather than a fresh one.
         harness::hold_pending(&engine, &doomed);
         let again = delete_connector(&router, &doomed).await;
-        assert_eq!(
-            (again.status, again.error_type.as_str()),
-            (202, ""),
-            "case {case:?}: a retry inside the teardown window must still be accepted, got {} / \
-             {:?}",
-            again.status,
-            again.body
-        );
+        assert_accepted(&again, &case);
         let reported = get_connector(&router, &doomed).await;
         assert_eq!(
             reported.body["Connector"]["Status"],
@@ -321,15 +292,16 @@ async fn delete_connector_is_accepted_while_the_record_is_there() {
             reported.body
         );
 
-        // Once the teardown is due the record is gone and the same call is refused.
+        // Once the teardown is due the record is gone and the same call is still accepted —
+        // and it does not bring the connector back.
         harness::release_pending(&engine, &doomed);
-        let refused = delete_connector(&router, &doomed).await;
+        let once_gone = delete_connector(&router, &doomed).await;
+        assert_accepted(&once_gone, &case);
+        let read = get_connector(&router, &doomed).await;
         assert_eq!(
-            (refused.status, refused.error_type.as_str()),
-            (404, "ResourceNotFoundException"),
-            "case {case:?}: once the record is gone the delete must be refused, got {} / {:?}",
-            refused.status,
-            refused.body
+            read.status, 404,
+            "case {case:?}: the repeated delete must not resurrect the connector, got {} / {:?}",
+            read.status, read.body
         );
 
         // Exactly that connector went: every other one is still listed and still deletable.
@@ -353,13 +325,7 @@ async fn delete_connector_is_accepted_while_the_record_is_there() {
                 "case {case:?}: sibling {arn:?} must still be listed, got {listed_arns:?}"
             );
             let accepted = delete_connector(&router, arn).await;
-            assert_eq!(
-                (accepted.status, accepted.error_type.as_str()),
-                (202, ""),
-                "case {case:?}: sibling {arn:?} must still be deletable, got {} / {:?}",
-                accepted.status,
-                accepted.body
-            );
+            assert_accepted(&accepted, &case);
         }
     }
 }

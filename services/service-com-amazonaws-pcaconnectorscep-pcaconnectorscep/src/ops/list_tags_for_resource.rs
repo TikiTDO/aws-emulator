@@ -5,7 +5,9 @@
 //! Reports the tags stored on the connector or challenge `ResourceArn` names, read straight
 //! off that record. `ResourceArn` is parsed first: a value that is not a resource ARN this
 //! service could hold a record under is an input validation failure, not a missing resource.
-//! A reporting operation: the one write it makes is materialising the
+//! An ARN that could name a resource and names none is the resource-tagging layer's own
+//! not-found refusal ([`crate::state::TaggingError::not_found`]), which is how this route
+//! reports absence. A reporting operation: the one write it makes is materialising the
 //! transition the clock already owes the connectors, so a resource whose teardown has come
 //! due is reported as gone rather than as tagged.
 //!
@@ -104,9 +106,12 @@ pub enum ListTagsForResourceErrorModeled {
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
-/// (`crate::ops::list_tags_for_resource::ListTagsForResourceError`). Wrapping the modeled enum is what
-/// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
-pub type ListTagsForResourceError = crate::scaffolded::Scaffolded<ListTagsForResourceErrorModeled>;
+/// (`crate::ops::list_tags_for_resource::ListTagsForResourceError`). This is a tagging
+/// endpoint, so the channel is the shared [`crate::state::TaggingError`]: the scaffold
+/// wrapper (this operation's modelled errors, plus the `ValidationException` a handler needs
+/// for a refusal its model cannot express) and the tagging layer's own not-found refusal,
+/// which the model declares on no shape.
+pub type ListTagsForResourceError = crate::state::TaggingError<ListTagsForResourceErrorModeled>;
 
 /// Lets `?` and `.into()` lift a modeled failure into the error channel, so an
 /// implemented handler writes `Err(SomeModeledError.into())` rather than naming the
@@ -114,7 +119,7 @@ pub type ListTagsForResourceError = crate::scaffolded::Scaffolded<ListTagsForRes
 /// this operation is implemented.
 impl From<ListTagsForResourceErrorModeled> for ListTagsForResourceError {
     fn from(modeled: ListTagsForResourceErrorModeled) -> Self {
-        crate::scaffolded::Scaffolded::Modeled(modeled)
+        Self::Scaffolded(crate::scaffolded::Scaffolded::Modeled(modeled))
     }
 }
 
@@ -175,7 +180,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // lookup keyed by the ARN's shape answers for a connector and for a challenge alike.
         let tags = store
             .tags_of(&region, &input.resource_arn)
-            .ok_or_else(|| not_found(&input.resource_arn))?;
+            .ok_or_else(not_found)?;
         Ok(ListTagsForResourceOutput {
             // `Tags` is the map as stored: empty for a resource created without tags, which
             // is a resource with no tags and not a missing member.
@@ -188,20 +193,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     }
 }
 
-/// This service holds no connector or challenge under this ARN — HTTP 404
-/// `ResourceNotFoundException`, whose own doc covers both the resource that is gone and the
-/// one "incorrectly specified". A listing after the resource (or its owning connector) was
-/// deleted lands here.
+/// This service holds no connector or challenge under this ARN.
+///
+/// A tagging endpoint answers that from the resource-tagging layer, with that layer's own
+/// error class rather than this service's `ResourceNotFoundException`
+/// ([`crate::state::TaggingError::not_found`]): one fixed sentence under the lower-case
+/// `message` member, naming no value of the request. A listing after the resource (or its
+/// owning connector) was deleted lands here.
 ///
 /// Reserved for an ARN that could name one of this service's resources: a value that is not
-/// such an ARN is refused by [`validation`] before any lookup, so no 404 ever invents a
-/// `ResourceType` for a string that named nothing.
-fn not_found(resource_arn: &str) -> ListTagsForResourceError {
-    ListTagsForResourceErrorModeled::ResourceNotFoundException(crate::state::resource_not_found(
-        crate::state::resource_type_of(resource_arn),
-        resource_arn,
-    ))
-    .into()
+/// such an ARN is refused by [`validation`] before any lookup.
+fn not_found() -> ListTagsForResourceError {
+    ListTagsForResourceError::not_found()
 }
 
 /// Refuse a request this operation cannot act on — HTTP 400 `ValidationException`, whose own

@@ -36,9 +36,6 @@ use service_com_amazonaws_pcaconnectorscep_pcaconnectorscep as scep;
 
 use crate::harness::{self, label};
 
-/// The account id every generated emulator presents, which both services mint ARNs in.
-const ACCOUNT: &str = "000000000000";
-
 /// The template that produces a ROOT CA's own certificate — step 2 of the documented
 /// procedure for creating a root private CA.
 const ROOT_CA_TEMPLATE: &str = "arn:aws:acm-pca:::template/RootCACertificate/V1";
@@ -294,6 +291,28 @@ impl Emulator {
 
     /// Create a connector through a request addressed at `authority`, settle it, and answer
     /// its ARN.
+    /// A private CA in `region` that EXISTS, created through that service's own
+    /// `CreateCertificateAuthority` and left where that call leaves it — holding no
+    /// certificate yet — for a case that needs a connector whose `CertificateAuthorityArn`
+    /// resolves, without needing a CA that can present a certificate.
+    async fn private_ca(&self, case: &str, region: &str, common_name: &str) -> String {
+        self.private_ca_ok(
+            case,
+            region,
+            "CreateCertificateAuthority",
+            &json!({
+                "CertificateAuthorityConfiguration": {
+                    "KeyAlgorithm": "RSA_2048",
+                    "SigningAlgorithm": "SHA256WITHRSA",
+                    "Subject": {"CommonName": common_name},
+                },
+                "CertificateAuthorityType": "ROOT",
+            }),
+        )
+        .await
+        .text("CertificateAuthorityArn", case)
+    }
+
     async fn active_connector(
         &self,
         case: &str,
@@ -366,13 +385,6 @@ fn connector_id_of(arn: &str) -> &str {
     arn.rsplit_once('/')
         .unwrap_or_else(|| panic!("expected a connector ARN ending `connector/<uuid>`, got {arn:?}"))
         .1
-}
-
-/// A CA ARN of `region` naming no CA this emulator holds, in the form
-/// `CertificateAuthorityArn`'s own pattern requires — for a case that needs a connector
-/// without needing a private CA behind it.
-fn absent_ca_arn(region: &str) -> String {
-    format!("arn:aws:acm-pca:{region}:{ACCOUNT}:certificate-authority/11111111-2222-3333-4444-555555555555")
 }
 
 /// The subject and serial number of a DER X.509 certificate, as the two facts that identify
@@ -463,7 +475,10 @@ fn address_rows() -> Vec<AddressRow> {
 async fn the_published_endpoint_is_an_address_of_the_emulator_the_caller_reached() {
     for row in address_rows() {
         let emulator = Emulator::new();
-        let mut request = json!({"CertificateAuthorityArn": absent_ca_arn(row.region)});
+        let ca_arn = emulator
+            .private_ca(row.name, row.region, "scep-endpoint-row")
+            .await;
+        let mut request = json!({"CertificateAuthorityArn": ca_arn});
         if let Some(vpce) = row.vpc_endpoint_id {
             request["VpcEndpointId"] = json!(vpce);
         }
@@ -623,6 +638,11 @@ async fn the_scep_plane_refuses_what_it_cannot_serve() {
     let region = "eu-west-1";
     let authority = "127.0.0.1:9297";
     let emulator = Emulator::new();
+    // A CA that exists and holds no certificate: the connectors below link a private CA their
+    // create resolves, and that CA has nothing to present to a SCEP client.
+    let ca_arn = emulator
+        .private_ca("the plane's refusals", region, "scep-root-uncertificated")
+        .await;
 
     // One connector that never reaches ACTIVE, held mid-creation, and one that does.
     let pending = {
@@ -632,7 +652,7 @@ async fn the_scep_plane_refuses_what_it_cannot_serve() {
                 region,
                 "POST",
                 "/connectors",
-                Some(json!({"CertificateAuthorityArn": absent_ca_arn(region)})),
+                Some(json!({"CertificateAuthorityArn": ca_arn})),
             )
             .await;
         let arn = created.text("ConnectorArn", "a connector still being created");
@@ -648,7 +668,7 @@ async fn the_scep_plane_refuses_what_it_cannot_serve() {
             "an active connector",
             authority,
             region,
-            json!({"CertificateAuthorityArn": absent_ca_arn(region)}),
+            json!({"CertificateAuthorityArn": ca_arn}),
         )
         .await;
     let active_endpoint = emulator

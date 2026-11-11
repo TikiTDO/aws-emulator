@@ -4,7 +4,8 @@
 //!
 //! The rule under test: a tag listing reports exactly the tag map stored on the connector or
 //! challenge its `ResourceArn` names — whichever of the two kinds the ARN names — and answers
-//! 404 `ResourceNotFoundException` when this service holds no record under that ARN.
+//! the tagging layer's own refusal (400 `NotFoundException`, see
+//! [`harness::assert_tagging_not_found`]) when this service holds no record under that ARN.
 //!
 //! Every case drives the service the way a client does: one HTTP request per call, through the
 //! same `MultiServiceRouter` the emulator boots. The rows of the table differ along what the
@@ -349,8 +350,8 @@ async fn every_resource_reports_its_own_tags() {
 async fn an_arn_this_service_holds_no_record_under_is_not_found() {
     let (router, engine) = new_router();
 
-    // A connector and a challenge that exist, so the 404s below are about the ARN and not
-    // about an empty store.
+    // A connector and a challenge that exist, so the refusals below are about the ARN and
+    // not about an empty store.
     let connector = active_connector(
         &router,
         &engine,
@@ -385,52 +386,23 @@ async fn an_arn_this_service_holds_no_record_under_is_not_found() {
     // removed with it, the connector's teardown taking its remaining challenges too.
     let gone_challenge = format!("{connector}/challenge/11111111-1111-1111-1111-111111111111");
 
-    for (name, arn, resource_type) in [
+    for (name, arn) in [
         (
             "connector ARN nothing was created under",
             never_created_connector.clone(),
-            "Connector",
         ),
         (
             "challenge ARN nothing was created under",
             never_created_challenge.clone(),
-            "Challenge",
         ),
-        (
-            "ARN of another service",
-            foreign.clone(),
-            // No challenge segment, so the ARN can only have been meant for a connector.
-            "Connector",
-        ),
+        ("ARN of another service", foreign.clone()),
         (
             "challenge of a live connector that was never created",
             gone_challenge.clone(),
-            "Challenge",
         ),
     ] {
         let listed = list_tags(&router, &arn).await;
-        assert_eq!(
-            listed.status, 404,
-            "case {name:?}: expected 404, got {} / {:?}",
-            listed.status, listed.body
-        );
-        assert_eq!(
-            listed.error_type, "ResourceNotFoundException",
-            "case {name:?}: expected ResourceNotFoundException, got {:?} / {:?}",
-            listed.error_type, listed.body
-        );
-        assert_eq!(
-            listed.body["ResourceId"].as_str(),
-            Some(arn.as_str()),
-            "case {name:?}: expected the requested ARN as ResourceId, got {:?}",
-            listed.body
-        );
-        assert_eq!(
-            listed.body["ResourceType"].as_str(),
-            Some(resource_type),
-            "case {name:?}: expected ResourceType {resource_type:?}, got {:?}",
-            listed.body
-        );
+        harness::assert_tagging_not_found(&listed, name);
     }
 
     // Deleting the challenge drops its tags with it.
@@ -441,11 +413,7 @@ async fn an_arn_this_service_holds_no_record_under_is_not_found() {
         deleted.status, deleted.body
     );
     let listed = list_tags(&router, &challenge).await;
-    assert_eq!(
-        listed.status, 404,
-        "case \"deleted challenge\": expected 404, got {} / {:?}",
-        listed.status, listed.body
-    );
+    harness::assert_tagging_not_found(&listed, "deleted challenge");
 
     // A second challenge, to prove the connector's teardown takes its challenges' tags too.
     let created = create_challenge(
@@ -497,15 +465,6 @@ async fn an_arn_this_service_holds_no_record_under_is_not_found() {
         ("challenge of a deleted connector", survivor.as_str()),
     ] {
         let listed = list_tags(&router, arn).await;
-        assert_eq!(
-            listed.status, 404,
-            "case {name:?}: expected 404 once the teardown has come due, got {} / {:?}",
-            listed.status, listed.body
-        );
-        assert_eq!(
-            listed.error_type, "ResourceNotFoundException",
-            "case {name:?}: expected ResourceNotFoundException, got {:?} / {:?}",
-            listed.error_type, listed.body
-        );
+        harness::assert_tagging_not_found(&listed, name);
     }
 }

@@ -210,7 +210,7 @@ impl<Eng: Send + Sync + 'static> ScepDataPlane<Eng> {
         region: &str,
         certificate_authority_arn: &str,
     ) -> RtResponse {
-        let answer = private_ca_client(ctx, region)
+        let answer = super::private_ca::client(ctx, region)
             .get_certificate_authority_certificate()
             .certificate_authority_arn(certificate_authority_arn)
             .send()
@@ -257,46 +257,6 @@ fn certificate_der(body: &str) -> Option<Vec<u8>> {
         .then(|| block.contents().to_vec())
 }
 
-/// The Amazon Web Services Private CA client this plane reads a connector's CA certificate
-/// through: the AWS SDK driven over the emulator's own in-process transport, signing in the
-/// emulator's name — Connector for SCEP reads the CA it was given with its own service
-/// principal, not with the device's credential, and a SCEP device presents none.
-///
-/// NOTHING here opens a socket or leaves the host: the transport is
-/// `ctx.callback().http_client()`, the emulator's in-process channel into its own services,
-/// and the endpoint is only the address that channel resolves the private CA by. The
-/// credentials are the emulator's own and are used to sign this one call; they are never
-/// returned or logged.
-fn private_ca_client(
-    ctx: &OperationContext<'_>,
-    region: &str,
-) -> ::aws_sdk_acmpca::Client {
-    let config = ::aws_sdk_acmpca::Config::builder()
-        .behavior_version(::aws_sdk_acmpca::config::BehaviorVersion::latest())
-        .http_client(ctx.callback().http_client())
-        .credentials_provider(ctx.callback().aws_credentials_provider())
-        .region(::aws_sdk_acmpca::config::Region::new(region.to_string()))
-        .endpoint_url(format!("https://{PRIVATE_CA_ENDPOINT_PREFIX}.{region}.amazonaws.com"))
-        // The transport is in-process: there is nothing to retry, time out or watch for a
-        // stalled stream, and each of those would need a sleep implementation this client is
-        // not given. The same goes for caching the identity: the credentials are handed over
-        // directly.
-        .retry_config(::aws_sdk_acmpca::config::retry::RetryConfig::disabled())
-        .timeout_config(::aws_sdk_acmpca::config::timeout::TimeoutConfig::disabled())
-        .identity_cache(::aws_sdk_acmpca::config::IdentityCache::no_cache())
-        .stalled_stream_protection(
-            ::aws_sdk_acmpca::config::StalledStreamProtectionConfig::disabled(),
-        )
-        .build();
-    ::aws_sdk_acmpca::Client::from_conf(config)
-}
-
-/// The endpoint prefix the in-process channel resolves Amazon Web Services Private CA by,
-/// which is also the service segment of every `CertificateAuthorityArn` this service accepts
-/// (`^arn:aws(-[a-z]+)*:acm-pca:…`).
-const PRIVATE_CA_ENDPOINT_PREFIX: &str = "acm-pca";
-
-/// The SCEP operation a request URI names, or `None` when it names none.
 /// The SCEP operation a request URI names, or `None` when it names none.
 ///
 /// Read with the tree's own query-parameter reading (`service_common::query_parameter`),

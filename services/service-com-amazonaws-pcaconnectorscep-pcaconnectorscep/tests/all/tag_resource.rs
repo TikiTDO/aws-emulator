@@ -7,7 +7,8 @@
 //! added, a key it does carry takes the request's value, and every other key it carries stays
 //! — answers the modelled HTTP 204 with an empty body, and the merged map is what a later
 //! `ListTagsForResource` reports. A request naming an ARN this service holds no record under
-//! answers 404 `ResourceNotFoundException`; a request whose entries are not a caller's to set,
+//! answers the tagging layer's own refusal (400 `NotFoundException`, see
+//! [`harness::assert_tagging_not_found`]); a request whose entries are not a caller's to set,
 //! or that would leave the resource carrying more than the per-resource ceiling, answers 400
 //! `ValidationException` and writes nothing.
 //!
@@ -538,8 +539,8 @@ async fn tagging_one_resource_leaves_every_other_resource_alone() {
 async fn tagging_an_arn_this_service_holds_no_record_under_is_not_found() {
     let (router, engine) = new_router();
 
-    // A live connector and challenge, so the 404s below are about the ARN and not about an
-    // empty store.
+    // A live connector and challenge, so the refusals below are about the ARN and not about
+    // an empty store.
     let connector = active_connector(&router, &engine, &pairs(&[("keep", "me")])).await;
     let created = create_challenge(&router, json!({ "ConnectorArn": connector })).await;
     assert_eq!(
@@ -575,65 +576,36 @@ async fn tagging_an_arn_this_service_holds_no_record_under_is_not_found() {
     );
     harness::release_pending_if_owed(&engine, &connector);
 
-    for (name, arn, resource_type) in [
+    for (name, arn) in [
         (
             "connector ARN nothing was created under",
             never_created_connector.as_str(),
-            "Connector",
         ),
         (
             "challenge ARN nothing was created under",
             never_created_challenge.as_str(),
-            "Challenge",
         ),
         (
             // No challenge segment, so the ARN can only have been meant for a connector.
             "ARN of another service",
             foreign.as_str(),
-            "Connector",
         ),
         (
             "challenge of a live connector that was never created",
             unknown_challenge_of_a_live_connector.as_str(),
-            "Challenge",
         ),
-        ("deleted challenge", challenge.as_str(), "Challenge"),
+        ("deleted challenge", challenge.as_str()),
         (
             "connector whose teardown has come due",
             connector.as_str(),
-            "Connector",
         ),
     ] {
         let tagged = tag_resource(&router, arn, &pairs(&[("owner", "platform")])).await;
-        assert_eq!(
-            tagged.status, 404,
-            "case {name:?}: expected 404, got {} / {:?}",
-            tagged.status, tagged.body
-        );
-        assert_eq!(
-            tagged.error_type, "ResourceNotFoundException",
-            "case {name:?}: expected ResourceNotFoundException, got {:?} / {:?}",
-            tagged.error_type, tagged.body
-        );
-        assert_eq!(
-            tagged.body["ResourceId"].as_str(),
-            Some(arn),
-            "case {name:?}: expected the requested ARN as ResourceId, got {:?}",
-            tagged.body
-        );
-        assert_eq!(
-            tagged.body["ResourceType"].as_str(),
-            Some(resource_type),
-            "case {name:?}: expected ResourceType {resource_type:?}, got {:?}",
-            tagged.body
-        );
+        harness::assert_tagging_not_found(&tagged, name);
 
-        // A refused call creates nothing: the ARN still names no record.
+        // A refused call creates nothing: the ARN still names no record, and the listing of
+        // its tags is refused the same way.
         let listed = list_tags(&router, arn).await;
-        assert_eq!(
-            listed.status, 404,
-            "case {name:?}: a refused TagResource must not create a record, got {} / {:?}",
-            listed.status, listed.body
-        );
+        harness::assert_tagging_not_found(&listed, name);
     }
 }

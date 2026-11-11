@@ -6,7 +6,8 @@
 //! the same `MultiServiceRouter` the emulator boots — and asserts only what the stored state
 //! can justify: a connector read back through `GetConnector` exactly as it was created, a
 //! challenge password that `GetChallengePassword` returns byte for byte, a page that resumes
-//! where the previous one ended, and a 404 for an ARN nothing was ever created under.
+//! where the previous one ended, and a 404 for a READ of an ARN nothing was ever created
+//! under.
 //!
 //! The rows of each table differ along what the rule generalises over (connector type,
 //! which optional members are present, the CA ARN, the client token's shape, how many
@@ -1019,9 +1020,9 @@ async fn pagination_token_of_another_listing_is_refused() {
 }
 
 /// A delete of a challenge removes the record, so the next reader cannot see it; a repeat
-/// delete of the same ARN now names no record and is refused with 404. Deleting a
-/// connector is accepted (202), takes its challenges with it once the teardown is due, and a
-/// repeat after that names no record either, so it is refused with 404 too.
+/// delete of the same ARN asks for the end state already reached, so it is accepted (202) with
+/// nothing left to remove. Deleting a connector is accepted (202), takes its challenges with
+/// it once the teardown is due, and a repeat after that is accepted too.
 #[tokio::test]
 async fn deletes_are_observable_and_idempotent() {
     for challenges_per_connector in [1usize, 3] {
@@ -1067,11 +1068,18 @@ async fn deletes_are_observable_and_idempotent() {
         let again = delete_challenge(&router, &doomed).await;
         assert_eq!(
             (again.status, again.error_type.as_str()),
-            (404, "ResourceNotFoundException"),
-            "case {challenges_per_connector} challenges: a repeated DeleteChallenge names a \
-             challenge that is gone, so it must answer 404, got {} / {:?}",
+            (202, ""),
+            "case {challenges_per_connector} challenges: a repeated DeleteChallenge asks for the \
+             end state already reached, so it must answer 202, got {} / {:?}",
             again.status,
             again.body
+        );
+        let still_gone = get_challenge_password(&router, &doomed).await;
+        assert_eq!(
+            still_gone.status, 404,
+            "case {challenges_per_connector} challenges: the repeat must not resurrect the \
+             challenge, got {} / {:?}",
+            still_gone.status, still_gone.body
         );
 
         // Delete the connector: it reports DELETING while the teardown runs, then stops
@@ -1124,17 +1132,27 @@ async fn deletes_are_observable_and_idempotent() {
         let again = delete_connector(&router, &connector).await;
         assert_eq!(
             (again.status, again.error_type.as_str()),
-            (404, "ResourceNotFoundException"),
-            "case {challenges_per_connector} challenges: a repeated DeleteConnector names a \
-             connector that is gone, so it must answer 404, got {} / {:?}",
+            (202, ""),
+            "case {challenges_per_connector} challenges: a repeated DeleteConnector asks for the \
+             end state already reached, so it must answer 202, got {} / {:?}",
             again.status,
             again.body
+        );
+        let still_gone = get_connector(&router, &connector).await;
+        assert_eq!(
+            still_gone.status, 404,
+            "case {challenges_per_connector} challenges: the repeat must not resurrect the \
+             connector, got {} / {:?}",
+            still_gone.status, still_gone.body
         );
     }
 }
 
-/// Every operation that names a resource answers `ResourceNotFoundException` for a
-/// well-formed ARN nothing was created under — never a 200 with an empty body.
+/// Every operation that READS or acts on a named resource answers
+/// `ResourceNotFoundException` for a well-formed ARN nothing was created under — never a 200
+/// with an empty body. The two deletes are not in the table: their whole output is the
+/// modelled 202 "accepted", and an ARN that holds no record is the end state they accept
+/// (see `connector_delete_not_found` and `challenge_deletion`).
 #[tokio::test]
 async fn unknown_arns_answer_resource_not_found() {
     let router = new_router().0;
@@ -1161,8 +1179,6 @@ async fn unknown_arns_answer_resource_not_found() {
                 "GetChallengePassword",
                 get_challenge_password(&router, &challenge).await,
             ),
-            ("DeleteConnector", delete_connector(&router, connector).await),
-            ("DeleteChallenge", delete_challenge(&router, &challenge).await),
         ] {
             assert_eq!(
                 answer.status, 404,
@@ -1331,8 +1347,8 @@ async fn deleting_a_connector_mid_creation_is_accepted() {
         tearing_down.body
     );
 
-    // Once the teardown is due the record is gone, and a delete of that ARN now names no
-    // connector, so it is refused with the modelled 404.
+    // Once the teardown is due the record is gone, and a delete of that ARN asks for the end
+    // state already reached, so it is accepted with nothing left to schedule.
     harness::release_pending(&engine, &arn);
     let gone = get_connector(&router, &arn).await;
     assert_eq!(
@@ -1343,8 +1359,8 @@ async fn deleting_a_connector_mid_creation_is_accepted() {
     let answer = delete_connector(&router, &arn).await;
     assert_eq!(
         (answer.status, answer.error_type.as_str()),
-        (404, "ResourceNotFoundException"),
-        "case \"delete once gone\": a delete of an ARN holding no record must answer 404, got {} \
+        (202, ""),
+        "case \"delete once gone\": a delete of an ARN holding no record must answer 202, got {} \
          / {:?}",
         answer.status,
         answer.body

@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! `DeleteChallenge` answers for the record its ARN names, not for the call being retried.
+//! `DeleteChallenge` answers for the end state the call asks for, not for what was there.
 //!
-//! The rule under test: an operation of this service whose input identifies a resource by its
-//! ARN answers `ResourceNotFoundException` (HTTP 404) — carrying that ARN as `ResourceId` and
-//! the kind of resource it names as `ResourceType` — whenever no such record is stored at the
-//! instant of the call, and succeeds only when one is. `@idempotent` says a retry is safe to
-//! repeat, which constrains the EFFECT of the second call (it removes the same record and
-//! nothing else), not the status of a call about a record that is not there.
+//! The rule under test: `DeleteChallenge`'s whole output is the modelled 202 "accepted" with
+//! an empty body (smithy_query operation=DeleteChallenge: output `Unit`, http code 202), and
+//! what it accepts is the END STATE "this challenge is not there" — so an ARN holding no
+//! record is the same 202 as one holding a stored challenge, with nothing left to remove.
+//! `@idempotent` constrains the EFFECT of a repeat; the status is the same 202 either way.
 //!
 //! Every case drives the service the way a client does, one HTTP request per call through the
 //! same `MultiServiceRouter` the emulator boots. The table's rows differ along what the rule
@@ -20,7 +19,6 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::harness::{self, label, new_router, Answer};
-use service_com_amazonaws_pcaconnectorscep_pcaconnectorscep::state;
 
 /// A region that is NOT the emulator default, so an ARN built from the request's own SigV4
 /// credential scope is distinguishable from a hardcoded one.
@@ -28,10 +26,6 @@ const REGION: &str = "eu-west-2";
 
 /// The canonical emulator account id every ARN of this service carries.
 const ACCOUNT: &str = "000000000000";
-
-/// The `ResourceType` a challenge's `ResourceNotFoundException` names, from the service's own
-/// vocabulary rather than respelled here.
-const RESOURCE_TYPE_CHALLENGE: &str = state::RESOURCE_TYPE_CHALLENGE;
 
 /// Private-CA ARNs matching `CertificateAuthorityArn`'s own pattern
 /// (`^arn:aws(-[a-z]+)*:acm-pca:<region>:<account>:certificate-authority/<uuid>$`). Rows name
@@ -157,10 +151,10 @@ struct MissingCase {
     ca_arn: &'static str,
 }
 
-/// The whole rule, row by row: every well-formed challenge ARN that holds no record is a 404
-/// `ResourceNotFoundException` naming that ARN and the `Challenge` resource type.
+/// The whole rule, row by row: every well-formed challenge ARN that holds no record is the
+/// same accepted 202, with nothing left to remove.
 #[tokio::test]
-async fn delete_challenge_refuses_an_arn_that_holds_no_challenge() {
+async fn delete_challenge_accepts_an_arn_that_holds_no_challenge() {
     let cases = [
         MissingCase {
             name: "never created, under a connector that exists",
@@ -278,31 +272,31 @@ async fn delete_challenge_refuses_an_arn_that_holds_no_challenge() {
         let answer = delete_challenge(&router, &arn).await;
         assert_eq!(
             (answer.status, answer.error_type.as_str()),
-            (404, "ResourceNotFoundException"),
-            "case {name:?} on {arn:?}: expected 404 ResourceNotFoundException, got {} / {:?}",
+            (202, ""),
+            "case {name:?} on {arn:?}: expected the modelled 202 with no error, got {} / {:?}",
             answer.status,
             answer.body
         );
-        assert_eq!(
-            answer.body["ResourceId"],
-            json!(arn),
-            "case {name:?}: the refusal must name the ARN it was asked for, got {:?}",
-            answer.body
-        );
-        assert_eq!(
-            answer.body["ResourceType"],
-            json!(RESOURCE_TYPE_CHALLENGE),
-            "case {name:?}: expected ResourceType {RESOURCE_TYPE_CHALLENGE}, got {:?}",
-            answer.body
+        assert!(
+            answer.raw.is_empty() || answer.body == json!({}),
+            "case {name:?}: expected an empty body, got {:?}",
+            String::from_utf8_lossy(&answer.raw)
         );
 
-        // The refusal changed nothing: a second attempt answers exactly the same way, so the
-        // 404 is a report about the state and not a one-shot.
+        // The accepted no-op changed nothing: the ARN still names no challenge, and a second
+        // attempt answers exactly the same way, so the 202 reports the end state rather than
+        // being a one-shot.
+        let read = get_challenge_password(&router, &arn).await;
+        assert_eq!(
+            read.status, 404,
+            "case {name:?}: the accepted delete must not create a challenge, got {} / {:?}",
+            read.status, read.body
+        );
         let repeat = delete_challenge(&router, &arn).await;
         assert_eq!(
             (repeat.status, repeat.error_type.as_str()),
-            (404, "ResourceNotFoundException"),
-            "case {name:?}: the refusal must be stable across calls, got {} / {:?}",
+            (202, ""),
+            "case {name:?}: the answer must be stable across calls, got {} / {:?}",
             repeat.status,
             repeat.body
         );
@@ -344,15 +338,22 @@ async fn delete_challenge_removes_exactly_the_named_challenge() {
             gone.body
         );
 
-        // `@idempotent` constrains the EFFECT of a repeat, not its status: the record is gone
-        // and stays gone, and nothing else was touched.
+        // `@idempotent` constrains the EFFECT of a repeat, and the modelled 202 is its
+        // status either way: the record is gone and stays gone, and nothing else was touched.
         let again = delete_challenge(&router, &doomed).await;
         assert_eq!(
             (again.status, again.error_type.as_str()),
-            (404, "ResourceNotFoundException"),
-            "case {case:?}: a repeat names no record, so it must answer 404, got {} / {:?}",
+            (202, ""),
+            "case {case:?}: a repeat asks for the end state already reached, so it must answer \
+             202, got {} / {:?}",
             again.status,
             again.body
+        );
+        let still_gone = get_challenge_password(&router, &doomed).await;
+        assert_eq!(
+            still_gone.status, 404,
+            "case {case:?}: the repeat must not resurrect the challenge, got {} / {:?}",
+            still_gone.status, still_gone.body
         );
 
         for (index, sibling) in arns.iter().enumerate() {
@@ -366,7 +367,8 @@ async fn delete_challenge_removes_exactly_the_named_challenge() {
                  {:?}",
                 read.status, read.body
             );
-            // And each sibling is itself deletable, once.
+            // And each sibling is itself deletable, with the same answer however often it is
+            // asked for.
             let dropped = delete_challenge(&router, sibling).await;
             assert_eq!(
                 dropped.status, 202,
@@ -375,18 +377,18 @@ async fn delete_challenge_removes_exactly_the_named_challenge() {
             );
             let repeat = delete_challenge(&router, sibling).await;
             assert_eq!(
-                repeat.status, 404,
-                "case {case:?}: sibling #{index} is gone, so its repeat must answer 404, got {} / \
-                 {:?}",
+                repeat.status, 202,
+                "case {case:?}: sibling #{index} is gone, so its repeat must answer 202 too, \
+                 got {} / {:?}",
                 repeat.status, repeat.body
             );
         }
     }
 }
 
-/// The 404 is reserved for an ARN that is WELL FORMED and holds no record: an ARN outside
-/// `ChallengeArn`'s own `@length(5, 200)` and pattern is a 400 `ValidationException` instead,
-/// so a caller can tell "you asked for something that is not there" from "that is not an ARN".
+/// The accepted no-op is for an ARN that is WELL FORMED: an ARN outside `ChallengeArn`'s own
+/// `@length(5, 200)` and pattern is a 400 `ValidationException` instead, so a caller can tell
+/// "that is already not there" from "that is not an ARN".
 #[tokio::test]
 async fn a_malformed_challenge_arn_is_a_validation_failure_not_a_404() {
     let (router, _engine) = new_router();

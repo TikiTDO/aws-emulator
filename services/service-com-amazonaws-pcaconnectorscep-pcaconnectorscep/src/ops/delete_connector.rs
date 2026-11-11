@@ -6,8 +6,9 @@
 //! the connector moves into the modelled `DELETING` status, which `GetConnector` and
 //! `ListConnectors` report until the teardown comes due and the record disappears (then 404).
 //! "This operation also deletes any challenges associated with the connector" — they go with
-//! the record. The ARN has to name a stored connector: one that holds no record — already
-//! torn down, or never created — is itself a 404 `ResourceNotFoundException`.
+//! the record. An ARN that holds no connector — already torn down, or never created — is the
+//! same 202 with nothing to schedule: the end state the call asks for is the state already
+//! reached, so the delete is idempotent in its STATUS and not only in its effect.
 //!
 //! ## Shape of an operation
 //!
@@ -191,31 +192,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // first. The record stays readable, reporting `DELETING`, until the clock makes its
         // removal due — and removing the connector removes the challenges it owns with it.
         //
-        // The ARN has to name a stored connector: `@idempotent` says a retry is SAFE to
-        // repeat (it schedules the same teardown and nothing else), not that a call about a
-        // record that is not there is a success. So a repeat inside the teardown window is
-        // accepted and neither extends nor restarts the teardown, while a well-formed ARN
-        // holding no record in this Region — one whose teardown has completed, one never
-        // created, or one naming a connector of another Region — is the only way this
-        // operation can reach its modelled `ResourceNotFoundException`, since that ARN is its
-        // whole input.
-        let Some(stored) = store.connector_mut(&region, &input.connector_arn) else {
-            return Err(not_found(&input.connector_arn));
-        };
-        stored.begin_deletion(now);
+        // An ARN holding no record in this Region — one whose teardown has completed, one
+        // never created, or one naming a connector of another Region — is a NO-OP SUCCESS:
+        // this operation's whole output is the modelled 202 "accepted", and what it accepts
+        // is that the connector the ARN names is not there any more. There is nothing left to
+        // schedule, so the call writes nothing and answers the same 202 as the first one;
+        // teardown code that deletes what may already be gone, or retries a delete whose
+        // answer it never saw, is not refused for reaching the state it asked for.
+        if let Some(stored) = store.connector_mut(&region, &input.connector_arn) {
+            stored.begin_deletion(now);
+        }
         Ok(DeleteConnectorOutput)
     }
-}
-
-/// No connector is stored under this ARN in the Region the request was signed for — HTTP 404
-/// `ResourceNotFoundException`, carrying the ARN as `ResourceId` and the kind of resource it
-/// names as `ResourceType`.
-fn not_found(connector_arn: &str) -> DeleteConnectorError {
-    DeleteConnectorErrorModeled::ResourceNotFoundException(crate::state::resource_not_found(
-        crate::state::RESOURCE_TYPE_CONNECTOR,
-        connector_arn,
-    ))
-    .into()
 }
 
 /// The store is unreachable — a server-side fault, which this operation models as

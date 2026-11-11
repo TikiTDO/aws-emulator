@@ -3,10 +3,13 @@
 //! @op CreateConnector
 //!
 //! Mints a connector: derives its `Type` and its SCEP `Endpoint` from the request, stores a
-//! full record keyed by a freshly minted ARN, and answers that ARN. The connector starts
-//! `CREATING`; the clock owes it the status its creation lands in (see
-//! [`crate::state::TRANSITION_SPAN`]) — `ACTIVE`, or `FAILED` with the reason it failed for
-//! when the private CA it names is not one it could reach
+//! full record keyed by a freshly minted ARN, and answers that ARN. `CertificateAuthorityArn`
+//! names a resource Amazon Web Services Private CA owns, so it is resolved against that
+//! service before a connector is admitted: a CA that service reports it does not hold is the
+//! modelled 404 `ResourceNotFoundException` naming that input member, and no record is
+//! created. The connector then starts `CREATING`; the clock owes it the status its creation
+//! lands in (see [`crate::state::TRANSITION_SPAN`]) — `ACTIVE`, or `FAILED` with the reason it
+//! failed for when the private CA it names is not one it could reach at all
 //! ([`crate::state::private_ca_failure_reason`]).
 //!
 //! ## Shape of an operation
@@ -194,10 +197,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let now = ::std::time::SystemTime::now();
         let region = crate::state::request_region(ctx);
 
-        let state = crate::state::service_state(&*self.engine).ok_or_else(store_unavailable)?;
-        let mut store = state.lock();
-        store.settle(now);
-
         // `Tags` carries neither a modelled `@length` nor a `@pattern`, on the map or on
         // either half of an entry, so every tagging rule is this handler's to enforce. It is
         // checked BEFORE anything is looked up or collected, so a request carrying a tag no
@@ -218,6 +217,45 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
             .into());
         }
+
+        // `CertificateAuthorityArn` references a resource Amazon Web Services Private CA
+        // owns, so whether that CA exists is that service's own read to answer, and the
+        // reference is resolved BEFORE a connector is admitted. A CA that service reports it
+        // does not hold is this operation's modelled `ResourceNotFoundException`, naming the
+        // input member that referenced it — the thing that was not found is the caller's
+        // parameter, not the resource this call creates. The lookup is made with no lock held
+        // and writes nothing.
+        //
+        // It is made on EVERY call, a `ClientToken` retry included: the reference is part of
+        // the request, so a retry whose CA has since been deleted is a request this service
+        // can no longer satisfy rather than one it answers out of the record the first call
+        // left.
+        if crate::service::private_ca::names_no_certificate_authority(
+            ctx,
+            &region,
+            &input.certificate_authority_arn,
+        )
+        .await
+        {
+            return Err(certificate_authority_not_found(
+                &input.certificate_authority_arn,
+            ));
+        }
+
+        // Whether the private CA this connector links is one it could USE, decided from the
+        // ARN the request named and the Region and account this connector is created in
+        // (`crate::state::private_ca_failure_reason`): a CA that exists but sits in another
+        // partition, Region or account is not one this endpoint and principal resolve. That
+        // outcome is reported on the connector rather than refused here — the status reason's
+        // own doc is "Information about why connector creation failed, if status is FAILED",
+        // so the values it carries for the private CA are observable only on a connector that
+        // was created and then failed.
+        let private_ca_failure =
+            crate::state::private_ca_failure_reason(&region, &input.certificate_authority_arn);
+
+        let state = crate::state::service_state(&*self.engine).ok_or_else(store_unavailable)?;
+        let mut store = state.lock();
+        store.settle(now);
 
         // The resource-defining inputs of this call, so a retry carrying the same
         // `ClientToken` can be checked to be the same request.
@@ -318,17 +356,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             input.vpc_endpoint_id.as_deref(),
         );
 
-        // Whether the private CA this connector links is one it could reach, decided from
-        // the ARN the request named and the Region and account this connector is created in
-        // (`crate::state::private_ca_failure_reason`). The call itself is still ACCEPTED —
-        // it answers 202 and the connector starts `CREATING`, as it does for a CA that is
-        // reachable — because the outcome of linking the CA is what `Status` and
-        // `StatusReason` report: the status reason's own doc is "Information about why
-        // connector creation failed, if status is FAILED", and the values it carries for
-        // the private CA are observable only on a connector that was created and then
-        // failed.
-        let private_ca_failure =
-            crate::state::private_ca_failure_reason(&region, &input.certificate_authority_arn);
+        // Whether the private CA this connector links is one it could use was decided above,
+        // before the record was admitted: the call is still ACCEPTED for a CA that exists in
+        // another Region, partition or account — it answers 202 and the connector starts
+        // `CREATING`, as it does for a usable CA — because the outcome of linking that CA is
+        // what `Status` and `StatusReason` report, and the values they carry for the private
+        // CA are observable only on a connector that was created and then failed.
 
         // `Type` follows from the request: absent `MobileDeviceManagement` means a
         // general-purpose connector, an `IntuneConfiguration` means an Intune one — and only
@@ -395,6 +428,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             connector_arn: Some(arn),
         })
     }
+}
+
+/// The name of this operation's input member that references the private certificate
+/// authority the connector links (smithy_query: operation CreateConnector).
+///
+/// It is what this call's `ResourceNotFoundException` carries as its `ResourceType`, and the
+/// word its `Message` opens with: the resource this call creates is the connector, so the
+/// thing that was not found is not the resource it acts on but the parameter that named it.
+const MISSING_MEMBER_CERTIFICATE_AUTHORITY_ARN: &str = "CertificateAuthorityArn";
+
+/// Amazon Web Services Private CA holds no certificate authority under the ARN the request
+/// named — HTTP 404 `ResourceNotFoundException`, which this operation models, carrying the
+/// supplied ARN as `ResourceId` and the input member that referenced it as `ResourceType`.
+fn certificate_authority_not_found(certificate_authority_arn: &str) -> CreateConnectorError {
+    CreateConnectorErrorModeled::ResourceNotFoundException(crate::state::resource_not_found(
+        MISSING_MEMBER_CERTIFICATE_AUTHORITY_ARN,
+        certificate_authority_arn,
+    ))
+    .into()
 }
 
 /// The store is unreachable — a server-side fault, which this operation models as

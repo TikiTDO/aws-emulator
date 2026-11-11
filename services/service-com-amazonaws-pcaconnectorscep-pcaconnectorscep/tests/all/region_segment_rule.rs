@@ -245,7 +245,8 @@ async fn the_region_a_record_is_filed_under_is_one_its_own_arn_can_name() {
 
 /// An ARN whose Region segment breaks the rule is refused by the operations that parse a
 /// `ResourceArn`, with the clause that quotes the published pattern; one whose Region segment
-/// keeps it is well formed and simply names nothing, so it is a 404.
+/// keeps it is well formed and simply names nothing, so it is the tagging layer's own
+/// not-found refusal.
 #[tokio::test]
 async fn an_arn_is_accepted_exactly_where_its_region_segment_satisfies_the_rule() {
     let router = new_router().0;
@@ -263,21 +264,7 @@ async fn an_arn_is_accepted_exactly_where_its_region_segment_satisfies_the_rule(
             ),
         ] {
             if row.arn_form_accepted {
-                assert_eq!(
-                    (answer.status, answer.error_type.as_str()),
-                    (404, "ResourceNotFoundException"),
-                    "case {case:?} on {operation}: {arn:?} is well formed and names nothing, so \
-                     expected 404 ResourceNotFoundException, got {} / {:?}",
-                    answer.status,
-                    answer.body
-                );
-                assert_eq!(
-                    answer.body["ResourceId"].as_str(),
-                    Some(arn.as_str()),
-                    "case {case:?} on {operation}: expected the requested ARN as ResourceId, \
-                     got {:?}",
-                    answer.body
-                );
+                harness::assert_tagging_not_found(&answer, &format!("{case} on {operation}"));
             } else {
                 assert_eq!(
                     (answer.status, answer.error_type.as_str()),

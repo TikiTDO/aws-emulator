@@ -43,6 +43,10 @@ mod harness;
 mod harness_contract;
 #[path = "all/minted_identifier_form.rs"]
 mod minted_identifier_form;
+#[path = "all/missing_resource_status_class.rs"]
+mod missing_resource_status_class;
+#[path = "all/model_pattern_refusal.rs"]
+mod model_pattern_refusal;
 #[path = "all/region_isolation.rs"]
 mod region_isolation;
 #[path = "all/region_segment_rule.rs"]
