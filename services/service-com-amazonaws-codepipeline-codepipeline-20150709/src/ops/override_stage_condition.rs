@@ -262,7 +262,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                             message: Some(not_overridable_message(
                                 &input.condition_type,
                                 &input.stage_name,
-                                &input.pipeline_execution_id,
+                                &input.pipeline_name,
                             )),
                         },
                     )
@@ -295,20 +295,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
 /// What `ConditionNotOverridableException` states: the site the request asked to
 /// override and the stage it named it on, with the three reasons the service gives for a
-/// condition it will not override now — the last of them naming the execution the
-/// request named.
+/// condition it will not override now — the last of them naming the PIPELINE the request
+/// named.
 ///
 /// Fixed text with the request's own values in it, so the statement is a template over
-/// what the caller asked for rather than words about one particular pipeline.
+/// what the caller asked for rather than words about one particular pipeline. The
+/// single-quoted slot of the "already superseded" clause carries the PIPELINE NAME: that
+/// is the value the recorded refusal of this class carries there, on two independently
+/// recorded calls of this operation whose own `pipelineExecutionId` is a per-run value
+/// that appears nowhere in the sentence (the recorded expectation, and the two calls, are
+/// quoted in `issues/things-that-do-not-work/20261103T173413Z-codepipeline-4-net-new-root-causes-conditionnotoverridableexception-names.md`).
+/// `tests/all/stage_condition_overrides.rs` pins the whole sentence over a set of
+/// requests, so the three substitutions stay the request's.
 fn not_overridable_message(
     condition_type: &str,
     stage_name: &str,
-    pipeline_execution_id: &str,
+    pipeline_name: &str,
 ) -> String {
     format!(
         "The condition type {condition_type} in stage {stage_name} cannot be overridden now. \
          Either it contains no failed or in-progress rule, the execution \
-         '{pipeline_execution_id}' is already superseded, or the pipeline definition has \
+         '{pipeline_name}' is already superseded, or the pipeline definition has \
          changed since the rules(s) failed."
     )
 }

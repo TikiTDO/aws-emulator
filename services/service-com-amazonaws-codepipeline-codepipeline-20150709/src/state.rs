@@ -1062,8 +1062,12 @@ impl ComAmazonawsCodepipelineCodepipeline20150709State {
         });
     }
 
-    /// Every action execution of `pipeline_name`'s retained executions, newest
-    /// execution first — the order `ListActionExecutions` pages through.
+    /// Every action execution of `pipeline_name`'s retained executions, the most
+    /// recently STARTED one first — the order `ListActionExecutions` pages through.
+    ///
+    /// An execution history is reported newest first: a reader asking for one page of
+    /// it is asking what happened LAST, so the order is by when each action execution
+    /// started, descending, across every retained execution of the pipeline.
     ///
     /// An action execution exists exactly for an action one of those executions has
     /// REACHED: the actions it begins with (the first stage of its own plan, at that
@@ -1133,6 +1137,10 @@ impl ComAmazonawsCodepipelineCodepipeline20150709State {
                 }
             }
         }
+        // Newest first, by when the action execution STARTED. A STABLE sort, so two
+        // actions of one execution that started at the same instant (a `runOrder` group
+        // the engine starts together) keep the order their stage declares them in.
+        records.sort_by_key(|record| ::std::cmp::Reverse(record.start_time));
         records
     }
 
@@ -3642,14 +3650,31 @@ pub const CONCURRENT_EXECUTION_LIMIT_MESSAGE: &str =
 ///
 /// Both are refused rather than quietly leaving a variable out of the execution, and
 /// both are refused the same way whichever call starts the execution.
+///
+/// LINEAR in the two counts: the overrides are indexed by name ONCE and every lookup
+/// below goes through that index, so a declaration's variables and a start's overrides
+/// cost their sum rather than their product — the same reason the declaration walk
+/// indexes the names it compares instead of rescanning them. Both lists are bounded by
+/// the MODEL before this is reached (`smithy_query query="shape"
+/// shape="PipelineVariableDeclarationList,PipelineVariableList"` reports `length 0..50`
+/// and `length 1..50`), so the framework's boundary walk has already refused a request
+/// that would size either of them past 50.
 pub fn resolve_execution_variables(
     declaration: &PipelineDeclaration,
     overrides: &[PipelineVariable],
 ) -> Result<Vec<ResolvedPipelineVariable>, String> {
     let declared = declaration.variables.clone().unwrap_or_default();
+    let declared_names: BTreeSet<&str> = declared
+        .iter()
+        .map(|variable| variable.name.as_str())
+        .collect();
+    let supplied: BTreeMap<&str, &str> = overrides
+        .iter()
+        .map(|variable| (variable.name.as_str(), variable.value.as_str()))
+        .collect();
     if let Some(unknown) = overrides
         .iter()
-        .find(|variable| !declared.iter().any(|d| d.name == variable.name))
+        .find(|variable| !declared_names.contains(variable.name.as_str()))
     {
         return Err(format!(
             "variables: pipeline {} declares no variable named {}",
@@ -3658,10 +3683,9 @@ pub fn resolve_execution_variables(
     }
     let mut variables: Vec<ResolvedPipelineVariable> = Vec::with_capacity(declared.len());
     for declared_variable in &declared {
-        let Some(resolved) = overrides
-            .iter()
-            .find(|variable| variable.name == declared_variable.name)
-            .map(|variable| variable.value.clone())
+        let Some(resolved) = supplied
+            .get(declared_variable.name.as_str())
+            .map(|value| (*value).to_string())
             .or_else(|| declared_variable.default_value.clone())
         else {
             return Err(format!(
@@ -3774,6 +3798,7 @@ pub const MAX_CONFIGURATION_ENTRIES_PER_ACTION: usize = 100;
 /// together with [`MAX_ACTIONS_PER_PIPELINE`] it bounds a declaration's artifacts in
 /// total.
 pub const MAX_ARTIFACTS_PER_ACTION: usize = 10;
+pub const MAX_PIPELINE_TRIGGERS: usize = 50;
 
 /// The `ActionCategory` of an action that brings a revision INTO the pipeline.
 pub const CATEGORY_SOURCE: &str = "Source";
@@ -3817,6 +3842,31 @@ pub fn too_few_stages_message(stages: usize) -> String {
 pub fn duplicate_action_name_message(action_name: &str, stage_name: &str) -> String {
     format!("Action name '{action_name}' is used more than once in pipeline stage '{stage_name}'")
 }
+
+/// The message a declaration that states `pipelineType` `V1` while carrying a V2-only
+/// FEATURE is refused with: the feature, in the service's own words.
+///
+/// `PipelineDeclaration$pipelineType` documents that "including V2 parameters, such as
+/// triggers on Git tags or pipeline-level variables" is what makes a pipeline V2, so a
+/// declaration that carries one while stating V1 is refused by naming THAT feature —
+/// which is what tells a caller which part of the declaration to drop (or that the
+/// pipeline is one to upgrade), rather than that V1 was rejected as a whole. One
+/// template over every such feature, so the pipeline-level variables, the Git triggers
+/// and the execution modes a V1 pipeline cannot have are all refused the same way.
+pub fn v2_only_feature_message(feature: &str) -> String {
+    format!("Pipeline {feature} can only be used with V2 pipelines")
+}
+
+/// The message a declaration that states `pipelineType` `V1` while stating an
+/// `executionMode` other than the default is refused with.
+///
+/// A FIXED sentence naming the two modes a V1 pipeline cannot be run in rather than the
+/// one the request stated: the defect class is "this mode is a V2 pipeline's", and the
+/// service states which modes those are. `PipelineDeclaration$executionMode` documents
+/// `SUPERSEDED` as the default, which is the mode a V1 pipeline handles multiple
+/// executions in.
+pub const V2_ONLY_EXECUTION_MODE_MESSAGE: &str =
+    "QUEUED or PARALLEL mode can only be used with V2 pipelines";
 
 /// The fewest characters a `codepipeline` resource ARN carries.
 ///
@@ -4157,15 +4207,19 @@ pub fn arn_resource(resource_arn: &str) -> String {
 ///   publishes are held to ([`validate_action_type`]).
 /// * an `inputArtifacts` entry must name an artifact some EARLIER action outputs (an
 ///   earlier stage, or the same stage at a lower `runOrder`): an action cannot consume
-///   an artifact nothing produces, and two actions cannot output the same name.
+///   an artifact nothing produces, and two actions cannot output the same name. Both
+///   are defects of the ACTION whose declaration names the artifact, so both are
+///   refused as an invalid action declaration rather than as a malformed structure.
 /// * the first stage is the pipeline's source stage: every action it carries is a
 ///   `Source` action, and no later stage carries one. A first stage that is not a
 ///   source stage is refused with [`FIRST_STAGE_NOT_SOURCE_ONLY_MESSAGE`], the fixed
 ///   sentence that defect class carries.
-/// * a declaration that states `pipelineType` `V1` cannot carry the V2-only members
-///   `variables` or `triggers` — `PipelineDeclaration$pipelineType` documents that
+/// * a declaration that states `pipelineType` `V1` cannot carry a V2-only FEATURE —
+///   `variables`, `triggers` ([`v2_only_feature_message`]), or an `executionMode` other
+///   than the default `SUPERSEDED` ([`V2_ONLY_EXECUTION_MODE_MESSAGE`]) —
+///   `PipelineDeclaration$pipelineType` documents that
 ///   "including V2 parameters … in the pipeline JSON" is what makes a pipeline V2, so
-///   carrying them while declaring V1 is a contradiction.
+///   carrying one while declaring V1 is a contradiction, refused by naming it.
 pub fn validate_declaration(
     declaration: &PipelineDeclaration,
     region: &str,
@@ -4394,7 +4448,7 @@ pub fn validate_declaration(
             for action in group {
                 for input in action.input_artifacts.iter().flatten() {
                     if !produced.contains(input.name.as_str()) {
-                        return Err(DeclarationProblem::Structure(format!(
+                        return Err(DeclarationProblem::Action(format!(
                             "action {} in stage {} declares the input artifact {}, which \
                              no earlier action outputs",
                             action.name, stage.name, input.name
@@ -4405,7 +4459,7 @@ pub fn validate_declaration(
                     if produced.contains(output.name.as_str())
                         || !outputs.insert(output.name.as_str())
                     {
-                        return Err(DeclarationProblem::Structure(format!(
+                        return Err(DeclarationProblem::Action(format!(
                             "the output artifact {} is declared by more than one action; \
                              an artifact name is produced exactly once",
                             output.name
@@ -4417,30 +4471,40 @@ pub fn validate_declaration(
         }
     }
 
-    // A declaration that states V1 cannot carry the V2-only members.
+    // A declaration that states V1 cannot carry the V2-only features. Each is refused by
+    // naming the feature, which is what the caller has to drop (or upgrade the pipeline
+    // for). The sentence is built on the REFUSING branch only, so an accepted declaration
+    // allocates none.
     if declaration.pipeline_type.as_deref() == Some(PIPELINE_TYPES[0]) {
-        let v2_only = [
-            (
-                "variables",
-                declaration
-                    .variables
-                    .as_ref()
-                    .is_some_and(|variables| !variables.is_empty()),
-            ),
-            (
-                "triggers",
-                declaration
-                    .triggers
-                    .as_ref()
-                    .is_some_and(|triggers| !triggers.is_empty()),
-            ),
-        ];
-        if let Some((member, _)) = v2_only.iter().find(|(_, present)| *present) {
-            return Err(DeclarationProblem::Structure(format!(
-                "pipeline.{member} is only supported on a V2 pipeline, but this \
-                 declaration states pipelineType {}",
-                PIPELINE_TYPES[0]
-            )));
+        let variables = declaration
+            .variables
+            .as_ref()
+            .is_some_and(|variables| !variables.is_empty());
+        let triggers = declaration
+            .triggers
+            .as_ref()
+            .is_some_and(|triggers| !triggers.is_empty());
+        // A V1 pipeline handles multiple executions one way: the `SUPERSEDED` mode
+        // `PipelineDeclaration$executionMode` documents as the default. The other two
+        // modes are a release-safety parameter of a V2 pipeline, so stating one while
+        // stating V1 is the same contradiction as the two features above — stated in
+        // that defect class's own sentence.
+        let execution_mode = declaration
+            .execution_mode
+            .as_deref()
+            .filter(|mode| !mode.is_empty())
+            .is_some_and(|mode| mode != DEFAULT_EXECUTION_MODE);
+        let v2_only = if variables {
+            Some(v2_only_feature_message("variable"))
+        } else if triggers {
+            Some(v2_only_feature_message("trigger"))
+        } else if execution_mode {
+            Some(V2_ONLY_EXECUTION_MODE_MESSAGE.to_string())
+        } else {
+            None
+        };
+        if let Some(message) = v2_only {
+            return Err(DeclarationProblem::Structure(message));
         }
     }
     Ok(())

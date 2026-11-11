@@ -20,13 +20,17 @@
 //!    action has finished, and one whose pipeline is gone are the same fact to a caller.
 //!
 //! The one thing this call writes is the drop of a job whose action is no longer waiting
-//! for a worker (abandoned by a stop, or finished): that release was already owed when
-//! the action moved, so materialising it here is the sanctioned "a read may write only
-//! to materialise a change the clock already made due" case, and it is the same sweep
-//! `PollForJobs` performs — the two cannot disagree about which jobs still exist.
+//! for a worker (abandoned by a stop, or finished), and the release of the artifact-store
+//! credentials the clock has ended: both were already owed when the clock passed them, so
+//! materialising them here is the sanctioned "a read may write only to materialise a
+//! change the clock already made due" case, and both are the sweeps `PollForJobs`
+//! performs — the two cannot disagree about which jobs exist or which credentials are
+//! still live.
 //!
-//! `JobData$artifactCredentials` stays ABSENT, for the reason
-//! [`crate::state::JobRecord::to_data`] records.
+//! `JobData$artifactCredentials` is the artifact-store credentials the job's DISPATCH
+//! vended (`state::jobs::mint_artifact_credentials`), reported as they were vended: this
+//! call mints none of its own, so a job no poll has handed out yet reports none, and the
+//! ones the clock has ended are released by the sweep above rather than reported.
 //!
 //! ## Shape of an operation
 //!
@@ -157,9 +161,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let state = crate::state::require_state(&*self.engine)?;
+
+        // The artifact-store credentials the CLOCK has already ended are released here
+        // too, so the ones this call reports are credentials the emulator would still
+        // accept: the release was owed at that instant whether or not anybody called,
+        // which is the same sanctioned materialisation as the job sweep below, and it is
+        // the same sweep `PollForJobs` performs. The state guard is dropped before the
+        // credential store is touched.
+        let due = state
+            .lock()
+            .due_artifact_credentials(::std::time::SystemTime::now());
+        for access_key_id in due {
+            let _ = ctx.credential_store().delete(&access_key_id);
+        }
+
         let mut state = state.lock();
         // A job whose action is no longer waiting for a worker is not a job any more
         // (the same sweep `PollForJobs` performs), so it is not reported either.

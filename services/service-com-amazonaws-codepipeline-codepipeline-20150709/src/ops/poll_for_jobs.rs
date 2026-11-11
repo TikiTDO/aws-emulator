@@ -8,7 +8,7 @@
 //! ACCOUNT runs polls CodePipeline for the jobs its own action type has waiting.
 //! "PollForJobs is valid only for action types with `Custom` in the owner field. If the
 //! action type contains `AWS` or `ThirdParty` in the owner field, the PollForJobs action
-//! returns an error." Four rules follow from that, and this handler is all four:
+//! returns an error." Five rules follow from that, and this handler is all five:
 //!
 //! 1. **Only a custom action is polled this way.** An `actionTypeId` naming any other
 //!    `ActionOwner` is refused `ValidationException` (HTTP 400) before anything is
@@ -37,6 +37,11 @@
 //!    claim lapses ([`crate::state::JOB_POLL_LEASE`]), after which it is available
 //!    again — with a NEW nonce, so the one the lapsed claim published no longer reaches
 //!    it. Everything else about the job is REPORTED from the store, not from the poll.
+//! 5. **A dispatch VENDS what the job needs.** "When this API is called, CodePipeline
+//!    returns temporary credentials for the S3 bucket used to store artifacts for the
+//!    pipeline, if the action requires access to that S3 bucket for input or output
+//!    artifacts": a job whose action moves an artifact is handed out with those
+//!    credentials, minted once per job and kept on it (see below).
 //!
 //! The jobs themselves are queued by the execution plane: when an execution reaches an
 //! action whose action type is `Custom`, CodePipeline cannot run it, so
@@ -50,11 +55,12 @@
 //! than with an invented one.
 //!
 //! `JobData$artifactCredentials` — the "temporary credentials for the S3 bucket used to
-//! store artifacts" the doc below mentions — stays ABSENT, for the reason
-//! [`crate::state::JobRecord::to_data`] records: it is an STS session SCOPED to the
-//! artifact bucket, this emulator's credential store holds no policies to scope one
-//! with, and a job is released by paths with no credential store in reach, so nothing
-//! would ever revoke it. The artifact LOCATIONS a worker needs are reported in full.
+//! store artifacts" the doc below mentions — is vended BY this dispatch, for a job whose
+//! action moves an artifact: the credentials are minted by the emulator's credential store,
+//! so the worker's own calls to the artifact store are accepted, they are recorded on the
+//! job so `GetJobDetails` reports the same ones, and they are released again once the clock
+//! has ended them or their job is gone. The artifact LOCATIONS a worker needs
+//! are reported in full beside them.
 //!
 //! ## Shape of an operation
 //!
@@ -314,9 +320,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::advance(&*self.engine, ctx, &pipeline).await;
         }
 
+        let now = ::std::time::SystemTime::now();
+
         // Rule 4: the jobs still waiting for this action type, oldest first, at most
         // `maxBatchSize` of them, each handed to this worker with a fresh nonce.
-        let now = ::std::time::SystemTime::now();
         let leased = {
             let mut store = state.lock();
             // A job whose action is no longer waiting for a worker (it was abandoned by

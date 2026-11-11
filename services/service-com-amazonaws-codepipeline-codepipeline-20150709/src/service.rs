@@ -67,10 +67,10 @@ const VALIDATION_EXCEPTION: &str = "ValidationException";
 ///
 /// A constraint a map's key or value SHAPE declares is a property of the map member,
 /// not of the one entry that happened to violate it, so the refusal names the map
-/// member and states that shape's whole constraint set. The bounds are the model's:
+/// member and states that shape's whole constraint set. The key bounds are the model's:
 /// `smithy_query query="shape" shape="ActionConfigurationMap"` reports
-/// `key ActionConfigurationKey length 1..50` and
-/// `value ActionConfigurationValue length 1..1000`.
+/// `key ActionConfigurationKey length 1..50`; the value bounds are the ones the service
+/// STATES ([`CONFIGURATION_VALUE_STATED_LENGTH`]).
 ///
 /// Hand-maintained, and only as far as it can be: `Violation` (the framework's
 /// constraint-walk output, `vendor/smithy-schema-server/src/constraints.rs`) carries a
@@ -97,11 +97,29 @@ struct ConstrainedMap {
     value_length: (i64, i64),
 }
 
+/// The `@length` bounds CodePipeline STATES for an action configuration value in a
+/// validation message.
+///
+/// The upper bound is the service's, not the model's: `ActionConfigurationValue` carries
+/// `@length(min: 1, max: 1000)` (`smithy_query query="shape"
+/// shape="ActionConfigurationValue"`), while the service states this figure as the
+/// configuration-value maximum in the message it refuses an out-of-bounds value with. The
+/// message is the contract a client reads the limit from, so it states the service's
+/// figure.
+///
+/// The two therefore disagree about the values BETWEEN them, and deliberately: what the
+/// request is CHECKED against is the model's own constraint, applied by the framework's
+/// boundary walk before any handler of this service runs, so a value longer than the
+/// model's maximum is refused here while the service that published this figure would
+/// take it. Closing that gap means the model's constraint, which this crate does not
+/// author; stating the service's figure in the message is what this constant is for.
+pub const CONFIGURATION_VALUE_STATED_LENGTH: (i64, i64) = (1, 50_000);
+
 /// Every constrained-entry map this service's inputs carry.
 const CONSTRAINED_MAPS: &[ConstrainedMap] = &[ConstrainedMap {
     member: "configuration",
     key_length: (1, 50),
-    value_length: (1, 1000),
+    value_length: CONFIGURATION_VALUE_STATED_LENGTH,
 }];
 
 /// The map member a violation path names an ENTRY of, if any.

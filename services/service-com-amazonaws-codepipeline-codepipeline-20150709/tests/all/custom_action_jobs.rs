@@ -646,12 +646,17 @@ async fn an_execution_reaching_a_custom_action_queues_a_job_for_its_worker() {
     );
     // The worker is handed the credentials it reads and writes those artifacts with:
     // minted by the dispatch, never chosen by this service, and all three members the
-    // model requires of a session.
+    // model requires of a session. Only the MEMBER is named in the failure text — a
+    // vended secret is not printed.
     let credentials = &job["data"]["artifactCredentials"];
     for member in ["accessKeyId", "secretAccessKey", "sessionToken"] {
         assert!(
-            credentials[member].as_str().is_some_and(|value| !value.is_empty()),
-            "case \"a queued job\": expected artifactCredentials.{member}, got {job}"
+            credentials[member]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+            "case \"a queued job\": expected a non-empty artifactCredentials.{member} on a \
+             job that moves artifacts, got {:?}",
+            credentials[member].as_str().map(str::len)
         );
     }
 

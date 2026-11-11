@@ -549,3 +549,92 @@ async fn a_request_that_names_no_gate_is_refused() {
         )
         .await;
 }
+
+/// RULE: `ConditionNotOverridableException` carries ONE fixed sentence with the request's
+/// own values in it — the `conditionType` and the `stageName` it named, and the PIPELINE
+/// it named them on in the single-quoted slot — so nothing of it is about one particular
+/// refusal and no per-run execution id reaches it.
+#[tokio::test]
+async fn the_not_overridable_refusal_states_one_sentence_over_the_request() {
+    let emulator = Emulator::new();
+    // Two gated pipelines, differing in the site their condition is declared at, so a row
+    // can ask for a site the stage does not hold as well as one whose condition was never
+    // met.
+    let entry_gated = "cond-wording-entry";
+    let entry_execution = gated_pipeline(
+        &emulator,
+        entry_gated,
+        "beforeEntry",
+        site("FAIL", variable_check("Check", "99", "EQ")),
+    )
+    .await;
+    wait_for_terminal(&emulator, entry_gated, &entry_execution).await;
+
+    // The rows differ along every value the sentence interpolates: the pipeline, the
+    // stage, and the condition type — and along which not-overridable class the request
+    // falls in (a site the stage does not hold, a stage no condition stopped).
+    let rows: Vec<(&str, &str, &str, &str)> = vec![
+        (
+            "the site the stage does not hold",
+            entry_gated,
+            "Gated",
+            ON_SUCCESS,
+        ),
+        (
+            "a stage no condition stopped, at the entry site",
+            entry_gated,
+            "Source",
+            BEFORE_ENTRY,
+        ),
+        (
+            "a stage no condition stopped, at the success site",
+            entry_gated,
+            "Source",
+            ON_SUCCESS,
+        ),
+    ];
+
+    for (case, pipeline_name, stage_name, condition_type) in rows {
+        let (status, response) = emulator
+            .cp(
+                "OverrideStageCondition",
+                &json!({
+                    "pipelineName": pipeline_name,
+                    "stageName": stage_name,
+                    "pipelineExecutionId": entry_execution,
+                    "conditionType": condition_type,
+                }),
+            )
+            .await;
+        let code = response["__type"].as_str().unwrap_or_default();
+        let message = response["message"]
+            .as_str()
+            .or_else(|| response["Message"].as_str())
+            .unwrap_or_default();
+        assert_eq!(
+            (status, code),
+            (REFUSAL_STATUS, "ConditionNotOverridableException"),
+            "case {case:?}: unexpected refusal, got {status} {code} {message:?}"
+        );
+        // The sentence, spelled here rather than read from the crate: the fixed text is
+        // the service's, and the three substitutions are the request's own values. The
+        // single-quoted slot carries the PIPELINE the request named — the value the
+        // recorded refusal of this class carries there, on two independently recorded
+        // calls whose own execution id appears nowhere in the sentence.
+        let expected = format!(
+            "The condition type {condition_type} in stage {stage_name} cannot be \
+             overridden now. Either it contains no failed or in-progress rule, the \
+             execution '{pipeline_name}' is already superseded, or the pipeline \
+             definition has changed since the rules(s) failed."
+        );
+        assert_eq!(
+            message, expected,
+            "case {case:?}: expected the refusal's one sentence, got {message:?}"
+        );
+        assert!(
+            !message.contains(entry_execution.as_str()),
+            "case {case:?}: the per-run execution id is not part of the sentence, got \
+             {message:?}"
+        );
+    }
+}

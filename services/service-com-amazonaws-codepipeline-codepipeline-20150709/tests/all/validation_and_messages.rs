@@ -4,11 +4,12 @@
 //!
 //! The rules under test, each over a SET of inputs:
 //!
-//! * `CreatePipeline` refuses a declaration that is structurally impossible — an
-//!   `inputArtifacts` entry no earlier action outputs, a first stage that is not the
-//!   source stage, a `Source` action outside it, a `roleArn` IAM holds no role for, and
-//!   the V2-only members on a declaration that states `pipelineType` `V1` — with the
-//!   error shape the model declares for a malformed structure;
+//! * `CreatePipeline` refuses a declaration that is structurally impossible — a first
+//!   stage that is not the source stage, a `Source` action outside it, a `roleArn` IAM
+//!   holds no role for, and a V2-only feature on a declaration that states
+//!   `pipelineType` `V1` — with the error shape the model declares for a malformed
+//!   structure (a defect of ONE action's or ONE stage's own declaration is refused with
+//!   its own error shape instead; `declaration_fault_classification.rs` pins those);
 //! * `PipelineNameInUseException` carries the text its rule builds from the REQUEST and
 //!   the caller's account, so the account the name collided in is reported, and so does
 //!   the pipeline-definition plane's `PipelineNotFoundException` (the OTHER planes word
@@ -45,10 +46,12 @@ const TRUST_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Al
 /// reports `^[A-Za-z0-9.@\-_]+$` for both).
 const NAME_PATTERN: &str = r"[A-Za-z0-9.@\-_]+";
 
-/// `ActionConfigurationValue`'s `@length` bounds
-/// (`smithy_query(query="shape", shape="ActionConfigurationMap")`: value
-/// `ActionConfigurationValue length 1..1000`).
-const CONFIGURATION_VALUE_BOUNDS: (i64, i64) = (1, 1000);
+/// The `@length` bounds CodePipeline STATES for an action configuration value, as the
+/// service's refusal states them — spelled here as the independent expectation, not read
+/// from the crate: the upper bound is the figure the service publishes in this message
+/// (the value shape's own modelled maximum, 1000, is what the boundary validator
+/// enforces).
+const CONFIGURATION_VALUE_BOUNDS: (i64, i64) = (1, 50_000);
 
 /// One emulator with CodePipeline and IAM mounted on one engine: `CreatePipeline` checks
 /// the declaration's role in IAM.
@@ -214,13 +217,6 @@ async fn create_pipeline_refuses_a_structurally_impossible_declaration() {
     // variation of: what the rows differ in is the SHAPE of the declaration.
     let rows: Vec<(&str, Value)> = vec![
         (
-            "an input artifact no earlier action outputs",
-            declaration(
-                "dangling-input",
-                json!([source_stage("SourceArtifact"), deploy_stage("Deploy", "NoSuchArtifact")]),
-            ),
-        ),
-        (
             "a source action outside the first stage",
             declaration(
                 "source-not-first",
@@ -267,27 +263,6 @@ async fn create_pipeline_refuses_a_structurally_impossible_declaration() {
             ),
         ),
         (
-            "one output artifact name declared twice",
-            declaration(
-                "duplicate-output",
-                json!([
-                    source_stage("SourceArtifact"),
-                    {
-                        "name": "Build",
-                        "actions": [{
-                            "name": "Again",
-                            "actionTypeId": {
-                                "category": "Build", "owner": "AWS",
-                                "provider": "CodeBuild", "version": "1",
-                            },
-                            "inputArtifacts": [{"name": "SourceArtifact"}],
-                            "outputArtifacts": [{"name": "SourceArtifact"}],
-                        }],
-                    },
-                ]),
-            ),
-        ),
-        (
             "no stage at all",
             declaration("no-stages", json!([])),
         ),
@@ -307,12 +282,15 @@ async fn create_pipeline_refuses_a_structurally_impossible_declaration() {
         );
     }
 
-    // A V1 declaration cannot carry the V2-only members, one row each.
-    for (case, member, value) in [
+    // A V1 declaration cannot carry a V2-only FEATURE, and the refusal names that
+    // feature in the service's own words: one row per feature, each asserting the whole
+    // sentence rather than that the member is mentioned somewhere.
+    for (case, member, value, feature) in [
         (
             "variables on a V1 pipeline",
             "variables",
             json!([{"name": "Flavor", "defaultValue": "vanilla"}]),
+            "variable",
         ),
         (
             "triggers on a V1 pipeline",
@@ -321,6 +299,7 @@ async fn create_pipeline_refuses_a_structurally_impossible_declaration() {
                 "providerType": "CodeStarSourceConnection",
                 "gitConfiguration": {"sourceActionName": "Src"},
             }]),
+            "trigger",
         ),
     ] {
         let mut body = declaration(
@@ -329,16 +308,13 @@ async fn create_pipeline_refuses_a_structurally_impossible_declaration() {
         );
         body["pipeline"]["pipelineType"] = json!("V1");
         body["pipeline"][member] = value;
+        let expected = format!("Pipeline {feature} can only be used with V2 pipelines");
         let (status, code, message) = emulator.refusal("CreatePipeline", &body).await;
         assert_eq!(
-            (status, code.as_str()),
-            (400, "InvalidStructureException"),
-            "case {case:?}: expected the modelled structure refusal, got {status} {code} \
-             {message:?}"
-        );
-        assert!(
-            message.contains(member),
-            "case {case:?}: the refusal names the member, got {message:?}"
+            (status, code.as_str(), message.as_str()),
+            (400, "InvalidStructureException", expected.as_str()),
+            "case {case:?}: expected the V2-only refusal naming the feature, got {status} \
+             {code} {message:?}"
         );
     }
 
@@ -559,6 +535,74 @@ async fn a_declaration_past_a_quota_is_refused_before_it_is_walked() {
         assert!(
             message.contains("outputArtifacts") && message.contains("limit of"),
             "case {case:?}: the refusal names the member and the limit, got {message:?}"
+        );
+    }
+
+    // And so are the two V2-only lists — by the MODEL's own `@length` on each
+    // (`smithy_query query="shape"
+    // shape="PipelineVariableDeclarationList,PipelineTriggerDeclarationList"` reports
+    // `length 0..50` for both), which the boundary walk applies before the handler runs.
+    // The rows pin both ends of that bound, because the resolution every execution
+    // performs over a declaration's variables and a start's overrides is sized by it.
+    const MODELLED_LIST_MAXIMUM: usize = 50;
+    for (case, member, count, accepted) in [
+        ("at the pipeline-variable limit", "variables", MODELLED_LIST_MAXIMUM, true),
+        (
+            "one past the pipeline-variable limit",
+            "variables",
+            MODELLED_LIST_MAXIMUM + 1,
+            false,
+        ),
+        ("at the trigger limit", "triggers", MODELLED_LIST_MAXIMUM, true),
+        (
+            "one past the trigger limit",
+            "triggers",
+            MODELLED_LIST_MAXIMUM + 1,
+            false,
+        ),
+    ] {
+        let declared: Vec<Value> = (0..count)
+            .map(|index| {
+                if member == "variables" {
+                    json!({"name": format!("Var{index}"), "defaultValue": "v"})
+                } else {
+                    json!({
+                        "providerType": "CodeStarSourceConnection",
+                        "gitConfiguration": {"sourceActionName": format!("Src{index}")},
+                    })
+                }
+            })
+            .collect();
+        let mut body = declaration(
+            &format!("quota-{member}-{count}"),
+            json!([source_stage("SourceArtifact"), acting_stage("Build")]),
+        );
+        body["pipeline"]["pipelineType"] = json!("V2");
+        body["pipeline"][member] = Value::Array(declared);
+        if accepted {
+            let (status, answer) = emulator.cp("CreatePipeline", &body).await;
+            assert_eq!(
+                status, 200,
+                "case {case:?}: a declaration inside the modelled length is accepted, got \
+                 {status} with {answer}"
+            );
+            continue;
+        }
+        let (status, code, message) = emulator.refusal("CreatePipeline", &body).await;
+        assert_eq!(
+            (status, code.as_str(), message.as_str()),
+            (
+                400,
+                "ValidationException",
+                format!(
+                    "1 validation error detected: Value at 'pipeline.{member}' failed to \
+                     satisfy constraint: Member must have length less than or equal to \
+                     {MODELLED_LIST_MAXIMUM}"
+                )
+                .as_str()
+            ),
+            "case {case:?}: expected the modelled length refusal, got {status} {code} \
+             {message:?}"
         );
     }
 }
@@ -782,6 +826,20 @@ async fn a_map_entrys_constraint_is_reported_against_the_map_member() {
             )),
             "case {case:?}: the requirement is the entry shape's whole constraint set, \
              got {message:?}"
+        );
+        // The whole envelope, once per row, with the bounds spelled out: the clause above
+        // is built from this suite's own figures, and this is what the service answers.
+        assert_eq!(
+            message,
+            format!(
+                "1 validation error detected: Value at \
+                 'pipeline.stages.{}.member.actions.1.member.configuration' failed to \
+                 satisfy constraint: Map value must satisfy constraint: [Member must have \
+                 length less than or equal to 50000, Member must have length greater than \
+                 or equal to 1]",
+                stage_index + 1
+            ),
+            "case {case:?}: expected the whole validation envelope, got {message:?}"
         );
         assert!(
             message.contains("configuration' failed"),

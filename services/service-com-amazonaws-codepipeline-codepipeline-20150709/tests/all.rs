@@ -15,6 +15,8 @@
 mod acknowledge_third_party_job;
 #[path = "all/action_artifact_lists.rs"]
 mod action_artifact_lists;
+#[path = "all/action_execution_history_order.rs"]
+mod action_execution_history_order;
 #[path = "all/action_executions.rs"]
 mod action_executions;
 #[path = "all/action_revisions.rs"]
@@ -47,6 +49,8 @@ mod custom_action_job_results;
 mod custom_action_jobs;
 #[path = "all/custom_action_types.rs"]
 mod custom_action_types;
+#[path = "all/declaration_fault_classification.rs"]
+mod declaration_fault_classification;
 #[path = "all/declaration_action_type_rules.rs"]
 mod declaration_action_type_rules;
 #[path = "all/declaration_structure_rules.rs"]
