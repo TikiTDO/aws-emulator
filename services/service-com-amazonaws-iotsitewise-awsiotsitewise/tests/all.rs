@@ -100,6 +100,13 @@ mod refusal_resource_arn;
 #[path = "all/client_token_conflict_names_a_held_record.rs"]
 mod client_token_conflict_names_a_held_record;
 
+// `pipeline_absence_depth` is declared HERE, beside the suite above, for the
+// reason its note gives: the sorted list and the END of this file are both where
+// every concurrent iotsitewise change puts a declaration of its own. Fold it into
+// the list once the churn settles.
+#[path = "all/pipeline_absence_depth.rs"]
+mod pipeline_absence_depth;
+
 // `asset_model_name_uniqueness` is declared HERE, beside the suite above, for the
 // reason its note gives: the sorted list and the END of this file are both where
 // every concurrent iotsitewise change puts a declaration of its own. Fold it into
