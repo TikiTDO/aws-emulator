@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListMessageTemplateVersions
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListMessageTemplateVersions`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListMessageTemplateVersions::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the versions one message template has published, out of the records
+//! `CreateMessageTemplateVersion` wrote, in ascending `versionNumber` order and one page at
+//! a time. `@readonly`: it writes nothing, so a read cannot change what a later caller
+//! sees — a template that has published no version reports the empty list.
 //!
 //! ## Shape of an operation
 //!
@@ -86,6 +82,27 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+/// The member whose label a refusal of this operation names, as a caller names it.
+const MEMBER_MESSAGE_TEMPLATE_ID: &str = "messageTemplateId";
+
+/// The modelled `ResourceNotFoundException` (HTTP 404), naming the resource the request
+/// addressed — the member the model provides for exactly that.
+fn not_found(message: &str, resource_name: &str) -> ListMessageTemplateVersionsError {
+    ListMessageTemplateVersionsErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+        message: Some(message.to_string()),
+        resource_name: Some(resource_name.to_string()),
+    })
+    .into()
+}
+
+/// The modelled `ValidationException` (HTTP 400).
+fn validation(message: &str) -> ListMessageTemplateVersionsError {
+    ListMessageTemplateVersionsErrorModeled::ValidationException(ValidationException {
+        message: Some(message.to_string()),
+    })
+    .into()
+}
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -157,18 +174,89 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListMessageTemplateVersions` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListMessageTemplateVersionsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListMessageTemplateVersions"))
+        // `ListMessageTemplateVersions` is `@readonly`: it reports the stored records and
+        // writes nothing, so a read cannot change what a later caller sees.
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            // Unreachable in this emulator: the router builds one `InMemoryEngine` and
+            // hands it to every service.
+            crate::scaffolded::Scaffolded::not_implemented("ListMessageTemplateVersions")
+        })?;
+        let store = state.lock();
+
+        // The listing is of ONE template inside ONE knowledge base, so both parents are
+        // resolved first: a knowledge base this account does not hold, and a template this
+        // knowledge base does not hold, are not found rather than an empty page.
+        let Some(knowledge_base) = store.knowledge_base(&input.knowledge_base_id) else {
+            return Err(not_found(
+                crate::state::MESSAGE_KNOWLEDGE_BASE_NOT_FOUND,
+                &input.knowledge_base_id,
+            ));
+        };
+        let knowledge_base_id = knowledge_base.knowledge_base_id.clone();
+
+        // This operation lists the versions of the template its label names: a knowledge
+        // base this account does not hold, and a template this knowledge base does not
+        // hold, are not found rather than an empty page.
+        let (message_template_id, qualifier) =
+            crate::state::resolve_qualified_id(&input.message_template_id);
+        let Some(message_template) = store.message_template(&knowledge_base_id, message_template_id)
+        else {
+            return Err(not_found(
+                crate::state::MESSAGE_MESSAGE_TEMPLATE_NOT_FOUND,
+                &input.message_template_id,
+            ));
+        };
+
+        // The label "cannot contain any qualifier": one that carries a qualifier is refused
+        // rather than read as naming a single version.
+        if qualifier.is_some() {
+            return Err(validation(&crate::state::message_qualifier_not_accepted(
+                MEMBER_MESSAGE_TEMPLATE_ID,
+            )));
+        }
+
+        // A token this service did not mint, or one that carries no version number, names
+        // no position: it is refused rather than silently read as "from the beginning".
+        let start_at = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => Some(
+                crate::state::decode_cursor(token)
+                    .and_then(|position| position.parse::<i64>().ok())
+                    .ok_or_else(|| validation("nextToken: the specified token is not valid."))?,
+            ),
+        };
+
+        // `maxResults` is modelled `range 1..100`, so the boundary validator refuses
+        // anything outside it before this handler runs. Refuse explicitly rather than
+        // defaulting, so a value this service cannot page with is never read as "the
+        // whole page".
+        let page_size = match input.max_results {
+            None => crate::state::DEFAULT_MAX_RESULTS,
+            Some(max) => usize::try_from(max)
+                .ok()
+                .filter(|size| *size > 0)
+                .ok_or_else(|| validation("maxResults: must be between 1 and 100."))?,
+        };
+
+        // The versions are held in ascending `versionNumber` order, and a continuation
+        // resumes at the first one at or after the cursor.
+        let versions = store.message_template_versions_of(&message_template.message_template_id);
+        let mut remaining = versions
+            .iter()
+            .filter(|version| start_at.is_none_or(|from| version.version_number >= from));
+        let message_template_version_summaries: Vec<MessageTemplateVersionSummary> = remaining
+            .by_ref()
+            .take(page_size)
+            .map(crate::state::MessageTemplateVersion::to_summary)
+            .collect();
+        let next_token = remaining
+            .next()
+            .map(|version| crate::state::encode_cursor(&version.version_number.to_string()));
+
+        Ok(ListMessageTemplateVersionsOutput {
+            message_template_version_summaries,
+            next_token,
+        })
     }
 }

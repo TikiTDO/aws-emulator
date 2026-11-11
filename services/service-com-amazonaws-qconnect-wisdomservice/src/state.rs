@@ -15,6 +15,11 @@
 mod message_templates;
 pub use message_templates::*;
 
+/// The published versions of a message template: the snapshot record, its projections and
+/// its lookups.
+mod message_template_versions;
+pub use message_template_versions::*;
+
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::SystemTime;
 
@@ -2935,6 +2940,12 @@ pub struct ComAmazonawsQconnectWisdomserviceState {
     /// route named, and at most [`MAX_MESSAGE_TEMPLATES_PER_KNOWLEDGE_BASE`] of them
     /// belong to any one knowledge base.
     pub message_templates: HashMap<String, MessageTemplate>,
+    /// Every published version of every message template, keyed by the
+    /// `messageTemplateId` of the template that published it and held in ascending
+    /// `versionNumber` order, at most [`MAX_MESSAGE_TEMPLATE_VERSIONS_PER_TEMPLATE`] per
+    /// template. A template that has published none holds no entry, which is the correct
+    /// "no versions" answer for it.
+    pub message_template_versions: MessageTemplateVersions,
 }
 
 impl ComAmazonawsQconnectWisdomserviceState {

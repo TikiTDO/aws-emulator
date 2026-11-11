@@ -59,7 +59,7 @@ use super::resource_tags::{label, wisdom_arn, Emulator, Reply, ABSENT_UUID, OTHE
 /// applies to it (`smithy_query(query="shape",shape="MessageTemplateContentProvider")`).
 /// The catalog is written out here rather than imported, so the table spans the whole
 /// value set and not the one subtype a single recording used.
-const CHANNEL_SUBTYPES: [(&str, &str); 4] = [
+pub(crate) const CHANNEL_SUBTYPES: [(&str, &str); 4] = [
     ("EMAIL", "email"),
     ("SMS", "sms"),
     ("WHATSAPP", "whatsApp"),
@@ -279,7 +279,7 @@ impl TemplateCase {
 
 /// The content union member that applies to one channel subtype, filled with values the
 /// modelled constraints of that member admit.
-fn content_for(channel_subtype: &str) -> Value {
+pub(crate) fn content_for(channel_subtype: &str) -> Value {
     match channel_subtype {
         "EMAIL" => json!({
             "email": {

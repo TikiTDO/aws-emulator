@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateMessageTemplateVersion
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateMessageTemplateVersion`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateMessageTemplateVersion::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Publishes the message template's working copy (the one `$LATEST` names) as a new,
+//! immutable version, numbered one above the template's previous version. A publish of a
+//! working copy the latest version already holds answers with that version rather than
+//! numbering a second identical one, as the operation's own documentation states.
 //!
 //! ## Shape of an operation
 //!
@@ -100,6 +96,37 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+/// The member whose label a refusal of this operation names, as a caller names it.
+const MEMBER_MESSAGE_TEMPLATE_ID: &str = "messageTemplateId";
+
+/// The modelled `ResourceNotFoundException` (HTTP 404), naming the resource the request
+/// addressed — the member the model provides for exactly that.
+fn not_found(message: &str, resource_name: &str) -> CreateMessageTemplateVersionError {
+    CreateMessageTemplateVersionErrorModeled::ResourceNotFoundException(
+        ResourceNotFoundException {
+            message: Some(message.to_string()),
+            resource_name: Some(resource_name.to_string()),
+        },
+    )
+    .into()
+}
+
+/// The modelled `ConflictException` (HTTP 409).
+fn conflict(message: String) -> CreateMessageTemplateVersionError {
+    CreateMessageTemplateVersionErrorModeled::ConflictException(ConflictException {
+        message: Some(message),
+    })
+    .into()
+}
+
+/// The modelled `ValidationException` (HTTP 400).
+fn validation(message: String) -> CreateMessageTemplateVersionError {
+    CreateMessageTemplateVersionErrorModeled::ValidationException(ValidationException {
+        message: Some(message),
+    })
+    .into()
+}
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -173,18 +200,109 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateMessageTemplateVersion` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateMessageTemplateVersionErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateMessageTemplateVersion"))
+        // Everything this operation answers with is rendered out of the stored record, so
+        // nothing here is built from request metadata. Modelled constraints (the label
+        // patterns, `messageTemplateContentSha256`'s length and pattern) are already
+        // refused BEFORE this handler runs.
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            // Unreachable in this emulator: the router builds one `InMemoryEngine` and
+            // hands it to every service.
+            crate::scaffolded::Scaffolded::not_implemented("CreateMessageTemplateVersion")
+        })?;
+        let mut store = state.lock();
+
+        // A message template is reachable only through the knowledge base it was created
+        // under, so the parent is resolved first and a knowledge base this account does
+        // not hold is reported as the resource that is missing.
+        let Some(knowledge_base) = store.knowledge_base(&input.knowledge_base_id) else {
+            return Err(not_found(
+                crate::state::MESSAGE_KNOWLEDGE_BASE_NOT_FOUND,
+                &input.knowledge_base_id,
+            ));
+        };
+        let knowledge_base_id = knowledge_base.knowledge_base_id.clone();
+
+        // This operation publishes the WORKING COPY of the template its label names. A
+        // label pair that crosses one knowledge base with another's template names nothing
+        // either.
+        let (message_template_id, qualifier) =
+            crate::state::resolve_qualified_id(&input.message_template_id);
+        let Some(message_template) = store.message_template(&knowledge_base_id, message_template_id)
+        else {
+            return Err(not_found(
+                crate::state::MESSAGE_MESSAGE_TEMPLATE_NOT_FOUND,
+                &input.message_template_id,
+            ));
+        };
+
+        // The label "cannot contain any qualifier": one that carries a qualifier is refused
+        // rather than read as naming a version to publish from.
+        if qualifier.is_some() {
+            return Err(validation(crate::state::message_qualifier_not_accepted(
+                MEMBER_MESSAGE_TEMPLATE_ID,
+            )));
+        }
+        let snapshot = message_template.clone();
+        let content_sha256 = snapshot.content_sha256();
+
+        // The checksum member is the caller's precondition on WHAT is published: the
+        // operation's own documentation states that a supplied value different from the
+        // working copy's is an error, so a publish of content the caller has not seen is
+        // refused rather than numbering a version of something else. A request that
+        // supplies none publishes the working copy as it stands, which is the documented
+        // default.
+        if let Some(supplied) = input.message_template_content_sha256.as_deref() {
+            if supplied != content_sha256 {
+                return Err(conflict(crate::state::message_content_checksum_mismatch(
+                    &content_sha256,
+                )));
+            }
+        }
+
+        // "If multiple CreateMessageTemplateVersion requests are made while the message
+        // template remains the same, only the first invocation creates a new version and
+        // the succeeding requests will return the same response as the first invocation" —
+        // so a publish whose working copy is the one the latest version already holds
+        // answers with that version instead of numbering a second identical one. The two
+        // are compared by the checksum the model defines over the content, which is what
+        // "the message template remains the same" is decided by.
+        if let Some(latest) = store.latest_message_template_version(message_template_id) {
+            if latest.snapshot.content_sha256() == content_sha256 {
+                return Ok(CreateMessageTemplateVersionOutput {
+                    message_template: Some(latest.to_extended_message_template_data()),
+                });
+            }
+        }
+
+        // The template's version bound, which is what keeps this store finite.
+        if store.message_template_versions_of(&snapshot.message_template_id).len()
+            >= crate::state::MAX_MESSAGE_TEMPLATE_VERSIONS_PER_TEMPLATE
+        {
+            return Err(
+                CreateMessageTemplateVersionErrorModeled::ServiceQuotaExceededException(
+                    ServiceQuotaExceededException {
+                        message: Some(crate::state::message_message_template_version_quota()),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // Publish the snapshot, then answer out of the record that was written: what this
+        // call reports is what a later read of that version reports.
+        let message_template_id = snapshot.message_template_id.clone();
+        let version_number = store.publish_message_template_version(snapshot);
+        let Some(version) = store.message_template_version(&message_template_id, version_number)
+        else {
+            // Unreachable: the publish above put this version in the store while the lock
+            // is held.
+            return Err(crate::scaffolded::Scaffolded::not_implemented(
+                "CreateMessageTemplateVersion",
+            ));
+        };
+        Ok(CreateMessageTemplateVersionOutput {
+            message_template: Some(version.to_extended_message_template_data()),
+        })
     }
 }

@@ -511,6 +511,19 @@ impl ComAmazonawsQconnectWisdomserviceState {
             .filter(|template| template.knowledge_base_id == knowledge_base_id)
     }
 
+    /// The same message template as [`Self::message_template`], for a caller that WRITES
+    /// to it: the seam `UpdateMessageTemplate` applies its changes through, so an update
+    /// and a read reach one record rather than two copies.
+    pub fn message_template_mut(
+        &mut self,
+        knowledge_base_id: &str,
+        message_template_id: &str,
+    ) -> Option<&mut MessageTemplate> {
+        self.message_templates
+            .get_mut(message_template_id)
+            .filter(|template| template.knowledge_base_id == knowledge_base_id)
+    }
+
     /// Every message template of one knowledge base, in `messageTemplateId` order, so
     /// what a read reports does not depend on map iteration order.
     pub fn message_templates_of(&self, knowledge_base_id: &str) -> Vec<&MessageTemplate> {
@@ -542,6 +555,10 @@ impl ComAmazonawsQconnectWisdomserviceState {
     /// Forget every message template of one knowledge base, answering with the ids it
     /// dropped — what `remove_knowledge_base` calls so a knowledge base that is gone takes
     /// its templates with it, releasing the names they held.
+    ///
+    /// A template takes its published versions with it
+    /// ([`ComAmazonawsQconnectWisdomserviceState::forget_message_template_versions_of`]):
+    /// a version exists only inside the template that published it.
     pub fn forget_message_templates_of(&mut self, knowledge_base_id: &str) -> Vec<String> {
         let orphaned: Vec<String> = self
             .message_templates_of(knowledge_base_id)
@@ -550,6 +567,7 @@ impl ComAmazonawsQconnectWisdomserviceState {
             .collect();
         for message_template_id in &orphaned {
             self.message_templates.remove(message_template_id);
+            self.forget_message_template_versions_of(message_template_id);
         }
         orphaned
     }

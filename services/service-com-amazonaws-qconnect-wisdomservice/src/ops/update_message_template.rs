@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateMessageTemplate
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateMessageTemplate`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateMessageTemplate::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Applies a partial update to the message template's WORKING COPY — the one `$LATEST`
+//! names — leaving every published version as it was, which is what the operation's own
+//! documentation states. A member the request does not carry stays as it was, so the
+//! record keeps what the create (or an earlier update) wrote.
 //!
 //! ## Shape of an operation
 //!
@@ -96,6 +92,27 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+/// The member whose label a refusal of this operation names, as a caller names it.
+const MEMBER_MESSAGE_TEMPLATE_ID: &str = "messageTemplateId";
+
+/// The modelled `ResourceNotFoundException` (HTTP 404), naming the resource the request
+/// addressed — the member the model provides for exactly that.
+fn not_found(message: &str, resource_name: &str) -> UpdateMessageTemplateError {
+    UpdateMessageTemplateErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+        message: Some(message.to_string()),
+        resource_name: Some(resource_name.to_string()),
+    })
+    .into()
+}
+
+/// The modelled `ValidationException` (HTTP 400).
+fn validation(message: String) -> UpdateMessageTemplateError {
+    UpdateMessageTemplateErrorModeled::ValidationException(ValidationException {
+        message: Some(message),
+    })
+    .into()
+}
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -168,18 +185,110 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateMessageTemplate` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateMessageTemplateErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateMessageTemplate"))
+        // Everything this operation answers with is rendered out of the stored record, so
+        // nothing here is built from request metadata. Modelled constraints (`language`'s
+        // length, the content union's own bounds, the label patterns) are already refused
+        // BEFORE this handler runs.
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            // Unreachable in this emulator: the router builds one `InMemoryEngine` and
+            // hands it to every service.
+            crate::scaffolded::Scaffolded::not_implemented("UpdateMessageTemplate")
+        })?;
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+
+        // A message template is reachable only through the knowledge base it was created
+        // under, so the parent is resolved first and a knowledge base this account does
+        // not hold is reported as the resource that is missing.
+        let Some(knowledge_base) = store.knowledge_base(&input.knowledge_base_id) else {
+            return Err(not_found(
+                crate::state::MESSAGE_KNOWLEDGE_BASE_NOT_FOUND,
+                &input.knowledge_base_id,
+            ));
+        };
+        let knowledge_base_id = knowledge_base.knowledge_base_id.clone();
+
+        // "Any modification will only apply to the message template that is referenced by
+        // the $LATEST qualifier", so the label names the TEMPLATE whose working copy is
+        // written.
+        let (message_template_id, qualifier) =
+            crate::state::resolve_qualified_id(&input.message_template_id);
+        let Some(message_template) = store.message_template(&knowledge_base_id, message_template_id)
+        else {
+            return Err(not_found(
+                crate::state::MESSAGE_MESSAGE_TEMPLATE_NOT_FOUND,
+                &input.message_template_id,
+            ));
+        };
+
+        // The label "cannot contain any qualifier": one that carries a qualifier is refused
+        // rather than read as naming a version to write to, since a published version is
+        // immutable.
+        if qualifier.is_some() {
+            return Err(validation(crate::state::message_qualifier_not_accepted(
+                MEMBER_MESSAGE_TEMPLATE_ID,
+            )));
+        }
+        let channel_subtype = message_template.channel_subtype.clone();
+        let message_template_id = message_template.message_template_id.clone();
+
+        // The channel subtype is fixed at create time ("The channel subtype of the message
+        // template is immutable and cannot be modified after creation"), so content given
+        // under another subtype's union member is not content for THIS template and the
+        // update is refused exactly as the create of such a template is — the same rule, in
+        // the same wording, decided by the same helpers.
+        if let Some(content) = input.content.as_ref() {
+            let applies_to = crate::state::content_channel_subtype(content);
+            if applies_to != channel_subtype {
+                return Err(validation(
+                    crate::state::message_content_channel_subtype_mismatch(
+                        &channel_subtype,
+                        crate::state::content_member_name(content),
+                    ),
+                ));
+            }
+        }
+        // `sourceConfiguration`'s own documentation states its rule — "Only set this
+        // argument for WHATSAPP channel subtype" — so an update that carries one for any
+        // other subtype is refused instead of persisting a configuration nothing reads.
+        if input.source_configuration.is_some()
+            && channel_subtype != crate::state::CHANNEL_SUBTYPE_WHATSAPP
+        {
+            return Err(validation(
+                crate::state::message_source_configuration_not_applicable(&channel_subtype),
+            ));
+        }
+
+        // "Partial update is supported. If any field is not supplied, it will remain
+        // unchanged": each member is written only when the request carried it, and the
+        // record is re-stamped with when it was written and by whom.
+        let Some(stored) = store.message_template_mut(&knowledge_base_id, &message_template_id)
+        else {
+            // Unreachable: the lookup above found this record while the lock is held.
+            return Err(crate::scaffolded::Scaffolded::not_implemented(
+                "UpdateMessageTemplate",
+            ));
+        };
+        if input.content.is_some() {
+            stored.content = input.content.clone();
+        }
+        if input.language.is_some() {
+            stored.language = input.language.clone();
+        }
+        if input.source_configuration.is_some() {
+            stored.source_configuration = input.source_configuration.clone();
+        }
+        if input.default_attributes.is_some() {
+            stored.default_attributes = input.default_attributes.clone();
+        }
+        stored.last_modified_at = now;
+        stored.last_modified_by = crate::state::caller_principal();
+
+        // Render out of the UPDATED record rather than out of the request: what this call
+        // answers is what a later `GetMessageTemplate` answers.
+        Ok(UpdateMessageTemplateOutput {
+            message_template: Some(stored.to_message_template_data()),
+        })
     }
 }

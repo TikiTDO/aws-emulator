@@ -212,32 +212,54 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // Which version the qualifier addresses. `$LATEST` is the working copy, which is
         // not a version: it reports neither `versionNumber` nor `isActive`, because neither
-        // member applies to it. Every other qualifier names a PUBLISHED version, and this
-        // store holds none — a version exists only once one is published out of the working
-        // copy — so such a label names nothing and gets this operation's not-found answer
-        // rather than the working copy under a version's name.
-        match crate::state::addressed_version(qualifier) {
-            Some(crate::state::AddressedVersion::Latest) => {}
+        // member applies to it. Every other qualifier names a PUBLISHED version — a number
+        // names the version published under it, and `$ACTIVE_VERSION` the activated one —
+        // so a qualifier naming a version this template has not published, or the
+        // activated one while none is activated, names nothing and gets this operation's
+        // not-found answer rather than the working copy under a version's name.
+        let version = match crate::state::addressed_version(qualifier) {
+            Some(crate::state::AddressedVersion::Latest) => None,
             Some(crate::state::AddressedVersion::Published) => {
-                return Err(not_found(
-                    crate::state::MESSAGE_MESSAGE_TEMPLATE_NOT_FOUND,
-                    &input.message_template_id,
-                ))
+                let published = if qualifier == crate::state::VERSION_QUALIFIER_ACTIVE {
+                    store.active_message_template_version(message_template_id)
+                } else {
+                    qualifier.parse::<i64>().ok().and_then(|version_number| {
+                        store.message_template_version(message_template_id, version_number)
+                    })
+                };
+                let Some(published) = published else {
+                    return Err(not_found(
+                        crate::state::MESSAGE_MESSAGE_TEMPLATE_VERSION_NOT_FOUND,
+                        &input.message_template_id,
+                    ));
+                };
+                Some(published)
             }
             None => {
                 return Err(validation(crate::state::message_invalid_version_qualifier(
                     qualifier,
                 )))
             }
-        }
+        };
 
+        // A version answers out of the snapshot that was published under it, so a later
+        // write to the working copy cannot change what a version reports; the working copy
+        // answers out of its own record. Either way the ARN carries the qualifier the
+        // request addressed.
         Ok(GetMessageTemplateOutput {
-            message_template: Some(message_template.to_extended_message_template_data(
-                qualifier,
-                // The working copy is not a version: see above.
-                None,
-                None,
-            )),
+            message_template: Some(match version {
+                Some(version) => version.snapshot.to_extended_message_template_data(
+                    qualifier,
+                    Some(version.version_number),
+                    Some(version.is_active),
+                ),
+                None => message_template.to_extended_message_template_data(
+                    qualifier,
+                    // The working copy is not a version: see above.
+                    None,
+                    None,
+                ),
+            }),
         })
     }
 }
