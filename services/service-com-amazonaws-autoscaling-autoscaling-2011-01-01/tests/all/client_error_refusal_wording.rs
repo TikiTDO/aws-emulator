@@ -80,7 +80,10 @@ fn absent_group_quoting_name(name: &str) -> String {
 }
 
 /// The same refusal whose detail field names the resource in the service's own prose.
-fn absent_group_in_prose(name: &str) -> String {
+///
+/// THE ONE COPY for this crate's tests: `tests/all/cancel_instance_refresh_absent_group.rs`
+/// drives the same sentence through the one operation that serves it.
+pub(crate) fn absent_group_in_prose(name: &str) -> String {
     format!("AutoScalingGroup name not found - Auto Scaling group with name {name} not found")
 }
 

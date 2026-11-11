@@ -21,6 +21,8 @@ mod account_wide_read_authorization;
 mod auto_scaling_group_lifecycle;
 #[path = "all/cancel_instance_refresh.rs"]
 mod cancel_instance_refresh;
+#[path = "all/cancel_instance_refresh_absent_group.rs"]
+mod cancel_instance_refresh_absent_group;
 #[path = "all/client_error_refusal_wording.rs"]
 mod client_error_refusal_wording;
 #[path = "all/describe_tags.rs"]
