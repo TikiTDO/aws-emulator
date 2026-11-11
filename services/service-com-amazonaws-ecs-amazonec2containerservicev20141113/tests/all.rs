@@ -83,6 +83,8 @@ mod enum_value_refusals;
 mod error_messages;
 #[path = "all/exec_task_role_resolution.rs"]
 mod exec_task_role_resolution;
+#[path = "all/execution_role_trust.rs"]
+mod execution_role_trust;
 #[path = "all/express_gateway_services.rs"]
 mod express_gateway_services;
 #[path = "all/forced_service_delete_status.rs"]

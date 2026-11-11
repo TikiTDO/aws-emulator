@@ -9,7 +9,11 @@
 //! `RUNNING` is owed by the clock (see `crate::state`). A task whose placement still has
 //! to have capacity acquired for it — routed through a capacity provider that scales its
 //! own Auto Scaling group, into a cluster holding no container instance — is answered in
-//! `PROVISIONING` instead, and reaches `PENDING` only once that capacity registers.
+//! `PROVISIONING` instead, and reaches `PENDING` only once that capacity registers. A task
+//! Amazon ECS cannot launch the containers of at all — a role the account's IAM says it may
+//! not assume ([`crate::state::settle_task_launches`]), or an image no path reaches — is
+//! answered the same way and then STOPPED at the instant it would otherwise have started, with
+//! the stop code of a task that never ran.
 //!
 //! ## Shape of an operation
 //!
@@ -765,9 +769,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .network_configuration
                     .as_ref()
                     .and_then(|configuration| configuration.awsvpc_configuration.clone()),
-                // Whether the images the task's containers run can be fetched from that
-                // placement is decided below, with the guard dropped
-                // ([`crate::state::evaluate_image_pulls`]).
+                // Whether Amazon ECS can assume the roles this launch resolved, and whether
+                // the images the task's containers run can be fetched from that placement,
+                // are decided below with the guard dropped — either answer is what this
+                // field carries ([`crate::state::settle_task_launches`]).
                 launch_failure: None,
                 // The task execution role this run resolved — the one its `overrides`
                 // name, else the revision's own — which is the principal the image pull
@@ -789,12 +794,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             guard.tasks.insert(task_arn, record);
         }
 
-        // The image fetch each task just placed needs is attempted from where it was
-        // placed: a placement with no path to the registry cannot make it, which is what
-        // settles such a task into STOPPED. Read with OUR guard dropped, since it takes
-        // the Amazon EC2 store's lock ([`crate::state::evaluate_image_pulls`]).
+        // The steps each task just placed needs taken before its containers start are
+        // settled here: the execution role is assumed, and the image fetch is attempted from
+        // where the task was placed — a role Amazon ECS cannot assume, or a placement with no
+        // path to the registry, is what settles such a task into STOPPED. Read with OUR guard
+        // dropped, since it takes the IAM, Amazon EC2 and Amazon ECR stores' locks
+        // ([`crate::state::settle_task_launches`]).
         drop(guard);
-        crate::state::evaluate_image_pulls(&*self.engine);
+        crate::state::settle_task_launches(&*self.engine);
         // The status each task this call placed now reports is an `ECS Task State Change`
         // on the account's default event bus, and the transitions the clock still owes
         // these tasks are published as they fall due

@@ -166,6 +166,17 @@ pub use task_interfaces::*;
 mod image_pull;
 pub use image_pull::*;
 
+/// Whether Amazon ECS can assume the task execution role a launched task names, and the
+/// sentence a task stopped because it cannot carries — the one reading of such a role's own
+/// trust policy in the account's IAM records.
+mod execution_role_trust;
+pub use execution_role_trust::*;
+
+/// WHICH roles a launch has Amazon ECS assume, the stop a task whose role it cannot assume
+/// earns, and the one pass both halves of a launch are settled in.
+mod launch_role_trust;
+pub use launch_role_trust::*;
+
 /// The Amazon VPC networking an `awsvpc` placement names, resolved against the task
 /// definition it places: what a launch of such a revision has to say, and what a launch of
 /// any other revision may not.
@@ -3634,10 +3645,11 @@ pub struct TaskRecord {
     /// an already-launched task was given. It is what the image fetch is decided against
     /// ([`TaskLaunch`]).
     pub awsvpc_configuration: Option<AwsVpcConfiguration>,
-    /// Why the containers of this task cannot be launched where it is placed: the
-    /// `stoppedReason` Amazon ECS stops it with at the instant it would otherwise have
-    /// started ([`TaskRecord::fail_launch`]), and `None` for a task nothing is known to
-    /// block.
+    /// Why Amazon ECS cannot launch the containers of this task: a role the launch
+    /// resolved that it may not assume ([`settle_task_launches`]), or an image no path
+    /// from this placement reaches ([`evaluate_image_pulls`]). It is the `stoppedReason`
+    /// Amazon ECS stops the task with at the instant it would otherwise have started
+    /// ([`TaskRecord::fail_launch`]), and `None` for a task nothing is known to block.
     pub launch_failure: Option<String>,
     /// The task execution role this task's image pull is made as — the one the placement
     /// resolved ([`resolved_execution_role_arn`]) — and `None` for a task whose revision

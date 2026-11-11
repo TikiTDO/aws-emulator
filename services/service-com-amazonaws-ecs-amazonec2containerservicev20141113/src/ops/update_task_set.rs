@@ -311,13 +311,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // what asks for a task set's tags ("If this field is omitted, tags aren't
         // included"), so the updated task set is reported without them.
         let view = guard.task_set_view(&updated, crate::state::TaskSetFields::default());
-        // The image fetch a task this update placed needs is attempted from where the
-        // scheduler placed it: a placement with no path to the registry cannot make it,
-        // which is what settles such a task into STOPPED. Read with OUR guard dropped,
-        // since it takes the Amazon EC2 store's lock
-        // ([`crate::state::evaluate_image_pulls`]).
+        // The steps a task this update placed needs taken before its containers start are
+        // settled here: the execution role is assumed, and the image fetch is attempted from
+        // where the scheduler placed it — a role Amazon ECS cannot assume, or a placement with
+        // no path to the registry, is what settles such a task into STOPPED. Read with OUR
+        // guard dropped, since it takes the IAM, Amazon EC2 and Amazon ECR stores' locks
+        // ([`crate::state::settle_task_launches`]).
         drop(guard);
-        crate::state::evaluate_image_pulls(&*self.engine);
+        crate::state::settle_task_launches(&*self.engine);
         // The statuses this rescale left on the task set's tasks are `ECS Task State
         // Change` events on the account's default event bus, and the transitions the clock
         // still owes them are published as they fall due

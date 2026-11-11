@@ -444,13 +444,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             guard.place_tasks_awaiting_capacity(&cluster_name, now);
             let container_instance = guard
                 .container_instance_view(&arn, crate::state::ContainerInstanceFields::all());
-            // A task this registration placed fetches its images from where it was
-            // placed: a placement with no path to the registry cannot make that fetch,
-            // which is what settles such a task into STOPPED. Read with OUR guard
-            // dropped, since it takes the Amazon EC2 store's lock
-            // ([`crate::state::evaluate_image_pulls`]).
+            // The steps a task this registration placed needs taken before its containers
+            // start are settled here: the execution role is assumed, and the image fetch is
+            // attempted from where the task was placed — a role Amazon ECS cannot assume, or
+            // a placement with no path to the registry, is what settles such a task into
+            // STOPPED. Read with OUR guard dropped, since it takes the IAM, Amazon EC2 and
+            // Amazon ECR stores' locks ([`crate::state::settle_task_launches`]).
             drop(guard);
-            crate::state::evaluate_image_pulls(&*self.engine);
+            crate::state::settle_task_launches(&*self.engine);
             // The placement this registration gave each parked task moves that task, which
             // is an `ECS Task State Change` on the account's default event bus
             // ([`crate::state::publish_task_state_changes`]).
@@ -511,12 +512,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let container_instance =
             guard.container_instance_view(&arn, crate::state::ContainerInstanceFields::all());
-        // A task this registration placed fetches its images from where it was placed: a
-        // placement with no path to the registry cannot make that fetch, which is what
-        // settles such a task into STOPPED. Read with OUR guard dropped, since it takes
-        // the Amazon EC2 store's lock ([`crate::state::evaluate_image_pulls`]).
+        // The steps a task this registration placed needs taken before its containers start
+        // are settled here: the execution role is assumed, and the image fetch is attempted
+        // from where the task was placed — a role Amazon ECS cannot assume, or a placement
+        // with no path to the registry, is what settles such a task into STOPPED. Read with
+        // OUR guard dropped, since it takes the IAM, Amazon EC2 and Amazon ECR stores' locks
+        // ([`crate::state::settle_task_launches`]).
         drop(guard);
-        crate::state::evaluate_image_pulls(&*self.engine);
+        crate::state::settle_task_launches(&*self.engine);
         // The placement this registration gave each parked task moves that task, which is
         // an `ECS Task State Change` on the account's default event bus
         // ([`crate::state::publish_task_state_changes`]).

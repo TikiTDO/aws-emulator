@@ -1108,12 +1108,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let registrations = guard.cloud_map_registrations();
         drop(guard);
         crate::state::reconcile_cloud_map_instances(&*self.engine, &registrations);
-        // The image fetch a task this create placed needs is attempted from where the
-        // scheduler placed it: a placement with no path to the registry cannot make it,
-        // which is what settles such a task into STOPPED. Read with OUR guard dropped,
-        // since it takes the Amazon EC2 store's lock
-        // ([`crate::state::evaluate_image_pulls`]).
-        crate::state::evaluate_image_pulls(&*self.engine);
+        // The steps a task this create placed needs taken before its containers start are
+        // settled here: the execution role is assumed, and the image fetch is attempted from
+        // where the scheduler placed it — a role Amazon ECS cannot assume, or a placement with
+        // no path to the registry, is what settles such a task into STOPPED. Read with OUR
+        // guard dropped, since it takes the IAM, Amazon EC2 and Amazon ECR stores' locks
+        // ([`crate::state::settle_task_launches`]).
+        crate::state::settle_task_launches(&*self.engine);
         // A service that binds a target group registers each of its tasks in that group once
         // the task is running, so the group is brought in line with what this create placed —
         // with OUR guard dropped, since the write takes the Elastic Load Balancing v2 store's
