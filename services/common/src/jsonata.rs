@@ -196,14 +196,24 @@ const UNBOUNDED_CONSTRUCT_NODES: &[(&str, &str)] = &[
 
 /// Why an expression was not evaluated.
 ///
-/// The two classes are the ones a calling service reports differently: a value larger
-/// than the allowance it was given, and everything else.
+/// The classes are the ones a calling service reports differently: a value larger
+/// than the allowance it was given, an expression the engine EVALUATED and that threw,
+/// and everything else.
 #[derive(Debug, Clone)]
 pub enum Refused {
     /// The value the expression produced is larger than the allowance.
     TooLarge(String),
-    /// The expression was not evaluated: a text this module refuses, a ceiling the
-    /// evaluation reached, or the engine's own account of a failure.
+    /// The engine evaluated the expression and it THREW, carrying the engine's own
+    /// account of the failure: the language's error code for it, and the message that
+    /// code carries ([`thrown_account`]).
+    ///
+    /// It is held apart from [`Refused::NotEvaluated`] because it is the ONE class a
+    /// calling service reports the expression's own failure from: everything else is a
+    /// text this module refuses or a ceiling it holds an evaluation to, which is about
+    /// the request rather than about what the expression computed.
+    Threw(String),
+    /// The expression was not evaluated: a text this module refuses, or a ceiling the
+    /// evaluation reached.
     NotEvaluated(String),
 }
 
@@ -452,17 +462,37 @@ fn unbounded_construct(parsed: &impl ::std::fmt::Debug) -> Option<&'static str> 
 /// How one evaluation's own failure reads: the engine's account of it, with the two
 /// ceilings it reports by name said in the terms the caller can act on.
 fn evaluation_failure(text: &str, why: &::jsonata_rs::Error, allowed_ms: usize) -> Refused {
-    Refused::NotEvaluated(match why {
-        ::jsonata_rs::Error::U1001Timeout => format!(
+    match why {
+        ::jsonata_rs::Error::U1001Timeout => Refused::NotEvaluated(format!(
             "'{text}' did not finish evaluating within the {allowed_ms} ms this emulator allowed \
              it"
-        ),
-        ::jsonata_rs::Error::U1001StackOverflow => format!(
+        )),
+        ::jsonata_rs::Error::U1001StackOverflow => Refused::NotEvaluated(format!(
             "'{text}' nested deeper than the {MAX_EVALUATION_DEPTH} evaluations this emulator \
              allows one expression"
-        ),
-        other => format!("evaluating '{text}' failed: {other}"),
-    })
+        )),
+        thrown => Refused::Threw(thrown_account(thrown)),
+    }
+}
+
+/// The engine's own account of an expression that THREW, as the language states one:
+/// the error CODE the failure carries, then the message for it.
+///
+/// The engine renders both in one line, with the offset into the expression text at
+/// which it stopped and with the token the message quotes in the backquotes this
+/// implementation writes it in. The OFFSET is a position in a caller's text rather than
+/// part of the account, and the quoting of a token is the implementation's rather than
+/// the language's, so the account is normalised here: the code and the message, with
+/// every quoted token in the double quotes the language's own messages carry.
+fn thrown_account(why: &::jsonata_rs::Error) -> String {
+    let rendered = why.to_string().replace('`', "\"");
+    let Some((code, message)) = rendered.split_once(": ") else {
+        return rendered;
+    };
+    match code.split_once(" @ ") {
+        Some((code, _offset)) => format!("{code}: {message}"),
+        None => rendered,
+    }
 }
 
 /// Whether the JSON text of `value` fits in what is left of `allowance`, spending it
@@ -630,6 +660,7 @@ mod tests {
     fn class(refused: &Refused) -> &'static str {
         match refused {
             Refused::TooLarge(_) => "TooLarge",
+            Refused::Threw(_) => "Threw",
             Refused::NotEvaluated(_) => "NotEvaluated",
         }
     }
@@ -741,6 +772,13 @@ mod tests {
                 json!({}),
                 1024,
                 "NotEvaluated",
+            ),
+            (
+                "an expression the engine evaluates and that throws",
+                "'text' + 1",
+                json!({}),
+                1024,
+                "Threw",
             ),
         ];
 

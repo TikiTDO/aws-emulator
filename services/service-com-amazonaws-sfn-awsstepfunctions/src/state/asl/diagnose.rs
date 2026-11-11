@@ -1545,6 +1545,16 @@ const _: () = assert!(MAX_SCOPED_VARIABLES <= ScopeMask::BITS as usize);
 /// The member a state assigns variables in: "Assign".
 pub(super) const ASSIGN_MEMBER: &str = "Assign";
 
+/// The member a JSONata state's own output is built in: "Output".
+pub(super) const OUTPUT_MEMBER: &str = "Output";
+
+/// The member a JSONata `Task`, `Map` or `Parallel` state builds the document it hands
+/// its work in: "Arguments".
+pub(super) const ARGUMENTS_MEMBER: &str = "Arguments";
+
+/// The member a `Map` state projects each of its items through: "ItemSelector".
+pub(super) const ITEM_SELECTOR_MEMBER: &str = "ItemSelector";
+
 /// What was already in scope where a state machine is DECLARED, which its states
 /// inherit.
 ///

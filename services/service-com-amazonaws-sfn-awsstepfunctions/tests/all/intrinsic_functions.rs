@@ -222,19 +222,19 @@ async fn states_hash_refuses_an_unnamed_algorithm_and_an_oversized_input() {
             "an algorithm the language does not name".to_string(),
             "States.Hash($.data, 'SHA-224')".to_string(),
             json!({ "data": "abc" }),
-            "SHA-224",
+            "Invalid arguments in States.Hash",
         ),
         (
             "an algorithm whose name differs in case".to_string(),
             "States.Hash($.data, 'sha-256')".to_string(),
             json!({ "data": "abc" }),
-            "sha-256",
+            "Invalid arguments in States.Hash",
         ),
         (
             "data that is not a string".to_string(),
             "States.Hash($.data, 'MD5')".to_string(),
             json!({ "data": 17 }),
-            "must be a string",
+            "Invalid arguments in States.Hash",
         ),
         (
             format!("an input of {} characters", MAX_HASH_CHARS + 1),

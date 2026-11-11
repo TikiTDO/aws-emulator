@@ -591,12 +591,15 @@ async fn a_state_members_failure_names_the_member_the_definition_wrote() {
         );
         let cause = string(&described, "cause");
         assert!(
-            cause.contains(&format!("'{member}'")),
+            cause.contains(member),
             "case {case:?}: expected the cause to name the member {member:?} the definition \
              wrote, got {cause:?}"
         );
+        // The names of a pair overlap (`Seconds` is a prefix of `SecondsPath`), so what
+        // is checked is that the OTHER member is not named once the one the definition
+        // wrote has been taken out of the sentence.
         assert!(
-            !cause.contains(&format!("'{other}'")),
+            !cause.replace(member, "").contains(other),
             "case {case:?}: expected the cause to name {member:?} alone, not the other member \
              {other:?} of the pair, got {cause:?}"
         );

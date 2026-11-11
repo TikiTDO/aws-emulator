@@ -483,13 +483,13 @@ fn projected(
         }
         crate::state::EVENT_ACTIVITY_TIMED_OUT => {
             event.activity_timed_out_event_details = Some(ActivityTimedOutEventDetails {
-                error: stored.details.error.clone(),
+                error: reported_error(&stored.details),
                 cause: stored.details.cause.clone(),
             });
         }
         crate::state::EVENT_ACTIVITY_FAILED => {
             event.activity_failed_event_details = Some(ActivityFailedEventDetails {
-                error: stored.details.error.clone(),
+                error: reported_error(&stored.details),
                 cause: stored.details.cause.clone(),
             });
         }
@@ -519,19 +519,19 @@ fn projected(
         }
         crate::state::EVENT_EXECUTION_FAILED => {
             event.execution_failed_event_details = Some(ExecutionFailedEventDetails {
-                error: stored.details.error.clone(),
+                error: reported_error(&stored.details),
                 cause: stored.details.cause.clone(),
             });
         }
         EVENT_EXECUTION_ABORTED => {
             event.execution_aborted_event_details = Some(ExecutionAbortedEventDetails {
-                error: stored.details.error.clone(),
+                error: reported_error(&stored.details),
                 cause: stored.details.cause.clone(),
             });
         }
         EVENT_EXECUTION_TIMED_OUT => {
             event.execution_timed_out_event_details = Some(ExecutionTimedOutEventDetails {
-                error: stored.details.error.clone(),
+                error: reported_error(&stored.details),
                 cause: stored.details.cause.clone(),
             });
         }
@@ -600,7 +600,7 @@ fn projected(
                 event.task_submit_failed_event_details = Some(TaskSubmitFailedEventDetails {
                     resource_type,
                     resource,
-                    error: stored.details.error.clone(),
+                    error: reported_error(&stored.details),
                     cause: stored.details.cause.clone(),
                 });
             }
@@ -610,7 +610,7 @@ fn projected(
                 event.task_failed_event_details = Some(TaskFailedEventDetails {
                     resource_type,
                     resource,
-                    error: stored.details.error.clone(),
+                    error: reported_error(&stored.details),
                     cause: stored.details.cause.clone(),
                 });
             }
@@ -620,7 +620,7 @@ fn projected(
                 event.task_timed_out_event_details = Some(TaskTimedOutEventDetails {
                     resource_type,
                     resource,
-                    error: stored.details.error.clone(),
+                    error: reported_error(&stored.details),
                     cause: stored.details.cause.clone(),
                 });
             }
@@ -654,14 +654,14 @@ fn projected(
         }
         crate::state::EVENT_LAMBDA_FUNCTION_FAILED => {
             event.lambda_function_failed_event_details = Some(LambdaFunctionFailedEventDetails {
-                error: stored.details.error.clone(),
+                error: reported_error(&stored.details),
                 cause: stored.details.cause.clone(),
             });
         }
         crate::state::EVENT_LAMBDA_FUNCTION_TIMED_OUT => {
             event.lambda_function_timed_out_event_details =
                 Some(LambdaFunctionTimedOutEventDetails {
-                    error: stored.details.error.clone(),
+                    error: reported_error(&stored.details),
                     cause: stored.details.cause.clone(),
                 });
         }
@@ -693,7 +693,7 @@ fn projected(
         crate::state::EVENT_EVALUATION_FAILED => {
             if let Some(state) = stored.state_name.clone() {
                 event.evaluation_failed_event_details = Some(EvaluationFailedEventDetails {
-                    error: stored.details.error.clone(),
+                    error: reported_error(&stored.details),
                     cause: stored.details.cause.clone(),
                     location: stored.details.location.clone(),
                     state,
@@ -703,6 +703,22 @@ fn projected(
         _ => {}
     }
     event
+}
+
+/// The error name an event reports, held to the modelled `SensitiveError` (0..256) the
+/// history carries it through.
+///
+/// A `Fail` state may name its error from the execution's own data, so the name is not
+/// bounded by the definition: one past that maximum is TRIMMED
+/// (`crate::state::asl::trimmed_error`) rather than replaced, exactly as
+/// `DescribeExecution` reports it, so the two readings of one failed execution say the
+/// same thing. The untrimmed name stays on the record, which is what a synchronous
+/// response and an execution's log carry.
+fn reported_error(stored: &crate::state::EventDetails) -> Option<String> {
+    stored
+        .error
+        .as_deref()
+        .map(crate::state::asl::trimmed_error)
 }
 
 /// The work a `Task` state's event names: "the service name of the resource in a task

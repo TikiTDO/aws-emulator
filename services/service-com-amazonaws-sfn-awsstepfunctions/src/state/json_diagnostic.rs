@@ -68,6 +68,21 @@ pub fn diagnostic(document: &str, error: &serde_json::Error) -> String {
     framed(document, error, fault::REDACTED_SOURCE)
 }
 
+/// [`definition_diagnostic`] for any other document this service QUOTES the text of
+/// in its refusal: the same sentence, with the document quoted in every clause and the
+/// position the parse ended at stated after it.
+///
+/// `error` is the parse that refused `document`: call this where that parse failed,
+/// and nowhere else.
+pub fn quoted_diagnostic(document: &str, error: &serde_json::Error) -> String {
+    let source = quoted_source(document);
+    format!(
+        "{}\n at {}",
+        framed(document, error, &source),
+        stopped_at_clause(document, error, &source)
+    )
+}
+
 /// [`diagnostic`] for a state machine DEFINITION: the same sentence with the document
 /// quoted in every clause, and the position the parse ended at stated after it.
 ///
@@ -80,12 +95,7 @@ pub fn diagnostic(document: &str, error: &serde_json::Error) -> String {
 /// `error` is the parse that refused `document`: call this where that parse failed,
 /// and nowhere else.
 pub fn definition_diagnostic(document: &str, error: &serde_json::Error) -> String {
-    let source = quoted_source(document);
-    format!(
-        "{}\n at {}",
-        framed(document, error, &source),
-        stopped_at_clause(document, error, &source)
-    )
+    quoted_diagnostic(document, error)
 }
 
 /// WHERE a refused state machine definition stopped parsing, as the clause a

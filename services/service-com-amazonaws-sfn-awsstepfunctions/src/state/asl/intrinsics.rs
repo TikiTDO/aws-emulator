@@ -31,29 +31,39 @@ pub(super) fn invoke_intrinsic(
 ) -> Result<Value, Failure> {
     let text = text.trim();
     if depth > MAX_EXPRESSION_DEPTH {
-        return Err(runtime(format!(
-            "an intrinsic-function invocation nests more than the {MAX_EXPRESSION_DEPTH} \
-             levels this service evaluates"
+        return Err(runtime(intrinsic_failure(
+            text,
+            &format!(
+                "an invocation nests more than the {MAX_EXPRESSION_DEPTH} levels this service \
+                 evaluates"
+            ),
         )));
     }
     if text.len() > MAX_EXPRESSION_CHARS {
-        return Err(runtime(format!(
-            "an intrinsic-function invocation of {} bytes is longer than the \
-             {MAX_EXPRESSION_CHARS} this service evaluates",
-            text.len()
+        return Err(runtime(intrinsic_failure(
+            text,
+            &format!(
+                "an invocation of {} bytes is longer than the {MAX_EXPRESSION_CHARS} this service \
+                 evaluates",
+                text.len()
+            ),
         )));
     }
-    let open = text
-        .find('(')
-        .ok_or_else(|| runtime(format!("'{text}' is not an intrinsic-function invocation")))?;
+    let open = text.find('(').ok_or_else(|| {
+        runtime(intrinsic_failure(
+            text,
+            "this is not an intrinsic-function invocation",
+        ))
+    })?;
     if !text.ends_with(')') {
-        return Err(runtime(format!(
-            "the intrinsic invocation '{text}' is not closed"
+        return Err(runtime(intrinsic_failure(
+            text,
+            "the invocation is not closed",
         )));
     }
     let name = text[..open].trim();
     let arguments = split_arguments(&text[open + 1..text.len() - 1])
-        .map_err(|why| runtime(format!("'{text}': {why}")))?;
+        .map_err(|why| runtime(intrinsic_failure(text, &why)))?;
     // Each argument may select a whole document, and an invocation may carry as many
     // arguments as its text has room for, so the arguments are measured as they are
     // evaluated and bounded together: the function below cannot be handed more than a
@@ -61,22 +71,85 @@ pub(super) fn invoke_intrinsic(
     let mut spent = 0usize;
     let mut values = Vec::with_capacity(arguments.len());
     for argument in &arguments {
-        let value = argument_value(argument, input, context, depth)?;
-        spent = spent.saturating_add(measure_payload(&value, "an intrinsic argument")?);
+        let value = argument_value(argument, input, context, depth)
+            .map_err(|failure| argument_failure(text, argument, input, context, failure))?;
+        spent = spent.saturating_add(measure_payload(&value, UNNAMED_PRODUCER)?);
         if spent > MAX_PAYLOAD_BYTES {
-            return Err(runtime(format!(
-                "'{name}' was given at least {spent} bytes of arguments, more than the \
-                 {MAX_PAYLOAD_BYTES} a state's output may carry"
+            return Err(runtime(intrinsic_failure(
+                text,
+                &format!(
+                    "the arguments together are larger than the {MAX_PAYLOAD_BYTES} bytes a \
+                     state's output may carry"
+                ),
             )));
         }
         values.push(value);
     }
-    let result = apply_intrinsic(name, &values, &arguments)
-        .map_err(|why| runtime(format!("'{text}': {why}")))?;
+    let result = apply_intrinsic(name, &values, &arguments).map_err(|why| {
+        runtime(intrinsic_failure(
+            text,
+            &match why {
+                // "Invalid arguments in <function>": the one detail every way an
+                // argument can be wrong is reported under.
+                Invalid::Arguments => invalid_intrinsic_arguments(name),
+                // The function itself failed on the arguments it was given, and says
+                // what it could not do with them, naming itself.
+                Invalid::Function(why) => why,
+            },
+        ))
+    })?;
     // And what it built is bounded too, because a function may expand what it was
     // given.
-    measure_payload(&result, "an intrinsic function")?;
+    measure_payload(&result, UNNAMED_PRODUCER)?;
     Ok(result)
+}
+
+/// `failure`, as the invocation `invocation` reading the argument `argument` reports it.
+///
+/// An argument that is a `*Path` the document does not carry a value for is the one the
+/// service words a diagnosis of its own for: the FUNCTION, the path, and the document it
+/// was looked for in ([`intrinsic_function_error`], [`intrinsic_path_not_found`]), which
+/// is the whole of what such a failure reports. Every other reason an argument could not
+/// be evaluated is reported as this invocation failing to evaluate
+/// ([`intrinsic_failure`]), and a failure a NESTED invocation already worded is carried
+/// exactly as it was raised: it names the invocation it belongs to, which is the one
+/// that failed. The quota sentence a nested invocation's own document raised is carried
+/// as raised for the same reason — it is the STATE's result that outgrew the ceiling,
+/// and the state being executed is what names itself in it ([`result_too_large`]).
+fn argument_failure(
+    invocation: &str,
+    argument: &str,
+    input: &Value,
+    context: &Value,
+    failure: Failure,
+) -> Failure {
+    let Some(why) = failure.cause else {
+        return Failure {
+            error: failure.error,
+            cause: None,
+        };
+    };
+    if why.starts_with(INTRINSIC_OPENING)
+        || why.starts_with(FUNCTION_ERROR_OPENING)
+        || is_unnamed_producer(&why)
+    {
+        return Failure {
+            error: failure.error,
+            cause: Some(why),
+        };
+    }
+    let path = argument.trim();
+    let cause = match is_unresolved_path(&why, path) {
+        true => intrinsic_function_error(
+            invocation,
+            &intrinsic_path_not_found(path, if is_context_path(path) { context } else { input }),
+        ),
+        false => intrinsic_failure(invocation, &why),
+    };
+    Failure {
+        error: failure.error,
+        cause: Some(cause),
+    }
 }
 
 /// Split an intrinsic's argument list on the commas that are not inside a nested
@@ -176,7 +249,8 @@ pub(super) fn quoted_literal(text: &str) -> Option<&str> {
 ///
 /// The list is the function's own: an algorithm is in it because the language's
 /// `States.Hash` documents it, so a definition asking for one gets the digest the
-/// real service would return. The digest is a DATA TRANSFORMATION a payload template
+/// real service would return, and one outside it is an argument the function does not
+/// take. The digest is a DATA TRANSFORMATION a payload template
 /// asked for and nothing else — nothing in this emulator decides anything on one, so
 /// MD5 and SHA-1 are here as members of a published catalog rather than as a choice
 /// of cryptography.
@@ -185,6 +259,11 @@ pub(super) const HASH_ALGORITHMS: &[&str] = &["MD5", "SHA-1", "SHA-256", "SHA-38
 /// `data` hashed with one of [`HASH_ALGORITHMS`], as the lowercase hex digest
 /// `States.Hash` returns; `None` for a name that is not one of them.
 fn hash_hex(algorithm: &str, data: &[u8]) -> Option<String> {
+    // The catalog decides WHICH names the function takes, so a name outside it is
+    // answered for before any digest is computed.
+    if !HASH_ALGORITHMS.contains(&algorithm) {
+        return None;
+    }
     // One `Digest` trait, implemented by each of the three crates below.
     use ::sha2::Digest as _;
     Some(match algorithm {
@@ -195,6 +274,18 @@ fn hash_hex(algorithm: &str, data: &[u8]) -> Option<String> {
         "SHA-512" => ::hex::encode(::sha2::Sha512::digest(data)),
         _ => return None,
     })
+}
+
+/// Why one intrinsic function could not be applied, in the two classes the service
+/// reports them under ([`invoke_intrinsic`]).
+pub(super) enum Invalid {
+    /// The arguments are not the ones this function takes: one is missing, one is of
+    /// another type, one is a figure outside the function's domain. The service reports
+    /// every one of those the same way ([`invalid_intrinsic_arguments`]).
+    Arguments,
+    /// The function itself could not do what the arguments asked of it, and says what
+    /// it could not do ([`intrinsic_function_error`]).
+    Function(String),
 }
 
 /// Apply one intrinsic function to its evaluated arguments.
@@ -212,38 +303,34 @@ pub(super) fn apply_intrinsic(
     name: &str,
     arguments: &[Value],
     raw: &[String],
-) -> Result<Value, String> {
-    let argument = |index: usize| -> Result<&Value, String> {
-        arguments
-            .get(index)
-            .ok_or_else(|| format!("'{name}' needs at least {} arguments", index + 1))
+) -> Result<Value, Invalid> {
+    let argument = |index: usize| -> Result<&Value, Invalid> {
+        arguments.get(index).ok_or(Invalid::Arguments)
     };
     // A JSON number is finite by construction, but the arithmetic below is only
     // total for a finite value, so the guard is stated rather than assumed.
-    let number = |index: usize| -> Result<f64, String> {
+    let number = |index: usize| -> Result<f64, Invalid> {
         argument(index)?
             .as_f64()
             .filter(|number| number.is_finite())
-            .ok_or_else(|| format!("argument {} of '{name}' must be a finite number", index + 1))
+            .ok_or(Invalid::Arguments)
     };
-    let string = |index: usize| -> Result<String, String> {
+    let string = |index: usize| -> Result<String, Invalid> {
         argument(index)?
             .as_str()
             .map(str::to_string)
-            .ok_or_else(|| format!("argument {} of '{name}' must be a string", index + 1))
+            .ok_or(Invalid::Arguments)
     };
-    let array = |index: usize| -> Result<Vec<Value>, String> {
+    let array = |index: usize| -> Result<Vec<Value>, Invalid> {
         let items = argument(index)?
             .as_array()
             .cloned()
-            .ok_or_else(|| format!("argument {} of '{name}' must be an array", index + 1))?;
+            .ok_or(Invalid::Arguments)?;
         if items.len() > MAX_ARRAY_ITEMS {
-            return Err(format!(
-                "argument {} of '{name}' carries {} items, more than the {MAX_ARRAY_ITEMS} this \
-                 function walks",
-                index + 1,
+            return Err(Invalid::Function(format!(
+                "an array of {} items is longer than the {MAX_ARRAY_ITEMS} this function walks",
                 items.len()
-            ));
+            )));
         }
         Ok(items)
     };
@@ -284,15 +371,22 @@ pub(super) fn apply_intrinsic(
             }
             Ok(Value::String(rendered))
         }
-        "States.StringToJson" => serde_json::from_str(&string(0)?)
-            .map_err(|error| format!("the argument is not JSON: {error}")),
+        "States.StringToJson" => {
+            let text = string(0)?;
+            serde_json::from_str(&text).map_err(|error| {
+                Invalid::Function(format!(
+                    "Cannot convert String to Json in {name}, caused by: {}",
+                    crate::state::json_parse_quoted_diagnostic(&text, &error)
+                ))
+            })
+        }
         "States.JsonToString" => Ok(Value::String(argument(0)?.to_string())),
         "States.Array" => Ok(Value::Array(arguments.to_vec())),
         "States.ArrayPartition" => {
             let items = array(0)?;
             let size = number(1)?;
             if size < 1.0 {
-                return Err("the chunk size must be a positive whole number".to_string());
+                return Err(Invalid::Arguments);
             }
             Ok(Value::Array(
                 items
@@ -309,7 +403,7 @@ pub(super) fn apply_intrinsic(
         "States.ArrayRange" => {
             let (start, end, step) = (number(0)?, number(1)?, number(2)?);
             if step == 0.0 {
-                return Err("the step must not be zero".to_string());
+                return Err(Invalid::Arguments);
             }
             let mut values = Vec::new();
             let mut current = start;
@@ -319,10 +413,10 @@ pub(super) fn apply_intrinsic(
                 // The array is built from three numbers, so nothing the caller sent
                 // bounds its length: this does.
                 if values.len() > MAX_ARRAY_RANGE_VALUES {
-                    return Err(format!(
+                    return Err(Invalid::Function(format!(
                         "the range is longer than the {MAX_ARRAY_RANGE_VALUES} values this \
                          function builds"
-                    ));
+                    )));
                 }
             }
             Ok(Value::Array(values))
@@ -331,12 +425,12 @@ pub(super) fn apply_intrinsic(
             let items = array(0)?;
             let index = number(1)?;
             if index < 0.0 {
-                return Err("the index must not be negative".to_string());
+                return Err(Invalid::Arguments);
             }
             items
                 .get(index as usize)
                 .cloned()
-                .ok_or_else(|| format!("index {index} is past the end of the array"))
+                .ok_or(Invalid::Arguments)
         }
         "States.ArrayLength" => Ok(json!(array(0)?.len())),
         "States.ArrayUnique" => {
@@ -356,17 +450,13 @@ pub(super) fn apply_intrinsic(
             let mut merged = argument(0)?
                 .as_object()
                 .cloned()
-                .ok_or_else(|| format!("argument 1 of '{name}' must be a JSON object"))?;
-            let second = argument(1)?
-                .as_object()
-                .ok_or_else(|| format!("argument 2 of '{name}' must be a JSON object"))?;
+                .ok_or(Invalid::Arguments)?;
+            let second = argument(1)?.as_object().ok_or(Invalid::Arguments)?;
             let deep = argument(2)?.as_bool().unwrap_or(false);
             if deep {
                 // "Currently, Step Functions only supports the shallow merging mode;
                 // therefore, you must specify the Boolean value as false."
-                return Err(format!(
-                    "'{name}' performs a shallow merge, so argument 3 must be false"
-                ));
+                return Err(Invalid::Arguments);
             }
             for (key, value) in second {
                 merged.insert(key.clone(), value.clone());
@@ -377,7 +467,7 @@ pub(super) fn apply_intrinsic(
         "States.MathRandom" => {
             let (start, end) = (number(0)?, number(1)?);
             if end < start {
-                return Err("the end of the range must not be below its start".to_string());
+                return Err(Invalid::Arguments);
             }
             let mut seed = match arguments.get(2).and_then(Value::as_f64) {
                 Some(seed) => seed as u64,
@@ -401,32 +491,37 @@ pub(super) fn apply_intrinsic(
         "States.Base64Encode" => {
             let text = string(0)?;
             if text.len() > MAX_BASE64_CHARS {
-                return Err(format!(
+                return Err(Invalid::Function(format!(
                     "the input is {} characters, more than the {MAX_BASE64_CHARS} this function \
                      encodes",
                     text.len()
-                ));
+                )));
             }
             Ok(Value::String(::aws_smithy_types::base64::encode(text)))
         }
         "States.Base64Decode" => {
             let text = string(0)?;
             if text.len() > MAX_BASE64_CHARS {
-                return Err(format!(
+                return Err(Invalid::Function(format!(
                     "the input is {} characters, more than the {MAX_BASE64_CHARS} this function \
                      decodes",
                     text.len()
-                ));
+                )));
             }
-            let decoded = ::aws_smithy_types::base64::decode(&text)
-                .map_err(|error| format!("the input is not MIME Base64: {error}"))?;
+            let decoded =
+                ::aws_smithy_types::base64::decode(&text).map_err(|_| Invalid::Arguments)?;
             String::from_utf8(decoded)
                 .map(Value::String)
-                .map_err(|error| format!("the decoded data is not UTF-8 text: {error}"))
+                .map_err(|_| Invalid::Arguments)
         }
         "States.StringSplit" => {
             let text = string(0)?;
-            let delimiters: Vec<char> = string(1)?.chars().collect();
+            // Both arguments are a CALLER's, each as large as a state's document, and
+            // the split asks whether every character of the text is one of the
+            // delimiters: the delimiters are therefore held in a SET, so the pass costs
+            // the length of the text times the log of the delimiter count rather than
+            // the PRODUCT of the two lengths a linear scan per character would cost.
+            let delimiters: BTreeSet<char> = string(1)?.chars().collect();
             let parts = text
                 .split(|character| delimiters.contains(&character))
                 .filter(|part| !part.is_empty())
@@ -441,20 +536,15 @@ pub(super) fn apply_intrinsic(
             let data = string(0)?;
             let characters = data.chars().count();
             if characters > MAX_HASH_CHARS {
-                return Err(format!(
+                return Err(Invalid::Function(format!(
                     "the input is {characters} characters, more than the {MAX_HASH_CHARS} this \
                      function hashes"
-                ));
+                )));
             }
             let algorithm = string(1)?;
             hash_hex(&algorithm, data.as_bytes())
                 .map(Value::String)
-                .ok_or_else(|| {
-                    format!(
-                        "argument 2 of '{name}' must be one of {}, not {algorithm:?}",
-                        HASH_ALGORITHMS.join(", ")
-                    )
-                })
+                .ok_or(Invalid::Arguments)
         }
         "States.UUID" => {
             let mut seed = super::super::now_nanos();
@@ -462,10 +552,10 @@ pub(super) fn apply_intrinsic(
             let low = super::super::splitmix64(&mut seed);
             Ok(Value::String(super::super::uuid_v4(high, low)))
         }
-        other => Err(format!(
+        other => Err(Invalid::Function(format!(
             "'{other}' is an intrinsic function this emulator does not evaluate, so nothing was \
              run for it"
-        )),
+        ))),
     }
 }
 

@@ -50,7 +50,7 @@ pub(super) fn render_template(
                         })?;
                         budget.charge_path()?;
                         let built = template_expression(key, text, input, context)?;
-                        budget.spend(measure_payload(&built, "a payload template")?)?;
+                        budget.spend(measure_payload(&built, UNNAMED_PRODUCER)?)?;
                         rendered.insert(stripped.to_string(), built);
                     }
                     None => {
@@ -72,7 +72,7 @@ pub(super) fn render_template(
             Ok(Value::Array(rendered))
         }
         other => {
-            budget.spend(measure_payload(other, "a payload template")?)?;
+            budget.spend(measure_payload(other, UNNAMED_PRODUCER)?)?;
             Ok(other.clone())
         }
     }
@@ -85,8 +85,10 @@ pub(super) fn render_template(
 /// path it could not resolve against: "The JSONPath '<path>' specified for the field
 /// '<field>' could not be found in the input '<document>'". The document is the one the
 /// path was evaluated against — the context object for a path that begins with `$$`,
-/// the template's own input for every other — quoted under the one clipping every
-/// caller value in a diagnostic gets.
+/// the template's own input for every other — and it is reported WHOLE: showing what
+/// the path was looked for in is what the message exists for, so nothing of it is
+/// clipped here (the cause as a whole is held to the bytes the modelled `SensitiveCause`
+/// carries). The state names itself around the diagnosis ([`names_its_state`]).
 pub(super) fn template_expression(
     field: &str,
     text: &str,
@@ -99,10 +101,9 @@ pub(super) fn template_expression(
     select_optional(text, input, context)?.ok_or_else(|| {
         let searched = if is_context_path(text) { context } else { input };
         runtime(format!(
-            "The JSONPath '{}' specified for the field '{}' could not be found in the input '{}'",
-            echoed(text),
-            echoed(field),
-            echoed(&searched.to_string())
+            "{CONTEXT_PATH_OPENING}{text}' specified for the field '{field}' could not be found in \
+             the input '{}'",
+            reported_document(searched)
         ))
     })
 }
@@ -346,14 +347,27 @@ pub(super) fn canonical_path(segments: &[Segment]) -> String {
 ///
 /// "If the ResultPath matches an item in the state's input, only that input item is
 /// overwritten", and a path the input does not carry yet is created.
+///
+/// The two ways this fails are different failures, and the language names each: a text
+/// that is not a reference path at all was applied to nothing
+/// ([`RESULT_PATH_ERROR`]), while a reference path whose segments CONFLICT with the
+/// document it names a place in — a member of a value that is not an object, an index
+/// of a value that is not an array — is the conflict
+/// [`REFERENCE_PATH_CONFLICT_ERROR`] reports, which a definition's `Retry` and `Catch`
+/// answer for by that name.
 pub(super) fn set_at_reference_path(raw: &Value, path: &str, result: Value) -> Result<Value, Failure> {
     let segments = reference_segments(path).map_err(|why| named(RESULT_PATH_ERROR, why))?;
     let mut target = raw.clone();
-    assign(&mut target, &segments, result, path).map_err(|why| named(RESULT_PATH_ERROR, why))?;
+    assign(&mut target, &segments, result)
+        .map_err(|why| named(REFERENCE_PATH_CONFLICT_ERROR, why))?;
     Ok(target)
 }
 
 /// Place `result` at `segments` within `target`, creating the objects it names.
+///
+/// A segment that names no place in the document it is applied to is the conflict the
+/// language reports ([`unable_to_apply_step`]): the step itself, and the document it
+/// could not be applied to.
 ///
 /// Walked ITERATIVELY, so the descent costs no stack: the path's segment count is a
 /// caller's choice, and [`MAX_PATH_SEGMENTS`] bounds the WORK rather than having to
@@ -362,7 +376,6 @@ pub(super) fn assign(
     target: &mut Value,
     segments: &[Segment],
     result: Value,
-    path: &str,
 ) -> Result<(), String> {
     let mut cursor = target;
     for segment in segments {
@@ -372,29 +385,29 @@ pub(super) fn assign(
                     *cursor = Value::Object(Map::new());
                 }
                 if !cursor.is_object() {
-                    return Err(format!(
-                        "'{path}' names a member of {cursor}, which is not a JSON object"
-                    ));
+                    return Err(unable_to_apply_step(key, cursor));
                 }
                 let Some(object) = cursor.as_object_mut() else {
-                    return Err(format!("'{path}' names a member of a document that is not an object"));
+                    return Err(unable_to_apply_step(key, &Value::Null));
                 };
                 object.entry(key.clone()).or_insert(Value::Null)
             }
             Segment::Index(index) => {
-                if !cursor.is_array() {
-                    return Err(format!(
-                        "'{path}' names index {index} of {cursor}, which is not a JSON array"
-                    ));
-                }
-                let Some(array) = cursor.as_array_mut() else {
-                    return Err(format!("'{path}' names an index of a document that is not an array"));
+                // The conflict is worded from the IMMUTABLE reading of the document,
+                // before the slot is taken mutably: an index of a value that is not an
+                // array, and one the array does not carry, each name no place in it.
+                let conflicted = match cursor.as_array() {
+                    Some(items) if *index < items.len() => None,
+                    _ => Some(unable_to_apply_step(&index.to_string(), cursor)),
                 };
-                let length = array.len();
-                let Some(slot) = array.get_mut(*index) else {
-                    return Err(format!(
-                        "'{path}' names index {index}, past the end of an array of {length} items"
-                    ));
+                if let Some(conflict) = conflicted {
+                    return Err(conflict);
+                }
+                let Some(slot) = cursor
+                    .as_array_mut()
+                    .and_then(|items| items.get_mut(*index))
+                else {
+                    return Err(unable_to_apply_step(&index.to_string(), &Value::Null));
                 };
                 slot
             }
@@ -402,6 +415,20 @@ pub(super) fn assign(
     }
     *cursor = result;
     Ok(())
+}
+
+/// The diagnosis for a reference-path STEP that names no place in the document it was
+/// applied to: the step as the path wrote it, and that document as this service reports
+/// it ([`reported_document`]).
+///
+/// It is what a `ResultPath` the state's result cannot be placed through reports
+/// ([`REFERENCE_PATH_CONFLICT_ERROR`]): a member of a value that is not an object, an
+/// index of a value that is not an array.
+fn unable_to_apply_step(step: &str, applied_to: &Value) -> String {
+    format!(
+        "Unable to apply step \"{step}\" to input {}",
+        reported_document(applied_to)
+    )
 }
 
 // ---------------------------------------------------------------------------

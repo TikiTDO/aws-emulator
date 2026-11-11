@@ -15,7 +15,7 @@
 //! a transition to a state the definition does not declare, a path the service does
 //! not follow, an item source that is not an array — against the controls in the same
 //! shape, whose errors ARE retriable and catchable: a `Fail` state's own error name
-//! and a `ResultPath` that cannot be applied.
+//! and a `ResultPath` that conflicts with the document it names a place in.
 //!
 //! The harness (`Emulator`, `create_machine`, `start_execution`, `string`) is the one
 //! `state_machine_lifecycle` already builds and the history reader is
@@ -121,7 +121,7 @@ fn cases() -> Vec<FailureCase> {
             }),
             input: r#"{"num":1}"#,
             terminal_error: Some("States.Runtime"),
-            cause_names: "Map",
+            cause_names: "must point to array",
             caught_error: "",
         },
         FailureCase {
@@ -133,7 +133,7 @@ fn cases() -> Vec<FailureCase> {
             caught_error: "Tally.Boom",
         },
         FailureCase {
-            case: "a ResultPath that cannot be applied, which IS retried and caught",
+            case: "a ResultPath that conflicts with the document, which IS retried and caught",
             failing: json!({
                 "Type": "Pass",
                 "Result": 1,
@@ -143,7 +143,7 @@ fn cases() -> Vec<FailureCase> {
             input: r#"{"num":1}"#,
             terminal_error: None,
             cause_names: "",
-            caught_error: "States.ResultPathMatchFailure",
+            caught_error: "States.ReferencePathConflict",
         },
     ]
 }

@@ -245,3 +245,57 @@ impl Supplied {
 pub(super) fn echoed_payload(value: &Value, supplied: &Supplied) -> String {
     supplied.echo(value)
 }
+
+thread_local! {
+    /// The documents the walk running on THIS thread was given as text.
+    ///
+    /// Empty on a thread no walk installed any on, where every document is reported in
+    /// the encoding it was produced in: the same primitives also validate a definition
+    /// at create time, which was given no execution data at all.
+    static GIVEN: ::std::cell::RefCell<Supplied> =
+        ::std::cell::RefCell::new(Supplied::default());
+}
+
+/// The documents ONE walk was given as text, installed on the thread that walk runs on
+/// for as long as it lasts — exactly as the work it may do is ([`WorkAllowance`]).
+///
+/// It is AMBIENT for the same reason: a diagnosis about a document — a path that
+/// selected nothing in it, a reference path that could not be applied to it — QUOTES
+/// that document, and those diagnoses are worded by the plain functions the walk
+/// reaches through several layers (a payload template's member, an intrinsic's
+/// argument, a `ResultPath`'s own assignment) rather than by the walk itself. The
+/// documents in force when it was installed are restored when it is dropped, on the
+/// error paths and while unwinding as much as at the end of a walk, so a blocking
+/// thread that carries one walk after another quotes each walk's own.
+#[derive(Debug)]
+pub(super) struct GivenDocuments {
+    /// What was installed for the walk this one interrupted.
+    restored: Supplied,
+}
+
+impl GivenDocuments {
+    /// Install `supplied` as the documents the walk about to run on this thread was
+    /// given.
+    pub(super) fn of(supplied: &Supplied) -> Self {
+        Self {
+            restored: GIVEN.with(|given| given.replace(supplied.clone())),
+        }
+    }
+}
+
+impl Drop for GivenDocuments {
+    fn drop(&mut self) {
+        let restored = std::mem::take(&mut self.restored);
+        GIVEN.with(|given| given.replace(restored));
+    }
+}
+
+/// `value` as the walk running on this thread reports it: the bytes it was GIVEN in
+/// where that walk was given it, and the encoding the walk produced it in otherwise
+/// ([`echoed_payload`]).
+///
+/// What a diagnosis QUOTES a document in, for the diagnoses worded where the walk's own
+/// record of them is not in scope ([`GivenDocuments`]).
+pub(super) fn reported_document(value: &Value) -> String {
+    GIVEN.with(|given| given.borrow().echo(value))
+}

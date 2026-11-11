@@ -2967,6 +2967,15 @@ pub use json_diagnostic::diagnostic as json_parse_diagnostic;
 /// service is reached.
 pub use json_diagnostic::definition_diagnostic as json_parse_definition_diagnostic;
 
+/// What a refusal about any OTHER document this service quotes the text of states:
+/// the same reading, with that document quoted in each clause and the position the
+/// parse ended at stated after the sentence.
+///
+/// It is what a definition's own expression converting a string to JSON reports
+/// (`States.StringToJson`): the string is the execution's data and the service is
+/// recorded quoting it, exactly as it quotes a definition it could not read.
+pub use json_diagnostic::quoted_diagnostic as json_parse_quoted_diagnostic;
+
 /// WHERE a refused definition stopped parsing, as the `location` of the diagnostic
 /// that reports it — the clause [`json_parse_definition_diagnostic`] also states
 /// after its sentence.

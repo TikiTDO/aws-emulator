@@ -11,19 +11,23 @@
 //! "An error occurred while executing the state '<name>' (entered at the event id
 //! #<id>). <diagnosis>" — so a definition carrying many states that read the same path
 //! still says which one failed and where in the history it failed. The diagnosis is the
-//! path itself ("Invalid path '<path>' : No results for path: <path>") for every member
-//! of a state, the same path followed by the service's own choice-condition sentence for
-//! a path a `Choice` rule's condition reads, and the same path followed by the MEMBER a
-//! `Wait` state read it through, which is one of a pair of alternatives the definition
-//! carries only one of.
+//! path AS THE DEFINITION WROTE IT followed by the path that was RESOLVED, rendered in
+//! BRACKET notation ("Invalid path '<path>' : No results for path: $['a'][0]"), for
+//! every member of a state; the same path followed by the service's own
+//! choice-condition sentence, with NO space before the colon, for a path a `Choice`
+//! rule's condition reads; the parameter sentence naming the MEMBER for one of a pair
+//! of alternatives a `Wait` state reads its figure through; and the field the path was
+//! written for beside the WHOLE document it was looked for in, for a member of a
+//! payload template.
 //!
 //! The rows differ along what the rule generalises over: which MEMBER names the path (a
 //! `Choice` rule's `Variable`, the same rule's `*Path` operand, `OutputPath`, a `Wait`
-//! state's `SecondsPath`, a `Fail` state's `CausePath`, a `Map` state's `ItemsPath`),
-//! the state's TYPE, the path's own form (a member, a nested member, a bracketed
-//! member, a path into the context object), the state's POSITION in the definition —
-//! which is what makes the event id differ from row to row — and whether the failing
-//! state is a top-level state or one inside a `Map`'s `ItemProcessor`.
+//! state's `SecondsPath` and `TimestampPath`, a `Fail` state's `CausePath`, a `Map`
+//! state's `ItemsPath`, a `Parameters` member), the state's TYPE, the path's own form (a
+//! member, a nested member, a bracketed member, an array index, a path into the context
+//! object), the state's POSITION in the definition — which is what makes the event id
+//! differ from row to row — and whether the failing state is a top-level state or one
+//! inside a `Map`'s `ItemProcessor`.
 //!
 //! The event id in the cause is not a figure written into the table: each row reads the
 //! entered event of its failing state out of `GetExecutionHistory` and requires the
@@ -50,14 +54,22 @@ const FAILING: &str = "JobComplete";
 /// Which diagnosis the service words for an unresolvable path, which depends on the
 /// member the path was written in.
 enum Diagnosis {
-    /// The path and what came of resolving it, which every member of a state reports.
+    /// The path as written and the path that was resolved, which every member of a
+    /// state reports.
     Path,
     /// The path and the service's choice-condition sentence, for a path a `Choice`
     /// rule's condition reads.
     ChoiceCondition,
-    /// The path and the member that read it, for a member the definition carries one of
-    /// a pair of alternatives of (a `Wait` state's `SecondsPath`, say).
+    /// The member named as the parameter it is, for a member the definition carries one
+    /// of a pair of alternatives of (a `Wait` state's `SecondsPath`, say).
     Member(&'static str),
+    /// The field the path was written for and the WHOLE document it was looked for in,
+    /// for a `"<name>.$"` member of a payload template.
+    Field {
+        field: &'static str,
+        /// The document the path was resolved against, as the execution carries it.
+        searched: &'static str,
+    },
 }
 
 /// One row: the state that fails, how many `Pass` states run before it, and the path
@@ -137,6 +149,43 @@ fn rows() -> Vec<Row> {
             diagnosis: Diagnosis::Member("SecondsPath"),
         },
         Row {
+            case: "a Wait state's TimestampPath, the other member of that pair",
+            failing: json!({ "Type": "Wait", "TimestampPath": "$.due[0]", "End": true }),
+            before: 2,
+            input: r#"{"due":[]}"#,
+            path: "$.due[0]",
+            entered_event: "WaitStateEntered",
+            transitions_to_done: false,
+            diagnosis: Diagnosis::Member("TimestampPath"),
+        },
+        Row {
+            case: "an array index the state's output stops short of",
+            failing: json!({ "Type": "Pass", "OutputPath": "$.items[2]", "End": true }),
+            before: 1,
+            input: r#"{"items":[1,2]}"#,
+            path: "$.items[2]",
+            entered_event: "PassStateEntered",
+            transitions_to_done: false,
+            diagnosis: Diagnosis::Path,
+        },
+        Row {
+            case: "a member of a Parameters payload template",
+            failing: json!({
+                "Type": "Pass",
+                "Parameters": { "picked.$": "$.absent" },
+                "End": true,
+            }),
+            before: 0,
+            input: r#"{"present":true}"#,
+            path: "$.absent",
+            entered_event: "PassStateEntered",
+            transitions_to_done: false,
+            diagnosis: Diagnosis::Field {
+                field: "picked.$",
+                searched: r#"{"present":true}"#,
+            },
+        },
+        Row {
             case: "a Fail state's CausePath",
             failing: json!({ "Type": "Fail", "Error": "Boom", "CausePath": "$.why" }),
             before: 3,
@@ -204,20 +253,67 @@ fn definition(row: &Row) -> String {
 /// The cause the service words for a path that selected no value in state `name`,
 /// entered at event `entered`.
 ///
-/// The `diagnosis` selects what follows the path: a path a `Choice` rule's condition
-/// reads is reported with the condition referencing a value that is not there, a path a
-/// member of a pair of alternatives reads is reported with that member, and every other
-/// member of a state is reported with what came of resolving the path.
+/// The `diagnosis` selects what follows: a path a `Choice` rule's condition reads is
+/// reported with the condition referencing a value that is not there and no space before
+/// its colon, a member of a pair of alternatives is reported as that parameter not
+/// referencing an input value, a payload-template member is reported with the field it
+/// builds and the whole document the path was looked for in, and every other member of a
+/// state is reported with the path that was RESOLVED, in bracket notation.
 fn expected_cause(name: &str, entered: i64, path: &str, diagnosis: &Diagnosis) -> String {
-    let no_results = format!("No results for path: {path}");
+    let prefix =
+        format!("An error occurred while executing the state '{name}' (entered at the event id #{entered}). ");
     let diagnosis = match diagnosis {
-        Diagnosis::Path => no_results,
-        Diagnosis::ChoiceCondition => CHOICE_CONDITION_DIAGNOSIS.to_string(),
-        Diagnosis::Member(member) => {
-            format!("{no_results}. The '{member}' field selected no value.")
+        Diagnosis::Path => format!(
+            "Invalid path '{path}' : No results for path: {}",
+            bracketed(path)
+        ),
+        Diagnosis::ChoiceCondition => {
+            format!("Invalid path '{path}': {CHOICE_CONDITION_DIAGNOSIS}")
         }
+        Diagnosis::Member(member) => {
+            format!("The {member} parameter does not reference an input value: {path}")
+        }
+        Diagnosis::Field { field, searched } => format!(
+            "The JSONPath '{path}' specified for the field '{field}' could not be found in the \
+             input '{searched}'"
+        ),
     };
-    format!("An error occurred while executing the state '{name}' (entered at the event id #{entered}). Invalid path '{path}' : {diagnosis}")
+    format!("{prefix}{diagnosis}")
+}
+
+/// `path` in the BRACKET notation the service renders a RESOLVED path in: every member
+/// name quoted, every index bare, and the first `$` of a path into the context object
+/// dropped, since that `$` names the object the rest of the path was resolved against.
+///
+/// Written out here rather than read from the service, so the test states the notation
+/// instead of restating the code that produces it.
+fn bracketed(path: &str) -> String {
+    let mut rest = path.strip_prefix('$').unwrap_or(path);
+    rest = rest.strip_prefix('$').unwrap_or(rest);
+    let mut rendered = String::from("$");
+    while !rest.is_empty() {
+        if let Some(tail) = rest.strip_prefix('.') {
+            let end = tail.find(['.', '[']).unwrap_or(tail.len());
+            let (name, tail) = tail.split_at(end);
+            rendered.push_str(&format!("['{name}']"));
+            rest = tail;
+            continue;
+        }
+        let tail = rest
+            .strip_prefix('[')
+            .unwrap_or_else(|| panic!("the row's path {path:?} is a reference path"));
+        let end = tail
+            .find(']')
+            .unwrap_or_else(|| panic!("the row's path {path:?} closes every subscript"));
+        let (inside, tail) = tail.split_at(end);
+        let name = inside.trim_matches('\'').trim_matches('"');
+        match name.parse::<usize>() {
+            Ok(index) => rendered.push_str(&format!("[{index}]")),
+            Err(_) => rendered.push_str(&format!("['{name}']")),
+        }
+        rest = &tail[1..];
+    }
+    rendered
 }
 
 /// What the service states about a path a `Choice` rule's condition could not resolve.

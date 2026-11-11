@@ -387,7 +387,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // dispatched this execution": the Map Run the record belongs to, and null
             // for an execution no Map Run dispatched.
             map_run_arn: execution.map_run_arn.clone(),
-            error: crate::state::sensitive_member(included_data, execution.error.clone()),
+            // "error — the cause string of the error": the name the execution failed
+            // with, held to the modelled `SensitiveError` (0..256) it is reported
+            // through. A `Fail` state may name its error from the execution's own data,
+            // so a name past that maximum is TRIMMED here
+            // (`crate::state::asl::trimmed_error`) rather than replacing what the state
+            // raised: the untrimmed name stays on the record, which is what a
+            // synchronous response and an execution's log carry. Both members are
+            // withheld from a METADATA-ONLY read with the rest of the sensitive family.
+            error: crate::state::sensitive_member(
+                included_data,
+                execution
+                    .error
+                    .as_deref()
+                    .map(crate::state::asl::trimmed_error),
+            ),
             cause: crate::state::sensitive_member(included_data, execution.cause.clone()),
             // The alias and version the start was made through, which the execution
             // record carries: "the alias ARN is a combination of state machine ARN

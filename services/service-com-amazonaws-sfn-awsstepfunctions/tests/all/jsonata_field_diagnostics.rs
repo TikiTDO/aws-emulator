@@ -63,9 +63,13 @@ fn diagnosis(state: &str, expression: &str, field: &str, because: &str) -> Strin
     )
 }
 
-/// What the diagnosis says of an expression that produced a value of the wrong type.
-fn unexpected_type(expected: &str, produced: &str) -> String {
-    format!("returned an unexpected type. Expected '{expected}' but was '{produced}'.")
+/// What the diagnosis says of an expression that produced a value of the wrong type:
+/// the type the field requires, the type it produced and the VALUE it produced.
+fn unexpected_type(expected: &str, produced: &str, value: &str) -> String {
+    format!(
+        "returned an unexpected result type. Expected '{expected}', but was '{produced}' for \
+         value: {value}"
+    )
 }
 
 /// What it says of an expression that produced nothing at all.
@@ -154,7 +158,7 @@ async fn a_typed_jsonata_field_reports_the_expression_the_field_and_the_types() 
                     "Route",
                     "$states.input.label",
                     "Choices[0]/Condition",
-                    &unexpected_type("boolean", "string"),
+                    &unexpected_type("boolean", "string", "\"hello\""),
                 ),
                 location: "Choices[0]/Condition",
             }),
@@ -171,7 +175,7 @@ async fn a_typed_jsonata_field_reports_the_expression_the_field_and_the_types() 
                     "Route",
                     "$states.input.label",
                     "Choices[0]/Condition",
-                    &unexpected_type("boolean", "number"),
+                    &unexpected_type("boolean", "number", "1"),
                 ),
                 location: "Choices[0]/Condition",
             }),
@@ -188,7 +192,7 @@ async fn a_typed_jsonata_field_reports_the_expression_the_field_and_the_types() 
                     "Route",
                     "$states.input.label",
                     "Choices[0]/Condition",
-                    &unexpected_type("boolean", "null"),
+                    &unexpected_type("boolean", "null", "null"),
                 ),
                 location: "Choices[0]/Condition",
             }),
@@ -210,7 +214,7 @@ async fn a_typed_jsonata_field_reports_the_expression_the_field_and_the_types() 
                     "Route",
                     "$states.input.shape",
                     "Choices[1]/Condition",
-                    &unexpected_type("boolean", "object"),
+                    &unexpected_type("boolean", "object", r#"{"a":1}"#),
                 ),
                 location: "Choices[1]/Condition",
             }),
@@ -231,7 +235,7 @@ async fn a_typed_jsonata_field_reports_the_expression_the_field_and_the_types() 
                     "Route",
                     "[$states.input.n]",
                     "Choices[2]/Condition",
-                    &unexpected_type("boolean", "array"),
+                    &unexpected_type("boolean", "array", "[1]"),
                 ),
                 location: "Choices[2]/Condition",
             }),
@@ -270,7 +274,7 @@ async fn a_typed_jsonata_field_reports_the_expression_the_field_and_the_types() 
                     "Route",
                     "$states.input.x & \"' specified for the field 'nope'\"",
                     "Choices[0]/Condition",
-                    &unexpected_type("boolean", "string"),
+                    &unexpected_type("boolean", "string", "\"a' specified for the field 'nope'\""),
                 ),
                 location: "Choices[0]/Condition",
             }),
@@ -290,7 +294,7 @@ async fn a_typed_jsonata_field_reports_the_expression_the_field_and_the_types() 
                     "Hold",
                     "$states.input.delay",
                     "Seconds",
-                    &unexpected_type("number", "string"),
+                    &unexpected_type("number", "string", "\"soon\""),
                 ),
                 location: "Seconds",
             }),
@@ -333,7 +337,7 @@ async fn a_typed_jsonata_field_reports_the_expression_the_field_and_the_types() 
                     "Each",
                     "$states.input.values",
                     "Items",
-                    &unexpected_type("array", "object"),
+                    &unexpected_type("array", "object", r#"{"not":"an array"}"#),
                 ),
                 location: "Items",
             }),
@@ -353,7 +357,7 @@ async fn a_typed_jsonata_field_reports_the_expression_the_field_and_the_types() 
                     "Boom",
                     "$states.input.code",
                     "Error",
-                    &unexpected_type("string", "number"),
+                    &unexpected_type("string", "number", "7"),
                 ),
                 location: "Error",
             }),

@@ -269,7 +269,7 @@ impl Interpreter<'_> {
             // produced it: a definition that grows what it carries is stopped at the
             // first state past what a state's output may hold, rather than after the
             // whole run.
-            if let Err(failure) = measure_payload(&current, &format!("state '{name}'")) {
+            if let Err(failure) = measure_payload(&current, &name) {
                 return Branch {
                     outcome: Err(failure),
                     end: at,
@@ -316,11 +316,20 @@ impl Interpreter<'_> {
         scope: &Scope,
     ) -> Result<StateStep, Fault> {
         let entered = self.next_event_id();
+        // Where this state's own events begin, so a failure of its EXPRESSIONS is
+        // recorded at the point it happened rather than after the event that records
+        // the state failing ([`Interpreter::push_evaluation_failure`]).
+        let from = self.steps.len();
+        // And nothing another state's expressions left behind is read as this state's:
+        // the field an expression failed in is remembered for the state being executed
+        // ([`super::super::jsonata::take_failed_field`]), so this state starts with
+        // none.
+        super::super::jsonata::clear_failed_field();
         match self.run_state(name, state, raw, at, scope, entered) {
             Ok(step) => Ok(step),
             Err(fault) => {
                 let fault = diagnosed(name, entered, fault);
-                self.push_evaluation_failure(name, &fault);
+                self.push_evaluation_failure(name, state, &fault, from);
                 Err(fault)
             }
         }
@@ -330,21 +339,44 @@ impl Interpreter<'_> {
     /// evaluated, for a fault that is such a failure.
     ///
     /// "This event will only be present in state machines that have QueryLanguage set
-    /// to JSONata, or individual states set to JSONata": the event is written for the
-    /// one error name an expression fails under ([`QUERY_EVALUATION_ERROR`]) and for
-    /// no other fault, and it carries the error and the cause the execution itself
-    /// reports — the same bytes, so a caller reading the history and a caller reading
-    /// the execution are told the same thing — beside the field of the definition the
-    /// diagnosis names ([`super::super::jsonata::diagnosed_field`]).
+    /// to JSONata, or individual states set to JSONata": the event is written for a
+    /// failure of this state's own EXPRESSIONS and for no other fault, and it carries
+    /// the error and the cause the execution itself reports — the same bytes, so a
+    /// caller reading the history and a caller reading the execution are told the same
+    /// thing — beside the field of the definition the diagnosis was worded for
+    /// ([`super::super::jsonata::take_failed_field`]).
     ///
-    /// ONE event per failure, written for the state the expression is written IN. A
+    /// Which faults those are: every failure under the error name an expression that
+    /// could not be evaluated carries ([`QUERY_EVALUATION_ERROR`]), and the document a
+    /// JSONATA state's own expressions BUILT outgrowing what a state may carry, which
+    /// is that state's template failing under the language's data-limit name
+    /// ([`DATA_LIMIT_ERROR`]) rather than under the other one.
+    ///
+    /// ONE event per failure, written for the state the expression is written IN, and
+    /// written WHERE the evaluation failed: an expression is evaluated before the work
+    /// it feeds, so the event naming it precedes the event that records the state
+    /// failing (`from` is where this state's own events begin). A
     /// `Map` iteration's or a `Parallel` branch's failure is carried to the state that
     /// encloses it unchanged, and that state's own turn ends on the same fault, so a
     /// failure this walk has already recorded is not recorded again: the cause names
     /// the state and the event it was entered at, so an identical one is that same
     /// failure travelling outwards rather than a second expression failing.
-    fn push_evaluation_failure(&mut self, name: &str, fault: &Fault) {
-        if fault.failure.name() != QUERY_EVALUATION_ERROR {
+    fn push_evaluation_failure(
+        &mut self,
+        name: &str,
+        state: &Map<String, Value>,
+        fault: &Fault,
+        from: usize,
+    ) {
+        let expression_failure = match fault.failure.name() {
+            QUERY_EVALUATION_ERROR => true,
+            DATA_LIMIT_ERROR => self.language_of(state).ok() == Some(JSONATA),
+            _ => false,
+        };
+        if !expression_failure {
+            // Nothing of this state's own expressions failed, so the field one of them
+            // would have been written in is not this state's to report.
+            super::super::jsonata::clear_failed_field();
             return;
         }
         // Held to the bytes the modelled `SensitiveCause` carries exactly as the
@@ -357,21 +389,30 @@ impl Interpreter<'_> {
         if recorded {
             return;
         }
-        let location = cause
-            .as_deref()
-            .and_then(super::super::jsonata::diagnosed_field)
-            .map(str::to_string);
-        self.push_detailed(
-            super::super::EVENT_EVALUATION_FAILED,
-            name,
-            fault.at,
-            super::super::EventDetails {
+        let location = super::super::jsonata::take_failed_field();
+        let evaluation_failed = Step {
+            event_type: super::super::EVENT_EVALUATION_FAILED,
+            state_name: Some(name.to_string()),
+            after: fault.at,
+            terminal: false,
+            details: super::super::EventDetails {
                 error: fault.failure.error.clone(),
                 cause,
                 location,
                 ..super::super::EventDetails::default()
             },
-        );
+        };
+        // The event belongs where the evaluation happened: before the event this state
+        // records for having FAILED, which the failure of the expression is what
+        // caused.
+        let at = self
+            .steps
+            .iter()
+            .enumerate()
+            .skip(from)
+            .find(|(_, step)| records_a_failure(step.event_type))
+            .map_or(self.steps.len(), |(index, _)| index);
+        self.steps.insert(at, evaluation_failed);
     }
 
     /// The id the next history event this walk records will carry.
@@ -637,7 +678,7 @@ impl Interpreter<'_> {
         let scope = self.variables.clone();
         let assigned = self.assigned.clone();
         let produced = self
-            .jsonata_assign(state, input, result, error_output, context, &mut budget)
+            .jsonata_assign(state, ASSIGN_MEMBER, input, result, error_output, context, &mut budget)
             .and_then(|()| match state.get("Output") {
                 None => Ok(error_output
                     .or(result)
@@ -646,7 +687,12 @@ impl Interpreter<'_> {
                 Some(template) => {
                     let rendered = {
                         let bindings = self.bindings(input, context, result, error_output);
-                        super::super::jsonata::render(template, &bindings, &mut budget)
+                        super::super::jsonata::render(
+                            template,
+                            OUTPUT_MEMBER,
+                            &bindings,
+                            &mut budget,
+                        )
                     };
                     rendered.map_err(jsonata_failure)
                 }
@@ -668,6 +714,7 @@ impl Interpreter<'_> {
     pub(super) fn jsonata_assign(
         &mut self,
         node: &Map<String, Value>,
+        at: &str,
         input: &Value,
         result: Option<&Value>,
         error_output: Option<&Value>,
@@ -694,13 +741,18 @@ impl Interpreter<'_> {
                     error_output,
                     variables: &variables,
                 };
-                super::super::jsonata::render(template, &bindings, budget)
-                    .map_err(jsonata_failure)?
+                super::super::jsonata::render(
+                    template,
+                    &super::super::jsonata::member_field(at, variable),
+                    &bindings,
+                    budget,
+                )
+                .map_err(jsonata_failure)?
             };
             // A variable is a document the execution retains and a later state reads,
             // so it is measured against the same ceiling every document this walk
             // produces is measured against.
-            measure_payload(&value, &format!("the variable '{variable}'"))?;
+            measure_payload(&value, UNNAMED_PRODUCER)?;
             assigned.insert(variable.clone(), value.to_string());
             variables.insert(variable.clone(), value);
         }
@@ -717,6 +769,7 @@ impl Interpreter<'_> {
         &self,
         language: &'static str,
         node: &Value,
+        field: &str,
         input: &Value,
         context: &Value,
     ) -> Result<Option<Value>, Failure> {
@@ -724,7 +777,7 @@ impl Interpreter<'_> {
             return Ok(Some(node.clone()));
         }
         let bindings = self.bindings(input, context, None, None);
-        super::super::jsonata::field(node, &bindings, &mut self.jsonata_budget())
+        super::super::jsonata::field(node, field, &bindings, &mut self.jsonata_budget())
             .map_err(jsonata_failure)
     }
 
@@ -770,11 +823,16 @@ impl Interpreter<'_> {
         context: &Value,
     ) -> Result<Value, Failure> {
         match language {
-            JSONATA => match state.get("Arguments") {
+            JSONATA => match state.get(ARGUMENTS_MEMBER) {
                 Some(template) => {
                     let bindings = self.bindings(effective, context, None, None);
-                    super::super::jsonata::render(template, &bindings, &mut self.jsonata_budget())
-                        .map_err(jsonata_failure)
+                    super::super::jsonata::render(
+                        template,
+                        ARGUMENTS_MEMBER,
+                        &bindings,
+                        &mut self.jsonata_budget(),
+                    )
+                    .map_err(jsonata_failure)
                 }
                 None => Ok(effective.clone()),
             },
@@ -908,7 +966,10 @@ impl Interpreter<'_> {
     /// member or from the `<member>Path` reference path into the state's input.
     ///
     /// Both are "a positive integer" of seconds, so a value that is not one is a
-    /// defect in the definition rather than a bound to be guessed at.
+    /// defect in the definition rather than a bound to be guessed at. It is reported
+    /// under the member the DEFINITION wrote — `HeartbeatSecondsPath` where the
+    /// definition carries that — because the two forms are alternatives and naming the
+    /// one it does not carry points a reader at the wrong field.
     pub(super) fn task_seconds(
         &self,
         state: &Map<String, Value>,
@@ -918,9 +979,15 @@ impl Interpreter<'_> {
         context: &Value,
     ) -> Result<Option<u64>, Failure> {
         let path_member = format!("{member}Path");
-        let declared = match (state.get(member), state.get(path_member.as_str())) {
-            (Some(declared), _) => self.literal(language, declared, input, context)?,
-            (None, Some(Value::String(path))) => Some(expression(path, input, context)?),
+        let (wrote, declared) = match (state.get(member), state.get(path_member.as_str())) {
+            (Some(declared), _) => (
+                member.to_string(),
+                self.literal(language, declared, member, input, context)?,
+            ),
+            (None, Some(Value::String(path))) => (
+                path_member.clone(),
+                Some(member_path_value(&path_member, path, input, context).map_err(runtime)?),
+            ),
             (None, Some(other)) => {
                 return Err(runtime(format!(
                     "'{path_member}' must be a JSONPath string, not {other}"
@@ -930,10 +997,42 @@ impl Interpreter<'_> {
         };
         match declared.as_ref().and_then(Value::as_u64) {
             Some(seconds) if seconds > 0 => Ok(Some(seconds)),
-            _ => Err(runtime(format!(
-                "'{member}' must be a positive whole number of seconds"
-            ))),
+            _ => Err(self.invalid_field_value(
+                language,
+                state.get(wrote.as_str()),
+                &wrote,
+                POSITIVE_SECONDS,
+                declared.as_ref().unwrap_or(&Value::Null),
+            )),
         }
+    }
+
+    /// What a FIELD of a state whose value is of a kind the language does not accept
+    /// there reports: the field, what it must carry, and the value found.
+    ///
+    /// A JSONata field's value is what the expression written IN it produced, so a
+    /// value the field cannot take is that expression misevaluating — the language's own
+    /// query-evaluation failure, diagnosed under the field it is written in, which a
+    /// definition's `Retry` and `Catch` may answer for by that name
+    /// ([`super::super::jsonata::invalid_value`]). A field carrying a literal, and one
+    /// a JSONPath `*Path` read out of the state's data, is reported under the member the
+    /// definition wrote ([`referenced_value_must_be`]).
+    pub(super) fn invalid_field_value(
+        &self,
+        language: &'static str,
+        node: Option<&Value>,
+        field: &str,
+        must_be: &str,
+        value: &Value,
+    ) -> Failure {
+        if language == JSONATA {
+            if let Some(refusal) = node
+                .and_then(|node| super::super::jsonata::invalid_value(node, field, must_be, value))
+            {
+                return jsonata_failure(refusal);
+            }
+        }
+        runtime(referenced_value_must_be(field, must_be, value))
     }
 
     /// The context object (`$$`) a state reads: the run's own members, plus the state
@@ -1159,8 +1258,7 @@ impl Interpreter<'_> {
                 let mut details = work.naming();
                 details.output = Some(self.echo(&result));
                 self.push_detailed(work.succeeded(), state_name, at, details);
-                measure_payload(&result, &format!("the 'Task' state '{state_name}'"))
-                    .map(|_bytes| result)
+                measure_payload(&result, state_name).map(|_bytes| result)
             }
             Err(failure) => {
                 self.push_task_failure(state_name, work, &failure, at);
@@ -1218,7 +1316,7 @@ impl Interpreter<'_> {
         at: Duration,
     ) -> Result<StateStep, Fault> {
         let outcome = outcome.and_then(|result| {
-            measure_payload(&result, &format!("the 'Task' state '{name}'")).map(|_bytes| result)
+            measure_payload(&result, &task_producer(state, name)).map(|_bytes| result)
         });
         match outcome {
             Ok(result) => {
@@ -1366,7 +1464,7 @@ impl Interpreter<'_> {
                 context,
             )?;
             let text = evaluated.as_str().map(str::to_string).ok_or_else(|| {
-                runtime(format!("a 'Fail' state's '{member}' must be a string"))
+                runtime(referenced_value_must_be_a_string(member, &evaluated))
             })?;
             return Ok(Some(text));
         }
@@ -1375,10 +1473,7 @@ impl Interpreter<'_> {
             Some(Value::String(path)) => {
                 let value = expression(path, input, context)?;
                 let text = value.as_str().map(str::to_string).ok_or_else(|| {
-                    runtime(format!(
-                        "'{path_member}' selected {value}, and a 'Fail' state's '{member}' must \
-                         be a string"
-                    ))
+                    runtime(referenced_value_must_be_a_string(path_member, &value))
                 })?;
                 Ok(Some(text))
             }
@@ -1442,18 +1537,22 @@ impl Interpreter<'_> {
             (None, None) => ("Seconds", None),
         };
         if let Some(seconds) = seconds {
-            let seconds = seconds.as_u64().ok_or_else(|| {
-                runtime(format!(
-                    "'{member}' must be a non-negative whole number, not {seconds}"
-                ))
-            })?;
-            if seconds > MAX_WAIT_SECONDS {
+            let Some(whole) = seconds.as_u64() else {
+                return Err(self.invalid_field_value(
+                    language,
+                    state.get(member),
+                    member,
+                    WHOLE_SECONDS,
+                    &seconds,
+                ));
+            };
+            if whole > MAX_WAIT_SECONDS {
                 return Err(runtime(format!(
-                    "'{member}' is {seconds}, more than the {MAX_WAIT_SECONDS} seconds a 'Wait' \
+                    "'{member}' is {whole}, more than the {MAX_WAIT_SECONDS} seconds a 'Wait' \
                      state may wait for"
                 )));
             }
-            return Ok(Duration::from_secs(seconds));
+            return Ok(Duration::from_secs(whole));
         }
 
         let (member, timestamp) = match (state.get("Timestamp"), state.get("TimestampPath")) {
@@ -1483,16 +1582,18 @@ impl Interpreter<'_> {
             (None, None) => ("Timestamp", None),
         };
         if let Some(timestamp) = timestamp {
-            let text = timestamp.as_str().ok_or_else(|| {
-                runtime(format!(
-                    "'{member}' must be an ISO 8601 instant, not {timestamp}"
-                ))
-            })?;
-            let due_millis = iso_millis(text).map_err(|_| {
-                runtime(format!(
-                    "'{member}' must be an ISO 8601 instant, not {timestamp}"
-                ))
-            })?;
+            let instant = timestamp.as_str().and_then(|text| {
+                iso_millis(text).ok().map(|millis| (text.to_string(), millis))
+            });
+            let Some((text, due_millis)) = instant else {
+                return Err(self.invalid_field_value(
+                    language,
+                    state.get(member),
+                    member,
+                    ISO_INSTANT,
+                    &timestamp,
+                ));
+            };
             let reached = super::super::epoch_millis(self.start)
                 .saturating_add(i64::try_from(at.as_millis()).unwrap_or(i64::MAX));
             // A `Timestamp` already behind the run is no wait at all; one further
@@ -1582,9 +1683,11 @@ impl Interpreter<'_> {
             return Ok(Chosen {
                 next: next.to_string(),
                 // The rule that matched is the one whose own `Assign` and `Output`
-                // apply; a JSONPath rule carries neither.
+                // apply; a JSONPath rule carries neither. Its own place in the
+                // definition is where those members are written
+                // ([`choice_rule_field`]), which is what a diagnosis about one names.
                 rule: match language {
-                    JSONATA => Some(rule.clone()),
+                    JSONATA => Some((index, rule.clone())),
                     _ => None,
                 },
             });
@@ -1622,7 +1725,7 @@ impl Interpreter<'_> {
     pub(super) fn choice_output(
         &mut self,
         state: &Map<String, Value>,
-        rule: Option<&Map<String, Value>>,
+        rule: Option<&(usize, Map<String, Value>)>,
         input: &Value,
         context: &Value,
     ) -> Result<Value, Failure> {
@@ -1640,7 +1743,7 @@ impl Interpreter<'_> {
     fn choice_assign_and_output(
         &mut self,
         state: &Map<String, Value>,
-        rule: Option<&Map<String, Value>>,
+        rule: Option<&(usize, Map<String, Value>)>,
         input: &Value,
         context: &Value,
     ) -> Result<Value, Failure> {
@@ -1648,18 +1751,29 @@ impl Interpreter<'_> {
         // are the expressions of one visit to this state.
         let mut budget = self.jsonata_budget();
         // The `Assign` of whichever decided the transition: the rule that matched, or
-        // the state itself where none did.
-        self.jsonata_assign(rule.unwrap_or(state), input, None, None, context, &mut budget)?;
-        let template = rule
-            .and_then(|rule| rule.get("Output"))
-            .or_else(|| state.get("Output"))
-            .cloned();
+        // the state itself where none did. A member of a RULE is written inside that
+        // rule, which is where a diagnosis about it locates it.
+        let (owner, at) = match rule {
+            Some((index, rule)) => (rule, choice_rule_field(*index, ASSIGN_MEMBER)),
+            None => (state, ASSIGN_MEMBER.to_string()),
+        };
+        self.jsonata_assign(owner, &at, input, None, None, context, &mut budget)?;
+        let (template, at) = match rule.and_then(|(index, rule)| {
+            rule.get(OUTPUT_MEMBER)
+                .map(|template| (template.clone(), choice_rule_field(*index, OUTPUT_MEMBER)))
+        }) {
+            Some(found) => (Some(found.0), found.1),
+            None => (
+                state.get(OUTPUT_MEMBER).cloned(),
+                OUTPUT_MEMBER.to_string(),
+            ),
+        };
         match template {
             None => Ok(input.clone()),
             Some(template) => {
                 let rendered = {
                     let bindings = self.bindings(input, context, None, None);
-                    super::super::jsonata::render(&template, &bindings, &mut budget)
+                    super::super::jsonata::render(&template, &at, &bindings, &mut budget)
                 };
                 rendered.map_err(jsonata_failure)
             }
@@ -2010,7 +2124,7 @@ impl Interpreter<'_> {
                 // against.
                 Ok(answer) => {
                     let result = super::super::integration::reported_result(&call, &answer);
-                    match measure_payload(&result, &format!("the 'Task' state '{name}'")) {
+                    match measure_payload(&result, &task_producer(state, name)) {
                         Ok(_bytes) => Ok(result),
                         Err(failure) => Err(failure),
                     }
@@ -2524,8 +2638,13 @@ impl Interpreter<'_> {
         match language {
             JSONATA => {
                 let bindings = self.bindings(effective, context, None, None);
-                super::super::jsonata::render(template, &bindings, &mut self.jsonata_budget())
-                    .map_err(jsonata_failure)
+                super::super::jsonata::render(
+                    template,
+                    ITEM_SELECTOR_MEMBER,
+                    &bindings,
+                    &mut self.jsonata_budget(),
+                )
+                .map_err(jsonata_failure)
             }
             _ => payload_template(template, effective, context),
         }
@@ -2573,11 +2692,23 @@ impl Interpreter<'_> {
                 }
             },
         };
-        match selected {
-            Value::Array(items) => Ok(items),
-            other => Err(runtime(format!(
-                "the 'Map' state '{name}' was given {other}, which is not the array of items a \
-                 'Map' state iterates"
+        if let Value::Array(items) = selected {
+            return Ok(items);
+        }
+        // The items a `Map` state iterates come from a REFERENCE PATH — its `ItemsPath`,
+        // or the default `$` the language gives a state that declares none — so a value
+        // that is not an array is reported as that path not pointing at one. A state
+        // whose items are its `Items` member names no path, so the member itself is
+        // what the failure names.
+        match (state.get("Items"), state.get("ItemsPath")) {
+            (Some(_), _) => Err(runtime(format!(
+                "the 'Items' field of the 'Map' state '{name}' is not an array of items to \
+                 iterate"
+            ))),
+            (None, items_path) => Err(runtime(reference_path_must_point_to_array(
+                items_path
+                    .and_then(Value::as_str)
+                    .unwrap_or(WHOLE_INPUT_PATH),
             ))),
         }
     }
@@ -2966,7 +3097,7 @@ impl Interpreter<'_> {
                         .as_deref()
                         .and_then(|output| serde_json::from_str(output).ok())
                         .unwrap_or(Value::Null);
-                    match measure_payload(&value, "a 'Map' iteration") {
+                    match measure_payload(&value, UNNAMED_PRODUCER) {
                         Ok(bytes) => results_bytes = results_bytes.saturating_add(bytes),
                         Err(failure) => return (Err(failure), batch_end),
                     }
@@ -3107,7 +3238,7 @@ impl Interpreter<'_> {
                         // The array the iterations are building is a document this
                         // state will put out, so it is bounded as it grows rather
                         // than only once it is whole.
-                        match measure_payload(&value, "a 'Map' iteration") {
+                        match measure_payload(&value, UNNAMED_PRODUCER) {
                             Ok(bytes) => results_bytes = results_bytes.saturating_add(bytes),
                             Err(failure) => return (Err(failure), batch_end),
                         }
@@ -3497,11 +3628,18 @@ impl Interpreter<'_> {
             }
             (None, None) => return Ok(default),
         };
-        value.as_f64().filter(|number| *number >= 0.0).ok_or_else(|| {
-            runtime(format!(
-                "'{member}' must be a non-negative number, not {value}"
-            ))
-        })
+        value
+            .as_f64()
+            .filter(|number| *number >= 0.0)
+            .ok_or_else(|| {
+                self.invalid_field_value(
+                    language,
+                    state.get(member.as_str()),
+                    &member,
+                    NON_NEGATIVE_NUMBER,
+                    &value,
+                )
+            })
     }
 }
 
@@ -3518,12 +3656,52 @@ fn member_path_value(
     })
 }
 
+/// Whether `event_type` is the event a STATE records for having failed.
+///
+/// The event a state's own expression failing writes belongs before it
+/// ([`Interpreter::push_evaluation_failure`]): the expression is evaluated first, and
+/// the state failing is what came of it. The list is the one event per state TYPE that
+/// reports its failure, plus the one a `Map` iteration reports.
+fn records_a_failure(event_type: &str) -> bool {
+    [
+        super::super::EVENT_PARALLEL_STATE_FAILED,
+        super::super::EVENT_MAP_STATE_FAILED,
+        super::super::EVENT_MAP_ITERATION_FAILED,
+        super::super::EVENT_TASK_FAILED,
+        super::super::EVENT_TASK_SUBMIT_FAILED,
+        super::super::EVENT_ACTIVITY_FAILED,
+        super::super::EVENT_LAMBDA_FUNCTION_FAILED,
+    ]
+    .contains(&event_type)
+}
+
+/// What the service names as the producer of a `Task` state's result: the invoked
+/// RESOURCE the state's `Resource` names, which is what such a result is reported
+/// against, and the state's own name for a state that declares none.
+fn task_producer(state: &Map<String, Value>, name: &str) -> String {
+    state
+        .get("Resource")
+        .and_then(Value::as_str)
+        .unwrap_or(name)
+        .to_string()
+}
+
 /// Where in a definition the `Condition` of the `Choice` rule at `index` is written.
 ///
 /// RECORDED: the field a diagnosis names is the path to it through the state's own
 /// members, and a rule's position in the `Choices` array is what tells one rule from
 /// the next — so a state of many rules says which of them the execution failed on.
 fn choice_condition_field(index: usize) -> String {
-    format!("Choices[{index}]/Condition")
+    choice_rule_field(index, "Condition")
+}
+
+/// Where in a definition the member `member` of the `Choice` rule at `index` is
+/// written: the rule's own place in the `Choices` array, and the member inside it.
+///
+/// A rule carries members of its own — its `Condition`, and the `Assign` and `Output` a
+/// JSONata rule may declare — so a diagnosis about one locates it in the RULE rather
+/// than in the state, which is what tells it from the state's own member of that name.
+fn choice_rule_field(index: usize, member: &str) -> String {
+    super::super::jsonata::member_field(&format!("Choices[{index}]"), member)
 }
 

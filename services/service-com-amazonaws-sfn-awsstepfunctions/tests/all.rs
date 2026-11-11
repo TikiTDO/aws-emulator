@@ -79,6 +79,8 @@ mod error_messages;
 mod execution_alias_routing;
 #[path = "all/execution_data_encryption.rs"]
 mod execution_data_encryption;
+#[path = "all/execution_failure_causes.rs"]
+mod execution_failure_causes;
 #[path = "all/execution_history.rs"]
 mod execution_history;
 #[path = "all/execution_history_outcomes.rs"]

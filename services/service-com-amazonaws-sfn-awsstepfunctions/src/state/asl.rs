@@ -216,9 +216,21 @@ const CHILD_START_RESOURCE: &str = "arn:aws:states:::states:startExecution";
 /// ("States.DataLimitExceeded").
 pub const DATA_LIMIT_ERROR: &str = "States.DataLimitExceeded";
 
-/// The ASL predefined error name for a `ResultPath` that could not be applied to the
-/// state's input ("States.ResultPathMatchFailure").
+/// The ASL predefined error name for a `ResultPath` that is not a reference path this
+/// service follows at all ("States.ResultPathMatchFailure").
 pub const RESULT_PATH_ERROR: &str = "States.ResultPathMatchFailure";
+
+/// The ASL predefined error name for a reference path that CANNOT BE APPLIED to the
+/// document it names a place in ("States.ReferencePathConflict").
+///
+/// A `ResultPath` is a reference path the service places the state's result at, and a
+/// path whose own segments conflict with the document it is applied to — a member of a
+/// value that is not an object, an index of a value that is not an array — names no
+/// place in it. That is the conflict this name reports, and it is what a definition's
+/// `Retry` and `Catch` answer for by name; a path that is not a reference path at all
+/// is a different failure ([`RESULT_PATH_ERROR`]), since nothing was applied to
+/// anything.
+pub const REFERENCE_PATH_CONFLICT_ERROR: &str = "States.ReferencePathConflict";
 
 /// The ASL predefined error name for a `Parameters`/`ItemSelector` payload template
 /// whose path could not be resolved ("States.ParameterPathFailure").
@@ -304,14 +316,38 @@ pub const FIRST_EVENT_ID: i64 = 1;
 /// state reports ([`diagnosed`]).
 const INVALID_PATH_OPENING: &str = "Invalid path '";
 
-/// The diagnosis for a reference path that selected no value: the path that could not
-/// be resolved, and that nothing came of resolving it.
+/// The diagnosis for a reference path that selected no value: the path AS THE
+/// DEFINITION WROTE IT, and then the path that was RESOLVED, rendered the way the
+/// service renders a resolved path ([`resolved_path`]).
 ///
 /// It names no state, because the path is written in a state and the state names
 /// itself around this ([`executing_state`]) — the one place that knows which state is
 /// being executed and which history event entered it.
 fn no_results_for_path(path: &str) -> String {
-    format!("{INVALID_PATH_OPENING}{path}' : No results for path: {path}")
+    format!(
+        "{INVALID_PATH_OPENING}{path}' : No results for path: {}",
+        resolved_path(path)
+    )
+}
+
+/// The path a diagnosis reports as the one that was RESOLVED: the BRACKET notation
+/// every segment of a reference path is written in (`$['a'][0]`), whichever of the two
+/// forms the definition wrote it in.
+///
+/// It is the canonical rendering of the segments the path names ([`canonical_path`]),
+/// which is also the only text the JSONPath engine is handed, so the path a diagnosis
+/// reports is the path that was evaluated. A path into the CONTEXT OBJECT is resolved
+/// against that object, with its first `$` naming the object itself, so what was
+/// resolved is the rest of it; a text that names no reference-path segments at all was
+/// never resolved, so it is reported as written.
+fn resolved_path(path: &str) -> String {
+    let evaluated = match is_context_path(path) {
+        true => &path[1..],
+        false => path,
+    };
+    reference_segments(evaluated)
+        .map(|segments| canonical_path(&segments))
+        .unwrap_or_else(|_| evaluated.to_string())
 }
 
 /// The diagnosis for a state the walk reached and could not LEAVE: the state decided
@@ -350,7 +386,7 @@ const CHOICE_CONDITION_PATH_INVALID: &str =
 /// evaluated. Naming the path is what tells the failing operand from every other path
 /// in the state, which is what a reader follows back to the rule that owns it.
 fn invalid_choice_condition_path(path: &str) -> String {
-    format!("{INVALID_PATH_OPENING}{path}' : {CHOICE_CONDITION_PATH_INVALID}")
+    format!("{INVALID_PATH_OPENING}{path}': {CHOICE_CONDITION_PATH_INVALID}")
 }
 
 /// Whether `cause` is the diagnosis `path` SELECTING NOTHING reports
@@ -389,16 +425,90 @@ fn choice_path_failure(failure: Failure, path: &str) -> Failure {
 ///
 /// A member and its `*Path` form are ALTERNATIVES — a definition carrying a
 /// `SecondsPath` carries no `Seconds` — so what a reader has to be told is which of the
-/// two the definition wrote and that its path selected nothing. The path's own
-/// diagnosis is kept as it was worded ([`no_results_for_path`]) and the member is named
-/// beside it in a clause of this service's own wording; every other failure is carried
-/// as raised.
+/// two the definition wrote and that the path it carries selected nothing. That is the
+/// diagnosis the service words for such a member ([`parameter_without_input_value`]),
+/// which NAMES the member rather than reporting the generic unresolved-path text; every
+/// other failure is carried as raised.
 fn member_path_diagnosis(member: &str, path: &str, why: String) -> String {
     if is_unresolved_path(&why, path) {
-        return format!("{why}. The '{member}' field selected no value.");
+        return parameter_without_input_value(member, path);
     }
     why
 }
+
+/// How the diagnosis of a `*Path` MEMBER whose path selected nothing OPENS, and the
+/// clause that follows the member's own name in it: together they tell it from every
+/// other cause ([`names_its_state`], [`parameter_without_input_value`]).
+const PARAMETER_OPENING: &str = "The ";
+const NO_INPUT_VALUE_CLAUSE: &str = " parameter does not reference an input value: ";
+
+/// The diagnosis for the `*Path` member `member` whose path selected no value: the
+/// member named as the parameter it is, and the path the definition wrote in it.
+///
+/// The member is what points a reader at the field to correct, and a member of this
+/// kind is one of a PAIR of alternatives a definition carries only one of, so the
+/// diagnosis says which of the two was read. The state names itself around the whole of
+/// it ([`executing_state`], through [`names_its_state`]).
+fn parameter_without_input_value(member: &str, path: &str) -> String {
+    format!("{PARAMETER_OPENING}{member}{NO_INPUT_VALUE_CLAUSE}{path}")
+}
+
+/// The diagnosis for a `Fail` state's `*Path` member that resolved to a value of
+/// another type: the member, the type the language requires there, and the value it
+/// found.
+///
+/// A `Fail` state's `Error` and `Cause` are strings, so a path that selects a number, an
+/// array or an object names no value the state can fail with. The state names itself
+/// around it ([`names_its_state`]).
+fn referenced_value_must_be_a_string(member: &str, value: &Value) -> String {
+    referenced_value_must_be(member, "a string", value)
+}
+
+/// The diagnosis for a member whose value is not one the language accepts there: the
+/// member, what it must carry, and the value found.
+///
+/// One sentence for every member of that kind, because what a reader has to be told is
+/// the same in each: which field of the state was read, what the language requires in
+/// it, and what reading it produced.
+fn referenced_value_must_be(member: &str, must_be: &str, value: &Value) -> String {
+    format!("{REFERENCED_VALUE_OPENING}{member} must be {must_be}, but the value was: {value}")
+}
+
+/// What a `Wait` state's `Seconds` must carry: "a time, in seconds, the state machine
+/// waits before continuing" — a whole number of them, and never a negative one.
+pub(super) const WHOLE_SECONDS: &str = "a non-negative whole number of seconds";
+
+/// What a `Task` state's `TimeoutSeconds` and `HeartbeatSeconds` must carry: each is
+/// documented as "a positive integer" of seconds.
+pub(super) const POSITIVE_SECONDS: &str = "a positive whole number of seconds";
+
+/// What a `Wait` state's `Timestamp` must carry: "an absolute expiry time ... must
+/// conform to the RFC3339 profile of ISO 8601".
+pub(super) const ISO_INSTANT: &str = "an ISO 8601 instant";
+
+/// What a retrier's own figures (`IntervalSeconds`, `BackoffRate`, `MaxDelaySeconds`)
+/// must carry: a number, and never a negative one.
+pub(super) const NON_NEGATIVE_NUMBER: &str = "a non-negative number";
+
+/// How [`referenced_value_must_be_a_string`] opens, which is what tells it from every
+/// other cause ([`names_its_state`]).
+const REFERENCED_VALUE_OPENING: &str = "The value referenced by ";
+
+/// The diagnosis for a `Map` state whose items are not an array: the reference path
+/// that was supposed to name them, and what a `Map` state's items must be.
+///
+/// `path` is the state's `ItemsPath` where it declares one and [`WHOLE_INPUT_PATH`] —
+/// "the default value is `$`, which selects the state's whole input" — where it does
+/// not. The value itself is NOT quoted: what a reader has to be told is which path
+/// named something that is not an array, and the value is the execution's own data.
+fn reference_path_must_point_to_array(path: &str) -> String {
+    format!("Reference path \"{path}\" must point to array.")
+}
+
+/// The reference path that selects a state's WHOLE input, which is the default of every
+/// `*Path` member the language gives one: "the default value is `$`, which matches the
+/// entire input".
+pub(super) const WHOLE_INPUT_PATH: &str = "$";
 
 /// `fault` as the state it happened IN reports it: a diagnosis this module worded
 /// about that state's own expression is reported under [`executing_state`], naming the
@@ -410,13 +520,15 @@ fn member_path_diagnosis(member: &str, path: &str, why: String) -> String {
 /// `Map` iteration or `Parallel` branch raised was already wrapped by the state inside
 /// it that raised it.
 fn diagnosed(name: &str, entered_at: i64, fault: Fault) -> Fault {
-    let wrapped = fault
-        .failure
-        .cause
-        .as_deref()
-        .filter(|cause| names_its_state(cause))
-        .map(|cause| executing_state(name, entered_at, cause));
-    match wrapped {
+    let worded = match fault.failure.cause.as_deref() {
+        // A document past what a state may carry, measured where the state that
+        // produced it was not in scope: the state being executed is the one that
+        // produced it, and the sentence names it here.
+        Some(cause) if is_unnamed_producer(cause) => Some(result_too_large(name)),
+        Some(cause) if names_its_state(cause) => Some(executing_state(name, entered_at, cause)),
+        _ => None,
+    };
+    match worded {
         Some(cause) => Fault {
             at: fault.at,
             failure: Failure {
@@ -429,13 +541,91 @@ fn diagnosed(name: &str, entered_at: i64, fault: Fault) -> Fault {
 }
 
 /// Whether `cause` is a diagnosis this module worded about the state being executed —
-/// its own expression, the condition path of a `Choice` rule, or its failure to
-/// transition out of it — so that state names itself around it ([`diagnosed`]) rather
-/// than carrying a name of its own.
+/// its own expression, the condition path of a `Choice` rule, a `*Path` member that
+/// selected nothing, an intrinsic invocation that could not be evaluated, or its
+/// failure to transition out of it — so that state names itself around it
+/// ([`diagnosed`]) rather than carrying a name of its own.
 fn names_its_state(cause: &str) -> bool {
     cause.starts_with(INVALID_PATH_OPENING)
         || cause == NO_NEXT_STATE
         || cause.starts_with(super::jsonata::DIAGNOSIS_OPENING)
+        || cause.starts_with(CONTEXT_PATH_OPENING)
+        || cause.starts_with(INTRINSIC_OPENING)
+        || cause.starts_with(FUNCTION_ERROR_OPENING)
+        || cause.starts_with(REFERENCED_VALUE_OPENING)
+        || names_a_parameter(cause)
+}
+
+/// Whether `cause` is the diagnosis of a `*Path` member whose path selected nothing
+/// ([`parameter_without_input_value`]).
+///
+/// The member's name is the only caller-chosen part, and it is written between the
+/// opening and the clause, so the reading is anchored at the START of the cause rather
+/// than searching it: a value this module echoes elsewhere in a cause cannot make
+/// another diagnosis look like this one.
+fn names_a_parameter(cause: &str) -> bool {
+    cause
+        .strip_prefix(PARAMETER_OPENING)
+        .and_then(|rest| rest.split_once(NO_INPUT_VALUE_CLAUSE))
+        .is_some_and(|(member, _)| !member.is_empty() && !member.contains(' '))
+}
+
+/// How the diagnosis of a PAYLOAD-TEMPLATE member whose path could not be found opens
+/// ([`template_expression`]), which is what tells it from every other cause
+/// ([`names_its_state`]).
+pub(super) const CONTEXT_PATH_OPENING: &str = "The JSONPath '";
+
+/// How the diagnosis of an intrinsic-function invocation that could not be evaluated
+/// opens ([`intrinsic_failure`]).
+pub(super) const INTRINSIC_OPENING: &str =
+    "There was an error while evaluating the intrinsic function: ";
+
+/// The diagnosis for an intrinsic-function invocation that could not be evaluated: the
+/// invocation AS THE DEFINITION WROTE IT, and then what the function itself reported.
+///
+/// The invocation is what identifies the failing expression — a payload template may
+/// carry many, and a nested invocation is one of the arguments of another — so it is
+/// named whatever the detail says. The state names itself around the whole of it
+/// ([`executing_state`], through [`names_its_state`]).
+pub(super) fn intrinsic_failure(invocation: &str, detail: &str) -> String {
+    format!("{INTRINSIC_OPENING}{invocation}. {detail}")
+}
+
+/// The detail an intrinsic function whose ARGUMENTS are not the ones it takes reports:
+/// the service's own sentence, naming the function.
+///
+/// It is the one detail for every way an argument can be wrong — a missing argument, a
+/// value of another type, a figure out of range — because what a reader has to be told
+/// is the same in each: this function cannot be applied to these arguments.
+pub(super) fn invalid_intrinsic_arguments(name: &str) -> String {
+    format!("Invalid arguments in {name}")
+}
+
+/// The detail an intrinsic function that FAILED on its arguments reports: the
+/// invocation, and the error the function itself raised.
+///
+/// It is the WHOLE of what a `*Path` argument that selected no value reports, because
+/// such a failure is the function's own rather than one of evaluating the invocation
+/// ([`intrinsic_failure`] is what every other one is reported under).
+pub(super) fn intrinsic_function_error(invocation: &str, why: &str) -> String {
+    format!("{FUNCTION_ERROR_OPENING}{invocation}' had the following error: {why}")
+}
+
+/// How [`intrinsic_function_error`] opens, which is what tells it from every other
+/// cause ([`names_its_state`]).
+pub(super) const FUNCTION_ERROR_OPENING: &str = "The function '";
+
+/// The error a `*Path` ARGUMENT of an intrinsic function that selected no value
+/// reports: the argument's own path, and the document it was resolved against.
+///
+/// The document is the one the path was evaluated against — the context object for a
+/// path that begins with `$$`, the state's own input for every other — and it is
+/// reported WHOLE: the message exists to show what the path was looked for in.
+pub(super) fn intrinsic_path_not_found(path: &str, searched: &Value) -> String {
+    format!(
+        "The JsonPath argument for the field '{path}' could not be found in the input '{}'",
+        reported_document(searched)
+    )
 }
 
 /// What a `Wait` state's members failing to evaluate reports.
@@ -1537,8 +1727,19 @@ fn reported(failed: super::integration::Failed) -> Failure {
 /// [`QUERY_EVALUATION_ERROR`] for every expression that was not evaluated.
 fn jsonata_failure(refusal: super::jsonata::Refusal) -> Failure {
     match refusal {
-        super::jsonata::Refusal::TooLarge(why) => named(DATA_LIMIT_ERROR, why),
+        // What the expressions of one state build is that state's own result, so a
+        // template past the ceiling is the same failure a state whose document outgrew
+        // what it may carry raises, worded the one way the service words it: the state
+        // itself is named by the state being executed ([`diagnosed`]).
+        super::jsonata::Refusal::TooLarge(_) => {
+            named(DATA_LIMIT_ERROR, result_too_large(UNNAMED_PRODUCER))
+        }
         super::jsonata::Refusal::NotEvaluated(why) => named(QUERY_EVALUATION_ERROR, why),
+        // An expression that THREW and was not reported under the field it is written
+        // in — a template whose own evaluation is not a field of the state — carries
+        // the engine's account alone, under the same error name every expression that
+        // was not evaluated fails with.
+        super::jsonata::Refusal::Threw(account) => named(QUERY_EVALUATION_ERROR, account),
     }
 }
 
@@ -1555,11 +1756,12 @@ struct StateStep {
 /// decided it.
 struct Chosen {
     next: String,
-    /// The rule that MATCHED, for a JSONata `Choice`: its own `Assign` and `Output`
-    /// are the state's, applied over the state's own ([`Interpreter::choice_output`]).
-    /// `None` where the `Default` was taken, and for a JSONPath rule, which carries
-    /// neither.
-    rule: Option<Map<String, Value>>,
+    /// The rule that MATCHED, for a JSONata `Choice`: its own POSITION in the state's
+    /// `Choices` array, which is where its members are written, and the rule itself —
+    /// whose `Assign` and `Output` are the state's, applied over the state's own
+    /// ([`Interpreter::choice_output`]). `None` where the `Default` was taken, and for
+    /// a JSONPath rule, which carries neither.
+    rule: Option<(usize, Map<String, Value>)>,
 }
 
 /// Where the walk goes after a state.
@@ -2479,6 +2681,9 @@ fn interpret(
         // that document is echoed in the caller's bytes rather than re-encoded.
         supplied: supplied.clone(),
     };
+    // And the same documents for the diagnoses this walk's own expressions word, which
+    // quote the document they could not be applied to ([`GivenDocuments`]).
+    let _given = GivenDocuments::of(&supplied);
     let branch = interpreter.walk(
         states,
         &start_at,
@@ -2675,36 +2880,49 @@ fn failed(steps: Vec<Step>, elapsed: Duration, failure: Failure) -> Run {
     // `error` and `cause` leave through the modelled `SensitiveError` (0..256) and
     // `SensitiveCause` (0..32768) shapes. A `Fail` state may read its error from the
     // execution's own data, and a cause the interpreter wrote quotes the value it
-    // could not handle, so neither is bounded by the definition alone: an error name
-    // past its maximum is reported as ASL's own data-limit error, since a name
-    // carries meaning and cannot be shortened, while an over-long cause keeps the
-    // error name and is clipped to what the service can report.
-    let error = failure.error;
-    let cause = failure.cause;
-    if error.as_ref().is_some_and(|error| error.len() > MAX_ERROR_BYTES) {
-        return terminal(
-            steps,
-            elapsed,
-            super::EVENT_EXECUTION_FAILED,
-            super::EXECUTION_STATUS_FAILED,
-            None,
-            Some(DATA_LIMIT_ERROR.to_string()),
-            Some(format!(
-                "the execution's error name is longer than the {MAX_ERROR_BYTES} bytes this \
-                 service reports it through"
-            )),
-        );
-    }
+    // could not handle, so neither is bounded by the definition alone. The RUN keeps
+    // both as it computed them — a synchronous response and the log of an execution
+    // carry the whole of what the state raised — and each reader holds them to what it
+    // reports them through: an over-long error NAME is trimmed where it is reported
+    // ([`trimmed_error`]) and an over-long cause is cut to the bytes the cause member
+    // carries.
     terminal(
         steps,
         elapsed,
         super::EVENT_EXECUTION_FAILED,
         super::EXECUTION_STATUS_FAILED,
         None,
-        error,
-        cause.map(clip_cause),
+        failure.error,
+        failure.cause.map(clip_cause),
     )
 }
+
+/// `error` as a reader bounded by the modelled `SensitiveError` (0..256) reports it: the
+/// name itself when it fits, and as much of it as leaves room for [`ERROR_ELLIPSIS`]
+/// inside that maximum when it does not.
+///
+/// A `Fail` state may name its error from the execution's own data (`ErrorPath`), so the
+/// name is not bounded by the definition and is not ASCII either: the cut is made in
+/// BYTES, which is what the maximum counts, and moved back to a character boundary, so
+/// the trimmed name is both inside the bound and still text. A name past the maximum is
+/// TRIMMED rather than replaced: what the state raised is what a caller has to see, and
+/// the trim marks that the rest of it was cut. The whole name stays on the run itself,
+/// which is what a synchronous response and an execution's log carry.
+#[must_use]
+pub fn trimmed_error(error: &str) -> String {
+    if error.len() <= MAX_ERROR_BYTES {
+        return error.to_string();
+    }
+    let mut end = MAX_ERROR_BYTES - ERROR_ELLIPSIS.len();
+    while end > 0 && !error.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{ERROR_ELLIPSIS}", &error[..end])
+}
+
+/// What marks an error name [`trimmed_error`] cut, and is counted inside the maximum
+/// the name is reported through.
+const ERROR_ELLIPSIS: &str = "...";
 
 /// `cause` within the bytes the modelled `SensitiveCause` carries, cut at a character
 /// boundary.
@@ -2755,23 +2973,50 @@ fn terminal(
     }
 }
 
+/// The diagnosis a document past what a state's output may carry fails with: the
+/// service's own sentence about a result that outgrew the quota, naming what produced
+/// it.
+///
+/// `produced_by` is the STATE's name for a state that built the document itself, and
+/// the invoked resource for a `Task` state, which is what the service names there. A
+/// document produced where the state's own name is not in scope — a payload template's
+/// member, an intrinsic's result — carries [`UNNAMED_PRODUCER`] and is named by the
+/// state being executed ([`diagnosed`]).
+fn result_too_large(produced_by: &str) -> String {
+    format!(
+        "The state/task '{produced_by}' returned a result with a size exceeding the maximum \
+         number of bytes service limit."
+    )
+}
+
+/// What [`result_too_large`] names as the producer of a document measured where the
+/// state that produced it is not in scope; the state being executed substitutes its own
+/// name for it ([`is_unnamed_producer`], read by [`diagnosed`] and by the single-state
+/// trial, which are the two places a failure is reported FOR a state).
+const UNNAMED_PRODUCER: &str = "";
+
+/// Whether `cause` is the quota sentence raised with no producer named
+/// ([`UNNAMED_PRODUCER`]), which the state being executed names itself in.
+fn is_unnamed_producer(cause: &str) -> bool {
+    cause == result_too_large(UNNAMED_PRODUCER)
+}
+
+
 /// The bytes `value` serialises to, refusing a document past what a state's output
-/// may carry or deeper than [`MAX_PAYLOAD_DEPTH`]. `built_by` names what produced it,
-/// for the cause the refusal carries.
+/// may carry or deeper than [`MAX_PAYLOAD_DEPTH`]. `produced_by` names what produced
+/// it, for the cause the refusal carries ([`result_too_large`]).
+///
+/// The count is the length of the document's COMPACT JSON text, byte for byte — the
+/// separators between a container's members, the quotes and escapes of a string, the
+/// digits of a number — because the limit is a boundary a caller may sit exactly on: a
+/// document of exactly [`MAX_PAYLOAD_BYTES`] bytes is inside the limit and only one
+/// past it is refused.
 ///
 /// Walked ITERATIVELY, over an explicit stack, so measuring a document is not itself
 /// bounded by the thread's stack; and it stops at the first byte past the limit, so
 /// the measurement of an over-large document costs no more than the limit.
-fn measure_payload(value: &Value, built_by: &str) -> Result<usize, Failure> {
-    let too_large = |bytes: usize| {
-        named(
-            DATA_LIMIT_ERROR,
-            format!(
-                "{built_by} produced a document of at least {bytes} bytes, more than the \
-                 {MAX_PAYLOAD_BYTES} a state's output may carry"
-            ),
-        )
-    };
+fn measure_payload(value: &Value, produced_by: &str) -> Result<usize, Failure> {
+    let too_large = || named(DATA_LIMIT_ERROR, result_too_large(produced_by));
     let mut bytes = 0usize;
     let mut pending: Vec<(&Value, usize)> = vec![(value, 1)];
     while let Some((node, depth)) = pending.pop() {
@@ -2779,8 +3024,8 @@ fn measure_payload(value: &Value, built_by: &str) -> Result<usize, Failure> {
             return Err(named(
                 DATA_LIMIT_ERROR,
                 format!(
-                    "{built_by} produced a document nested more than the {MAX_PAYLOAD_DEPTH} \
-                     levels this service carries"
+                    "a document nested more than the {MAX_PAYLOAD_DEPTH} levels this service \
+                     carries was produced"
                 ),
             ));
         }
@@ -2795,29 +3040,32 @@ fn measure_payload(value: &Value, built_by: &str) -> Result<usize, Failure> {
                 }
             }
             Value::Number(number) => number.to_string().len(),
-            Value::String(text) => text.len() + 2,
+            Value::String(text) => quoted_bytes(text),
             Value::Array(items) => {
                 for item in items {
                     pending.push((item, depth + 1));
                 }
-                items.len() + 2
+                // The brackets, and one comma between each pair of items.
+                items.len().saturating_sub(1) + 2
             }
             Value::Object(members) => {
                 let mut keys = 0usize;
                 for (key, member) in members {
-                    keys = keys.saturating_add(key.len() + 3);
+                    // The member's name, its quotes and the colon after it.
+                    keys = keys.saturating_add(quoted_bytes(key) + 1);
                     pending.push((member, depth + 1));
                 }
-                keys.saturating_add(members.len() + 2)
+                // The braces, and one comma between each pair of members.
+                keys.saturating_add(members.len().saturating_sub(1) + 2)
             }
         });
         if bytes > MAX_PAYLOAD_BYTES {
-            return Err(too_large(bytes));
+            return Err(too_large());
         }
         // The pending list is bounded by the bytes already counted, so it cannot
         // outgrow the limit either.
         if pending.len() > MAX_PAYLOAD_BYTES {
-            return Err(too_large(pending.len()));
+            return Err(too_large());
         }
     }
     // Measuring a document is itself work the definition asked for, and the one
@@ -2827,6 +3075,25 @@ fn measure_payload(value: &Value, built_by: &str) -> Result<usize, Failure> {
         return Err(out_of_work());
     }
     Ok(bytes)
+}
+
+/// The bytes `text` takes as a JSON string: its quotes, and the escape `serde_json`
+/// writes for every byte that needs one.
+///
+/// The count is part of measuring a document EXACTLY ([`measure_payload`]): a string
+/// carrying a quote, a backslash or a control byte is longer in the document than it is
+/// in memory, and a document a caller sized to the limit must not be refused for it.
+fn quoted_bytes(text: &str) -> usize {
+    2 + text
+        .bytes()
+        .map(|byte| match byte {
+            // The two-character escapes: `\"`, `\\`, `\n`, `\r`, `\t`, `\b`, `\f`.
+            b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 2,
+            // Every other control byte is written as `\u00xx`.
+            0x00..=0x1f => 6,
+            _ => 1,
+        })
+        .sum::<usize>()
 }
 
 /// One walk of one definition.
@@ -3088,13 +3355,12 @@ impl Interpreter<'_> {
             _ => None,
         };
         let (outcome, end) = self.with_retries(state, at, &mut |me, at| {
-            // Every attempt at this state starts its branches, so every attempt
-            // writes its own `ParallelStateStarted` and the event of the outcome
-            // those branches reached.
-            me.push(super::EVENT_PARALLEL_STATE_STARTED, name, at);
             // "Parameters ... The effective input each branch receives" —
-            // `Arguments` in JSONata. It is re-evaluated per attempt, because this
-            // attempt's own members read `$$.State.RetryCount`.
+            // `Arguments` in JSONata. The branches are handed that document, so it is
+            // built BEFORE they start: a state whose own members could not be
+            // evaluated starts no branch, and records no event for having started
+            // any. It is re-evaluated per attempt, because this attempt's own members
+            // read `$$.State.RetryCount`.
             let context = with_retry_count(context, me.retry_count);
             let branch_input = match me.task_request(state, language, &effective, &context) {
                 Ok(value) => value,
@@ -3103,6 +3369,10 @@ impl Interpreter<'_> {
                     return (Err(failure), at);
                 }
             };
+            // Every attempt at this state starts its branches, so every attempt
+            // writes its own `ParallelStateStarted` and the event of the outcome
+            // those branches reached.
+            me.push(super::EVENT_PARALLEL_STATE_STARTED, name, at);
             let (outcome, end) =
                 me.run_branches(&plan, name, &raw, &branch_input, at, resume.take());
             // A branch that PARKED leaves the state with no outcome at all, so the
@@ -3203,7 +3473,7 @@ impl Interpreter<'_> {
         // and not only the branch that resumed.
         let mut results_bytes = 0usize;
         for value in done.iter().flatten() {
-            match measure_payload(value, "a 'Parallel' branch") {
+            match measure_payload(value, UNNAMED_PRODUCER) {
                 Ok(bytes) => results_bytes = results_bytes.saturating_add(bytes),
                 Err(failure) => return (Err(failure), at),
             }
@@ -3258,7 +3528,7 @@ impl Interpreter<'_> {
             }
             match branch.outcome {
                 Ok(value) => {
-                    match measure_payload(&value, "a 'Parallel' branch") {
+                    match measure_payload(&value, UNNAMED_PRODUCER) {
                         Ok(bytes) => results_bytes = results_bytes.saturating_add(bytes),
                         Err(failure) => {
                             // Leaving by any path puts back the bound the state was
@@ -3272,14 +3542,7 @@ impl Interpreter<'_> {
                     if results_bytes > MAX_PAYLOAD_BYTES {
                         self.cancel_after = enclosing_cancel;
                         return (
-                            Err(named(
-                                DATA_LIMIT_ERROR,
-                                format!(
-                                    "the 'Parallel' state's branches produced at least \
-                                     {results_bytes} bytes, more than the {MAX_PAYLOAD_BYTES} a \
-                                     state's output may carry"
-                                ),
-                            )),
+                            Err(named(DATA_LIMIT_ERROR, result_too_large(UNNAMED_PRODUCER))),
                             end.max(branch.end),
                         );
                     }
@@ -3624,13 +3887,10 @@ impl TemplateBudget {
                 self.bytes = left;
                 Ok(())
             }
-            None => Err(named(
-                DATA_LIMIT_ERROR,
-                format!(
-                    "the payload template builds more than the {MAX_PAYLOAD_BYTES} bytes a \
-                     state's output may carry"
-                ),
-            )),
+            // What a template builds is the state's own document, so a template past
+            // the ceiling is the same failure an over-large state output is
+            // ([`result_too_large`]); the state is named by the one being executed.
+            None => Err(named(DATA_LIMIT_ERROR, result_too_large(UNNAMED_PRODUCER))),
         }
     }
 
@@ -3792,36 +4052,25 @@ impl Trial {
     ///
     /// `error` and `cause` leave through the modelled `SensitiveError` (0..256) and
     /// `SensitiveCause` (0..32768) shapes, so they are bounded exactly as an
-    /// execution's are: a name past its maximum is reported as ASL's own data-limit
-    /// error, since a name carries meaning and cannot be shortened, while an
-    /// over-long cause keeps the error name and is clipped to what the service
+    /// execution's are: a name past its maximum is TRIMMED where it is reported
+    /// ([`trimmed_error`]), since what the state raised is what the caller has to see,
+    /// while an over-long cause keeps the error name and is clipped to what the service
     /// reports.
+    ///
+    /// This is the reporting boundary of the single-state trial, so a quota sentence
+    /// raised with no producer named ([`UNNAMED_PRODUCER`]) names the state under test
+    /// here, exactly as an execution's own state names itself in it ([`diagnosed`]).
     fn failed(inspection: Inspection, failure: Failure) -> Self {
         let Failure { error, cause } = failure;
-        if error
-            .as_ref()
-            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
-        {
-            return Self {
-                status: TEST_STATUS_FAILED,
-                output: None,
-                next_state: None,
-                error: Some(DATA_LIMIT_ERROR.to_string()),
-                cause: Some(format!(
-                    "the state's error name is longer than the {MAX_ERROR_BYTES} bytes this \
-                     service reports it through"
-                )),
-                inspection,
-                retry_index: None,
-                retry_backoff_seconds: None,
-                catch_index: None,
-            };
-        }
+        let cause = cause.map(|cause| match is_unnamed_producer(&cause) {
+            true => result_too_large(SINGLE_STATE_LABEL),
+            false => cause,
+        });
         Self {
             status: TEST_STATUS_FAILED,
             output: None,
             next_state: None,
-            error,
+            error: error.as_deref().map(trimmed_error),
             cause: cause.map(clip_cause),
             inspection,
             retry_index: None,
@@ -3896,8 +4145,20 @@ pub fn test_state(test: &StateTest<'_>) -> Trial {
     // state's output may carry is answered with ASL's own data-limit error rather
     // than evaluated, which is also what bounds what one path or one `StringMatches`
     // rule can be asked to walk.
-    if let Err(failure) = measure_payload(&raw, "the state's input") {
-        return Trial::failed(inspection, failure);
+    if let Err(failure) = measure_payload(&raw, UNNAMED_PRODUCER) {
+        // The document measured here is the state's INPUT, which the request supplied:
+        // the quota sentence is about a result a state RETURNED, so an input past the
+        // ceiling says what it is instead.
+        return Trial::failed(
+            inspection,
+            Failure {
+                error: failure.error,
+                cause: Some(format!(
+                    "the state input is larger than the {MAX_PAYLOAD_BYTES} bytes a state's \
+                     document may carry"
+                )),
+            },
+        );
     }
     let base_context = match test.context_override {
         Some(context) => context.clone(),
@@ -3992,6 +4253,9 @@ pub fn test_state(test: &StateTest<'_>) -> Trial {
             supplied
         },
     };
+    // And the same document for the diagnoses the trial's own expressions word, which
+    // quote the document they could not be applied to ([`GivenDocuments`]).
+    let _given = GivenDocuments::of(&interpreter.supplied);
     interpreter.trial(test, &raw, inspection)
 }
 

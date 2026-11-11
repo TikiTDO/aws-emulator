@@ -133,26 +133,32 @@ impl Bindings<'_> {
     }
 }
 
-/// Why a state's expressions were not evaluated, in the two classes the Amazon States
+/// Why a state's expressions were not evaluated, in the classes the Amazon States
 /// Language reports them under.
 ///
 /// The classes are the caller's to act on: a template that outgrew what a state may
 /// carry is the language's data-limit failure, and everything else — an expression
 /// that could not be parsed or evaluated, and every ceiling on the work one visit to
-/// a state may do — is its query-evaluation failure.
+/// a state may do — is its query-evaluation failure. An expression the engine
+/// EVALUATED and that threw is held apart from the rest of those, because the field it
+/// is written in is reported around it ([`in_field`]).
 #[derive(Debug, Clone)]
 pub enum Refusal {
     /// The template built more than one state's document may carry.
     TooLarge(String),
+    /// The expression was evaluated and THREW, carrying the engine's own account of
+    /// the failure: its code and its message.
+    Threw(String),
     /// The expressions were not evaluated.
     NotEvaluated(String),
 }
 
 impl From<engine::Refused> for Refusal {
-    /// A refusal of the shared seam, in this language's own two classes.
+    /// A refusal of the shared seam, in this language's own classes.
     fn from(refused: engine::Refused) -> Self {
         match refused {
             engine::Refused::TooLarge(why) => Refusal::TooLarge(why),
+            engine::Refused::Threw(account) => Refusal::Threw(account),
             engine::Refused::NotEvaluated(why) => Refusal::NotEvaluated(why),
         }
     }
@@ -313,14 +319,16 @@ fn evaluate(
 /// bounded in bytes and in evaluations however many members the definition declares.
 pub fn render(
     node: &Value,
+    field: &str,
     bindings: &Bindings<'_>,
     budget: &mut Budget,
 ) -> Result<Value, Refusal> {
-    render_at(node, bindings, engine::MAX_EVALUATION_DEPTH, budget)
+    render_at(node, field, bindings, engine::MAX_EVALUATION_DEPTH, budget)
 }
 
 fn render_at(
     node: &Value,
+    field: &str,
     bindings: &Bindings<'_>,
     depth: usize,
     budget: &mut Budget,
@@ -332,22 +340,28 @@ fn render_at(
         )));
     };
     match node {
-        Value::String(text) if is_expression(text) => {
-            Ok(evaluate(text, bindings, budget)?.unwrap_or(Value::Null))
-        }
+        Value::String(text) if is_expression(text) => Ok(in_field(
+            evaluate(text, bindings, budget),
+            text,
+            field,
+        )?
+        .unwrap_or(Value::Null)),
         Value::Array(items) => {
             let mut rendered = Vec::with_capacity(items.len());
-            for item in items {
+            for (index, item) in items.iter().enumerate() {
                 // The comma and the brackets each element costs the document it is
                 // built into, charged before the element itself is.
                 budget.spend(1)?;
+                let at = element_field(field, index);
                 match item {
                     Value::String(text) if is_expression(text) => {
-                        if let Some(value) = evaluate(text, bindings, budget)? {
+                        if let Some(value) =
+                            in_field(evaluate(text, bindings, budget), text, &at)?
+                        {
                             rendered.push(value);
                         }
                     }
-                    other => rendered.push(render_at(other, bindings, depth, budget)?),
+                    other => rendered.push(render_at(other, &at, bindings, depth, budget)?),
                 }
             }
             Ok(Value::Array(rendered))
@@ -358,16 +372,19 @@ fn render_at(
                 // The member's own name, its quotes, its colon and the comma after
                 // it: what the document carries for the member whatever its value is.
                 budget.spend(member.len() + 4)?;
+                let at = member_field(field, member);
                 match child {
                     Value::String(text) if is_expression(text) => {
-                        if let Some(value) = evaluate(text, bindings, budget)? {
+                        if let Some(value) =
+                            in_field(evaluate(text, bindings, budget), text, &at)?
+                        {
                             rendered.insert(member.clone(), value);
                         }
                     }
                     other => {
                         rendered.insert(
                             member.clone(),
-                            render_at(other, bindings, depth, budget)?,
+                            render_at(other, &at, bindings, depth, budget)?,
                         );
                     }
                 }
@@ -383,6 +400,20 @@ fn render_at(
     }
 }
 
+/// Where the member `member` of the template at `field` is written, as a diagnosis
+/// names a field of a state: the members joined by `/`, which is how the language
+/// addresses a field nested inside one (`Assign/total`).
+pub fn member_field(field: &str, member: &str) -> String {
+    format!("{field}/{member}")
+}
+
+/// Where the element at `index` of the array at `field` is written: the array's own
+/// field with the index bracketed onto it (`Arguments/values[0]`), which is how the
+/// language addresses one element of a template.
+fn element_field(field: &str, index: usize) -> String {
+    format!("{field}[{index}]")
+}
+
 /// How the language opens its diagnosis of a field's expression that MISEVALUATED,
 /// and the clause that names the field inside it.
 ///
@@ -393,11 +424,17 @@ fn render_at(
 /// ([`diagnosed_field`]), so the one place that words it is the one place that knows
 /// its shape.
 pub const DIAGNOSIS_OPENING: &str = "The JSONata expression '";
+/// The field a diagnosis this module worded names — "the location of the field in the
+/// state in which the evaluation error occurred".
 const FIELD_CLAUSE: &str = "' specified for the field '";
 
 /// What the diagnosis says of an expression that produced NOTHING, which the
 /// language's own `undefined` is: a field whose value the language requires has none.
 const RETURNED_NOTHING: &str = "returned nothing (undefined).";
+
+/// What the diagnosis says of an expression that THREW: the engine's own account of
+/// the failure follows it.
+const THREW_AN_ERROR: &str = "threw an error during evaluation.";
 
 /// The JSON type ONE field of a state requires the expression in it to produce.
 ///
@@ -451,32 +488,15 @@ fn type_of(value: &Value) -> &'static str {
 /// The diagnosis of the expression `text`, written in the definition field `field`:
 /// the expression as the definition wrote it, the field it is written in, and `what`
 /// was wrong with the value it produced.
+///
+/// The field is remembered beside the diagnosis ([`failed_field`]), which is what the
+/// event reporting the failure carries.
 fn misevaluated(text: &str, field: &str, what: &str) -> Refusal {
+    failed_in(field);
     Refusal::NotEvaluated(format!(
         "{DIAGNOSIS_OPENING}{}{FIELD_CLAUSE}{field}' {what}",
         inner(text)
     ))
-}
-
-/// The field a diagnosis this module worded names — "the location of the field in the
-/// state in which the evaluation error occurred", which the event reporting the
-/// failure carries.
-///
-/// The clause is read from the END of the diagnosis: the expression the diagnosis
-/// echoes is the DEFINITION'S text and can carry anything, that clause included,
-/// while what follows the field is this module's own fixed text — so the last
-/// occurrence is the one this module wrote, whatever a definition writes in its
-/// expression.
-///
-/// `None` for every other cause, and for a TEMPLATE: its members build one document
-/// rather than naming one field, so there is no single field to report.
-pub fn diagnosed_field(cause: &str) -> Option<&str> {
-    if !cause.contains(DIAGNOSIS_OPENING) {
-        return None;
-    }
-    let (_, named) = cause.rsplit_once(FIELD_CLAUSE)?;
-    let (field, _) = named.split_once('\'')?;
-    Some(field)
 }
 
 /// What the definition field `field` carries, held to the type the language requires
@@ -500,19 +520,119 @@ pub fn typed(
         Value::String(text) if is_expression(text) => text,
         other => return Ok(other.clone()),
     };
-    match evaluate(text, bindings, budget)? {
+    match in_field(evaluate(text, bindings, budget), text, field)? {
         None => Err(misevaluated(text, field, RETURNED_NOTHING)),
         Some(value) if expected.holds(&value) => Ok(value),
         Some(value) => Err(misevaluated(
             text,
             field,
             &format!(
-                "returned an unexpected type. Expected '{}' but was '{}'.",
+                "returned an unexpected result type. Expected '{}', but was '{}' for value: \
+                 {value}",
                 expected.named(),
                 type_of(&value)
             ),
         )),
     }
+}
+
+/// `evaluated`, as the field `field` of a state reports an expression that THREW.
+///
+/// The engine's own account of the failure says only what went wrong inside the
+/// expression; which FIELD of which state was being evaluated is what a caller acts on,
+/// so an evaluation that failed is reported under the same diagnosis a field's value of
+/// the wrong type is ([`misevaluated`]), with the engine's account as its detail. Every
+/// other refusal — a ceiling this emulator holds an expression to, a template that
+/// outgrew what a state may carry — is carried as raised: it is about the request rather
+/// than about the expression's own evaluation.
+fn in_field<T>(
+    evaluated: Result<T, Refusal>,
+    text: &str,
+    field: &str,
+) -> Result<T, Refusal> {
+    evaluated.map_err(|refusal| match refusal {
+        Refusal::Threw(account) => {
+            misevaluated(text, field, &format!("{THREW_AN_ERROR} {account}"))
+        }
+        // A template that outgrew what a state may carry is reported in the service's
+        // own words about a state's result rather than about the expression, so the
+        // refusal is carried as raised — but the FIELD it was building is remembered,
+        // which is what the event reporting the failure names.
+        Refusal::TooLarge(why) => {
+            failed_in(field);
+            Refusal::TooLarge(why)
+        }
+        other => other,
+    })
+}
+
+/// The diagnosis of a field's expression that produced a value the language does not
+/// accept THERE: the expression, the field, what that field must carry, and the value.
+///
+/// The field's own type check is [`typed`]; this is the one for a value of the right
+/// JSON type that the field cannot take all the same — a `Wait`'s `Timestamp` that is a
+/// string but not an instant, a `Seconds` that is a number but not a whole one — which
+/// is the same expression misevaluating and is diagnosed the same way.
+///
+/// `None` for a field that carries a literal rather than an expression: nothing was
+/// evaluated for it, so its value is the definition's own.
+pub fn invalid_value(node: &Value, field: &str, must_be: &str, value: &Value) -> Option<Refusal> {
+    let Value::String(text) = node else {
+        return None;
+    };
+    if !is_expression(text) {
+        return None;
+    }
+    Some(misevaluated(
+        text,
+        field,
+        &format!(
+            "returned an unexpected result type. Expected '{must_be}', but was '{}' for value: \
+             {value}",
+            type_of(value)
+        ),
+    ))
+}
+
+/// The field a diagnosis this module worded names — "the location of the field in the
+/// state in which the evaluation error occurred", which the event reporting the
+/// failure carries, TAKEN from the thread it was remembered on.
+///
+/// It is REMEMBERED where the diagnosis is worded rather than read back out of it: the
+/// expression a diagnosis echoes is the DEFINITION's text and can carry anything the
+/// sentence around it does, so no reading of the finished cause can tell the field this
+/// module named from one a definition wrote inside its own expression. The state about
+/// to be run empties the cell ([`clear_failed_field`]), so the field reported for a
+/// state is one of ITS own expressions or none at all.
+pub fn take_failed_field() -> Option<String> {
+    FAILED_FIELD.with(|field| field.borrow_mut().take())
+}
+
+/// Forget the field remembered on this thread, for the state about to evaluate its own
+/// expressions: what an earlier state's failure left behind is not this state's to
+/// report ([`take_failed_field`]).
+pub fn clear_failed_field() {
+    let _forgotten = take_failed_field();
+}
+
+thread_local! {
+    /// The field of a state the last expression that FAILED on this thread is written
+    /// in ([`take_failed_field`]).
+    ///
+    /// One state's expressions are evaluated, and the event their failure writes is
+    /// recorded, on the one thread that walk runs on, so the field travels with the
+    /// failure without every refusal having to carry it — the same way the work one
+    /// interpretation may do is ambient to the thread it runs on. A thread no walk is
+    /// running on holds none.
+    static FAILED_FIELD: ::std::cell::RefCell<Option<String>> =
+        const { ::std::cell::RefCell::new(None) };
+}
+
+/// Remember `field` as the field the expression that just failed is written in.
+fn failed_in(field: &str) {
+    FAILED_FIELD.with(|held| {
+        held.replace(Some(field.to_string()));
+    });
 }
 
 /// A field that is EITHER one whole expression or the literal value it is written as:
@@ -522,11 +642,14 @@ pub fn typed(
 /// reports one.
 pub fn field(
     node: &Value,
+    field: &str,
     bindings: &Bindings<'_>,
     budget: &mut Budget,
 ) -> Result<Option<Value>, Refusal> {
     match node {
-        Value::String(text) if is_expression(text) => evaluate(text, bindings, budget),
+        Value::String(text) if is_expression(text) => {
+            in_field(evaluate(text, bindings, budget), text, field)
+        }
         other => Ok(Some(other.clone())),
     }
 }

@@ -276,10 +276,10 @@ async fn the_data_flow_members_decide_what_a_state_reads_and_writes() {
             expected: Expected::Output(r#"{"slot":"new","other":1}"#),
         },
         RunCase {
-            case: "a ResultPath into something that is not an object fails",
+            case: "a ResultPath into something that is not an object conflicts with it",
             definition: r#"{"StartAt":"A","States":{"A":{"Type":"Pass","Result":1,"ResultPath":"$.slot.deeper","End":true}}}"#,
             input: r#"{"slot":"a string"}"#,
-            expected: Expected::Failure("States.ResultPathMatchFailure"),
+            expected: Expected::Failure("States.ReferencePathConflict"),
         },
         RunCase {
             case: "OutputPath narrows the state's output",
@@ -1299,17 +1299,20 @@ async fn a_map_of_passes_mirrors_its_items() {
 
 /// An `error` and a `cause` the run computed from the execution's own data stay
 /// inside the modelled `SensitiveError` (0..256) and `SensitiveCause` (0..32768)
-/// shapes they are reported through: an over-long error NAME is ASL's own
-/// `States.DataLimitExceeded`, and an over-long cause keeps the error name and is
-/// clipped.
+/// shapes they are reported through: an over-long error NAME is TRIMMED to the
+/// maximum — its first `256 - 3` characters followed by `...` — and an over-long cause
+/// keeps the error name and is clipped.
 ///
 /// Rows sit either side of each published bound, which is the member's own modelled
-/// length.
+/// length, and one far past it.
 #[tokio::test]
 async fn a_computed_error_and_cause_stay_within_what_the_service_reports() {
     let emulator = Emulator::new();
     let from_input = r#"{"StartAt":"F","States":{"F":{"Type":"Fail","ErrorPath":"$.why"}}}"#;
     let machine = create_machine(&emulator, "bounded-error", from_input).await;
+
+    /// What marks an error name the maximum cut, counted inside that maximum.
+    const ELLIPSIS: &str = "...";
 
     // (case, the error name's length, the error the execution must report)
     let cases: Vec<(&str, usize, String)> = vec![
@@ -1321,7 +1324,12 @@ async fn a_computed_error_and_cause_stay_within_what_the_service_reports() {
         (
             "an error name one byte past the bound",
             MAX_ERROR_BYTES + 1,
-            "States.DataLimitExceeded".to_string(),
+            format!("{}{ELLIPSIS}", "e".repeat(MAX_ERROR_BYTES - ELLIPSIS.len())),
+        ),
+        (
+            "an error name far past the bound",
+            MAX_ERROR_BYTES * 4,
+            format!("{}{ELLIPSIS}", "e".repeat(MAX_ERROR_BYTES - ELLIPSIS.len())),
         ),
     ];
     let mut started = Vec::with_capacity(cases.len());
@@ -1332,11 +1340,11 @@ async fn a_computed_error_and_cause_stay_within_what_the_service_reports() {
         );
     }
 
-    // A cause the interpreter wrote quotes the value it could not handle, so a large
-    // input is what pushes it past its own bound.
-    let not_an_array = r#"{"StartAt":"M","States":{"M":{"Type":"Map","ItemsPath":"$.items","ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},"End":true}}}"#;
-    let bulky = create_machine(&emulator, "bounded-cause", not_an_array).await;
-    let bulky_input = json!({ "items": { "blob": "b".repeat(MAX_CAUSE_BYTES * 2) } }).to_string();
+    // A cause the interpreter wrote quotes the document a path could not be found in,
+    // so a large input is what pushes it past its own bound.
+    let absent_member = r#"{"StartAt":"A","States":{"A":{"Type":"Pass","Parameters":{"v.$":"$.absent"},"End":true}}}"#;
+    let bulky = create_machine(&emulator, "bounded-cause", absent_member).await;
+    let bulky_input = json!({ "blob": "b".repeat(MAX_CAUSE_BYTES * 2) }).to_string();
     let bulky_run = start_execution(&emulator, &bulky, "only", &bulky_input).await;
 
     std::thread::sleep(PAST_THE_EXECUTION_DELAY);
@@ -1347,6 +1355,12 @@ async fn a_computed_error_and_cause_stay_within_what_the_service_reports() {
             described.get("error").and_then(Value::as_str),
             Some(expected.as_str()),
             "case {case:?}: expected error {expected:?}, got {described:?}"
+        );
+        let reported = described.get("error").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            reported.len() <= MAX_ERROR_BYTES,
+            "case {case:?}: expected an error name within {MAX_ERROR_BYTES} bytes, got {} bytes",
+            reported.len()
         );
     }
 
