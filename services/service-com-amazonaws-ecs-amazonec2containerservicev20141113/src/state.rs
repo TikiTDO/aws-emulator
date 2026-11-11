@@ -1287,7 +1287,8 @@ pub fn capacity_provider_not_found_message(reference: &str) -> String {
 /// One fixed sentence, naming neither member's value, answered by every operation that
 /// takes the pair.
 pub const LAUNCH_TYPE_WITH_CAPACITY_PROVIDER_STRATEGY_MESSAGE: &str =
-    "You may choose a capacity provider or a launch type but not both.";
+    "Specifying both a launch type and capacity provider strategy is not supported. Remove one \
+     and try again.";
 
 /// The inclusive range `CapacityProviderStrategyItem$base` admits, from the member's own
 /// `@range` trait and its doc ("The valid range is 0 to 100,000").

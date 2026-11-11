@@ -354,18 +354,15 @@ async fn a_filter_value_matching_no_tenant_serves_an_empty_page() {
     );
 }
 
-/// The listing filters by exactly ONE association, so a request that names neither member,
-/// or both at once, is refused with the modelled `InvalidArgument` (400) and the sentence
-/// that states the rule.
+/// The listing filters by exactly ONE association when it is given a filter at all, so a
+/// filter element that names neither member, or both at once, is refused with the modelled
+/// `InvalidArgument` (400) and the sentence that states the rule.
 #[tokio::test]
 async fn a_filter_that_names_no_single_association_is_refused() {
     let router = emulator();
     let fixture = fixture(&router).await;
 
-    let mut cases: Vec<(&str, String)> = vec![(
-        "no filter element at all",
-        list_body(None, None, None),
-    )];
+    let mut cases: Vec<(&str, String)> = Vec::new();
     for row in unadmitted_filters(&fixture) {
         cases.push((row.case, row.body(None)));
     }

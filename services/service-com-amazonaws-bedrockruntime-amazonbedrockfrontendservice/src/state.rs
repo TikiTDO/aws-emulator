@@ -3577,25 +3577,18 @@ pub fn emulated_completion_text(model_id: &str, messages: u32, input_tokens: u32
     emulated_completion(model_id, messages, input_tokens, u32::MAX, &[]).text
 }
 
-/// The refusal message for an `InvokeModel` body whose JSON cannot be PARSED: the bytes
-/// are not a JSON document at all, so there is no request to read.
+/// The refusal message for an `InvokeModel` body that is not a readable request of the
+/// invoked family at all: bytes whose JSON cannot be PARSED, or a JSON document that parses
+/// to something other than an object, so no member of the family's documented request schema
+/// can be read off it.
 ///
 /// "You must provide the body in JSON format" is all the operation's own documentation says
-/// about such a body, and this is the sentence Amazon Bedrock states that refusal in — the
-/// recorded one for this class. The fault is the DOCUMENT's syntax rather than any one
-/// member of it, so the message names no member and carries no value of the request.
-pub const MALFORMED_JSON_BODY_MESSAGE: &str =
-    "The JSON object in the request body is malformed. Fix the syntax errors and retry \
-     your request.";
-
-/// The refusal message for a body that IS a JSON document but is not a request of the
-/// invoked family: a value that is not an object, so no member of the family's documented
-/// request schema can be read off it.
-///
-/// A different class from the one above and worded differently by Amazon Bedrock: here the
-/// document parsed and what it holds is not the request, which is the same complaint a body
-/// missing a required member gets ([`invoke_body_violation`] states that one with the
-/// member's own name).
+/// about such a body, and this is the sentence Amazon Bedrock states the refusal in — the
+/// recorded one for this class, for an unparseable document as for a parsed non-object. The
+/// fault is the DOCUMENT rather than any one member of it, so the message names no member
+/// and carries no value of the request; a body that IS the family's request object but omits
+/// a member it requires is reported naming that member instead
+/// ([`invoke_body_violation`]).
 pub const MALFORMED_BODY_MESSAGE: &str =
     "Malformed input request, please reformat your input and try again.";
 
@@ -3630,16 +3623,15 @@ fn required_body_slots(family: ModelFamily) -> &'static [&'static [&'static str]
 /// documented request schema, or `None` when it does.
 ///
 /// The body is model-specific, so this is the only place the request's own shape is
-/// checked, and the three ways it can fail are three different complaints: bytes whose JSON
-/// cannot be PARSED are a syntax fault in the document
-/// ([`MALFORMED_JSON_BODY_MESSAGE`]); a document that parses but is not an object is no
-/// request of the family ([`MALFORMED_BODY_MESSAGE`]); and one that omits a member the
-/// family requires is reported naming that member, as a schema violation is.
+/// checked, and it can fail in two ways the service words differently: a body that is no
+/// request of the family at all — bytes whose JSON cannot be parsed, or a document that
+/// parses to something other than an object — is refused as the malformed input request it
+/// is ([`MALFORMED_BODY_MESSAGE`]); one that IS the family's request object but omits a
+/// member the family requires is reported naming that member, as a schema violation is.
 pub fn invoke_body_violation(family: ModelFamily, body: &[u8]) -> Option<String> {
     let members = match serde_json::from_slice::<serde_json::Value>(body) {
         Ok(serde_json::Value::Object(members)) => members,
-        Ok(_) => return Some(MALFORMED_BODY_MESSAGE.to_string()),
-        Err(_) => return Some(MALFORMED_JSON_BODY_MESSAGE.to_string()),
+        Ok(_) | Err(_) => return Some(MALFORMED_BODY_MESSAGE.to_string()),
     };
     for slot in required_body_slots(family) {
         if slot.iter().any(|name| members.contains_key(*name)) {

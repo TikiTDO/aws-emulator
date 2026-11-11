@@ -51,7 +51,9 @@ use crate::hosted_zone_records::{
 use crate::traffic_policies::{
     create_policy, document_with_start_endpoint, document_with_start_rule, policy_of,
 };
-use crate::traffic_policy_not_found_envelope::assert_identity_only;
+use crate::traffic_policy_not_found_envelope::{
+    assert_identity_only, assert_no_such_traffic_policy,
+};
 use crate::traffic_policy_versions::create_version;
 
 /// The published maximum of `TTL` (`range 0..2147483647`,
@@ -693,11 +695,10 @@ async fn a_create_naming_something_the_account_does_not_hold_is_refused() {
             row.code,
             reply.body
         );
-        // A traffic policy the account does not hold is reported by its code
-        // alone — `Type` and `Code` and no `Message` — while every other
-        // refusal here says why.
+        // A traffic policy the account does not hold is reported with the one sentence
+        // that refusal states, and every other refusal here says why in its own.
         if row.code == "NoSuchTrafficPolicy" {
-            assert_identity_only(&reply, row.case, row.code);
+            assert_no_such_traffic_policy(&reply, row.case);
         } else {
             assert!(
                 reply

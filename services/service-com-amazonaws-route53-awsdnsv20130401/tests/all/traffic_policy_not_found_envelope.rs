@@ -3,19 +3,21 @@
 //! The error BODY of the two Route 53 traffic-policy not-found refusals, end to
 //! end over the router.
 //!
-//! The rule under test: a traffic policy or a traffic policy instance the account
-//! does not hold is reported by its IDENTITY ALONE — HTTP 404 with
-//! `<ErrorResponse><Error><Type>Sender</Type><Code>…</Code></Error>…` and NO
-//! `Message` child — from every operation that binds the error, whichever half of
-//! `(Id, Version)` the store does not hold and whatever form the requested id
-//! takes. The error shapes' documentation states the RULE each refusal reports
-//! ("No traffic policy exists with the specified ID", "No traffic policy instance
-//! exists with the specified ID",
+//! The rules under test: a traffic policy the account does not hold is reported HTTP 404
+//! with `<ErrorResponse><Error><Type>Sender</Type><Code>NoSuchTrafficPolicy</Code>`
+//! `<Message>The policy does not exist.</Message>` — one fixed sentence stating the rule
+//! and carrying nothing the request named — while a traffic policy INSTANCE the account
+//! does not hold is reported by its IDENTITY ALONE, with NO `Message` child. Each holds for
+//! every operation that binds the error, whichever half of `(Id, Version)` the store does
+//! not hold and whatever form the requested id takes. The error shapes' documentation states
+//! the RULE each refusal reports ("No traffic policy exists with the specified ID", "No
+//! traffic policy instance exists with the specified ID",
 //! smithy_query(query="shape",shape="NoSuchTrafficPolicy,NoSuchTrafficPolicyInstance"))
-//! rather than a sentence the service sends, and the `message` member both shapes
-//! carry is optional, so nothing is put on the wire for it.
+//! rather than a sentence the service sends, and the `message` member both shapes carry is
+//! optional — so which of the two puts an element on the wire is the service's own
+//! behaviour, not the model's.
 //!
-//! The rule is about the SHAPE of the body, so it is asserted over a table of
+//! The rules are about the SHAPE of the body, so each is asserted over a table of
 //! requests rather than over the one that exposed it: every implemented operation
 //! that binds either error, crossed with the ways an `(Id, Version)` or an
 //! instance id can name nothing — an id nobody minted, an id of another entity
@@ -24,7 +26,7 @@
 //! that existed until it was deleted.
 //!
 //! The other half of the rule is asserted too: a refusal of the SAME operations
-//! that is not one of these two still carries its message, so the body shape
+//! that is neither of these two carries its own message, so the body shape
 //! belongs to these two refusals rather than to the operations or to the
 //! service's error envelope.
 //!
@@ -57,11 +59,15 @@ const VERSION_MAX: &str = "1000";
 /// The DNS name every traffic policy instance in this suite is applied to.
 const INSTANCE_NAME: &str = "www.example.com";
 
+/// The one sentence a traffic policy the account does not hold is refused with: fixed text
+/// stating the rule, carrying nothing the request named.
+pub(crate) const NO_SUCH_POLICY_MESSAGE: &str = "The policy does not exist.";
+
 /// Assert that `reply` reports a refusal by its identity alone: HTTP 404, the
 /// `Error` element carrying `Type` `Sender` and the expected `Code`, and no
 /// `Message` element anywhere in the body.
 ///
-/// `pub(crate)` so every suite that drives one of these two refusals asserts the
+/// `pub(crate)` so every suite that drives the traffic-policy-instance refusal asserts the
 /// body shape through the SAME check rather than growing a second copy of it.
 pub(crate) fn assert_identity_only(reply: &Reply, case: &str, code: &str) {
     assert_eq!(
@@ -96,6 +102,41 @@ pub(crate) fn assert_identity_only(reply: &Reply, case: &str, code: &str) {
     assert!(
         !reply.body.contains("<Message"),
         "case {case:?}: the body must carry no Message element at all, got {}",
+        reply.body
+    );
+}
+
+/// Assert that `reply` is the traffic-policy not-found refusal: HTTP 404, the `Error`
+/// element carrying `Type` `Sender`, the code `NoSuchTrafficPolicy`, and the one sentence
+/// that refusal states.
+///
+/// `pub(crate)` for the same reason [`assert_identity_only`] is: every suite that drives
+/// this refusal asserts its body through this one check.
+pub(crate) fn assert_no_such_traffic_policy(reply: &Reply, case: &str) {
+    assert_eq!(
+        reply.status, 404,
+        "case {case:?}: expected HTTP 404, got {} with body {}",
+        reply.status, reply.body
+    );
+    assert_eq!(
+        reply.error_code(),
+        NO_SUCH_POLICY,
+        "case {case:?}: expected the code {NO_SUCH_POLICY:?}, got {:?}; body {}",
+        reply.error_code(),
+        reply.body
+    );
+    assert_eq!(
+        reply.first("Error/Type"),
+        Some("Sender"),
+        "case {case:?}: expected the fault Type \"Sender\", got {:?}; body {}",
+        reply.first("Error/Type"),
+        reply.body
+    );
+    assert_eq!(
+        reply.first("Error/Message"),
+        Some(NO_SUCH_POLICY_MESSAGE),
+        "case {case:?}: expected the refusal's own sentence, got {:?}; body {}",
+        reply.first("Error/Message"),
         reply.body
     );
 }
@@ -192,7 +233,7 @@ async fn policy_id(router: &MultiServiceRouter, name: &str) -> String {
 }
 
 #[tokio::test]
-async fn a_traffic_policy_the_account_does_not_hold_is_refused_by_its_code_alone() {
+async fn a_traffic_policy_the_account_does_not_hold_is_refused_with_one_sentence() {
     let router = router();
     let zone = create_zone_ok(&router, "example.com", "ref-policy-identity-only").await;
     // A policy the account DOES hold, so the rows below ask about versions of a
@@ -217,7 +258,9 @@ async fn a_traffic_policy_the_account_does_not_hold_is_refused_by_its_code_alone
         for operation in POLICY_OPERATIONS {
             let case = format!("{operation:?} on {case}");
             let reply = operation.send(&router, &zone, id, "1").await;
-            assert_identity_only(&reply, &case, NO_SUCH_POLICY);
+            // The sentence is fixed text: asserting it EQUALS the one sentence is what
+            // proves no part of the request reached it.
+            assert_no_such_traffic_policy(&reply, &case);
         }
     }
 
@@ -236,7 +279,7 @@ async fn a_traffic_policy_the_account_does_not_hold_is_refused_by_its_code_alone
         {
             let case = format!("{operation:?} on {case}");
             let reply = operation.send(&router, &zone, &held, version).await;
-            assert_identity_only(&reply, &case, NO_SUCH_POLICY);
+            assert_no_such_traffic_policy(&reply, &case);
         }
     }
 
@@ -262,7 +305,7 @@ async fn a_traffic_policy_the_account_does_not_hold_is_refused_by_its_code_alone
     {
         let case = format!("{operation:?} on a version a delete flagged");
         let reply = operation.send(&router, &zone, &deleted, "1").await;
-        assert_identity_only(&reply, &case, NO_SUCH_POLICY);
+        assert_no_such_traffic_policy(&reply, &case);
     }
 }
 
@@ -346,7 +389,7 @@ async fn a_traffic_policy_instance_the_account_does_not_hold_is_refused_by_its_c
 
 #[tokio::test]
 async fn another_refusal_of_the_same_operations_still_states_its_message() {
-    // The other half of the rule: the messageless body belongs to the two
+    // The other half of the rule: the body shape belongs to the two
     // not-found refusals, not to these operations or to the service's envelope,
     // so every OTHER refusal the same operations answer still says why. The rows
     // span a refusal of each remaining class these operations model: a hosted

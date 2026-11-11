@@ -163,11 +163,10 @@ fn stated_from_request<O: Operation>(
     let restated: Vec<Violation> = violations.iter().map(super::stated_violation).collect();
     let stated = aws_validation_refusal_over_elements_stating(
         &Refusal::Invalid(restated),
-        // The expression a clause quotes arrives already quoted the way this service quotes
-        // one (`super::stated_pattern` restated it above, with the anchor pair the model
-        // wraps it in dropped), so the rendering here leaves it as it is: this module
-        // changes which MEMBER a clause is stated at and nothing about how any requirement
-        // reads.
+        // The expression a clause quotes is the one the model declares, anchors and all, as
+        // `super::stated_violation` left it: the rendering here leaves it as it is, since
+        // this module changes which MEMBER a clause is stated at and nothing about how any
+        // requirement reads.
         |pattern| pattern.to_string(),
         // The value a clause stated at a list member quotes: the entries of that member the
         // element constraint refused, in the order the request sent them.
@@ -247,11 +246,10 @@ fn offending_entries(violations: &[Violation]) -> HashMap<String, String> {
 /// the framework's own.
 ///
 /// A `@pattern` inside the NESTED set keeps the expression the model declares, anchors and
-/// all: the recorded element clause this module was built on (the one-entry `DnsIpAddrs`
+/// all — the same way the per-member clause quotes one ([`super::stated_violation`]), which is
+/// what the recorded element clause this module was built on (the one-entry `DnsIpAddrs`
 /// refusal the module header quotes, pinned row by row in
-/// `tests/all/refusal_classification_rules.rs`) states it that way, while the per-member
-/// clause drops the pair ([`super::stated_pattern`]). The two renderings are what the two
-/// recordings show, so neither is derived from the other.
+/// `tests/all/refusal_classification_rules.rs`) shows.
 fn element_set_in_the_services_own_order(
     input_schema: &'static Schema,
     collection: &str,

@@ -391,16 +391,21 @@ const WIDEST_STEP_CONCURRENCY_CEILING: i64 = 6400;
 const BEYOND_EVERY_BAND_SENTENCE: &str = "Invalid step concurrency level.";
 
 /// The sentence a level above the cluster's own ceiling but inside the widest one a mode
-/// raises it to is refused with: the band the cluster's mode allows, and nothing of the
-/// request.
-const ABOVE_THE_BAND_SENTENCE: &str =
-    "Invalid step concurrency level. Allowed level is from 1 to 256";
+/// raises it to is refused with: the level it could not take, the ceiling and the mode that
+/// ceiling belongs to, then the mode that would take it and that mode's own ceiling.
+fn above_the_band_sentence(level: i64) -> String {
+    format!(
+        "StepConcurrencyLevel {level} exceeds the maximum (256) for StepExecutionMode \
+         STANDARD. Set StepExecutionMode to DISTRIBUTED for up to 6400 concurrent steps."
+    )
+}
 
 /// THE RULE: a `StepConcurrencyLevel` outside the band the cluster's step execution mode
 /// allows is refused with the class's own sentence for WHICH class it falls into — the
-/// band itself for a level another mode would take, and no band at all for one no mode
-/// could take — on every operation that takes the member; a level inside the band is
-/// stored and read back. Rows span either side of each published bound and far past both.
+/// level, the ceiling it exceeded and the mode that would take it for a level another mode
+/// would take, and no band at all for one no mode could take — on every operation that
+/// takes the member; a level inside the band is stored and read back. Rows span either side
+/// of each published bound and far past both.
 #[tokio::test]
 async fn a_step_concurrency_level_outside_the_band_is_refused_per_side_of_the_band() {
     let emr = Emr::new();
@@ -409,15 +414,15 @@ async fn a_step_concurrency_level_outside_the_band_is_refused_per_side_of_the_ba
     let widest = WIDEST_STEP_CONCURRENCY_CEILING;
 
     let out_of_band = [
-        (low - 1, BEYOND_EVERY_BAND_SENTENCE),
-        (low - 2, BEYOND_EVERY_BAND_SENTENCE),
-        (-1, BEYOND_EVERY_BAND_SENTENCE),
-        (high + 1, ABOVE_THE_BAND_SENTENCE),
-        (high + 2, ABOVE_THE_BAND_SENTENCE),
-        (widest, ABOVE_THE_BAND_SENTENCE),
-        (widest + 1, BEYOND_EVERY_BAND_SENTENCE),
-        (10_000, BEYOND_EVERY_BAND_SENTENCE),
-        (i64::from(i32::MAX), BEYOND_EVERY_BAND_SENTENCE),
+        (low - 1, BEYOND_EVERY_BAND_SENTENCE.to_string()),
+        (low - 2, BEYOND_EVERY_BAND_SENTENCE.to_string()),
+        (-1, BEYOND_EVERY_BAND_SENTENCE.to_string()),
+        (high + 1, above_the_band_sentence(high + 1)),
+        (high + 2, above_the_band_sentence(high + 2)),
+        (widest, above_the_band_sentence(widest)),
+        (widest + 1, BEYOND_EVERY_BAND_SENTENCE.to_string()),
+        (10_000, BEYOND_EVERY_BAND_SENTENCE.to_string()),
+        (i64::from(i32::MAX), BEYOND_EVERY_BAND_SENTENCE.to_string()),
     ];
 
     for (level, sentence) in out_of_band {

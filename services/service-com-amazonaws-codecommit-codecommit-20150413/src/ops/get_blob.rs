@@ -207,7 +207,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // repository holds under it.
         let content = repository.blob(&blob_id).ok_or_else(|| {
             GetBlobErrorModeled::BlobIdDoesNotExistException(BlobIdDoesNotExistException {
-                message: Some(crate::state::BLOB_ID_DOES_NOT_EXIST_MESSAGE.to_string()),
+                message: Some(crate::state::blob_id_does_not_exist_message(
+                    &input.blob_id,
+                )),
             })
         })?;
 

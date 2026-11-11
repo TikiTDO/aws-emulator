@@ -46,7 +46,7 @@ use crate::traffic_policies::{
     create_policy, document_with_start_endpoint, document_with_start_rule, get_policy, policy_count,
     policy_of, PolicyView,
 };
-use crate::traffic_policy_not_found_envelope::assert_identity_only;
+use crate::traffic_policy_not_found_envelope::assert_no_such_traffic_policy;
 
 /// `TrafficPolicyComment` is `len 0..1024`
 /// (smithy_query(query="shape",shape="TrafficPolicyComment")).
@@ -380,7 +380,7 @@ async fn an_id_that_names_no_policy_is_refused() {
         // Route 53 reports a traffic policy it does not hold by its code alone,
         // so every id above is refused with the same body: `Type` and `Code`
         // and no `Message` element.
-        assert_identity_only(&reply, case, "NoSuchTrafficPolicy");
+        assert_no_such_traffic_policy(&reply, case);
     }
 
     // The policy that does exist still holds only the version it was created

@@ -4135,25 +4135,12 @@ pub fn stack_cannot_be_rolled_back() -> String {
 /// The message CloudFormation answers when `ContinueUpdateRollback` names a stack whose
 /// current status is not one a rollback can be continued from.
 ///
-/// ONE sentence, whatever the stack's status is: the call is refused by the state gate of the
-/// INTERNAL rollback operation a continuation resumes
-/// ([`ROLLBACK_UPDATED_STACK_STATUS_GATE`]), which names that operation and no part of the
-/// stack — neither its id nor the status it is really in, both of which are this run's own
-/// state and are what `DescribeStacks` reports. The same shape `RollbackStack`'s and
-/// `CancelUpdateStack`'s status refusals have: a status gate states which call cannot be made,
-/// not what the stack holds.
-pub fn cannot_continue_update_rollback() -> String {
-    ROLLBACK_UPDATED_STACK_STATUS_GATE.to_string()
+/// CloudFormation's status gate states the call that cannot be made and the status the stack
+/// IS in: the operation's own name, then the stack's current `StackStatus` read off the
+/// record. The stack's id and name reach no part of the text.
+pub fn cannot_continue_update_rollback(stack_status: &str) -> String {
+    format!("ContinueUpdateRollback cannot be called from stack with {stack_status} status.")
 }
-
-/// The fixed sentence the internal rollback operation's state gate answers: the call cannot be
-/// made from the status the stack is in, stated without naming the stack or that status.
-///
-/// It names `RollbackUpdatedStack`, the internal operation a continuation resumes, rather than
-/// the API operation the caller called — which is how CloudFormation words a gate of its own
-/// workflow rather than of the call.
-pub const ROLLBACK_UPDATED_STACK_STATUS_GATE: &str =
-    "RollbackUpdatedStack cannot be called from current stack status";
 
 /// `Err(message)` for a request that names a change set by NAME without the stack it
 /// belongs to.

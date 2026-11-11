@@ -35,7 +35,7 @@ use crate::traffic_policies::{
     create_policy, document_with_start_endpoint, document_with_start_rule, get_policy,
     policy_count, policy_of, PolicyView,
 };
-use crate::traffic_policy_not_found_envelope::assert_identity_only;
+use crate::traffic_policy_not_found_envelope::assert_no_such_traffic_policy;
 use crate::traffic_policy_versions::create_version;
 
 /// `TrafficPolicyComment` is `len 0..1024`
@@ -377,7 +377,7 @@ async fn an_id_or_version_the_store_does_not_hold_is_refused() {
         // Route 53 reports a traffic policy it does not hold by its code alone,
         // so both halves of `(Id, Version)`, in every form above, are refused
         // with the same body: `Type` and `Code` and no `Message` element.
-        assert_identity_only(&reply, case, "NoSuchTrafficPolicy");
+        assert_no_such_traffic_policy(&reply, case);
     }
 
     assert_versions_read_back(&router, &held, "after the refusals").await;

@@ -319,23 +319,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         };
 
-        // "This action is only used by the Amazon ECS agent, and it is not intended for use
-        // outside of the agent": the agent that reports a task's state is the one running on
-        // the capacity that HOSTS it, and a Fargate task's agent is Amazon's own — nothing a
-        // caller of this API holds credentials for. Such a report cannot have come from it,
-        // so it is refused as the unauthorized call it is, before anything is recorded
-        // ([`crate::state::agent_plane_denies_report`]).
-        if crate::state::agent_plane_denies_report(task) {
-            return Err(
-                SubmitTaskStateChangeErrorModeled::AccessDeniedException(AccessDeniedException {
-                    message: Some(
-                        crate::state::AGENT_INSTANCE_NOT_VERIFIED_MESSAGE.to_string(),
-                    ),
-                })
-                .into(),
-            );
-        }
-
         // Every nested reference the report carries is resolved BEFORE any of them is
         // recorded, so a report carrying one unknown reference stores nothing: it is
         // refused whole, as it is when the cluster or the task resolves to nothing.

@@ -322,11 +322,11 @@ fn user_pool_not_found(user_pool_id: &str) -> UpdateIdentityProviderError {
 }
 
 /// This operation's `ResourceNotFoundException` for a provider name the pool does not
-/// hold, worded as every operation that resolves an IdP against a pool words it
-/// ([`crate::state::identity_provider_not_found_message`]).
+/// hold, worded as the UPDATE path words that class
+/// ([`crate::state::identity_provider_not_found_in_pool_message`]).
 fn provider_not_found(provider_name: &str, user_pool_id: &str) -> UpdateIdentityProviderError {
     UpdateIdentityProviderErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
-        message: Some(crate::state::identity_provider_not_found_message(
+        message: Some(crate::state::identity_provider_not_found_in_pool_message(
             provider_name,
             user_pool_id,
         )),

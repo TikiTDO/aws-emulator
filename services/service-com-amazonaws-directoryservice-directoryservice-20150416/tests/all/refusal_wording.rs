@@ -441,10 +441,9 @@ async fn every_other_constraint_class_keeps_the_boundary_wording() {
     // One row per constraint class this service's inputs declare besides an enum value
     // set: a numeric `@range` bound, a `@length` bound and a `@pattern`. None of them
     // names a value set, so none of them has its clause restated — the `@pattern` row's
-    // EXPRESSION is quoted without the anchor pair the model wraps it in, which is what a
-    // recorded refusal of this service quotes (`tests/all/validation_pattern_wording.rs`
-    // pins that rendering over this service's patterns), and nothing else about the clause
-    // changes.
+    // EXPRESSION is quoted as the model declares it, anchors and all
+    // (`tests/all/validation_pattern_wording.rs` pins that rendering over this service's
+    // patterns), and nothing else about the clause changes.
     let rows = [
         (
             "a @range minimum",
@@ -472,7 +471,7 @@ async fn every_other_constraint_class_keeps_the_boundary_wording() {
             "a @pattern",
             "DescribeUpdateDirectory",
             json!({ "DirectoryId": "not-a-directory-id", "UpdateType": "OS" }),
-            "Member must satisfy regular expression pattern: d-[0-9a-f]{10}",
+            "Member must satisfy regular expression pattern: ^d-[0-9a-f]{10}$",
         ),
     ];
 

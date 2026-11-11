@@ -57,10 +57,12 @@ const ABSENT_OBJECT_ID: &str = "0123456789abcdef0123456789abcdef01234567";
 const PARENT_COMMIT_DOES_NOT_EXIST: &str =
     "The parent commit ID is not valid. The specified parent commit ID does not exist.";
 
-/// `BlobIdDoesNotExistException`'s whole text: a well-formed object name that no
-/// object carries states that the blob is not in the repository, and names
-/// nothing — the counterpart of the form check, which names the value it rejected.
-const BLOB_ID_DOES_NOT_EXIST: &str = "The specified blob does not exist in the repository.";
+/// `BlobIdDoesNotExistException`'s text: a well-formed object name that no object
+/// carries names which blob could not be found — the counterpart of the form check,
+/// which names the value it rejected as malformed.
+fn blob_id_does_not_exist(blob_id: &str) -> String {
+    format!("AWS CodeCommit could not find the blob {blob_id} in the repository.")
+}
 
 /// `InvalidBlobIdException`'s text for a value that does not name a git object.
 fn invalid_blob_id(blob_id: &str) -> String {
@@ -209,32 +211,74 @@ async fn invalid_blob_id_message_names_the_rejected_id() {
 }
 
 /// A blob id that IS an object name but names no object this repository holds is a
-/// different refusal: the lookup's own code, worded with its own FIXED sentence,
-/// which names neither the id nor the repository. Pinned beside the form check so
-/// the two cannot collapse into one.
+/// different refusal: the lookup's own code, worded with its own sentence, which names
+/// the object the request asked for and not the repository. Pinned beside the form check
+/// so the two cannot collapse into one.
 #[tokio::test]
 async fn an_object_name_the_repository_does_not_hold_is_a_different_refusal() {
     let router = emulator();
     let repository = "blob-id-lookup";
-    seeded(&router, repository, "main", "README.md", b"# demo\n").await;
+    let content = b"# demo\n".to_vec();
+    seeded(&router, repository, "main", "README.md", &content).await;
+    let held = git_blob_id(&content);
 
-    let (code, message) = error_with_message(
-        &router,
-        "GetBlob",
-        &json!({ "repositoryName": repository, "blobId": ABSENT_OBJECT_ID }),
-        CLIENT_ERROR_STATUS,
-    )
-    .await;
-    assert_eq!(
-        code, "BlobIdDoesNotExistException",
-        "case an object name no object carries: expected code \
-         BlobIdDoesNotExistException, got {code:?}"
-    );
-    assert_eq!(
-        message, BLOB_ID_DOES_NOT_EXIST,
-        "case an object name no object carries: expected message \
-         {BLOB_ID_DOES_NOT_EXIST:?}, got {message:?}"
-    );
+    // The rows span the FORM a well-formed object name no object carries can take: a
+    // content-addressed id of content never written, each end of the object-name range, a
+    // fixed id, and the same id in upper case (an object name is hexadecimal, so its case
+    // does not change which object it names).
+    let absent: Vec<(&str, String)> = vec![
+        ("a content id never written", git_blob_id(b"never written\n")),
+        ("the lowest object name", "0".repeat(40)),
+        ("the highest object name", "f".repeat(40)),
+        ("a fixed full object id", ABSENT_OBJECT_ID.to_string()),
+        (
+            "the same id in upper case",
+            ABSENT_OBJECT_ID.to_ascii_uppercase(),
+        ),
+    ];
+    for (label, missing) in absent {
+        // Each row is asked of every member that carries a blob id: `GetBlob`'s `blobId`,
+        // and both sides of `GetBlobDifferences`.
+        let requests: Vec<(&str, Value)> = vec![
+            (
+                "GetBlob",
+                json!({ "repositoryName": repository, "blobId": missing }),
+            ),
+            (
+                "GetBlobDifferences",
+                json!({ "repositoryName": repository, "afterBlobId": missing }),
+            ),
+            (
+                "GetBlobDifferences",
+                json!({
+                    "repositoryName": repository,
+                    "beforeBlobId": missing,
+                    "afterBlobId": held,
+                }),
+            ),
+        ];
+        for (operation, body) in requests {
+            let (code, message) =
+                error_with_message(&router, operation, &body, CLIENT_ERROR_STATUS).await;
+            assert_eq!(
+                code, "BlobIdDoesNotExistException",
+                "case ({operation}, {label}): expected code BlobIdDoesNotExistException, got \
+                 {code:?}"
+            );
+            // The refusal names the object as the request spelled it; an object name is
+            // hexadecimal, so its case does not change which object it names.
+            let expected = blob_id_does_not_exist(&missing);
+            assert_eq!(
+                message, expected,
+                "case ({operation}, {label}): expected message {expected:?}, got {message:?}"
+            );
+            assert!(
+                !message.contains(repository),
+                "case ({operation}, {label}): the message must not name the repository, got \
+                 {message:?}"
+            );
+        }
+    }
 }
 
 /// The specifier forms `CommitName` documents — a branch name, a fully qualified

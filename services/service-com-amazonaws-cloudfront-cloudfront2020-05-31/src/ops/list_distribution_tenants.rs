@@ -5,11 +5,13 @@
 //! `MaxItems` is the page size, `Marker` is the tenant id the previous page ended at, and
 //! `NextMarker` arrives exactly when tenants remain.
 //!
-//! `AssociationFilter` narrows the listing to the tenants ASSOCIATED with ONE resource —
-//! "the distribution ID to filter by" or "the ID of the connection group to filter by" —
-//! and exactly one of the two has to be set, so a request naming neither or both is
-//! refused. Every summary, and the filter decision behind it, is read from the record the
-//! create or the last update persisted rather than from the request being served.
+//! `AssociationFilter` is OPTIONAL, so a request carrying none asks for no narrowing and is
+//! served the whole stored set. A request that does carry one narrows the listing to the
+//! tenants ASSOCIATED with ONE resource — "the distribution ID to filter by" or "the ID of
+//! the connection group to filter by" — and exactly one of the two has to be set, so a
+//! filter element naming neither or both is refused. Every summary, and the filter decision
+//! behind it, is read from the record the create or the last update persisted rather than
+//! from the request being served.
 //!
 //! ## Shape of an operation
 //!
@@ -112,9 +114,9 @@ impl From<ListDistributionTenantsErrorModeled> for ListDistributionTenantsError 
     }
 }
 
-/// The sentence CloudFront answers a request that does not name exactly one association to
-/// filter the tenants by: the rule itself, stating the condition and echoing no part of the
-/// request.
+/// The sentence CloudFront answers a filter element that does not name exactly one
+/// association to filter the tenants by: the rule itself, stating the condition and echoing
+/// no part of the request.
 const ONE_ASSOCIATION_FILTER_REQUIRED_MESSAGE: &str =
     "Exactly one association filter must be set.";
 
@@ -177,12 +179,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
-        // "Filter by the associated distribution ID or connection group ID": the listing is
-        // about the tenants associated with ONE resource, so a request that names neither
-        // describes no association to filter by and one that names both describes two — the
-        // same rule, and the same refusal, as the customization listing beside this one. A
-        // member carrying no value names no resource, so it names no association either, and
-        // a request carrying no filter element at all names none.
+        // "Filter by the associated distribution ID or connection group ID": the filter is
+        // an OPTIONAL input member, so a request carrying no filter element at all asks for
+        // no narrowing and is served every stored tenant — the unfiltered enumeration this
+        // paginated listing is documented to serve ("Lists the distribution tenants in your
+        // Amazon Web Services account").
+        //
+        // A filter element that IS carried is about the tenants associated with ONE
+        // resource, so one that names neither member describes no association to filter by
+        // and one that names both describes two — the same rule, and the same refusal, as
+        // the customization listing beside this one. A member carrying no value names no
+        // resource, so it names no association either.
         //
         // Both members are unconstrained strings the model requires nothing more of than
         // naming "the distribution ID to filter by" and "the ID of the connection group to
@@ -198,17 +205,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let connection_group_filter = association_filter
             .and_then(|filter| filter.connection_group_id.as_deref())
             .filter(|id| !id.is_empty());
-        let association = match (distribution_filter, connection_group_filter) {
-            (Some(distribution_id), None) => Association::Distribution(distribution_id),
-            (None, Some(connection_group_id)) => Association::ConnectionGroup(connection_group_id),
-            _ => {
-                return Err(ListDistributionTenantsErrorModeled::InvalidArgument(
-                    InvalidArgument {
-                        message: Some(ONE_ASSOCIATION_FILTER_REQUIRED_MESSAGE.to_string()),
-                    },
-                )
-                .into());
-            }
+        let association = match association_filter {
+            None => None,
+            Some(_) => match (distribution_filter, connection_group_filter) {
+                (Some(distribution_id), None) => Some(Association::Distribution(distribution_id)),
+                (None, Some(connection_group_id)) => {
+                    Some(Association::ConnectionGroup(connection_group_id))
+                }
+                _ => {
+                    return Err(ListDistributionTenantsErrorModeled::InvalidArgument(
+                        InvalidArgument {
+                            message: Some(ONE_ASSOCIATION_FILTER_REQUIRED_MESSAGE.to_string()),
+                        },
+                    )
+                    .into());
+                }
+            },
         };
 
         let mut store = state.lock();
@@ -257,10 +269,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // A tenant is part of this listing when its OWN record names the resource the
             // filter names: the filter narrows the listing to the tenants associated with
             // that one resource, so a tenant created under another distribution, or routed
-            // through another connection group, is not part of it.
+            // through another connection group, is not part of it. A request that named no
+            // association narrows by nothing, so every stored tenant is part of it.
             let associated = match association {
-                Association::Distribution(wanted) => stored.distribution_id == wanted,
-                Association::ConnectionGroup(wanted) => stored.connection_group_id == wanted,
+                None => true,
+                Some(Association::Distribution(wanted)) => stored.distribution_id == wanted,
+                Some(Association::ConnectionGroup(wanted)) => {
+                    stored.connection_group_id == wanted
+                }
             };
             if !associated {
                 continue;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! The SCOPE a request's references have to be inside, and whose reports the agent plane
-//! takes — driven end to end over the shared wire harness in [`crate::ecs_wire`].
+//! The SCOPE a request's references have to be inside, and what the agent plane records —
+//! driven end to end over the shared wire harness in [`crate::ecs_wire`].
 //!
 //! The rules under test, each asserted over a table that spans the class rather than over
 //! one request:
@@ -33,12 +33,11 @@
 //!   with `ClusterNotFoundException`, while an ARN under a cluster that IS there and names
 //!   nothing stored stays a `MISSING` failure;
 //! * the `Submit*StateChange` family is the container agent's ("This action is only used by
-//!   the Amazon ECS agent"), and the agent that reports a task's state is the one running on
-//!   the capacity that hosts it — so a report about a FARGATE task, whose agent is Amazon's
-//!   own, is refused with `AccessDeniedException`, while a report about a task on capacity
-//!   the account registered is taken. The values a report carries are read FIRST: a status
-//!   outside the ECS task lifecycle, and an attachment state other than `ATTACHED`, are
-//!   refused before the caller is weighed at all;
+//!   the Amazon ECS agent"), and what it checks is the report: the VALUES it carries — a
+//!   status outside the ECS task lifecycle, and an attachment state other than `ATTACHED`,
+//!   are refused — and that the resources it names resolve inside the cluster it names. The
+//!   capacity hosting the task is no input to either, so a readable report about any task the
+//!   named cluster holds is recorded and acknowledged, and read back through `DescribeTasks`;
 //! * `ListServicesByNamespace$namespace` is "The namespace name or full Amazon Resource Name
 //!   (ARN) of the Cloud Map namespace", so either form names the same namespace.
 //!
@@ -68,35 +67,6 @@ const ONE_SPAN: Duration = Duration::from_millis(
         + 400,
 );
 
-/// One call that must be refused, returning the modelled error code and the message — for a
-/// row whose refusal carries a status other than 400 (the agent plane's 403).
-async fn refused_with_status(
-    router: &MultiServiceRouter,
-    operation: &str,
-    body: Value,
-    expected_status: u16,
-    case: &str,
-) -> (String, String) {
-    let (status, parsed) = answered(router, operation, body).await;
-    assert_eq!(
-        status, expected_status,
-        "case {case:?}: expected {operation} to answer {expected_status}, got {status} with \
-         {parsed}"
-    );
-    let code = parsed["__type"]
-        .as_str()
-        .unwrap_or_default()
-        .rsplit('#')
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    let message = parsed["message"]
-        .as_str()
-        .unwrap_or_else(|| panic!("case {case:?}: expected a message, got {parsed}"))
-        .to_string();
-    (code, message)
-}
-
 /// The image every container below starts from; irrelevant to these rules, so one value.
 const IMAGE: &str = "public.ecr.aws/nginx/nginx:latest";
 
@@ -119,10 +89,6 @@ const CLUSTER_IDENTIFIERS_MISMATCH: &str = "Invalid identifier: cluster identifi
 
 /// The sentence a cluster this account holds no record of is refused with.
 const CLUSTER_NOT_FOUND: &str = "Cluster not found.";
-
-/// The sentence a report about a task whose agent cannot be the caller is refused with.
-const INSTANCE_NOT_VERIFIED: &str =
-    "Fargate task state changes from the agent must have the instance verified";
 
 /// The sentence a report naming an attachment state the plane does not take is refused with.
 const ATTACHMENT_STATUS_SET: &str = "attachmentStatus should be one of [ATTACHED]";
@@ -1007,8 +973,69 @@ async fn attachment_id(
     )
 }
 
+/// The status one attachment of a task holds, read back through `DescribeTasks`.
+async fn attachment_status(
+    router: &MultiServiceRouter,
+    cluster: &str,
+    task_arn: &str,
+    attachment: &str,
+    case: &str,
+) -> String {
+    let body = ok(
+        router,
+        "DescribeTasks",
+        json!({ "cluster": cluster, "tasks": [task_arn] }),
+        case,
+    )
+    .await;
+    let task = list(&body, "tasks", case)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("case {case:?}: expected the task back, got {body}"));
+    let found = list(&task, "attachments", case)
+        .into_iter()
+        .find(|entry| entry["id"].as_str() == Some(attachment))
+        .unwrap_or_else(|| panic!("case {case:?}: expected the interface back, got {task}"));
+    string(&found, "status", case)
+}
+
+/// The status one container of a task holds, read back through `DescribeTasks`.
+async fn container_status(
+    router: &MultiServiceRouter,
+    cluster: &str,
+    task_arn: &str,
+    container: &str,
+    case: &str,
+) -> String {
+    let body = ok(
+        router,
+        "DescribeTasks",
+        json!({ "cluster": cluster, "tasks": [task_arn] }),
+        case,
+    )
+    .await;
+    let task = list(&body, "tasks", case)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("case {case:?}: expected the task back, got {body}"));
+    let found = list(&task, "containers", case)
+        .into_iter()
+        .find(|entry| entry["name"].as_str() == Some(container))
+        .unwrap_or_else(|| panic!("case {case:?}: expected the container back, got {task}"));
+    string(&found, "lastStatus", case)
+}
+
+/// RULE: a `Submit*StateChange` report is about the resources it NAMES — the cluster, the
+/// task, the container, the attachment — and the capacity that hosts the task is not one of
+/// its inputs, so a report whose values the plane reads and whose references resolve inside
+/// the named cluster is recorded and acknowledged whatever the task runs on.
+///
+/// The rows differ along WHERE the task runs, which is the only thing this rule generalises
+/// over: the Fargate launch type, each managed Fargate capacity provider, and the capacity
+/// the account registered to the cluster — reached by the launch type and by naming nothing
+/// at all.
 #[tokio::test]
-async fn the_agent_plane_takes_a_report_only_from_the_agent_that_hosts_the_task() {
+async fn the_agent_plane_records_a_report_about_any_task_the_named_cluster_holds() {
     let router = service();
     let case = "setup";
     let cluster = "agentscope";
@@ -1017,31 +1044,34 @@ async fn the_agent_plane_takes_a_report_only_from_the_agent_that_hosts_the_task(
     register_fargate_definition(&router, family, case).await;
     associate(&router, cluster, &[FARGATE, FARGATE_SPOT], case).await;
 
-    // The rows differ along WHERE the task runs, which is what decides whose agent could
-    // have sent the report: the Fargate launch type, each managed Fargate capacity provider
-    // (`places_on_fargate` reads both), and the capacity the account registered to the
-    // cluster — reached by the launch type and by naming nothing at all.
-    let rows: [(&str, Value, bool); 5] = [
-        ("the FARGATE launch type", json!({ "launchType": "FARGATE" }), true),
+    let rows: [(&str, Value); 5] = [
+        ("the FARGATE launch type", json!({ "launchType": "FARGATE" })),
         (
             "the FARGATE capacity provider",
             json!({ "capacityProviderStrategy": [{ "capacityProvider": FARGATE, "weight": 1 }] }),
-            true,
         ),
         (
             "the FARGATE_SPOT capacity provider",
             json!({
                 "capacityProviderStrategy": [{ "capacityProvider": FARGATE_SPOT, "weight": 1 }],
             }),
-            true,
         ),
-        ("the EC2 launch type", json!({ "launchType": "EC2" }), false),
-        ("no placement named at all", json!({}), false),
+        ("the EC2 launch type", json!({ "launchType": "EC2" })),
+        ("no placement named at all", json!({})),
     ];
 
-    for (case, overlay, fargate) in rows {
+    for (case, overlay) in rows {
         let task_arn = run(&router, cluster, family, overlay, case).await;
         let attachment = attachment_id(&router, cluster, &task_arn, case).await;
+
+        // Amazon ECS creates the interface and carries it as far as `ATTACHING` itself; the
+        // attach the agent completed is what the report below carries, so the attachment is
+        // not in place before it.
+        assert_ne!(
+            attachment_status(&router, cluster, &task_arn, &attachment, case).await,
+            "ATTACHED",
+            "case {case:?}: expected an interface Amazon ECS has not attached yet"
+        );
 
         // Each operation of the family, with the reference each of them names the task by.
         let reports: [(&str, Value); 3] = [
@@ -1062,34 +1092,33 @@ async fn the_agent_plane_takes_a_report_only_from_the_agent_that_hosts_the_task(
                 "SubmitAttachmentStateChanges",
                 json!({
                     "cluster": cluster,
-                    "attachments": [{ "attachmentArn": attachment, "status": "ATTACHED" }],
+                    "attachments": [{ "attachmentArn": attachment.clone(), "status": "ATTACHED" }],
                 }),
             ),
         ];
 
         for (operation, request) in reports {
             let case = &format!("{operation}: {case}");
-            if fargate {
-                let (code, message) =
-                    refused_with_status(&router, operation, request, 403, case).await;
-                assert_eq!(
-                    (code.as_str(), message.as_str()),
-                    ("AccessDeniedException", INSTANCE_NOT_VERIFIED),
-                    "case {case:?}: expected the agent-plane refusal, got {code} with \
-                     {message:?}"
-                );
-            } else {
-                let acknowledged = ok(&router, operation, request, case).await;
-                assert_eq!(
-                    acknowledged["acknowledgment"].as_str(),
-                    Some("ACK"),
-                    "case {case:?}: expected the report to be taken, got {acknowledged}"
-                );
-            }
+            let acknowledged = ok(&router, operation, request, case).await;
+            assert_eq!(
+                acknowledged["acknowledgment"].as_str(),
+                Some("ACK"),
+                "case {case:?}: expected the report to be taken, got {acknowledged}"
+            );
         }
 
-        // What the refused reports left: a Fargate task holds the stage Amazon ECS itself
-        // put it at, not the one the report named.
+        // What the reports left, read back through `DescribeTasks`: every one of them is in
+        // the record the next caller sees.
+        assert_eq!(
+            container_status(&router, cluster, &task_arn, "web", case).await,
+            "RUNNING",
+            "case {case:?}: the container report the plane took is what the record holds"
+        );
+        assert_eq!(
+            attachment_status(&router, cluster, &task_arn, &attachment, case).await,
+            "ATTACHED",
+            "case {case:?}: the attachment report the plane took is what the record holds"
+        );
         let read = ok(
             &router,
             "DescribeTasks",
@@ -1101,32 +1130,24 @@ async fn the_agent_plane_takes_a_report_only_from_the_agent_that_hosts_the_task(
             .into_iter()
             .next()
             .unwrap_or_else(|| panic!("case {case:?}: expected the task back, got {read}"));
-        if fargate {
-            assert_ne!(
-                task["lastStatus"].as_str(),
-                Some("RUNNING"),
-                "case {case:?}: a refused report records nothing, got {task}"
-            );
-        } else {
-            assert_eq!(
-                task["lastStatus"].as_str(),
-                Some("RUNNING"),
-                "case {case:?}: the report the plane took is what the task holds, got {task}"
-            );
-        }
+        assert_eq!(
+            task["lastStatus"].as_str(),
+            Some("RUNNING"),
+            "case {case:?}: the report the plane took is what the task holds, got {task}"
+        );
     }
 }
 
 #[tokio::test]
-async fn a_report_is_read_before_its_caller_is_weighed() {
+async fn a_report_is_refused_for_the_values_it_carries_whatever_hosts_the_task() {
     let router = service();
     let case = "setup";
     let cluster = "reportvalues";
     let family = "reportfamily";
     cluster_with_capacity(&router, cluster, case).await;
     register_fargate_definition(&router, family, case).await;
-    // One task on capacity the account registered, whose reports the plane takes, and one on
-    // Fargate, whose reports it refuses — so the ORDER of the two checks is observable.
+    // One task on capacity the account registered and one on Fargate: the capacity hosting
+    // the task is no input to the value checks, so each row is refused the same way on both.
     let ec2_task = run(&router, cluster, family, json!({ "launchType": "EC2" }), case).await;
     let fargate_task = run(
         &router,
@@ -1183,8 +1204,8 @@ async fn a_report_is_read_before_its_caller_is_weighed() {
             "case {case:?}: expected the invalid-status refusal, got {code} with {message:?}"
         );
 
-        // The SAME value on a task whose reports the plane would refuse is still refused for
-        // the value: what the report says is read before who sent it is weighed.
+        // The SAME value on a task Fargate hosts is refused the same way: what the report
+        // says is read whatever capacity the task runs on.
         let case = &format!("status {status:?} on a Fargate task");
         let (code, message) = refusal(
             &router,
@@ -1203,7 +1224,8 @@ async fn a_report_is_read_before_its_caller_is_weighed() {
                 "InvalidParameterException",
                 format!("The status {status} is not a valid status.").as_str()
             ),
-            "case {case:?}: expected the value to be read first, got {code} with {message:?}"
+            "case {case:?}: expected the value to be read whatever hosts the task, got {code} \
+             with {message:?}"
         );
     }
 

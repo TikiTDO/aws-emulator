@@ -2086,23 +2086,20 @@ async fn an_invoke_body_is_checked_against_the_invoked_family_request_schema() {
         );
     }
 
-    // A body that is not a request of the family at all: bytes whose JSON cannot be parsed
-    // are a syntax fault in the document, and a document that parses but is not an object
-    // is no request of any family. The two are DIFFERENT refusals, and the literal sentence
-    // of each is pinned here rather than compared against the constant the handler itself
-    // carries.
+    // A body that is not a request of the family at all: bytes whose JSON cannot be parsed,
+    // and a document that parses but is not an object, are the SAME refusal — neither is a
+    // request the family can read — and its literal sentence is pinned here rather than
+    // compared against the constant the handler itself carries.
     for (case, body, expected) in [
         (
             "plain text",
             "not json at all",
-            "The JSON object in the request body is malformed. Fix the syntax errors and \
-             retry your request.",
+            "Malformed input request, please reformat your input and try again.",
         ),
         (
             "a truncated object",
             "{\"prompt\":",
-            "The JSON object in the request body is malformed. Fix the syntax errors and \
-             retry your request.",
+            "Malformed input request, please reformat your input and try again.",
         ),
         (
             "a JSON array",

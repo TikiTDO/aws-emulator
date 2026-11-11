@@ -359,7 +359,8 @@ async fn create_task_set_refuses_each_condition_it_models_and_creates_nothing() 
                 ],
             }),
             code: "InvalidParameterException",
-            message: "You may choose a capacity provider or a launch type but not both."
+            message: "Specifying both a launch type and capacity provider strategy is not \
+                      supported. Remove one and try again."
                 .to_string(),
         },
         RefusalCase {

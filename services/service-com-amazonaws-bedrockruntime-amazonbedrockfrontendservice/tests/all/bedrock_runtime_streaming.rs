@@ -1478,9 +1478,7 @@ async fn a_model_version_past_its_end_of_life_is_not_found_with_the_end_of_life_
 #[tokio::test]
 async fn a_body_the_model_cannot_read_is_a_malformed_input_request() {
     let router = emulator();
-    use service_com_amazonaws_bedrockruntime_amazonbedrockfrontendservice::state::{
-        MALFORMED_BODY_MESSAGE, MALFORMED_JSON_BODY_MESSAGE,
-    };
+    use service_com_amazonaws_bedrockruntime_amazonbedrockfrontendservice::state::MALFORMED_BODY_MESSAGE;
 
     /// The refusal for a body that omits a required member, as the service words
     /// a schema violation.
@@ -1527,7 +1525,7 @@ async fn a_body_the_model_cannot_read_is_a_malformed_input_request() {
             "anthropic: bytes that are not JSON",
             "anthropic.claude-3-haiku-20240307-v1:0",
             "not json at all",
-            Some(MALFORMED_JSON_BODY_MESSAGE.to_string()),
+            Some(MALFORMED_BODY_MESSAGE.to_string()),
         ),
         (
             "anthropic: a JSON array",

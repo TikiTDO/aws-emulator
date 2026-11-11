@@ -43,7 +43,7 @@ use crate::traffic_policies::{
     policy_count, policy_of, PolicyView,
 };
 use crate::traffic_policy_deletion::{delete_policy, policy_with_versions};
-use crate::traffic_policy_not_found_envelope::assert_identity_only;
+use crate::traffic_policy_not_found_envelope::assert_no_such_traffic_policy;
 use crate::traffic_policy_version_listing::list_versions;
 use crate::traffic_policy_versions::create_version;
 
@@ -309,7 +309,7 @@ async fn an_id_no_policy_was_minted_under_is_refused() {
             );
             // Route 53 reports a traffic policy it does not hold by its code
             // alone: `Type` and `Code`, with no `Message` element.
-            assert_identity_only(&reply, case, "NoSuchTrafficPolicy");
+            assert_no_such_traffic_policy(&reply, case);
         }
     }
 

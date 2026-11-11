@@ -72,9 +72,11 @@ const SAME_FILE_CONTENT: &str = "The content of the file is exactly the same as 
     the file in the AWS CodeCommit repository and branch you specified. The file has not been \
     added.";
 const BRANCH_DOES_NOT_EXIST: &str = "The specified branch does not exist";
-/// `BlobIdDoesNotExistException`'s whole text: a well-formed object name no object
-/// carries states that the blob is not in the repository, and names nothing.
-const BLOB_ID_DOES_NOT_EXIST: &str = "The specified blob does not exist in the repository.";
+
+/// `BlobIdDoesNotExistException`'s message names the object the request asked for.
+fn blob_id_does_not_exist(blob_id: &str) -> String {
+    format!("AWS CodeCommit could not find the blob {blob_id} in the repository.")
+}
 
 /// `CommitDoesNotExistException`'s text for a member the model types `CommitName`
 /// — a commit SPECIFIER (a branch, a tag, `HEAD` or a full commit id) — that
@@ -462,7 +464,7 @@ async fn blob_id_does_not_exist_message_is_a_constant() {
                 "case ({label}, {repository}): expected code BlobIdDoesNotExistException, \
                  got {code:?}"
             );
-            let expected = BLOB_ID_DOES_NOT_EXIST;
+            let expected = blob_id_does_not_exist(&blob_id);
             assert_eq!(
                 message, expected,
                 "case ({label}, {repository}): expected message {expected:?}, got {message:?}"
@@ -470,11 +472,6 @@ async fn blob_id_does_not_exist_message_is_a_constant() {
             assert!(
                 !message.contains(repository.as_str()),
                 "case ({label}, {repository}): the message must not name the repository, \
-                 got {message:?}"
-            );
-            assert!(
-                !message.contains(blob_id.as_str()),
-                "case ({label}, {repository}): the message must not name the blob id, \
                  got {message:?}"
             );
         }
@@ -496,8 +493,10 @@ async fn blob_id_does_not_exist_message_is_a_constant() {
         "case (upper-case id): expected code BlobIdDoesNotExistException, got {code:?}"
     );
     assert_eq!(
-        message, BLOB_ID_DOES_NOT_EXIST,
-        "case (upper-case id): expected message {BLOB_ID_DOES_NOT_EXIST:?}, got {message:?}"
+        message,
+        blob_id_does_not_exist(&upper),
+        "case (upper-case id): expected the message to name the id the request carried, got \
+         {message:?}"
     );
 }
 

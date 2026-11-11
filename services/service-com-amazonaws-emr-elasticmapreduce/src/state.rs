@@ -1335,18 +1335,22 @@ pub mod step_execution_mode {
 
 /// How every operation that takes a `StepConcurrencyLevel` refuses one ABOVE the ceiling
 /// of the mode the cluster runs its steps in but inside the widest ceiling a mode raises
-/// it to: Amazon EMR's own sentence for that class, which states the band the cluster's
-/// own mode allows.
+/// it to: Amazon EMR's own sentence for that class, which states the level it could not
+/// take, the ceiling and the mode that ceiling belongs to, then the mode that would take it
+/// and that mode's own ceiling.
 ///
-/// Recorded behavior for the text: the offending value is NOT echoed, so a caller matching
-/// the sentence recognises every such level the same way, and the two numbers are the
-/// documented bounds themselves ([`MIN_STEP_CONCURRENCY_LEVEL`] and the ceiling of the
-/// mode the cluster runs its steps in) — so the band a caller is TOLD about is the band
-/// that is ENFORCED.
-pub fn step_concurrency_level_exceeded_message() -> String {
+/// Recorded behavior for the text. Every variable part is read from the request and from
+/// this service's own bounds — the `level` the request carried, the ceiling of the mode the
+/// cluster runs its steps in, and the other mode's name and ceiling — so the band a caller
+/// is TOLD about is the band that is ENFORCED.
+pub fn step_concurrency_level_exceeded_message(level: i32) -> String {
     format!(
-        "Invalid step concurrency level. Allowed level is from \
-         {MIN_STEP_CONCURRENCY_LEVEL} to {MAX_STEP_CONCURRENCY_LEVEL}"
+        "StepConcurrencyLevel {level} exceeds the maximum ({MAX_STEP_CONCURRENCY_LEVEL}) for \
+         StepExecutionMode {mode}. Set StepExecutionMode to {other} for up to {ceiling} \
+         concurrent steps.",
+        mode = step_execution_mode::DEFAULT,
+        other = step_execution_mode::DISTRIBUTED,
+        ceiling = step_execution_mode::DISTRIBUTED_MAX_STEP_CONCURRENCY_LEVEL,
     )
 }
 
@@ -1366,7 +1370,7 @@ pub fn step_concurrency_level_violation(level: i32) -> Option<String> {
         return Some(invalid_step_concurrency_level_message());
     }
     if level > MAX_STEP_CONCURRENCY_LEVEL {
-        return Some(step_concurrency_level_exceeded_message());
+        return Some(step_concurrency_level_exceeded_message(level));
     }
     None
 }

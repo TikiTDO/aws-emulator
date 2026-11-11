@@ -756,26 +756,37 @@ async fn an_absent_pool_or_provider_name_is_a_400() {
     };
     stored.create(&router, &user_pool_id).await;
 
-    for (label, body, expected_message) in [
-        (
-            "an update of a provider in a pool that does not exist",
-            json!({
-                "UserPoolId": "us-east-1_absent",
-                "ProviderName": "AuthExampleOIDC",
-                "AttributeMapping": { "email": "email" },
-            }),
-            "User pool us-east-1_absent does not exist.".to_string(),
-        ),
-        (
-            "an update of a provider name the pool does not hold",
+    // The provider rows span what the sentence's variable parts can be: a name of each
+    // form `ProviderName` admits, over the pool the fixture created and over a pool name of
+    // another Region's shape, so neither part is a value one row happens to carry.
+    let mut cases: Vec<(String, Value, String)> = vec![(
+        "an update of a provider in a pool that does not exist".to_string(),
+        json!({
+            "UserPoolId": "us-east-1_absent",
+            "ProviderName": "AuthExampleOIDC",
+            "AttributeMapping": { "email": "email" },
+        }),
+        "User pool us-east-1_absent does not exist.".to_string(),
+    )];
+    for absent in [
+        "AbsentProvider",
+        "SignInWithApple",
+        "a",
+        "Provider_with.every:char/",
+    ] {
+        cases.push((
+            format!("an update of the provider name {absent:?}, which the pool does not hold"),
             json!({
                 "UserPoolId": user_pool_id,
-                "ProviderName": "AbsentProvider",
+                "ProviderName": absent,
                 "AttributeMapping": { "email": "email" },
             }),
-            format!("Identity provider AbsentProvider for tenantId {user_pool_id} does not exist."),
-        ),
-    ] {
+            // The UPDATE path names the pool as the user pool it is.
+            format!("Identity provider {absent} in User Pool {user_pool_id} does not exist."),
+        ));
+    }
+
+    for (label, body, expected_message) in cases {
         let (status, payload) = call(&router, "UpdateIdentityProvider", &body).await;
         assert_eq!(
             (status, error_code(&payload)),
@@ -786,6 +797,30 @@ async fn an_absent_pool_or_provider_name_is_a_400() {
             error_message(&payload),
             expected_message,
             "case {label:?}: expected the refusal to report {expected_message:?}, got {payload}"
+        );
+    }
+
+    // The RESOLVE path words the same class its own way, so the two sentences cannot
+    // collapse into one: the same absent provider read back names the pool as a tenant.
+    for absent in ["AbsentProvider", "SignInWithApple"] {
+        let (status, payload) = call(
+            &router,
+            "DescribeIdentityProvider",
+            &json!({ "UserPoolId": user_pool_id, "ProviderName": absent }),
+        )
+        .await;
+        assert_eq!(
+            (status, error_code(&payload)),
+            (400, "ResourceNotFoundException"),
+            "case a read of {absent:?}: must be a 400 ResourceNotFoundException, got {payload}"
+        );
+        let expected =
+            format!("Identity provider {absent} for tenantId {user_pool_id} does not exist.");
+        assert_eq!(
+            error_message(&payload),
+            expected,
+            "case a read of {absent:?}: expected the resolve path's own sentence {expected:?}, \
+             got {payload}"
         );
     }
 

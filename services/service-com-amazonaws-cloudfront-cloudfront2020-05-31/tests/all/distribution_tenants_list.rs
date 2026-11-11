@@ -445,8 +445,10 @@ fn parts_of(filter: Option<&Filter>) -> (Option<&str>, Option<&str>) {
     filter.map(Filter::parts).unwrap_or((None, None))
 }
 
-/// Every filter the cases below run: each member alone, over each resource the fixture
-/// stored — which is what the listing admits, exactly one association to filter by.
+/// Every filter the cases below run: no filter element at all — the optional input member
+/// absent, which narrows by nothing — and then each member alone, over each resource the
+/// fixture stored, which is what a filter element that IS carried admits: exactly one
+/// association to filter by.
 fn filters(fixture: &Fixture) -> Vec<(String, Option<Filter>)> {
     let first_distribution = fixture.distributions[0].clone();
     let second_distribution = fixture.distributions[1].clone();
@@ -454,6 +456,7 @@ fn filters(fixture: &Fixture) -> Vec<(String, Option<Filter>)> {
     let first_group = fixture.group_id(Group::First);
     let second_group = fixture.group_id(Group::Second);
     vec![
+        ("no filter element at all".to_string(), None),
         (
             "the first distribution".to_string(),
             Some(Filter::distribution(&first_distribution)),

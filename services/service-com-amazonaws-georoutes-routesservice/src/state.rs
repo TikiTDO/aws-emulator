@@ -1527,13 +1527,17 @@ fn must_be_between(
 }
 
 /// The sentence for a rule no model can express: a set of otherwise-optional members of
-/// which a request must set at least one. The members are the only variable part — each
-/// quoted, as every sentence of this service quotes a member name — and the member the
+/// which a request must set at least one. The members are the only variable part — listed
+/// bare, which is how a recorded refusal of this class states them — and the member the
 /// refusal names in its `fieldList` is the first of them.
+///
+/// The sibling sentences of this service's other field rules state their member lists
+/// QUOTED ([`only_one_of`], [`only_one_of_within`]): each class is worded as this service
+/// words that class.
 pub fn at_least_one_of(members: &[&str]) -> String {
     format!(
         "At least one of the following fields must be set: {}.",
-        quoted_list(members)
+        members.join(", ")
     )
 }
 

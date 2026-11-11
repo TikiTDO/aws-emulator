@@ -50,7 +50,7 @@ use crate::traffic_policies::{
 };
 use crate::traffic_policy_instance_deletion::delete_instance;
 use crate::traffic_policy_instances::create_instance;
-use crate::traffic_policy_not_found_envelope::assert_identity_only;
+use crate::traffic_policy_not_found_envelope::assert_no_such_traffic_policy;
 use crate::traffic_policy_versions::create_version;
 
 /// The one sentence `TrafficPolicyInUse` reports, which names neither the
@@ -175,7 +175,7 @@ async fn listed_policies(router: &MultiServiceRouter, case: &str) -> Vec<(String
 /// Assert that `(id, version)` is refused as a traffic policy version the
 /// account does not hold — the refusal Route 53 reports by its code alone.
 fn assert_no_such_policy(case: &str, reply: &Reply) {
-    assert_identity_only(reply, case, "NoSuchTrafficPolicy");
+    assert_no_such_traffic_policy(reply, case);
 }
 
 // ---------------------------------------------------------------------------

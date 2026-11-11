@@ -48,13 +48,12 @@
 //! 501 and a refusal raised while serving it. Everything else about those paths — status,
 //! `__type`, `Message`, the whole success path — stays with the framework.
 //!
-//! A second seam is taken for the two things this service words differently from the
+//! A second seam is taken for the one thing this service words differently from the
 //! framework when it refuses a request at its boundary: see the `override_refusal` body
-//! below, [`stated_enum_values`] (the order an enum's admissible values are listed in) and
-//! [`stated_pattern`] (how a `@pattern` expression is quoted). A refusal of a constraint a
-//! LIST's ELEMENTS break is stated at the list member instead of at the element, which
-//! needs the request as well as the violations and so is answered in that same operation
-//! wrapper ([`list_element_refusals`]).
+//! below and [`stated_enum_values`] (the order an enum's admissible values are listed in). A
+//! refusal of a constraint a LIST's ELEMENTS break is stated at the list member instead of at
+//! the element, which needs the request as well as the violations and so is answered in that
+//! same operation wrapper ([`list_element_refusals`]).
 //!
 //! [`authorization`] is not a seam at all: it is the IAM decision the operations whose
 //! model declares `AccessDeniedException` take before they touch the store, held beside
@@ -65,7 +64,6 @@ pub mod list_element_refusals;
 pub mod request_id_header;
 
 use request_id_header::RequestIdHeaderOperation;
-use service_common::validation::unanchored;
 use smithy_server_runtime::{
     http, ErasedOperation, ErasedServiceDefinition, Refusal, Refused, Service, Violation,
     ViolationKind,
@@ -100,22 +98,18 @@ fn stated_enum_values(allowed: &[String]) -> Vec<String> {
 /// `refusal` stated the way this service states a boundary constraint refusal, or `None`
 /// to keep the framework's own wording.
 ///
-/// The ONLY things restated are the two renderings this service's own refusals differ from
-/// the framework's in — the order of an enum's value list ([`stated_enum_values`]) and the
-/// quoting of a `@pattern` expression ([`stated_pattern`]); the envelope, the clause, the
-/// member path, the echoed value and every other requirement are the framework's, built by
-/// handing it the violations back ([`::aws_smithy_schema_server::envelope`]), so a reworded
-/// refusal cannot drift from one the framework words. A refusal about neither of them is
-/// left alone entirely.
+/// The ONLY thing restated is the one rendering this service's own refusals differ from the
+/// framework's in — the order of an enum's value list ([`stated_enum_values`]); the envelope,
+/// the clause, the member path, the echoed value and every other requirement are the
+/// framework's, built by handing it the violations back
+/// ([`::aws_smithy_schema_server::envelope`]), so a reworded refusal cannot drift from one the
+/// framework words. A refusal about anything else is left alone entirely.
 fn stated_refusal(refusal: &Refusal) -> Option<Refused> {
     let Refusal::Invalid(violations) = refusal else {
         return None;
     };
     if !violations.iter().any(|violation| {
-        matches!(
-            violation.kind,
-            ViolationKind::EnumValue(_) | ViolationKind::Pattern(_)
-        )
+        matches!(violation.kind, ViolationKind::EnumValue(_))
     }) {
         return None;
     }
@@ -126,38 +120,24 @@ fn stated_refusal(refusal: &Refusal) -> Option<Refused> {
     })
 }
 
-/// A `@pattern` expression as a refusal of this service QUOTES it: without the `^`/`$` pair
-/// the model wraps a whole-value expression in — the shared reading of that pair
-/// ([`unanchored`]), so this service cannot read it differently from the others.
-///
-/// The `^` and `$` a Smithy `@pattern` carries are how a model turns a find into a
-/// whole-string match rather than part of the character grammar, and Directory Service
-/// quotes the expression a value had to satisfy without them: a recorded refusal of a value
-/// outside its member's pattern ends in the expression bare. The CHECK is unchanged — the
-/// framework still matched the value against the expression as the model writes it — so
-/// only the quoting back of it is this service's.
-///
-/// One member's refusal is NOT stated here and keeps its own quoting: `CreateAlias`' `Alias`,
-/// whose recorded refusal quotes its expression with the leading `^` (see
-/// `crate::ops::create_alias`). That clause is built in the handler, which is why this
-/// rendering does not reach it.
-fn stated_pattern(pattern: &str) -> String {
-    unanchored(pattern)
-}
-
 /// `violation` as this service STATES it: an enum's admissible values LISTED the way this
-/// service lists them ([`stated_enum_values`]) and a `@pattern` QUOTED the way this service
-/// quotes one ([`stated_pattern`]), with everything else — its member path, its echoed
-/// value, its sensitivity and every other constraint class — exactly as the framework found
-/// it.
+/// service lists them ([`stated_enum_values`]), with everything else — its member path, its
+/// echoed value, a `@pattern` expression, its sensitivity and every other constraint class —
+/// exactly as the framework found it.
 ///
-/// THE one place those restatings are made, so the two paths they are applied on (the
-/// boundary refusal this file words, and the list-element clause
-/// [`list_element_refusals`] words) cannot disagree about either rendering.
+/// A `@pattern` is quoted as the MODEL declares it, anchors and all: the `^`/`$` a Smithy
+/// `@pattern` wraps a whole-value expression in are part of the expression a recorded
+/// Directory Service refusal quotes back, per-member clause and nested element set alike.
+/// `CreateAlias`' `Alias` is the one member whose recorded refusal drops the trailing `$`,
+/// and its clause is built in the handler (`crate::ops::create_alias`), which is why this
+/// rendering does not reach it.
+///
+/// THE one place that restating is made, so the two paths it is applied on (the boundary
+/// refusal this file words, and the list-element clause [`list_element_refusals`] words)
+/// cannot disagree about it.
 fn stated_violation(violation: &Violation) -> Violation {
     let kind = match &violation.kind {
         ViolationKind::EnumValue(allowed) => ViolationKind::EnumValue(stated_enum_values(allowed)),
-        ViolationKind::Pattern(pattern) => ViolationKind::Pattern(stated_pattern(pattern)),
         other => other.clone(),
     };
     Violation {
@@ -235,18 +215,16 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // required member, or a value outside a declared bound) to let this service
         // reword it.
         //
-        // Two renderings are reworded, both inside the framework's own envelope, clause,
-        // member path and echoed value: a value outside an enumerated type's value set has
-        // the admissible values LISTED the way this service lists them rather than the way
-        // the model declares them (see `stated_enum_values`), and a value outside a
-        // `@pattern` has that expression QUOTED without the anchor pair the model wraps it
-        // in (see `stated_pattern`). The code travels with them, unchanged from the one the
-        // framework picks for this refusal, so a client still branches on what it branched
-        // on before.
+        // ONE rendering is reworded, inside the framework's own envelope, clause, member
+        // path and echoed value: a value outside an enumerated type's value set has the
+        // admissible values LISTED the way this service lists them rather than the way the
+        // model declares them (see `stated_enum_values`). The code travels with it, unchanged
+        // from the one the framework picks for this refusal, so a client still branches on
+        // what it branched on before.
         //
-        // Everything else — an absent member, a length, a numeric bound, and an
-        // authentication refusal, which is not an input-constraint failure at all — keeps
-        // the framework's wording.
+        // Everything else — an absent member, a length, a numeric bound, a `@pattern`
+        // expression, and an authentication refusal, which is not an input-constraint failure
+        // at all — keeps the framework's wording.
         stated_refusal(refusal)
     }
 

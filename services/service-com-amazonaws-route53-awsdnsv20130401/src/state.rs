@@ -2952,23 +2952,24 @@ pub fn apply_tag_changes(
     Ok(())
 }
 
+/// The sentence Route 53 refuses a traffic policy it does not hold with.
+///
+/// Entirely fixed text: it states the rule the refusal reports and carries nothing the
+/// request named — neither the `Id` nor the `Version` it asked about — so a caller learns
+/// WHAT it asked about from its own request.
+pub const NO_SUCH_TRAFFIC_POLICY_MESSAGE: &str = "The policy does not exist.";
+
 /// The modelled `NoSuchTrafficPolicy` (HTTP 404) for a request that names no
 /// traffic policy in this store.
 ///
 /// The ONE place this service words that refusal, so every operation addressed
 /// at a traffic policy answers a missing one identically — whichever half of
 /// `(Id, Version)` the store does not hold, and whether the request named a
-/// version at all.
-///
-/// MESSAGELESS: Route 53 reports a traffic policy or a traffic policy instance
-/// it does not hold as the error's identity alone — the `Error` element carries
-/// `Type` and `Code` and no `Message` child — so this shape's optional `message`
-/// member is left unset and the serializer emits no element for it. The error
-/// shape's documentation states the RULE the refusal reports, not a sentence
-/// Route 53 sends, so answering it as documentation text would put an element on
-/// the wire the service never sends.
+/// version at all — carrying [`NO_SUCH_TRAFFIC_POLICY_MESSAGE`].
 pub fn no_such_traffic_policy() -> NoSuchTrafficPolicy {
-    NoSuchTrafficPolicy { message: None }
+    NoSuchTrafficPolicy {
+        message: Some(NO_SUCH_TRAFFIC_POLICY_MESSAGE.to_string()),
+    }
 }
 
 /// The modelled `NoSuchTrafficPolicyInstance` (HTTP 404) for a request that
@@ -2976,10 +2977,14 @@ pub fn no_such_traffic_policy() -> NoSuchTrafficPolicy {
 ///
 /// The ONE place this service words that refusal, beside
 /// [`no_such_traffic_policy`], so every operation addressed at a traffic policy
-/// instance answers a missing one identically. MESSAGELESS for the same reason,
-/// and it takes no argument because a refusal with no message has nothing to
-/// take from the request: a caller learns WHAT it asked about from its own
-/// request.
+/// instance answers a missing one identically.
+///
+/// MESSAGELESS, unlike the policy refusal beside it: Route 53 reports a traffic policy
+/// INSTANCE it does not hold as the error's identity alone — the `Error` element carries
+/// `Type` and `Code` and no `Message` child — so this shape's optional `message` member is
+/// left unset and the serializer emits no element for it. It takes no argument because a
+/// refusal with no message has nothing to take from the request: a caller learns WHAT it
+/// asked about from its own request.
 pub fn no_such_traffic_policy_instance() -> NoSuchTrafficPolicyInstance {
     NoSuchTrafficPolicyInstance { message: None }
 }

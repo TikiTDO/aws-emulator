@@ -910,16 +910,20 @@ pub fn default_branch_cannot_be_deleted_message(branch_name: &str) -> String {
     )
 }
 
-/// `BlobIdDoesNotExistException`'s message: a FIXED sentence carrying NOTHING
-/// from the request — neither the object name that was looked for nor the
-/// repository it was looked for in — and the one place this crate words that code.
+/// `BlobIdDoesNotExistException`'s message, built from the object name the request
+/// asked for — the one place this crate words that code.
 ///
-/// The id's ABSENCE from the text is the difference from
-/// [`invalid_blob_id_message`]: a value that is not an object name at all is
-/// rejected as the caller's value, and names it, while a well-formed object name
-/// that no object carries states only that the blob is not in the repository.
-pub const BLOB_ID_DOES_NOT_EXIST_MESSAGE: &str =
-    "The specified blob does not exist in the repository.";
+/// The template's single slot is that object name, as the REQUEST spelled it: the
+/// sentence states which blob could not be found, and the repository it was looked
+/// for in reaches no part of the text.
+///
+/// It names the id for the same reason [`invalid_blob_id_message`] does — the value
+/// the caller supplied is what the refusal is about — and differs from it in the
+/// class: a value that is not an object name at all is rejected as malformed, while
+/// a well-formed object name no object carries was simply not found here.
+pub fn blob_id_does_not_exist_message(blob_id: &str) -> String {
+    format!("AWS CodeCommit could not find the blob {blob_id} in the repository.")
+}
 
 /// `BranchNameExistsException`'s message, built from the branch the request asked
 /// to create — the one place this crate words that code.

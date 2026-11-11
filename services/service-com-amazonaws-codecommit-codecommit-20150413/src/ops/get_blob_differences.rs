@@ -535,12 +535,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `beforeBlobId` is optional, and a blank one is the same as leaving it out:
         // "If you do not specify a value, the operation returns a diff against an
         // empty before-state."
-        let before_id = match input
+        let before_raw = input
             .before_blob_id
             .as_deref()
             .map(str::trim)
-            .filter(|blob_id| !blob_id.is_empty())
-        {
+            .filter(|blob_id| !blob_id.is_empty());
+        let before_id = match before_raw {
             Some(blob_id) => Some(object_name(blob_id)?),
             None => None,
         };
@@ -603,8 +603,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 })?;
             // A blob belongs to the repository that holds it: an object name this
             // repository has no object for does not exist here, whatever another
-            // repository holds under it.
-            let blob = |blob_id: &str| {
+            // repository holds under it. The refusal names the object as the REQUEST
+            // spelled it, since that is the value the caller asked about.
+            let blob = |blob_id: &str, requested: &str| {
                 repository
                     .blob(blob_id)
                     .map(<[u8]>::to_vec)
@@ -612,18 +613,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         GetBlobDifferencesErrorModeled::BlobIdDoesNotExistException(
                             BlobIdDoesNotExistException {
                                 message: Some(
-                                    crate::state::BLOB_ID_DOES_NOT_EXIST_MESSAGE.to_string(),
+                                    crate::state::blob_id_does_not_exist_message(requested),
                                 ),
                             },
                         )
                     })
             };
-            let after = blob(&after_id)?;
+            let after = blob(&after_id, after_raw)?;
             // No `beforeBlobId` is an empty before-state, "equivalent to treating the
             // file as newly added", and its reported size is 0.
-            let before = match &before_id {
-                Some(blob_id) => blob(blob_id)?,
-                None => Vec::new(),
+            let before = match (&before_id, before_raw) {
+                (Some(blob_id), Some(requested)) => blob(blob_id, requested)?,
+                _ => Vec::new(),
             };
             (before, after)
         };

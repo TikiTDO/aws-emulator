@@ -9,18 +9,17 @@
 //!
 //! The rule under test: a value a member's `@pattern` does not admit is refused HTTP 400
 //! `ValidationException` with the boundary's envelope — the rejected value, the member as
-//! the wire names it, and the requirement — and the requirement QUOTES the expression
-//! without the `^`/`$` pair the model wraps a whole-value pattern in. It is asserted over a
-//! TABLE of this service's `@pattern`-constrained members rather than the one recorded
-//! call: ids of four different id spaces, a topic name, a tag resource id and a domain
-//! name, which between them span a short character class, a class with an escaped
+//! the wire names it, and the requirement — and the requirement QUOTES the expression AS THE
+//! MODEL DECLARES IT, including the `^`/`$` pair the model wraps a whole-value pattern in. It
+//! is asserted over a TABLE of this service's `@pattern`-constrained members rather than the
+//! one recorded call: ids of four different id spaces, a topic name, a tag resource id and a
+//! domain name, which between them span a short character class, a class with an escaped
 //! metacharacter, a bracketed single letter, a counted hex run and a grouped repetition.
 //!
-//! The CHECK is unaffected: every rejected value below CONTAINS a substring the expression
-//! matches (a run of admitted characters), so a value is still refused exactly when the
-//! model's anchored expression refuses it — only the quoting back of that expression drops
-//! the pair. The last case is the positive control: a value the expression admits whole is
-//! not refused this way at all and reaches the handler.
+//! The CHECK is the same expression: every rejected value below CONTAINS a substring the
+//! expression matches (a run of admitted characters), so a value is refused exactly when the
+//! model's anchored expression refuses it. The last case is the positive control: a value the
+//! expression admits whole is not refused this way at all and reaches the handler.
 
 use serde_json::json;
 
@@ -38,9 +37,9 @@ struct PatternCase {
     operation: &'static str,
     member: &'static str,
     value: &'static str,
-    /// The expression as the refusal quotes it: the shape's `@pattern` without the anchor
-    /// pair the model wraps it in. Each row's modelled pattern is named in the comment
-    /// beside it, from `smithy_query(query="shape",shape="<Shape>")`.
+    /// The expression as the refusal quotes it: the shape's `@pattern` itself, anchor pair
+    /// included. Each row's modelled pattern is named in the comment beside it, from
+    /// `smithy_query(query="shape",shape="<Shape>")`.
     stated: &'static str,
     body: fn(&str) -> serde_json::Value,
 }
@@ -55,7 +54,7 @@ fn pattern_rows() -> Vec<PatternCase> {
             operation: "RegisterEventTopic",
             member: "topicName",
             value: "sim2real.behav.topic",
-            stated: r"[a-zA-Z0-9_-]+",
+            stated: r"^[a-zA-Z0-9_-]+$",
             body: |value| json!({ "DirectoryId": ABSENT_DIRECTORY_ID, "TopicName": value }),
         },
         // `DirectoryId`: `^d-[0-9a-f]{10}$` — a literal prefix and a counted hex run.
@@ -64,7 +63,7 @@ fn pattern_rows() -> Vec<PatternCase> {
             operation: "DescribeLDAPSSettings",
             member: "directoryId",
             value: "not-a-directory-id",
-            stated: r"d-[0-9a-f]{10}",
+            stated: r"^d-[0-9a-f]{10}$",
             body: |value| json!({ "DirectoryId": value }),
         },
         // `SnapshotId`: `^s-[0-9a-f]{10}$` — another id space, so the clause is not one
@@ -74,7 +73,7 @@ fn pattern_rows() -> Vec<PatternCase> {
             operation: "DeleteSnapshot",
             member: "snapshotId",
             value: "snap-0123456789",
-            stated: r"s-[0-9a-f]{10}",
+            stated: r"^s-[0-9a-f]{10}$",
             body: |value| json!({ "SnapshotId": value }),
         },
         // `AssessmentId`: `^da-[0-9a-f]{18}$` — a wider run and a two-letter prefix.
@@ -83,7 +82,7 @@ fn pattern_rows() -> Vec<PatternCase> {
             operation: "DescribeADAssessment",
             member: "assessmentId",
             value: "da-0123456789",
-            stated: r"da-[0-9a-f]{18}",
+            stated: r"^da-[0-9a-f]{18}$",
             body: |value| json!({ "AssessmentId": value }),
         },
         // `ResourceId`: `^[d]-[0-9a-f]{10}$` — a bracketed single letter, which the drop
@@ -93,7 +92,7 @@ fn pattern_rows() -> Vec<PatternCase> {
             operation: "AddTagsToResource",
             member: "resourceId",
             value: "r-0123456789",
-            stated: r"[d]-[0-9a-f]{10}",
+            stated: r"^[d]-[0-9a-f]{10}$",
             body: |value| {
                 json!({
                     "ResourceId": value,
@@ -108,7 +107,7 @@ fn pattern_rows() -> Vec<PatternCase> {
             operation: "DescribeCertificate",
             member: "certificateId",
             value: "cert-0123456789",
-            stated: r"c-[0-9a-f]{10}",
+            stated: r"^c-[0-9a-f]{10}$",
             body: |value| {
                 json!({ "DirectoryId": ABSENT_DIRECTORY_ID, "CertificateId": value })
             },
@@ -119,7 +118,7 @@ fn pattern_rows() -> Vec<PatternCase> {
             operation: "DeleteTrust",
             member: "trustId",
             value: "trust-0123456789",
-            stated: r"t-[0-9a-f]{10}",
+            stated: r"^t-[0-9a-f]{10}$",
             body: |value| json!({ "TrustId": value }),
         },
         // `RemoteDomainName`: `^([a-zA-Z0-9]+[\\.-])+([a-zA-Z0-9])+[.]?$` — a grouped
@@ -130,7 +129,7 @@ fn pattern_rows() -> Vec<PatternCase> {
             operation: "CreateConditionalForwarder",
             member: "remoteDomainName",
             value: "not a domain!",
-            stated: r"([a-zA-Z0-9]+[\\.-])+([a-zA-Z0-9])+[.]?",
+            stated: r"^([a-zA-Z0-9]+[\\.-])+([a-zA-Z0-9])+[.]?$",
             body: |value| {
                 json!({
                     "DirectoryId": ABSENT_DIRECTORY_ID,
@@ -151,7 +150,7 @@ fn pattern_clause(value: &str, member: &str, stated: &str) -> String {
 }
 
 #[tokio::test]
-async fn a_pattern_refusal_quotes_the_expression_without_the_models_anchor_pair() {
+async fn a_pattern_refusal_quotes_the_expression_the_model_declares() {
     let router = service();
 
     for row in pattern_rows() {
@@ -171,16 +170,7 @@ async fn a_pattern_refusal_quotes_the_expression_without_the_models_anchor_pair(
         assert_eq!(
             stated,
             pattern_clause(row.value, row.member, row.stated),
-            "case {:?}: expected the expression quoted without its anchor pair, got \
-             {stated:?}",
-            row.case
-        );
-        // The two characters AWS never sends, named explicitly so a regression is read off
-        // the failure rather than off a diff of two long expressions.
-        let anchored = format!("^{}$", row.stated);
-        assert!(
-            !stated.contains(&anchored),
-            "case {:?}: expected no anchored expression in the clause, found {anchored:?} in \
+            "case {:?}: expected the expression quoted as the model declares it, got \
              {stated:?}",
             row.case
         );
@@ -193,8 +183,8 @@ async fn a_value_its_pattern_admits_is_not_refused_by_it() {
 
     // The positive control for the whole table: a topic name the expression admits WHOLE
     // clears the constraint walk and reaches the handler, which resolves the directory the
-    // request named and refuses THAT instead — so the drop of the anchors changed which
-    // text is quoted and not which values are admitted.
+    // request named and refuses THAT instead — so the clause quotes the expression a value
+    // had to satisfy and the walk admits exactly the values it matches.
     for topic_name in ["sim2real-behav-topic", "a", "A_1-b", "0123456789"] {
         let case = format!("topic name {topic_name:?}");
         let (status, parsed) = call(

@@ -123,7 +123,7 @@ fn refusal(case: &str, status: u16, answer: &Value) -> Refusal {
 async fn optimize_waypoints_requires_a_destination_or_a_waypoint() {
     let router = routes_service();
     // The one sentence under test: fixed text whose only variable part is the member list.
-    let expected = "At least one of the following fields must be set: 'Destination', 'Waypoints'.";
+    let expected = "At least one of the following fields must be set: Destination, Waypoints.";
     // Rows differ along what the rule generalises over: which of the two members is set,
     // how many entries the list carries, and whether the list is present but empty.
     let cases: [(&str, Value, u16); 6] = [

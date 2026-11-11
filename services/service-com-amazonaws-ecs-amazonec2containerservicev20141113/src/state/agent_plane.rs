@@ -1,23 +1,22 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! The AGENT plane: what a `Submit*StateChange` report may say, and whose report it can be.
+//! The AGENT plane: what a `Submit*StateChange` report may say.
 //!
 //! Those operations are the container agent's — "This action is only used by the Amazon ECS
 //! agent, and it is not intended for use outside of the agent" — and Amazon ECS holds a
-//! report to two rules before it records anything:
+//! report to the VALUES it may carry before it records anything.
+//! `SubmitTaskStateChange$status` and `AttachmentStateChange$status` are plain strings in the
+//! model, so the accepted set is recorded behavior: a task is reported at one of the stages
+//! of the ECS task lifecycle ([`AGENT_REPORT_TASK_STATUSES`], and a value outside it is
+//! refused naming the value itself) and an attachment is reported ATTACHED and nothing else
+//! ([`AGENT_REPORT_ATTACHMENT_STATUSES`], refused with the sentence this service words every
+//! out-of-set value with, [`super::value_set_message`]) — the one transition the agent makes,
+//! from the `ATTACHING` Amazon ECS leaves the interface at.
 //!
-//! * the VALUES it carries are the ones the plane accepts. `SubmitTaskStateChange$status` and
-//!   `AttachmentStateChange$status` are plain strings in the model, so the accepted set is
-//!   recorded behavior: a task is reported at one of the stages of the ECS task lifecycle
-//!   ([`AGENT_REPORT_TASK_STATUSES`], and a value outside it is refused naming the value
-//!   itself) and an attachment is reported ATTACHED and nothing else
-//!   ([`AGENT_REPORT_ATTACHMENT_STATUSES`], refused with the sentence this service words
-//!   every out-of-set value with, [`super::value_set_message`]) — the one transition the
-//!   agent makes, from the `ATTACHING` Amazon ECS leaves the interface at;
-//! * the CALLER is the agent that hosts the task ([`agent_plane_denies_report`]).
-//!
-//! The values are checked FIRST, so a report that cannot be read at all is refused for what
-//! it says rather than for who sent it.
+//! WHO may report is not this plane's decision: the report's values and the resources it
+//! names are what it checks, and the capacity a task runs on is not an input to either —
+//! every task has a hosting agent, so a report about any task the named cluster holds is one
+//! the plane records and acknowledges.
 
 use super::*;
 
@@ -82,28 +81,4 @@ pub fn agent_report_attachment_status_violation<'a>(
                 &AGENT_REPORT_ATTACHMENT_STATUSES,
             )
         })
-}
-
-/// `AccessDeniedException$message` for a state-change report about a task whose hosting
-/// agent cannot be the caller.
-///
-/// Amazon ECS states what the report is missing: the agent reporting a FARGATE task's state
-/// has to be an agent whose container instance Amazon ECS verified, and no caller of this
-/// API is one. Fixed text, naming nothing the request carried.
-pub const AGENT_INSTANCE_NOT_VERIFIED_MESSAGE: &str =
-    "Fargate task state changes from the agent must have the instance verified";
-
-/// Whether the agent plane refuses a state-change report about `task` to the caller that
-/// sent it.
-///
-/// The agent that reports a task's state is the one running on the capacity that hosts it. A
-/// task on Fargate runs on infrastructure Amazon Web Services manages, so there is no
-/// container instance of this account whose identity could be verified for the report: it
-/// cannot have come from that task's agent, and is refused as the unauthorized call it is.
-///
-/// A task on capacity registered to the cluster IS hosted by a container instance the
-/// account registered, whose agent is the caller of this plane — so its reports are taken,
-/// which is what the agent plane exists for.
-pub fn agent_plane_denies_report(task: &TaskRecord) -> bool {
-    task.runs_on_fargate()
 }
