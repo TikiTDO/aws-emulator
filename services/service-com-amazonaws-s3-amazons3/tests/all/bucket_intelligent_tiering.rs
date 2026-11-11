@@ -64,8 +64,8 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use service_com_amazonaws_s3_amazons3::ops::put_bucket_intelligent_tiering_configuration::PUT_BUCKET_INTELLIGENT_TIERING_CONFIGURATION_SUCCESS_STATUS;
 use service_com_amazonaws_s3_amazons3::state::{
-    INVALID_ACCESS_TIER_CODE, INVALID_ARGUMENT_CODE, INVALID_CONFIG_ID_CODE,
-    MALFORMED_CONTINUATION_TOKEN_CODE,
+    INVALID_ACCESS_TIER_CODE, INVALID_CONFIG_ID_CODE,
+    MALFORMED_CONTINUATION_TOKEN_CODE, MALFORMED_XML_CODE,
     MAX_CONFIGURATION_ID_CHARS, MAX_INTELLIGENT_TIERING_CONFIGURATIONS_PER_BUCKET,
     NO_SUCH_BUCKET_CODE, NO_SUCH_CONFIGURATION_CODE,
 };
@@ -489,7 +489,10 @@ fn round_trip_rows() -> Vec<(&'static str, ConfigurationRow)> {
         (
             "an And operator over tags alone",
             ConfigurationRow::enabled("and-tags-only")
-                .with_filter(FilterRow::and(None, &[("retain", "long")]))
+                .with_filter(FilterRow::and(
+                    None,
+                    &[("retain", "long"), ("team", "ops")],
+                ))
                 .with_status("Disabled"),
         ),
         (
@@ -757,7 +760,56 @@ fn refusal_rows() -> Vec<RefusalRow<'static>> {
             "a payload naming another id",
             "wanted".to_string(),
             ConfigurationRow::enabled("other").xml(),
-            Some(INVALID_ARGUMENT_CODE),
+            Some(MALFORMED_XML_CODE),
+        ),
+        (
+            "two tierings naming the same access tier",
+            "duplicate-tier".to_string(),
+            ConfigurationRow::enabled("duplicate-tier")
+                .with_tierings(vec![
+                    TieringRow::new(archive_floor, archive),
+                    TieringRow::new(archive_floor + 30, archive),
+                ])
+                .xml(),
+            Some(INVALID_ACCESS_TIER_CODE),
+        ),
+        (
+            "deep archive access due no later than archive access",
+            "deep-not-after".to_string(),
+            ConfigurationRow::enabled("deep-not-after")
+                .with_tierings(vec![
+                    TieringRow::new(deep_floor, archive),
+                    TieringRow::new(deep_floor, deep),
+                ])
+                .xml(),
+            Some(INVALID_ACCESS_TIER_CODE),
+        ),
+        (
+            "an And operator over a single predicate",
+            "lone-predicate".to_string(),
+            ConfigurationRow::enabled("lone-predicate")
+                .with_filter(FilterRow::and(None, &[("retain", "long")]))
+                .xml(),
+            Some("InvalidAnd"),
+        ),
+        (
+            "an And operator naming one tag key twice",
+            "duplicate-key".to_string(),
+            ConfigurationRow::enabled("duplicate-key")
+                .with_filter(FilterRow::and(
+                    Some("cold/"),
+                    &[("team", "one"), ("team", "two")],
+                ))
+                .xml(),
+            Some("InvalidAnd"),
+        ),
+        (
+            "a filter prefix spelled empty",
+            "empty-prefix".to_string(),
+            ConfigurationRow::enabled("empty-prefix")
+                .with_filter(FilterRow::prefix(""))
+                .xml(),
+            Some("InvalidPrefix"),
         ),
         (
             "a status outside the enum",
@@ -950,7 +1002,7 @@ async fn the_per_bucket_ceiling_is_the_published_one() {
 /// crate so that a change to the handler's wording fails this suite — the way the
 /// subresource-message suite beside this one pins its published texts.
 const PUBLISHED_INVALID_CONFIG_ID_MESSAGE: &str =
-    "Config Id should be more than 1 character and less than 64 characters in length.";
+    "Config Id should not be more than 1 char and less than 64 chars in length";
 
 /// The published id-length bound, tested at each end and one past it.
 ///

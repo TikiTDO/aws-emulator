@@ -45,9 +45,9 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use service_com_amazonaws_s3_amazons3::ops::put_bucket_analytics_configuration::PUT_BUCKET_ANALYTICS_CONFIGURATION_SUCCESS_STATUS;
 use service_com_amazonaws_s3_amazons3::state::{
-    INVALID_CONFIGURATION_ID_CODE, INVALID_CONFIG_ID_CODE, MALFORMED_XML_CODE,
-    MAX_ANALYTICS_CONFIGURATIONS_PER_BUCKET, MAX_ANALYTICS_ID_CHARS, NO_SUCH_BUCKET_CODE,
-    NO_SUCH_CONFIGURATION_CODE, TOO_MANY_CONFIGURATIONS_CODE,
+    INVALID_CONFIGURATION_ID_CODE, INVALID_CONFIG_ID_CODE, INVALID_DESTINATION_CODE,
+    MALFORMED_XML_CODE, MAX_ANALYTICS_CONFIGURATIONS_PER_BUCKET, MAX_ANALYTICS_ID_CHARS,
+    NO_SUCH_BUCKET_CODE, NO_SUCH_CONFIGURATION_CODE, TOO_MANY_CONFIGURATIONS_CODE,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -839,6 +839,69 @@ async fn a_configuration_s3_cannot_record_is_refused_and_changes_nothing() {
                  <OutputSchemaVersion>{SCHEMA_VERSION}</OutputSchemaVersion><Destination>\
                  <S3BucketDestination><Format>{EXPORT_FORMAT}</Format>\
                  <Bucket>analytics-destination</Bucket></S3BucketDestination></Destination>\
+                 </DataExport></StorageClassAnalysis></AnalyticsConfiguration>"
+            ),
+            400,
+            INVALID_DESTINATION_CODE,
+        ),
+        (
+            "an export destination ARN that names a Region",
+            "region-destination".to_string(),
+            format!(
+                "<AnalyticsConfiguration xmlns=\"{XMLNS}\"><Id>region-destination</Id>\
+                 <StorageClassAnalysis><DataExport>\
+                 <OutputSchemaVersion>{SCHEMA_VERSION}</OutputSchemaVersion><Destination>\
+                 <S3BucketDestination><Format>{EXPORT_FORMAT}</Format>\
+                 <Bucket>arn:aws:s3:us-west-2::analytics-destination</Bucket>\
+                 </S3BucketDestination></Destination>\
+                 </DataExport></StorageClassAnalysis></AnalyticsConfiguration>"
+            ),
+            400,
+            INVALID_DESTINATION_CODE,
+        ),
+        (
+            // The same rule, with the account field filled in too: a bucket ARN names
+            // neither, so the Region is still what the refusal states.
+            "an export destination ARN that names a Region and an account",
+            "region-account-destination".to_string(),
+            format!(
+                "<AnalyticsConfiguration xmlns=\"{XMLNS}\"><Id>region-account-destination</Id>\
+                 <StorageClassAnalysis><DataExport>\
+                 <OutputSchemaVersion>{SCHEMA_VERSION}</OutputSchemaVersion><Destination>\
+                 <S3BucketDestination><Format>{EXPORT_FORMAT}</Format>\
+                 <Bucket>arn:aws:s3:us-west-2:123456789012:analytics-destination</Bucket>\
+                 </S3BucketDestination></Destination>\
+                 </DataExport></StorageClassAnalysis></AnalyticsConfiguration>"
+            ),
+            400,
+            INVALID_DESTINATION_CODE,
+        ),
+        (
+            "an export destination ARN of another service",
+            "other-service-destination".to_string(),
+            format!(
+                "<AnalyticsConfiguration xmlns=\"{XMLNS}\"><Id>other-service-destination</Id>\
+                 <StorageClassAnalysis><DataExport>\
+                 <OutputSchemaVersion>{SCHEMA_VERSION}</OutputSchemaVersion><Destination>\
+                 <S3BucketDestination><Format>{EXPORT_FORMAT}</Format>\
+                 <Bucket>arn:aws:sqs:us-west-2:123456789012:analytics-destination</Bucket>\
+                 </S3BucketDestination></Destination>\
+                 </DataExport></StorageClassAnalysis></AnalyticsConfiguration>"
+            ),
+            400,
+            INVALID_DESTINATION_CODE,
+        ),
+        (
+            "an export destination account id that is not an account id",
+            "bad-account".to_string(),
+            format!(
+                "<AnalyticsConfiguration xmlns=\"{XMLNS}\"><Id>bad-account</Id>\
+                 <StorageClassAnalysis><DataExport>\
+                 <OutputSchemaVersion>{SCHEMA_VERSION}</OutputSchemaVersion><Destination>\
+                 <S3BucketDestination><Format>{EXPORT_FORMAT}</Format>\
+                 <BucketAccountId></BucketAccountId>\
+                 <Bucket>arn:aws:s3:::analytics-destination</Bucket>\
+                 </S3BucketDestination></Destination>\
                  </DataExport></StorageClassAnalysis></AnalyticsConfiguration>"
             ),
             400,

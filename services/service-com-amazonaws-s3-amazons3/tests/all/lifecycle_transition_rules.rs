@@ -158,8 +158,8 @@ fn too_soon(action: (&str, &str), filter: &str, earlier: &str, later: &str) -> S
     let minimum = minimum_storage_duration_days(earlier).unwrap_or_default();
     format!(
         "'{days}' in the '{action}' action for StorageClass '{later}' for filter '{filter}' \
-         must be {minimum} days more than 'filter '{filter}'' '{days}' in the '{action}' \
-         action for StorageClass '{earlier}' for filter '{filter}'"
+         must be {minimum} days more than 'filter '{filter}'' in the '{action}' action for \
+         StorageClass '{earlier}'"
     )
 }
 

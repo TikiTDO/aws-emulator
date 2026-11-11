@@ -182,17 +182,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 GetBucketAnalyticsConfigurationErrorModeled::NoSuchBucket(NoSuchBucket {}).into(),
             );
         };
-        // An id outside the id rule every bucket configuration id shares identifies no
-        // configuration a put could have recorded, so the read is refused for the id rather
-        // than answered about stored state — the same refusal
-        // `PutBucketAnalyticsConfiguration` gives such a value
-        // ([`crate::state::configuration_id_fault`]), so the two sides of one configuration
-        // cannot disagree about which ids name one.
-        if let Some(fault) = crate::state::configuration_id_fault(&input.id) {
+        // A READ does not judge the id against the PATTERN or the LENGTH bound: those bound
+        // what a PUT may record, and a read names a configuration the bucket either carries
+        // or does not. Recorded behavior: the same malformed id a put refuses
+        // `InvalidConfigId` is answered here with the not-there refusal below, so a reader
+        // reports only what the bucket holds. A call stating NO id at all is different: it
+        // identifies no configuration for the store to be asked about, which S3 reports
+        // against the id itself ([`crate::state::ConfigurationIdFault::Unstated`]).
+        if let Some(unstated @ crate::state::ConfigurationIdFault::Unstated) =
+            crate::state::configuration_id_fault(&input.id)
+        {
             return Err(crate::scaffolded::Scaffolded::unmodeled(
-                fault.code(),
-                fault.status(),
-                fault.message(),
+                unstated.code(),
+                unstated.status(),
+                unstated.message(),
             ));
         }
         // A bucket carrying no configuration under that id has nothing to report, and

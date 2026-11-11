@@ -270,18 +270,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The request identifies the configuration by "the ID used to identify the S3
         // Intelligent-Tiering configuration" (`Id`), and the payload carries that same id
         // as `IntelligentTieringConfiguration$Id`: a payload naming a different one does
-        // not describe the configuration the request addresses, which is what
-        // `InvalidArgument` reports.
+        // not describe the configuration the request addresses, which is a document that
+        // "did not validate against our published schema" — the fixed refusal
+        // [`crate::state::MALFORMED_XML_CODE`] carries however a document failed to validate.
         if configuration.id != input.id {
-            return Err(crate::scaffolded::Scaffolded::unmodeled(
-                crate::state::INVALID_ARGUMENT_CODE,
-                crate::state::INVALID_ARGUMENT_STATUS,
-                format!(
-                    "IntelligentTieringConfiguration.Id must be the id the request \
-                     identifies ({:?}), got {:?}",
-                    input.id, configuration.id
-                ),
-            ));
+            return Err(malformed_tiering_configuration());
         }
 
         // The id is the configuration's KEY on the bucket, and AWS bounds its length: an id
@@ -356,6 +349,100 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // "The S3 Intelligent-Tiering storage class is suitable for objects … `Tierings` is
+        // the list of tiers": each tier of the plan moves the object ONCE, so two tierings
+        // naming the same `AccessTier` describe no plan the service can carry out — one of
+        // them could never move the object anywhere. Judged over the whole list rather than
+        // pairwise, so the refusal does not depend on the order the document listed them in.
+        if let Some(repeated) = first_repeated_access_tier(&configuration.tierings) {
+            return Err(crate::scaffolded::Scaffolded::unmodeled(
+                crate::state::INVALID_ACCESS_TIER_CODE,
+                crate::state::INVALID_ACCESS_TIER_STATUS,
+                format!(
+                    "All AccessTiers in Tierings must be unique. Found duplicate entry for \
+                     {repeated}."
+                ),
+            ));
+        }
+
+        // A plan naming both archive tiers moves the object from the warmer one to the
+        // deeper one, so the deeper tier's `Days` has to be LONGER than the warmer tier's:
+        // an object cannot reach Deep Archive Access before it has reached Archive Access.
+        let days_of = |tier: &str| {
+            configuration
+                .tierings
+                .iter()
+                .find(|tiering| tiering.access_tier == tier)
+                .map(|tiering| tiering.days)
+        };
+        if let (Some(archive), Some(deep_archive)) = (
+            days_of(ARCHIVE_ACCESS_TIER),
+            days_of(DEEP_ARCHIVE_ACCESS_TIER),
+        ) {
+            if deep_archive <= archive {
+                return Err(crate::scaffolded::Scaffolded::unmodeled(
+                    crate::state::INVALID_ACCESS_TIER_CODE,
+                    crate::state::INVALID_ACCESS_TIER_STATUS,
+                    format!(
+                        "Days specified in {DEEP_ARCHIVE_ACCESS_TIER} should be greater than \
+                         days specified in {ARCHIVE_ACCESS_TIER}"
+                    ),
+                ));
+            }
+        }
+
+        // "A filter is used to identify a subset of objects to which the S3
+        // Intelligent-Tiering configuration applies" (`IntelligentTieringFilter`): a filter
+        // that names a predicate it cannot evaluate scopes the configuration to nothing
+        // determinate, so it is refused rather than recorded.
+        if let Some(filter) = &configuration.filter {
+            // "The prefix that an object must have to be included in the metrics results"
+            // — an EMPTY prefix states no prefix at all, so a document that spells the
+            // element out and leaves it empty names a predicate that is not one.
+            let prefixes = [
+                filter.prefix.as_deref(),
+                filter.and.as_ref().and_then(|and| and.prefix.as_deref()),
+            ];
+            if prefixes.iter().flatten().any(|prefix| prefix.is_empty()) {
+                return Err(crate::scaffolded::Scaffolded::unmodeled(
+                    INVALID_PREFIX_CODE,
+                    crate::state::INVALID_ARGUMENT_STATUS,
+                    EMPTY_FILTER_PREFIX_MESSAGE,
+                ));
+            }
+            if let Some(and) = &filter.and {
+                // "A conjunction (logical AND) of predicates … The operator must have at
+                // least two predicates" (`IntelligentTieringAndOperator`): a prefix and each
+                // tag are one predicate each, so a conjunction carrying fewer states a
+                // conjunction of one thing, which is not one.
+                let predicates =
+                    usize::from(and.prefix.is_some()) + and.tags.as_ref().map_or(0, Vec::len);
+                if predicates < MIN_AND_OPERATOR_PREDICATES {
+                    return Err(crate::scaffolded::Scaffolded::unmodeled(
+                        INVALID_AND_CODE,
+                        crate::state::INVALID_ARGUMENT_STATUS,
+                        AND_TOO_FEW_PREDICATES_MESSAGE,
+                    ));
+                }
+                // A tag predicate matches one key to one value, so two predicates on the
+                // same key can never both hold: the conjunction would match nothing. Read
+                // through the crate's one reading of that predicate rule
+                // ([`crate::state::first_repeated_tag_key`]).
+                if let Some(repeated) =
+                    crate::state::first_repeated_tag_key(and.tags.as_deref().unwrap_or_default())
+                {
+                    return Err(crate::scaffolded::Scaffolded::unmodeled(
+                        INVALID_AND_CODE,
+                        crate::state::INVALID_ARGUMENT_STATUS,
+                        format!(
+                            "All Tag Keys in an And must be unique. Found duplicate entry \
+                             for {repeated}."
+                        ),
+                    ));
+                }
+            }
+        }
+
         let Some(bucket) = store.bucket_mut(&input.bucket) else {
             // Unreachable: the lookup above ran under this same guard.
             return Err(
@@ -377,11 +464,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 return Err(crate::scaffolded::Scaffolded::unmodeled(
                     crate::state::TOO_MANY_CONFIGURATIONS_CODE,
                     crate::state::TOO_MANY_CONFIGURATIONS_STATUS,
-                    format!(
-                        "The bucket already carries the {} S3 Intelligent-Tiering \
-                         configurations a bucket may have",
-                        crate::state::MAX_INTELLIGENT_TIERING_CONFIGURATIONS_PER_BUCKET
-                    ),
+                    crate::state::TOO_MANY_CONFIGURATIONS_MESSAGE,
                 ));
             }
         }
@@ -412,6 +495,57 @@ fn archive_tier_minimum_days(access_tier: &str) -> Option<i32> {
 /// The deeper of the two archiving tiers, as `IntelligentTieringAccessTier` spells it: the
 /// one whose floor is the longer of the two the `Days` documentation publishes.
 const DEEP_ARCHIVE_ACCESS_TIER: &str = "DEEP_ARCHIVE_ACCESS";
+
+/// The warmer of the two archiving tiers, as `IntelligentTieringAccessTier` spells it.
+const ARCHIVE_ACCESS_TIER: &str = "ARCHIVE_ACCESS";
+
+/// The fewest predicates `IntelligentTieringAndOperator` may carry: "The operator must have
+/// at least two predicates" (that shape's own documentation).
+const MIN_AND_OPERATOR_PREDICATES: usize = 2;
+
+/// The code S3 answers a filter `And` it cannot evaluate with: `InvalidAnd`, under HTTP 400.
+///
+/// The conjunction is what the configuration's scope is read from, so a conjunction the
+/// service cannot evaluate is reported against the `And` itself rather than as a bare bad
+/// argument.
+const INVALID_AND_CODE: &str = "InvalidAnd";
+
+/// See [`INVALID_AND_CODE`] — the fixed text S3 sends for a conjunction carrying fewer
+/// predicates than a logical AND applies to. It states the rule and echoes nothing of the
+/// request.
+const AND_TOO_FEW_PREDICATES_MESSAGE: &str =
+    "Number of Prefixes and Tags combined cannot be less than 2. And cannot contain less than \
+     2 elements.";
+
+/// The code S3 answers a filter `Prefix` that states no prefix with: `InvalidPrefix`, under
+/// HTTP 400 — the prefix is what the filter's scope is read from, so the refusal names it.
+const INVALID_PREFIX_CODE: &str = "InvalidPrefix";
+
+/// See [`INVALID_PREFIX_CODE`] — the fixed text S3 sends for a `Prefix` element spelled out
+/// and left empty, which states the two things a caller may do instead.
+const EMPTY_FILTER_PREFIX_MESSAGE: &str =
+    "Filter Prefix should be set to a valid non-empty value or not set at all.";
+
+/// The refusal for an `IntelligentTieringConfiguration` document that does not validate
+/// against the schema the API publishes for it, carrying that code's own FIXED published
+/// text ([`crate::state::MALFORMED_XML_MESSAGE`]) rather than anything about this request.
+fn malformed_tiering_configuration() -> PutBucketIntelligentTieringConfigurationError {
+    crate::scaffolded::Scaffolded::unmodeled(
+        crate::state::MALFORMED_XML_CODE,
+        crate::state::MALFORMED_XML_STATUS,
+        crate::state::MALFORMED_XML_MESSAGE,
+    )
+}
+
+/// The first access tier more than one of `tierings` names, or `None` when each names its
+/// own.
+fn first_repeated_access_tier(tierings: &[Tiering]) -> Option<&str> {
+    let mut seen: ::std::collections::BTreeSet<&str> = ::std::collections::BTreeSet::new();
+    tierings
+        .iter()
+        .find(|tiering| !seen.insert(tiering.access_tier.as_str()))
+        .map(|tiering| tiering.access_tier.as_str())
+}
 
 /// "The minimum number of days specified for Archive Access tier must be at least 90 days"
 /// (`Tiering$Days`).

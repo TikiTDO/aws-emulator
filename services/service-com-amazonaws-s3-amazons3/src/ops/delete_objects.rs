@@ -291,15 +291,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObjects<Eng
         // carries no shape for, so it goes out through the unmodelled channel.
         let identifiers = &input.delete.objects;
         if identifiers.is_empty() || identifiers.len() > MAX_KEYS_PER_DELETE {
+            // The sentence is that code's own FIXED published text
+            // ([`crate::state::MALFORMED_XML_MESSAGE`]) and nothing else: the code says the
+            // document did not validate against the published schema, and the schema is the
+            // same for every document, so nothing of this request is appended to it.
             return Err(crate::scaffolded::Scaffolded::unmodeled(
                 crate::state::MALFORMED_XML_CODE,
-                400,
-                format!(
-                    "The XML you provided was not well-formed or did not validate against \
-                     our published schema: a Delete request carries from 1 to \
-                     {MAX_KEYS_PER_DELETE} Object elements, and this one carries {}",
-                    identifiers.len()
-                ),
+                crate::state::MALFORMED_XML_STATUS,
+                crate::state::MALFORMED_XML_MESSAGE,
             ));
         }
 
@@ -503,9 +502,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObjects<Eng
                                 version_id: Some(version_id.to_string()),
                                 // "Indicates whether the specified object version that was
                                 // permanently deleted was (true) or was not (false) a delete
-                                // marker before deletion" (`DeletedObject$DeleteMarker`).
+                                // marker before deletion" (`DeletedObject$DeleteMarker`), and
+                                // `DeleteMarkerVersionId` is "the version ID of the delete
+                                // marker" the entry reports — which, for a version that WAS a
+                                // marker, is the version this identifier removed, so a caller
+                                // undeleting an object can tell WHICH marker went away.
                                 delete_marker: removed_marker.then_some(true),
-                                delete_marker_version_id: None,
+                                delete_marker_version_id: removed_marker
+                                    .then(|| version_id.to_string()),
                             });
                         }
                         // A version the bucket holds none of is this key's own failure,

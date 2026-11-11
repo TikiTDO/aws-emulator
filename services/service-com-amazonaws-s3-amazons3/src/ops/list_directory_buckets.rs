@@ -187,15 +187,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // chose.
         let resume_at = match input.continuation_token.as_deref() {
             Some(token) if !token.is_empty() => Some(
-                crate::state::decode_continuation_token(&page_tokens, LISTING, token).ok_or_else(
-                    || {
-                        crate::scaffolded::Scaffolded::unmodeled(
-                            crate::state::INVALID_ARGUMENT_CODE,
-                            crate::state::INVALID_ARGUMENT_STATUS,
-                            CONTINUATION_TOKEN_REFUSAL,
-                        )
-                    },
-                )?,
+                crate::state::decode_continuation_token(
+                    &page_tokens,
+                    LISTING,
+                    ACCOUNT_WIDE_SCOPE,
+                    token,
+                )
+                .ok_or_else(|| {
+                    crate::scaffolded::Scaffolded::unmodeled(
+                        crate::state::INVALID_ARGUMENT_CODE,
+                        crate::state::INVALID_ARGUMENT_STATUS,
+                        CONTINUATION_TOKEN_REFUSAL,
+                    )
+                })?,
             ),
             _ => None,
         };
@@ -219,6 +223,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 next_continuation_token = Some(crate::state::encode_continuation_token(
                     &page_tokens,
                     LISTING,
+                    ACCOUNT_WIDE_SCOPE,
                     name,
                 ));
                 break;
@@ -274,3 +279,8 @@ const LISTING: crate::state::PagedListing = crate::state::PagedListing::Director
 /// The sentence a continuation token this operation did not mint is refused with, the one
 /// S3 states for a bad continuation token (the same refusal `ListBuckets` answers).
 const CONTINUATION_TOKEN_REFUSAL: &str = "The continuation token provided is incorrect";
+
+/// The scope a token of this listing is minted under: this listing is the ACCOUNT's own —
+/// every directory bucket it holds — so there is no bucket to scope a token to, unlike the
+/// bucket-configuration listings, whose tokens name the bucket they were issued over.
+const ACCOUNT_WIDE_SCOPE: &str = "";

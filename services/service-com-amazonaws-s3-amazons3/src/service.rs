@@ -805,6 +805,18 @@ fn published_refusal(violation: &Violation) -> Option<Refused> {
                 format!("Invalid target Storage class for {action} action"),
             )
         }
+        // `PutBucketLifecycleConfiguration`'s
+        // `x-amz-transition-default-minimum-object-size` header: the value "indicates which
+        // default minimum object size behavior is applied" (that member's own
+        // documentation), and the member is an enum over two behaviours, so a value outside
+        // it names none the service could apply. S3 reports it as an `InvalidRequest` that
+        // ECHOES the value — the caller has to replace that value, and the sentence is what
+        // says which one was not a behaviour — rather than as a constraint clause naming the
+        // member's path.
+        "transitionDefaultMinimumObjectSize" => (
+            crate::state::INVALID_REQUEST_CODE,
+            format!("Invalid TransitionDefaultMinimumObjectSize found: {rejected}"),
+        ),
         _ => return None,
     };
     Some(Refused {

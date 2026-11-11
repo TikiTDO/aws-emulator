@@ -712,6 +712,20 @@ pub const MAX_TAG_KEY_CHARS: usize = 128;
 /// string, so nothing refuses an over-long value before this check.
 pub const MAX_TAG_VALUE_CHARS: usize = 256;
 
+/// The first key more than one of `tags` names, or `None` when each names its own.
+///
+/// A tag predicate matches ONE key to one value, so two predicates on the same key can never
+/// both hold. ONE reading for every member that takes a list of tag predicates — a lifecycle
+/// rule's filter and an S3 Intelligent-Tiering filter's conjunction among them — so two
+/// configuration families cannot drift apart on which tag sets they admit; each family keeps
+/// its own refusal shape.
+pub fn first_repeated_tag_key(tags: &[crate::ops::types::Tag]) -> Option<&str> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    tags.iter()
+        .find(|tag| !seen.insert(tag.key.as_str()))
+        .map(|tag| tag.key.as_str())
+}
+
 /// The punctuation a tag key or value may carry, beside Unicode letters, digits and
 /// whitespace.
 ///
@@ -3041,9 +3055,10 @@ impl std::fmt::Display for WebsiteConfigurationRejection {
             Self::MalformedErrorDocumentKey { .. } => {
                 write!(f, "The ErrorDocument Key is not well formed")
             }
-            Self::TooManyRoutingRules { .. } => write!(
+            Self::TooManyRoutingRules { count } => write!(
                 f,
-                "The number of routing rules must not exceed {MAX_WEBSITE_ROUTING_RULES}."
+                "{count} routing rules provided, the number of routing rules in a website \
+                 configuration is limited to {MAX_WEBSITE_ROUTING_RULES}."
             ),
             Self::EmptyCondition => write!(
                 f,

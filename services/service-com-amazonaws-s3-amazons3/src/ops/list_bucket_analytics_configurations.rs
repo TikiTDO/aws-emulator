@@ -227,21 +227,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // names no cursor — the first page, exactly as if none had been sent (the reading
         // the sibling configuration listings give it).
         let resume_at = match input.continuation_token.as_deref() {
-            Some(token) if !token.is_empty() => Some(
-                crate::state::decode_continuation_token(&page_tokens, LISTING, token).ok_or_else(
-                    || {
-                        // A token this listing did not issue names no page of it, which S3
-                        // reports against the token itself rather than as a bare bad
-                        // argument — the refusal every bucket-configuration listing shares
-                        // ([`crate::state::MALFORMED_CONTINUATION_TOKEN_CODE`]).
-                        crate::scaffolded::Scaffolded::unmodeled(
-                            crate::state::MALFORMED_CONTINUATION_TOKEN_CODE,
-                            crate::state::MALFORMED_CONTINUATION_TOKEN_STATUS,
-                            crate::state::MALFORMED_CONTINUATION_TOKEN_MESSAGE,
-                        )
-                    },
-                )?,
-            ),
+            Some(token) if !token.is_empty() => {
+                // A token this listing did not issue, and one S3 issued for ANOTHER bucket's
+                // listing of the same family, each name no page of THIS listing — and S3
+                // answers the two differently
+                // ([`crate::state::ContinuationTokenReading::refusal`]).
+                match crate::state::read_continuation_token(
+                    &page_tokens,
+                    LISTING,
+                    &input.bucket,
+                    token,
+                ) {
+                    crate::state::ContinuationTokenReading::Position(at) => Some(at),
+                    unusable => {
+                        let (code, status, message) = unusable.refusal();
+                        return Err(crate::scaffolded::Scaffolded::unmodeled(
+                            code, status, message,
+                        ));
+                    }
+                }
+            }
             _ => None,
         };
 
@@ -269,6 +274,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 next_continuation_token = Some(crate::state::encode_continuation_token(
                     &page_tokens,
                     LISTING,
+                    &input.bucket,
                     id,
                 ));
                 break;

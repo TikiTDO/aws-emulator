@@ -827,7 +827,7 @@ async fn a_configuration_s3_cannot_record_is_refused_and_changes_nothing() {
             "query-id".to_string(),
             configuration_of("payload-id").xml(),
             400,
-            Some(INVALID_ARGUMENT_CODE),
+            Some("IdMismatch"),
         ),
         (
             "an IncludedObjectVersions outside its enum",

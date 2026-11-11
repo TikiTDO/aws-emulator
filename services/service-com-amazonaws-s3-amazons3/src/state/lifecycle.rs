@@ -301,6 +301,55 @@ pub enum LifecycleConfigurationRejection {
         /// The count it named.
         count: i32,
     },
+    /// A `Filter`'s `And` carrying fewer than [`MIN_LIFECYCLE_AND_PREDICATES`] predicates:
+    /// the operator "is used in a Lifecycle Rule Filter to apply a logical AND to two or
+    /// more predicates" (`LifecycleRuleAndOperator`'s own documentation), so a conjunction
+    /// of one thing is not one.
+    AndWithTooFewPredicates {
+        /// Which rule carries it.
+        rule: usize,
+        /// How many predicates it named.
+        named: usize,
+    },
+    /// Two tag predicates of one filter naming the same key: a tag predicate matches one
+    /// key to one value, so two on the same key can never both hold.
+    DuplicateTagKey {
+        /// Which rule carries them.
+        rule: usize,
+        /// The key named twice.
+        key: String,
+    },
+    /// A tag predicate whose key is outside the published bounds: shorter than one
+    /// character, or longer than [`MAX_TAG_KEY_CHARS`].
+    TagKeyOutsideBounds {
+        /// Which rule carries it.
+        rule: usize,
+        /// How long the key is.
+        chars: usize,
+    },
+    /// A tag predicate whose value is longer than [`MAX_TAG_VALUE_CHARS`] characters.
+    TagValueTooLong {
+        /// Which rule carries it.
+        rule: usize,
+        /// How long the value is.
+        chars: usize,
+    },
+    /// An action that acts on something an object TAG does not describe, in a rule whose
+    /// filter names a tag: an incomplete multipart upload carries no object tags yet, and a
+    /// delete marker carries none at all, so neither action can be scoped by them.
+    TagFilteredAction {
+        /// Which rule carries it.
+        rule: usize,
+        /// The action that cannot be tag-scoped.
+        action: &'static str,
+    },
+    /// An `Expiration` due no later than the last `Transition` of the same rule, so the
+    /// object would be expired before — or on the same day as — a transition that is meant
+    /// to move it first.
+    ExpirationNotAfterTransition {
+        /// The scope of the rule carrying them, as S3 describes a filter.
+        filter: String,
+    },
 }
 
 impl LifecycleConfigurationRejection {
@@ -324,7 +373,11 @@ impl LifecycleConfigurationRejection {
             | Self::FilterNamesSeveralPredicates { .. }
             | Self::SeveralExpirationPredicates { .. }
             | Self::TransitionWithoutStorageClass { .. }
-            | Self::ActionWithoutWhen { .. } => MALFORMED_XML_CODE,
+            | Self::ActionWithoutWhen { .. }
+            | Self::AndWithTooFewPredicates { .. } => MALFORMED_XML_CODE,
+            Self::TagKeyOutsideBounds { .. } | Self::TagValueTooLong { .. } => {
+                INVALID_REQUEST_CODE
+            }
             Self::IdTooLong { .. }
             | Self::DuplicateId { .. }
             | Self::NonPositiveDays { .. }
@@ -333,11 +386,14 @@ impl LifecycleConfigurationRejection {
             | Self::NegativeObjectSize { .. }
             | Self::TransitionToWarmerClass { .. }
             | Self::TransitionBeforeMinimumDuration { .. }
+            | Self::ExpirationNotAfterTransition { .. }
             | Self::TooManyNewerNoncurrentVersions { .. } => INVALID_ARGUMENT_CODE,
             Self::MixedPrefixAndFilterRules { .. }
             | Self::ObjectSizeRangeEmpty { .. }
             | Self::NoAction { .. }
             | Self::MixedDateAndDays { .. }
+            | Self::DuplicateTagKey { .. }
+            | Self::TagFilteredAction { .. }
             | Self::DuplicateTransitionStorageClass { .. } => INVALID_REQUEST_CODE,
         }
     }
@@ -371,15 +427,13 @@ impl std::fmt::Display for LifecycleConfigurationRejection {
                 "LifecycleConfiguration.Rules carries {count} rules, more than the \
                  {MAX_LIFECYCLE_RULES} rules one lifecycle configuration may hold"
             ),
-            Self::IdTooLong { rule, length } => write!(
+            Self::IdTooLong { .. } => write!(
                 f,
-                "Rule {rule}: ID is {length} characters long, more than the \
-                 {MAX_LIFECYCLE_RULE_ID_CHARS} characters a rule identifier may carry"
+                "ID length should not exceed allowed limit of {MAX_LIFECYCLE_RULE_ID_CHARS}"
             ),
-            Self::DuplicateId { rule, id } => write!(
+            Self::DuplicateId { .. } => write!(
                 f,
-                "Rule {rule}: ID {id:?} identifies an earlier rule as well; a rule \
-                 identifier is unique within a lifecycle configuration"
+                "Rule ID must be unique. Found same ID for more than one rule"
             ),
             Self::PrefixAndFilter { rule } => write!(
                 f,
@@ -419,10 +473,9 @@ impl std::fmt::Display for LifecycleConfigurationRejection {
                 "Rule {rule}: ObjectSizeGreaterThan {greater_than} is not below \
                  ObjectSizeLessThan {less_than}, so no object size matches the filter"
             ),
-            Self::NoAction { rule } => write!(
+            Self::NoAction { .. } => write!(
                 f,
-                "Rule {rule}: names no action; a lifecycle rule carries at least one \
-                 expiration or transition action"
+                "At least one action needs to be specified in a rule"
             ),
             Self::SeveralExpirationPredicates { rule, named } => write!(
                 f,
@@ -437,10 +490,7 @@ impl std::fmt::Display for LifecycleConfigurationRejection {
                 f,
                 "'{member}' for {action} action must be 0 or a positive integer"
             ),
-            Self::DateNotMidnight { rule, member } => write!(
-                f,
-                "Rule {rule}: {member} must be at midnight UTC"
-            ),
+            Self::DateNotMidnight { .. } => write!(f, "'Date' must be at midnight GMT"),
             Self::MixedDateAndDays { rule } => write!(
                 f,
                 "Rule {rule}: mixes Date-based and Days-based actions; a rule measures \
@@ -483,13 +533,42 @@ impl std::fmt::Display for LifecycleConfigurationRejection {
             } => write!(
                 f,
                 "'{days}' in the '{action}' action for StorageClass '{later}' for filter \
-                 '{filter}' must be {minimum} days more than 'filter '{filter}'' '{days}' \
-                 in the '{action}' action for StorageClass '{earlier}' for filter '{filter}'"
+                 '{filter}' must be {minimum} days more than 'filter '{filter}'' in the \
+                 '{action}' action for StorageClass '{earlier}'"
             ),
             Self::TooManyNewerNoncurrentVersions { rule, count } => write!(
                 f,
                 "Rule {rule}: NewerNoncurrentVersions retains {count} versions, more than \
                  the {MAX_NEWER_NONCURRENT_VERSIONS} noncurrent versions a rule may retain"
+            ),
+            // The code's own FIXED published text: an `And` of fewer than two predicates is
+            // a document the published schema does not validate, and the schema is the same
+            // for every document, so this variant's sentence is never read (see
+            // [`LifecycleConfigurationRejection::message`]) and states the rule only.
+            Self::AndWithTooFewPredicates { rule, named } => write!(
+                f,
+                "Rule {rule}: Filter And names {named} predicates, fewer than the \
+                 {MIN_LIFECYCLE_AND_PREDICATES} a logical AND applies to"
+            ),
+            Self::DuplicateTagKey { .. } => {
+                write!(f, "Duplicate Tag Keys are not allowed.")
+            }
+            Self::TagKeyOutsideBounds { .. } => write!(
+                f,
+                "A Tag's Key must be a length between 1 and {MAX_TAG_KEY_CHARS}."
+            ),
+            Self::TagValueTooLong { .. } => write!(
+                f,
+                "A Tag's Value must be a length between 0 and {MAX_TAG_VALUE_CHARS}."
+            ),
+            Self::TagFilteredAction { action, .. } => write!(
+                f,
+                "{action} cannot be specified with Tags."
+            ),
+            Self::ExpirationNotAfterTransition { filter } => write!(
+                f,
+                "'Days' in the Expiration action for filter '{filter}' must be greater than \
+                 'Days' in the Transition action"
             ),
         }
     }
@@ -592,6 +671,56 @@ pub(super) fn validate_lifecycle_filter(
         });
     }
 
+    // The conjunction "is used in a Lifecycle Rule Filter to apply a logical AND to two or
+    // more predicates" (`LifecycleRuleAndOperator`): a prefix, each tag and each object-size
+    // bound are one predicate each, so an `And` carrying fewer than
+    // [`MIN_LIFECYCLE_AND_PREDICATES`] is a conjunction of one thing, which is not one.
+    if let Some(and) = &filter.and {
+        let predicates = usize::from(and.prefix.is_some())
+            + and.tags.as_ref().map_or(0, Vec::len)
+            + usize::from(and.object_size_greater_than.is_some())
+            + usize::from(and.object_size_less_than.is_some());
+        if predicates < MIN_LIFECYCLE_AND_PREDICATES {
+            return Err(Rejection::AndWithTooFewPredicates {
+                rule: position,
+                named: predicates,
+            });
+        }
+    }
+
+    // Every tag predicate the filter names, wherever it names it: the filter's own `Tag` and
+    // each tag inside its `And` are the same predicate — "a tag key and value" an object
+    // must carry — so neither may be judged a way of its own.
+    let tags: Vec<crate::ops::types::Tag> = lifecycle_filter_tags(filter).cloned().collect();
+    for tag in &tags {
+        // The published bounds every tag of this service is judged by
+        // ([`MAX_TAG_KEY_CHARS`] and [`MAX_TAG_VALUE_CHARS`]), so a predicate cannot name a
+        // tag no object could carry. The key's floor is one character — `Tag$Key` targets
+        // `ObjectKey`, `length {min 1}` — and the value's is none.
+        let key_chars = tag.key.chars().count();
+        if key_chars == 0 || key_chars > MAX_TAG_KEY_CHARS {
+            return Err(Rejection::TagKeyOutsideBounds {
+                rule: position,
+                chars: key_chars,
+            });
+        }
+        let value_chars = tag.value.chars().count();
+        if value_chars > MAX_TAG_VALUE_CHARS {
+            return Err(Rejection::TagValueTooLong {
+                rule: position,
+                chars: value_chars,
+            });
+        }
+    }
+    // Read through the crate's one reading of the tag-predicate uniqueness rule, which the
+    // S3 Intelligent-Tiering filter is judged by too.
+    if let Some(repeated) = first_repeated_tag_key(&tags) {
+        return Err(Rejection::DuplicateTagKey {
+            rule: position,
+            key: repeated.to_string(),
+        });
+    }
+
     validate_lifecycle_object_sizes(
         position,
         filter.object_size_greater_than,
@@ -657,9 +786,41 @@ pub(super) fn validate_lifecycle_actions(
 ) -> Result<(), LifecycleConfigurationRejection> {
     use LifecycleConfigurationRejection as Rejection;
 
+    // Two actions act on something an object TAG does not describe: an incomplete multipart
+    // upload carries no object tags yet, and a delete marker carries none at all. A rule
+    // whose filter names a tag therefore cannot carry either — the action could never be
+    // scoped the way the filter asks.
+    let tag_filtered = rule
+        .filter
+        .as_ref()
+        .is_some_and(|filter| lifecycle_filter_tags(filter).next().is_some());
+    if tag_filtered {
+        if rule.abort_incomplete_multipart_upload.is_some() {
+            return Err(Rejection::TagFilteredAction {
+                rule: position,
+                action: "AbortIncompleteMultipartUpload",
+            });
+        }
+        if rule
+            .expiration
+            .as_ref()
+            .and_then(|expiration| expiration.expired_object_delete_marker)
+            == Some(true)
+        {
+            return Err(Rejection::TagFilteredAction {
+                rule: position,
+                action: "ExpiredObjectDeleteMarker",
+            });
+        }
+    }
+
     let mut actions = 0usize;
     let mut days_based = false;
     let mut date_based = false;
+    // The day the rule's expiration is due on, on whichever of the two scales the rule is
+    // written against — the same scale the transitions below are collected on, since a rule
+    // mixing the two is refused.
+    let mut expiration_day: Option<i64> = None;
 
     if let Some(expiration) = &rule.expiration {
         let named = [
@@ -686,6 +847,7 @@ pub(super) fn validate_lifecycle_actions(
                 });
             }
             days_based = true;
+            expiration_day = Some(i64::from(days));
         }
         if let Some(date) = &expiration.date {
             if !is_utc_midnight(date) {
@@ -695,6 +857,7 @@ pub(super) fn validate_lifecycle_actions(
                 });
             }
             date_based = true;
+            expiration_day = Some(date.secs() / SECONDS_PER_DAY);
         }
     }
 
@@ -843,7 +1006,7 @@ pub(super) fn validate_lifecycle_actions(
     }
 
     let filter = lifecycle_rule_scope(rule);
-    validate_transition_order(position, TRANSITION_ACTION, &filter, transitions)?;
+    validate_transition_order(position, TRANSITION_ACTION, &filter, transitions.clone())?;
     validate_transition_order(
         position,
         NONCURRENT_VERSION_TRANSITION_ACTION,
@@ -851,7 +1014,47 @@ pub(super) fn validate_lifecycle_actions(
         noncurrent_transitions,
     )?;
 
+    // A transition MOVES the object and an expiration REMOVES it, so an expiration due on or
+    // before the last transition would take the object away before that transition could
+    // ever run: the expiration has to fall strictly after every transition of the same rule.
+    // Both are on the one scale the rule is written against, the mixed case having been
+    // refused above.
+    if let (Some(expiration), Some(transition)) = (
+        expiration_day,
+        transitions.iter().map(|(day, _)| *day).max(),
+    ) {
+        if expiration <= transition {
+            return Err(Rejection::ExpirationNotAfterTransition {
+                filter: filter.clone(),
+            });
+        }
+    }
+
     Ok(())
+}
+
+/// The fewest predicates a lifecycle filter's `And` may carry: the operator "is used in a
+/// Lifecycle Rule Filter to apply a logical AND to two or more predicates"
+/// (`LifecycleRuleAndOperator`'s own documentation).
+pub const MIN_LIFECYCLE_AND_PREDICATES: usize = 2;
+
+/// Every TAG predicate `filter` names, wherever it names it: the filter's own `Tag` and each
+/// tag inside its `And`.
+///
+/// One reading for both, because they are the same predicate — a tag key and value an object
+/// must carry — so a filter cannot be judged one way at the top level and another inside a
+/// conjunction.
+pub(super) fn lifecycle_filter_tags(
+    filter: &crate::ops::types::LifecycleRuleFilter,
+) -> impl Iterator<Item = &crate::ops::types::Tag> {
+    filter.tag.as_ref().into_iter().chain(
+        filter
+            .and
+            .as_ref()
+            .and_then(|and| and.tags.as_ref())
+            .into_iter()
+            .flatten(),
+    )
 }
 
 /// How S3 describes the set of objects one lifecycle rule applies to, which is what its
@@ -871,15 +1074,22 @@ pub(super) fn lifecycle_rule_scope(rule: &crate::ops::types::LifecycleRule) -> S
         .prefix
         .as_deref()
         .or_else(|| filter.and_then(|filter| filter.prefix.as_deref()))
-        .or_else(|| and.and_then(|and| and.prefix.as_deref()))
-        .unwrap_or_default();
-    let mut described = format!("(prefix={prefix}");
-    let tags = filter
-        .and_then(|filter| filter.tag.as_ref())
-        .into_iter()
-        .chain(and.and_then(|and| and.tags.as_ref()).into_iter().flatten());
-    for tag in tags {
-        described.push_str(&format!(", tag={}={}", tag.key, tag.value));
+        .or_else(|| and.and_then(|and| and.prefix.as_deref()));
+    // A rule that states no prefix at all describes no prefix predicate, so the description
+    // names none; one that states the element and leaves it EMPTY states a prefix every key
+    // matches, which the description names as the empty value it is.
+    let mut described = match prefix {
+        Some(prefix) => format!("(prefix={prefix}"),
+        None => "(".to_string(),
+    };
+    // Every tag the rule's filter names, wherever it names it, through the one reading of
+    // that ([`lifecycle_filter_tags`]).
+    let tags = filter.into_iter().flat_map(lifecycle_filter_tags);
+    for (index, tag) in tags.enumerate() {
+        if prefix.is_some() || index > 0 {
+            described.push_str(", ");
+        }
+        described.push_str(&format!("tag={}={}", tag.key, tag.value));
     }
     described.push(')');
     described

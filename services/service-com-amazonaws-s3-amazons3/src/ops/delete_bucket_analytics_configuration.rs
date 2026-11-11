@@ -214,16 +214,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
-        // An id outside the id rule every bucket configuration id shares identifies no
-        // configuration a put could have recorded, so the delete is refused for the id
-        // itself — the same refusal the write and the read of this configuration give such a
-        // value ([`crate::state::configuration_id_fault`]) — rather than reporting a
-        // successful removal of nothing.
-        if let Some(fault) = crate::state::configuration_id_fault(&input.id) {
+        // A DELETE does not judge the id against the PATTERN or the LENGTH bound either:
+        // those bound what a PUT may record, and a delete names a configuration the bucket
+        // either carries or does not, which the not-there refusal below reports — the
+        // reading `GetBucketAnalyticsConfiguration` gives the same id. A call stating NO id
+        // at all identifies no configuration to remove, which S3 reports against the id
+        // itself ([`crate::state::ConfigurationIdFault::Unstated`]).
+        if let Some(unstated @ crate::state::ConfigurationIdFault::Unstated) =
+            crate::state::configuration_id_fault(&input.id)
+        {
             return Err(crate::scaffolded::Scaffolded::unmodeled(
-                fault.code(),
-                fault.status(),
-                fault.message(),
+                unstated.code(),
+                unstated.status(),
+                unstated.message(),
             ));
         }
         let Some(bucket) = store.bucket_mut(&input.bucket) else {

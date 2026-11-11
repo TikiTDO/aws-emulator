@@ -290,16 +290,36 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "The Amazon Resource Name (ARN) of the bucket to which data is exported"
         // (`AnalyticsS3BucketDestination$Bucket`): a value that is not a bucket ARN — a bare
-        // bucket name, say — names no destination an export could be written to, so the
-        // document does not validate against the published schema either. Judged through the
-        // crate's one bucket-ARN reading ([`crate::state::is_s3_bucket_arn`]), the same one
-        // a replication rule's destination bucket is judged by.
+        // bucket name, or one qualified by a Region, which a bucket ARN never carries —
+        // names no destination an export could be written to, and S3 reports it against the
+        // DESTINATION rather than as a schema failure, since the document validates and only
+        // the value does not. Judged through the crate's one destination-bucket reading
+        // ([`crate::state::bucket_arn_fault`]), the same one every export destination is
+        // judged by.
+        //
+        // "The account ID that owns the destination S3 bucket"
+        // (`AnalyticsS3BucketDestination$BucketAccountId`) is optional, but a value that is
+        // STATED and is not an account id owns nothing the export could be validated
+        // against — a document that "did not validate against our published schema", which
+        // is the fixed refusal [`crate::state::MALFORMED_XML_CODE`] carries.
         if let Some(export) = &input
             .analytics_configuration
             .storage_class_analysis
             .data_export
         {
-            if !crate::state::is_s3_bucket_arn(&export.destination.s3_bucket_destination.bucket) {
+            let destination = &export.destination.s3_bucket_destination;
+            if let Some(fault) = crate::state::bucket_arn_fault(&destination.bucket) {
+                return Err(crate::scaffolded::Scaffolded::unmodeled(
+                    crate::state::INVALID_DESTINATION_CODE,
+                    crate::state::INVALID_DESTINATION_STATUS,
+                    fault.message(),
+                ));
+            }
+            if destination
+                .bucket_account_id
+                .as_deref()
+                .is_some_and(|account| !crate::state::is_account_id(account))
+            {
                 return Err(malformed_analytics_configuration());
             }
         }

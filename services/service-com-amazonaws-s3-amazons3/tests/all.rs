@@ -111,6 +111,8 @@ mod bucket_replication_delete;
 mod bucket_request_payment;
 #[path = "all/bucket_subresource_absent_messages.rs"]
 mod bucket_subresource_absent_messages;
+#[path = "all/bucket_subresource_document_rules.rs"]
+mod bucket_subresource_document_rules;
 #[path = "all/bucket_tagging.rs"]
 mod bucket_tagging;
 #[path = "all/bucket_tagging_put_status.rs"]

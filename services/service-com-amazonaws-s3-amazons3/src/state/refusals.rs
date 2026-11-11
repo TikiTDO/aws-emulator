@@ -891,6 +891,10 @@ pub const NO_SUCH_LIFECYCLE_CONFIGURATION_STATUS: u16 = 404;
 /// about the bucket.
 pub const INTERNAL_ERROR_CODE: &str = "InternalError";
 
+/// See [`INTERNAL_ERROR_CODE`] — the fixed text S3 sends with it, from that same list,
+/// nothing of which comes from the request.
+pub const INTERNAL_ERROR_MESSAGE: &str = "We encountered an internal error. Please try again.";
+
 /// The HTTP status [`INTERNAL_ERROR_CODE`] is rendered with: 500, from the same list.
 pub const INTERNAL_ERROR_STATUS: u16 = 500;
 
@@ -960,10 +964,11 @@ pub enum IntelligentTieringWrite {
 pub const TOO_MANY_CONFIGURATIONS_CODE: &str = "TooManyConfigurations";
 
 /// See [`TOO_MANY_CONFIGURATIONS_CODE`] — the description AWS documents for that code,
-/// nothing of which comes from the request.
+/// nothing of which comes from the request. The sentence is the one that code's own
+/// "Special errors" entry publishes, word for word, for every family that shares the code.
 pub const TOO_MANY_CONFIGURATIONS_MESSAGE: &str =
     "You are attempting to create a new configuration but have already reached the \
-     1,000-configuration limit";
+     1,000-configuration limit.";
 
 /// The HTTP status [`TOO_MANY_CONFIGURATIONS_CODE`] is rendered with: 400, from that same
 /// special-errors list.
@@ -1000,7 +1005,7 @@ pub const INVALID_CONFIG_ID_CODE: &str = "InvalidConfigId";
 /// and the shortest id S3 records is one character. Do not narrow the check to match the
 /// prose.
 pub const INVALID_CONFIG_ID_MESSAGE: &str =
-    "Config Id should be more than 1 character and less than 64 characters in length.";
+    "Config Id should not be more than 1 char and less than 64 chars in length";
 
 /// The HTTP status [`INVALID_CONFIG_ID_CODE`] is rendered with: 400, the status S3 gives a
 /// configuration it cannot apply.
@@ -1040,6 +1045,93 @@ pub const INVALID_CONFIGURATION_ID_MESSAGE: &str = "The specified configuration 
 /// The HTTP status [`INVALID_CONFIGURATION_ID_CODE`] is rendered with: 400, the status S3
 /// gives a request naming an argument it cannot act on.
 pub const INVALID_CONFIGURATION_ID_STATUS: u16 = 400;
+
+/// The code S3 answers a bucket-configuration document whose EXPORT DESTINATION is not a
+/// bucket it could write to with: `InvalidDestination`, under HTTP 400.
+///
+/// Distinct from [`MALFORMED_XML_CODE`]: the document validates against the published schema
+/// — the member is a string and it is there — and what S3 cannot act on is the VALUE of the
+/// destination, so the refusal names the destination.
+pub const INVALID_DESTINATION_CODE: &str = "InvalidDestination";
+
+/// The HTTP status [`INVALID_DESTINATION_CODE`] is rendered with: 400.
+pub const INVALID_DESTINATION_STATUS: u16 = 400;
+
+/// The code S3 answers a bucket-configuration write whose DOCUMENT `Id` is not the id the
+/// request addresses with, where the operation publishes a code naming that disagreement:
+/// `IdMismatch`, under HTTP 400.
+pub const ID_MISMATCH_CODE: &str = "IdMismatch";
+
+/// See [`ID_MISMATCH_CODE`] — the fixed text S3 sends for that condition, which states the
+/// rule rather than echoing either id back.
+pub const ID_MISMATCH_MESSAGE: &str = "Document ID does not match the specified configuration ID.";
+
+/// The HTTP status [`ID_MISMATCH_CODE`] is rendered with: 400.
+pub const ID_MISMATCH_STATUS: u16 = 400;
+
+/// Why a value is not the ARN of a BUCKET data may be exported to — which is what decides
+/// the sentence a write naming it is refused with.
+///
+/// ONE type for every member that takes a bucket ARN as an export destination, because the
+/// rule is one rule: a bucket ARN names neither a Region nor an account id, "because a
+/// bucket name is globally unique" ([`is_s3_bucket_arn`] carries the grammar).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BucketArnFault {
+    /// The value is not a bucket ARN at all — a bare bucket name, say, or an ARN of another
+    /// service.
+    NotAnArn,
+    /// The value is an S3 ARN whose Region field carries a value, which a bucket ARN never
+    /// does.
+    RegionQualified,
+}
+
+impl BucketArnFault {
+    /// The `<Message>` a write naming such a destination is refused with: the fixed sentence
+    /// S3 publishes for the rule the value broke, with nothing of the request in it.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NotAnArn => "Invalid bucket ARN.",
+            Self::RegionQualified => "Bucket ARN should not specify a region.",
+        }
+    }
+}
+
+/// Why `value` is not the ARN of a bucket data may be exported to, or `None` when it is one.
+///
+/// The one reading of the destination rule, shared by every member that takes an export
+/// destination bucket, so two configuration families cannot drift apart on which values they
+/// record. The REGION-qualified case is told apart from the rest because S3 states a rule of
+/// its own for it: a bucket ARN carries no Region.
+pub fn bucket_arn_fault(value: &str) -> Option<BucketArnFault> {
+    if is_s3_bucket_arn(value) {
+        return None;
+    }
+    match ::service_common::arn::parse(value) {
+        // An S3 ARN naming a resource and a Region: the Region is the one thing wrong with
+        // it, whether or not it also names an account, which is the rule S3 states its own
+        // sentence for.
+        Some(parsed)
+            if parsed.vendor == "s3"
+                && !parsed.region.is_empty()
+                && !parsed.resource.is_empty() =>
+        {
+            Some(BucketArnFault::RegionQualified)
+        }
+        _ => Some(BucketArnFault::NotAnArn),
+    }
+}
+
+/// How many decimal digits an AWS account id carries: twelve, the form every account id in
+/// this emulator takes ([`::engine::emulator_account_id`] mints one).
+pub const ACCOUNT_ID_DIGITS: usize = 12;
+
+/// Whether `value` is an AWS account id: exactly [`ACCOUNT_ID_DIGITS`] decimal digits.
+///
+/// One reading for every member that takes an account id, so a configuration family cannot
+/// admit a value another refuses.
+pub fn is_account_id(value: &str) -> bool {
+    value.len() == ACCOUNT_ID_DIGITS && value.bytes().all(|digit| digit.is_ascii_digit())
+}
 
 /// Why a value is not an id a bucket configuration may be identified by — which is what
 /// decides the refusal a call naming it answers with.

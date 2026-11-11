@@ -23,11 +23,14 @@
 //!   path with no id.
 //! * An id identifies the configuration, so a value that is not one identifies nothing: an
 //!   id the request states empty (or does not state at all) is refused with
-//!   `InvalidConfigurationId` / "The specified configuration id is invalid.", one spelled
-//!   with a character outside [`CONFIGURATION_ID_PATTERN`] with `InvalidConfigId` quoting
-//!   that pattern, and one longer than [`MAX_CONFIGURATION_ID_CHARS`] with `InvalidConfigId`
-//!   stating that bound — on the write, the read and the delete alike, since all three
-//!   address the configuration by the same id.
+//!   `InvalidConfigurationId` / "The specified configuration id is invalid." on the write,
+//!   the read and the delete alike, since none of the three identifies a configuration at
+//!   all. The PATTERN and the LENGTH bound are a different rule: they bound what a WRITE
+//!   may record, so an id spelled with a character outside [`CONFIGURATION_ID_PATTERN`] is
+//!   refused `InvalidConfigId` quoting that pattern and one longer than
+//!   [`MAX_CONFIGURATION_ID_CHARS`] `InvalidConfigId` stating that bound — on the PUT only,
+//!   while the read and the delete report what the bucket holds under that id, which for an
+//!   id no put could have recorded is `NoSuchConfiguration`.
 //! * An id the rule admits round-trips: the put records the configuration under it
 //!   ([`PUT_BUCKET_ANALYTICS_CONFIGURATION_SUCCESS_STATUS`] with an empty body), the read
 //!   reports it back, and the listing names it in its own result element,
@@ -453,7 +456,23 @@ async fn one_id_rule_governs_the_write_the_read_and_the_delete() {
                         );
                         vec![("put", &put), ("delete", &deleted)]
                     }
-                    false => vec![("put", &put), ("read", &read), ("delete", &deleted)],
+                    false => {
+                        // The id rule bounds what a PUT may RECORD. A read and a delete name
+                        // a configuration the bucket either carries or does not, so they
+                        // report the not-there refusal rather than judging the id.
+                        for (call, answer) in [("read", &read), ("delete", &deleted)] {
+                            assert_eq!(
+                                answer.error_code(),
+                                NO_SUCH_CONFIGURATION_CODE,
+                                "case {case:?} ({call}): a read and a delete report only what \
+                                 the bucket holds; expected \
+                                 {NO_SUCH_CONFIGURATION_CODE}, got {} ({})",
+                                answer.error_code(),
+                                answer.status
+                            );
+                        }
+                        vec![("put", &put)]
+                    }
                 };
                 for (call, answer) in refused {
                     assert_eq!(

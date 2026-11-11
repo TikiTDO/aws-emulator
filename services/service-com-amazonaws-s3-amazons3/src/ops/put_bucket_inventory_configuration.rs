@@ -292,16 +292,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The configuration a put adds is the one "identified by the inventory ID" and the
         // `Id` that "identifies the inventory configuration" in the payload name ONE
         // configuration, so two different values name no configuration the service can
-        // record.
+        // record. S3 publishes a code of its own for exactly that disagreement
+        // ([`crate::state::ID_MISMATCH_CODE`]), which is what a client branching on it reads.
         if configuration.id != input.id {
             return Err(crate::scaffolded::Scaffolded::unmodeled(
-                crate::state::INVALID_ARGUMENT_CODE,
-                crate::state::INVALID_ARGUMENT_STATUS,
-                format!(
-                    "InventoryConfiguration.Id {:?} does not identify the inventory \
-                     configuration the request names, {:?}",
-                    configuration.id, input.id
-                ),
+                crate::state::ID_MISMATCH_CODE,
+                crate::state::ID_MISMATCH_STATUS,
+                crate::state::ID_MISMATCH_MESSAGE,
             ));
         }
 

@@ -476,6 +476,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     if common_prefixes.last() == Some(rolled_up) {
                         continue;
                     }
+                    // "CommonPrefixes is filtered out from results if it is not
+                    // lexicographically greater than the key-marker"
+                    // (`ListObjectsRequest$Delimiter`, the same start token this
+                    // listing's `StartAfter` is): with a delimiter the token names an
+                    // ENTRY of the listing — a key or a common prefix — and the listing
+                    // resumes after that whole entry, so a token naming a common prefix
+                    // leaves the group it rolls up behind it rather than reporting the
+                    // group a second time.
+                    if resume_at.is_none()
+                        && input
+                            .start_after
+                            .as_deref()
+                            .is_some_and(|start_after| rolled_up.as_str() <= start_after)
+                    {
+                        continue;
+                    }
                 }
 
                 // One slot per entry, shared by Contents and CommonPrefixes. Out of

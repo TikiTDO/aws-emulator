@@ -77,10 +77,10 @@ impl PagedListing {
     }
 }
 
-/// The separator between the listing a token was issued for and the position in it: a unit
-/// separator, which no listing's label and no cursor carries (no configuration id
-/// ([`super::CONFIGURATION_ID_PATTERN`]) and no bucket name admits it), so the two halves of
-/// a cursor cannot run together.
+/// The separator between the listing a token was issued for, the resource it was issued
+/// AGAINST and the position in it: a unit separator, which no listing's label, no bucket name
+/// and no cursor carries (no configuration id ([`super::CONFIGURATION_ID_PATTERN`]) and no
+/// bucket name admits it), so the three parts of a cursor cannot run together.
 const CURSOR_SEPARATOR: char = '\u{1f}';
 
 /// The `NextContinuationToken` that resumes a listing at `first_not_returned` (inclusive):
@@ -93,29 +93,109 @@ const CURSOR_SEPARATOR: char = '\u{1f}';
 /// it first), so no second alphabet swap lives here. The authenticator inside is what makes a
 /// token this store did not mint detectable, which is what lets the next page refuse it
 /// instead of serving from a position the caller chose.
+///
+/// `scope` is the resource the listing was taken OVER — the bucket a configuration listing is
+/// bound to, and the empty string for a listing of the account itself — so a token issued for
+/// one bucket names no page of the same listing on another.
 pub fn encode_continuation_token(
     key: &PageTokenKey,
     listing: PagedListing,
+    scope: &str,
     first_not_returned: &str,
 ) -> String {
     encode_base64url(&key.mint(&format!(
-        "{}{CURSOR_SEPARATOR}{first_not_returned}",
+        "{}{CURSOR_SEPARATOR}{scope}{CURSOR_SEPARATOR}{first_not_returned}",
         listing.label()
     )))
 }
 
-/// The position `token` resumes `listing` at (inclusive), or `None` for any value
-/// this store did not mint for that listing: one that is not base64url, one whose
-/// authenticator does not match the cursor it travels with, one issued for another
-/// listing, and one carrying no cursor at all.
+/// The position `token` resumes `listing` over `scope` at (inclusive), or `None` for any
+/// value this store did not mint for that listing and that scope: one that is not base64url,
+/// one whose authenticator does not match the cursor it travels with, one issued for another
+/// listing, one issued for another BUCKET, and one carrying no cursor at all.
 pub fn decode_continuation_token(
     key: &PageTokenKey,
     listing: PagedListing,
+    scope: &str,
     token: &str,
 ) -> Option<String> {
-    let cursor = key.cursor_of(&decode_base64url(token)?)?;
-    let (label, resume_at) = cursor.split_once(CURSOR_SEPARATOR)?;
-    (label == listing.label()).then(|| resume_at.to_string())
+    match read_continuation_token(key, listing, scope, token) {
+        ContinuationTokenReading::Position(resume_at) => Some(resume_at),
+        _ => None,
+    }
+}
+
+/// What `token` is, read against the listing and the scope the request addresses.
+///
+/// Three outcomes, because S3 answers them differently: a token that names a position here
+/// resumes the listing, a token this service issued over ANOTHER resource names a position
+/// the listing cannot be resumed from, and a value this service never issued names no page at
+/// all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContinuationTokenReading {
+    /// The position the listing resumes at (inclusive).
+    Position(String),
+    /// A token this store minted for this listing, but over another scope — another bucket's
+    /// listing of the same family.
+    OtherScope,
+    /// Not a token this store minted for this listing at all: not base64url, authenticated
+    /// under another key, issued for another listing, or carrying no cursor.
+    Unknown,
+}
+
+impl ContinuationTokenReading {
+    /// The refusal a bucket-configuration listing answers an UNUSABLE reading with, as
+    /// `(code, status, message)` — and the not-a-token refusal for a reading that names a
+    /// position, which a caller matching `Position` first never reaches.
+    ///
+    /// Recorded behavior, and the two readings are answered DIFFERENTLY. A token the caller
+    /// FORGED — one S3 never issued — names no page of the listing, which S3 reports against
+    /// the token itself ([`super::MALFORMED_CONTINUATION_TOKEN_CODE`], HTTP 400, the input
+    /// error a paginating client branches on). A token S3 DID issue, for another bucket's
+    /// listing of the same family, is a cursor into a listing this request does not address:
+    /// the recorded answer to one is [`super::INTERNAL_ERROR_CODE`] and its own published
+    /// sentence, rather than the addressed bucket's first page or a page resolved against
+    /// the addressed bucket's contents. The issue this was filed under reads the second case
+    /// as the first; the recording is what is followed here.
+    pub fn refusal(&self) -> (&'static str, u16, &'static str) {
+        match self {
+            Self::OtherScope => (
+                super::INTERNAL_ERROR_CODE,
+                super::INTERNAL_ERROR_STATUS,
+                super::INTERNAL_ERROR_MESSAGE,
+            ),
+            Self::Position(_) | Self::Unknown => (
+                super::MALFORMED_CONTINUATION_TOKEN_CODE,
+                super::MALFORMED_CONTINUATION_TOKEN_STATUS,
+                super::MALFORMED_CONTINUATION_TOKEN_MESSAGE,
+            ),
+        }
+    }
+}
+
+/// Read `token` against `listing` and `scope`. See [`ContinuationTokenReading`].
+pub fn read_continuation_token(
+    key: &PageTokenKey,
+    listing: PagedListing,
+    scope: &str,
+    token: &str,
+) -> ContinuationTokenReading {
+    let Some(cursor) = decode_base64url(token).and_then(|bytes| key.cursor_of(&bytes)) else {
+        return ContinuationTokenReading::Unknown;
+    };
+    let Some((label, rest)) = cursor.split_once(CURSOR_SEPARATOR) else {
+        return ContinuationTokenReading::Unknown;
+    };
+    let Some((issued_for, resume_at)) = rest.split_once(CURSOR_SEPARATOR) else {
+        return ContinuationTokenReading::Unknown;
+    };
+    if label != listing.label() {
+        return ContinuationTokenReading::Unknown;
+    }
+    match issued_for == scope {
+        true => ContinuationTokenReading::Position(resume_at.to_string()),
+        false => ContinuationTokenReading::OtherScope,
+    }
 }
 
 #[cfg(test)]
@@ -123,8 +203,9 @@ mod tests {
     use super::*;
     use crate::state::MAX_CONFIGURATION_ID_CHARS;
 
-    /// Every listing's token names its position under the key that minted it, and nothing
-    /// else does: another store's key, another family's listing, or a value a caller wrote.
+    /// Every listing's token names its position under the key that minted it, for the scope
+    /// it was issued against, and nothing else does: another store's key, another family's
+    /// listing, another bucket, or a value a caller wrote.
     #[test]
     fn a_token_names_a_position_only_for_the_store_and_listing_that_issued_it() {
         let key = PageTokenKey::new();
@@ -136,6 +217,7 @@ mod tests {
             PagedListing::Inventory,
             PagedListing::Metrics,
         ];
+        let scope = "a-bucket";
         for listing in listings {
             // Cursors spanning what one can be: one character, every character class a
             // configuration id allows, one at the published ceiling, and a directory
@@ -146,21 +228,26 @@ mod tests {
                 "z".repeat(MAX_CONFIGURATION_ID_CHARS),
                 "base--usw2-az1--x-s3".to_string(),
             ] {
-                let token = encode_continuation_token(&key, listing, &id);
+                let token = encode_continuation_token(&key, listing, scope, &id);
                 assert_eq!(
-                    decode_continuation_token(&key, listing, &token).as_deref(),
+                    decode_continuation_token(&key, listing, scope, &token).as_deref(),
                     Some(id.as_str()),
                     "case {listing:?}/{id:?}: a minted token must name its position, got \
                      {token:?}"
                 );
                 assert_eq!(
-                    decode_continuation_token(&other_store, listing, &token),
+                    decode_continuation_token(&other_store, listing, scope, &token),
                     None,
                     "case {listing:?}/{id:?}: another store's key must name no position"
                 );
+                assert_eq!(
+                    decode_continuation_token(&key, listing, "another-bucket", &token),
+                    None,
+                    "case {listing:?}/{id:?}: another scope must name no position"
+                );
                 for elsewhere in listings.iter().filter(|other| **other != listing) {
                     assert_eq!(
-                        decode_continuation_token(&key, *elsewhere, &token),
+                        decode_continuation_token(&key, *elsewhere, scope, &token),
                         None,
                         "case {listing:?}/{id:?}: must name no position in {elsewhere:?}"
                     );
@@ -203,7 +290,7 @@ mod tests {
             ("a minted token's shape", shaped),
         ] {
             assert_eq!(
-                decode_continuation_token(&key, PagedListing::Metrics, &token),
+                decode_continuation_token(&key, PagedListing::Metrics, scope, &token),
                 None,
                 "case {case}: expected no position for {token:?}"
             );
