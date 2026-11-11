@@ -19,6 +19,8 @@ mod bearer_token_gate;
 mod credential_expiry;
 #[path = "all/endpoint_agnostic_routing.rs"]
 mod endpoint_agnostic_routing;
+#[path = "all/minted_sign_in.rs"]
+mod minted_sign_in;
 #[path = "all/page_bound_clamp.rs"]
 mod page_bound_clamp;
 #[path = "all/page_token_spelling.rs"]

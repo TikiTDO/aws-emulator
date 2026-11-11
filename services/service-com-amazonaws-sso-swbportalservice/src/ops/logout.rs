@@ -177,6 +177,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let now = ::std::time::SystemTime::now();
+        // The sign-in this token names, as the records OUTSIDE this service hold it (see
+        // `ListAccounts`): resolved before this store is locked.
+        let federated = crate::state::federated_sign_in(&*self.engine, &input.access_token, now);
         // Invalidating the sign-in session is what this operation DOES. The role
         // credentials already minted for it are deliberately left alone: the model's own
         // documentation says role sessions created through a permission set "continue
@@ -186,8 +189,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `crate::state::end_expired_credentials`), which the clock owed anyway.
         let mut state = state.lock();
         crate::state::end_expired_credentials(&mut state, ctx.credential_store(), now);
-        if !state.invalidate_session(&input.access_token, now) {
+        let Some(signed_in) = state.signed_in(&input.access_token, federated.as_ref(), now) else {
             // One gate, one refusal (see `crate::state::unauthorized_session`).
+            return Err(LogoutErrorModeled::UnauthorizedException(
+                crate::state::unauthorized_session(),
+            )
+            .into());
+        };
+        // Ending a sign-in is something only this service knows, so a sign-in the
+        // emulator's own `CreateToken` minted is recorded here before it is ended —
+        // otherwise the next request would resolve it afresh against that mint and serve
+        // a sign-in this call ended.
+        state.remember_sign_in(&input.access_token, &signed_in);
+        if !state.invalidate_session(&input.access_token, now) {
+            // UNREACHABLE: the sign-in resolved as usable and was recorded, under this
+            // same lock. Answered rather than panicked, with the one refusal this service
+            // words for a token that names no usable sign-in.
             return Err(LogoutErrorModeled::UnauthorizedException(
                 crate::state::unauthorized_session(),
             )

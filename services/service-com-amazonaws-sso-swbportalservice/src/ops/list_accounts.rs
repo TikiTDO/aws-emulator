@@ -166,6 +166,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let now = ::std::time::SystemTime::now();
+        // The sign-in this token names, as the records OUTSIDE this service hold it: the
+        // token the emulator's own `CreateToken` minted and the assignments an
+        // administrator made. Resolved before this store is locked, so only one store's
+        // lock is ever held at a time.
+        let federated = crate::state::federated_sign_in(&*self.engine, &input.access_token, now);
         let mut state = state.lock();
         // The one write a listing makes, and only what the clock already owed: a minted
         // role credential past its expiration is ended here, so it stops being accepted
@@ -173,7 +178,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the listing below changes because of it. An expired SESSION is left as it is:
         // it is simply not usable, and `Logout` is what ends a session.
         crate::state::end_expired_credentials(&mut state, ctx.credential_store(), now);
-        let Some(session) = state.session(&input.access_token, now) else {
+        let Some(signed_in) = state.signed_in(&input.access_token, federated.as_ref(), now) else {
             // One gate, one refusal: the message comes from `crate::state`, so it is the
             // same constant every portal operation answers with.
             return Err(ListAccountsErrorModeled::UnauthorizedException(
@@ -182,13 +187,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
-        let assigned = state.visible_accounts(session).into_iter().map(|account| {
+        let assigned = signed_in.accounts.values().map(|account| {
             (
                 account.account_id.clone(),
                 AccountInfo {
                     account_id: Some(account.account_id.clone()),
-                    account_name: Some(account.account_name.clone()),
-                    email_address: Some(account.email_address.clone()),
+                    account_name: account.account_name.clone(),
+                    email_address: account.email_address.clone(),
                 },
             )
         });

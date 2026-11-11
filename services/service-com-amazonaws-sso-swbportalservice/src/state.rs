@@ -4,22 +4,39 @@
 //!
 //! The IAM Identity Center portal has no create API of its own: a sign-in session is
 //! minted elsewhere (`CreateToken` in the OIDC service) and the account/role
-//! assignments are made by an administrator. So everything the four portal operations
-//! report is held here and seeded through [`ComAmazonawsSsoSwbportalserviceState::put_session`]
-//! / [`ComAmazonawsSsoSwbportalserviceState::put_account`]; no handler ever synthesizes
-//! an account, a role or a session.
+//! assignments are made by an administrator. So nothing a portal operation reports is
+//! synthesized by a handler — it is RESOLVED, from the records of whoever made it:
+//!
+//! * the sign-in a presented access token names, and the accounts and roles assigned to
+//!   it, come from the emulator's own records of those two events, read where they live
+//!   ([`sign_in`], [`federated_sign_in`]);
+//! * a sign-in and an assignment handed to this store directly
+//!   ([`ComAmazonawsSsoSwbportalserviceState::put_session`] /
+//!   [`ComAmazonawsSsoSwbportalserviceState::put_account`]) are reported the same way, so
+//!   whatever stands an emulator up can seed one without an OIDC flow;
+//! * what THIS store owns is what only the portal knows: that a `Logout` ended a sign-in,
+//!   and the role credentials this portal minted.
+//!
+//! [`ComAmazonawsSsoSwbportalserviceState::signed_in`] is the one place those sources are
+//! combined, so no handler decides for itself what a token names.
 //!
 //! This module also owns the rules every handler shares, so none is written twice:
-//! resolving a presented access token to a usable session
-//! ([`ComAmazonawsSsoSwbportalserviceState::session`]), wording the refusal when it
-//! resolves to nothing ([`unauthorized_session`], and [`unauthorized_response`] for the
-//! gate in [`crate::service`] that runs before any handler), stamping an expiry without
-//! risking an overflow panic ([`expiry_after`]), ending the minted role credentials the
-//! clock has made spent ([`end_expired_credentials`]), and cutting a sorted listing into
-//! a page with an opaque cursor ([`page_of`]).
+//! wording the refusal when a token resolves to no sign-in ([`unauthorized_session`], and
+//! [`unauthorized_response`] for the gate in [`crate::service`] that runs before any
+//! handler), stamping an expiry without risking an overflow panic ([`expiry_after`]),
+//! ending the minted role credentials the clock has made spent
+//! ([`end_expired_credentials`]), and cutting a sorted listing into a page with an opaque
+//! cursor ([`page_of`]).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Resolving a presented access token against the records the REST of the emulator holds:
+/// the sign-in its own `CreateToken` minted and the IAM Identity Center assignments an
+/// administrator made. Re-exported, so `crate::state::federated_sign_in` and
+/// `crate::state::SignedIn` stay the paths handlers and tests use.
+mod sign_in;
+pub use sign_in::*;
 
 /// One IAM Identity Center sign-in session, keyed in [`ComAmazonawsSsoSwbportalserviceState::sessions`]
 /// by the access token `CreateToken` issued for it.
@@ -38,6 +55,18 @@ pub struct Session {
     pub active: bool,
     /// When the sign-in session stops being usable, whether or not anyone logs out.
     pub expires_at: SystemTime,
+    /// Whether this record is a COPY of a sign-in minted elsewhere in the emulator
+    /// ([`ComAmazonawsSsoSwbportalserviceState::remember_sign_in`]) rather than a sign-in
+    /// this store was given ([`ComAmazonawsSsoSwbportalserviceState::put_session`]).
+    ///
+    /// A copy is kept for the two things only this store knows — that a `Logout` ended the
+    /// sign-in, and which identity a credential minted for it speaks for — and it never
+    /// ANSWERS as a sign-in of its own: the mint's own record is what says whether such a
+    /// token still names one, so a token the mint no longer holds (a refresh supersedes the
+    /// access token it rotates) stops being served at that instant instead of being served
+    /// from this copy. See
+    /// [`ComAmazonawsSsoSwbportalserviceState::signed_in`].
+    pub federated: bool,
 }
 
 impl Session {
@@ -116,8 +145,17 @@ pub fn unauthorized_response(
 #[derive(Debug, Clone)]
 pub struct Account {
     pub account_id: String,
-    pub account_name: String,
-    pub email_address: String,
+    /// The account's display name, as the emulator's records of the ACCOUNT hold it, and
+    /// `None` when it holds no record of this account at all.
+    ///
+    /// `AccountInfo$accountName` is an optional member, and the portal is not where an
+    /// account's name lives: it reports the name the organization's own records carry (see
+    /// [`sign_in`]). An account nothing in the emulator has a record of has no name to
+    /// report, and reporting none is what that is — never a name derived from the id.
+    pub account_name: Option<String>,
+    /// The account's email address, on the same footing as [`Self::account_name`]
+    /// (`AccountInfo$emailAddress` is optional too).
+    pub email_address: Option<String>,
     /// The role names assigned in this account, ascending.
     pub roles: BTreeSet<String>,
 }
@@ -184,12 +222,23 @@ pub fn expiry_after(at: SystemTime, duration: Duration) -> SystemTime {
 }
 
 /// Per-service state for com-amazonaws-sso-swbportalservice. A handler reaches it through [`service_state`].
+///
+/// What is held here is what only the portal knows: that a `Logout` ended a sign-in, the
+/// role credentials this portal minted, and whatever sign-in or assignment was handed to
+/// this store directly. The sign-in and the assignments the EMULATOR records elsewhere
+/// are read where they live instead of being copied in ([`federated_sign_in`]), so an
+/// assignment an administrator makes or withdraws is in force on the next request without
+/// anything having to propagate it.
 #[derive(Debug, Default)]
 pub struct ComAmazonawsSsoSwbportalserviceState {
-    /// Sign-in sessions by access token.
+    /// Sign-in sessions by access token: one seeded here, and one this store was made to
+    /// REMEMBER because something only it knows happened to it — a `Logout` that ended it
+    /// ([`Self::invalidate_session`]) or a role credential minted for it
+    /// ([`Self::remember_sign_in`]).
     pub sessions: HashMap<String, Session>,
     /// Accounts by account id, ascending (a `BTreeMap`, so listings and their cursors
-    /// are deterministic).
+    /// are deterministic). The accounts a SEEDED session reports; a sign-in the emulator
+    /// minted carries the accounts its own assignments name.
     pub accounts: BTreeMap<String, Account>,
     /// Role credentials already minted, by [`IssuedCredentialKey`].
     pub issued_credentials: HashMap<IssuedCredentialKey, RoleCredentialRecord>,
@@ -198,10 +247,11 @@ pub struct ComAmazonawsSsoSwbportalserviceState {
 impl ComAmazonawsSsoSwbportalserviceState {
     /// Seed (or replace) an account and the roles assigned in it.
     ///
-    /// The portal models no create API, so this is how the assignments an
-    /// administrator would have made get into the emulator: a test, or whatever stands
-    /// an emulator up, calls it through [`service_state`]. The listing operations only
-    /// ever read what this stored.
+    /// The portal models no create API, so this is one of the two ways the assignments an
+    /// administrator would have made reach the emulator: a test, or whatever stands an
+    /// emulator up, calls it through [`service_state`]. The other is the administrator's
+    /// own IAM Identity Center records, which are read where they live
+    /// ([`federated_sign_in`]) rather than copied in here.
     pub fn put_account(
         &mut self,
         account_id: impl Into<String>,
@@ -212,8 +262,8 @@ impl ComAmazonawsSsoSwbportalserviceState {
         let account_id = account_id.into();
         let account = Account {
             account_id: account_id.clone(),
-            account_name: account_name.into(),
-            email_address: email_address.into(),
+            account_name: Some(account_name.into()),
+            email_address: Some(email_address.into()),
             roles: roles.into_iter().map(Into::into).collect(),
         };
         self.accounts.insert(account_id, account);
@@ -236,35 +286,21 @@ impl ComAmazonawsSsoSwbportalserviceState {
             accounts: accounts.into_iter().map(Into::into).collect(),
             active: true,
             expires_at: expiry_after(SystemTime::now(), ttl),
+            // A sign-in this store was GIVEN: no mint elsewhere in the emulator holds a
+            // record of it, so this record is the whole of it.
+            federated: false,
         };
         self.sessions.insert(access_token.into(), session);
-    }
-
-    /// The session `access_token` names, when it is one this service still serves at
-    /// `now`. `None` covers all three unauthorized cases alike — unknown token,
-    /// logged-out session, expired session — because the API distinguishes none of
-    /// them. Word the refusal with [`unauthorized_session`], never with a message of
-    /// the operation's own.
-    pub fn session(&self, access_token: &str, now: SystemTime) -> Option<&Session> {
-        let resolved = self
-            .sessions
-            .get(access_token)
-            .filter(|session| session.is_usable_at(now));
-        if resolved.is_none() {
-            // The access attempt real IAM Identity Center would record. The token is
-            // `@sensitive` and the subject is personal data, so neither is recorded:
-            // the fact of the refusal is what an assertion needs.
-            tracing::debug!(
-                target: "sso.portal",
-                "a presented access token named no usable sign-in session"
-            );
-        }
-        resolved
     }
 
     /// Invalidate the sign-in session `access_token` names, as `Logout` does.
     /// Answers whether a usable session was invalidated; `false` is the unauthorized
     /// case.
+    ///
+    /// Only a session this store holds a record of can be ended here, which is why
+    /// `Logout` records the sign-in it resolved ([`Self::remember_sign_in`]) before it
+    /// calls this: a sign-in minted by the emulator's own `CreateToken` is otherwise
+    /// resolved afresh on every request, and ending it has to be remembered somewhere.
     ///
     /// The record is kept (deactivated) rather than dropped: the credentials already
     /// minted for it are keyed by this token and, per the `Logout` documentation, they
@@ -303,6 +339,35 @@ impl ComAmazonawsSsoSwbportalserviceState {
         ended
     }
 
+    /// Forget every sign-in record the clock has made spent at `now`: one whose own expiry
+    /// has passed and that no role credential this store still holds was issued to.
+    ///
+    /// A sign-in's expiry is the instant the CLOCK makes the record spent — past it the
+    /// record answers nothing, because an expired sign-in is refused whether it is held
+    /// here or resolved from the mint — so dropping it is owed then and no response changes
+    /// because this ran. A record a still-valid credential was issued to is KEPT whatever
+    /// its expiry, because that credential goes on working for the rest of its own duration
+    /// and this record is the identity it speaks for (see [`Self::signed_in_subject`]); the
+    /// sweep is therefore run AFTER [`Self::expire_credentials`], when every credential left
+    /// is one still inside its duration.
+    ///
+    /// This is what bounds the record count: a request presenting a token the emulator's
+    /// own mint issued has one recorded for it ([`Self::remember_sign_in`]), and the records
+    /// of tokens whose lifetimes have run out are reclaimed here rather than held for the
+    /// life of the process.
+    pub fn expire_sessions(&mut self, now: SystemTime) {
+        // The tokens a credential still speaks through, read once: the sweep is run on
+        // every request, so it walks the credentials once rather than once per record.
+        let issued_to: HashSet<&str> = self
+            .issued_credentials
+            .keys()
+            .map(|(access_token, _, _)| access_token.as_str())
+            .collect();
+        self.sessions.retain(|access_token, session| {
+            session.expires_at > now || issued_to.contains(access_token.as_str())
+        });
+    }
+
     /// Who the role credential `access_key_id` speaks for: the subject of the sign-in
     /// session this portal issued that credential to, while the credential itself is
     /// still usable at `now`.
@@ -325,34 +390,14 @@ impl ComAmazonawsSsoSwbportalserviceState {
             .and_then(|((access_token, _, _), _)| self.sessions.get(access_token))
             .map(|session| session.subject.as_str())
     }
-
-    /// The accounts `session` is assigned to, ascending by account id, skipping an
-    /// assignment whose account this service holds no record of (there is nothing to
-    /// report for it).
-    pub fn visible_accounts(&self, session: &Session) -> Vec<&Account> {
-        session
-            .accounts
-            .iter()
-            .filter_map(|account_id| self.accounts.get(account_id))
-            .collect()
-    }
-
-    /// The account `account_id` names, when `session` is assigned to it. `None` is the
-    /// `ResourceNotFoundException` case: an account the presented session cannot see
-    /// does not exist as far as that session is concerned.
-    pub fn visible_account(&self, session: &Session, account_id: &str) -> Option<&Account> {
-        session
-            .accounts
-            .contains(account_id)
-            .then(|| self.accounts.get(account_id))
-            .flatten()
-    }
 }
 
 /// End every minted role credential the clock has made spent at `now`: drop its record
 /// here and forget the credential it names in the emulator's credential store, so the
 /// emulator stops accepting it for signing at exactly the `expiration` the response that
-/// minted it advertised.
+/// minted it advertised; then reclaim every sign-in record the clock has made spent too
+/// ([`ComAmazonawsSsoSwbportalserviceState::expire_sessions`]), which is what keeps this
+/// store's record count bounded.
 ///
 /// Every handler calls this before it serves, because the expiration is due at its
 /// instant and not at the next request for the same role: a credential nobody asks about
@@ -377,6 +422,9 @@ pub fn end_expired_credentials(
             "a minted role credential reached its expiration and was ended"
         );
     }
+    // After the credentials, so a record still speaking for a usable credential is kept
+    // and every other expired record is reclaimed.
+    state.expire_sessions(now);
 }
 
 /// `at` as epoch milliseconds, the unit `RoleCredentials$expiration` is modeled in.

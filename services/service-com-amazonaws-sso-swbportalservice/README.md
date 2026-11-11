@@ -106,12 +106,31 @@ Do not add a second engine crate — the router and every service must share
 one `InMemoryEngine` type or the engine the router injects cannot be handed to this
 service's operations.
 
-## Seeding the portal fixture
+## Where a sign-in and an assignment come from
 
-The portal API is read-only: it has no operation that creates a sign-in session, an
-account or a role assignment. A session is minted by the OIDC service's `CreateToken`,
-and the assignments are made by an administrator — so the emulator takes them through
-`state.rs` instead, and the four operations only ever report what is there:
+The portal API creates nothing: it has no operation that creates a sign-in session, an
+account or a role assignment. Both events happen elsewhere in the emulator, and this
+service RESOLVES them where they are recorded, in the same shared engine:
+
+- the sign-in is the access token IAM Identity Center OIDC's `CreateToken` minted
+  (`RegisterClient` -> `StartDeviceAuthorization` -> approval at the portal page ->
+  `CreateToken`), which is what `aws sso login` performs;
+- the accounts and roles are IAM Identity Center's own account assignments
+  (`CreatePermissionSet` + `CreateAccountAssignment`), a role being the NAME of the
+  permission set an assignment grants;
+- an assigned account's `accountName`/`emailAddress` are the organization's records of that
+  account, and are reported absent for an account the emulator holds no record of.
+
+So a client that signs in against the emulator's own OIDC endpoint and then calls
+`ListAccounts` is served, with no fixture code involved; an assignment an administrator
+withdraws stops being reported on the next request, because nothing is copied into this
+service's store. `state::federated_sign_in` does that resolution and
+`ComAmazonawsSsoSwbportalserviceState::signed_in` is the one place it is combined with what
+this store owns — that a `Logout` ended a sign-in, and the role credentials this portal
+minted.
+
+A sign-in and an assignment can also be handed to this store directly, for a test or
+whatever stands an emulator up, and are reported exactly the same way:
 
 ```rust
 let store = service_com_amazonaws_sso_swbportalservice::state::service_state(&*engine)
@@ -121,11 +140,13 @@ store.put_account("111111111111", "Production", "production@example.com", ["Admi
 store.put_session("tok-1", "alice@example.com", ["111111111111"], std::time::Duration::from_secs(8 * 60 * 60));
 ```
 
-With nothing seeded there are no sessions, so every operation answers
-`UnauthorizedException` (401) — which is what a portal holding no sign-in sessions
-should say. That refusal is one constant for the whole service
+A token that names neither — one the emulator never issued, one past its own lifetime, or
+one whose sign-in was logged out — is `UnauthorizedException` (401). That refusal is one
+constant for the whole service
 (`state::INVALID_SESSION_MESSAGE`, returned through `state::unauthorized_session`): the
 Portal API's authentication gate answers the same message on every operation and for
-every token, so no handler words it itself. `tests/all/portal_session.rs` drives the
-whole loop through HTTP, and `tests/all/unauthorized_rejection.rs` sweeps the gate over
+every token, so no handler words it itself. `tests/all/minted_sign_in.rs` drives the whole
+loop — sign-in, assignments, listings, credentials and logout — over HTTP against the
+services that record them, `tests/all/portal_session.rs` drives it over seeded state, and
+`tests/all/unauthorized_rejection.rs` sweeps the gate over
 the operations × token classes × the rest of the request.

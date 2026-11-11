@@ -165,26 +165,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let now = ::std::time::SystemTime::now();
+        // The sign-in this token names, as the records OUTSIDE this service hold it (see
+        // `ListAccounts`): resolved before this store is locked.
+        let federated = crate::state::federated_sign_in(&*self.engine, &input.access_token, now);
         let mut state = state.lock();
         // Every credential whose advertised expiration has passed is spent, so it ends
         // here before anything else is read or minted.
         crate::state::end_expired_credentials(&mut state, ctx.credential_store(), now);
 
-        // Resolve the session, then the assignment, before anything is minted. Both
-        // answers are read out as plain values so the shared borrow of the store ends
-        // here and the issuing step below can write.
-        let role_assigned = match state.session(&input.access_token, now) {
-            Some(session) => state
-                .visible_account(session, &input.account_id)
-                .is_some_and(|account| account.roles.contains(&input.role_name)),
-            None => {
-                // One gate, one refusal (see `crate::state::unauthorized_session`).
-                return Err(GetRoleCredentialsErrorModeled::UnauthorizedException(
-                    crate::state::unauthorized_session(),
-                )
-                .into());
-            }
+        // Resolve the sign-in, then the assignment, before anything is minted.
+        let Some(signed_in) = state.signed_in(&input.access_token, federated.as_ref(), now) else {
+            // One gate, one refusal (see `crate::state::unauthorized_session`).
+            return Err(GetRoleCredentialsErrorModeled::UnauthorizedException(
+                crate::state::unauthorized_session(),
+            )
+            .into());
         };
+        let role_assigned = signed_in
+            .account(&input.account_id)
+            .is_some_and(|account| account.roles.contains(&input.role_name));
         if !role_assigned {
             // Either the account is not one this session can see or the role is not
             // assigned in it: either way there is no such role session to return.
@@ -243,6 +242,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     )),
                 };
                 state.issued_credentials.insert(key, record.clone());
+                // The identity this credential speaks for has to stay resolvable for the
+                // credential's OWN duration — past a `Logout`, and past the sign-in's own
+                // expiry — so the mint records the sign-in it was issued to. A sign-in
+                // this store already has a record of is left exactly as it is.
+                state.remember_sign_in(&input.access_token, &signed_in);
                 record
             }
         };

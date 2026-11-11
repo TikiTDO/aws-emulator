@@ -161,11 +161,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let now = ::std::time::SystemTime::now();
+        // The sign-in this token names, as the records OUTSIDE this service hold it (see
+        // `ListAccounts`): resolved before this store is locked.
+        let federated = crate::state::federated_sign_in(&*self.engine, &input.access_token, now);
         let mut state = state.lock();
         // The one write a listing makes, and only what the clock already owed (see
         // `crate::state::end_expired_credentials`): nothing reported below depends on it.
         crate::state::end_expired_credentials(&mut state, ctx.credential_store(), now);
-        let Some(session) = state.session(&input.access_token, now) else {
+        let Some(signed_in) = state.signed_in(&input.access_token, federated.as_ref(), now) else {
             // One gate, one refusal (see `crate::state::unauthorized_session`).
             return Err(ListAccountRolesErrorModeled::UnauthorizedException(
                 crate::state::unauthorized_session(),
@@ -175,7 +178,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // An account the presented session is not assigned to does not exist as far as
         // that session is concerned.
-        let Some(account) = state.visible_account(session, &input.account_id) else {
+        let Some(account) = signed_in.account(&input.account_id) else {
             return Err(ListAccountRolesErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
                     message: Some(format!(

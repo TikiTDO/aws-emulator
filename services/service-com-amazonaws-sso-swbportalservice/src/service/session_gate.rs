@@ -5,7 +5,10 @@
 //!
 //! The portal has exactly one caller identity — the sign-in session the presented bearer
 //! token names — so a request presenting no usable session is an unauthenticated request
-//! and is refused as one, whatever else it did or did not carry.
+//! and is refused as one, whatever else it did or did not carry. The session itself is
+//! resolved through [`crate::state::ComAmazonawsSsoSwbportalserviceState::signed_in`],
+//! the one place this service decides what a token names, so the gate and the handler
+//! behind it cannot disagree.
 //!
 //! A handler's own gate cannot state that rule by itself. The framework reads and
 //! validates a request's modelled members BEFORE it calls any handler, so a value outside
@@ -54,8 +57,9 @@ impl<Eng: Send + Sync + 'static> SessionGate<Eng> {
     /// header at all, or one naming a session that is unknown, logged out or expired —
     /// because the portal authenticates a caller by that session and distinguishes none
     /// of them. It is the same question
-    /// [`crate::state::ComAmazonawsSsoSwbportalserviceState::session`] answers for a
-    /// handler, asked of a request that has not reached one.
+    /// [`crate::state::ComAmazonawsSsoSwbportalserviceState::signed_in`] answers for a
+    /// handler, asked of a request that has not reached one — resolved against the same
+    /// two sources, so the gate cannot refuse a token a handler would have served.
     ///
     /// A pure READ: it writes nothing, so asking it cannot change what a later caller
     /// sees, and two identical requests get the identical answer.
@@ -73,8 +77,11 @@ impl<Eng: Send + Sync + 'static> SessionGate<Eng> {
             // the framework's own answer stands.
             return true;
         };
+        let now = SystemTime::now();
+        // Resolved before this store is locked, exactly as a handler does it.
+        let federated = crate::state::federated_sign_in(&*self.engine, token, now);
         let state = state.lock();
-        state.session(token, SystemTime::now()).is_some()
+        state.signed_in(token, federated.as_ref(), now).is_some()
     }
 }
 

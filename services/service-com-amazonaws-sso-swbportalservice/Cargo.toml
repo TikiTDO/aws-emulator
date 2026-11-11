@@ -21,6 +21,16 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# The sign-in a presented access token names is the one the emulator's own IAM Identity
+# Center OIDC `CreateToken` minted, so the token is resolved against that service's own
+# record of it rather than against a copy kept here.
+service-com-amazonaws-ssooidc-awsssooidcservice = { workspace = true }
+# The account assignments an administrator made are IAM Identity Center's own records, and
+# they are what the portal reports, so they are read where they live.
+service-com-amazonaws-ssoadmin-swbexternalservice = { workspace = true }
+# An assigned account's display name and email address are the organization's records of
+# that account, which is what `AccountInfo` reports them from.
+service-com-amazonaws-organizations-awsorganizationsv20161128 = { workspace = true }
 # Encodes the opaque pagination cursors `src/state.rs` issues (hex in, hex out).
 hex = { workspace = true }
 # Digests the access token into a pagination cursor's scope, so a cursor is bound to
