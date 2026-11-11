@@ -120,7 +120,7 @@ use aws_smithy_runtime_api::client::http::HttpConnector;
 use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse, StatusCode};
 use aws_smithy_types::body::SdkBody;
 use smithy_server_runtime::{http, OperationContext};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use super::edge_metrics;
 use super::origin_access::{self, OriginAccess};
@@ -787,6 +787,9 @@ pub async fn serve<Eng: Send + Sync + 'static>(
     ctx: &OperationContext<'_>,
 ) -> RtResponse {
     let now = SystemTime::now();
+    // When the edge RECEIVED this request, on the monotonic clock: the instant the origin
+    // latency of an answer an origin produces is measured from ([`edge_metrics`]).
+    let received = Instant::now();
     let cf_id;
     let served_for;
     let plan;
@@ -810,7 +813,7 @@ pub async fn serve<Eng: Send + Sync + 'static>(
     // origin request made — while the answer is still counted into the distribution's own
     // series, the edge having served it. Asked with THIS service's store released, since
     // the decision locks the WAFv2 service's own ([`super::web_acl`]).
-    let response = match served_for
+    let (response, served_from, origin_latency) = match served_for
         .as_ref()
         .and_then(|served| {
             super::web_acl::refusal(
@@ -821,18 +824,41 @@ pub async fn serve<Eng: Send + Sync + 'static>(
                 &served.query,
             )
         }) {
-        Some(refusal) => refused_by_web_acl(refusal, &cf_id),
+        Some(refusal) => (
+            refused_by_web_acl(refusal, &cf_id),
+            edge_metrics::ServedFrom::CloudFront,
+            None,
+        ),
         None => match plan {
-            Plan::Generated { status, detail } => generated(status, detail, &cf_id),
-            Plan::Hit { answer, encode } => {
-                served_origin_answer(&answer, encode, CACHE_HIT, &cf_id)
+            Plan::Generated { status, detail } => (
+                generated(status, detail, &cf_id),
+                edge_metrics::ServedFrom::CloudFront,
+                None,
+            ),
+            Plan::Hit { answer, encode } => (
+                served_origin_answer(&answer, encode, CACHE_HIT, &cf_id),
+                edge_metrics::ServedFrom::EdgeCache,
+                None,
+            ),
+            Plan::Fetch(fetch) => {
+                let fetched = fetch_origin(engine, ctx, *fetch, &cf_id, req, received).await;
+                // An origin that answered is what the answer came FROM; one that answered
+                // nothing leaves CloudFront to produce the answer itself, which is no
+                // origin's and has no origin latency.
+                let served_from = if fetched.origin_latency.is_some() {
+                    edge_metrics::ServedFrom::Origin
+                } else {
+                    edge_metrics::ServedFrom::CloudFront
+                };
+                (fetched.response, served_from, fetched.origin_latency)
             }
-            Plan::Fetch(fetch) => fetch_origin(engine, ctx, *fetch, &cf_id, req).await,
         },
     };
     // What the edge DID with this request is reported as the distribution's own CloudWatch
     // series, whoever produced the answer: the counters and error rates a client watches a
-    // distribution with are the viewer requests it served ([`edge_metrics`]).
+    // distribution with are the viewer requests it served ([`edge_metrics`]). The series the
+    // distribution's monitoring subscription adds to those are published beside them where
+    // that subscription enables them, and for no other distribution.
     if let Some(served) = served_for {
         edge_metrics::count_viewer_request(
             engine,
@@ -843,7 +869,10 @@ pub async fn serve<Eng: Send + Sync + 'static>(
                 status: response.status().as_u16(),
                 response_bytes: response.body().bytes().map_or(0, <[u8]>::len),
                 request_bytes,
+                served_from,
+                origin_latency,
             },
+            served.additional_metrics,
         );
     }
     response
@@ -871,11 +900,15 @@ fn refused_by_web_acl(refusal: super::web_acl::Refusal, cf_id: &str) -> RtRespon
 }
 
 /// The distribution one viewer request resolved to, and everything about it the edge still
-/// needs once the store's lock is released: the id its series is counted under, the web ACL
-/// its configuration puts in front of it, and the viewer path and query a rule inspects.
+/// needs once the store's lock is released: the id its series is counted under, whether its
+/// monitoring subscription enables the additional series, the web ACL its configuration puts
+/// in front of it, and the viewer path and query a rule inspects.
 #[derive(Debug)]
 struct ServedFor {
     id: String,
+    /// What this distribution's monitoring subscription says about its ADDITIONAL CloudWatch
+    /// series ([`edge_metrics::AdditionalMetrics`]).
+    additional_metrics: edge_metrics::AdditionalMetrics,
     /// `DistributionConfig$WebACLId` as the stored configuration carries it — the empty
     /// string for a distribution that names none.
     web_acl_id: String,
@@ -906,6 +939,9 @@ fn plan_request(
     };
     let served_for = ServedFor {
         id: resolved.distribution.id.clone(),
+        additional_metrics: edge_metrics::AdditionalMetrics::of_subscription(
+            resolved.distribution.monitoring_subscription.as_ref(),
+        ),
         web_acl_id: resolved
             .distribution
             .config
@@ -1345,6 +1381,27 @@ fn origin_request_headers(
     headers
 }
 
+/// One answer the edge reached for the origin to produce, and what the metrics read it by:
+/// the response the viewer gets, and — when an ORIGIN really answered — how long the edge had
+/// been working on the request when that answer was ready, which is the span
+/// [`edge_metrics::ORIGIN_LATENCY_METRIC`] measures. `origin_latency` is `None` for every path
+/// where no origin answered, so an answer CloudFront produced for an origin it could not reach
+/// is not reported as an origin's.
+struct Fetched {
+    response: RtResponse,
+    origin_latency: Option<Duration>,
+}
+
+impl Fetched {
+    /// An answer CloudFront produced itself, no origin having answered.
+    fn of_cloudfront(response: RtResponse) -> Self {
+        Self {
+            response,
+            origin_latency: None,
+        }
+    }
+}
+
 /// Fetch the origin, serve what it answered, and cache it when the behaviour caches it.
 ///
 /// The fetch goes through the transport `OperationContext::callback` hands this handler,
@@ -1356,7 +1413,8 @@ async fn fetch_origin<Eng: Send + Sync + 'static>(
     fetch: OriginFetch,
     cf_id: &str,
     req: &RtRequest,
-) -> RtResponse {
+    received: Instant,
+) -> Fetched {
     let body = req.body().bytes().map(<[u8]>::to_vec).unwrap_or_default();
     let mut builder = ::http::Request::builder()
         .method(req.method())
@@ -1374,7 +1432,7 @@ async fn fetch_origin<Eng: Send + Sync + 'static>(
                 "the configured origin does not render an HTTP request, so no origin \
                  request was made"
             );
-            return generated(BAD_GATEWAY, NO_ORIGIN_DETAIL, cf_id);
+            return Fetched::of_cloudfront(generated(BAD_GATEWAY, NO_ORIGIN_DETAIL, cf_id));
         }
     };
     // The ORIGIN ACCESS CONTROL's own half of the fetch: a request the origin's resource
@@ -1425,7 +1483,7 @@ async fn fetch_origin<Eng: Send + Sync + 'static>(
                 "the configured origin does not render an HTTP request, so no origin \
                  request was made"
             );
-            return generated(BAD_GATEWAY, NO_ORIGIN_DETAIL, cf_id);
+            return Fetched::of_cloudfront(generated(BAD_GATEWAY, NO_ORIGIN_DETAIL, cf_id));
         }
     };
     let transport = ctx.callback().http_connector();
@@ -1437,7 +1495,7 @@ async fn fetch_origin<Eng: Send + Sync + 'static>(
                 timeout_seconds = fetch.read_timeout.as_secs(),
                 "the origin did not answer within its read timeout"
             );
-            return generated(BAD_GATEWAY, NO_ORIGIN_DETAIL, cf_id);
+            return Fetched::of_cloudfront(generated(BAD_GATEWAY, NO_ORIGIN_DETAIL, cf_id));
         }
         Ok(Err(error)) => {
             ::tracing::warn!(
@@ -1445,10 +1503,13 @@ async fn fetch_origin<Eng: Send + Sync + 'static>(
                 error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
                 "the configured origin could not be reached"
             );
-            return generated(BAD_GATEWAY, NO_ORIGIN_DETAIL, cf_id);
+            return Fetched::of_cloudfront(generated(BAD_GATEWAY, NO_ORIGIN_DETAIL, cf_id));
         }
         Ok(Ok(response)) => response,
     };
+    // The origin has answered, so this is the span from the edge receiving the viewer request
+    // to the answer being ready: what the origin latency of this request is.
+    let origin_latency = received.elapsed();
     let status = response.status().as_u16();
     // What the ORIGIN said about its own bytes: the media type, which decides whether the
     // edge may compress them, and the coding they are already under, which means it must
@@ -1472,7 +1533,7 @@ async fn fetch_origin<Eng: Send + Sync + 'static>(
             "nothing in this emulator serves the configured origin, so no origin response \
              exists to serve"
         );
-        return generated(BAD_GATEWAY, NO_ORIGIN_DETAIL, cf_id);
+        return Fetched::of_cloudfront(generated(BAD_GATEWAY, NO_ORIGIN_DETAIL, cf_id));
     }
     let answer = OriginAnswer {
         status,
@@ -1499,7 +1560,10 @@ async fn fetch_origin<Eng: Send + Sync + 'static>(
     } else {
         CACHE_ERROR
     };
-    served_origin_answer(&answer, fetch.encode, x_cache, cf_id)
+    Fetched {
+        response: served_origin_answer(&answer, fetch.encode, x_cache, cf_id),
+        origin_latency: Some(origin_latency),
+    }
 }
 
 /// The error types that are the in-process TRANSPORT's own refusal rather than an answer

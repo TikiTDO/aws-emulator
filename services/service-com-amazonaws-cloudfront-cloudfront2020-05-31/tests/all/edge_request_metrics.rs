@@ -62,7 +62,7 @@ const PERIOD: i64 = 60;
 /// One emulator carrying this service and CloudWatch on ONE engine: the edge publishes into
 /// the CloudWatch store, so both have to be mounted on the same engine for a client to read
 /// back what the edge reported.
-fn emulator() -> MultiServiceRouter {
+pub(crate) fn emulator() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
@@ -77,7 +77,7 @@ fn emulator() -> MultiServiceRouter {
 
 /// One viewer request: no AWS credential, addressed to the distribution's own domain name,
 /// exactly as a browser reaches a distribution. Answers the status and the body's length.
-async fn view(
+pub(crate) async fn view(
     router: &MultiServiceRouter,
     method: &str,
     domain: &str,
@@ -95,7 +95,7 @@ async fn view(
 }
 
 /// One CloudWatch call (`awsJson1_0`), which must answer 200.
-async fn cloudwatch(
+pub(crate) async fn cloudwatch(
     router: &MultiServiceRouter,
     case: &str,
     operation: &str,
@@ -135,7 +135,7 @@ async fn cloudwatch(
 }
 
 /// Wall-clock now as epoch seconds, the clock a datapoint's instant is stamped on.
-fn now_secs() -> f64 {
+pub(crate) fn now_secs() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0.0, |since| since.as_secs_f64())
@@ -191,7 +191,7 @@ async fn created(router: &MultiServiceRouter, caller_reference: &str, origin: &s
 }
 
 /// Assert through `GetDistribution` that the clock has deployed `id`.
-async fn assert_deployed(router: &MultiServiceRouter, id: &str) {
+pub(crate) async fn assert_deployed(router: &MultiServiceRouter, id: &str) {
     let read = call(
         router,
         "GET",
@@ -218,17 +218,17 @@ fn window(at: f64) -> (f64, f64) {
 /// What one series holds over the whole window: how many observations, their sum, and the
 /// unit every one of them was published under.
 #[derive(Debug, Default)]
-struct Held {
-    samples: f64,
-    sum: f64,
-    units: Vec<String>,
+pub(crate) struct Held {
+    pub(crate) samples: f64,
+    pub(crate) sum: f64,
+    pub(crate) units: Vec<String>,
 }
 
 impl Held {
     /// The average over every observation in the window — the statistic a rate is read with,
     /// folded across the windows the read split the span into so the answer does not depend
     /// on which minute boundary the traffic straddled.
-    fn average(&self) -> f64 {
+    pub(crate) fn average(&self) -> f64 {
         if self.samples == 0.0 {
             return f64::NAN;
         }
@@ -237,7 +237,7 @@ impl Held {
 }
 
 /// Read one of a distribution's series over the whole window.
-async fn held(
+pub(crate) async fn held(
     router: &MultiServiceRouter,
     case: &str,
     distribution_id: &str,
@@ -274,7 +274,7 @@ async fn held(
 }
 
 /// The dimension set a distribution's own series carries, as a request names it.
-fn dimensions(distribution_id: &str) -> Value {
+pub(crate) fn dimensions(distribution_id: &str) -> Value {
     json!([
         {"Name": edge_metrics::DISTRIBUTION_ID_DIMENSION, "Value": distribution_id},
         {"Name": edge_metrics::REGION_DIMENSION, "Value": edge_metrics::GLOBAL_REGION},

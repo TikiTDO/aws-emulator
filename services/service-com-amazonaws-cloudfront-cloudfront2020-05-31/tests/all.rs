@@ -121,6 +121,8 @@ mod distributions_by_web_acl_id;
 mod domain_conflicts;
 #[path = "all/duplicate_name_conflict_wording.rs"]
 mod duplicate_name_conflict_wording;
+#[path = "all/edge_additional_metrics.rs"]
+mod edge_additional_metrics;
 #[path = "all/edge_data_plane.rs"]
 mod edge_data_plane;
 #[path = "all/edge_geo_restriction.rs"]

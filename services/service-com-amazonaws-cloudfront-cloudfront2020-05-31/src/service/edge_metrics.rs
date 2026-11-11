@@ -35,6 +35,34 @@
 //!   answered in it — which is what the metric is, and is why it is published with
 //!   [`PERCENT_UNIT`].
 //!
+//! Beside those DEFAULT series, a distribution has a second set a client OPTS IN to: the
+//! additional metrics a monitoring subscription buys
+//! (`RealtimeMetricsSubscriptionConfig$RealtimeMetricsSubscriptionStatus` — "a flag that
+//! indicates whether additional CloudWatch metrics are enabled for a given CloudFront
+//! distribution"). They are published for exactly the same traffic, in the same namespace and
+//! under the same dimensions, and ONLY while that flag is `Enabled`
+//! ([`ADDITIONAL_DISTRIBUTION_METRICS`], [`AdditionalMetrics`]): a distribution carrying no
+//! subscription, or one whose subscription is `Disabled`, publishes none of them — so such a
+//! series has no datapoint in any minute, while the DEFAULT series the same traffic fills is
+//! what tells a client the traffic was served at all. What each of them carries follows its
+//! own definition:
+//!
+//! * [`CACHE_HIT_RATE_METRIC`] — "the percentage of all cacheable requests for which
+//!   CloudFront served the content from its cache", where "HTTP POST and PUT requests, and
+//!   errors, are not considered cacheable requests": one observation of [`WHOLE_PERCENT`] for
+//!   a cacheable request the edge cache answered and 0 for one the origin answered, and NO
+//!   observation at all for a request that is not cacheable — so the `Average` over a period
+//!   is the share of that period's cacheable requests served from the cache, and a period of
+//!   nothing but uploads and errors has no hit rate rather than a rate of zero;
+//! * [`ORIGIN_LATENCY_METRIC`] — "the total time spent from when CloudFront receives a request
+//!   to when it starts providing a response to the network (not the viewer) for requests that
+//!   are served from the origin, not the CloudFront cache": the measured span of serving one
+//!   such request, in [`MILLISECONDS_UNIT`], published only for a request an origin answered;
+//! * [`STATUS_ERROR_RATE_METRICS`] — one series per status code CloudFront reports a rate for,
+//!   each "the percentage of all viewer requests for which the response's HTTP status code is"
+//!   that code: published per request exactly as the class rates above are, so the `Average`
+//!   over a period is the share of its requests answered with that one status.
+//!
 //! The datapoints go into the CloudWatch emulator's OWN metric store — the same store
 //! `ListMetrics`, `GetMetricStatistics` and the alarm evaluation read — reached through the
 //! shared engine, so one metric has one home and the publisher and its readers cannot drift.
@@ -43,7 +71,7 @@
 //! `PutMetricDataInput$Namespace`).
 
 use ::service_com_amazonaws_cloudwatch_graniteserviceversion20100801 as cloudwatch;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The namespace CloudFront reports its per-distribution metrics in.
 pub const NAMESPACE: &str = "AWS/CloudFront";
@@ -77,7 +105,9 @@ pub const FOUR_XX_ERROR_RATE_METRIC: &str = "4xxErrorRate";
 /// The share of the period's viewer requests answered with a 5xx status.
 pub const FIVE_XX_ERROR_RATE_METRIC: &str = "5xxErrorRate";
 
-/// Every per-distribution series the edge publishes for a distribution that serves traffic.
+/// Every DEFAULT per-distribution series the edge publishes for a distribution that serves
+/// traffic — the ones every distribution has, whether or not it is subscribed to the
+/// additional metrics ([`ADDITIONAL_DISTRIBUTION_METRICS`]).
 ///
 /// All of them are published for every request, so a distribution with traffic HAS each of
 /// these series and a reader of one is not told a period had no requests because that
@@ -91,9 +121,57 @@ pub const DISTRIBUTION_METRICS: &[&str] = &[
     FIVE_XX_ERROR_RATE_METRIC,
 ];
 
+/// The share of the period's CACHEABLE viewer requests the edge cache answered.
+///
+/// One of the ADDITIONAL metrics: published only while the distribution's monitoring
+/// subscription enables them ([`AdditionalMetrics`]).
+pub const CACHE_HIT_RATE_METRIC: &str = "CacheHitRate";
+
+/// How long the edge took to answer a viewer request an ORIGIN answered.
+///
+/// One of the ADDITIONAL metrics ([`AdditionalMetrics`]).
+pub const ORIGIN_LATENCY_METRIC: &str = "OriginLatency";
+
+/// The per-STATUS-CODE error rates CloudFront reports, each beside the status whose share of
+/// the period's viewer requests it carries.
+///
+/// One series per code, all of them ADDITIONAL metrics ([`AdditionalMetrics`]): the codes
+/// CloudFront publishes a rate of its own for, as the "Additional metrics" of its
+/// distribution metrics name them (`401ErrorRate`, `403ErrorRate`, `404ErrorRate`,
+/// `502ErrorRate`, `503ErrorRate`, `504ErrorRate`). A status outside this list is reported by
+/// the CLASS rates alone, which every distribution publishes.
+pub const STATUS_ERROR_RATE_METRICS: [(u16, &str); 6] = [
+    (401, "401ErrorRate"),
+    (403, "403ErrorRate"),
+    (404, "404ErrorRate"),
+    (502, "502ErrorRate"),
+    (503, "503ErrorRate"),
+    (504, "504ErrorRate"),
+];
+
+/// Every ADDITIONAL per-distribution series, in the order a request observes them: the series
+/// a distribution publishes only while its monitoring subscription enables them.
+///
+/// [`CACHE_HIT_RATE_METRIC`] and [`ORIGIN_LATENCY_METRIC`] are each observed only by the
+/// requests their own definitions count, so one request need not fill every one of these — but
+/// no request fills ANY of them for a distribution that is not subscribed.
+pub const ADDITIONAL_DISTRIBUTION_METRICS: &[&str] = &[
+    CACHE_HIT_RATE_METRIC,
+    ORIGIN_LATENCY_METRIC,
+    STATUS_ERROR_RATE_METRICS[0].1,
+    STATUS_ERROR_RATE_METRICS[1].1,
+    STATUS_ERROR_RATE_METRICS[2].1,
+    STATUS_ERROR_RATE_METRICS[3].1,
+    STATUS_ERROR_RATE_METRICS[4].1,
+    STATUS_ERROR_RATE_METRICS[5].1,
+];
+
 /// The unit an error-rate series carries: it is a percentage of the period's requests, which
 /// is the `StandardUnit` value `Percent`.
 const PERCENT_UNIT: &str = "Percent";
+
+/// The unit a latency series carries, as the `StandardUnit` enumerated type spells it.
+pub const MILLISECONDS_UNIT: &str = "Milliseconds";
 
 /// The percentage ONE request contributes to the rate of the class its own status falls in:
 /// that request was wholly of that class.
@@ -117,10 +195,64 @@ const DOWNLOADING_METHODS: [&str; 3] = ["GET", "HEAD", "OPTIONS"];
 /// POST and PUT requests").
 const UPLOADING_METHODS: [&str; 2] = ["POST", "PUT"];
 
+/// The methods whose requests are NOT cacheable requests, and so take no part in
+/// [`CACHE_HIT_RATE_METRIC`]: "HTTP POST and PUT requests, and errors, are not considered
+/// cacheable requests".
+const UNCACHEABLE_METHODS: [&str; 2] = ["POST", "PUT"];
+
 /// The lowest status of the 4xx class, and of the 5xx class, and the first status past both.
 const CLIENT_ERROR_STATUS: u16 = 400;
 const SERVER_ERROR_STATUS: u16 = 500;
 const PAST_SERVER_ERROR_STATUS: u16 = 600;
+
+/// WHO produced the answer one viewer request was served with, which is what the cache and
+/// origin series read it by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServedFrom {
+    /// The edge cache held the answer, so no origin request was made for this viewer.
+    EdgeCache,
+    /// An origin produced the answer for this very request.
+    Origin,
+    /// CloudFront produced the answer itself, reaching neither its cache nor an origin.
+    CloudFront,
+}
+
+/// Whether a distribution's ADDITIONAL metrics are published for the traffic it serves.
+///
+/// The one reading of the subscription flag, so the publisher and anything else asking what a
+/// distribution reports cannot disagree: the additional series exist for a distribution whose
+/// monitoring subscription carries
+/// `RealtimeMetricsSubscriptionConfig$RealtimeMetricsSubscriptionStatus` `Enabled` — "a flag
+/// that indicates whether additional CloudWatch metrics are enabled for a given CloudFront
+/// distribution" — and for no other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdditionalMetrics {
+    /// A subscription enables them, so they are published beside the default series.
+    Enabled,
+    /// No subscription enables them, so none of them is published at all.
+    Withheld,
+}
+
+/// The one `RealtimeMetricsSubscriptionStatus` value that enables the additional metrics, as
+/// the enumerated type spells it (`REALTIME_METRICS_SUBSCRIPTION_STATUS_VALUES`).
+const REALTIME_METRICS_ENABLED: &str = "Enabled";
+
+impl AdditionalMetrics {
+    /// What the monitoring subscription a distribution carries — `None` for a distribution
+    /// carrying none — says about its additional metrics.
+    pub fn of_subscription(subscription: Option<&crate::ops::types::MonitoringSubscription>) -> Self {
+        let enabled = subscription
+            .and_then(|subscription| subscription.realtime_metrics_subscription_config.as_ref())
+            .is_some_and(|config| {
+                config.realtime_metrics_subscription_status == REALTIME_METRICS_ENABLED
+            });
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Withheld
+        }
+    }
+}
 
 /// ONE viewer request the edge answered, as these series read it.
 #[derive(Debug)]
@@ -133,12 +265,23 @@ pub struct ServedRequest<'a> {
     pub response_bytes: usize,
     /// How many bytes of body the viewer sent.
     pub request_bytes: usize,
+    /// Who produced the answer, which is what the hit rate reads.
+    pub served_from: ServedFrom,
+    /// How long the edge took to answer, for an answer an ORIGIN produced: the span
+    /// [`ORIGIN_LATENCY_METRIC`] is the measure of. `None` for a request no origin answered,
+    /// which that series does not count.
+    pub origin_latency: Option<Duration>,
 }
 
+/// One observation a served request contributes to one series: the metric, the value, and the
+/// unit the value is published under (`None` for a measurement CloudFront publishes without
+/// one).
+type Observation = (&'static str, f64, Option<&'static str>);
+
 impl ServedRequest<'_> {
-    /// What this one request contributes to each of the distribution's series: the metric, the
-    /// value, and the unit the value is published under.
-    fn observations(&self) -> [(&'static str, f64, Option<&'static str>); 6] {
+    /// What this one request contributes to each of the distribution's DEFAULT series: the
+    /// metric, the value, and the unit the value is published under.
+    fn observations(&self) -> [Observation; 6] {
         let four_xx = (CLIENT_ERROR_STATUS..SERVER_ERROR_STATUS).contains(&self.status);
         let five_xx = (SERVER_ERROR_STATUS..PAST_SERVER_ERROR_STATUS).contains(&self.status);
         [
@@ -172,7 +315,60 @@ impl ServedRequest<'_> {
             ),
         ]
     }
+
+    /// What this one request contributes to each ADDITIONAL series — the ones a monitoring
+    /// subscription buys — in the order [`ADDITIONAL_DISTRIBUTION_METRICS`] lists them.
+    ///
+    /// A series this request takes no part in is absent from the list rather than observed as
+    /// zero: a request that is not a cacheable request has no hit rate of its own, and a
+    /// request no origin answered has no origin latency, so neither is folded into the
+    /// period's average as if it were one.
+    fn additional_observations(&self) -> Vec<Observation> {
+        let mut observations: Vec<Observation> = Vec::new();
+        if let Some(rate) = self.cache_hit_rate() {
+            observations.push((CACHE_HIT_RATE_METRIC, rate, Some(PERCENT_UNIT)));
+        }
+        if let Some(latency) = self.origin_latency {
+            observations.push((
+                ORIGIN_LATENCY_METRIC,
+                milliseconds_of(latency),
+                Some(MILLISECONDS_UNIT),
+            ));
+        }
+        for (status, metric) in STATUS_ERROR_RATE_METRICS {
+            observations.push((metric, percent_of(self.status == status), Some(PERCENT_UNIT)));
+        }
+        observations
+    }
+
+    /// The percentage this request contributes to [`CACHE_HIT_RATE_METRIC`], or `None` when it
+    /// is not one of the requests that metric is a percentage OF.
+    ///
+    /// "The percentage of all cacheable requests for which CloudFront served the content from
+    /// its cache. HTTP POST and PUT requests, and errors, are not considered cacheable
+    /// requests": an upload and an answer of an error class take no part in the rate, and
+    /// neither does an answer CloudFront produced itself, which came from no cache and no
+    /// origin. Everything left is a cacheable request, and it is wholly a hit when the edge
+    /// cache answered it and wholly a miss when the origin did.
+    fn cache_hit_rate(&self) -> Option<f64> {
+        if UNCACHEABLE_METHODS.contains(&self.method) || self.status >= CLIENT_ERROR_STATUS {
+            return None;
+        }
+        match self.served_from {
+            ServedFrom::EdgeCache => Some(WHOLE_PERCENT),
+            ServedFrom::Origin => Some(NO_PERCENT),
+            ServedFrom::CloudFront => None,
+        }
+    }
 }
+
+/// `latency` in the unit [`ORIGIN_LATENCY_METRIC`] is published under.
+fn milliseconds_of(latency: Duration) -> f64 {
+    latency.as_secs_f64() * MILLISECONDS_PER_SECOND
+}
+
+/// How many milliseconds one second is, which is what a measured span is published as.
+const MILLISECONDS_PER_SECOND: f64 = 1_000.0;
 
 /// The percentage one request contributes to a rate whose class its status either is or is
 /// not in.
@@ -198,6 +394,10 @@ fn bytes_of(counted: bool, bytes: usize) -> f64 {
 
 /// Count one answer the edge served into the series of the distribution it served it for.
 ///
+/// The DEFAULT series are published for every distribution; the ADDITIONAL ones only where
+/// `additional` says this distribution's monitoring subscription enables them, so a
+/// distribution that is not subscribed to them never gets one of their datapoints.
+///
 /// Nothing is published when the CloudWatch store is not mounted beside this service: a
 /// datapoint has one home, and this path never makes a second one.
 pub fn count_viewer_request<Eng: Send + Sync + 'static>(
@@ -205,6 +405,7 @@ pub fn count_viewer_request<Eng: Send + Sync + 'static>(
     distribution_id: &str,
     at: SystemTime,
     served: &ServedRequest<'_>,
+    additional: AdditionalMetrics,
 ) {
     let Some(state) = cloudwatch::state::service_state(engine) else {
         return;
@@ -219,8 +420,16 @@ pub fn count_viewer_request<Eng: Send + Sync + 'static>(
     .into_iter()
     .collect();
     let timestamp_secs = epoch_secs(at);
+    let published: Vec<Observation> = match additional {
+        AdditionalMetrics::Enabled => served
+            .observations()
+            .into_iter()
+            .chain(served.additional_observations())
+            .collect(),
+        AdditionalMetrics::Withheld => served.observations().to_vec(),
+    };
     let mut store = state.lock();
-    for (metric_name, value, unit) in served.observations() {
+    for (metric_name, value, unit) in published {
         let key = cloudwatch::state::MetricKey {
             namespace: NAMESPACE.to_string(),
             metric_name: metric_name.to_string(),
@@ -296,6 +505,8 @@ mod tests {
                 status,
                 response_bytes: 0,
                 request_bytes: 0,
+                served_from: ServedFrom::Origin,
+                origin_latency: None,
             };
             assert_eq!(
                 value_of(&served, FOUR_XX_ERROR_RATE_METRIC),
@@ -339,6 +550,8 @@ mod tests {
                 status: 200,
                 response_bytes: 11,
                 request_bytes: 7,
+                served_from: ServedFrom::Origin,
+                origin_latency: None,
             };
             assert_eq!(
                 value_of(&served, BYTES_DOWNLOADED_METRIC),
@@ -360,6 +573,8 @@ mod tests {
             status: 404,
             response_bytes: 3,
             request_bytes: 0,
+            served_from: ServedFrom::Origin,
+            origin_latency: None,
         };
         let observed: Vec<&str> = served
             .observations()
@@ -370,5 +585,168 @@ mod tests {
             observed, DISTRIBUTION_METRICS,
             "every series the edge publishes is observed by every request it serves"
         );
+    }
+
+    /// One request of `method` answered `status` by `served_from`, with a measured span for an
+    /// answer an origin produced.
+    fn served_of(method: &'static str, status: u16, served_from: ServedFrom) -> ServedRequest<'static> {
+        ServedRequest {
+            method,
+            status,
+            response_bytes: 5,
+            request_bytes: 0,
+            served_from,
+            origin_latency: matches!(served_from, ServedFrom::Origin)
+                .then(|| Duration::from_millis(7)),
+        }
+    }
+
+    /// The value `metric` takes in `served`'s ADDITIONAL observations, or `None` when this
+    /// request contributes nothing to that series.
+    fn additional_value_of(served: &ServedRequest<'_>, metric: &str) -> Option<f64> {
+        served
+            .additional_observations()
+            .into_iter()
+            .find(|(name, _, _)| *name == metric)
+            .map(|(_, value, _)| value)
+    }
+
+    #[test]
+    fn the_hit_rate_counts_only_the_cacheable_requests_a_cache_or_an_origin_answered() {
+        // Rows span who answered the request, the methods the metric's definition excludes,
+        // and an answer of an error class — the three things that decide whether a request is
+        // a cacheable request at all.
+        let cases: [(&str, &'static str, u16, ServedFrom, Option<f64>); 7] = [
+            ("a cached read", "GET", 200, ServedFrom::EdgeCache, Some(100.0)),
+            ("a read the origin answered", "GET", 200, ServedFrom::Origin, Some(0.0)),
+            ("a cached conditional read", "HEAD", 304, ServedFrom::EdgeCache, Some(100.0)),
+            ("an upload", "POST", 200, ServedFrom::Origin, None),
+            ("a replaced object", "PUT", 200, ServedFrom::Origin, None),
+            ("an error the origin answered", "GET", 404, ServedFrom::Origin, None),
+            (
+                "an answer CloudFront produced itself",
+                "GET",
+                403,
+                ServedFrom::CloudFront,
+                None,
+            ),
+        ];
+        for (case, method, status, served_from, expected) in cases {
+            let served = served_of(method, status, served_from);
+            let actual = additional_value_of(&served, CACHE_HIT_RATE_METRIC);
+            assert_eq!(
+                actual, expected,
+                "case {case:?}: expected a hit rate of {expected:?}, got {actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_origin_latency_is_published_only_for_an_answer_an_origin_produced() {
+        let from_origin = ServedRequest {
+            method: "GET",
+            status: 200,
+            response_bytes: 5,
+            request_bytes: 0,
+            served_from: ServedFrom::Origin,
+            origin_latency: Some(Duration::from_millis(12)),
+        };
+        assert_eq!(
+            additional_value_of(&from_origin, ORIGIN_LATENCY_METRIC),
+            Some(12.0),
+            "case {:?}: the measured span is published in milliseconds",
+            "an answer the origin produced"
+        );
+        for (case, served_from) in [
+            ("an answer the edge cache held", ServedFrom::EdgeCache),
+            ("an answer CloudFront produced itself", ServedFrom::CloudFront),
+        ] {
+            let served = served_of("GET", 200, served_from);
+            let actual = additional_value_of(&served, ORIGIN_LATENCY_METRIC);
+            assert_eq!(
+                actual, None,
+                "case {case:?}: no origin answered it, so it has no origin latency, got \
+                 {actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_per_status_rate_is_the_whole_of_a_request_answered_with_its_own_status() {
+        // Rows span each status CloudFront publishes a rate of its own for, plus a status it
+        // publishes none for (which the class rates still carry).
+        let statuses: [u16; 7] = [401, 403, 404, 502, 503, 504, 410];
+        for status in statuses {
+            let served = served_of("GET", status, ServedFrom::Origin);
+            for (code, metric) in STATUS_ERROR_RATE_METRICS {
+                let expected = percent_of(code == status);
+                let actual = additional_value_of(&served, metric);
+                assert_eq!(
+                    actual,
+                    Some(expected),
+                    "case {status}: expected {metric} to carry {expected}, got {actual:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_additional_series_are_the_ones_a_subscription_buys() {
+        let served = served_of("GET", 200, ServedFrom::Origin);
+        let observed: Vec<&str> = served
+            .additional_observations()
+            .into_iter()
+            .map(|(name, _, _)| name)
+            .collect();
+        assert_eq!(
+            observed, ADDITIONAL_DISTRIBUTION_METRICS,
+            "a cacheable request the origin answered observes every additional series"
+        );
+        for metric in ADDITIONAL_DISTRIBUTION_METRICS {
+            assert!(
+                !DISTRIBUTION_METRICS.contains(metric),
+                "case {metric:?}: an additional series is not one of the default series"
+            );
+        }
+    }
+
+    #[test]
+    fn only_an_enabled_subscription_enables_the_additional_metrics() {
+        use crate::ops::types::{MonitoringSubscription, RealtimeMetricsSubscriptionConfig};
+
+        /// One subscription carrying `status`.
+        fn subscription(status: &str) -> MonitoringSubscription {
+            MonitoringSubscription {
+                realtime_metrics_subscription_config: Some(RealtimeMetricsSubscriptionConfig {
+                    realtime_metrics_subscription_status: status.to_string(),
+                }),
+            }
+        }
+
+        // Rows span every value the flag's enumerated type takes
+        // (`REALTIME_METRICS_SUBSCRIPTION_STATUS_VALUES`), a subscription carrying no
+        // configuration at all, and a distribution carrying no subscription.
+        let enabled = subscription("Enabled");
+        let disabled = subscription("Disabled");
+        let empty = MonitoringSubscription {
+            realtime_metrics_subscription_config: None,
+        };
+        let cases: [(&str, Option<&MonitoringSubscription>, AdditionalMetrics); 4] = [
+            ("an Enabled subscription", Some(&enabled), AdditionalMetrics::Enabled),
+            ("a Disabled subscription", Some(&disabled), AdditionalMetrics::Withheld),
+            (
+                "a subscription carrying no configuration",
+                Some(&empty),
+                AdditionalMetrics::Withheld,
+            ),
+            ("no subscription at all", None, AdditionalMetrics::Withheld),
+        ];
+        for (case, subscription, expected) in cases {
+            let actual = AdditionalMetrics::of_subscription(subscription);
+            assert_eq!(
+                actual, expected,
+                "case {case:?}: expected {expected:?}, got {actual:?}"
+            );
+        }
     }
 }
