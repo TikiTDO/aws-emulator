@@ -102,8 +102,59 @@ pub fn error_code(answer: &Answer) -> String {
         .to_owned()
 }
 
+/// The access key id [`call`] signs with: a key neither STS nor IAM holds a record for,
+/// which is the account's own published credential.
+pub const DEFAULT_ACCESS_KEY_ID: &str = "AKIDEXAMPLE";
+
+/// The emulator under test beside the two services a decision about WHO is calling reads
+/// from: IAM (the user, the role and their identity policies) and STS (the session a role
+/// is assumed into), all over the SAME shared engine.
+///
+/// Here rather than in a suite for the same reason the rest of this module is: a second
+/// copy is a second place where "what a client sees" can drift.
+pub fn emulator_with_identity() -> MultiServiceRouter {
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    let mut router = MultiServiceRouter::new();
+    router.set_request_authentication(false);
+    router.register_service(EmulatedService::new(Arc::clone(&engine)));
+    router.register_service(
+        service_com_amazonaws_iam_awsidentitymanagementv20100508::EmulatedService::new(Arc::clone(
+            &engine,
+        )),
+    );
+    router.register_service(
+        service_com_amazonaws_sts_awssecuritytokenservicev20110615::EmulatedService::new(engine),
+    );
+    router
+}
+
+/// The text of the first `<name>…</name>` element of a response body — what reads one
+/// value out of the awsQuery answer an IAM or STS setup call gives.
+pub fn xml_element(body: &str, name: &str) -> Option<String> {
+    let open = format!("<{name}>");
+    let close = format!("</{name}>");
+    let start = body.find(&open)? + open.len();
+    let end = body[start..].find(&close)? + start;
+    Some(body[start..end].to_string())
+}
+
 pub async fn call(
     router: &MultiServiceRouter,
+    region: &str,
+    method: &str,
+    uri: &str,
+    body: &str,
+) -> Answer {
+    call_as(router, DEFAULT_ACCESS_KEY_ID, region, method, uri, body).await
+}
+
+/// [`call`], signed with `access_key_id` in the SigV4 credential scope — which is where
+/// this emulator reads WHICH principal a request speaks for. One request builder for both,
+/// so a suite that drives a particular caller cannot send a differently shaped request
+/// from every other suite.
+pub async fn call_as(
+    router: &MultiServiceRouter,
+    access_key_id: &str,
     region: &str,
     method: &str,
     uri: &str,
@@ -116,7 +167,7 @@ pub async fn call(
         .header(
             "authorization",
             format!(
-                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{region}/eks/aws4_request, \
+                "AWS4-HMAC-SHA256 Credential={access_key_id}/20260101/{region}/eks/aws4_request, \
                  SignedHeaders=host, Signature=deadbeef"
             ),
         )

@@ -21,16 +21,19 @@
 //!   for anything the model does not express: a signing name shared by several
 //!   services, or routing that keys on the access-key id.
 //! - `override_operation` — serve a request the model's routing key cannot name
-//!   correctly. EDITED HERE: it claims a tag request the model's own tag contract
-//!   refuses, so that refusal is stated in the error code the called operation
-//!   declares (see [`tag_contract`]), an add-on request whose `resolveConflicts`
-//!   is outside the modelled enum, so that refusal names the operation it was sent
-//!   to (see [`resolve_conflicts_contract`]), and a request whose body the
-//!   framework's walk refuses but whose operation answers the pass-role
-//!   authorization, a capability type this API does not define, or the missing
-//!   cluster first (see [`precedence`], and [`off_enum_member_contract`] for the
-//!   rule the undefined-value half of it implements). Every other
-//!   request resolves through the generated routing table.
+//!   correctly. EDITED HERE: every request this service serves is handed to
+//!   [`request_pipeline`], the sequence that runs before any handler — the IAM
+//!   authorization decision ([`authorization`]), then the pre-dispatch contracts:
+//!   a tag request the model's own tag contract refuses, so that refusal is stated
+//!   in the error code the called operation declares (see [`tag_contract`]), an
+//!   add-on request whose `resolveConflicts` is outside the modelled enum, so that
+//!   refusal names the operation it was sent to (see
+//!   [`resolve_conflicts_contract`]), and a request whose body the framework's walk
+//!   refuses but whose operation answers the pass-role authorization, a capability
+//!   type this API does not define, or the missing cluster first (see
+//!   [`precedence`], and [`off_enum_member_contract`] for the rule the
+//!   undefined-value half of it implements). A request none of them answers is
+//!   served by the generated operation the routing table names, exactly as before.
 //! - `override_refusal` — how this service words a request the framework refused
 //!   before any handler ran. The default returns `None`, keeping the framework's
 //!   wording. See the inline note on that method for how to reword.
@@ -54,16 +57,20 @@
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
 
+pub mod authorization;
 pub mod lenient_json;
 pub mod lenient_scalars;
 pub mod off_enum_member_contract;
 pub mod parameter_contract;
 pub mod precedence;
+pub mod request_pipeline;
 pub mod resolve_conflicts_contract;
 pub mod tag_contract;
 
+use aws_smithy_schema::Schema;
 use smithy_server_runtime::{
-    http, ErasedOperation, ErasedServiceDefinition, Refusal, Refused, ServerHttpProtocol, Service,
+    http, DeserializableStruct, ErasedOperation, ErasedServiceDefinition, Refusal, Refused,
+    ServerHttpProtocol, Service,
 };
 use std::sync::Arc;
 
@@ -84,6 +91,22 @@ pub fn body_codec<'svc>(
         .unwrap_or_else(|| definition.protocol())
 }
 
+/// Read a request into `T` through the protocol and schema the dispatch sequence uses, so
+/// a layer that runs before dispatch reads exactly the value the handler would be given,
+/// or `None` for a body it cannot read at all — which is the framework's refusal, not that
+/// layer's question.
+///
+/// One reader for every such layer ([`authorization`] and [`precedence`] both ask it), so
+/// two of them cannot read one request differently.
+pub fn read_input<T: DeserializableStruct>(
+    protocol: &dyn ServerHttpProtocol,
+    schema: &'static Schema,
+    req: &aws_smithy_runtime_api::http::Request,
+) -> Option<T> {
+    let mut deserializer = protocol.deserialize_input(req, schema).ok()?;
+    T::deserialize(&mut *deserializer).ok()
+}
+
 /// The `com-amazonaws-eks-awswesleyfrontend` emulated service: the generated [`ServiceDefinition`] plus
 /// the behavioral seams this file owns.
 ///
@@ -91,25 +114,14 @@ pub fn body_codec<'svc>(
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
     entry: crate::ServiceDefinition<Eng>,
-    /// Answers a `TagResource` / `UntagResource` request the model's own tag
-    /// contract refuses, in the error channel those two operations declare (see
-    /// [`tag_contract`]). Held on the service because
-    /// [`Service::override_operation`] hands back a borrow of one of its own
-    /// operations.
-    refused_tag_request: tag_contract::RefusedTagRequest,
-    /// Answers a `CreateAddon` / `UpdateAddon` request whose `resolveConflicts`
-    /// is outside the modelled enum, in this service's own sentence for that
-    /// value (see [`resolve_conflicts_contract`]). Held on the service for the
-    /// same reason the refused tag request is.
-    refused_addon_request: resolve_conflicts_contract::RefusedAddonRequest,
-    /// Answers a request whose body the framework's validating walk refuses but
-    /// whose operation answers something else FIRST — the pass-role
-    /// authorization of a role it hands Amazon EKS, a capability type this API
-    /// does not define, or the cluster it is addressed to (see [`precedence`]).
-    /// Held on the service for the same reason the two above are, and holding the
-    /// shared engine because the missing-cluster half is answered from this
-    /// service's store.
-    precedence_first: precedence::PrecedenceFirst<Eng>,
+    /// What this service does with a request before a handler runs, in the order
+    /// it does it: the IAM authorization decision, then the pre-dispatch
+    /// contracts, then the modelled operation (see [`request_pipeline`]). Held on
+    /// the service because [`Service::override_operation`] hands back a borrow of
+    /// one of its own operations, and holding the shared engine because the
+    /// authorization decision and the missing-cluster half of [`precedence`] are
+    /// answered from this emulator's stores.
+    pipeline: request_pipeline::RequestPipeline<Eng>,
     /// The codec the modelled sequence reads and writes this service's requests
     /// with: the model's own `restJson1`, reading a body the way this service
     /// reads one (see [`lenient_json`]). Held on the service because
@@ -125,9 +137,7 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
             entry: crate::ServiceDefinition::new(Arc::clone(&engine)),
-            refused_tag_request: tag_contract::RefusedTagRequest::new(),
-            refused_addon_request: resolve_conflicts_contract::RefusedAddonRequest::new(),
-            precedence_first: precedence::PrecedenceFirst::new(engine),
+            pipeline: request_pipeline::RequestPipeline::new(engine),
             protocol: lenient_json::LenientRestJson::new(),
         }
     }
@@ -160,47 +170,27 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // it. `req` is the whole request, so a decision that depends on the body —
         // the `Action` form field on a query protocol, say — is reachable here.
         //
-        // EDITED HERE: a tag request the model's own tag contract refuses is claimed
-        // so that the refusal is stated in the error code the CALLED operation
-        // declares. `TagResource` and `UntagResource` declare `BadRequestException`
-        // and nothing else, where the rest of this service declares
-        // `InvalidParameterException` — the code `override_refusal` below picks. That
-        // seam is per SERVICE and cannot tell the two apart, so the choice is made
-        // here, before dispatch, which is the only place the operation is known.
-        // Every other request keeps the generated routing table as its only source.
-        // See [`tag_contract`] for the whole argument and for the refusal this
-        // answers instead.
+        // EDITED HERE: every request this service serves is handed to
+        // [`request_pipeline`], which runs what this service does BEFORE a handler —
+        // the IAM authorization decision, then the pre-dispatch contracts (the tag
+        // contract, the add-on `resolveConflicts` contract and the precedence layer)
+        // — and then hands the request to the modelled operation the routing key
+        // names. Each of those decisions needs the operation, which only this seam
+        // knows, and the authorization one needs the request context, which only a
+        // claimed operation is handed: that is why the whole sequence lives behind
+        // this one claim rather than being re-derived here. See
+        // [`request_pipeline`], [`authorization`], [`tag_contract`],
+        // [`resolve_conflicts_contract`] (with [`off_enum_member_contract`] for the
+        // rule it implements) and [`precedence`].
         //
-        // ALSO EDITED HERE, for the same reason: an add-on request whose
-        // `resolveConflicts` is outside the modelled enum is refused in a sentence
-        // that names the OPERATION it was sent to, which a per-service refusal seam
-        // cannot word because no operation is named by the time it is reached. See
-        // [`resolve_conflicts_contract`], and [`off_enum_member_contract`] for the
-        // rule both it and the capability-type half of [`precedence`] implement.
-        // The ROUTING KEY is resolved by the model's own codec, which is the one
-        // that carries this service's route table; the BODY is read by the codec
-        // dispatch will read it with (see [`body_codec`]).
-        let protocol = self.entry.protocol();
-        let key = protocol.routing_key(req).ok()?;
-        let body = body_codec(self, &self.entry);
-        if tag_contract::refusal_for(key, body, req).is_some() {
-            return Some(&self.refused_tag_request as &dyn ErasedOperation);
-        }
-        if resolve_conflicts_contract::refusal_for(key, body, req).is_some() {
-            return Some(&self.refused_addon_request as &dyn ErasedOperation);
-        }
-        // ALSO EDITED HERE, and for the same reason — the decision needs the
-        // operation, which only this seam knows: a request whose body the
-        // framework's validating walk would refuse, sent to an operation that
-        // answers the pass-role authorization of a role it hands Amazon EKS, a
-        // capability type this API does not define, or the cluster it is addressed
-        // to, BEFORE it judges the body. The walk runs before any handler does, so
-        // without this seam the body refusal pre-empts all three. See [`precedence`],
-        // which claims nothing else.
-        if precedence::has_a_question(key, body, req) {
-            return Some(&self.precedence_first as &dyn ErasedOperation);
-        }
-        None
+        // Claimed only for a routing key the generated table actually serves, so a
+        // request naming no operation of this service still reaches
+        // `override_routing_error` rather than a layer with nothing to run. The key
+        // is resolved by the model's own codec, which is the one that carries this
+        // service's route table.
+        let key = self.entry.protocol().routing_key(req).ok()?;
+        self.entry.routing_table().get(key)?;
+        Some(&self.pipeline as &dyn ErasedOperation)
     }
 
     fn override_protocol(&self) -> Option<&dyn smithy_server_runtime::ServerHttpProtocol> {

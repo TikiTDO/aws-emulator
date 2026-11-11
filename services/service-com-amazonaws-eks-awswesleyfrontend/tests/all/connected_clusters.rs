@@ -443,59 +443,107 @@ async fn the_provider_must_be_a_modelled_member() {
 }
 
 // ---------------------------------------------------------------------------
-// RULE: a name identifies one cluster per Region however it got there, and a
-// retry carrying the same idempotency token is absorbed and answered with the
-// registration it already made.
+// RULE: a cluster name identifies one cluster per Region however it got there,
+// and the NAME is the whole conflict key of a registration — the
+// `clientRequestToken` participates in no deduplication, so a second
+// registration of a name this Region already holds is refused whatever token it
+// carries, while the same token under another name registers a second, distinct
+// cluster.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_retry_with_the_same_token_returns_the_same_registration() {
-    // (case, the token the retry sends, whether the retry is absorbed)
-    let rows: &[(&str, Option<&str>, bool)] = &[
-        ("the same token as the first call", Some("token-a"), true),
-        ("a different token", Some("token-b"), false),
-        ("no token at all", None, false),
+async fn a_second_registration_of_a_name_is_refused_whatever_the_token() {
+    // (case, the token the first call sends, the token the replay sends)
+    let rows: &[(&str, Option<&str>, Option<&str>)] = &[
+        (
+            "the same token as the first call",
+            Some("token-a"),
+            Some("token-a"),
+        ),
+        ("a different token", Some("token-a"), Some("token-b")),
+        ("no token at all", Some("token-a"), None),
+        ("no token on either call", None, None),
+        ("a token only on the replay", None, Some("token-b")),
+        (
+            "a blank token on both calls",
+            Some("   "),
+            Some("   "),
+        ),
     ];
 
-    for (index, (case, retry_token, absorbed)) in rows.iter().enumerate() {
+    for (index, (case, first_token, replay_token)) in rows.iter().enumerate() {
         let router = emulator();
-        let name = format!("retry-case-{index}");
+        let name = format!("replay-case-{index}");
         let mut first = minimal_registration(&name, "OTHER");
-        first["clientRequestToken"] = serde_json::json!("token-a");
+        if let Some(token) = first_token {
+            first["clientRequestToken"] = serde_json::json!(token);
+        }
         let registered = register(&router, &first).await;
         assert_eq!(
             registered.status, 200,
             "case {case:?}: expected 200 from the first RegisterCluster, got {registered:?}"
         );
 
-        let mut retry = minimal_registration(&name, "OTHER");
-        if let Some(token) = retry_token {
-            retry["clientRequestToken"] = serde_json::json!(token);
+        let mut replay = minimal_registration(&name, "OTHER");
+        if let Some(token) = replay_token {
+            replay["clientRequestToken"] = serde_json::json!(token);
         }
-        let second = register(&router, &retry).await;
-        if *absorbed {
-            assert_eq!(
-                second.status, 200,
-                "case {case:?}: an absorbed retry answers 200, got {second:?}"
-            );
-            assert_eq!(
-                second.cluster(),
-                registered.cluster(),
-                "case {case:?}: an absorbed retry returns the same registration — a new \
-                 activation id or code would invalidate the manifest already built"
-            );
-        } else {
-            assert_eq!(
-                second.status, 409,
-                "case {case:?}: expected 409, got {second:?}"
-            );
-            assert_eq!(
-                second.error_type.as_deref(),
-                Some("ResourceInUseException"),
-                "case {case:?}: expected ResourceInUseException, got {second:?}"
-            );
-        }
+        let second = register(&router, &replay).await;
+        assert_eq!(
+            second.status, 409,
+            "case {case:?}: expected 409 for a name already registered, got {second:?}"
+        );
+        assert_eq!(
+            second.error_type.as_deref(),
+            Some("ResourceInUseException"),
+            "case {case:?}: expected ResourceInUseException, got {second:?}"
+        );
+        assert_eq!(
+            second.message(),
+            format!("Cluster already exists with name: {name}"),
+            "case {case:?}: expected the conflict to name the cluster, got {:?}",
+            second.message()
+        );
+
+        // Exactly one cluster carries the name afterwards, and it is the one the
+        // first call registered.
+        let listed = list(&router, &format!("include={LIST_INCLUDE_ALL}")).await;
+        let names = names_of(&listed);
+        assert_eq!(
+            names.iter().filter(|listed| **listed == name).count(),
+            1,
+            "case {case:?}: expected the name exactly once, got {names:?}"
+        );
+        let described = describe(&router, &name).await;
+        assert_eq!(
+            described.cluster(),
+            registered.cluster(),
+            "case {case:?}: expected the refused replay to have changed nothing, got \
+             {described:?}"
+        );
     }
+
+    // The same token under a DIFFERENT name is a different registration, which
+    // mints a second, distinct cluster: the token deduplicates nothing.
+    let router = emulator();
+    let mut first = minimal_registration("shared-token-one", "OTHER");
+    first["clientRequestToken"] = serde_json::json!("one-token-two-names");
+    let mut second = minimal_registration("shared-token-two", "OTHER");
+    second["clientRequestToken"] = serde_json::json!("one-token-two-names");
+    let one = register(&router, &first).await;
+    let two = register(&router, &second).await;
+    assert_eq!(
+        (one.status, two.status),
+        (200, 200),
+        "the same token under two names registers both, got {one:?} and {two:?}"
+    );
+    assert_ne!(
+        one.cluster()["arn"],
+        two.cluster()["arn"],
+        "the two registrations are distinct clusters, got {:?} and {:?}",
+        one.cluster()["arn"],
+        two.cluster()["arn"]
+    );
 
     // The name space is shared with created clusters: neither kind can take a
     // name the other holds — not even when the two calls carry the SAME

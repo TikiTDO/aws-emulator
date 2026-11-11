@@ -28,7 +28,7 @@ use service_com_amazonaws_eks_awswesleyfrontend::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::cluster_lifecycle::REGION;
-use crate::wire::{call, Answer};
+use crate::wire::{call, error_code, Answer};
 
 /// One day, the unit the version calendar is published in.
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -525,6 +525,88 @@ async fn filters_narrow_the_listing() {
              ({:?})",
             answer.body
         );
+    }
+}
+
+/// A `clusterVersions` entry that does not name Kubernetes versions is REFUSED, while
+/// every entry that does is a filter — whether or not the calendar publishes it.
+///
+/// The rows differ along what the rule generalises over: how many dot-separated
+/// components the value has, whether each is numeric, how many versions one entry
+/// carries and how many entries the filter has, and whether a value that names none
+/// sits beside one that does.
+#[tokio::test]
+async fn a_cluster_version_filter_must_be_a_cluster_version() {
+    let (router, engine) = emulator();
+    let now = SystemTime::now();
+    seed_calendar(&engine, clock_relative_calendar(now));
+
+    // The sentence this filter's own refusal states, written out rather than read from
+    // the constant the handler renders it from, so this check fails if the wording
+    // changes.
+    let refusal =
+        "Provided Cluster Versions are invalid, it must be comma separated versions ie 1.27,1.28";
+
+    // (case, the query, whether the filter names Kubernetes versions). The form is
+    // `<major>.<minor>`, which is the form every row of the calendar carries
+    // (`ClusterVersionInformation$clusterVersion`), and one entry may carry several of
+    // them comma-separated — the form the refusal above states.
+    let rows: &[(&str, &str, bool)] = &[
+        ("the default version of the seeded calendar", "clusterVersions=2.12", true),
+        ("a version the calendar does not publish", "clusterVersions=0.1", true),
+        ("a two-digit minor", "clusterVersions=1.31", true),
+        ("a many-digit major and minor", "clusterVersions=123.456", true),
+        ("two well-formed entries", "clusterVersions=2.11&clusterVersions=2.12", true),
+        (
+            "two versions comma-separated in one entry",
+            "clusterVersions=2.11%2C2.12",
+            true,
+        ),
+        ("a word", "clusterVersions=not-a-version", false),
+        ("a major alone", "clusterVersions=1", false),
+        ("a non-numeric minor", "clusterVersions=1.x", false),
+        ("a patch component as well", "clusterVersions=1.31.2", false),
+        ("an empty entry", "clusterVersions=", false),
+        ("a trailing dot", "clusterVersions=1.", false),
+        ("a leading dot", "clusterVersions=.31", false),
+        ("whitespace around a version", "clusterVersions=%201.31", false),
+        (
+            "a word beside a version in one comma-separated entry",
+            "clusterVersions=2.12%2Cnot-a-version",
+            false,
+        ),
+        (
+            "a malformed entry beside a well-formed one",
+            "clusterVersions=2.12&clusterVersions=not-a-version",
+            false,
+        ),
+    ];
+
+    for (case, query, accepted) in rows {
+        let answer = describe_versions(&router, query).await;
+        if *accepted {
+            assert_eq!(
+                answer.status, 200,
+                "case {case:?}: a cluster version is a filter, got {answer:?}"
+            );
+        } else {
+            assert_eq!(
+                answer.status, 400,
+                "case {case:?}: expected HTTP 400 for a filter that is no cluster version, \
+                 got {answer:?}"
+            );
+            assert_eq!(
+                error_code(&answer),
+                "InvalidParameterException",
+                "case {case:?}: expected InvalidParameterException, got {answer:?}"
+            );
+            assert_eq!(
+                answer.message(),
+                refusal,
+                "case {case:?}: expected this filter's own refusal sentence, got {:?}",
+                answer.message()
+            );
+        }
     }
 }
 

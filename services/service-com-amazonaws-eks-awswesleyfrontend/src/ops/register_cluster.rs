@@ -291,29 +291,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // this cluster in your Amazon Web Services Region", `RegisterCluster$name`), and
         // a registration occupies that name exactly as a created cluster does — the
         // store is keyed `(region, name)` for both.
-        if let Some(existing) = guard.clusters.get(&(region.clone(), input.name.clone())) {
-            // `clientRequestToken` is `@idempotencyToken`: an SDK generates it once per
-            // call and RESENDS the same value when it retries, so a retry of the call
-            // that registered this cluster is absorbed and answered with that cluster —
-            // with the SAME activation id and code, since minting new ones would make a
-            // retry invalidate the manifest the first answer was used to build. A blank
-            // token identifies nothing, so it never matches.
-            let replayed_token = input
-                .client_request_token
-                .as_deref()
-                .filter(|token| !token.trim().is_empty());
-            if let Some(token) = replayed_token {
-                // And only a retry of a REGISTRATION: a token that happens to match
-                // the one a `CreateCluster` used for this name is not a retry of
-                // this call, so it conflicts rather than answering with an Amazon
-                // EKS cluster the caller never asked for.
-                if existing.is_connected() && existing.client_request_token.as_deref() == Some(token)
-                {
-                    return Ok(RegisterClusterOutput {
-                        cluster: Some(existing.to_cluster()),
-                    });
-                }
-            }
+        //
+        // The NAME is the whole conflict key: `clientRequestToken` is
+        // `@idempotencyToken`, but a registration deduplicates on nothing — a second
+        // call for a name this account already holds in this Region is refused whether
+        // the token is identical, different or absent, because the name is already
+        // taken and there is nothing left for the call to do. (A token is still stored
+        // on the record it created, which is what `DescribeCluster` reports back.)
+        if guard
+            .clusters
+            .contains_key(&(region.clone(), input.name.clone()))
+        {
             return Err(RegisterClusterErrorModeled::ResourceInUseException(
                 ResourceInUseException {
                     cluster_name: Some(input.name.clone()),

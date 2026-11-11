@@ -22,7 +22,9 @@
 //!
 //! The rows span who the caller is: the account's own published credential, an IAM
 //! user's own long-term access key, and an assumed-role session of a role under a
-//! path.
+//! path. The two IAM identities carry a policy allowing this service's actions, because
+//! EKS decides every request against the policies in force on the caller and a principal
+//! carrying none may call nothing; who the entry is filed under is what this suite pins.
 
 use std::sync::Arc;
 
@@ -45,6 +47,19 @@ const SESSION: &str = "creator";
 const TRUST_POLICY: &str = concat!(
     r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","#,
     r#""Principal":{"AWS":"arn:aws:iam::000000000000:root"},"Action":"sts:AssumeRole"}]}"#
+);
+
+/// An identity-based policy allowing every action of Amazon EKS on every resource.
+///
+/// A principal that creates a cluster has to be ALLOWED to: EKS decides every request
+/// against the identity-based policies in force on the principal its credential speaks
+/// for, so a user or role carrying no policy at all may call nothing (IAM's default
+/// deny). The account's own published credential holds no IAM policies and is not bound
+/// by that decision, which is why only the two rows that sign as an IAM identity need
+/// this.
+const EKS_ADMIN_POLICY: &str = concat!(
+    r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","#,
+    r#""Action":"eks:*","Resource":"*"}]}"#
 );
 
 /// The three services this rule spans, over ONE engine.
@@ -163,7 +178,8 @@ async fn caller_identity_arn(router: &MultiServiceRouter, case: &str, access_key
         .unwrap_or_else(|| panic!("case {case:?}: GetCallerIdentity answered no <Arn>: {body}"))
 }
 
-/// Create an IAM role with [`TRUST_POLICY`] under `path`, and return its ARN.
+/// Create an IAM role with [`TRUST_POLICY`] under `path`, carrying
+/// [`EKS_ADMIN_POLICY`] as its inline policy, and return its ARN.
 async fn create_role(router: &MultiServiceRouter, role_name: &str, path: &str) -> String {
     let (status, body) = query(
         router,
@@ -180,11 +196,26 @@ async fn create_role(router: &MultiServiceRouter, role_name: &str, path: &str) -
         status, 200,
         "setup: CreateRole({role_name}) expected 200, got {status} {body}"
     );
+    let (status, put) = query(
+        router,
+        AMBIENT_KEY,
+        "iam",
+        format!(
+            "Action=PutRolePolicy&Version=2010-05-08&RoleName={role_name}&PolicyName=eks\
+             &PolicyDocument={}",
+            encoded(EKS_ADMIN_POLICY)
+        ),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "setup: PutRolePolicy({role_name}) expected 200, got {status} {put}"
+    );
     xml_element(&body, "Arn").unwrap_or_else(|| panic!("setup: no <Arn> in {body}"))
 }
 
-/// Create an IAM user and one long-term access key of its own; returns
-/// `(user ARN, access key id)`.
+/// Create an IAM user carrying [`EKS_ADMIN_POLICY`] as its inline policy, and one
+/// long-term access key of its own; returns `(user ARN, access key id)`.
 async fn create_user_with_key(router: &MultiServiceRouter, user_name: &str) -> (String, String) {
     let (status, body) = query(
         router,
@@ -198,6 +229,21 @@ async fn create_user_with_key(router: &MultiServiceRouter, user_name: &str) -> (
         "setup: CreateUser({user_name}) expected 200, got {status} {body}"
     );
     let arn = xml_element(&body, "Arn").unwrap_or_else(|| panic!("setup: no <Arn> in {body}"));
+    let (status, put) = query(
+        router,
+        AMBIENT_KEY,
+        "iam",
+        format!(
+            "Action=PutUserPolicy&Version=2010-05-08&UserName={user_name}&PolicyName=eks\
+             &PolicyDocument={}",
+            encoded(EKS_ADMIN_POLICY)
+        ),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "setup: PutUserPolicy({user_name}) expected 200, got {status} {put}"
+    );
     let (status, body) = query(
         router,
         AMBIENT_KEY,

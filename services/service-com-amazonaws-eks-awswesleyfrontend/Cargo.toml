@@ -46,6 +46,11 @@ aws-sdk-cloudwatchlogs = { version = "1", default-features = false }
 # for, so that principal is resolved through STS's OWN resolution rather than
 # guessed (`src/state/cluster_creator_access.rs`).
 service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# The account's IAM records in that same shared engine: the authorization decision
+# every request is judged by (`src/service/authorization.rs`) reads the
+# identity-based policy documents and the permissions boundary in force on the
+# principal the request's credential speaks for, through IAM's own accessors.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 # `iam_trust_policy`: the one reading of an IAM trust policy — including the
 # decode of the URL-encoded form IAM reports a document in — shared with every
 # other service that resolves a caller-supplied role.

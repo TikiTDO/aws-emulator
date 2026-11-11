@@ -243,19 +243,6 @@ impl Answer {
     }
 }
 
-/// Read the request into `T` through the protocol and schema the dispatch sequence
-/// uses, so this layer reads exactly the value the handler would be given, or `None`
-/// for a body it cannot read at all — which is the framework's refusal, not this
-/// layer's question.
-fn read<T: DeserializableStruct>(
-    protocol: &dyn ServerHttpProtocol,
-    schema: &'static Schema,
-    req: &RtRequest,
-) -> Option<T> {
-    let mut deserializer = protocol.deserialize_input(req, schema).ok()?;
-    T::deserialize(&mut *deserializer).ok()
-}
-
 /// The violations the framework's own validating walk would report for this input,
 /// which is the only case this layer has a question about: they are what would
 /// otherwise be answered BEFORE the checks the operation performs first.
@@ -276,7 +263,10 @@ fn addressed_with<T: DeserializableStruct + SerializableStruct>(
     req: &RtRequest,
     members: impl FnOnce(&T, &[Violation]) -> Addressed,
 ) -> Option<Addressed> {
-    let input: T = read(protocol, schema, req)?;
+    // Read through the ONE reader every pre-dispatch layer of this service shares
+    // (`crate::service::read_input`), so this layer and the authorization gate ahead of
+    // it cannot read one request differently.
+    let input: T = super::read_input(protocol, schema, req)?;
     let violations = boundary_violations(&input, schema);
     if violations.is_empty() {
         return None;
