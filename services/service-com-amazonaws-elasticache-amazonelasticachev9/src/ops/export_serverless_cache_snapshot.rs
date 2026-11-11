@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ExportServerlessCacheSnapshot
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ExportServerlessCacheSnapshot`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ExportServerlessCacheSnapshot::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! This operation IS implemented: the `handle` below serves it from state, so it no
+//! longer answers 501 and carries no `SCAFFOLDED, NOT IMPLEMENTED:` marker line
+//! (that line is the machine-readable record of which operations are still stubs,
+//! `grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`). This is still the ONLY
+//! file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -152,18 +148,139 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ExportServerlessCacheSnapshot` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ExportServerlessCacheSnapshotErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ExportServerlessCacheSnapshot"))
+        // This operation EXPORTS: it "provides the functionality to export the
+        // serverless cache snapshot data to Amazon S3", so it reads the stored
+        // snapshot and WRITES its data set into the bucket the request names —
+        // a write into the service that owns objects, not into this store. The
+        // snapshot itself is left as it stands: nothing about an export changes
+        // what the snapshot is, and the only status vocabulary this API
+        // publishes for a snapshot (`Snapshot$SnapshotStatus`: "creating |
+        // available | restoring | copying | deleting") has no value for one
+        // being exported.
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(crate::scaffolded::Scaffolded::validation(
+                crate::state::STORE_UNAVAILABLE,
+            ));
+        };
+
+        // "The identifier of the serverless cache snapshot to be exported to
+        // S3." A snapshot name "is stored as a lowercase string", so the lookup
+        // folds the request's case the same way the store does.
+        let requested = input.serverless_cache_snapshot_name;
+        let stored_name = requested.to_ascii_lowercase();
+        let region = crate::state::request_region(ctx.parts());
+        let now = ::std::time::SystemTime::now();
+
+        // What may be exported is settled under the guard, which is then
+        // released: the object store below is another service's and cannot be
+        // asked while this service's store is held.
+        {
+            let mut store = state.lock();
+            // A snapshot that has become available since it was created is
+            // available now, so the record read here is the one this instant
+            // owes.
+            let Some(snapshot) = store.settled_serverless_cache_snapshot_mut(&stored_name, now)
+            else {
+                return Err(
+                    ExportServerlessCacheSnapshotErrorModeled::ServerlessCacheSnapshotNotFoundFault(
+                        ServerlessCacheSnapshotNotFoundFault {
+                            message: Some(
+                                crate::state::serverless_cache_snapshot_not_found_message(
+                                    &requested,
+                                ),
+                            ),
+                        },
+                    )
+                    .into(),
+                );
+            };
+            // Only a settled snapshot has a finished data set to export: one
+            // still `creating` holds nothing to write out yet, which is what
+            // `InvalidServerlessCacheSnapshotStateFault` ("the state of the
+            // serverless cache snapshot was not received") refuses.
+            if snapshot.status != crate::state::STATUS_AVAILABLE {
+                return Err(
+                    ExportServerlessCacheSnapshotErrorModeled::InvalidServerlessCacheSnapshotStateFault(
+                        InvalidServerlessCacheSnapshotStateFault {
+                            message: Some(format!(
+                                "Serverless cache snapshot {stored_name} is in {} state, not {}.",
+                                snapshot.status,
+                                crate::state::STATUS_AVAILABLE
+                            )),
+                        },
+                    )
+                    .into(),
+                );
+            }
+        }
+
+        // The export itself: the snapshot's data set is written into the bucket
+        // as the object an exported snapshot is. A destination the object store
+        // will not take it into is refused — with the bucket's own Region when
+        // that is what is wrong with it — rather than answered with an export
+        // nothing performed.
+        if let Err(refusal) =
+            crate::state::s3_export::export(ctx, &region, &input.s3_bucket_name, &stored_name).await
+        {
+            let message = match refusal {
+                crate::state::s3_export::ExportRefusal::CrossRegion(bucket_region) => {
+                    crate::state::s3_export::cross_region_bucket_message(
+                        &input.s3_bucket_name,
+                        &bucket_region,
+                        &region,
+                    )
+                }
+                crate::state::s3_export::ExportRefusal::NotWritable => {
+                    crate::state::s3_export::bucket_not_writable_message(&input.s3_bucket_name)
+                }
+            };
+            return Err(invalid_value(message));
+        }
+
+        // The response is read back out of the store, so it reports the
+        // persisted snapshot — the one whose data set was just written.
+        let mut store = state.lock();
+        let Some(snapshot) = store.serverless_cache_snapshots.get(&stored_name) else {
+            // The snapshot was there a moment ago and is not any more, so there
+            // is nothing left to report the export of.
+            return Err(
+                ExportServerlessCacheSnapshotErrorModeled::ServerlessCacheSnapshotNotFoundFault(
+                    ServerlessCacheSnapshotNotFoundFault {
+                        message: Some(crate::state::serverless_cache_snapshot_not_found_message(
+                            &requested,
+                        )),
+                    },
+                )
+                .into(),
+            );
+        };
+        let serverless_cache_snapshot = snapshot.to_modeled();
+        // Exporting a snapshot is one of the events this service records, under
+        // the snapshot itself; see
+        // `crate::state::SOURCE_TYPE_SERVERLESS_CACHE_SNAPSHOT`.
+        store.record_event(
+            crate::state::SOURCE_TYPE_SERVERLESS_CACHE_SNAPSHOT,
+            &stored_name,
+            format!(
+                "Serverless cache snapshot exported to Amazon S3 bucket {}",
+                input.s3_bucket_name
+            ),
+            now,
+        );
+        Ok(ExportServerlessCacheSnapshotOutput {
+            serverless_cache_snapshot: Some(serverless_cache_snapshot),
+        })
     }
+}
+
+/// The modelled refusal for a parameter value this operation cannot accept:
+/// `InvalidParameterValueException` ("The value for a parameter is invalid"),
+/// HTTP 400.
+fn invalid_value(message: impl Into<String>) -> ExportServerlessCacheSnapshotError {
+    ExportServerlessCacheSnapshotErrorModeled::InvalidParameterValueException(
+        InvalidParameterValueException {
+            message: Some(message.into()),
+        },
+    )
+    .into()
 }

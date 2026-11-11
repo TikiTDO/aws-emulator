@@ -40,6 +40,11 @@ aws-sdk-kms = { version = "1", default-features = false, features = ["rt-tokio",
 # transport — and `behavior-version-latest` is what `BehaviorVersion::latest()`
 # in that module is gated behind.
 aws-sdk-ec2 = { version = "1", default-features = false, features = ["behavior-version-latest"] }
+# The AWS SDK for Amazon S3, driven over the same in-process callback: exporting a
+# serverless cache snapshot writes its data set into a bucket, and buckets and objects
+# belong to Amazon S3, so `src/state/s3_export.rs` writes it where that service holds
+# it. Only the generated client is needed — the emulator supplies the transport.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 # `arn::region_label`: the ONE reading of a caller-supplied Region as a Region
 # LABEL, which is what the endpoint the EC2 call above is made at is built from.
 service-common = { path = "../common" }
@@ -56,6 +61,10 @@ service-com-amazonaws-kms-trentservice = { workspace = true }
 # end to end with the owner of subnets on the same engine. DEV-ONLY: this crate
 # depends on no other service's crate outside its tests.
 service-com-amazonaws-ec2-amazonec2 = { workspace = true }
+# Amazon S3, mounted beside this one in the test harness: the object an export of a
+# serverless cache snapshot writes is read back through that service's OWN operations,
+# so what the export reports is what the owner of objects really holds.
+service-com-amazonaws-s3-amazons3 = { workspace = true }
 
 [lints]
 workspace = true

@@ -238,6 +238,57 @@ impl Emulator {
         }
     }
 
+    /// The same emulator with Amazon S3 mounted BESIDE this service on the one
+    /// shared engine, the way the assembled emulator mounts them.
+    ///
+    /// That is the only way a suite about an EXPORT reaches the objects the
+    /// export writes, because a bucket and the object in it belong to Amazon S3:
+    /// what this service reports as exported is read back through that
+    /// service's own operations.
+    pub fn with_s3() -> Self {
+        let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+        let mut router = MultiServiceRouter::new();
+        router.set_request_authentication(false);
+        router.register_service(EmulatedService::new(Arc::clone(&engine)));
+        router.register_service(service_com_amazonaws_ec2_amazonec2::EmulatedService::new(
+            Arc::clone(&engine),
+        ));
+        router.register_service(service_com_amazonaws_s3_amazons3::EmulatedService::new(
+            Arc::clone(&engine),
+        ));
+        let callback = EmbeddedEmulator::from_router(router.clone());
+        Self {
+            router,
+            engine,
+            callback,
+        }
+    }
+
+    /// An Amazon S3 client for `region` over the in-process callback this
+    /// emulator routes on: no socket is opened, and the endpoint URL is only the
+    /// address that transport routes by.
+    ///
+    /// The emulator serves every service on one endpoint, so the bucket travels
+    /// in the PATH rather than in a per-bucket host — the same addressing the
+    /// service under test writes its export through.
+    pub fn s3(&self, region: &str) -> ::aws_sdk_s3::Client {
+        let config = ::aws_sdk_s3::Config::builder()
+            .behavior_version(::aws_sdk_s3::config::BehaviorVersion::latest())
+            .region(::aws_sdk_s3::config::Region::new(region.to_string()))
+            .endpoint_url(format!("https://s3.{region}.amazonaws.com"))
+            .force_path_style(true)
+            .credentials_provider(self.callback.aws_credentials_provider())
+            .http_client(self.callback.http_client())
+            .retry_config(::aws_sdk_s3::config::retry::RetryConfig::disabled())
+            .timeout_config(::aws_sdk_s3::config::timeout::TimeoutConfig::disabled())
+            .identity_cache(::aws_sdk_s3::config::IdentityCache::no_cache())
+            .stalled_stream_protection(
+                ::aws_sdk_s3::config::StalledStreamProtectionConfig::disabled(),
+            )
+            .build();
+        ::aws_sdk_s3::Client::from_conf(config)
+    }
+
     /// An EC2 client for `region` over the in-process callback this emulator
     /// routes on: no socket is opened, and the endpoint URL is only the address
     /// that transport routes by.

@@ -435,6 +435,37 @@ impl ComAmazonawsElasticacheAmazonelasticachev9State {
         Some(snapshot)
     }
 
+    /// The serverless cache snapshot `name` names (the stored, lowercased
+    /// name), with any status change the clock owes it already materialised —
+    /// the serverless counterpart of [`Self::settled_snapshot_mut`], so an
+    /// operation that branches on a snapshot's status reads the status it is
+    /// owed at this instant.
+    pub fn settled_serverless_cache_snapshot_mut(
+        &mut self,
+        name: &str,
+        now: SystemTime,
+    ) -> Option<&mut ServerlessCacheSnapshotRecord> {
+        // Deliberately two lookups, for the reason
+        // [`Self::settled_serverless_cache_mut`] gives: the first ends the
+        // record's borrow so the transition's event can be written to the log
+        // beside it.
+        let settled = {
+            let snapshot = self.serverless_cache_snapshots.get_mut(name)?;
+            snapshot
+                .settle(now)
+                .map(|settled| (snapshot.name.clone(), settled))
+        };
+        if let Some((snapshot_name, settled)) = settled {
+            self.record_transition(
+                SOURCE_TYPE_SERVERLESS_CACHE_SNAPSHOT,
+                &snapshot_name,
+                "Serverless cache snapshot",
+                &settled,
+            );
+        }
+        self.serverless_cache_snapshots.get_mut(name)
+    }
+
     /// Drop every snapshot whose removal the clock already owes — the snapshots
     /// a `DeleteSnapshot` put into [`STATUS_DELETING`] at least
     /// [`SNAPSHOT_TRANSITION`] ago.

@@ -270,3 +270,8 @@ mod parameter_group_engine_must_match;
 // with.
 #[path = "all/auth_token_refusal_wording.rs"]
 mod auth_token_refusal_wording;
+
+// Appended for the same reason: the `ExportServerlessCacheSnapshot` suite, which reads the
+// object the export wrote back through Amazon S3's own operations.
+#[path = "all/serverless_cache_snapshot_export.rs"]
+mod serverless_cache_snapshot_export;

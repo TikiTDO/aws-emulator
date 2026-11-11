@@ -191,6 +191,18 @@ pub fn serverless_cache_snapshot_arn(region: &str, name: &str) -> String {
     )
 }
 
+/// How ElastiCache words `ServerlessCacheSnapshotNotFoundFault` ("this
+/// serverless cache snapshot could not be found or does not exist"): the
+/// sentence names the snapshot the REQUEST asked for, as it was sent, because a
+/// name the store resolves to nothing is all the service knows about it.
+///
+/// One statement, so every operation that resolves a serverless cache snapshot
+/// by name — `DescribeServerlessCacheSnapshots` and
+/// `ExportServerlessCacheSnapshot` — words that fault the same way.
+pub fn serverless_cache_snapshot_not_found_message(requested: &str) -> String {
+    format!("Serverless cache snapshot with name {requested} not found.")
+}
+
 /// How many default subnets a serverless cache created in `region` without
 /// `SubnetIds` is given; see [`TWO_DEFAULT_SUBNET_REGION`].
 pub fn default_subnet_count(region: &str) -> usize {

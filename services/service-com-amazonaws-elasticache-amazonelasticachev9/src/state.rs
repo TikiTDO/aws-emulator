@@ -180,6 +180,7 @@ pub mod ec2_client;
 pub mod ec2_security_groups;
 pub mod ec2_subnets;
 pub mod kms_key;
+pub mod s3_export;
 mod store;
 mod parameters;
 mod reserved_nodes;
