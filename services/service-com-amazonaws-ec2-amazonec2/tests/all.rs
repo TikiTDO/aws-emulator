@@ -79,6 +79,12 @@ mod address_attribute_modify;
 // Declared beside `prefix_lists` for the reason the note above gives: the sorted
 #[path = "all/key_pairs.rs"]
 mod key_pairs;
+// The key pair as a resource the rest of the service uses: what a created key pair is good for
+// while it is held (reported by the read, usable as a launch's `KeyName`) and what its delete
+// does and does not change (the name stops resolving and is free again; an instance already
+// launched with it keeps it). Declared beside `key_pairs`, the suite it shares a subject with.
+#[path = "all/key_pair_launch_lifecycle.rs"]
+mod key_pair_launch_lifecycle;
 // The ONE snapshot resource the EBS direct APIs and EC2 both describe: a snapshot
 // `ebs:StartSnapshot` minted reported and resolved on the EC2 side through its whole
 // lifecycle, the narrowings that select it, and the refusal that stays for an id nothing
