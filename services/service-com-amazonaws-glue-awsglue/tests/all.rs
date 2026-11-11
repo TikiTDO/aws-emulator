@@ -351,6 +351,8 @@ mod update_partition;
 mod usage_profiles;
 #[path = "all/wire.rs"]
 mod wire;
+#[path = "all/workflow_batch_reads.rs"]
+mod workflow_batch_reads;
 #[path = "all/workflow_graph.rs"]
 mod workflow_graph;
 #[path = "all/workflow_listing.rs"]

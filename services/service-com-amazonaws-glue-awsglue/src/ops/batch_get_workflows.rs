@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op BatchGetWorkflows
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `BatchGetWorkflows`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`BatchGetWorkflows::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -145,18 +136,110 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `BatchGetWorkflows` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(BatchGetWorkflowsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            // This operation models a server fault, so an unreachable store is reported
+            // as that rather than as a client error the caller could act on.
+            return Err(BatchGetWorkflowsErrorModeled::InternalServiceException(
+                InternalServiceException {
+                    message: Some("the Glue workflow store is unavailable".into()),
+                },
+            )
+            .into());
+        };
+
+        // `Names` is bounded `length 1..25` with each element bounded `length 1..255` and a
+        // pattern (`smithy_query operation=BatchGetWorkflows`), so an empty batch, an
+        // oversized one and a name too long to address a workflow are all refused at the
+        // request boundary: reaching here, the only question per name is whether this
+        // account holds a workflow under it.
+        let now = ::std::time::SystemTime::now();
+        let region = crate::state::request_region(ctx.parts());
+
+        // The only writes this read makes are the ones the CLOCK had already made due to
+        // the named workflows' runs, materialised exactly as the single-workflow read
+        // materialises them (`GetWorkflow`): a batch read reports the state each workflow
+        // has reached by now, not the state it was last written in.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("BatchGetWorkflows"))
+        // A batch of events an EVENT trigger of one of these workflows was holding fires on
+        // its own once its window has run out, and the run that firing begins is a run of
+        // that workflow like any other — so every named workflow's due batches are settled
+        // FIRST, under one guard, and the jobs whose runs those workflows' actions began are
+        // collected after it. The job names are collected across the WHOLE batch and the
+        // owed script executions performed in ONE call with no store guard held, so what a
+        // batch read spends on them is bounded by the same per-call ceilings a single read
+        // is ([`crate::state::MAX_JOB_SCRIPT_RUNS_PER_CALL`] scripts over at most
+        // [`crate::state::MAX_JOBS_PER_SCRIPT_CALL`] jobs, nothing further started past
+        // [`crate::state::JOB_SCRIPT_CALL_CEILING`], each script stopped at
+        // [`crate::state::JOB_SCRIPT_RUN_CEILING`]) rather than by that ceiling times the
+        // number of names. The scripts are compiled and run INSIDE this process by the
+        // embedded interpreter ([`crate::state::job_script`]).
+        let action_jobs: Vec<String> = {
+            let mut store = state.lock();
+            let mut named = ::std::collections::BTreeSet::new();
+            for name in &input.names {
+                store.settle_due_event_batches(&region, name, now);
+                named.extend(store.action_job_run_job_names(name));
+            }
+            named.into_iter().collect()
+        };
+        crate::state::perform_owed_job_runs(&*self.engine, ctx, &region, &action_jobs).await;
+
+        // "Specifies whether to include a graph when returning the workflow resource
+        // metadata": one `IncludeGraph` governs the whole batch, and a request that named
+        // none asked for no graph. The projection is the STORE's, the same one `GetWorkflow`
+        // serves, so a workflow read in a batch and read on its own are identical.
+        let include_graph = input.include_graph.unwrap_or(false);
+
+        // The owed scripts above were awaited, so the clock has moved on: the pass that
+        // builds the answer reads it again, and a batch an event trigger was holding whose
+        // window ran out while those scripts ran is therefore materialised here rather than
+        // being left owed to a later call.
+        let settled_at = ::std::time::SystemTime::now();
+
+        // The walk keeps the request's order and its repeats — one answer per REQUESTED
+        // name, not per distinct name — and is bounded above by the batch's modelled
+        // maximum.
+        let mut workflows = Vec::new();
+        let mut missing_workflows = Vec::new();
+        let mut store = state.lock();
+        for name in &input.names {
+            // Settled again under THIS guard, at the instant the answer is built: the run a
+            // held batch's firing begins is "the last execution of the workflow" this read
+            // reports.
+            store.settle_due_event_batches(&region, name, settled_at);
+            if let Some(entry) = store.workflow_mut(name) {
+                entry.settle_due_runs(settled_at);
+            }
+            // The runs those executions' actions began were owed the same clock, and this
+            // read reports the state each has reached.
+            store.settle_due_action_job_runs(&region, name, settled_at);
+            // ONE lookup decides both lists, so every requested name is accounted for in
+            // exactly one of them: the projection when this account holds a workflow under
+            // the name, and otherwise "a list of names of workflows not found" — a miss is
+            // reported back to the caller rather than failing the whole batch, since this
+            // operation models no not-found error.
+            match store.workflow(name) {
+                Some(entry) => workflows.push(store.to_workflow(&region, entry, include_graph)),
+                None => missing_workflows.push(name.clone()),
+            }
+        }
+        drop(store);
+
+        ::tracing::info!(
+            operation = "BatchGetWorkflows",
+            region = %region,
+            requested = input.names.len(),
+            found = workflows.len(),
+            missing = missing_workflows.len(),
+            "read Glue workflows in a batch"
+        );
+
+        // Both output members target a list bounded `length 1..25`, so neither carries an
+        // empty list: a batch in which nothing missed reports no `MissingWorkflows` member
+        // at all, and one in which nothing was found reports no `Workflows` member.
+        Ok(BatchGetWorkflowsOutput {
+            workflows: (!workflows.is_empty()).then_some(workflows),
+            missing_workflows: (!missing_workflows.is_empty()).then_some(missing_workflows),
+        })
     }
 }
