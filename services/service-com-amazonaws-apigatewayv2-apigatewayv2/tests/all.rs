@@ -99,6 +99,8 @@ mod http_api_integration_fault_status;
 mod http_api_jwt_claims_reach_the_integration;
 #[path = "all/http_api_jwt_data_plane.rs"]
 mod http_api_jwt_data_plane;
+#[path = "all/http_api_jwt_scope_gate.rs"]
+mod http_api_jwt_scope_gate;
 #[path = "all/http_api_payload_quota.rs"]
 mod http_api_payload_quota;
 #[path = "all/http_api_published_invoke_address.rs"]
