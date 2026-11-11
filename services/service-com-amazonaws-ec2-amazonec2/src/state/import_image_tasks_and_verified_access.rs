@@ -223,7 +223,8 @@ pub fn imported_disk_volume_size(disk_image_size: f64) -> Option<i32> {
 ///
 /// Derived from the share of the import's window that has elapsed, and held below
 /// [`MAX_ACTIVE_IMPORT_PROGRESS`] because a task still reporting progress has not finished.
-/// The ONE reader of that share, for every kind of import task: a percentage is a fact of
+/// The ONE reader of that share, for every kind of VM conversion task — an import task of
+/// either kind, and the export image task an `ExportImage` starts: a percentage is a fact of
 /// elapsed time, so no stored value could be right twice and no second definition of it
 /// could agree with this one.
 pub fn import_task_progress_at(started_at: Instant, ends_at: Instant, now: Instant) -> String {

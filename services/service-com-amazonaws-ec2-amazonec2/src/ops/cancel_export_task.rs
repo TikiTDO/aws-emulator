@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CancelExportTask
-//! IMPLEMENTED: cancels the instance export task the request names in [`crate::state`]. This
+//! IMPLEMENTED: cancels the export task the request names in [`crate::state`] — of EITHER
+//! kind, "the ID returned by the CreateInstanceExportTask and ExportImage operations". This
 //! is the ONLY file to touch for this operation.
 //!
 //! "Cancels an ACTIVE export task" and "if the export task is complete or is in the process
 //! of transferring the final disk image, the command fails and returns an error"
 //! (`CancelExportTask`): a task that is not active is refused with `IncorrectState`, the code
 //! EC2 answers when the resource exists but is not in a state that admits the request. A
-//! cancel that is admitted puts the task into the non-terminal `cancelling` state and the
-//! clock owes it `cancelled` ([`crate::state::ExportTaskRecord`]).
+//! cancel that is admitted puts the task into the non-terminal state its own modelled shape
+//! publishes and the clock owes it the terminal one: `cancelling` -> `cancelled` for an
+//! INSTANCE export task ([`crate::state::ExportTaskRecord`], `ExportTask$State`), and
+//! `deleting` -> `deleted` for an IMAGE export task
+//! ([`crate::state::ExportImageTaskRecord`], `ExportImageTask$Status`).
 //!
 //! `ExportVmTaskId` carries no modelled pattern, so the id form is the one the operations
 //! that MINT an export task id use — `export-i-<hex>` and `export-ami-<hex>`, the
@@ -18,9 +22,9 @@
 //! that reads an export task id). An id outside that form is not an EC2 resource id at all,
 //! so it is refused `InvalidID` BEFORE any lookup, and only an id EC2 could have issued that
 //! resolves to nothing is answered `InvalidExportTaskID.NotFound`.
-//! `CreateInstanceExportTask`, which is what starts a task, is still a scaffold, so a fresh
-//! account holds none — and that is the answer every well-formed id gets until one is
-//! started.
+//! `CreateInstanceExportTask`, which is what starts an INSTANCE export task, is still a
+//! scaffold, so a fresh account holds none of those — and that is the answer every
+//! well-formed id gets until `ExportImage` starts an image export task.
 //!
 //! This operation models no `DryRun` member, so there is no permission probe to answer.
 //!
@@ -217,8 +221,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         use crate::state::{
-            EXPORT_TASK_STATE_ACTIVE, TRANSITION_DELAY, incorrect_state_of,
-            invalid_export_task_id_not_found, require_service_state,
+            EXPORT_IMAGE_TASK_STATUS_ACTIVE, EXPORT_TASK_STATE_ACTIVE, TRANSITION_DELAY,
+            incorrect_state_of, invalid_export_task_id_not_found, require_service_state,
         };
 
         // An export task carries no Region member of its own, so nothing here depends on the
@@ -233,24 +237,49 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut store = state.lock();
         let now = ::std::time::Instant::now();
 
-        let Some(record) = store.export_tasks.get_mut(&input.export_task_id) else {
+        // "This is the ID returned by the CreateInstanceExportTask and ExportImage operations"
+        // (`CancelExportTaskRequest$ExportTaskId`): one operation cancels either kind of export
+        // task, and an id names at most one of them, so the INSTANCE export tasks are looked at
+        // first and the IMAGE export tasks after. Each kind reports the states of its own
+        // modelled shape, which are not the same words: an instance export task goes
+        // `cancelling` -> `cancelled` (`ExportTask$State`), an image export task
+        // `deleting` -> `deleted` (`ExportImageTask$Status`).
+        if let Some(record) = store.export_tasks.get_mut(&input.export_task_id) {
+            // Only an active task can be cancelled: one already cancelling, cancelled or
+            // complete is refused with the state it is in, worded the one way this crate words
+            // a refusal for the state of the resource the request names
+            // ([`crate::state::incorrect_state_of`]).
+            let current = record.state_at(now);
+            if current != EXPORT_TASK_STATE_ACTIVE {
+                return Err(incorrect_state_of(
+                    "Export task",
+                    &input.export_task_id,
+                    &current,
+                ));
+            }
+            // The cancellation is started now and falls due on the clock, the same span a
+            // volume's `creating` -> `available` move takes in this crate.
+            record.cancelled_at = Some(now + TRANSITION_DELAY);
+            return Ok(CancelExportTaskOutput);
+        }
+
+        let Some(record) = store.export_image_tasks.get_mut(&input.export_task_id) else {
             return Err(invalid_export_task_id_not_found(&input.export_task_id));
         };
-        // Only an active task can be cancelled: one already cancelling, cancelled or
-        // complete is refused with the state it is in, worded the one way this crate words
-        // a refusal for the state of the resource the request names
-        // ([`crate::state::incorrect_state_of`]).
-        let current = record.state_at(now);
-        if current != EXPORT_TASK_STATE_ACTIVE {
+        // The same rule as above for the other kind of task: "Cancels an active export task",
+        // so one already deleting, deleted or complete is refused with the status it is in.
+        let current = record.status_at(now);
+        if current != EXPORT_IMAGE_TASK_STATUS_ACTIVE {
             return Err(incorrect_state_of(
                 "Export task",
                 &input.export_task_id,
-                &current,
+                current,
             ));
         }
-        // The cancellation is started now and falls due on the clock, the same span a
-        // volume's `creating` -> `available` move takes in this crate.
-        record.cancelled_at = Some(now + TRANSITION_DELAY);
+        // "The request removes all artifacts of the export, including any partially-created
+        // Amazon S3 objects": that removal is what `deleting` reports, and the clock owes the
+        // task `deleted` once it is done.
+        record.deleted_at = Some(now + TRANSITION_DELAY);
         Ok(CancelExportTaskOutput)
     }
 }

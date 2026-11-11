@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ExportImage
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ExportImage`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: starts an export of one of the account's AMIs to a VM file in the Amazon S3
+//! destination the request names, storing it as an
+//! [`crate::state::ExportImageTaskRecord`] that `DescribeExportImageTasks` then reports. This
+//! is the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ExportImage::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The AMI is resolved against the images the calling account can see
+//! ([`crate::state::require_visible_image`]), the destination bucket's name against Amazon
+//! S3's published naming rules ([`crate::state::s3_bucket_name_is_well_formed`]), and the task
+//! AWS hands back is `active`: finishing it writes an object of ANOTHER service and mints
+//! nothing a later read has to agree on, so its status is a fact of the clock alone and is
+//! derived on every read rather than written.
 //!
 //! ## Shape of an operation
 //!
@@ -93,6 +95,17 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+/// The prefix an export image task id carries, from the crate's one definition of it — the
+/// operation the model gives such an id back to, whose own documentation names this operation
+/// as a source of the ids it takes ("This is the ID returned by the CreateInstanceExportTask
+/// and ExportImage operations").
+use crate::ops::cancel_export_task::IMAGE_EXPORT_TASK_ID_PREFIX;
+
+/// "A description of the image being exported. The maximum length is 255 characters"
+/// (`ExportImageRequest$Description`): the published bound, enforced by hand because the model
+/// declares no `@length` for the member.
+pub const MAX_EXPORT_DESCRIPTION_CHARS: usize = 255;
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -160,18 +173,215 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ExportImage` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ExportImageErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        use crate::scaffolded::Scaffolded;
+        use crate::state::{
+            EXPORT_IMAGE_TASK_TAGGABLE_RESOURCE, ExportImageTaskRecord, MAX_CLIENT_TOKEN_CHARS,
+            MAX_STORED_BYTES, MAX_STORED_EXPORT_IMAGE_TASKS, TRANSITION_DELAY,
+            export_image_task_payload_bytes, invalid_s3_bucket_name, missing_parameter,
+            require_service_state, require_visible_image, resource_count_exceeded,
+            s3_bucket_name_is_well_formed, tags_from_specifications,
+        };
+
+        // `ctx` carries request metadata only; the AMI, the format and the S3 destination are
+        // each named by the request, and an export image task carries no Region member of its
+        // own. The store is reached through the engine held on `self`.
+        let _ = ctx;
+
+        // The three `@required` members are modelled `clientOptional`, so a request that left
+        // one out reaches this handler as an empty value rather than being refused at the
+        // boundary. An export names the image to export, the format to export it in and the
+        // bucket to export it into, so a request missing any of them is one EC2 answers
+        // `MissingParameter` for.
+        for (parameter, value) in [
+            ("ImageId", input.image_id.as_str()),
+            ("DiskImageFormat", input.disk_image_format.as_str()),
+            (
+                "S3ExportLocation.S3Bucket",
+                input.s3_export_location.s3_bucket.as_str(),
+            ),
+        ] {
+            if value.is_empty() {
+                return Err(missing_parameter(format!(
+                    "The request must contain the parameter {parameter}"
+                )));
+            }
+        }
+
+        // "The disk image format" (`ExportImageRequest$DiskImageFormat`): the formats EC2
+        // exports an AMI in are the members of the modelled `DiskImageFormat` enum, so a value
+        // outside it names no format at all. The boundary validator refuses a spelling outside
+        // the enum; this is the backstop that keeps one the store would then report from
+        // reaching the task.
+        if !DISK_IMAGE_FORMAT_VALUES.contains(&input.disk_image_format.as_str()) {
+            return Err(Scaffolded::invalid_parameter_value(format!(
+                "Invalid value '{format}' for diskImageFormat",
+                format = input.disk_image_format,
+            )));
+        }
+
+        // "A description of the image being exported. The maximum length is 255 characters"
+        // (`ExportImageRequest$Description`): a published bound the model declares no `@length`
+        // for, so it is enforced here, counted in CHARACTERS as the sentence states.
+        if input
+            .description
+            .as_ref()
+            .is_some_and(|description| description.chars().count() > MAX_EXPORT_DESCRIPTION_CHARS)
+        {
+            return Err(Scaffolded::invalid_parameter_value(format!(
+                "description accepts at most {MAX_EXPORT_DESCRIPTION_CHARS} characters"
+            )));
+        }
+        if input
+            .client_token
+            .as_ref()
+            .is_some_and(|token| token.chars().count() > MAX_CLIENT_TOKEN_CHARS)
+        {
+            return Err(Scaffolded::invalid_parameter_value(format!(
+                "clientToken accepts at most {MAX_CLIENT_TOKEN_CHARS} characters"
+            )));
+        }
+
+        // "The Amazon S3 bucket for the destination image. The destination bucket must exist"
+        // (`ExportImageRequest$S3ExportLocation`): EC2 names a bucket here rather than creating
+        // one, so what it can tell about the name without reading another service's state is
+        // whether it is a bucket name at all — a value outside Amazon S3's published naming
+        // rules names none, and is refused as the malformed parameter it is, through the one
+        // answer every operation of this crate that takes a bucket name shares.
+        if !s3_bucket_name_is_well_formed(&input.s3_export_location.s3_bucket) {
+            return Err(invalid_s3_bucket_name());
+        }
+
+        // "The tags to apply to the export image task during creation"
+        // (`ExportImageRequest$TagSpecifications`) — "you must specify the resource type to
+        // tag, otherwise the request will fail" (`TagSpecification`), and the only type this
+        // action tags is the task it creates.
+        let tags: Vec<Tag> = tags_from_specifications(
+            input.tag_specifications.as_deref(),
+            EXPORT_IMAGE_TASK_TAGGABLE_RESOURCE,
+            Self::NAME,
+        )?;
+
+        let state = require_service_state(&*self.engine)?;
+        let mut store = state.lock();
+        let now = ::std::time::Instant::now();
+
+        // "The ID of the image" (`ExportImageRequest$ImageId`): the task exports THAT AMI, so
+        // an id the calling account can see no image for has nothing to export. Read through
+        // the crate's shared image-id validator, which separates a value that is no AMI id at
+        // all from a well-formed id no visible image has — the two answers the describes of
+        // this account's images keep.
+        require_visible_image(&store, &input.image_id)?;
+
+        // Idempotency: "Token to enable idempotency for export image requests"
+        // (`ExportImageRequest$ClientToken`) — one token names the one task it started, so a
+        // replay reports that task and starts no second export. Read before the DryRun check,
+        // answered after it, because a replay stores nothing and so passes the ceilings a fresh
+        // export has to clear.
+        let replayed = input
+            .client_token
+            .as_deref()
+            .and_then(|token| store.export_image_task_client_tokens.get(token).cloned());
+
+        if replayed.is_none() && !store.has_export_image_task_capacity() {
+            return Err(resource_count_exceeded(format!(
+                "This emulator holds {MAX_STORED_EXPORT_IMAGE_TASKS} export image tasks, \
+                 which is as many as it stores"
+            )));
+        }
+
+        // The task as it will be stored, all but its id: the id is minted only after the DryRun
+        // and replay gates below, so neither a dry run (which "leaves state untouched") nor an
+        // idempotent replay (which stores nothing) consumes one from the store's counter.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ExportImage"))
+        // `Status` and `Progress` are left unset on purpose: both are facts of the clock, so
+        // [`crate::state::ExportImageTaskRecord::view_at`] fills them on every read and no
+        // stored value can go stale.
+        let mut view = ExportImageTask {
+            export_image_task_id: None,
+            description: input.description.clone(),
+            image_id: Some(input.image_id.clone()),
+            s3_export_location: Some(ExportTaskS3Location {
+                s3_bucket: Some(input.s3_export_location.s3_bucket.clone()),
+                s3_prefix: input.s3_export_location.s3_prefix.clone(),
+            }),
+            // "The status message for the export image task" (`ExportImageTask$StatusMessage`):
+            // an export running to plan has nothing to say about its status beyond the status
+            // itself.
+            status_message: None,
+            status: None,
+            progress: None,
+            tags: Some(tags),
+        };
+
+        // The caller-chosen bytes this export would retain for the process's lifetime, counted
+        // by the ONE definition of that charge. A COUNT ceiling admits gigabytes on its own,
+        // because each record holds strings the caller chose the length of.
+        let payload_bytes = export_image_task_payload_bytes(
+            &view,
+            input.role_name.as_deref(),
+            input.client_token.as_deref(),
+        );
+        if replayed.is_none() && store.would_exceed_stored_bytes(payload_bytes) {
+            return Err(resource_count_exceeded(format!(
+                "This emulator holds {} of at most {MAX_STORED_BYTES} bytes of \
+                 caller-supplied data, so it cannot store {payload_bytes} more",
+                store.stored_bytes()
+            )));
+        }
+
+        // DryRun sits AFTER every parameter has been validated and BEFORE the first write: the
+        // flag asks whether the request WOULD have worked, so one that would have been refused
+        // is refused with that reason instead, and one that would have succeeded leaves state
+        // untouched.
+        if input.dry_run == Some(true) {
+            return Err(Scaffolded::dry_run_operation());
+        }
+
+        if let Some(task_id) = replayed {
+            return store
+                .export_image_tasks
+                .get(&task_id)
+                .map(|record| record.export_response(now))
+                .ok_or_else(|| {
+                    Scaffolded::internal_error(format!(
+                        "a client token names export task '{task_id}', which is not stored"
+                    ))
+                });
+        }
+
+        let task_id = store.next_id(IMAGE_EXPORT_TASK_ID_PREFIX);
+        view.export_image_task_id = Some(task_id.clone());
+        let record = ExportImageTaskRecord {
+            view,
+            disk_image_format: input.disk_image_format.clone(),
+            role_name: input.role_name.clone(),
+            started_at: now,
+            // An export AWS hands back is `active` and reaches `completed` without anyone
+            // asking: the same clock-owed span every other transition in this crate takes.
+            completed_at: now + TRANSITION_DELAY,
+            // Nothing has cancelled a task this call is starting, so the clock owes it no
+            // `deleted` state.
+            deleted_at: None,
+        };
+        if let Some(token) = input.client_token.clone() {
+            store
+                .export_image_task_client_tokens
+                .insert(token, task_id.clone());
+        }
+        store.add_stored_bytes(payload_bytes);
+        store.export_image_tasks.insert(task_id.clone(), record);
+
+        // Read the response back OUT of the store, so the caller sees what a later
+        // `DescribeExportImageTasks` will see rather than the request object.
+        store
+            .export_image_tasks
+            .get(&task_id)
+            .map(|record| record.export_response(now))
+            .ok_or_else(|| {
+                Scaffolded::internal_error(format!(
+                    "export task '{task_id}' was not stored by this request"
+                ))
+            })
     }
 }
+

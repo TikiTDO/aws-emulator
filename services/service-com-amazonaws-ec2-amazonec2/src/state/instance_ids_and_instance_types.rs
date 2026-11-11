@@ -44,6 +44,7 @@ impl ComAmazonawsEc2Amazonec2State {
             customer_gateways => view,
             dedicated_hosts,
             dhcp_options,
+            export_image_tasks => view,
             export_tasks => view,
             fleets => fleet,
             fpga_images => view,

@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeExportImageTasks
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeExportImageTasks`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeExportImageTasks::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: reports the export image tasks [`crate::state`] holds, narrowed by
+//! `ExportImageTaskIds` and by `Filters`, each task carrying the status and the progress the
+//! clock has reached for it, one `MaxResults` page at a time. This is the ONLY file to touch
+//! for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -140,18 +135,222 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeExportImageTasks` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeExportImageTasksErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        use crate::scaffolded::Scaffolded;
+        use crate::state::{
+            CompiledFilter, MAX_FILTER_MATCH_STEPS, MAX_FILTER_VALUE_BYTES, MAX_FILTER_VALUES,
+            MAX_FILTERS, MAX_PAGE_SIZE, MAX_RESOURCE_IDS, MatchBudget, PageTokenRule,
+            decode_page_token, invalid_pagination_token_for, matches_every_filter,
+            page_from_cursor, require_service_state,
+        };
+
+        // `ctx` carries request metadata only; this operation reads none of it — an export
+        // image task's modelled shape names no Region. The store is reached through the engine
+        // held on `self`.
+        let _ = ctx;
+
+        // Read in place rather than copied: the ids only go into the lookup set below, and the
+        // cap is asked before anything proportional to them is done.
+        let requested_ids: &[String] = input.export_image_task_ids.as_deref().unwrap_or_default();
+        if requested_ids.len() > MAX_RESOURCE_IDS {
+            return Err(Scaffolded::invalid_parameter_value(format!(
+                "ExportImageTaskIds carries {} ids, above the maximum of {MAX_RESOURCE_IDS}",
+                requested_ids.len()
+            )));
+        }
+
+        // Matching cost is filters x values x held values x stored tasks, and the model bounds
+        // none of those, so the request-controlled factors are capped here, before any work
+        // proportional to them is done — and their PRODUCT is charged to ONE [`MatchBudget`]
+        // below, which is the bound the per-factor caps cannot give.
+        let supplied_filters = input.filters.as_ref().map_or(0, Vec::len);
+        if supplied_filters > MAX_FILTERS {
+            return Err(Scaffolded::invalid_parameter_value(format!(
+                "The request carries {supplied_filters} filters, above the maximum \
+                 of {MAX_FILTERS}"
+            )));
+        }
+
+        // A filter name this operation does not document is NOT refused: a name it does not
+        // answer compares against no values, so it selects nothing ([`filter_values`]). That is
+        // the recorded behaviour of the paired operation whose `Filters` member carries the
+        // IDENTICAL documented sentence — `DescribeImportImageTasks`, where the corpus unit
+        // `ec2.op-contract-describe-import-image-tasks` sends an invented filter name and AWS
+        // answers a RESULT rather than `InvalidParameterValue`. What is still bounded is the
+        // SIZE of what the caller sent, below.
+        let filters: &[Filter] = input.filters.as_deref().unwrap_or_default();
+        let mut selectors: Vec<CompiledFilter> = Vec::with_capacity(filters.len());
+        for filter in filters {
+            let name = filter.name.as_deref().unwrap_or_default();
+            let values = filter.values.as_deref().unwrap_or_default();
+            if values.len() > MAX_FILTER_VALUES {
+                return Err(Scaffolded::invalid_parameter_value(format!(
+                    "The filter '{name}' carries {} values, above the maximum of \
+                     {MAX_FILTER_VALUES}",
+                    values.len()
+                )));
+            }
+            // A capped NUMBER of comparisons is not capped WORK: the matcher's cost is the
+            // product of the pattern's length and the value's, so each value's size is bounded
+            // too, before any matching runs under the lock.
+            if let Some(oversize) = values
+                .iter()
+                .find(|value| value.len() > MAX_FILTER_VALUE_BYTES)
+            {
+                return Err(Scaffolded::invalid_parameter_value(format!(
+                    "A value of the filter '{name}' carries {} bytes, above the maximum of \
+                     {MAX_FILTER_VALUE_BYTES}",
+                    oversize.len()
+                )));
+            }
+            selectors.push(CompiledFilter::new(name.to_string(), values.to_vec()));
+        }
+
+        // "A token that indicates the next page of results" — anything this service did not
+        // mint is refused rather than read as a position, and it is refused before any other
+        // member is looked at, so whether a bogus token is caught never depends on the rest of
+        // the request.
+        let start_at = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => {
+                Some(decode_page_token(token).ok_or_else(|| invalid_pagination_token_for(token))?)
+            }
+        };
+
+        // "The IDs of the export image tasks"
+        // (`DescribeExportImageTasksRequest$ExportImageTaskIds`) NARROW the report: an id the
+        // account holds no export image task for selects no row rather than failing the call.
+        // The recorded behaviour of the sibling describe of this same resource family settles
+        // it — the corpus unit `ec2.op-contract-describeExportTasks` names an export task id no
+        // account holds and AWS answers a RESULT, not `InvalidExportTaskID.NotFound`. That code
+        // is for an operation that ACTS on one named task (`CancelExportTask`), where there is
+        // nothing to act on; a describe reports the set it was asked about, which is then
+        // empty.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeExportImageTasks"))
+        // The ids go into a SET, so narrowing one stored task is a logarithmic lookup rather
+        // than a scan of up to `MAX_RESOURCE_IDS` ids per task under the state lock.
+        let named_ids: ::std::collections::BTreeSet<&str> =
+            requested_ids.iter().map(String::as_str).collect();
+
+        let state = require_service_state(&*self.engine)?;
+        let store = state.lock();
+
+        // DryRun sits AFTER every parameter has been validated: the flag asks whether the
+        // request WOULD have succeeded, so one that would have been refused is refused with
+        // that reason instead.
+        if input.dry_run == Some(true) {
+            return Err(Scaffolded::dry_run_operation());
+        }
+
+        // Every comparison is charged to ONE budget — one step per task as well, so even an
+        // unfiltered scan is counted — so the PRODUCT of stored tasks, filters, values, held
+        // values and value length is bounded however the caller combines them, which is also
+        // what bounds how long this holds the state lock.
+        //
+        // This loop only READS: the `active` -> `completed` move the export's window owes, and
+        // the `deleting` -> `deleted` move a cancel started, are DERIVED from the stored
+        // instants by [`crate::state::ExportImageTaskRecord::view_at`], so reporting them
+        // stores nothing and cannot change what a later caller sees.
+        let now = ::std::time::Instant::now();
+        let mut budget = MatchBudget::new(MAX_FILTER_MATCH_STEPS);
+        let mut selected: Vec<ExportImageTask> = Vec::new();
+        // Whether the scan stopped before it had looked at every task. A budget spent while the
+        // LAST task was being compared leaves a COMPLETE answer, so incompleteness is recorded
+        // where it happens rather than inferred from the spent budget afterwards.
+        let mut stopped_early = false;
+        for (export_image_task_id, record) in &store.export_image_tasks {
+            if budget.exhausted() {
+                stopped_early = true;
+                break;
+            }
+            // The id narrowing is read off the stored key, so a task the request did not name
+            // costs no projection and no comparison at all.
+            if !named_ids.is_empty() && !named_ids.contains(export_image_task_id.as_str()) {
+                continue;
+            }
+            let task = record.view_at(now);
+            // The AND/OR rule EC2 defines for every `Filters` member is evaluated by the one
+            // shared evaluator; only the per-operation lookup is local.
+            if matches_every_filter(&selectors, &mut budget, &|name| filter_values(&task, name)) {
+                selected.push(task);
+            }
+        }
+        // A scan that stopped before the end answers an INCOMPLETE set, and so does one whose
+        // budget was spent WHILE the last task was being compared — the shared evaluator
+        // reports an aborted comparison as a non-match, which must not read as a genuine one.
+        // Neither is something to report as a result: the request asked for more filtering than
+        // one call will do, and is told so rather than given a silently truncated page.
+        if stopped_early || budget.exhausted() {
+            return Err(Scaffolded::request_limit_exceeded(format!(
+                "The request's filters would take more than {MAX_FILTER_MATCH_STEPS} \
+                 comparisons to evaluate; narrow them or page with MaxResults"
+            )));
+        }
+
+        // "The maximum number of results to return in a single call": a request that names no
+        // page size gets the largest page this service serves, so the `NextToken` path behaves
+        // the same whether or not a page size was asked for. The model publishes
+        // `@range 1..500` on the member, so a value outside it is refused at the request
+        // boundary before this handler runs and the clamp here only bounds the DEFAULT.
+        let limit = input
+            .max_results
+            .and_then(|max_results| usize::try_from(max_results).ok())
+            .unwrap_or(MAX_PAGE_SIZE)
+            .clamp(1, MAX_PAGE_SIZE);
+
+        // Reported and paged in `ExportImageTaskId` order: the store is an ordered map and the
+        // narrowing above preserves its order, so the selected set is already ascending by the
+        // id the cursor names a position in. A token is due only when a task FOLLOWS this page:
+        // "This value is null when there are no more results to return"
+        // (`DescribeExportImageTasksResult$NextToken`).
+        let (page, next_token) = page_from_cursor(
+            &selected,
+            start_at.as_deref(),
+            Some(limit),
+            PageTokenRule::WhenAnotherItemFollows,
+            |task| task.export_image_task_id.as_deref().unwrap_or_default(),
+        );
+
+        Ok(DescribeExportImageTasksOutput {
+            export_image_tasks: Some(page.to_vec()),
+            next_token,
+        })
+    }
+}
+
+/// The one filter name this operation documents, from
+/// `DescribeExportImageTasksRequest$Filters`:
+///
+/// ```text
+/// smithy_query(query="doc",shape="DescribeExportImageTasksRequest",member="Filters",model_path="services/service-com-amazonaws-ec2-amazonec2/smithy-model/com-amazonaws-ec2-amazonec2.json")
+/// ```
+///
+/// "Filter tasks using the task-state filter and one of the following values: active,
+/// completed, deleting, or deleted" — ONE name, which is therefore the only name
+/// [`filter_values`] answers with any value at all. The four values it compares against are
+/// the status catalog [`crate::state::EXPORT_IMAGE_TASK_STATUS_VALUES`] holds, which is what
+/// the task reports.
+const TASK_STATE_FILTER: &str = "task-state";
+
+/// The values the EC2 filter `name` compares against this export image task.
+///
+/// A filter naming an attribute this task does not carry — which is every name but
+/// [`TASK_STATE_FILTER`] — compares against NO values, so it selects nothing. This is the one
+/// per-operation half of the shared AND/OR evaluator
+/// ([`crate::state::matches_every_filter`]).
+fn filter_values<'a>(task: &'a ExportImageTask, name: &str) -> Vec<::std::borrow::Cow<'a, str>> {
+    use ::std::borrow::Cow;
+
+    match name {
+        // "the task-state filter and one of the following values: active, completed, deleting,
+        // or deleted": the task's state is the member the model calls `Status`.
+        TASK_STATE_FILTER => task
+            .status
+            .as_deref()
+            .map(Cow::Borrowed)
+            .into_iter()
+            .collect(),
+        // An attribute an export image task does not have holds no value for a filter to
+        // match, so a filter naming one selects nothing.
+        _ => Vec::new(),
     }
 }

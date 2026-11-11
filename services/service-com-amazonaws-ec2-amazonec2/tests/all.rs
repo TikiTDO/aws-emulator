@@ -870,6 +870,11 @@ mod ec2_query_error_request_id;
 mod elastic_gpus;
 #[path = "all/elastic_ip_addresses.rs"]
 mod elastic_ip_addresses;
+// What `DescribeExportImageTasks` reports out of the export image task store `ExportImage`
+// writes, how the clock and a cancellation move a task through the published statuses, and how
+// the ids, the filters and the pages narrow the report.
+#[path = "all/export_image_tasks.rs"]
+mod export_image_tasks;
 // What `DescribeExportTasks` reports out of the export task store, and how `ExportTaskIds`
 // and the filters narrow it.
 #[path = "all/export_tasks.rs"]

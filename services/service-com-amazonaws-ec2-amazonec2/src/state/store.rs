@@ -2846,6 +2846,14 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// docs. Ordered by id, which is the order `DescribeImportImageTasks` reports and pages
     /// over.
     pub import_image_tasks: BTreeMap<String, ImportImageTaskRecord>,
+    /// Every export image task the account has started, by `ExportImageTaskId` — see the
+    /// module docs. Ordered by id, which is the order `DescribeExportImageTasks` reports and
+    /// pages over.
+    pub export_image_tasks: BTreeMap<String, ExportImageTaskRecord>,
+    /// An `ExportImage` `ClientToken` and the export task id it minted, so a repeat of the
+    /// same request answers with that task instead of starting a second export: "Token to
+    /// enable idempotency for export image requests" (`ExportImageRequest$ClientToken`).
+    pub export_image_task_client_tokens: HashMap<String, String>,
     /// An `ImportImage` `ClientToken` and the import task id it minted, so a repeat of the
     /// same request answers with that task instead of starting a second import: "The token
     /// to enable idempotency for VM import requests" (`ImportImageRequest$ClientToken`).
@@ -3486,6 +3494,10 @@ impl Default for ComAmazonawsEc2Amazonec2State {
             // reports the default state and the `off` mode without a record of its own.
             vpc_block_public_access_options: BTreeMap::new(),
             import_image_tasks: BTreeMap::new(),
+            // A fresh account has started no export image task, so it has none to report and
+            // none to cancel.
+            export_image_tasks: BTreeMap::new(),
+            export_image_task_client_tokens: HashMap::new(),
             import_image_task_client_tokens: HashMap::new(),
             // A fresh account has cancelled no import task, so the clock owes none of them
             // its `deleted` state.

@@ -1671,6 +1671,19 @@
 //! of progress an active task reports is derived per read, being a fact of elapsed time
 //! that no store could hold.
 //!
+//! ## VM export image tasks
+//!
+//! [`ComAmazonawsEc2Amazonec2State::export_image_tasks`] holds the export image tasks
+//! `ExportImage` starts as [`ExportImageTaskRecord`]s: the modelled [`ExportImageTask`]
+//! `DescribeExportImageTasks` reports, plus the window the export runs in and the two
+//! `ExportImageResult` members that shape carries no member for. Keyed by
+//! `ExportImageTaskId` in a [`BTreeMap`], the same stable order the other stores are kept
+//! in, so a pagination token can name the id the next page starts at. Its STATUS is derived
+//! on every read ([`ExportImageTaskRecord::view_at`]) rather than written, because finishing
+//! an export mints nothing for a later read to agree on — the VM file it writes is an object
+//! of another service — so `active` -> `completed`, and the `deleting` -> `deleted` of a
+//! cancellation, are facts of the clock alone.
+//!
 //! `CancelImportTask` cancels a task of EITHER import kind, so the state it reads and the
 //! state it moves are reached through
 //! [`ComAmazonawsEc2Amazonec2State::import_task_state`] and
@@ -2144,6 +2157,14 @@ macro_rules! resource_tag_lists {
 use crate::ops::types::{ImportImageOutput, ImportImageTask};
 
 // ---------------------------------------------------------------------------
+// VM export: the export image tasks `ExportImage` starts
+// ---------------------------------------------------------------------------
+
+// The modelled shapes this slice reads, named here for the reason the ones above are: the
+// slice that reads them keeps its own modelled names beside the code that uses them.
+use crate::ops::types::{ExportImageOutput, ExportImageTask};
+
+// ---------------------------------------------------------------------------
 // VM import: the import snapshot tasks `ImportSnapshot` starts
 // ---------------------------------------------------------------------------
 
@@ -2415,6 +2436,11 @@ pub use published_amazon_linux::*;
 mod published_image_metadata;
 pub use published_image_metadata::*;
 mod import_image_tasks_and_verified_access;
+/// The export-image-task store: the status catalog `ExportImageTask$Status` publishes, the
+/// record `ExportImage` writes and `DescribeExportImageTasks` reports, and the ceilings that
+/// store keeps. Everything it declares is re-exported below, so a handler reaches it as
+/// `crate::state::ExportImageTaskRecord` like any primitive of this module.
+mod export_image_tasks;
 /// Which Verified Access trust providers each Verified Access instance has attached: the one
 /// writer of that attachment, the one reading of it, and the tokens the two calls that change
 /// it were given — in a file of its own rather than as more lines here. Everything it declares
@@ -2448,6 +2474,7 @@ pub use outpost_lags::*;
 pub use service_link_virtual_interfaces::*;
 pub use volumes::*;
 pub use import_image_tasks_and_verified_access::*;
+pub use export_image_tasks::*;
 pub use verified_access_trust_provider_attachments::*;
 pub use images_and_zone_facts::*;
 pub use security_group_rules_and_page_tokens::*;
