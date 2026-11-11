@@ -1,44 +1,64 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! Whether a launched task can FETCH the images its containers run from where it was
-//! placed, and the stop a task that cannot earns.
+//! Whether a launched task can FETCH the images its containers run, and the stop a task
+//! that cannot earns.
 //!
 //! A container runs an image, and the image is fetched from its registry before the
-//! container starts — so a task whose network placement has no path to that registry never
-//! runs at all. `Task$stopCode` is "the stop code indicating why a task was stopped", and
-//! the `TaskStopCode` member for a task that failed before its containers started is
+//! container starts — so a task whose image cannot be fetched never runs at all.
+//! `Task$stopCode` is "the stop code indicating why a task was stopped", and the
+//! `TaskStopCode` member for a task that failed before its containers started is
 //! [`STOP_CODE_TASK_FAILED_TO_START`]; `Task$stoppedReason` ("The reason that the task was
 //! stopped") carries the fetch failure itself, which the container runtime words as a
-//! `CannotPullContainerError` ([`cannot_pull_container_message`]).
+//! `CannotPullContainerError` ([`cannot_pull_container_message`] and its siblings).
 //!
-//! The path is Amazon VPC's, read off the placement's own subnet:
+//! Two things have to hold for the fetch, and each is answered by the service that owns the
+//! facts:
 //!
-//! * a subnet whose route table sends `0.0.0.0/0` to a PUBLIC NAT gateway reaches the
-//!   internet — "with a public NAT gateway, internet-bound traffic from a private subnet
-//!   can be routed to the NAT gateway" (`CreateNatGateway`), which a PRIVATE one does not
-//!   do;
-//! * a subnet whose route table sends `0.0.0.0/0` to an internet gateway reaches it only
-//!   for a task that was given a public address — "to use an internet gateway, your
-//!   subnet's route table must contain a route that directs internet-bound traffic to the
-//!   internet gateway" (Amazon VPC User Guide) and the instance must have a public address,
-//!   which for an `awsvpc` task is `AwsVpcConfiguration$assignPublicIp`
-//!   ([`ASSIGN_PUBLIC_IP_ENABLED`]);
-//! * a subnet with no route off the VPC at all can still reach AMAZON ECR, through the
-//!   endpoints that service publishes: an interface endpoint for `ecr.api`, one for
-//!   `ecr.dkr` and a gateway endpoint for Amazon S3, which the image layers come from
-//!   (Amazon ECR User Guide, "Amazon ECR interface VPC endpoints"). A public registry is
-//!   not an AWS service and publishes no endpoint, so an image held in one needs the
-//!   internet.
+//! 1. **a path to the registry**, which is Amazon VPC's and is read off the placement's own
+//!    subnet:
 //!
-//! The verdict is reached at LAUNCH, by the call that places the task, and stored on the
-//! task ([`TaskRecord::launch_failure`]); the clock then stops the task at the instant it
-//! would otherwise have started ([`TaskRecord::fail_launch`]), so a caller reading in
-//! between still sees the task come up.
+//!    * a subnet whose route table sends `0.0.0.0/0` to a PUBLIC NAT gateway reaches the
+//!      internet — "with a public NAT gateway, internet-bound traffic from a private subnet
+//!      can be routed to the NAT gateway" (`CreateNatGateway`), which a PRIVATE one does
+//!      not do;
+//!    * a subnet whose route table sends `0.0.0.0/0` to an internet gateway reaches it only
+//!      for a task that was given a public address — "to use an internet gateway, your
+//!      subnet's route table must contain a route that directs internet-bound traffic to
+//!      the internet gateway" (Amazon VPC User Guide) and the instance must have a public
+//!      address, which for an `awsvpc` task is `AwsVpcConfiguration$assignPublicIp`
+//!      ([`ASSIGN_PUBLIC_IP_ENABLED`]);
+//!    * a subnet with no route off the VPC at all can still reach AMAZON ECR, through the
+//!      endpoints that service publishes: an interface endpoint for `ecr.api`, one for
+//!      `ecr.dkr` and a gateway endpoint for Amazon S3, which the image layers come from
+//!      (Amazon ECR User Guide, "Amazon ECR interface VPC endpoints"). A public registry is
+//!      not an AWS service and publishes no endpoint, so an image held in one needs the
+//!      internet.
 //!
-//! LOCK ORDER: the cross-service read here takes the Amazon EC2 store's lock, holds no
-//! other while it does, and hands back owned values — so it is called with NO guard of
-//! this service's store held, which is what keeps a lock cycle between the two stores
-//! unreachable. The same contract [`unattached_target_groups`] has.
+//! 2. **an image the registry serves to this task's principal**, for an image reference
+//!    that names a repository of this account's Amazon ECR registry. Amazon ECS pulls it as
+//!    the task's EXECUTION ROLE — "the task execution role that grants the Amazon ECS
+//!    container agent permission to make Amazon Web Services API calls on your behalf"
+//!    (`TaskDefinition$executionRoleArn`) — so the registry decides the pull over the
+//!    policies in force on that role and its own repository policy, resolves the reference,
+//!    and caches the upstream image when a pull through cache rule covers the repository
+//!    ([`::service_com_amazonaws_ecr_amazonec2containerregistry_v20150921::state::registry_pull`]).
+//!    A reference that names another registry — a public one, or a bare name a container
+//!    runtime resolves against Docker Hub — is not this registry's to answer, so nothing
+//!    beyond the path above is decided for it.
+//!
+//! The pull is attempted at LAUNCH, by the call that places the task: the instants it took
+//! are recorded on the task (`Task$pullStartedAt`/`pullStoppedAt`) and a failure with them
+//! ([`TaskRecord::launch_failure`]); the clock then stops the task at the instant it would
+//! otherwise have started ([`TaskRecord::fail_launch`]), so a caller reading in between
+//! still sees the task come up. The attempt is made once per task: a task that already
+//! carries its pull instants is not pulled again, so a later placement by another call
+//! re-decides nothing and imports nothing twice.
+//!
+//! LOCK ORDER: the cross-service reads here take the Amazon EC2 store's lock and then the
+//! Amazon ECR store's (which takes the IAM store's), each holding no other while it does,
+//! and hand back owned values — so they are called with NO guard of this service's store
+//! held, which is what keeps a lock cycle between the stores unreachable. The same contract
+//! [`unattached_target_groups`] has.
 
 use super::*;
 
@@ -86,25 +106,30 @@ const S3_ENDPOINT_SUFFIX: &str = ".s3";
 /// which is what makes an image one the ECR endpoints can reach.
 const ECR_REGISTRY_INFIX: &str = ".dkr.ecr.";
 
-/// What ONE launched task's image fetch depends on: where the launch placed it, and what
-/// its containers run.
+/// What ONE launched task's image fetch depends on: where the launch placed it, what its
+/// containers run, and the principal Amazon ECS pulls as.
 ///
 /// Collected from the stored tasks under this service's lock
 /// ([`ComAmazonawsEcsAmazonec2containerservicev20141113State::launches_awaiting_image_pull`])
-/// and answered against the Amazon EC2 store under that store's own, so neither lock is
-/// ever held while the other is taken.
+/// and answered against the Amazon EC2 and Amazon ECR stores under those stores' own, so no
+/// two locks are ever held at once.
 #[derive(Debug, Clone)]
 pub struct TaskLaunch {
     /// The task the verdict belongs to.
     pub task_arn: String,
     /// `AwsVpcConfiguration$subnets`: "The IDs of the subnets associated with the task or
-    /// service", in the order the launch named them.
+    /// service", in the order the launch named them. Empty for a task that shares the
+    /// networking of the host that runs it, which carries no placement of its own.
     pub subnets: Vec<String>,
     /// `AwsVpcConfiguration$assignPublicIp`: "Whether the task's elastic network interface
     /// receives a public IP address", and `None` when the launch named no value.
     pub assign_public_ip: Option<String>,
     /// The images the task's containers run, as `Container$image` holds them.
     pub images: Vec<String>,
+    /// The task execution role Amazon ECS makes the pull as
+    /// ([`TaskRecord::execution_role_arn`]), and `None` for a task whose revision and
+    /// overrides name none.
+    pub execution_role_arn: Option<String>,
 }
 
 /// The `stoppedReason` of a task whose containers could not be launched because an image
@@ -122,6 +147,24 @@ pub fn cannot_pull_container_message(image: &str) -> String {
     )
 }
 
+/// The `stoppedReason` of a task whose image the registry would not serve to its execution
+/// role: the same `CannotPullContainerError` class, with the condition a registry that
+/// refuses the pull produces (the runtime's words for a registry answering `403 Forbidden`)
+/// and the registry's own refusal as the authorization it was refused by.
+pub fn pull_access_denied_message(image: &str, refusal: &str) -> String {
+    format!(
+        "CannotPullContainerError: failed to resolve ref {image}: pull access denied, \
+         repository does not exist or may require authorization: {refusal}"
+    )
+}
+
+/// The `stoppedReason` of a task whose image the registry holds nothing for: the same
+/// class, with the condition the runtime words for a reference that resolves to no content
+/// and the registry's own account of what it does not hold.
+pub fn image_not_found_message(image: &str, refusal: &str) -> String {
+    format!("CannotPullContainerError: failed to resolve ref {image}: not found: {refusal}")
+}
+
 /// The REGISTRY an image reference is fetched from: the part before the first `/` when
 /// that part is a host — it carries a `.` or a `:`, or is `localhost` — and
 /// [`DOCKER_HUB_REGISTRY`] otherwise, which is how a container runtime resolves a
@@ -137,17 +180,18 @@ pub fn registry_host(image: &str) -> &str {
     }
 }
 
-/// Decide the image fetch of every task that has just been launched, and record the
-/// failure on each task whose placement cannot make it.
+/// Attempt the image fetch of every task that has just been launched, and record what it
+/// took and why it failed.
 ///
 /// Called by the operations that LAUNCH a task, with this service's guard dropped: the
-/// verdict is a question about the Amazon VPC networking the launch named, so it is read
-/// out of the Amazon EC2 service's own store through the one shared engine, under that
-/// store's lock and no other.
+/// verdict is a question about the Amazon VPC networking the launch named and about what
+/// Amazon ECR serves the task's execution role, so each half is read out of that service's
+/// own store through the one shared engine, under that store's lock and no other.
 ///
-/// Nothing is recorded for a placement this emulator holds no network facts about — a
-/// subnet the EC2 store does not hold is not evidence of a blocked path — and nothing is
-/// recorded twice: a task already carrying a verdict is not re-decided.
+/// Nothing is recorded for a fact this emulator does not hold — a subnet the Amazon EC2
+/// store does not hold is not evidence of a blocked path, and an engine carrying no Amazon
+/// ECR store says nothing about an image — and nothing is attempted twice: a task that
+/// already carries its pull instants is not pulled again.
 pub fn evaluate_image_pulls<Eng: Send + Sync + 'static>(engine: &Eng) {
     let Some(state) = service_state(engine) else {
         return;
@@ -156,23 +200,67 @@ pub fn evaluate_image_pulls<Eng: Send + Sync + 'static>(engine: &Eng) {
     if launches.is_empty() {
         return;
     }
-    let Some(ec2) = ::service_com_amazonaws_ec2_amazonec2::state::service_state(engine) else {
-        return;
-    };
-    let failures: Vec<(String, String)> = {
-        let store = ec2.lock();
-        launches
+    // The network half, under the Amazon EC2 store's lock alone: every launch is answered
+    // in one pass, so the lock is taken once however many tasks were placed.
+    let mut failures: Vec<(String, Option<String>)> = match ::service_com_amazonaws_ec2_amazonec2::state::service_state(engine) {
+        Some(ec2) => {
+            let store = ec2.lock();
+            launches
+                .iter()
+                .map(|launch| (launch.task_arn.clone(), unfetchable_image(&store, launch)))
+                .collect()
+        }
+        None => launches
             .iter()
-            .filter_map(|launch| {
-                unfetchable_image(&store, launch)
-                    .map(|reason| (launch.task_arn.clone(), reason))
-            })
-            .collect()
+            .map(|launch| (launch.task_arn.clone(), None))
+            .collect(),
     };
-    if failures.is_empty() {
-        return;
+    // The registry half, with no lock of this service's or Amazon EC2's held: the registry
+    // answers each pull itself, which is also what imports an upstream image through a pull
+    // through cache rule.
+    let now = SystemTime::now();
+    for (launch, failure) in launches.iter().zip(failures.iter_mut()) {
+        if failure.1.is_none() {
+            failure.1 = unservable_image(engine, launch, now);
+        }
     }
-    state.lock().record_launch_failures(&failures);
+    state.lock().record_image_pulls(&failures, now);
+}
+
+/// Why the images of `launch` are not served to the task's execution role by this account's
+/// Amazon ECR registry — the `stoppedReason` of the first image it will not serve — or
+/// `None` when every image is served, or names a registry this one does not answer for.
+///
+/// The pull itself is Amazon ECR's: it decides the authorization, resolves the reference and
+/// caches an upstream image where a pull through cache rule covers the repository, which is
+/// why the import happens on the FIRST pull of such a reference and is visible to every
+/// later read of that repository.
+fn unservable_image<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    launch: &TaskLaunch,
+    now: SystemTime,
+) -> Option<String> {
+    use ::service_com_amazonaws_ecr_amazonec2containerregistry_v20150921::state::registry_pull;
+
+    launch.images.iter().find_map(|image| {
+        // A reference naming another registry is not this one's to serve: whether it can be
+        // fetched was decided by the path above.
+        let reference = registry_pull::parse_reference(image)?;
+        match registry_pull::serve_pull(
+            engine,
+            &reference,
+            launch.execution_role_arn.as_deref(),
+            now,
+        ) {
+            Ok(_) => None,
+            Err(registry_pull::PullRefusal::NotAuthorized { message, .. }) => {
+                Some(pull_access_denied_message(image, &message))
+            }
+            Err(registry_pull::PullRefusal::NotFound { message }) => {
+                Some(image_not_found_message(image, &message))
+            }
+        }
+    })
 }
 
 /// Why the containers of `launch` cannot be launched where the task is placed — the
@@ -352,54 +440,70 @@ fn effective_route_table<'store>(
 }
 
 impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
-    /// Every task whose image fetch has not been decided yet: one that is on its way UP
-    /// (its `desiredStatus` is `RUNNING` and it has not started) and that was launched
-    /// into an `awsvpc` network placement, with the placement and the images its
-    /// containers run.
+    /// Every task whose image fetch has not been attempted yet: one that is on its way UP
+    /// (its `desiredStatus` is `RUNNING` and it has not started) and that carries no pull
+    /// instants, with the placement it was launched into, the images its containers run and
+    /// the execution role the pull is made as.
     ///
     /// A task that shares the networking of the host that runs it carries no placement of
-    /// its own, so nothing here decides for it: the path it fetches an image over is that
-    /// host's.
+    /// its own, so the PATH half decides nothing for it: the path it fetches an image over
+    /// is that host's. The registry half is decided for it like any other task — the image
+    /// a reference names is the same image whichever networking the task runs with.
     pub fn launches_awaiting_image_pull(&self) -> Vec<TaskLaunch> {
         self.tasks
             .values()
             .filter(|task| {
                 task.launch_failure.is_none()
+                    && task.pull_started_at.is_none()
                     && task.desired_status == STATUS_RUNNING
                     && task.is_pending()
             })
-            .filter_map(|task| {
-                let awsvpc = task.awsvpc_configuration.as_ref()?;
-                Some(TaskLaunch {
-                    task_arn: task.task_arn.clone(),
-                    subnets: awsvpc.subnets.clone(),
-                    assign_public_ip: awsvpc.assign_public_ip.clone(),
-                    images: task
-                        .containers
-                        .iter()
-                        .filter_map(|container| container.image.clone())
-                        .collect(),
-                })
+            .map(|task| TaskLaunch {
+                task_arn: task.task_arn.clone(),
+                subnets: task
+                    .awsvpc_configuration
+                    .as_ref()
+                    .map(|awsvpc| awsvpc.subnets.clone())
+                    .unwrap_or_default(),
+                assign_public_ip: task
+                    .awsvpc_configuration
+                    .as_ref()
+                    .and_then(|awsvpc| awsvpc.assign_public_ip.clone()),
+                images: task
+                    .containers
+                    .iter()
+                    .filter_map(|container| container.image.clone())
+                    .collect(),
+                execution_role_arn: task.execution_role_arn.clone(),
             })
             .collect()
     }
 
-    /// Record, on each named task, why its containers cannot be launched where it is
-    /// placed — the `stoppedReason` the stop the clock then owes carries
+    /// Record what the image fetch of each named task took, and why it failed where it did
+    /// — the `stoppedReason` the stop the clock then owes carries
     /// ([`TaskRecord::fail_launch`]).
     ///
-    /// Only a task that is still on its way up takes a verdict: one that has started has
+    /// `Task$pullStartedAt` is "the time when the container image pull began" and
+    /// `pullStoppedAt` "the time when the container image pull completed": the fetch is made
+    /// in this process, so it began and completed at the instant it was attempted, and both
+    /// are recorded whether or not it succeeded — a pull that failed was still attempted.
+    /// They are recorded for a task whose start fell due while the fetch was being decided
+    /// too: the fetch was made for THAT task, so the instants belong on it however far the
+    /// clock has since taken it.
+    ///
+    /// Only a task that is still on its way UP takes a FAILURE: one that has started has
     /// already fetched its images, and one that is stopping is on its way out either way.
-    /// Nothing a client reads changes here, so the task's `version` does not move — the
-    /// stop itself is the change.
-    pub fn record_launch_failures(&mut self, failures: &[(String, String)]) {
-        for (task_arn, reason) in failures {
+    pub fn record_image_pulls(&mut self, verdicts: &[(String, Option<String>)], now: SystemTime) {
+        let at = DateTime::from(now);
+        for (task_arn, failure) in verdicts {
             if let Some(task) = self.tasks.get_mut(task_arn) {
-                if task.launch_failure.is_none()
-                    && task.desired_status == STATUS_RUNNING
-                    && task.is_pending()
-                {
-                    task.launch_failure = Some(reason.clone());
+                if task.pull_started_at.is_some() || task.desired_status != STATUS_RUNNING {
+                    continue;
+                }
+                task.pull_started_at = Some(at);
+                task.pull_stopped_at = Some(at);
+                if task.launch_failure.is_none() && task.is_pending() {
+                    task.launch_failure = failure.clone();
                 }
             }
         }

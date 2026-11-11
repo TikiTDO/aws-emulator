@@ -30,6 +30,15 @@ service-com-amazonaws-servicediscovery-route53autonaming-v20170314 = { workspace
 # resources, held in its own store in the shared engine, so this is a cross-service READ
 # rather than a copy kept here. No cycle: that crate depends on no service crate.
 service-com-amazonaws-ec2-amazonec2 = { workspace = true }
+# The Amazon ECR service, which SERVES the image pull a launched task's containers need:
+# whether the task's execution role may pull, whether the registry holds the image the
+# reference names, and the upstream import a pull through cache rule makes on the first pull
+# (`crate::state::evaluate_image_pulls` ->
+# `…ecr…::state::registry_pull::serve_pull`). The repositories, images and cache rules are
+# that service's own resources, held in its own store in the shared engine, so the pull is
+# answered by the service that owns them rather than by a copy kept here. No cycle: that
+# crate does not depend on this one.
+service-com-amazonaws-ecr-amazonec2containerregistry-v20150921 = { workspace = true }
 # The Amazon EC2 Auto Scaling service, for ONE read of the Auto Scaling group a capacity
 # provider's `autoScalingGroupProvider` names: whether the account holds that group, which
 # decides whether the provider can be created at all
@@ -102,8 +111,13 @@ service-com-amazonaws-sqs-amazonsqs = { workspace = true }
 service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
 # `percent-encoding`: RFC 3986 percent-encoding for the `application/x-www-form-urlencoded`
 # body the test harness posts to Amazon EC2 Auto Scaling's awsQuery endpoint, so the group a
-# capacity provider binds onto is created through that service's own API.
+# capacity provider binds onto is created through that service's own API — and to IAM's, so a
+# task execution role and its policies are created through IAM's own API.
 percent-encoding = "2.3"
+# IAM is mounted beside Amazon ECS on one engine in the integration tests that drive the
+# image pull: the pull is decided over the policies in force on the task's execution role,
+# and those are created through IAM's own API rather than written into its store.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 
 [lints]
 workspace = true

@@ -94,6 +94,14 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                         None => {
                             task.last_status = STATUS_RUNNING.to_string();
                             task.started_at = Some(DateTime::from(due));
+                            // A task placed on its own runs the work it was placed for
+                            // and then ends, so the instant that work is finished is owed
+                            // from the instant it started ([`CONTAINER_WORK_SPAN`]); a
+                            // task a service's scheduler placed is kept in place by that
+                            // scheduler instead.
+                            if task.service_name.is_none() {
+                                task.work_done_due_at = Some(due + CONTAINER_WORK_SPAN);
+                            }
                             for container in &mut task.containers {
                                 container.advance_to(STATUS_RUNNING);
                             }
@@ -111,6 +119,17 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                             task.version += 1;
                         }
                     }
+                }
+            }
+            // The work a STANDALONE task was placed to do, finished at the instant it was
+            // owed at whether or not anybody called to look: its essential containers have
+            // exited, so Amazon ECS stops the task ([`TaskRecord::finish_work`]). Only a
+            // task whose work is still going takes that stop — one already on its way out
+            // is being stopped for the reason that put it there
+            // ([`TaskRecord::work_is_running`]).
+            if let Some(due) = task.work_done_due_at {
+                if due <= now && task.work_is_running() {
+                    task.finish_work(due);
                 }
             }
             if let Some(due) = task.stopped_due_at {
@@ -3279,7 +3298,9 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
             stopping_at: None,
             stopped_at: None,
             execution_stopped_at: None,
-            // Only the agent's own report carries the image-pull instants.
+            // The image pull is attempted by the call that placed the task, with this
+            // store's guard dropped, and the instants it took are recorded there
+            // ([`evaluate_image_pulls`]).
             pull_started_at: None,
             pull_stopped_at: None,
             stopped_reason: None,
@@ -3307,6 +3328,14 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
             // placement is the launching call's to decide, with this store's guard
             // dropped ([`crate::state::evaluate_image_pulls`]).
             launch_failure: None,
+            // The task execution role the revision this placement runs declares, which is
+            // the principal its image pull is made as. A service's placement carries no
+            // overrides, so the revision's own value is the resolved one.
+            execution_role_arn: definition.execution_role_arn.clone(),
+            // Nothing is owed on the work of a task that has not started, and a service's
+            // task is kept in place by its scheduler either way
+            // ([`CONTAINER_WORK_SPAN`]).
+            work_done_due_at: None,
         };
         self.tasks.insert(task_arn, record);
     }

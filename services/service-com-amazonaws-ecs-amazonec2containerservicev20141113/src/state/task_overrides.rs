@@ -111,6 +111,30 @@ pub fn resolved_task_role_arn<'a>(
     .or_else(|| declared_task_role_arn(definition.task_role_arn.as_deref()))
 }
 
+/// The IAM role Amazon ECS itself acts as for the task a placement launches — the one its
+/// `overrides` name, and the one the STORED revision declares when the overrides name
+/// none.
+///
+/// `TaskOverride$executionRoleArn` is "The Amazon Resource Name (ARN) of the task execution
+/// role override for the task", so like the task role it stands in place of the value the
+/// revision fixed (`TaskDefinition$executionRoleArn`: "the task execution role that grants
+/// the Amazon ECS container agent permission to make Amazon Web Services API calls on your
+/// behalf"). It is the principal the image pull of this task is made as
+/// ([`evaluate_image_pulls`]).
+///
+/// Spelled ONCE for both placements that carry a `TaskOverride`, exactly as
+/// [`resolved_task_role_arn`] is, so `RunTask` and `StartTask` resolve the same request to
+/// the same role.
+pub fn resolved_execution_role_arn<'a>(
+    overrides: Option<&'a TaskOverride>,
+    definition: &'a TaskDefinitionRecord,
+) -> Option<&'a str> {
+    declared_task_role_arn(
+        overrides.and_then(|overrides| overrides.execution_role_arn.as_deref()),
+    )
+    .or_else(|| declared_task_role_arn(definition.execution_role_arn.as_deref()))
+}
+
 /// The override a `containerOverrides` list carries for ONE container of the revision, or
 /// `None` when the list names it nowhere.
 fn override_for<'a>(

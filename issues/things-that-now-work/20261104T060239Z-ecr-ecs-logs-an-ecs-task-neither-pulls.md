@@ -29,3 +29,26 @@ Both checks fail with "Check timed out after 60.0s". Expected: for the pull-thro
 ## Steps to Reproduce
 1. Create an ECR pull-through cache rule, register a FARGATE task definition referencing <account>.dkr.ecr.<region>.amazonaws.com/<prefix>/<upstream-image>, RunTask and poll DescribeTasks/DescribeImages - the image is never imported and the task never settles.
 2. Register the same kind of task definition with an execution role that has no ECR permissions, RunTask and poll DescribeTasks - the task never stops with CannotPullContainerError.
+
+## Resolution
+The image pull is now performed at launch as the task's execution role: Amazon ECR decides it
+(`ecr:GetAuthorizationToken` on the registry, `ecr:BatchGetImage` on the repository, over the
+role's identity documents, its permissions boundary and the repository's own policy), resolves
+the reference, and caches the upstream image on the first pull of a reference under a pull
+through cache rule's prefix; the task records `pullStartedAt`/`pullStoppedAt`, a task whose
+image is not served stops with `TaskFailedToStart` and a `CannotPullContainerError`
+`stoppedReason`, and a task placed on its own reaches the terminal `STOPPED` status with
+`EssentialContainerExited` once the work it was placed to do is finished.
+
+Known divergences that remain, each needing a capability this emulator does not have:
+
+* a CACHED image is the registry's own record of what was cached (an OCI manifest over one
+  configuration document the repository holds, every digest and size computed over those
+  bytes). No upstream registry is contacted — the emulator makes no outbound connection — so a
+  client that compares the cached digest or layer list against the real upstream registry will
+  diverge.
+* a container reports NO `exitCode`, and its stdout reaches no awslogs stream: this emulator
+  starts no container process, so nothing observed an exit status and nothing produced the
+  output a log event would carry. The awslogs half is tracked as cause 1 of
+  `issues/things-that-do-not-work/20261104T060239Z-cloudwatch-ecr-ecs-logs-tasks-never-settle-and.md`,
+  and both recorded units of this issue still wait on it.

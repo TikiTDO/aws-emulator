@@ -161,7 +161,11 @@ fn not_authorized(principal: &str, action: &str, resource: &str, reason: &str) -
 
 /// Why no grant was found, as the reason clause of [`not_authorized`]: an explicit deny in
 /// one of the two documents, or no statement allowing the action at all.
-fn withheld_because(identity: Decision, stated: Decision, action: &str) -> String {
+///
+/// The ONE wording of that clause in this service: the in-process pull gate words its own
+/// refusal with it too ([`super::registry_pull`]), so a caller refused a repository and a
+/// compute service refused an image are told the same thing about the same documents.
+pub(crate) fn withheld_because(identity: Decision, stated: Decision, action: &str) -> String {
     if identity == Decision::Denied {
         "with an explicit deny in an identity-based policy".to_string()
     } else if stated == Decision::Denied {

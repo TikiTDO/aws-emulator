@@ -58,9 +58,14 @@ const IMAGE: &str = "public.ecr.aws/nginx/nginx:latest";
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// How long a poll keeps trying before it gives up: the whole start of an `awsvpc` task
-/// ([`AWSVPC_START`]) plus the stop that can follow it, with margin for a loaded test
-/// machine.
-const POLL_BUDGET: Duration = AWSVPC_START.saturating_add(Duration::from_secs(5));
+/// ([`AWSVPC_START`]), the work a standalone task is placed to do
+/// (`state::CONTAINER_WORK_SPAN`) and the stop that follows it, with margin for a loaded
+/// test machine.
+const POLL_BUDGET: Duration = AWSVPC_START
+    .saturating_add(
+        service_com_amazonaws_ecs_amazonec2containerservicev20141113::state::CONTAINER_WORK_SPAN,
+    )
+    .saturating_add(Duration::from_secs(5));
 
 /// How long a row waits before asserting that NOTHING was delivered: long enough that a
 /// delivery that was going to happen would have.
@@ -785,7 +790,19 @@ async fn a_transition_is_published_once_however_often_the_task_is_read() {
         ok(&router, operation, body, case).await;
     }
 
-    let delivered = collect_events(&router, case, &url, &task_arn, &["PENDING", "RUNNING"]).await;
+    // A task placed on its own ends the work it was placed for
+    // (`state::CONTAINER_WORK_SPAN`), so its WHOLE run is four moves: it comes up PENDING
+    // then RUNNING, and stops DEACTIVATING then STOPPED. Collecting until the last of them
+    // arrives is what makes the exact sequence assertable — the rule being that each move is
+    // published once, however often the task was READ in between.
+    let delivered = collect_events(
+        &router,
+        case,
+        &url,
+        &task_arn,
+        &["PENDING", "RUNNING", "DEACTIVATING", "STOPPED"],
+    )
+    .await;
     // One more quiet stretch, in case a read queued a second announcement of a move.
     tokio::time::sleep(QUIET_BUDGET).await;
     let late: Vec<Value> = drain(&router, case, &url)
@@ -797,9 +814,14 @@ async fn a_transition_is_published_once_however_often_the_task_is_read() {
     let late_observed = statuses_of(&late);
     assert_eq!(
         observed,
-        vec!["PENDING".to_string(), "RUNNING".to_string()],
-        "case {case:?}: expected each move published exactly once, got {observed:?} and then \
-         {late_observed:?}"
+        vec![
+            "PENDING".to_string(),
+            "RUNNING".to_string(),
+            "DEACTIVATING".to_string(),
+            "STOPPED".to_string(),
+        ],
+        "case {case:?}: expected the task's whole run published in order, once each, got \
+         {observed:?} and then {late_observed:?}"
     );
     assert!(
         late.is_empty(),

@@ -541,7 +541,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 stopping_at: None,
                 stopped_at: None,
                 execution_stopped_at: None,
-                // Only the agent's own report carries the image-pull instants.
+                // The image pull is attempted below, with the guard dropped, and the
+                // instants it took are recorded there
+                // ([`crate::state::evaluate_image_pulls`]).
                 pull_started_at: None,
                 pull_stopped_at: None,
                 stopped_reason: None,
@@ -570,6 +572,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // placement is decided below, with the guard dropped
                 // ([`crate::state::evaluate_image_pulls`]).
                 launch_failure: None,
+                // The task execution role this placement resolved — the one its
+                // `overrides` name, else the revision's own — which is the principal the
+                // image pull of this task is made as
+                // ([`crate::state::resolved_execution_role_arn`]).
+                execution_role_arn: crate::state::resolved_execution_role_arn(
+                    input.overrides.as_ref(),
+                    &definition,
+                )
+                .map(ToString::to_string),
+                // Nothing is owed on the work of a task that has not started yet; the
+                // instant it is finished at is owed from the instant it starts
+                // ([`crate::state::CONTAINER_WORK_SPAN`]).
+                work_done_due_at: None,
             };
             // `StartTask` has no `include` member to narrow the response with, so the
             // task it just created is reported with the tags it was created with.

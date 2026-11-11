@@ -540,7 +540,10 @@ pub(crate) async fn cloud_map(
 /// A router carrying this service AND the Amazon EC2 service over ONE shared engine — the
 /// two stores the image-fetch rule reads across, mounted the way the production router
 /// mounts them. Amazon EC2 Auto Scaling is mounted beside them, so a capacity provider
-/// these suites create has a group to bind onto ([`create_auto_scaling_group`]).
+/// these suites create has a group to bind onto ([`create_auto_scaling_group`]), and Amazon
+/// ECR, which SERVES the pull of an image reference naming this account's registry: the
+/// repository and the image such a reference resolves to are created through that service's
+/// own API ([`ecr`]).
 pub(crate) fn emulator_with_ec2() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
@@ -556,9 +559,128 @@ pub(crate) fn emulator_with_ec2() -> MultiServiceRouter {
         )),
     );
     router.register_service(
+        service_com_amazonaws_ecr_amazonec2containerregistry_v20150921::EmulatedService::new(
+            Arc::clone(&engine),
+        ),
+    );
+    router.register_service(
         service_com_amazonaws_ec2_amazonec2::EmulatedService::new(engine),
     );
     router
+}
+
+/// One `awsJson1_1` call to the Amazon ECR service, returning its parsed body. An image an
+/// ECS pull resolves is pushed through ECR's OWN API, never written into a store by hand.
+pub(crate) async fn ecr(
+    router: &MultiServiceRouter,
+    operation: &str,
+    body: Value,
+    case: &str,
+) -> Value {
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/")
+        .header("content-type", "application/x-amz-json-1.1")
+        .header(
+            "x-amz-target",
+            format!("AmazonEC2ContainerRegistry_V20150921.{operation}"),
+        )
+        .header(
+            "authorization",
+            format!(
+                "AWS4-HMAC-SHA256 Credential=AKIDECSTEST/20260101/{SIGNED_REGION}\
+                 /ecr/aws4_request, SignedHeaders=host;x-amz-target, Signature=00"
+            ),
+        )
+        .body(bytes::Bytes::from(
+            serde_json::to_vec(&body).expect("the request body serializes"),
+        ))
+        .expect("a well-formed request");
+    let response = router.dispatch(request).await;
+    let status = response.status().as_u16();
+    let payload = response.into_body();
+    let parsed: Value = if payload.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice(&payload)
+            .unwrap_or_else(|_| json!({ "__unparsed": String::from_utf8_lossy(&payload) }))
+    };
+    assert_eq!(
+        status, 200,
+        "case {case:?}: expected Amazon ECR {operation} to answer 200, got {status} with \
+         {parsed}"
+    );
+    parsed
+}
+
+/// A router carrying this service AND the two stores the image PULL of a launched task is
+/// decided across — Amazon ECR, which serves the pull, and IAM, which holds the policies in
+/// force on the task's execution role — over ONE shared engine, mounted the way the
+/// production router mounts them.
+pub(crate) fn emulator_with_ecr_and_iam() -> MultiServiceRouter {
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    seed_awsvpc_subnets(&engine);
+    let mut router = MultiServiceRouter::new();
+    router.set_request_authentication(false);
+    router.register_service(
+        service_com_amazonaws_ecs_amazonec2containerservicev20141113::EmulatedService::new(
+            Arc::clone(&engine),
+        ),
+    );
+    router.register_service(
+        service_com_amazonaws_ecr_amazonec2containerregistry_v20150921::EmulatedService::new(
+            Arc::clone(&engine),
+        ),
+    );
+    router.register_service(
+        service_com_amazonaws_iam_awsidentitymanagementv20100508::EmulatedService::new(engine),
+    );
+    router
+}
+
+/// The IAM API version an awsQuery body carries.
+const IAM_API_VERSION: &str = "2010-05-08";
+
+/// One awsQuery call to IAM that must succeed, returning its XML body. A role and the
+/// policies in force on it are created through IAM's OWN API, never written into its store.
+pub(crate) async fn iam(
+    router: &MultiServiceRouter,
+    action: &str,
+    params: &[(&str, String)],
+    case: &str,
+) -> String {
+    let mut body = format!("Action={action}&Version={IAM_API_VERSION}");
+    for (name, value) in params {
+        body.push('&');
+        body.push_str(name);
+        body.push('=');
+        body.push_str(
+            &percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
+                .to_string(),
+        );
+    }
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/")
+        .header("host", "iam.amazonaws.com")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(
+            "authorization",
+            format!(
+                "AWS4-HMAC-SHA256 Credential=AKIDECSTEST/20260101/{SIGNED_REGION}\
+                 /iam/aws4_request, SignedHeaders=host, Signature=00"
+            ),
+        )
+        .body(bytes::Bytes::from(body))
+        .expect("a well-formed awsQuery request");
+    let response = router.dispatch(request).await;
+    let status = response.status().as_u16();
+    let text = String::from_utf8_lossy(response.body()).to_string();
+    assert_eq!(
+        status, 200,
+        "case {case:?}: expected IAM {action} to answer 200, got {status} with {text}"
+    );
+    text
 }
 
 /// The Amazon EC2 API version an `ec2Query` body carries.

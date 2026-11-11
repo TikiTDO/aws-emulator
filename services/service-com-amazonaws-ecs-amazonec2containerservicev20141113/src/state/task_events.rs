@@ -195,12 +195,14 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
     /// The earliest instant at which this store owes a TASK transition, if any — the
     /// instant the clock pump waits for.
     ///
-    /// Every instant a task's own lifecycle is waiting on: its placement, its start, its
-    /// stop, and each step of the interface Amazon ECS is attaching for it. A placement that
-    /// is waiting on an interface that is NOT in place is not owed yet, however long ago its
-    /// instant fell due ([`TaskRecord::interfaces_attached`]) — the attach's own instant is
-    /// what the pump waits for there, so an attach nothing will finish parks the task
-    /// instead of waking the pump over and over.
+    /// Every instant a task's own lifecycle is waiting on: its placement, its start, the
+    /// end of the work it was placed to do, its stop, and each step of the interface Amazon
+    /// ECS is attaching for it. An instant whose transition can no longer be materialised is
+    /// not owed, however long ago it fell due — a placement waiting on an interface that is
+    /// NOT in place ([`TaskRecord::interfaces_attached`]), and the end of the work of a task
+    /// something else has already stopped — so the pump waits for what it can actually
+    /// apply and stands down when nothing is left, instead of waking over and over on an
+    /// instant nothing will act on.
     pub fn next_task_due_at(&self) -> Option<SystemTime> {
         self.tasks
             .values()
@@ -208,6 +210,7 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                 [
                     task.pending_due_at.filter(|_| task.interfaces_attached()),
                     task.running_due_at,
+                    task.work_done_due_at.filter(|_| task.work_is_running()),
                     task.stopped_due_at,
                 ]
                 .into_iter()

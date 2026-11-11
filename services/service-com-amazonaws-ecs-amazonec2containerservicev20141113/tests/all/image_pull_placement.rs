@@ -39,8 +39,8 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::ecs_wire::{
-    create_cluster, ec2, ec2_element, emulator_with_ec2, list, ok, string, ACCOUNT, AWSVPC_START,
-    SIGNED_REGION,
+    create_cluster, ec2, ec2_element, ecr, emulator_with_ec2, list, ok, string, ACCOUNT,
+    AWSVPC_START, SIGNED_REGION,
 };
 use crate::task_lifecycle::container;
 
@@ -80,9 +80,47 @@ const TASK_FAILED_TO_START: &str = "TaskFailedToStart";
 const CANNOT_PULL: &str = "CannotPullContainerError";
 
 /// An image in a repository of THIS account's Amazon ECR registry, whose registry URI is
-/// `<account>.dkr.ecr.<region>.amazonaws.com` (Amazon ECR User Guide).
+/// `<account>.dkr.ecr.<region>.amazonaws.com` (Amazon ECR User Guide). The repository and
+/// the image it names are pushed through Amazon ECR's own API ([`push_ecr_image`]), because
+/// what these rows are about is the PATH to the registry: an image the registry does not
+/// hold cannot be fetched from any placement.
 fn ecr_image() -> String {
-    format!("{ACCOUNT}.dkr.ecr.{SIGNED_REGION}.amazonaws.com/app:1")
+    format!("{ACCOUNT}.dkr.ecr.{SIGNED_REGION}.amazonaws.com/{ECR_REPOSITORY}:{ECR_TAG}")
+}
+
+/// The repository of this account's registry the rows below pull from.
+const ECR_REPOSITORY: &str = "app";
+
+/// The tag that repository's one image carries.
+const ECR_TAG: &str = "1";
+
+/// A Docker image manifest V2 schema 2 referencing no blob: what these rows are about is
+/// the path to the registry, not which blobs an image is built from.
+const ECR_MANIFEST: &str = concat!(
+    r#"{"schemaVersion":2,"#,
+    r#""mediaType":"application/vnd.docker.distribution.manifest.v2+json"}"#
+);
+
+/// Create [`ECR_REPOSITORY`] and push its one tagged image, through Amazon ECR's own API.
+async fn push_ecr_image(router: &MultiServiceRouter, case: &str) {
+    ecr(
+        router,
+        "CreateRepository",
+        json!({ "repositoryName": ECR_REPOSITORY }),
+        case,
+    )
+    .await;
+    ecr(
+        router,
+        "PutImage",
+        json!({
+            "repositoryName": ECR_REPOSITORY,
+            "imageManifest": ECR_MANIFEST,
+            "imageTag": ECR_TAG,
+        }),
+        case,
+    )
+    .await;
 }
 
 /// The subnets the rows place tasks in, each created through Amazon EC2's own API.
@@ -449,13 +487,14 @@ fn assert_failed_to_start(task: &Value, image: &str, case: &str) {
 async fn a_task_is_stopped_when_its_placement_cannot_reach_the_image_registry() {
     let router = emulator_with_ec2();
     create_cluster(&router, CLUSTER, "fetch").await;
+    push_ecr_image(&router, "fetch").await;
     let network = network(&router).await;
 
-    let ecr = ecr_image();
+    let ecr_reference = ecr_image();
     for (family, image) in [
         ("publicimage", PUBLIC_IMAGE),
         ("hubimage", HUB_IMAGE),
-        ("ecrimage", ecr.as_str()),
+        ("ecrimage", ecr_reference.as_str()),
     ] {
         register(&router, family, image, "fetch").await;
     }
@@ -544,7 +583,7 @@ async fn a_task_is_stopped_when_its_placement_cannot_reach_the_image_registry() 
         let image = match family {
             "publicimage" => PUBLIC_IMAGE.to_string(),
             "hubimage" => HUB_IMAGE.to_string(),
-            _ => ecr.clone(),
+            _ => ecr_reference.clone(),
         };
         let task = settled(&router, &task_arn, case).await;
         if fetchable {

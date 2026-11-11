@@ -71,6 +71,8 @@ mod describe_failure_identifiers;
 mod describe_service_deployments;
 #[path = "all/domain_refusal_wording.rs"]
 mod domain_refusal_wording;
+#[path = "all/ecr_image_pull.rs"]
+mod ecr_image_pull;
 #[path = "all/ecs_wire.rs"]
 mod ecs_wire;
 #[path = "all/enum_value_refusals.rs"]

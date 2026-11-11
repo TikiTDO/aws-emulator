@@ -1052,6 +1052,39 @@ pub const DEFAULT_LAUNCH_TYPE: &str = "EC2";
 /// `stopCode` for a stop the caller asked for, from the `TaskStopCode` enum.
 pub const STOP_CODE_USER_INITIATED: &str = "UserInitiated";
 
+/// `stopCode` for a task that stopped because the work its containers were placed to do
+/// is finished: the `TaskStopCode` enum's `EssentialContainerExited`
+/// (`smithy_query(query="shape",shape="TaskStopCode")` -> EssentialContainerExited,
+/// InfrastructureHealth, ServiceSchedulerInitiated, SpotInterruption, TaskFailedToStart,
+/// TerminationNotice, UserInitiated) — "The task stopped because an essential container
+/// exited" (Stopped tasks error codes, Amazon ECS Developer Guide).
+pub const STOP_CODE_ESSENTIAL_CONTAINER_EXITED: &str = "EssentialContainerExited";
+
+/// The `stoppedReason` that goes with [`STOP_CODE_ESSENTIAL_CONTAINER_EXITED`]: Amazon
+/// ECS's own words for a task whose essential container has exited.
+pub const ESSENTIAL_CONTAINER_EXITED_REASON: &str = "Essential container in task exited";
+
+/// How long after it starts a STANDALONE task's containers have finished the work they
+/// were placed to do, after which Amazon ECS stops the task
+/// ([`TaskRecord::finish_work`]).
+///
+/// A task placed on its own is one run of a workload — nothing replaces it when it ends,
+/// which is why "if you have an application that runs on a schedule or that runs to
+/// completion" is a standalone task and "a long-running application" is a service
+/// (`RunTask`, and `CreateService`: the scheduler "replaces tasks that fail or stop") — so
+/// its containers' work finishes and the task reaches the terminal `STOPPED` status. A
+/// task a service's scheduler placed takes no such instant: that scheduler keeps the
+/// service's desired count in place, so the service always holds a task that is running.
+///
+/// How long the work takes is the workload's own business and AWS publishes no duration
+/// for it, so the span is CHOSEN: long enough that a client that places a task and then
+/// polls it observes it `RUNNING` — the status Amazon ECS reports for a task that is doing
+/// its work — across several reads, and short enough that a client waiting for the task to
+/// finish gets its answer inside an ordinary poll budget. The instant is STORED
+/// ([`TaskRecord::work_done_due_at`]) and materialised by whoever next looks at the task or
+/// by the clock pump; nothing sleeps for it.
+pub const CONTAINER_WORK_SPAN: Duration = Duration::from_secs(10);
+
 /// The network mode that gives each task its own elastic network interface, from the
 /// `NetworkMode` enum. Named here because three derivations key off it: which launch
 /// types a revision is compatible with, which container-instance attributes it
@@ -3587,6 +3620,19 @@ pub struct TaskRecord {
     /// started ([`TaskRecord::fail_launch`]), and `None` for a task nothing is known to
     /// block.
     pub launch_failure: Option<String>,
+    /// The task execution role this task's image pull is made as — the one the placement
+    /// resolved ([`resolved_execution_role_arn`]) — and `None` for a task whose revision
+    /// and overrides name none.
+    ///
+    /// Kept on the task because it is the principal THIS task was launched with: a later
+    /// registration of another revision does not change what the pull of an already
+    /// launched task was decided against.
+    pub execution_role_arn: Option<String>,
+    /// When the work this task's containers were placed to do is finished, after which the
+    /// task stops ([`Self::finish_work`]) — set when the task STARTS, and `None` for a
+    /// task that has not started, for one that is already on its way out, and for a task a
+    /// service's scheduler placed (see [`CONTAINER_WORK_SPAN`]).
+    pub work_done_due_at: Option<SystemTime>,
 }
 
 impl TaskRecord {
@@ -3751,6 +3797,49 @@ impl TaskRecord {
             .iter()
             .filter(|attachment| attachment.is_elastic_network_interface())
             .all(AttachmentRecord::is_attached)
+    }
+
+    /// Whether the work this task was placed to do is still going: it is running, and it is
+    /// still wanted running.
+    ///
+    /// What decides whether the end of that work ([`Self::work_done_due_at`]) is still owed:
+    /// a task something else has already stopped — a caller's `StopTask`, a scheduler's
+    /// stop, an agent's report — is on its way out for THAT reason, so the instant its work
+    /// would have finished at is not a transition anything will materialise, and the clock
+    /// pump does not wait for it ([`next_task_due_at`]).
+    pub fn work_is_running(&self) -> bool {
+        self.last_status == STATUS_RUNNING && self.desired_status == STATUS_RUNNING
+    }
+
+    /// Stop this task because the work its containers were placed to do is finished, as of
+    /// `at`.
+    ///
+    /// The stop a task that RAN earns, as against the one a task that could not be launched
+    /// at all earns ([`TaskRecord::fail_launch`]): the task keeps the `startedAt` it
+    /// reached, and the stop carries [`STOP_CODE_ESSENTIAL_CONTAINER_EXITED`] with the
+    /// reason Amazon ECS words for that code. The task is on its way out from this instant
+    /// — `desiredStatus` is `STOPPED`, which is what a `ListTasks` narrowed to stopped
+    /// tasks reports it under — and `STOPPED` itself falls due one [`TRANSITION_SPAN`]
+    /// later, the same two-step stop every other stop of a task is recorded as.
+    ///
+    /// No container is given an `exitCode`: `Container$exitCode` is "the exit code returned
+    /// from the container", and this emulator starts no container process, so nothing
+    /// observed an exit status to report. The agent's own report
+    /// (`SubmitContainerStateChange`) stays the only writer of one.
+    pub fn finish_work(&mut self, at: SystemTime) {
+        self.work_done_due_at = None;
+        self.desired_status = STATUS_STOPPED.to_string();
+        // The first status of a stop: "DEACTIVATING" is where a task that is on its way out
+        // is, with `stoppingAt` recorded — the same two-step stop `StopTask` records.
+        self.last_status = STATUS_DEACTIVATING.to_string();
+        self.stopped_reason = Some(ESSENTIAL_CONTAINER_EXITED_REASON.to_string());
+        self.stop_code = Some(STOP_CODE_ESSENTIAL_CONTAINER_EXITED.to_string());
+        self.stopping_at = Some(DateTime::from(at));
+        self.stopped_due_at = Some(at + TRANSITION_SPAN);
+        for container in &mut self.containers {
+            container.advance_to(STATUS_DEACTIVATING);
+        }
+        self.version += 1;
     }
 }
 

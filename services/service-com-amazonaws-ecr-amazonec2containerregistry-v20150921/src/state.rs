@@ -2580,22 +2580,32 @@ pub fn upstream_registry_for_url(url: &str) -> Option<&'static str> {
     None
 }
 
-/// Whether `host` is an `<accountId>.dkr.ecr.<region>.amazonaws.com` registry host, as
-/// the `upstreamRegistryUrl` doc spells Amazon ECR's: an account id, the two fixed
-/// labels, one region label, and nothing else. `host` is already lowercased.
-fn is_ecr_registry_host(host: &str) -> bool {
-    let Some(rest) = host.strip_suffix(".amazonaws.com") else {
-        return false;
-    };
+/// The account id and the Region an `<accountId>.dkr.ecr.<region>.amazonaws.com` host
+/// names, as the `upstreamRegistryUrl` doc spells Amazon ECR's: an account id, the two
+/// fixed labels, one Region label, and nothing else. `host` is already lowercased, and
+/// `None` for every host of another shape.
+///
+/// The ONE reading of that host layout: the `upstreamRegistryUrl` resolution above asks
+/// whether a URL names Amazon ECR at all ([`is_ecr_registry_host`]), and a PULL asks which
+/// Region and account the reference it carries addresses
+/// ([`registry_pull::parse_reference`]), so neither walks the labels itself.
+pub fn ecr_registry_host_parts(host: &str) -> Option<(&str, &str)> {
+    let rest = host.strip_suffix(".amazonaws.com")?;
     let mut labels = rest.split('.');
-    let account_id_is_well_formed = labels.next().is_some_and(|account| {
+    let account = labels.next().filter(|account| {
         account.len() == ACCOUNT_ID_LEN && account.bytes().all(|byte| byte.is_ascii_digit())
-    });
-    account_id_is_well_formed
-        && labels.next() == Some("dkr")
-        && labels.next() == Some("ecr")
-        && labels.next().is_some_and(|region| !region.is_empty())
-        && labels.next().is_none()
+    })?;
+    if labels.next() != Some("dkr") || labels.next() != Some("ecr") {
+        return None;
+    }
+    let region = labels.next().filter(|region| !region.is_empty())?;
+    labels.next().is_none().then_some((account, region))
+}
+
+/// Whether `host` is an `<accountId>.dkr.ecr.<region>.amazonaws.com` registry host of ANY
+/// account, which is what makes an `upstreamRegistryUrl` name Amazon ECR.
+fn is_ecr_registry_host(host: &str) -> bool {
+    ecr_registry_host_parts(host).is_some()
 }
 
 /// The length of an Amazon Web Services account id, which the `registryId` member's own
@@ -4228,6 +4238,12 @@ pub mod image_events;
 /// re-exported, so a handler names the gate it consults) here, so a handler reaches it as
 /// `crate::state::authorization::…` like every other part of this store.
 pub mod authorization;
+/// Serving an image PULL made in-process by a compute service on a role's behalf, and the
+/// upstream import a pull through cache rule makes on the first one, in
+/// `state/registry_pull.rs`. Declared (and not glob re-exported, so a caller names the
+/// registry plane it reaches) here, so it is reached as `crate::state::registry_pull::…`
+/// like every other part of this store.
+pub mod registry_pull;
 /// The `AWS/ECR` metric this registry publishes about the pulls its data plane serves, in
 /// `state/pull_metrics.rs`. Declared (and not glob re-exported, so a caller names the
 /// publication it makes) here, so it is reached as `crate::state::pull_metrics::…` like
