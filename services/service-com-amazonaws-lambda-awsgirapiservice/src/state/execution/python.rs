@@ -33,13 +33,16 @@
 //!   datagram half of [`super::xray_daemon`]) opens nothing: its one reachable destination is
 //!   the in-process X-Ray daemon, whose datagrams travel over the SAME bounded AWS SDK seam
 //!   below, and every other destination raises the error a host with no route to it answers;
-//! * the only host functions the guest can call are the four on [`HOST_MODULE`]: the
+//! * the only host functions the guest can call are the six on [`HOST_MODULE`]: the
 //!   invocation log, a sleep clamped to what is left of the run, ONE AWS SDK call into this
 //!   same emulator ([`super::aws_api`], which decides which services are reachable, signs the
-//!   request itself and bounds it by what the run has left), and the authentication token an
-//!   SDK mints in its client. No host path, host environment variable, host credential or
-//!   other function's state is reachable from guest code, and NO bound of the run is reachable
-//!   from it either.
+//!   request itself and bounds it by what the run has left), the authentication token an
+//!   SDK mints in its client, the one request a handler sends itself and the one URL it has
+//!   signed. No host path, host environment variable, host credential or
+//!   other function's state is reachable from guest code, and NO bound of the run — no
+//!   deadline, no step count and no memory baseline — is reachable from it either: where one
+//!   PHASE of a run ends and the next begins is decided by the HOST, between two calls it
+//!   makes into the runtime ([`drive`]), rather than by anything the guest can reach.
 //!
 //! # Bounds
 //!
@@ -55,17 +58,23 @@
 //! * MEMORY is sampled from outside the guest — this thread's faulted pages and the
 //!   process's resident size — because the interpreter exposes no allocation seam; a sample
 //!   past the run's own ceiling ends the run, and so does one showing the run has grown the
-//!   whole process past the process ceiling.
+//!   whole process past the process ceiling. Both are measured from what was held once the
+//!   interpreter was standing and before a line of the run's own code had been read
+//!   ([`Bounds::measure_memory_from_here`]), and the HOST takes that baseline: nothing the
+//!   guest can call re-takes it, so the ceiling cannot be lifted by asking.
+//! * A long NATIVE call emits no trace event, so neither the deadline nor a memory sample can
+//!   land inside one. That is what the host's own watch ([`watch_run`]) is for: ONE thread of
+//!   this process reads the same clock and the same process reading for every live run and
+//!   LATCHES the stop, which the next event the interpreter delivers then raises — so one
+//!   native allocation that takes the process past its ceiling ends that run without waiting
+//!   for the guest to produce an event. Beside it, the caller's own host wait and
+//!   abandoned-run accounting ([`super::run_invocation`]) make sure the CALLER is always
+//!   answered inside its ceiling, and a run still going after its budget was spent is given
+//!   up on.
 //! * RECURSION is clamped on the interpreter before any guest code runs, and
 //!   `sys.setrecursionlimit` is removed so the guest cannot raise it.
 //! * The LOG and the RESPONSE are each capped, so a small request cannot make an
 //!   unbounded answer.
-//! * A long NATIVE call emits no trace event, so the deadline cannot land inside one. That is
-//!   what the host's own watch ([`watch_run`]) is for: ONE thread of this process reads the
-//!   same clock for every live run and LATCHES the stop, which the next event the interpreter
-//!   delivers then raises. Beside it, the caller's own host wait and abandoned-run accounting
-//!   ([`super::run_invocation`]) make sure the CALLER is always answered inside its ceiling,
-//!   and a run still going after its budget was spent is given up on.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -560,12 +569,16 @@ fn bounded_sleep(bounds: &Arc<Bounds>, seconds: f64) {
 /// time clamps it further.
 const MAX_GUEST_SLEEP_SECONDS: f64 = 3_600.0;
 
-/// Evaluate the runtime source and read its answer back.
+/// Evaluate the runtime source and read its answer back, one PHASE at a time.
 ///
 /// The runtime's own setup — its imports and definitions — runs FIRST, with no bound
-/// spending against it, because none of it is the caller's work. The bounds are installed
-/// between that and the one call that does the caller's work, so the step budget, the
-/// deadline and the memory sample all measure the HANDLER.
+/// spending against it, because none of it is the caller's work. Then the two calls the
+/// runtime leaves behind ([`super::bootstrap`]) are made in turn: `__lambda_prepare` runs
+/// the INIT phase — this runtime's installation, the import of the handler's module and the
+/// resolution of its entry point — and `__lambda_invoke` runs the handler itself. The HOST
+/// decides where the boundary is: it begins the invoke phase between the two calls
+/// ([`Bounds::start`]), which is what starts the deadline the function's `Timeout` states
+/// and what the handler is told it has left. Nothing the guest can call moves it.
 fn drive(
     vm: &VirtualMachine,
     input: &str,
@@ -583,10 +596,26 @@ fn drive(
             vm.new_runtime_error(format!("the Lambda runtime source does not compile: {error}"))
         })?;
     vm.run_code_obj(code, scope.clone())?;
-    let entry = scope.globals.get_item("__lambda_entry", vm)?;
+    let prepare = scope.globals.get_item("__lambda_prepare", vm)?;
+    let invoke = scope.globals.get_item("__lambda_invoke", vm)?;
     install_trace_hook(vm, bounds, held)?;
-    bounds.start();
-    let answered = entry.call((vm.ctx.new_str(input),), vm)?;
+    // The interpreter is standing and nothing of the RUN's own code has been read yet, so
+    // this is where the memory the run itself takes is measured from. The host takes this
+    // baseline, never the guest.
+    bounds.measure_memory_from_here();
+    // The INIT phase, under the span an initialization is allowed rather than the
+    // function's `Timeout`. It answers nothing when the environment is ready, and the
+    // document of a failure that belongs to no invocation when it is not.
+    let prepared = prepare.call((vm.ctx.new_str(input),), vm)?;
+    let prepared: String = prepared.try_into_value(vm)?;
+    if !prepared.is_empty() {
+        return Ok(read_completion(&prepared, bounds.response_bytes));
+    }
+    // The INVOKE phase begins HERE, which is the handler's own run: from this instant the
+    // deadline is the function's `Timeout`, and the instant it falls at is what the handler
+    // is told it has left.
+    let deadline_epoch_ms = bounds.start();
+    let answered = invoke.call((vm.ctx.new_int(deadline_epoch_ms),), vm)?;
     let text: String = answered.try_into_value(vm)?;
     Ok(read_completion(&text, bounds.response_bytes))
 }
@@ -652,11 +681,6 @@ fn runtime_input(request: &Run<'_>) -> Result<String, String> {
             .unwrap_or(::serde_json::Value::Null),
         None => ::serde_json::Value::Null,
     };
-    let deadline = SystemTime::now() + request.budget.wall_clock;
-    let deadline_epoch_ms = deadline
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|since| since.as_millis())
-        .unwrap_or_default();
     let document = ::serde_json::json!({
         "handler": request.handler,
         "modules": modules,
@@ -668,7 +692,6 @@ fn runtime_input(request: &Run<'_>) -> Result<String, String> {
         "invokedFunctionArn": request.invoked_function_arn,
         "clientContext": client_context,
         "tenantId": request.tenant_id,
-        "deadlineEpochMs": deadline_epoch_ms,
     });
     ::serde_json::to_string(&document).map_err(|error| error.to_string())
 }
@@ -753,9 +776,12 @@ fn clamp_recursion(vm: &VirtualMachine, limit: usize) -> PyResult<()> {
     Ok(())
 }
 
-/// The module the five host functions live on: the invocation log, the bounded sleep, the
-/// step hook, the one AWS SDK call and the authentication token the SDK mints in the client.
-/// Nothing else of the host is reachable from guest code.
+/// The module the host functions live on, and the whole of what guest code can call of
+/// this process: `log`, `sleep`, `aws`, `db_auth_token`, `request` and `presign` — the
+/// invocation log, a sleep clamped to what the run has left, ONE AWS SDK call into this
+/// same emulator, the authentication token an SDK mints in its client, the one request a
+/// handler sends itself and the one URL it has signed. Nothing else of the host is
+/// reachable from guest code, and nothing here moves a bound.
 fn host_module(
     vm: &VirtualMachine,
     capture: &Arc<Mutex<Capture>>,
@@ -782,7 +808,10 @@ fn host_module(
             Ok(vm.ctx.none())
         },
     );
-    // The hook that spends the step, deadline and memory budget is NOT here: the
+    // Where the INIT phase ends and the handler's own run begins is the HOST's to decide,
+    // so there is no name for it on this module at all: [`drive`] makes the two calls the
+    // runtime leaves behind and begins the invoke phase between them ([`Bounds::start`]).
+    // The hook that spends the step, deadline and memory budget is NOT here either: the
     // interpreter calls it directly ([`install_trace_hook`]), so there is no name on this
     // module for a guest to rebind and no way for guest code to reach the bounds at all.
     // The ONE call a handler reaches another service of this emulator by. The service
@@ -1141,10 +1170,14 @@ fn formatted_exception(
 /// caller after the run.
 #[derive(Debug)]
 pub struct Bounds {
-    /// When the run must be over. Set when the handler's own work starts.
+    /// When the PHASE the run is in must be over: the initialization of the execution
+    /// environment until [`Self::start`], and the handler's own run from there.
     deadline: Mutex<Instant>,
     /// How long the handler may run for.
     wall_clock: Duration,
+    /// When the HANDLER's run must be over, in milliseconds since the epoch, which is what
+    /// the handler is told it has left. Set by [`Self::start`].
+    deadline_epoch_ms: ::std::sync::atomic::AtomicI64,
     /// How many traced events are left.
     steps: AtomicU64,
     /// How many have been spent, for the memory-sample interval.
@@ -1153,75 +1186,127 @@ pub struct Bounds {
     memory_bytes: u64,
     /// How large the handler's response may be.
     response_bytes: usize,
-    /// This thread's faulted bytes when the handler's work started.
+    /// This thread's faulted bytes when the run's own code was about to run, which is what
+    /// the run's own ceiling measures its growth against. Taken by
+    /// [`Self::measure_memory_from_here`], which only the HOST calls — no guest call re-takes
+    /// it, so no guest can raise the baseline it is judged against.
     faulted_at_start: AtomicU64,
-    /// What this PROCESS held resident when the handler's work started, which is what the
-    /// process ceiling measures this run's own growth against.
+    /// What this PROCESS held resident at that same instant, which is what the process
+    /// ceiling measures this run's own growth against. Taken there too, for the same reason.
     resident_at_start: AtomicU64,
     /// Which bound was breached, once one was. Latched: the answer to a run that spent its
     /// budget is that stop, whatever the guest does afterwards.
     stopped: Mutex<Option<Stop>>,
     /// Whether a bound was breached at all, read without taking the lock.
     breached: AtomicBool,
-    /// Whether the handler's own work has begun ([`Self::start`]), which is when the bounds
-    /// start measuring and so when the host's watch starts judging.
+    /// Whether the INVOKE phase has begun ([`Self::start`]), which is when the handler's
+    /// own deadline starts running.
     spending: AtomicBool,
 }
 
 impl Bounds {
-    /// The bounds of a run with `budget`. The clock and the memory sample they measure
-    /// against are taken by [`Self::start`], when the handler's own work begins.
+    /// The bounds of a run with `budget`, in its INIT phase: the deadline is the one the
+    /// initialization of the execution environment has, which is not the function's
+    /// `Timeout` — the phase has a limit of its own ([`super::INIT_PHASE_LIMIT`]), and AWS
+    /// retries an initialization that outlasts it under the configured function timeout, so
+    /// what an initialization is given up on after is the two spans together. The handler's
+    /// own deadline is taken by [`Self::start`], when the invoke phase begins.
+    ///
+    /// The MEMORY baselines are taken by [`Self::measure_memory_from_here`], once the
+    /// interpreter this emulator builds is standing and before any of the run's own code is
+    /// read — by the host, because a baseline a guest could re-take is no ceiling at all.
     fn new(budget: &Budget) -> Self {
         Self {
-            deadline: Mutex::new(Instant::now() + budget.wall_clock),
+            deadline: Mutex::new(
+                Instant::now() + super::INIT_PHASE_LIMIT.saturating_add(budget.wall_clock),
+            ),
             wall_clock: budget.wall_clock,
+            deadline_epoch_ms: ::std::sync::atomic::AtomicI64::new(0),
             steps: AtomicU64::new(budget.steps),
             spent: AtomicU64::new(0),
             memory_bytes: budget.memory_bytes,
             response_bytes: budget.response_bytes,
             faulted_at_start: AtomicU64::new(faulted_bytes()),
-            resident_at_start: AtomicU64::new(0),
+            resident_at_start: AtomicU64::new(resident_bytes()),
             stopped: Mutex::new(None),
             breached: AtomicBool::new(false),
             spending: AtomicBool::new(false),
         }
     }
 
-    /// Start spending: the deadline runs from HERE and the memory sample is taken from
-    /// here, so what the bounds measure is the handler's own work rather than the
-    /// interpreter this emulator built to run it in.
-    fn start(&self) {
-        *self.deadline.lock().unwrap_or_else(PoisonError::into_inner) =
-            Instant::now() + self.wall_clock;
+    /// Measure this run's memory from HERE: the thread's faulted pages and the process's
+    /// resident size as they are now, which is what both ceilings judge the run's own growth
+    /// against.
+    ///
+    /// Called by the HOST only ([`drive`]), once the interpreter is standing and before a
+    /// line of the run's own code has been read, so what it measures is the memory the run
+    /// itself takes and not the environment this emulator built for it. It is deliberately
+    /// not on the module the guest can reach: a run that could re-take its own baseline
+    /// could hold the ceiling's worth of memory again after every call.
+    fn measure_memory_from_here(&self) {
         self.faulted_at_start
             .store(faulted_bytes(), Ordering::Relaxed);
         self.resident_at_start
             .store(resident_bytes(), Ordering::Relaxed);
-        self.spending.store(true, Ordering::Relaxed);
     }
 
-    /// Sample the run's DEADLINE from OUTSIDE it, and latch the stop when it is spent.
+    /// Begin the INVOKE phase: the handler's deadline runs from HERE, so what the deadline
+    /// measures is the handler's own work rather than the execution environment this
+    /// emulator built to run it in — the interpreter, the runtime and the import of the
+    /// handler's own module, none of which the function's `Timeout` bounds. Answers when
+    /// that deadline falls, in milliseconds since the epoch, which is what the handler is
+    /// told it has left.
+    ///
+    /// Called by the HOST, between the two calls it makes into the runtime ([`drive`]), and
+    /// reachable from no guest code. It is ONE-SHOT and moves NOTHING but this one deadline
+    /// besides: a second call answers the same instant, and no memory baseline, step count
+    /// or latched stop is touched.
+    fn start(&self) -> i64 {
+        if self.spending.swap(true, Ordering::SeqCst) {
+            return self.deadline_epoch_ms.load(Ordering::Relaxed);
+        }
+        *self.deadline.lock().unwrap_or_else(PoisonError::into_inner) =
+            Instant::now() + self.wall_clock;
+        let epoch_ms = super::epoch_millis(SystemTime::now() + self.wall_clock);
+        self.deadline_epoch_ms.store(epoch_ms, Ordering::Relaxed);
+        epoch_ms
+    }
+
+    /// Sample the run's DEADLINE and the PROCESS's memory from OUTSIDE it, and latch the stop
+    /// when either is spent.
     ///
     /// Called by the host's own watch thread ([`watch_run`]) rather than by the interpreter,
-    /// so the clock a run is stopped on is the host's and not the guest's traced events: a
-    /// long NATIVE call emits none, and this is what notices a run that has stopped producing
-    /// them. The stop is latched here and raised at the next event the interpreter does
-    /// deliver, which is the only place an interpreter can be interrupted; the caller's own
+    /// so what a run is stopped on is the host's own reading and not the guest's traced events:
+    /// a long NATIVE call emits none, and this is what notices a run that has stopped producing
+    /// them — whether it is sitting past its deadline or has taken the process past its ceiling
+    /// in ONE allocation. The stop is latched here and raised at the next event the interpreter
+    /// does deliver, which is the only place an interpreter can be interrupted; the caller's own
     /// wait and abandoned-run accounting ([`super::run_invocation`]) answer the caller
     /// whatever the run goes on doing.
     ///
-    /// The memory samples stay with the hook ([`Self::step`]): the run's own ceiling is this
-    /// THREAD's faulted pages, which only the run's own thread can read, and the whole
-    /// process's resident size is a bound about the process rather than about this run.
+    /// The run's OWN ceiling stays with the hook ([`Self::step`]): it is this THREAD's faulted
+    /// pages, which only the run's own thread can read. The process's resident size is a
+    /// reading any thread can take, so once the run's own code is what is allocating it is
+    /// taken here as well — a bound sampled only between traced events is one a single native
+    /// allocation would step over. Before that, while this emulator is building the
+    /// interpreter the run will happen in, the memory in flight is the host's own doing and
+    /// stopping a run for it would answer a caller that allocated none of it.
     ///
-    /// Nothing is judged before the handler's own work begins: the interpreter this emulator
-    /// builds to run the handler in spends none of the run's budget ([`Self::start`]).
+    /// The deadline judged is the one of the PHASE the run is in: a run still initializing
+    /// its execution environment is judged against the span that initialization is allowed
+    /// ([`super::INIT_PHASE_LIMIT`]), and one whose handler is running against the
+    /// function's own `Timeout` — so neither phase is unbounded and neither is charged the
+    /// other's span.
     fn watch(&self) {
-        if !self.spending.load(Ordering::Relaxed) || self.stopped().is_some() {
+        if self.stopped().is_some() {
             return;
         }
         if Instant::now() >= self.deadline() {
             self.breach(Stop::Deadline);
+            return;
+        }
+        if self.spending.load(Ordering::Relaxed) && self.past_process_ceiling() {
+            self.breach(Stop::Memory);
         }
     }
 
@@ -1259,7 +1344,8 @@ impl Bounds {
 
     /// Whether the run has grown past its own ceiling, sampled from OUTSIDE the guest: the
     /// interpreter exposes no allocation seam, so the bound is read from this thread's
-    /// faulted pages.
+    /// faulted pages, against what this thread had faulted when the run's own code was
+    /// about to be read ([`Self::measure_memory_from_here`]).
     fn past_run_ceiling(&self) -> bool {
         faulted_bytes().saturating_sub(self.faulted_at_start.load(Ordering::Relaxed))
             > self.memory_bytes
@@ -1268,12 +1354,17 @@ impl Bounds {
     /// Whether THIS RUN has grown the whole process past [`PROCESS_RESIDENT_CEILING_BYTES`].
     ///
     /// Both halves are needed, and each says something the other does not: the process is past
-    /// the ceiling, AND this run is what took it there — it holds more than it held when the
-    /// handler's work began, by more than the run's own ceiling allows it to add. A process
+    /// the ceiling, AND this run is what took it there — it holds more than it held when its
+    /// own code was about to be read ([`Self::measure_memory_from_here`]), by more than the
+    /// run's own ceiling allows it to add. A process
     /// already past the ceiling when the run began is not this run's doing: stopping the run
     /// for it would answer a caller that allocated none of it and would free none of it
     /// either, while the run's own growth is bounded by the ceiling above whatever the rest of
     /// the process holds.
+    ///
+    /// Read by the hook and by the host's own watch ([`Self::watch`]), so a run that takes the
+    /// process past the ceiling inside one native call is stopped without waiting for the
+    /// guest to deliver another traced event.
     fn past_process_ceiling(&self) -> bool {
         let held = resident_bytes();
         if held <= PROCESS_RESIDENT_CEILING_BYTES {
@@ -1823,6 +1914,119 @@ mod tests {
             "expected the stop inside the run's own ceiling, took {:?}",
             started.elapsed()
         );
+    }
+
+    /// Where one PHASE of a run ends and the next begins is the HOST's decision: the host
+    /// module carries no name for it, so no guest can start its own invoke phase — and a
+    /// guest that goes looking for one over every name that module does carry is still
+    /// stopped by the bounds the host set.
+    ///
+    /// The rows differ along WHICH bound such a guest would move if it could: the deadline,
+    /// looked for over and over from a handler that never returns, and the memory baseline,
+    /// looked for while the handler's module is being imported between two allocations that
+    /// TOGETHER pass the run's ceiling — a run that must still be stopped, because the
+    /// ceiling is measured from the one baseline the host took.
+    #[test]
+    fn no_guest_code_can_begin_its_own_invoke_phase() {
+        // The names the host module really carries, read from inside a run: a surface this
+        // small is the whole of what a guest can call, and none of these is a phase or a
+        // bound. A name added to it has to be added here too, which is the point.
+        let listed = ran(
+            "def handler(event, context):\n    \
+                 host = __import__('_lambda_host')\n    \
+                 return sorted(n for n in dir(host) if not n.startswith('_'))\n",
+            "lambda_function.handler",
+            None,
+        );
+        let reachable = returned(&listed, "the host surface a run can call");
+        let expected = ::serde_json::json!([
+            "aws",
+            "db_auth_token",
+            "log",
+            "presign",
+            "request",
+            "sleep"
+        ]);
+        assert_eq!(
+            reachable, expected,
+            "expected the host module to carry {expected} and nothing that begins a phase \
+             or moves a bound, got {reachable}"
+        );
+
+        /// How many megabytes each half of the memory row below allocates.
+        const ALLOCATIONS: usize = 40;
+        // Every name the host module carries, called by the guest in the hope that one of
+        // them starts its invoke phase over.
+        let hunts = "_host = __import__('_lambda_host')\n\
+             def _hunt():\n    \
+                 for name in dir(_host):\n        \
+                     try:\n            \
+                         getattr(_host, name)()\n        \
+                     except BaseException:\n            \
+                         pass\n";
+        let hunts_the_deadline = format!(
+            "{hunts}\
+             _hunt()\n\
+             def handler(event, context):\n    \
+                 while True:\n        \
+                     _hunt()\n"
+        );
+        let hunts_the_baseline = format!(
+            "{hunts}\
+             def megabyte():\n    \
+                 return bytearray(b'x' * (1024 * 1024))\n\
+             KEPT = [megabyte() for _ in range({ALLOCATIONS})]\n\
+             _hunt()\n\
+             def handler(event, context):\n    \
+                 KEPT.extend(megabyte() for _ in range({ALLOCATIONS}))\n    \
+                 return {{'held': len(KEPT)}}\n"
+        );
+        let cases: &[(&str, &str, Stop)] = &[
+            (
+                "the deadline, hunted for from inside a handler that never returns",
+                hunts_the_deadline.as_str(),
+                Stop::Deadline,
+            ),
+            (
+                "the memory baseline, hunted for while the module is being imported",
+                hunts_the_baseline.as_str(),
+                Stop::Memory,
+            ),
+        ];
+        for (case, source, expected) in cases {
+            let mut tight = budget();
+            tight.wall_clock = Duration::from_secs(1);
+            // Far more steps than a second of spinning spends, so the row about the
+            // DEADLINE is answered by the deadline and not by the step budget.
+            tight.steps = 2_000_000_000;
+            // Under what the two allocations hold together and over what either holds on
+            // its own, so the row about the BASELINE is stopped only if the baseline stayed
+            // where the host took it.
+            tight.memory_bytes = 64 * 1024 * 1024;
+            let started = Instant::now();
+            let finished = ran_with(
+                source,
+                "lambda_function.handler",
+                None,
+                &BTreeMap::new(),
+                tight,
+            );
+            match &finished.completion {
+                Completion::Stopped(stopped) => assert_eq!(
+                    stopped, expected,
+                    "case {case}: expected the run to be stopped by {expected:?}, got \
+                     {stopped:?}"
+                ),
+                other => panic!(
+                    "case {case}: expected the run to be stopped by {expected:?}, got {other:?}"
+                ),
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "case {case}: expected the stop inside the run's own ceiling, took {:?}",
+                started.elapsed()
+            );
+        }
     }
 
     /// A guest `atexit` callback runs during the interpreter's finalization, which is after

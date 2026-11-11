@@ -15,17 +15,23 @@
 //! source cannot be made to hand one over by deleting or rebinding a name in it. The two
 //! host functions it does use are the ones the host deliberately exposes — the log the
 //! handler's output goes into, and the bounded sleep — and both are enforced in host code.
+//! No bound of the run is reachable from here either: this source neither starts nor moves
+//! the deadline the handler's run is stopped at, which is why the protocol below is TWO
+//! calls the host makes rather than one.
 //!
-//! The protocol between host and runtime is two globals, so the host's own interpreter
-//! surface stays as small as a string in and a string out:
+//! The protocol between host and runtime is a document in and two functions out, so the
+//! host's own interpreter surface stays as small as a string in and a string out:
 //!
-//! * `__lambda_input` — a JSON document the host sets before this source runs: the
+//! * `__lambda_input` — a JSON document the host hands to the first call below: the
 //!   handler name, the package's modules, the modules the RUNTIME supplies beside them
-//!   (the AWS SDK), the event, the environment the invocation runs with, and the
-//!   deadline.
-//! * `__lambda_entry` — the one function this source leaves behind, which the host calls
-//!   once the bounds are in place; it answers a JSON document carrying what the handler
-//!   returned, or the error it raised.
+//!   (the AWS SDK), the event and the environment the invocation runs with.
+//! * `__lambda_prepare` — the INIT phase: it installs this runtime, imports the handler's
+//!   module and resolves its entry point, answering the empty string when the environment
+//!   is ready and an error document for an initialization that failed. None of that is the
+//!   handler's run, so none of it is bounded by the function's `Timeout`.
+//! * `__lambda_invoke` — the handler's own run, which the host calls next, having begun the
+//!   invoke phase itself and passing the instant the `Timeout` is up at. It answers a JSON
+//!   document carrying what the handler returned, or the error it raised.
 //!
 //! Nothing here imports an operating-system module: the environment the handler sees is
 //! installed by the HOST into the module `os` reads it from, and the context's members are
@@ -47,6 +53,10 @@ import time
 import traceback
 
 _host = __import__("_lambda_host")
+
+# What the INIT phase resolved, for the INVOKE phase the host calls next: the request
+# document, this runtime's own library directory and the handler's entry point.
+_PREPARED = {}
 
 
 class _LogStream:
@@ -241,6 +251,8 @@ class LambdaContext:
         self.identity = None
         self.client_context = request["clientContext"]
         self.tenant_id = request["tenantId"]
+        # When this invocation's own run is up, which the host answers when the invoke
+        # phase begins: the execution environment's initialization is not part of it.
         self._deadline_epoch_ms = request["deadlineEpochMs"]
 
     def get_remaining_time_in_millis(self):
@@ -331,7 +343,15 @@ def _bounded_sleep(seconds):
     return _host.sleep(float(seconds))
 
 
-def _run(request, library):
+def _prepare(request, library):
+    """The INIT phase: everything that has to happen before the handler can be called.
+
+    Answers ``None`` once the handler's module is imported and its entry point resolved,
+    and an error document for an initialization that failed. What it resolved is kept for
+    [_invoke], which the HOST calls next: the phase boundary is the host's to decide, so
+    nothing in here — and nothing the deployment package can call — says when the
+    handler's own `Timeout` starts running.
+    """
     sources = request["modules"]
     sys.meta_path.insert(0, _PackageFinder(sources, importlib.util.spec_from_loader))
     # The modules of the STANDARD LIBRARY this runtime supplies itself — the socket
@@ -385,6 +405,23 @@ def _run(request, library):
             [],
         )
 
+    _PREPARED["request"] = request
+    _PREPARED["library"] = library
+    _PREPARED["entry"] = entry
+    return None
+
+
+def _invoke(deadline_epoch_ms):
+    """The INVOKE phase: the handler's own run, which is what the ``Timeout`` bounds.
+
+    ``deadline_epoch_ms`` is when that ``Timeout`` is up at, as the host decided it when it
+    began this phase; it is what the context reports as the time remaining.
+    """
+    request = _PREPARED["request"]
+    library = _PREPARED["library"]
+    entry = _PREPARED["entry"]
+    request["deadlineEpochMs"] = deadline_epoch_ms
+
     event_text = request["event"]
     try:
         event = json.loads(event_text) if event_text else {}
@@ -418,15 +455,35 @@ def _run(request, library):
     return {"outcome": "returned", "payload": payload}
 
 
-def _main(payload):
+def _main_prepare(payload):
     try:
         request = json.loads(payload)
     except BaseException as error:
         return json.dumps(_raised("Runtime.InternalError", str(error), []))
     # Where this runtime's OWN modules are, which a frame of one of them names.
     library = _runtime_library(request.get("environment") or {})
+    _PREPARED["library"] = library
     try:
-        return json.dumps(_run(request, library))
+        outcome = _prepare(request, library)
+    except BaseException as error:
+        return json.dumps(
+            _raised(
+                type(error).__name__,
+                str(error),
+                _frames(error.__traceback__, library),
+            )
+        )
+    if outcome is not None:
+        return json.dumps(outcome)
+    # Nothing to report: the initialization is done and the host may begin the invoke
+    # phase.
+    return ""
+
+
+def _main_invoke(deadline_epoch_ms):
+    library = _PREPARED.get("library") or ""
+    try:
+        return json.dumps(_invoke(deadline_epoch_ms))
     except BaseException as error:
         return json.dumps(
             _raised(
@@ -437,7 +494,9 @@ def _main(payload):
         )
 
 
-# The host calls this once the bounds are in place. Nothing above has run any of the
-# caller's own code: the imports and definitions above are this runtime's own setup.
-__lambda_entry = _main
+# The two functions this source leaves behind, both called by the HOST: the first runs the
+# init phase, the second the handler's own run. Nothing above has run any of the caller's
+# own code: the imports and definitions above are this runtime's own setup.
+__lambda_prepare = _main_prepare
+__lambda_invoke = _main_invoke
 "##;

@@ -31,9 +31,17 @@
 //!   allows for it, plus the step, memory, log and response bounds;
 //! * how long the caller waits for THE RUN once it has that memory, which is this module's
 //!   ([`HOST_WAIT_CEILING`]) and is never the guest's to set: a run still going when that
-//!   wait is spent is ABANDONED — its share goes back to the envelope at once, it counts
-//!   against [`MAX_ABANDONED_RUNS`] for as long as its thread lasts, and past that cap an
-//!   invocation is refused with the modelled throttle rather than adding another thread.
+//!   wait is spent is ABANDONED — it keeps its share of the envelope and counts against
+//!   [`MAX_ABANDONED_RUNS`] for as long as its thread lasts, because the engine still
+//!   holding that memory is the thread's, and past that cap an invocation is refused with
+//!   the modelled throttle rather than adding another thread.
+//!
+//! Both are about the HANDLER's run, because the function's `Timeout` is: every invocation
+//! this emulator serves also INITIALIZES an execution environment of its own first — the
+//! engine is built, its runtime is installed and the handler's module is imported — and that
+//! phase has a span of its own ([`INIT_PHASE_LIMIT`]), which is waited out beside the
+//! handler's `Timeout` and charged to neither the deadline the run is stopped at nor the time
+//! the handler is told it has left.
 //!
 //! The engines of the runs in flight hold at most [`MAX_CONCURRENT_RUN_MEMORY_MB`] of memory
 //! between them, so what the handlers of this process take of the host is bounded however
@@ -181,13 +189,17 @@ const PER_RUN_MEMORY_CEILING_MB: u32 = (MAX_RUN_MEMORY_BYTES / BYTES_PER_MB) as 
 
 /// How long an invocation waits for its share of that envelope before it is throttled.
 ///
-/// The longest a run AHEAD of it can hold a share: a caller's wait for a run is bounded by
-/// [`HOST_WAIT_CEILING`], and a run still going when that wait is spent is abandoned
-/// [`ABANDON_GRACE`] later and hands its share straight back. So within this span memory is
-/// certain to come free, and waiting it out is what keeps this emulator's own envelope from
-/// answering the modelled throttle where neither the function's reservation nor the
-/// account's capacity was reached.
-pub const PERMIT_WAIT: Duration = HOST_WAIT_CEILING.saturating_add(ABANDON_GRACE);
+/// As long as a run AHEAD of it is being answered: such a run holds its share for the
+/// initialization of the execution environment it happens in ([`INIT_PHASE_LIMIT`]) and for
+/// the handler's own run, whose wait is bounded by [`HOST_WAIT_CEILING`], plus the
+/// [`ABANDON_GRACE`] its caller then gives it. So a caller that arrives while the memory is
+/// held is served as soon as a handler ahead of it ends, and only an envelope still full
+/// after that span is answered the modelled throttle. A run that outlived its own caller
+/// keeps its share until its thread ends, because the engine still holding that memory is
+/// that thread's, and it counts against [`MAX_ABANDONED_RUNS`] for just as long.
+pub const PERMIT_WAIT: Duration = INIT_PHASE_LIMIT
+    .saturating_add(HOST_WAIT_CEILING)
+    .saturating_add(ABANDON_GRACE);
 
 /// How many handlers run at once, at most, which FOLLOWS from that envelope: every function
 /// has at least the smallest `MemorySize` the model allows ([`MIN_MEMORY_SIZE_MB`]), so no
@@ -202,8 +214,10 @@ pub const MAX_CONCURRENT_RUNS: u32 = MAX_CONCURRENT_RUN_MEMORY_MB / (MIN_MEMORY_
 /// memory before the handler can be loaded ([`package`]), so the number of invocations doing
 /// that at one instant is the host's to decide and not the caller's. Each read is itself
 /// bounded by [`package::ReadBudget`], so this bounds the product: at most this many
-/// invocations × that budget is inflated at once. The permit is held only for the READ,
-/// which is why it is a pool of its own rather than a claim on the run envelope: an
+/// invocations × that budget is inflated at once. The permit is held for as long as those
+/// EXPANDED bytes are live, which is the whole run, so a queue of invocations waiting for
+/// memory cannot hold expanded archives nothing accounts for. It is a pool of its own rather
+/// than a claim on the run envelope because the two bound different bytes, and because an
 /// invocation whose package this emulator cannot read is answered as that without ever
 /// waiting for memory it would never use.
 #[must_use]
@@ -225,13 +239,29 @@ pub fn run_memory_claim_mb(memory_size: i32) -> u32 {
     megabytes.clamp(1, MAX_CONCURRENT_RUN_MEMORY_MB)
 }
 
-/// The longest a CALLER waits for a RUN of its own, whatever the function's own timeout says.
+/// The longest a CALLER waits for the RUN of a handler, whatever the function's own timeout
+/// says.
 ///
 /// This is the HOST's ceiling, not the function's: a `Timeout` of up to 900 seconds would
 /// otherwise hold a request open for a quarter of an hour. The run's own deadline is the
 /// function's clamped `Timeout` ([`run_budget`]); this is only how long the answer is
-/// waited for, from the moment this invocation holds the memory to run in.
+/// waited for, from the moment this invocation holds the memory to run in — beside the
+/// initialization of the execution environment the handler is called in, which is waited for
+/// on its own span ([`INIT_PHASE_LIMIT`]) because the function's `Timeout` does not bound it.
 pub const HOST_WAIT_CEILING: Duration = Duration::from_secs(30);
+
+/// How long the EXECUTION ENVIRONMENT one invocation runs in may take to be initialized,
+/// which the function's own `Timeout` does not bound.
+///
+/// An invocation happens in two phases, and the `Timeout` — "the amount of time that Lambda
+/// allows a function to run before stopping it" — bounds the second of them: the INIT phase
+/// creates the execution environment, loads the runtime and runs the code outside the
+/// handler, and AWS states that phase "is limited to 10 seconds"; the INVOKE phase that
+/// follows it is the handler's own run. Every invocation this emulator serves initializes an
+/// environment of its own — the interpreter is built, the runtime is installed and the
+/// handler's module is imported for that one run — so this is the span that setup is allowed,
+/// over and above the `Timeout` the handler itself is given.
+pub const INIT_PHASE_LIMIT: Duration = Duration::from_secs(10);
 
 /// How long after its budget is spent a run is still waited for before it is abandoned.
 pub const ABANDON_GRACE: Duration = Duration::from_secs(2);
@@ -508,13 +538,40 @@ pub async fn run_invocation(invocation: Invocation) -> Result<Invoked, Unrunnabl
         return Err(Unrunnable::NoHandler);
     };
 
+    // A host already holding as many runs past their budget as it keeps threads for starts
+    // no further one, and is answered BEFORE a byte of the caller's archive is expanded: a
+    // throttled invocation inflates nothing.
+    if abandoned_runs() >= MAX_ABANDONED_RUNS {
+        // The capacity that is full is this host's, which stands in for the account's
+        // concurrent executions, so what the caller is told is the modelled throttle for
+        // that pool and the detail of which host ceiling it was stays in the log.
+        //
+        // The reading is taken before this run is admitted rather than claimed against the
+        // ceiling: what bounds the runs in flight is the memory envelope below, which every
+        // one of them holds a share of for as long as its thread lasts, abandoned or not.
+        // So the most runs that can be outstanding past their wait at one instant is what
+        // that envelope admits, each of them accounted for in it.
+        ::tracing::warn!(
+            abandoned = abandoned_runs(),
+            ceiling = MAX_ABANDONED_RUNS,
+            "as many runs of this emulator are outstanding past their budget as it keeps \
+             threads for, so this invocation was throttled rather than started"
+        );
+        return Err(Unrunnable::Overloaded(
+            super::execution_slot::THROTTLED_INVOCATION_MESSAGE.to_string(),
+        ));
+    }
+
     // The archives this invocation reads are INFLATED here, under a pool of its own: the
     // package and layer bytes are the caller's, so how many of them this process holds
     // expanded at once is bounded by [`max_concurrent_mount_reads`] rather than by how fast
-    // invocations arrive. The permit is held only for the read — it is no claim on the run
-    // envelope, so a package this emulator cannot read at all is answered as that without
+    // invocations arrive. The permit is a pool of its own rather than a claim on the run
+    // envelope — so a package this emulator cannot read at all is answered as that without
     // ever waiting for memory it would never use — and each archive is itself read under
-    // [`package::ReadBudget`]'s entry and byte ceilings.
+    // [`package::ReadBudget`]'s entry and byte ceilings. It is held for as long as the
+    // EXPANDED bytes are live, which is the whole run: the permit moves onto the run's own
+    // thread below, so the number of inflated archive sets this process holds is what the
+    // pool admits however many invocations queue behind them.
     let reading = ::tokio::time::timeout(
         PERMIT_WAIT,
         Arc::clone(mount_readers()).acquire_owned(),
@@ -574,29 +631,16 @@ pub async fn run_invocation(invocation: Invocation) -> Result<Invoked, Unrunnabl
     if engine == Engine::Node {
         modules.extend(node_sdk_guest::runtime_modules());
     }
-    // Every archive is read: the next invocation may inflate its own.
-    drop(reading);
 
-    if abandoned_runs() >= MAX_ABANDONED_RUNS {
-        // The capacity that is full is this host's, which stands in for the account's
-        // concurrent executions, so what the caller is told is the modelled throttle for
-        // that pool and the detail of which host ceiling it was stays in the log.
-        ::tracing::warn!(
-            abandoned = abandoned_runs(),
-            ceiling = MAX_ABANDONED_RUNS,
-            "as many runs of this emulator are outstanding past their budget as it keeps \
-             threads for, so this invocation was throttled rather than started"
-        );
-        return Err(Unrunnable::Overloaded(
-            super::execution_slot::THROTTLED_INVOCATION_MESSAGE.to_string(),
-        ));
-    }
     // This run's share of the engine memory the process allows its runs together
     // ([`MAX_CONCURRENT_RUN_MEMORY_MB`]), waited for as long as [`PERMIT_WAIT`] — the longest
     // a run ahead of this one can hold a share — so a caller that arrives while the memory is
     // held is served once a handler ahead of it ends, and only an envelope still full after
-    // that is answered the modelled throttle. Held until this invocation is answered,
-    // including when its run is abandoned — which is what puts the share back at once.
+    // that is answered the modelled throttle. Held for as long as the RUN is, which is not
+    // the same as how long its CALLER waits: the share moves onto the run's own thread below
+    // and goes back to the envelope when that thread ends, so a run the caller gave up on
+    // still holds the memory its engine is still really using and what the handlers of this
+    // process hold together stays inside the envelope.
     let claim = run_memory_claim_mb(invocation.memory_size);
     let permit = ::tokio::time::timeout(
         PERMIT_WAIT,
@@ -628,6 +672,14 @@ pub async fn run_invocation(invocation: Invocation) -> Result<Invoked, Unrunnabl
         .name("lambda-invocation".to_string())
         .stack_size(RUN_STACK_BYTES)
         .spawn(move || {
+            // The two claims this run holds for as long as its own memory is live, moved
+            // ONTO this thread so they go back when the thread ends rather than when the
+            // caller stops waiting: its share of the run envelope, and its place in the
+            // pool that bounds how many invocations hold their mounts expanded at once —
+            // the modules below are those expanded bytes, and they live exactly as long as
+            // this thread does.
+            let _envelope = permit;
+            let _mounts = reading;
             // The lifecycle is marked by a GUARD, so the mark and the release of an
             // abandoned run's count happen on every exit of this thread — including an
             // unwind out of the interpreter, which would otherwise leave the count
@@ -673,9 +725,22 @@ pub async fn run_invocation(invocation: Invocation) -> Result<Invoked, Unrunnabl
         )));
     }
 
-    let wait = budget.wall_clock.saturating_add(ABANDON_GRACE).min(
-        HOST_WAIT_CEILING.saturating_add(ABANDON_GRACE),
-    );
+    // What the caller waits for is the INIT phase AND the handler's own run: the function's
+    // `Timeout` bounds the handler, and the execution environment the handler runs in is
+    // built, loaded and handed the package before the handler is called at all
+    // ([`INIT_PHASE_LIMIT`]). A wait of the `Timeout` alone would give up on a run whose
+    // handler had not been reached yet — a failure the function's configuration never asked
+    // for — so the initialization is waited out beside it and the ceiling on the whole wait
+    // moves with it.
+    let wait = budget
+        .wall_clock
+        .saturating_add(INIT_PHASE_LIMIT)
+        .saturating_add(ABANDON_GRACE)
+        .min(
+            HOST_WAIT_CEILING
+                .saturating_add(INIT_PHASE_LIMIT)
+                .saturating_add(ABANDON_GRACE),
+        );
     // The accounting of a run that outlives the caller is a GUARD rather than a branch, so
     // it happens however this invocation ends: the wait running out, the caller's request
     // being cancelled while it is suspended (which drops this future at the await below),
@@ -686,7 +751,6 @@ pub async fn run_invocation(invocation: Invocation) -> Result<Invoked, Unrunnabl
     };
     let waited = ::tokio::time::timeout(wait, receiver).await;
     drop(accounting);
-    drop(permit);
     let finished = match waited {
         Ok(Ok(finished)) => finished,
         Ok(Err(_)) => {
@@ -696,8 +760,9 @@ pub async fn run_invocation(invocation: Invocation) -> Result<Invoked, Unrunnabl
         }
         Err(_) => {
             // The run is still going after its budget and the grace on top of it. It has
-            // been given up on: the slot goes back to the pool and the guard above counted
-            // the run as abandoned until its thread ends.
+            // been given up on: the guard above counted the run as abandoned until its
+            // thread ends, and its share of the run envelope stays claimed for exactly as
+            // long, because the engine still holding that memory is the thread's.
             return Err(Unrunnable::Internal(format!(
                 "the invocation was given up on after {} seconds",
                 wait.as_secs()
@@ -1101,6 +1166,16 @@ fn event_text(payload: &[u8]) -> Option<String> {
         return None;
     }
     String::from_utf8(payload.to_vec()).ok()
+}
+
+/// `at` as the MILLISECONDS since the epoch, which is how an instant of a run is stated
+/// wherever one leaves this module: the deadline a run's own runtime reports to its handler
+/// ([`python`], [`node`]) and the timestamp its log events carry ([`log_delivery`]).
+pub(crate) fn epoch_millis(at: SystemTime) -> i64 {
+    at.duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_millis()).ok())
+        .unwrap_or_default()
 }
 
 /// What one run may spend: the function's own `Timeout`, clamped to the range the model

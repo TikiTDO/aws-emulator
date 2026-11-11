@@ -302,12 +302,10 @@ const MONTH_NAMES: &[&str] = &[
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-/// The instant `at` as the milliseconds since the epoch `requestContext.timeEpoch` carries.
+/// The instant `at` as the milliseconds since the epoch `requestContext.timeEpoch` carries:
+/// the one reading of an instant this crate states ([`crate::state::execution::epoch_millis`]).
 fn epoch_millis(at: ::std::time::SystemTime) -> i64 {
-    at.duration_since(::std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|since| i64::try_from(since.as_millis()).ok())
-        .unwrap_or_default()
+    crate::state::execution::epoch_millis(at)
 }
 
 /// What a handler's result maps onto.

@@ -28,6 +28,10 @@
 
 use std::time::{Duration, SystemTime};
 
+// How an instant of a run is stated in milliseconds since the epoch, which is what
+// `InputLogEvent$timestamp` carries: the one reading this module tree shares.
+use super::epoch_millis;
+
 use super::aws_api::AwsAccess;
 
 /// The IAM action namespace CloudWatch Logs' own calls are named under, which is also the
@@ -183,14 +187,6 @@ pub(super) fn events(
 /// How many lines close a run's log: the `END` line and the `REPORT` line
 /// ([`super::run_log`]).
 const CLOSING_FRAME_LINES: usize = 2;
-
-/// `at`, in the epoch milliseconds `InputLogEvent$timestamp` carries.
-fn epoch_millis(at: SystemTime) -> i64 {
-    at.duration_since(SystemTime::UNIX_EPOCH)
-        .ok()
-        .and_then(|since| i64::try_from(since.as_millis()).ok())
-        .unwrap_or_default()
-}
 
 /// How many events one `PutLogEvents` call carries at most, which is what AWS documents for
 /// one batch ("The maximum number of log events in a batch is 10,000") and what the model's

@@ -57,6 +57,7 @@ pub(super) const RUNTIME_SOURCE: &str = r##"
     var hostZoneOffsetMs = globalThis.__hostZoneOffsetMs;
     var hostEncode = globalThis.__hostEncode;
     var hostDecode = globalThis.__hostDecode;
+    var hostBeginInvocation = globalThis.__hostBeginInvocation;
     delete globalThis.__hostLog;
     delete globalThis.__hostModuleSource;
     delete globalThis.__hostModulePaths;
@@ -69,6 +70,7 @@ pub(super) const RUNTIME_SOURCE: &str = r##"
     delete globalThis.__hostZoneOffsetMs;
     delete globalThis.__hostEncode;
     delete globalThis.__hostDecode;
+    delete globalThis.__hostBeginInvocation;
 
     // Dynamic import is the one way a module of the package is loaded as an ES module. It
     // is compiled here, once, so a run never depends on it being available at any later
@@ -478,7 +480,30 @@ pub(super) const RUNTIME_SOURCE: &str = r##"
         return compiled;
     }
 
-    function requireId(id) {        var held = cache[id];
+    // Whether `id` is an id this runtime itself would have produced: a core module's, or a
+    // path `packagePath` answers for that id's own mount and tail, byte for byte.
+    //
+    // Every lookup goes through this FIRST, whatever route reached it. `requireId` is
+    // published on the protocol object a module can see (`__lambdaRuntime`), so the
+    // collapsing and the mount check `packagePath` performs cannot be the resolution's
+    // alone: an id that is not the one `packagePath` answers — one carrying `..`, an
+    // absolute host path, anything but a string — names nothing of this function's mounts
+    // and is not looked up at all.
+    function ownId(id) {
+        if (typeof id !== 'string' || id === '') {
+            return false;
+        }
+        if (id.indexOf(CORE_PREFIX) === 0) {
+            return true;
+        }
+        return packagePath(rootOf(id), tailOf(id)) === id;
+    }
+
+    function requireId(id) {
+        if (!ownId(id)) {
+            throw requireNotFound(typeof id === 'string' ? id : '');
+        }
+        var held = cache[id];
         if (held !== undefined) {
             return held.exports;
         }
@@ -1563,6 +1588,12 @@ pub(super) const RUNTIME_SOURCE: &str = r##"
             } catch (error) {
                 return runtimeFailure('Runtime.InvalidEvent', String(error));
             }
+            // The INIT phase is over here: the engine, this runtime and the handler's own
+            // module are all loaded and its entry point is resolved. None of that is the
+            // handler's run, which is what the function's `Timeout` bounds, so the host is
+            // told the invoke phase begins now and answers the instant that `Timeout` is up
+            // at — which is what the context reports as the time remaining.
+            input.deadlineEpochMs = hostBeginInvocation();
             return callHandler(entry, event, makeContext(input));
         }, function (error) {
             // How the node runtime classifies a module that would not load: a module it

@@ -234,8 +234,11 @@ fn evaluate(request: &Run<'_>, capture: &Arc<Mutex<Capture>>, bounds: &Arc<Bound
         // `Intl` and the local-zone reading of `Date`, which stand on the zone database the
         // host looks a zone's offset up in ([`intl`]).
         evaluate_script(&ctx, intl::INTL_SOURCE)?;
-        // The runtime's own setup is done; from here the bounds measure the caller's work.
-        bounds.start();
+        // The runtime is installed; from here it loads the handler's module, which is the
+        // rest of the INIT phase. The runtime itself says when that phase is over, by the
+        // one host call that begins the invoke phase ([`install_host`]'s
+        // `__hostBeginInvocation`) — so the bounds measure the handler and not the
+        // environment it runs in.
         runtime_call::<_, ()>(&ctx, "start", (input,))
     });
     if let Err(error) = prepared {
@@ -444,6 +447,26 @@ fn install_host(
     globals
         .set("__hostCompileScript", Func::from(compile_script))
         .map_err(|error| format!("the compiler could not be installed: {error}"))?;
+    // Where the INIT phase ends and the handler's own run begins. The runtime calls this
+    // once it has loaded the handler's module and resolved its entry point — which is
+    // everything the function's `Timeout` does not bound — and the deadline it answers is
+    // the instant that `Timeout` is up at, which is what the handler is told it has left.
+    // It is ONE-SHOT ([`Bounds::start`]), and the runtime takes it off the globals with the
+    // rest of this surface before a line of the package is loaded.
+    let phase_bounds = Arc::clone(bounds);
+    globals
+        .set(
+            "__hostBeginInvocation",
+            Func::from(move || {
+                // Milliseconds since the epoch as a NUMBER, which is how JavaScript states
+                // an instant: the value is far inside the integers a double holds exactly.
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    phase_bounds.start() as f64
+                }
+            }),
+        )
+        .map_err(|error| format!("the invoke phase could not be installed: {error}"))?;
     // The three pure computations the `crypto` core module is served by. They reach no
     // host path, socket or environment: an algorithm name and hex bytes go in, hex bytes
     // come out ([`digest`]).
@@ -768,11 +791,6 @@ fn runtime_input(request: &Run<'_>) -> Result<String, String> {
         }
         None => ::serde_json::Value::Null,
     };
-    let deadline = SystemTime::now() + request.budget.wall_clock;
-    let deadline_epoch_ms = deadline
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|since| since.as_millis())
-        .unwrap_or_default();
     let document = ::serde_json::json!({
         "handler": request.handler,
         "environment": environment,
@@ -781,7 +799,6 @@ fn runtime_input(request: &Run<'_>) -> Result<String, String> {
         "invokedFunctionArn": request.invoked_function_arn,
         "clientContext": client_context,
         "tenantId": request.tenant_id,
-        "deadlineEpochMs": deadline_epoch_ms,
         "nodeMajor": node_major(request.runtime),
         "nodeVersion": node_version(request.runtime),
         // The platform this process really runs on, and the architecture the FUNCTION is
@@ -923,10 +940,16 @@ impl Loader for RuntimeLoader {
 /// The run's budget, as the engine's interrupt handler spends it.
 #[derive(Debug)]
 pub struct Bounds {
-    /// When the run must be over. Set when the handler's own work starts.
+    /// When the PHASE the run is in must be over: the initialization of the execution
+    /// environment until [`Self::start`], and the handler's own run from there.
     deadline: Mutex<Instant>,
     /// How long the handler may run for.
     wall_clock: Duration,
+    /// When the HANDLER's run must be over, in milliseconds since the epoch, which is what
+    /// the handler is told it has left. Set by [`Self::start`].
+    deadline_epoch_ms: ::std::sync::atomic::AtomicI64,
+    /// Whether the INVOKE phase has begun ([`Self::start`]).
+    spending: AtomicBool,
     /// How many engine checks are left.
     checks: AtomicU64,
     /// How large the handler's response may be.
@@ -939,12 +962,20 @@ pub struct Bounds {
 }
 
 impl Bounds {
-    /// The bounds of a run with `budget`. The clock they measure against is taken by
-    /// [`Self::start`], when the handler's own work begins.
+    /// The bounds of a run with `budget`, in its INIT phase: the deadline is the one the
+    /// initialization of the execution environment has, which is not the function's
+    /// `Timeout` — the phase has a limit of its own ([`super::INIT_PHASE_LIMIT`]), and AWS
+    /// retries an initialization that outlasts it under the configured function timeout, so
+    /// what an initialization is given up on after is the two spans together. The handler's
+    /// own deadline is taken by [`Self::start`], when the invoke phase begins.
     fn new(budget: &Budget) -> Self {
         Self {
-            deadline: Mutex::new(Instant::now() + budget.wall_clock),
+            deadline: Mutex::new(
+                Instant::now() + super::INIT_PHASE_LIMIT.saturating_add(budget.wall_clock),
+            ),
             wall_clock: budget.wall_clock,
+            deadline_epoch_ms: ::std::sync::atomic::AtomicI64::new(0),
+            spending: AtomicBool::new(false),
             checks: AtomicU64::new(MAX_ENGINE_CHECKS),
             response_bytes: budget.response_bytes,
             stopped: Mutex::new(None),
@@ -952,11 +983,25 @@ impl Bounds {
         }
     }
 
-    /// Start spending: the deadline runs from HERE, so what the bounds measure is the
-    /// handler's own work rather than the engine this emulator built to run it in.
-    fn start(&self) {
+    /// Begin the INVOKE phase: the handler's deadline runs from HERE, so what the bounds
+    /// measure is the handler's own work rather than the execution environment this
+    /// emulator built to run it in — the engine, the runtime and the load of the handler's
+    /// own module, none of which the function's `Timeout` bounds. Answers when that
+    /// deadline falls, in milliseconds since the epoch, which is what the handler is told
+    /// it has left.
+    ///
+    /// ONE-SHOT: the invoke phase of a run begins once. A second call answers the same
+    /// deadline and moves nothing, so reaching this again cannot extend a deadline that is
+    /// already running.
+    fn start(&self) -> i64 {
+        if self.spending.swap(true, Ordering::SeqCst) {
+            return self.deadline_epoch_ms.load(Ordering::Relaxed);
+        }
         *self.deadline.lock().unwrap_or_else(PoisonError::into_inner) =
             Instant::now() + self.wall_clock;
+        let epoch_ms = super::epoch_millis(SystemTime::now() + self.wall_clock);
+        self.deadline_epoch_ms.store(epoch_ms, Ordering::Relaxed);
+        epoch_ms
     }
 
     /// When the run must be over.
@@ -1546,6 +1591,59 @@ mod tests {
             "kept": true,
         });
         assert_eq!(answered, expected, "expected {expected}, got {answered}");
+    }
+
+    /// The protocol object's own `requireId` is no second route to a lookup key: an id this
+    /// runtime did not produce — one that would leave a mount through `..`, an absolute host
+    /// path, an empty string, a value that is not a string at all — resolves to nothing,
+    /// because every lookup re-normalises its id against the mount and tail it names.
+    ///
+    /// The rows differ along the FORM the id is written in, which is what the normalisation
+    /// generalises over, and each must come back as the resolution failure a node runtime
+    /// reports for a module it cannot find.
+    #[test]
+    fn a_require_id_the_runtime_did_not_produce_resolves_to_nothing() {
+        let finished = ran(
+            "exports.handler = async () => {\n\
+                 const ids = [\n\
+                     '../../../etc/passwd',\n\
+                     './../../etc/passwd',\n\
+                     '/etc/passwd',\n\
+                     'layer:../../etc/passwd',\n\
+                     'runtime:../../../etc/passwd',\n\
+                     '',\n\
+                     7,\n\
+                 ];\n\
+                 return ids.map(function (id) {\n\
+                     try {\n\
+                         globalThis.__lambdaRuntime.requireId(id);\n\
+                         return 'resolved';\n\
+                     } catch (error) {\n\
+                         return (error && error.code) || String(error);\n\
+                     }\n\
+                 });\n\
+             };\n",
+            "index.handler",
+            None,
+        );
+        let answered = returned(&finished, "an id this runtime did not produce");
+        let refused = ::serde_json::json!("MODULE_NOT_FOUND");
+        let outcomes = answered
+            .as_array()
+            .unwrap_or_else(|| panic!("expected one outcome per id, got {answered}"))
+            .clone();
+        assert_eq!(
+            outcomes.len(),
+            7,
+            "expected one outcome per id, got {answered}"
+        );
+        for (index, outcome) in outcomes.iter().enumerate() {
+            assert_eq!(
+                outcome, &refused,
+                "id {index}: expected {refused} for an id the runtime did not produce, got \
+                 {outcome} in {answered}"
+            );
+        }
     }
 
     /// The environment a handler reads is the invocation's own, and the context is the one
