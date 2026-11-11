@@ -493,10 +493,15 @@ impl ::std::fmt::Display for SignatureDefect {
 /// The steps are the ones RFC 7515 §5.2 defines, which is what every consumer of such a
 /// token does: read `alg` and `kid` out of the header, find THAT key in the set the
 /// issuer published, rebuild the public key from the parameters the set carries
-/// (RFC 7518 §6.2.1) and check the signature over `base64url(header) '.'
-/// base64url(payload)` — the exact bytes the token carries, so a payload rewritten after
+/// (RFC 7518 §6) and check the signature over `base64url(header) '.'
+/// base64url(payload)` under the algorithm the header named — the exact bytes the token
+/// carries, so a payload rewritten after
 /// signing no longer checks out. Only PUBLIC key parameters are read, so a token that
 /// verifies here is one any third party holding the same key set could have verified.
+///
+/// The algorithms a signature is checked under are [`VERIFIABLE_SIGNATURE_ALGORITHMS`];
+/// a token naming any other is [`SignatureDefect::UnsupportedAlgorithm`], which leaves
+/// the question undecided rather than deciding it against the token.
 ///
 /// Total: every failure is a [`SignatureDefect`], never a panic — nothing is indexed,
 /// sliced or unwrapped on the way through.

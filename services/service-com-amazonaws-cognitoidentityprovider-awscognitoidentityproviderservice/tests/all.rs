@@ -239,6 +239,8 @@ mod terms_not_found_message;
 mod token_issuer_endpoint;
 #[path = "all/token_signing.rs"]
 mod token_signing;
+#[path = "all/token_signing_algorithm.rs"]
+mod token_signing_algorithm;
 #[path = "all/ui_customization.rs"]
 mod ui_customization;
 #[path = "all/update_group.rs"]
