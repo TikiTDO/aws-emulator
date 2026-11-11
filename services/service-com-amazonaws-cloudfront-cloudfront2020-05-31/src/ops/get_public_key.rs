@@ -141,9 +141,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let store = state.lock();
 
         // "The identifier of the public key you are getting": an id no stored key carries
-        // names no public key, and an id drawn from ANOTHER of this service's namespaces was
-        // never a public key id at all — the sentence is what tells the two apart under the
-        // one code this operation models.
+        // names no public key, whatever form the value takes — this `Id` is a plain string
+        // the model constrains in no way, so which ids were issued is the store's business
+        // and nothing about the value is refused ahead of it.
         let Some(stored) = store.public_key(&input.id) else {
             return Err(GetPublicKeyErrorModeled::NoSuchPublicKey(
                 crate::state::unresolved_public_key_id(&input.id),

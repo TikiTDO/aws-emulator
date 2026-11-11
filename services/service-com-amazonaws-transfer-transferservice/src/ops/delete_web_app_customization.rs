@@ -206,7 +206,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             Ok(claim) => claim,
             Err(st::web_app_customization::Refusal::Conflict) => {
                 return Err(DeleteWebAppCustomizationErrorModeled::ConflictException(
-                    st::web_app_customization::write_conflict(),
+                    st::web_app_customization::write_conflict(
+                        st::web_app_customization::Write::Delete,
+                    ),
                 )
                 .into());
             }

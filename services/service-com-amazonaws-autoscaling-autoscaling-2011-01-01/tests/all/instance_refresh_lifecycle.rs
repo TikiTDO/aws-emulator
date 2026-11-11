@@ -35,7 +35,10 @@ const ZONE: &str = "us-west-2a";
 /// Wait until the clock has certainly brought `steps` of a refresh's own steps due,
 /// each of which starts a lifecycle transition of its own. Derived from the service's
 /// own spans, so this and the implementation cannot drift apart.
-async fn past_refresh_steps(steps: u32) {
+///
+/// `pub(crate)` so a sibling suite that waits for a refresh's steps waits the same span
+/// rather than growing a copy of this.
+pub(crate) async fn past_refresh_steps(steps: u32) {
     let span = autoscaling::state::INSTANCE_REFRESH_REPLACEMENT
         .max(autoscaling::state::LIFECYCLE_TRANSITION);
     tokio::time::sleep(span * (steps + 2) + Duration::from_millis(250)).await;

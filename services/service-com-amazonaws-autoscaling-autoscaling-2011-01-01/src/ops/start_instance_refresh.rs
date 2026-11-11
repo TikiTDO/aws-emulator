@@ -244,27 +244,45 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .as_ref()
             .and_then(|preferences| preferences.skip_matching)
             .unwrap_or(false);
-        let target_template = match input.desired_configuration.as_ref() {
-            Some(desired) => crate::state::launch_template_of(
-                desired.launch_template.as_ref(),
+        let (target_template, target_policy) = match input.desired_configuration.as_ref() {
+            Some(desired) => (
+                crate::state::launch_template_of(
+                    desired.launch_template.as_ref(),
+                    desired.mixed_instances_policy.as_ref(),
+                ),
                 desired.mixed_instances_policy.as_ref(),
             ),
-            None => crate::state::launch_template_of(
-                group.launch_template.as_ref(),
+            None => (
+                crate::state::launch_template_of(
+                    group.launch_template.as_ref(),
+                    group.mixed_instances_policy.as_ref(),
+                ),
                 group.mixed_instances_policy.as_ref(),
             ),
         };
-        let pending_instance_ids: Vec<String> = group
-            .active_instances()
-            .filter(|instance| {
-                !(skip_matching
-                    && crate::state::same_launch_template(
-                        instance.launch_template.as_ref(),
-                        target_template,
-                    ))
-            })
-            .map(|instance| instance.instance_id.clone())
-            .collect();
+        // "If enabled (true), then Amazon EC2 Auto Scaling skips replacing instances
+        // that match the desired configuration. If no desired configuration is
+        // specified, then it skips replacing instances that have the same launch
+        // template and instance types that the Auto Scaling group was using before the
+        // start of the instance refresh"
+        // (`smithy_query(query="doc",shape="RefreshPreferences",member="SkipMatching")`).
+        // The matching is asked of the group's instances TOGETHER, so the target is
+        // resolved once and Amazon EC2's store is reached once however many instances the
+        // group holds; a refresh that asked for no skipping reaches it not at all.
+        let pending_instance_ids: Vec<String> = if skip_matching {
+            let target_instance_types = crate::state::declared_instance_types(target_policy);
+            crate::state::ec2_instances::instances_not_running(
+                &*self.engine,
+                group.active_instances(),
+                target_template,
+                &target_instance_types,
+            )
+        } else {
+            group
+                .active_instances()
+                .map(|instance| instance.instance_id.clone())
+                .collect()
+        };
         let instances_at_start = i32::try_from(pending_instance_ids.len()).unwrap_or(i32::MAX);
 
         let instance_refresh_id =

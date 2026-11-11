@@ -33,6 +33,8 @@ mod error_envelope;
 mod instance_lifecycle_events;
 #[path = "all/instance_refresh_lifecycle.rs"]
 mod instance_refresh_lifecycle;
+#[path = "all/instance_refresh_skip_matching.rs"]
+mod instance_refresh_skip_matching;
 #[path = "all/instance_scale_in_protection.rs"]
 mod instance_scale_in_protection;
 #[path = "all/launch_configurations_are_unavailable.rs"]

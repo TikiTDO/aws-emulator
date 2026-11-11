@@ -30,19 +30,37 @@
 use crate::ops::types::ConflictException;
 use crate::state::ComAmazonawsTransferTransferserviceState as State;
 
-/// `ConflictException`'s `Message` for a customization write that arrived while another
-/// write of the same web app's customization was still being applied.
-///
-/// Fixed for the condition and carrying no request data, like every other refusal text
-/// in this service: the web app a caller addressed is the one it named.
-pub const CUSTOMIZATION_WRITE_IN_PROGRESS: &str =
-    "Another update of this web app's customization is in progress; wait for it to \
-     complete and try again.";
+/// Which write of a web app's customization a refusal is about: the two operations that
+/// write the one object, and the two sentences the service refuses them with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Write {
+    /// `UpdateWebAppCustomization`, which assigns the customization's members.
+    Update,
+    /// `DeleteWebAppCustomization`, which removes the whole object.
+    Delete,
+}
 
-/// The conflict payload for a customization write that lost the claim.
-pub fn write_conflict() -> ConflictException {
+/// `ConflictException`'s `Message` for an UPDATE of a web app's customization that could
+/// not be carried out because another write of the same object was still being applied.
+///
+/// The service's own fixed text for the condition: it states that the write could not be
+/// done, names the object by the service's own name for it, and carries nothing from the
+/// request or the store — the web app a caller addressed is the one it named. Worded for
+/// the write it refuses, which is what [`DELETE_CONFLICT`] is for the other one.
+pub const UPDATE_CONFLICT: &str = "Unable to update WebApp customization";
+
+/// `ConflictException`'s `Message` for a DELETE of a web app's customization that lost
+/// the claim — [`UPDATE_CONFLICT`]'s sentence for the other write of the one object.
+pub const DELETE_CONFLICT: &str = "Unable to delete WebApp customization";
+
+/// The conflict payload for a customization write that lost the claim, worded for the
+/// write that lost it.
+pub fn write_conflict(write: Write) -> ConflictException {
     ConflictException {
-        message: CUSTOMIZATION_WRITE_IN_PROGRESS.to_string(),
+        message: match write {
+            Write::Update => UPDATE_CONFLICT.to_string(),
+            Write::Delete => DELETE_CONFLICT.to_string(),
+        },
     }
 }
 

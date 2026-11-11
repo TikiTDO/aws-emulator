@@ -249,6 +249,8 @@ mod precondition_family_wording;
 mod published_edge_address;
 #[path = "all/public_key_delete.rs"]
 mod public_key_delete;
+#[path = "all/public_key_id_is_resolved_against_the_store.rs"]
+mod public_key_id_is_resolved_against_the_store;
 #[path = "all/public_key_lifecycle.rs"]
 mod public_key_lifecycle;
 #[path = "all/public_key_update.rs"]

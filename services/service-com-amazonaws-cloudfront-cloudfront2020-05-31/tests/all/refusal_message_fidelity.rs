@@ -11,12 +11,10 @@
 //!   admits), never with the value that was sent: `CreateAnycastIpList`'s `IpCount` and the
 //!   `SamplingRate` every real-time log configuration carries;
 //! * an IDENTIFIER the operation cannot resolve is refused with the sentence for the
-//!   CONDITION the store puts it in: an identifier CloudFront could never have issued for the
-//!   kind addressed — one written in that kind's own namespace but not in the shape its ids
-//!   take, or one drawn from the namespace of ANOTHER resource kind of this service — is the
-//!   identifier that cannot be READ, so the refusal names the MEMBER it arrived in ("Id format
-//!   is invalid"), while an identifier CloudFront could have issued and that the store holds
-//!   nothing for is the kind's does-not-exist sentence;
+//!   CONDITION the store puts it in, as wide as the addressed surface reads its identifier:
+//!   the public key reads apply NO format gate — their `Id` is a plain `string` the model
+//!   constrains in no way, so every value the store holds no key for, of any shape, is the
+//!   kind's does-not-exist sentence;
 //! * where one operation's model serves no not-found code of its own, the identifier the
 //!   store holds nothing for is still reported as ABSENT under the code the model does serve
 //!   — `ListDistributionsByRealtimeLogConfig` answers `InvalidArgument` carrying the sentence
@@ -31,7 +29,8 @@
 //! ids in (a distribution's, a key group's UUID, both field-level encryption namespaces), and
 //! identifiers CloudFront could have issued (one never minted, one character off the stored
 //! one, the stored id in lower case, the caller reference, a bare digit, a word of no id shape
-//! at all), over every operation that addresses a public key by `Id`; and for the listing, the
+//! at all) — one condition, under one sentence — over every operation that addresses a public
+//! key by `Id`; and for the listing, the
 //! configuration named by `Name`, by `ARN` and by both.
 //!
 //! Each refusal is also shown to change nothing: the resource it named is read back
@@ -58,14 +57,9 @@ use crate::realtime_log_config_lifecycle::{get_config, strings, Endpoint, Submit
 use crate::response_headers_policy_lifecycle::escape;
 use crate::web_acl_association::create as create_distribution_returning_id;
 
-/// The sentence a refusal of an identifier that could never have been one of the addressed
-/// resource kind carries, for an identifier that arrived in the member `Id`. Spelled out here
-/// as a literal rather than read off the crate's producer, so the WORDING is what these rows
-/// are held to.
-const ID_FORMAT_INVALID: &str = "Id format is invalid";
-
-/// The sentence `NoSuchPublicKey` carries for an id that could have been a public key id and
-/// that the store holds no key for, spelled out here for the same reason.
+/// The sentence `NoSuchPublicKey` carries for an `Id` the store holds no public key for,
+/// spelled out here as a literal rather than read off the crate's producer, so the WORDING is
+/// what these rows are held to.
 const NO_SUCH_PUBLIC_KEY: &str = "The specified CloudFront public key does not exist.";
 
 /// The sentence an `IpCount` outside the documented value set is refused with: it names the
@@ -437,13 +431,15 @@ struct IdRow {
     message: &'static str,
 }
 
-/// An `Id` that is a minted id of ANOTHER resource kind of this service was never a public key
-/// id, so every operation that addresses a public key by `Id` reports the identifier it cannot
-/// read — `NoSuchPublicKey` (404) naming the member — while an `Id` that could have been one
-/// and that the store holds no key for is the absent-key sentence under the same code. Neither
-/// refusal touches the key the account really holds.
+/// Every operation that addresses a public key by `Id` reports an `Id` the store holds no key
+/// for as the key that is ABSENT — `NoSuchPublicKey` (404) under this service's one sentence
+/// for that condition — whatever shape the value takes: a minted id of another resource kind
+/// of this service, a value in the public key namespace that no minted id has the shape of,
+/// and an id CloudFront could have issued are one condition here, because the member carries
+/// no modelled constraint for a request to be refused on. No refusal touches the key the
+/// account really holds.
 #[tokio::test]
-async fn an_id_of_another_namespace_is_told_from_one_that_is_merely_absent() {
+async fn every_id_the_store_holds_no_public_key_for_is_reported_absent() {
     let router = emulator();
 
     // The one public key the account holds, and the two other namespaces whose ids are MINTED
@@ -500,12 +496,12 @@ async fn an_id_of_another_namespace_is_told_from_one_that_is_merely_absent() {
         IdRow {
             case: "a distribution id where a public key id belongs",
             id: distribution_id,
-            message: ID_FORMAT_INVALID,
+            message: NO_SUCH_PUBLIC_KEY,
         },
         IdRow {
             case: "a key group id, which this service draws as a UUID",
             id: group_id,
-            message: ID_FORMAT_INVALID,
+            message: NO_SUCH_PUBLIC_KEY,
         },
         IdRow {
             // The prefix is the one this service mints profile ids under
@@ -513,31 +509,31 @@ async fn an_id_of_another_namespace_is_told_from_one_that_is_merely_absent() {
             // alphabet, as `P280MFCLSYOCVU` is.
             case: "a field-level encryption profile id",
             id: format!("{FIELD_LEVEL_ENCRYPTION_PROFILE_ID_PREFIX}2AAAAAAAAAAAA"),
-            message: ID_FORMAT_INVALID,
+            message: NO_SUCH_PUBLIC_KEY,
         },
         IdRow {
             // The sibling field-level encryption CONFIG namespace
             // (`FIELD_LEVEL_ENCRYPTION_CONFIG_ID_PREFIX`).
             case: "a field-level encryption configuration id",
             id: format!("{FIELD_LEVEL_ENCRYPTION_CONFIG_ID_PREFIX}3AAAAAAAAAAAA"),
-            message: ID_FORMAT_INVALID,
+            message: NO_SUCH_PUBLIC_KEY,
         },
         IdRow {
             // In the public key namespace (`PUBLIC_KEY_ID_PREFIX`) but not in the shape its
             // ids take: a body too short to be one.
             case: "the public key prefix with too short a body",
             id: format!("{PUBLIC_KEY_ID_PREFIX}2AAA"),
-            message: ID_FORMAT_INVALID,
+            message: NO_SUCH_PUBLIC_KEY,
         },
         IdRow {
             case: "the public key prefix with too long a body",
             id: format!("{PUBLIC_KEY_ID_PREFIX}2AAAAAAAAAAAAAAAAAAA"),
-            message: ID_FORMAT_INVALID,
+            message: NO_SUCH_PUBLIC_KEY,
         },
         IdRow {
             case: "the stored id with one character appended",
             id: format!("{known}9"),
-            message: ID_FORMAT_INVALID,
+            message: NO_SUCH_PUBLIC_KEY,
         },
         IdRow {
             case: "a public key id of this namespace that was never minted",

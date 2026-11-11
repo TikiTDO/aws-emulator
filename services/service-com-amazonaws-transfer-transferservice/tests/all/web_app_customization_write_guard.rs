@@ -31,7 +31,10 @@ use crate::harness::{member_of, Answer, Emulator, ROLE};
 const INSTANCE_ARN: &str = "arn:aws:sso:::instance/ssoins-1234567890abcdef";
 
 /// Create one web app and hand back its `WebAppId`.
-async fn create_web_app(emulator: &Emulator) -> String {
+///
+/// `pub(crate)` so a sibling suite about the same guard creates its web app the same way
+/// rather than growing a copy of this.
+pub(crate) async fn create_web_app(emulator: &Emulator) -> String {
     let answer = emulator
         .call(
             "CreateWebApp",
@@ -246,7 +249,10 @@ async fn only_one_of_many_overlapping_writers_commits() {
 }
 
 /// Drive every call TOGETHER and collect the answers in the order the calls were made.
-async fn futures_of<F>(calls: impl Iterator<Item = F>) -> Vec<Answer>
+///
+/// `pub(crate)` for the reason [`create_web_app`] is: overlapping calls are made to overlap
+/// in ONE way in this crate's tests.
+pub(crate) async fn futures_of<F>(calls: impl Iterator<Item = F>) -> Vec<Answer>
 where
     F: std::future::Future<Output = Answer>,
 {

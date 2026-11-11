@@ -37,7 +37,7 @@
 //! resolves. This struct holds the group's own view of it — its lifecycle state, its
 //! health and the zone it was placed in — and nothing that Amazon EC2's record owns.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, SystemTime};
 
 use crate::ops::types::{
@@ -2317,9 +2317,12 @@ pub fn launch_template_of<'a>(
     })
 }
 
-/// Whether two specifications name the same launch template and version, which is
-/// what makes an instance launched from one of them already up to date with respect
-/// to the other.
+/// Whether two specifications name the same launch template and version, as WRITTEN.
+///
+/// All there is to go on for a template the account does not hold, and therefore the
+/// fallback the resolving comparison in [`ec2_instances::instances_not_running`] takes:
+/// that one is what a caller asks, because the same launch-template version can be written
+/// in several ways.
 pub fn same_launch_template(
     left: Option<&LaunchTemplateSpecification>,
     right: Option<&LaunchTemplateSpecification>,
@@ -2333,6 +2336,33 @@ pub fn same_launch_template(
         (None, None) => true,
         _ => false,
     }
+}
+
+/// The instance types a launch source names EXPLICITLY, beside the launch template it
+/// launches them from: the `InstanceType` of each override of a mixed instances policy.
+///
+/// An instance refresh skips "instances that match the desired configuration"
+/// (`smithy_query(query="doc",shape="RefreshPreferences",member="SkipMatching")`), and a
+/// configuration that names its own instance types is matched on them too: an instance
+/// of a type the configuration does not name does not run that configuration, whatever
+/// template it was launched from. A launch source that names none leaves the type to the
+/// template, so every instance launched from that template matches on type.
+///
+/// A SET, built once: the types come from the request, so a membership test that scanned
+/// them would cost the group's size times the request's length.
+pub fn declared_instance_types(
+    mixed_instances_policy: Option<&MixedInstancesPolicy>,
+) -> BTreeSet<String> {
+    mixed_instances_policy
+        .and_then(|policy| policy.launch_template.as_ref())
+        .and_then(|template| template.overrides.as_ref())
+        .map(|overrides| {
+            overrides
+                .iter()
+                .filter_map(|entry| entry.instance_type.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Decode a `NextToken` into the offset it names, or `None` when the token is not

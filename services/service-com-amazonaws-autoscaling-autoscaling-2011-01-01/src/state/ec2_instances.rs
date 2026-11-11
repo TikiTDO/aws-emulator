@@ -24,27 +24,18 @@
 //! nothing awaits while either is held. Amazon EC2 never reaches this service, so the
 //! two locks are never taken in the other order and no cycle exists.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
 use ::service_com_amazonaws_ec2_amazonec2::ops::types::RequestLaunchTemplateData;
 use ::service_com_amazonaws_ec2_amazonec2::state as ec2;
 
 use crate::ops::types::{LaunchTemplateSpecification, MixedInstancesPolicy, Tag};
-use crate::state::{ec2_subnets, StoredLaunchConfiguration};
+use crate::state::{ec2_subnets, StoredInstance, StoredLaunchConfiguration};
 
 /// The tag Amazon EC2 Auto Scaling itself puts on every instance it launches, naming
 /// the group the instance belongs to — beside the group's own propagate-at-launch tags.
 pub const GROUP_NAME_TAG: &str = "aws:autoscaling:groupName";
-
-/// The `Version` a launch template specification carries for "the default version of
-/// the launch template", from the model's own documentation for
-/// `LaunchTemplateSpecification$Version`: "The version number, `$Latest`, or
-/// `$Default`. … The default value is `$Default`."
-const VERSION_DEFAULT: &str = "$Default";
-
-/// The `Version` for "the latest version of the launch template" (same documentation).
-const VERSION_LATEST: &str = "$Latest";
 
 /// What a group asks Amazon EC2 to launch: how many instances, where they go and what
 /// they run.
@@ -550,20 +541,116 @@ fn template_data(
     store: &ec2::ComAmazonawsEc2Amazonec2State,
     specification: &LaunchTemplateSpecification,
 ) -> Option<RequestLaunchTemplateData> {
+    let (launch_template_id, version) = resolved_version(store, specification)?;
+    let record = store.launch_templates.get(&launch_template_id)?;
+    record
+        .versions
+        .get(&version)
+        .map(|version| version.data.clone())
+}
+
+/// Which of a group's instances are NOT already running the configuration a refresh would
+/// give them — the question `SkipMatching` asks of every instance of a group, answered
+/// under ONE acquisition of Amazon EC2's store lock whatever the group holds.
+///
+/// An instance MATCHES when the launch-template version it was launched from resolves to the
+/// version `target` resolves to: a specification is a WAY OF NAMING one version (the
+/// template by id or by name, the version by number or by `$Latest`/`$Default`), so two
+/// spellings of one version are one configuration and an instance running it needs no
+/// replacing. The target is resolved ONCE here rather than per instance, and
+/// `instance_types` — the types the target names explicitly, which come from the request —
+/// is a SET, so what one instance costs does not grow with the request: no work here is the
+/// product of the group's size and anything a caller sends.
+///
+/// A specification naming a template (or a version of one) the account does not hold
+/// resolves to nothing, and is then compared exactly as it was written
+/// ([`super::same_launch_template`]), which is also what every comparison falls back to on
+/// an engine carrying no Amazon EC2 store at all.
+pub fn instances_not_running<'a, Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    instances: impl Iterator<Item = &'a StoredInstance>,
+    target: Option<&LaunchTemplateSpecification>,
+    instance_types: &BTreeSet<String>,
+) -> Vec<String> {
+    let state = ec2::service_state(engine);
+    let store = state.as_ref().map(|state| state.lock());
+    let store = store.as_deref();
+    let resolved_target = store
+        .zip(target)
+        .and_then(|(store, target)| resolved_version(store, target));
+    instances
+        .filter(|instance| {
+            let matching = runs_target(
+                store,
+                resolved_target.as_ref(),
+                instance.launch_template.as_ref(),
+                target,
+            ) && (instance_types.is_empty()
+                || instance
+                    .instance_type
+                    .as_ref()
+                    .is_some_and(|instance_type| instance_types.contains(instance_type)));
+            !matching
+        })
+        .map(|instance| instance.instance_id.clone())
+        .collect()
+}
+
+/// Whether an instance launched from `launched` is running the version `target` names,
+/// `resolved_target` being that version where the store resolves it.
+///
+/// Both sides resolved, the versions decide; either side unresolvable, the specifications
+/// are compared as they were written, since there is then no stored version to tell them
+/// apart by.
+fn runs_target(
+    store: Option<&ec2::ComAmazonawsEc2Amazonec2State>,
+    resolved_target: Option<&(String, i64)>,
+    launched: Option<&LaunchTemplateSpecification>,
+    target: Option<&LaunchTemplateSpecification>,
+) -> bool {
+    let (Some(launched), Some(target)) = (launched, target) else {
+        return launched.is_none() && target.is_none();
+    };
+    let resolved_launched = store.and_then(|store| resolved_version(store, launched));
+    match (resolved_launched.as_ref(), resolved_target) {
+        (Some(launched_version), Some(target_version)) => launched_version == target_version,
+        _ => super::same_launch_template(Some(launched), Some(target)),
+    }
+}
+
+/// The `(launch template id, version number)` a specification resolves to against a
+/// locked Amazon EC2 store — the one place this crate resolves a specification, shared by
+/// the launch data a group launches from and by the matching [`instances_not_running`]
+/// does.
+///
+/// The VERSION member itself is read by the service that OWNS launch templates
+/// ([`ec2::resolve_launch_template_version`], the one reading of that member in the
+/// emulator): an alias resolves to the number the template records for it and a number has
+/// to be a version the template holds, so this crate and Amazon EC2's own operations can
+/// never disagree about which version a word names. A specification carrying no version
+/// means the template's default ([`ec2::LAUNCH_TEMPLATE_VERSION_DEFAULT`], from the
+/// model's documentation of `LaunchTemplateSpecification$Version`: "The default value is
+/// `$Default`"). EC2's refusal is discarded: a consumer of a template the account does not
+/// hold, or of a version it does not hold, resolves to nothing rather than refusing — what
+/// an unresolvable launch source does is the caller's own rule, not this lookup's.
+fn resolved_version(
+    store: &ec2::ComAmazonawsEc2Amazonec2State,
+    specification: &LaunchTemplateSpecification,
+) -> Option<(String, i64)> {
     let launch_template_id = match specification.launch_template_id.as_deref() {
         Some(launch_template_id) => launch_template_id.to_string(),
         None => store.launch_template_id_for_name(specification.launch_template_name.as_deref()?)?,
     };
     let record = store.launch_templates.get(&launch_template_id)?;
-    let version = match specification.version.as_deref() {
-        None | Some(VERSION_DEFAULT) => record.template.default_version_number?,
-        Some(VERSION_LATEST) => record.template.latest_version_number?,
-        Some(version) => version.parse::<i64>().ok()?,
-    };
-    record
-        .versions
-        .get(&version)
-        .map(|version| version.data.clone())
+    let version = ec2::resolve_launch_template_version::<()>(
+        record,
+        specification
+            .version
+            .as_deref()
+            .unwrap_or(ec2::LAUNCH_TEMPLATE_VERSION_DEFAULT),
+    )
+    .ok()?;
+    Some((launch_template_id, version))
 }
 
 /// Whether the launch-template version `specification` names resolves its image through
