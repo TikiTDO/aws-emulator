@@ -81,15 +81,18 @@ const VENDED_LOGS_DELIVERY_ACTION: &str = "AllowVendedLogDeliveryForResource";
 /// caught instead of agreed with. Each pinned row is
 /// `service|logType|resourceType|deliveryDestinationType`: a CloudFront access log delivered
 /// to S3, a WorkMail access-control log delivered to a log group, an Application Load
-/// Balancer access log delivered to Firehose, and an AgentCore trace delivered to X-Ray.
-const CATALOGUE_TEMPLATES: usize = 179;
-const PINNED_TEMPLATES: [&str; 6] = [
+/// Balancer access log delivered to Firehose, an AgentCore trace delivered to X-Ray, and a
+/// Security Hub finding log delivered to S3 from each of the two hub resources that send one.
+const CATALOGUE_TEMPLATES: usize = 182;
+const PINNED_TEMPLATES: [&str; 8] = [
     "cloudfront|ACCESS_LOGS|distribution|S3",
     "workmail|ACCESS_CONTROL_LOGS|organization|CWL",
     "elasticloadbalancing|ALB_ACCESS_LOGS|loadbalancer|FH",
     "bedrock-agentcore|TRACES|runtime|XRAY",
     "apigateway|EXECUTION_LOGS|stages|S3",
     "eks|AUTO_MODE_LOAD_BALANCING_LOGS|cluster|FH",
+    "securityhub|SECURITY_FINDING_LOGS|hub|S3",
+    "securityhub|SECURITY_FINDING_LOGS|hubv2|S3",
 ];
 
 /// The published bounds of the members a request names: `limit` is `DescribeLimit`
@@ -427,8 +430,9 @@ async fn every_template_derives_its_allowed_values_from_its_destination_type() {
             "case {case}: the columnar format applies exactly where the delivery writes objects, got {formats:?}"
         );
 
-        // The delimiter: it applies exactly where a delimited format is allowed, and the
-        // default is one of the delimiters the same template allows.
+        // The delimiter: the delimiters a caller MAY choose apply exactly where a delimited
+        // format is allowed, while the DEFAULT every template publishes is the same one — none
+        // at all.
         let delimited = formats
             .iter()
             .any(|format| ["plain", "raw", "w3c"].contains(&format.as_str()));
@@ -447,32 +451,31 @@ async fn every_template_derives_its_allowed_values_from_its_destination_type() {
             .get("fieldDelimiter")
             .and_then(Value::as_str)
             .map(ToString::to_string);
-        match (&delimiters, &default_delimiter) {
-            (Some(allowed), Some(default)) => {
-                assert_eq!(
-                    allowed.as_slice(),
-                    FIELD_DELIMITERS
-                        .iter()
-                        .map(|delimiter| (*delimiter).to_string())
-                        .collect::<Vec<String>>()
-                        .as_slice(),
-                    "case {case}: expected the published delimiters {FIELD_DELIMITERS:?}, got {allowed:?}"
+        // The default delimiter is published exactly where the delimiters to choose from are,
+        // and it is the one a delivery that names none is given: `FieldDelimiter` is
+        // `@length 0..5`, so NO delimiter is a value in its own right.
+        assert_eq!(
+            default_delimiter.as_deref(),
+            delimiters.as_ref().map(|_| DEFAULT_FIELD_DELIMITER),
+            "case {case}: expected the default delimiter {DEFAULT_FIELD_DELIMITER:?} exactly \
+             where delimiters are allowed, got {default_delimiter:?} and {delimiters:?}"
+        );
+        if let Some(allowed) = &delimiters {
+            assert_eq!(
+                allowed.as_slice(),
+                FIELD_DELIMITERS
+                    .iter()
+                    .map(|delimiter| (*delimiter).to_string())
+                    .collect::<Vec<String>>()
+                    .as_slice(),
+                "case {case}: expected the published delimiters {FIELD_DELIMITERS:?}, got {allowed:?}"
+            );
+            for delimiter in allowed {
+                assert!(
+                    delimiter.chars().count() <= MAX_FIELD_DELIMITER_CHARS,
+                    "case {case}: a delimiter is at most {MAX_FIELD_DELIMITER_CHARS} characters, got {delimiter:?}"
                 );
-                assert_eq!(
-                    default, DEFAULT_FIELD_DELIMITER,
-                    "case {case}: expected the default delimiter {DEFAULT_FIELD_DELIMITER:?}, got {default:?}"
-                );
-                for delimiter in allowed {
-                    assert!(
-                        delimiter.chars().count() <= MAX_FIELD_DELIMITER_CHARS,
-                        "case {case}: a delimiter is at most {MAX_FIELD_DELIMITER_CHARS} characters, got {delimiter:?}"
-                    );
-                }
             }
-            (None, None) => {}
-            (allowed, default) => panic!(
-                "case {case}: a default delimiter is reported exactly where delimiters are allowed, got {allowed:?} and {default:?}"
-            ),
         }
 
         // The S3 object layout: reported exactly for a delivery that writes objects, with

@@ -11,8 +11,10 @@
 //! because the service reads the document rather than keeping the bytes the caller's renderer
 //! produced; a destination that has had none assigned reports no policy at all; a
 //! `deliveryDestinationName` the account does not hold is refused as a missing resource by
-//! both operations; and a policy that is not an IAM policy document — a JSON object — is
-//! refused as an invalid parameter.
+//! both operations; and a policy that is not a delivery destination policy — one that is not
+//! an IAM resource policy document at all, or one whose statements are not grants of log
+//! delivery (naming the delivery resources they cover, the delivery actions they allow on
+//! them, and the ACCOUNT they are granted to) — is refused as an invalid parameter.
 //!
 //! Every case drives the service the way a client does — `POST /` with
 //! `X-Amz-Target: Logs_20140328.<Operation>` through the router that mounts it — so what is
@@ -20,15 +22,16 @@
 //! from the shared store cannot pass.
 //!
 //! The table spans what the rule generalises over rather than one request: policy documents
-//! of several forms and sizes (one statement and the two statements the operation's
-//! documentation describes, a statement written as the object itself, nested conditions,
-//! non-ASCII contents, pretty-printed and spaced whitespace, and a document on the published
-//! maximum length and one past it), destinations of several `DeliveryDestinationType`s, and
-//! destination names at both published length bounds.
+//! of several forms and sizes (one statement, two and three, a statement written as the object
+//! itself, each element spelled both as one value and as a list and both ways round, actions
+//! written out and as the patterns IAM admits, account principals as a root ARN and as a bare
+//! id, nested conditions, non-ASCII contents, pretty-printed and spaced whitespace, and a
+//! document on the published maximum length and one past it), destinations of several
+//! `DeliveryDestinationType`s, and destination names at both published length bounds.
 
 use serde_json::{json, Value};
 
-use crate::harness::Logs;
+use crate::harness::{Logs, REGION};
 
 /// The operations under test, plus the destination operations a round trip goes through.
 const PUT_POLICY: &str = "PutDeliveryDestinationPolicy";
@@ -39,6 +42,11 @@ const GET_DESTINATION: &str = "GetDeliveryDestination";
 /// The refusals these operations model for the cases below.
 const VALIDATION: &str = "ValidationException";
 const NOT_FOUND: &str = "ResourceNotFoundException";
+
+/// The whole message a `deliveryDestinationPolicy` that is not a delivery destination policy
+/// is refused with: fixed text for that class, stating neither the destination nor anything of
+/// the document it would not take.
+const INVALID_POLICY: &str = "Invalid Delivery Destination resource Policy is provided.";
 
 /// Destination resources of three vendors a delivery destination can represent, so the rule
 /// is asserted on more than one kind of destination.
@@ -144,6 +152,26 @@ impl PolicyCase {
     }
 }
 
+/// The vended-log delivery resources a delivery destination policy grants access to: every
+/// delivery destination this account holds in this Region, every delivery source and every
+/// delivery, named by the ARN this service builds for one — so no account id is written here.
+fn delivery_destinations() -> String {
+    ::engine::emulator_arn("logs", REGION, "delivery-destination:*")
+}
+
+fn delivery_sources() -> String {
+    ::engine::emulator_arn("logs", REGION, "delivery-source:*")
+}
+
+fn deliveries() -> String {
+    ::engine::emulator_arn("logs", REGION, "delivery:*")
+}
+
+/// The account the cross-account grants below are made to, as an IAM root ARN and as a bare
+/// account id — the two spellings an account principal is written in.
+const OTHER_ACCOUNT_ROOT: &str = "arn:aws:iam::210987654321:root";
+const OTHER_ACCOUNT: &str = "210987654321";
+
 /// The two statements the operation's documentation describes — "One statement enables
 /// general logs delivery, and the other allows delivery to the chosen destination" — as one
 /// IAM policy document.
@@ -154,105 +182,196 @@ fn two_statement_policy(destination_arn: &str) -> String {
             {
                 "Sid": "AllowLogDeliveryActions",
                 "Effect": "Allow",
-                "Principal": {"Service": "delivery.logs.amazonaws.com"},
-                "Action": ["logs:PutLogEvents", "logs:CreateLogStream"],
-                "Resource": destination_arn,
+                "Principal": {"AWS": OTHER_ACCOUNT_ROOT},
+                "Action": [
+                    "logs:PutDeliverySource",
+                    "logs:PutDeliveryDestination",
+                    "logs:CreateDelivery",
+                ],
+                "Resource": [delivery_sources(), deliveries()],
             },
             {
-                "Sid": "AllowLogDeliveryForResource",
+                "Sid": "AllowDeliveryToDestination",
                 "Effect": "Allow",
-                "Principal": {"Service": "delivery.logs.amazonaws.com"},
-                "Action": "logs:PutDeliverySource",
-                "Resource": "*",
+                "Principal": {"AWS": OTHER_ACCOUNT_ROOT},
+                "Action": "logs:CreateDelivery",
+                "Resource": destination_arn,
             },
         ],
     })
     .to_string()
 }
 
-/// A resource-policy document of exactly `length` characters: one statement padded through
-/// its `Sid` value, so a case can sit on a published length bound.
+/// A delivery destination policy of exactly `length` characters: the two statements padded
+/// through the first one's `Sid` value, so a case can sit on a published length bound.
 fn policy_of_length(length: usize) -> String {
-    let skeleton = one_statement_policy("");
+    let skeleton = padded_policy("");
     let padding = length - skeleton.len();
-    one_statement_policy(&"p".repeat(padding))
+    padded_policy(&"p".repeat(padding))
 }
 
-/// One resource-policy statement carrying `sid`: an effect, the service principal that
-/// delivers vended logs and the action it may take — the elements the IAM policy language
-/// requires of a resource-based statement.
-fn one_statement_policy(sid: &str) -> String {
+/// The two statements the operation documents, the first carrying `sid`: each states an
+/// effect, the account it grants to, a delivery action it may take and the delivery resource it
+/// may take it on — the elements a delivery destination policy's statements state.
+fn padded_policy(sid: &str) -> String {
+    let destinations = delivery_destinations();
     format!(
         "{{\"Version\":\"2012-10-17\",\"Statement\":[{{\"Sid\":\"{sid}\",\
-         \"Effect\":\"Allow\",\"Principal\":{{\"Service\":\"delivery.logs.amazonaws.com\"}},\
-         \"Action\":\"logs:PutLogEvents\"}}]}}"
+         \"Effect\":\"Allow\",\"Principal\":{{\"AWS\":\"{OTHER_ACCOUNT_ROOT}\"}},\
+         \"Action\":\"logs:GetDeliveryDestination\",\"Resource\":\"{destinations}\"}},\
+         {{\"Sid\":\"general\",\
+         \"Effect\":\"Allow\",\"Principal\":{{\"AWS\":\"{OTHER_ACCOUNT_ROOT}\"}},\
+         \"Action\":\"logs:CreateDelivery\",\"Resource\":\"{destinations}\"}}]}}"
     )
+}
+
+/// One resource-policy statement naming a delivery destination of this account: the elements
+/// the IAM policy language requires of a resource-based statement, with no `Sid`.
+fn one_statement_policy() -> String {
+    json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": OTHER_ACCOUNT_ROOT},
+            "Action": "logs:CreateDelivery",
+            "Resource": delivery_destinations(),
+        }],
+    })
+    .to_string()
+}
+
+/// A resource-policy document whose statement grants access to `resource` rather than to a
+/// resource of the vended-log delivery surface.
+fn policy_for(resource: &str) -> String {
+    json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": OTHER_ACCOUNT_ROOT},
+            "Action": "logs:CreateDelivery",
+            "Resource": resource,
+        }],
+    })
+    .to_string()
 }
 
 /// Policy documents spanning form, size, nesting, character set and whitespace.
 fn policies() -> Vec<PolicyCase> {
     vec![
         PolicyCase::of(
-            "a one-statement policy",
-            &json!({
-                "Version": "2012-10-17",
-                "Statement": [{
-                    "Effect": "Allow",
-                    "Principal": {"Service": "delivery.logs.amazonaws.com"},
-                    "Action": "logs:PutLogEvents",
-                    "Resource": "*",
-                }],
-            })
-            .to_string(),
-        ),
-        PolicyCase::of(
             "the two statements the operation documents",
-            &two_statement_policy(BUCKET_ARN),
+            &two_statement_policy(&delivery_destinations()),
         ),
         PolicyCase::of(
-            "a statement with a nested condition",
-            &json!({
-                "Version": "2012-10-17",
-                "Statement": [{
-                    "Effect": "Allow",
-                    "Principal": {"Service": "delivery.logs.amazonaws.com"},
-                    "Action": ["logs:PutLogEvents"],
-                    "Resource": "*",
-                    "Condition": {
-                        "StringEquals": {"aws:SourceAccount": ["123456789012", "210987654321"]},
-                        "ArnLike": {"aws:SourceArn": "arn:aws:logs:eu-west-2:123456789012:*"},
-                    },
-                }],
-            })
-            .to_string(),
-        ),
-        PolicyCase::of(
-            "a policy carrying non-ASCII contents",
-            &one_statement_policy("lieferung-\u{00fc}ber-gr\u{00f6}\u{00df}e-\u{65e5}\u{672c}"),
+            "one statement naming every delivery destination of this account",
+            &one_statement_policy(),
         ),
         PolicyCase::of(
             "a statement written as the object itself rather than as a list",
             &json!({
                 "Version": "2012-10-17",
                 "Statement": {
-                    "Effect": "Deny",
-                    "NotPrincipal": {"AWS": "arn:aws:iam::210987654321:root"},
-                    "NotAction": "logs:PutLogEvents",
+                    "Effect": "Allow",
+                    "Principal": {"AWS": OTHER_ACCOUNT_ROOT},
+                    "Action": "logs:CreateDelivery",
+                    "Resource": deliveries(),
                 },
+            })
+            .to_string(),
+        ),
+        PolicyCase::of(
+            "two statements, one of them with a nested condition",
+            &json!({
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": {"AWS": OTHER_ACCOUNT_ROOT},
+                        "Action": "logs:DescribeDeliveries",
+                        "Resource": "*",
+                        "Condition": {
+                            "StringEquals": {
+                                "aws:SourceAccount": ["123456789012", OTHER_ACCOUNT],
+                            },
+                            "ArnLike": {"aws:SourceArn": "arn:aws:logs:eu-west-2:123456789012:*"},
+                        },
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Principal": {"AWS": OTHER_ACCOUNT_ROOT},
+                        "Action": "logs:CreateDelivery",
+                        "Resource": deliveries(),
+                    },
+                ],
+            })
+            .to_string(),
+        ),
+        PolicyCase::of(
+            "a policy carrying non-ASCII contents",
+            &padded_policy("lieferung-\u{00fc}ber-gr\u{00f6}\u{00df}e-\u{65e5}\u{672c}"),
+        ),
+        PolicyCase::of(
+            "statements spelled across both of each element's forms",
+            &json!({
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Deny",
+                        "NotPrincipal": {"AWS": OTHER_ACCOUNT_ROOT},
+                        "NotAction": "logs:DeleteDelivery",
+                        "NotResource": deliveries(),
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Principal": {"AWS": [OTHER_ACCOUNT_ROOT, "arn:aws:iam::123456789012:root"]},
+                        "Action": ["logs:CreateDelivery", "logs:PutDeliverySource"],
+                        "Resource": [deliveries(), "*"],
+                    },
+                ],
+            })
+            .to_string(),
+        ),
+        PolicyCase::of(
+            "three statements, and actions written as the patterns IAM admits",
+            &json!({
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": "*",
+                        "Action": "logs:*",
+                        "Resource": delivery_sources(),
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Principal": "*",
+                        "Action": "logs:Create*",
+                        "Resource": deliveries(),
+                    },
+                    {
+                        "Effect": "Deny",
+                        "Principal": "*",
+                        "Action": "*",
+                        "Resource": delivery_destinations(),
+                    },
+                ],
             })
             .to_string(),
         ),
         PolicyCase::spaced(
             "a pretty-printed policy, whitespace and all",
             "{\n  \"Version\" : \"2012-10-17\",\n  \"Statement\" : [ {\n    \"Effect\" : \"Allow\",\n \
-             \"Principal\" : \"*\",\n    \"Action\" : \"logs:PutLogEvents\"\n  } ]\n}",
-            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"logs:PutLogEvents"}]}"#,
+             \"Principal\" : \"*\",\n    \"Action\" : \"logs:CreateDelivery\",\n    \
+             \"Resource\" : \"*\"\n  } ]\n}",
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"logs:CreateDelivery","Resource":"*"}]}"#,
         ),
         PolicyCase::spaced(
             "a policy spaced after each separator, with whitespace inside a string",
             "{\"Version\": \"2012-10-17\", \"Statement\": [{\"Sid\": \"two words\", \
-             \"Effect\": \"Allow\", \"Principal\": \"*\", \"Action\": \"logs:PutLogEvents\"}]}",
-            r#"{"Version":"2012-10-17","Statement":[{"Sid":"two words","Effect":"Allow","Principal":"*","Action":"logs:PutLogEvents"}]}"#,
+             \"Effect\": \"Allow\", \"Principal\": \"*\", \"Action\": \"logs:GetDelivery\", \
+             \"Resource\": \"*\"}, {\"Sid\": \"and more\", \"Effect\": \"Allow\", \
+             \"Principal\": \"*\", \"Action\": \"logs:CreateDelivery\", \"Resource\": \"*\"}]}",
+            r#"{"Version":"2012-10-17","Statement":[{"Sid":"two words","Effect":"Allow","Principal":"*","Action":"logs:GetDelivery","Resource":"*"},{"Sid":"and more","Effect":"Allow","Principal":"*","Action":"logs:CreateDelivery","Resource":"*"}]}"#,
         ),
         PolicyCase::of(
             "a policy on the published maximum length",
@@ -341,6 +460,115 @@ async fn an_assigned_policy_is_reported_and_read_back() {
     }
 }
 
+/// The service READS the document rather than keeping the caller's bytes, so what every later
+/// reader sees is its canonical form: a one-value list written as that value, and an account
+/// principal named by its id alone written as that account's root ARN. The assigning call still
+/// reports the document the request wrote.
+#[tokio::test]
+async fn a_stored_policy_is_reported_in_its_canonical_form() {
+    let logs = Logs::new();
+    let destination = Destination::of("an S3 bucket destination", "canonical", BUCKET_ARN);
+    logs.ok(PUT_DESTINATION, &destination.put_body()).await;
+
+    // (case, the document the request carries, the text every later reader reports)
+    let cases: Vec<(&str, String, String)> = vec![
+        (
+            "an account principal named by its id alone",
+            json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"AWS": OTHER_ACCOUNT},
+                    "Action": "logs:CreateDelivery",
+                    "Resource": "*",
+                }],
+            })
+            .to_string(),
+            json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"AWS": OTHER_ACCOUNT_ROOT},
+                    "Action": "logs:CreateDelivery",
+                    "Resource": "*",
+                }],
+            })
+            .to_string(),
+        ),
+        (
+            "every value element written as a one-value list",
+            json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Sid": "oneEach",
+                    "Effect": "Allow",
+                    "Principal": {"AWS": [OTHER_ACCOUNT]},
+                    "Action": ["logs:CreateDelivery"],
+                    "Resource": [delivery_destinations()],
+                }],
+            })
+            .to_string(),
+            json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Sid": "oneEach",
+                    "Effect": "Allow",
+                    "Principal": {"AWS": OTHER_ACCOUNT_ROOT},
+                    "Action": "logs:CreateDelivery",
+                    "Resource": delivery_destinations(),
+                }],
+            })
+            .to_string(),
+        ),
+        (
+            "a one-statement list, which is not a value list",
+            json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"AWS": [OTHER_ACCOUNT_ROOT, OTHER_ACCOUNT]},
+                    "Action": ["logs:CreateDelivery", "logs:GetDelivery"],
+                    "Resource": "*",
+                }],
+            })
+            .to_string(),
+            json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"AWS": [OTHER_ACCOUNT_ROOT, OTHER_ACCOUNT_ROOT]},
+                    "Action": ["logs:CreateDelivery", "logs:GetDelivery"],
+                    "Resource": "*",
+                }],
+            })
+            .to_string(),
+        ),
+    ];
+
+    for (case, document, canonical) in cases {
+        let assigned = put_policy(&logs, &destination.name, &document).await;
+        assert_eq!(
+            assigned.as_deref(),
+            Some(document.as_str()),
+            "case {case:?}: {PUT_POLICY} reports the document the request wrote, got {assigned:?}"
+        );
+        let read_back = get_policy(&logs, &destination.name).await;
+        assert_eq!(
+            read_back.as_deref(),
+            Some(canonical.as_str()),
+            "case {case:?}: expected the canonical form {canonical:?}, got {read_back:?}"
+        );
+        // The rendering is a fixed point: putting back what was read reports the same text.
+        put_policy(&logs, &destination.name, &canonical).await;
+        let again = get_policy(&logs, &destination.name).await;
+        assert_eq!(
+            again.as_deref(),
+            Some(canonical.as_str()),
+            "case {case:?}: the canonical form read back unchanged, got {again:?}"
+        );
+    }
+}
+
 /// A destination holds at most one policy, so each assignment REPLACES the one before it: the
 /// contents assigned last are the contents every later reader sees, whichever order the
 /// documents are assigned in.
@@ -397,7 +625,7 @@ async fn a_destination_with_no_policy_assigned_reports_none() {
 
     // One destination is given a policy; every other one still reports none.
     let assigned_to = &destinations[0];
-    put_policy(&logs, &assigned_to.name, &two_statement_policy(BUCKET_ARN)).await;
+    put_policy(&logs, &assigned_to.name, &two_statement_policy(&delivery_destinations())).await;
     for destination in destinations.iter().skip(1) {
         let reported = get_policy(&logs, &destination.name).await;
         assert_eq!(
@@ -433,7 +661,7 @@ async fn a_name_the_account_does_not_hold_is_refused() {
                 PUT_POLICY,
                 &json!({
                     "deliveryDestinationName": name,
-                    "deliveryDestinationPolicy": two_statement_policy(BUCKET_ARN),
+                    "deliveryDestinationPolicy": two_statement_policy(&delivery_destinations()),
                 }),
             )
             .await;
@@ -467,19 +695,22 @@ async fn a_name_the_account_does_not_hold_is_refused() {
 /// "Creates and assigns an IAM policy that grants permissions to CloudWatch Logs to deliver
 /// logs cross-account": the document is an IAM policy in its RESOURCE-based form — a JSON
 /// object whose statements each state an effect, the actions they cover and the principal they
-/// grant them to — so a `deliveryDestinationPolicy` that is not one is refused as an invalid
+/// grant them to — and each of its statements is a grant of LOG DELIVERY: it names the
+/// delivery resources it covers, allows the delivery actions on them, and grants them to an
+/// account. A `deliveryDestinationPolicy` that is not such a document is refused as an invalid
 /// parameter, and the refusal leaves the policy the destination already held in place.
 #[tokio::test]
 async fn a_policy_that_is_not_an_iam_policy_document_is_refused() {
     let logs = Logs::new();
     let destination = Destination::of("an S3 bucket destination", "guarded", BUCKET_ARN);
     logs.ok(PUT_DESTINATION, &destination.put_body()).await;
-    let kept = two_statement_policy(BUCKET_ARN);
+    let kept = two_statement_policy(&delivery_destinations());
     put_policy(&logs, &destination.name, &kept).await;
 
-    // The rows span the grammar's clauses: text that is not JSON at all, JSON that is not an
-    // object, an object declaring no statement, a statement that is not an object, and a
-    // statement missing each of the elements a resource-based statement states.
+    // The rows span the clauses the document is held to: text that is not JSON at all, JSON
+    // that is not an object, an object declaring no statement, a statement that is not an
+    // object, a statement missing each of the elements a resource-based statement states, and a
+    // well-formed policy whose statements are not grants of log delivery.
     let rejected = [
         ("plain text", "not a policy at all".to_string()),
         ("a one-character document", "p".to_string()),
@@ -515,17 +746,137 @@ async fn a_policy_that_is_not_an_iam_policy_document_is_refused() {
             r#"{"Version":"2024-01-01","Statement":[{"Effect":"Allow","Principal":"*","Action":"logs:PutLogEvents"}]}"#
                 .to_string(),
         ),
-        // One character past the published maximum length of `DeliveryDestinationPolicy`
-        // (`@length` 1..51200), whose in-bound sibling is a passing row above.
+        // A well-formed resource policy that is not a grant of LOG DELIVERY, so it is not a
+        // delivery destination policy: one granting access to a resource other than the
+        // vended-log delivery resources (the log group one destination represents, the bucket
+        // another represents, a value that names no resource at all), one naming no resource,
+        // one granting an action that cannot be taken on a delivery resource, and one granting
+        // to a service rather than to an account.
+        (
+            "a policy granting access to a log group",
+            policy_for(LOG_GROUP_ARN),
+        ),
+        (
+            "a policy granting access to an S3 bucket",
+            policy_for(BUCKET_ARN),
+        ),
+        (
+            "a policy naming a resource that is not an ARN",
+            policy_for("vended-logs-bucket"),
+        ),
+        (
+            "a statement naming no resource at all",
+            json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"AWS": OTHER_ACCOUNT_ROOT},
+                    "Action": "logs:CreateDelivery",
+                }],
+            })
+            .to_string(),
+        ),
+        (
+            "a policy granting an action no delivery resource takes",
+            json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"AWS": OTHER_ACCOUNT_ROOT},
+                    "Action": ["logs:CreateDelivery", "logs:PutLogEvents"],
+                    "Resource": "*",
+                }],
+            })
+            .to_string(),
+        ),
+        (
+            "a policy granting another service's action",
+            json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"AWS": OTHER_ACCOUNT_ROOT},
+                    "Action": "firehose:PutRecord",
+                    "Resource": "*",
+                }],
+            })
+            .to_string(),
+        ),
+        (
+            "a policy granting to a service principal rather than to an account",
+            json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"Service": "delivery.logs.amazonaws.com"},
+                    "Action": "logs:CreateDelivery",
+                    "Resource": delivery_destinations(),
+                }],
+            })
+            .to_string(),
+        ),
+        (
+            "a policy whose second statement grants another service's resource",
+            json!({
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": "*",
+                        "Action": "logs:CreateDelivery",
+                        "Resource": delivery_destinations(),
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Principal": "*",
+                        "Action": "firehose:PutRecord",
+                        "Resource": FIREHOSE_ARN,
+                    },
+                ],
+            })
+            .to_string(),
+        ),
+    ];
+
+    for (case, document) in &rejected {
+        let (code, said) = logs
+            .refusal(
+                PUT_POLICY,
+                &json!({
+                    "deliveryDestinationName": destination.name,
+                    "deliveryDestinationPolicy": document,
+                }),
+            )
+            .await;
+        assert_eq!(
+            code, VALIDATION,
+            "case {case:?}: a policy that is not a delivery destination policy is refused with \
+             {VALIDATION}, got {code} {said:?}"
+        );
+        assert_eq!(
+            said, INVALID_POLICY,
+            "case {case:?}: expected {INVALID_POLICY:?}, got {said:?}"
+        );
+
+        let reported = get_policy(&logs, &destination.name).await;
+        assert_eq!(
+            reported.as_deref(),
+            Some(kept.as_str()),
+            "case {case:?}: a refused assignment leaves the assigned policy in place, \
+             got {reported:?}"
+        );
+    }
+
+    // Both published length bounds of `DeliveryDestinationPolicy` (`@length` 1..51200), whose
+    // in-bound sibling is a passing row above: a value outside a modelled constraint is refused
+    // for the constraint it breaks, so only the CODE is the same as the rows above.
+    for (case, document) in [
         (
             "one character past the maximum length",
             policy_of_length(POLICY_MAX_LENGTH + 1),
         ),
-        // One character short of the published minimum (`@length` min 1).
         ("an empty document", String::new()),
-    ];
-
-    for (case, document) in &rejected {
+    ] {
         let code = logs
             .err(
                 PUT_POLICY,
@@ -537,10 +888,9 @@ async fn a_policy_that_is_not_an_iam_policy_document_is_refused() {
             .await;
         assert_eq!(
             code, VALIDATION,
-            "case {case:?}: a policy that is not an IAM policy document is refused with \
+            "case {case:?}: a document outside the published bounds is refused with \
              {VALIDATION}, got {code}"
         );
-
         let reported = get_policy(&logs, &destination.name).await;
         assert_eq!(
             reported.as_deref(),
@@ -568,7 +918,7 @@ async fn a_policy_and_the_destination_parameters_do_not_overwrite_each_other() {
     )
     .await;
 
-    let document = two_statement_policy(BUCKET_ARN);
+    let document = two_statement_policy(&delivery_destinations());
     put_policy(&logs, name, &document).await;
 
     // Assigning the policy left every destination parameter as the put set it.

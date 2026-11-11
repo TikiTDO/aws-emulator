@@ -359,16 +359,25 @@ async fn a_delivery_destination_is_held_only_by_the_region_that_created_it() {
     let logs = Logs::new();
     // The policy assigned below is a resource-based IAM policy document, which is what
     // `PutDeliveryDestinationPolicy` assigns ("Creates and assigns an IAM policy that grants
-    // permissions to CloudWatch Logs to deliver logs cross-account"): one statement naming an
-    // effect, the service principal that delivers the logs and the actions it may take.
+    // permissions to CloudWatch Logs to deliver logs cross-account"): the two statements the
+    // operation documents, each granting an account a delivery action on this account's
+    // delivery resources.
     let policy = json!({
         "Version": "2012-10-17",
-        "Statement": [{
-            "Effect": "Allow",
-            "Principal": {"Service": "delivery.logs.amazonaws.com"},
-            "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
-            "Resource": "*",
-        }],
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {"AWS": "arn:aws:iam::210987654321:root"},
+                "Action": ["logs:GetDeliveryDestination", "logs:PutDeliverySource"],
+                "Resource": "*",
+            },
+            {
+                "Effect": "Allow",
+                "Principal": {"AWS": "arn:aws:iam::210987654321:root"},
+                "Action": ["logs:CreateDelivery", "logs:UpdateDeliveryConfiguration"],
+                "Resource": "*",
+            },
+        ],
     })
     .to_string();
 

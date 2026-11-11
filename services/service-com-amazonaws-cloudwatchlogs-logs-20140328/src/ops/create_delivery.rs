@@ -336,6 +336,37 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .delivery_destination_by_arn(&region, &input.delivery_destination_arn)
             .and_then(|destination| destination.delivery_destination_type.clone());
 
+        // Which CONFIGURATION TEMPLATE governs this delivery: the one the catalogue publishes
+        // for the log type this delivery's source sends, from the kind of resource it sends
+        // them from, to the kind of destination this delivery pairs it with
+        // ([`crate::state::delivery_configuration_template`]). It carries both "the valid [...]
+        // values" a delivery of these logs may be configured with and the defaults for the
+        // ones the request leaves unstated.
+        let template = store
+            .delivery_source(&region, &input.delivery_source_name)
+            .zip(delivery_destination_type.as_deref())
+            .and_then(|(source, destination_type)| {
+                crate::state::delivery_configuration_template(source, destination_type)
+            });
+
+        // "If the delivery's log source has mandatory fields, they must be included in this
+        // list": a `recordFields` selection is the caller leaving fields OUT, so a log source
+        // that publishes no field a delivery may drop supports no selection at all and one is
+        // refused rather than stored — the same rule `UpdateDeliveryConfiguration` holds a
+        // selection to, so a create cannot store what an update would be refused for.
+        if input.record_fields.is_some()
+            && crate::state::record_fields_selection_unsupported(template.as_ref())
+        {
+            return Err(CreateDeliveryErrorModeled::ValidationException(
+                ValidationException {
+                    message: Some(
+                        crate::state::RECORD_FIELDS_SELECTION_UNSUPPORTED_MESSAGE.to_string(),
+                    ),
+                },
+            )
+            .into());
+        }
+
         // "Use CreateDelivery to create a delivery by pairing exactly one delivery source and
         // one delivery destination": the PAIR is what identifies a delivery, so a create
         // naming a pair the account already holds has nothing left to create. The call is
@@ -382,6 +413,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         record.record_fields = input.record_fields.clone();
         record.field_delimiter = input.field_delimiter.clone();
         record.s3_delivery_configuration = input.s3_delivery_configuration.clone();
+        // Whatever the request left unstated is the DEFAULT the configuration template that
+        // governs this delivery publishes, so the delivery this call reports is the
+        // configuration it will deliver under rather than the subset of it the request filled
+        // in.
+        record.resolve_configuration(template.as_ref());
         record.tags = input
             .tags
             .as_ref()

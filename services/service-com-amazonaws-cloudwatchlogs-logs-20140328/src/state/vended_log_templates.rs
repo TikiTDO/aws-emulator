@@ -486,24 +486,13 @@ const S3_SERVER_ACCESS_FIELDS: &[TemplateField] = &[
     ("aclrequired", false),
 ];
 
-/// The record schema of a Security Hub finding log: one finding, its instant, its id and the
-/// finding document mandatory.
-const SECURITY_FINDING_FIELDS: &[TemplateField] = &[
-    ("event_timestamp", true),
-    ("account_id", false),
-    ("region", false),
-    ("finding_id", true),
-    ("product_arn", false),
-    ("severity", false),
-    ("title", false),
-    ("types", false),
-    ("resources", false),
-    ("workflow_status", false),
-    ("record_state", false),
-    ("created_at", false),
-    ("updated_at", false),
-    ("finding", true),
-];
+/// The record schema of a Security Hub finding log: ONE mandatory field carrying the finding
+/// event itself.
+///
+/// A finding is delivered as the whole finding document rather than as a row of columns, so the
+/// log type publishes a single field and marks it mandatory: there is no part of the event a
+/// delivery may drop and still be delivering findings.
+const SECURITY_FINDING_FIELDS: &[TemplateField] = &[("event", true)];
 
 /// The record schema of a SES Mail Manager application log: the vended-log envelope plus the
 /// traffic policy and message the line belongs to, and the line.
@@ -736,6 +725,9 @@ impl ConfigurationTemplateSource {
                             .map(|(field, _mandatory)| (*field).to_string())
                             .collect(),
                     ),
+                    // The delimiter a delivery is given when the request names none, published
+                    // for a template whose delivery is written in a delimited format
+                    // ([`CONFIGURATION_TEMPLATE_DEFAULT_FIELD_DELIMITER`]).
                     field_delimiter,
                     s3_delivery_configuration,
                 },
@@ -1129,6 +1121,21 @@ pub const CONFIGURATION_TEMPLATE_SOURCES: &[ConfigurationTemplateSource] = &[
         suffix_path_fields: RESOURCE_ID_SUFFIX_PATH_FIELDS,
         s3_suffix_path: RESOURCE_ID_SUFFIX_PATH,
         log_types: &[log_type("S3_SERVER_ACCESS_LOGS", S3_SERVER_ACCESS_FIELDS)],
+    },
+    // Security Hub sends its findings from EITHER of its two hub resources, which the
+    // `logType` member's own catalogue states for this log type: "For the
+    // SECURITY_FINDING_LOGS logType, use a wildcard ARN for the hub resource. For AWS Security
+    // Hub, use arn:aws:securityhub:us-east-1:111122223333:hub/* and for Amazon Web Services
+    // Security Hub, use arn:aws:securityhub:us-east-1:111122223333:hubv2/*"
+    // (`smithy_query(query="doc",shape="PutDeliverySourceRequest",member="logType")`). So the
+    // catalogue publishes a row per hub resource type, and a caller holding a source over
+    // either one finds the templates that apply to it.
+    ConfigurationTemplateSource {
+        service: "securityhub",
+        resource_type: "hub",
+        suffix_path_fields: RESOURCE_ID_SUFFIX_PATH_FIELDS,
+        s3_suffix_path: RESOURCE_ID_SUFFIX_PATH,
+        log_types: &[log_type("SECURITY_FINDING_LOGS", SECURITY_FINDING_FIELDS)],
     },
     ConfigurationTemplateSource {
         service: "securityhub",

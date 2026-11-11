@@ -169,11 +169,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // "Creates and assigns an IAM policy": an IAM policy is a JSON document, and this one
         // is the policy that "allows delivery to that destination", whose contents "must
         // include two statements. One statement enables general logs delivery, and the other
-        // allows delivery to the chosen destination" — so a document that is not such a
-        // policy is refused rather than assigned
-        // ([`crate::state::is_delivery_destination_policy`]). What those statements SAY is not
-        // interpreted here: they govern a cross-account delivery nothing in this store
-        // performs, so the document's CONTENT is kept as it arrived.
+        // allows delivery to the chosen destination" — so a document that is not a policy
+        // about log delivery at all is refused rather than assigned
+        // ([`crate::state::is_delivery_destination_policy`]). What the statements SAY about
+        // those resources is not interpreted here: they govern a cross-account delivery
+        // nothing in this store performs, so the document's CONTENT is kept as it arrived.
         if !crate::state::is_delivery_destination_policy(&input.delivery_destination_policy) {
             return Err(
                 PutDeliveryDestinationPolicyErrorModeled::ValidationException(
@@ -218,20 +218,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // A destination holds at most one delivery destination policy, so assigning one
         // REPLACES whatever it held: the contents assigned last are the contents every later
-        // reader sees. The document is stored as the service reads it — its members and their
-        // values in the order and spelling they arrived in, and none of the whitespace BETWEEN
-        // its JSON tokens, which belongs to the caller's rendering rather than to the policy.
+        // reader sees. The document is stored in its CANONICAL form — the form a service that
+        // reads an IAM policy rather than keeping the caller's bytes reports on every later
+        // read ([`crate::state::canonical_delivery_destination_policy`]) — so two clients that
+        // assign the same policy written differently read the same text back.
         let assigned = input.delivery_destination_policy;
-        destination.policy = Some(::service_common::json_document::minified(&assigned));
+        destination.policy = Some(crate::state::canonical_delivery_destination_policy(&assigned));
 
         Ok(PutDeliveryDestinationPolicyOutput {
             // "The contents of the policy that you just created" — the document this call
             // assigned, as the request wrote it, which is what the recorded answer to an
             // assignment carries: the recording of this operation reports back the spacing
             // the request's own document was written with, while the read that follows it
-            // reports the stored form. So the STORED form is the same document with its
-            // insignificant whitespace gone — what every later read of it reports — and the
-            // spelling a caller used is this one answer's, not the policy's.
+            // reports the stored form.
             policy: Some(Policy {
                 delivery_destination_policy: Some(assigned),
             }),

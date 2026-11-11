@@ -9,10 +9,12 @@
 //! had it when the request names none — while everything that is not configuration (the
 //! delivery's source, its destination, the destination type read off that destination, its
 //! tags, and the id and ARN that identify it) stays as it was, because "you can't use this
-//! operation to change the source or destination of the delivery". An `id` this account holds
-//! no delivery under is refused `ResourceNotFoundException` and changes nothing, and the
-//! modelled response carries no member, so what changed is read back through `GetDelivery`
-//! and `DescribeDeliveries`.
+//! operation to change the source or destination of the delivery". The delivery still delivers
+//! under a WHOLE configuration afterwards, so a member of the S3 object layout the request
+//! restates in part keeps the value the governing configuration template defaults it to. An
+//! `id` this account holds no delivery under is refused `ResourceNotFoundException` and changes
+//! nothing, and the modelled response carries no member, so what changed is read back through
+//! `GetDelivery` and `DescribeDeliveries`.
 //!
 //! Every case drives the service the way a client does — `POST /` with
 //! `X-Amz-Target: Logs_20140328.<Operation>` through the router that mounts it — so a
@@ -47,6 +49,11 @@ const DELIVERY_NOT_FOUND: &str = "Requested Delivery does not exist in this acco
 /// `UpdateDeliveryConfigurationRequest` that are not the `id`
 /// (`smithy_query(query="operation",operation="UpdateDeliveryConfiguration")`).
 const CONFIGURATION_MEMBERS: [&str; 3] = ["recordFields", "fieldDelimiter", "s3DeliveryConfiguration"];
+
+/// The members of the S3 object layout a delivery delivers under — the two of
+/// `S3DeliveryConfiguration` (`smithy_query(query="shape",shape="S3DeliveryConfiguration")`).
+/// Each stands on its own, and the delivery carries BOTH however few of them a request names.
+const S3_CONFIGURATION_MEMBERS: [&str; 2] = ["suffixPath", "enableHiveCompatiblePath"];
 
 /// The members a delivery carries that an update may NOT change: "you can't use this
 /// operation to change the source or destination of the delivery", and the id, ARN,
@@ -242,7 +249,36 @@ async fn an_update_changes_the_members_it_names_and_only_those() {
         let after = fetched(&logs, &id, case).await;
         for member in CONFIGURATION_MEMBERS {
             match named.get(member) {
-                // A member the request named is stored exactly as given.
+                // A member the request named is stored as given. `s3DeliveryConfiguration` is
+                // a STRUCTURE whose members each stand on their own, so a request restating it
+                // in part names those members alone and the rest of the object layout stays at
+                // the value the governing template defaults it to.
+                Some(Value::Object(named_members)) => {
+                    let stored = after
+                        .get(member)
+                        .and_then(Value::as_object)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "case {case}: the delivery carries the {member} structure, got \
+                                 {after}"
+                            )
+                        });
+                    for (inner, value) in named_members {
+                        assert_eq!(
+                            stored.get(inner),
+                            Some(value),
+                            "case {case}: the delivery carries the {member}.{inner} this update \
+                             named, got {after}"
+                        );
+                    }
+                    for inner in S3_CONFIGURATION_MEMBERS {
+                        assert!(
+                            stored.contains_key(inner),
+                            "case {case}: the delivery's {member} carries {inner} whether the \
+                             update named it or not, got {after}"
+                        );
+                    }
+                }
                 Some(value) => assert_eq!(
                     after.get(member),
                     Some(value),

@@ -53,6 +53,8 @@ mod delivery_destination_policy_reads;
 mod delivery_destination_policy_removal;
 #[path = "all/delivery_destinations.rs"]
 mod delivery_destinations;
+#[path = "all/delivery_effective_configuration.rs"]
+mod delivery_effective_configuration;
 #[path = "all/delivery_idempotence.rs"]
 mod delivery_idempotence;
 #[path = "all/delivery_identity_authorization.rs"]

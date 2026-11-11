@@ -476,6 +476,9 @@ async fn the_packaging_a_template_publishes_follows_from_its_destination_type() 
                     Some(expected_delimiters.as_slice()),
                     "case {case}: expected the delimiters {expected_delimiters:?}, got {delimiters:?}"
                 );
+                // The DEFAULT is published with them, and it is the same for every template:
+                // no delimiter at all, which `FieldDelimiter` (`@length 0..5`) admits. A
+                // caller that wants one of the delimiters above states it on the delivery.
                 assert_eq!(
                     default_delimiter.as_deref(),
                     Some(DEFAULT_FIELD_DELIMITER),
@@ -484,7 +487,7 @@ async fn the_packaging_a_template_publishes_follows_from_its_destination_type() 
             } else {
                 assert!(
                     delimiters.is_none() && default_delimiter.is_none(),
-                    "case {case}: a destination that takes no delimited format publishes no delimiter, got {delimiters:?} and {default_delimiter:?}"
+                    "case {case}: a destination that takes no delimited format publishes no delimiter to choose from and none to default to, got {delimiters:?} and {default_delimiter:?}"
                 );
             }
         }

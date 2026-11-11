@@ -212,11 +212,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let cursor = match input.next_token.as_deref() {
             Some(token) => {
                 let Some(cursor) = Cursor::decode(token) else {
-                    return Err(invalid(crate::state::INVALID_NEXT_TOKEN_MESSAGE));
+                    return Err(invalid(
+                        crate::state::INVALID_DELIVERY_NEXT_TOKEN_MESSAGE,
+                    ));
                 };
                 if cursor.resource_arns != input.resource_arns {
                     return Err(invalid(
-                        crate::state::INVALID_NEXT_TOKEN_MESSAGE,
+                        crate::state::INVALID_DELIVERY_NEXT_TOKEN_MESSAGE,
                     ));
                 }
                 Some(cursor)

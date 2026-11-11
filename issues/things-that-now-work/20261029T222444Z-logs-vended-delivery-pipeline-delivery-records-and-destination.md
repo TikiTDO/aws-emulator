@@ -123,3 +123,34 @@ Cause 10: "$.message: value_mismatch (expected 'Invalid Next Token.', got 'nextT
 7+8: PutDeliverySource + PutDeliveryDestination + CreateDelivery with no recordFields/fieldDelimiter, then GetDelivery — both must echo the template-defaulted recordFields, fieldDelimiter and s3DeliveryConfiguration (#task#5, #task#6).
 9: UpdateDeliveryConfiguration on that delivery with a recordFields list — expect 400 ValidationException 'Record fields selection is not supported by this Delivery Source.' (#task#8).
 10: DescribeDeliveries(nextToken='<garbage>') — expect 400 with message 'Invalid Next Token.' (#task#11).
+
+## Resolution
+
+Causes 1, 2, 3, 4, 7, 8, 9 and 10 are FIXED, and every replay key this report carries is
+`fixed`: `logs-delivery-destination-and-cross-account-policy-lifecycle` and
+`logs-get-delivery-destination-policy-returns-empty-when-unset` replay clean.
+
+- 1+2+3: a `deliveryDestinationPolicy` is accepted only where each of its statements is a grant
+  of log delivery — it names the delivery resources it covers, allows only actions that act on
+  those resources, and grants them to an account — so a policy for some other resource is
+  refused with the fixed text and nothing is stored
+  (`src/state/delivery_destination_policy.rs`). The read of a destination that was never given
+  one reports an empty `policy` (cause 4, which was already correct).
+- 7+8: a delivery's effective configuration is resolved when it is created, from the
+  configuration template that governs it, so `recordFields`, `fieldDelimiter` and
+  `s3DeliveryConfiguration` are reported by `CreateDelivery`, `GetDelivery` and
+  `DescribeDeliveries` alike (`src/state/delivery_configuration.rs`).
+- 9: a `recordFields` selection is refused where the delivery source publishes no field a
+  delivery may drop, by `UpdateDeliveryConfiguration` and by `CreateDelivery`.
+- 10: the delivery enumerations word an unusable `nextToken` as AWS words it.
+
+Cause 5 (the qbusiness slice) and the packaging/membership half of cause 6 are DECLINED here:
+the parts of cause 6 this report's own keys depend on are fixed (the catalogue publishes
+SECURITY_FINDING_LOGS for both hub resource types, with the single mandatory `event` field, and
+every template's default `fieldDelimiter` is the empty string), but which rows the catalogue
+holds for each of the twenty service slices, and the `allowedOutputFormats` /
+`allowedFieldDelimiters` each row publishes, are one rule across the whole catalogue, owned by
+the open issue `20261030T142954Z-logs-describeconfigurationtemplates-catalog-rows-diverge-for-ten-services.md`
+with the `logs|DescribeConfigurationTemplates|2xx->2xx|$.configurationTemplates[*]` key — which
+is not among this report's keys. Those two causes are therefore NOT closed by this change: the
+catalogue issue closes them.

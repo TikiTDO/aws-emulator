@@ -229,6 +229,15 @@ pub use policy_documents::*;
 mod deliveries;
 pub use deliveries::*;
 
+/// Which configuration template governs a delivery, and what it defaults the delivery's own
+/// configuration to.
+mod delivery_configuration;
+pub use delivery_configuration::*;
+
+/// What makes a document the cross-account policy a delivery destination carries.
+mod delivery_destination_policy;
+pub use delivery_destination_policy::*;
+
 /// How a refusal about a PAIR of input parameters is worded, for every pair this service
 /// checks across two members.
 pub mod parameter_pairs;
@@ -1605,7 +1614,8 @@ pub use destinations::*;
 
 pub use vended_log_templates::{
     configuration_template_key, configuration_template_output_formats, configuration_templates,
-    ConfigurationTemplateSource, CONFIGURATION_TEMPLATE_SOURCES,
+    ConfigurationTemplateSource, CONFIGURATION_TEMPLATE_DEFAULT_FIELD_DELIMITER,
+    CONFIGURATION_TEMPLATE_DEFAULT_HIVE_COMPATIBLE_PATH, CONFIGURATION_TEMPLATE_SOURCES,
 };
 
 /// The log types a delivery source over `resource_arn` may send, or `None` when this service
@@ -3261,22 +3271,6 @@ pub const DELIVERY_DESTINATION_POLICY_NOT_FOUND_MESSAGE: &str =
 /// the document it would not take.
 pub const INVALID_DELIVERY_DESTINATION_POLICY_MESSAGE: &str =
     "Invalid Delivery Destination resource Policy is provided.";
-
-/// Whether `document` is a delivery destination resource policy.
-///
-/// The operation "creates and assigns an IAM policy that grants permissions to CloudWatch Logs
-/// to deliver logs cross-account", so the document is an IAM JSON policy in its RESOURCE-based
-/// form — it states who the permission is granted to — which is the one grammar
-/// [`service_common::iam_policy`] states for every service of this emulator that takes such a
-/// document.
-///
-/// What the statements SAY is not judged: they govern a cross-account delivery nothing in this
-/// store performs, and the operation documents nothing about them beyond that the policy
-/// "must include two statements. One statement enables general logs delivery, and the other
-/// allows delivery to the chosen destination".
-pub fn is_delivery_destination_policy(document: &str) -> bool {
-    ::service_common::iam_policy::resource_policy_defect(document).is_none()
-}
 
 /// The spelling the data protection half of this service gives the fixed missing-resource
 /// sentence: the same sentence as [`UNIDENTIFIED_RESOURCE_NOT_FOUND_MESSAGE`], with the

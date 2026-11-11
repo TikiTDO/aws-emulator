@@ -195,15 +195,59 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // "The ID of the delivery to be updated by this request": an id this Region holds no
         // delivery under names no delivery, which is the modelled not-found refusal — the one
         // every delivery operation answers such an id with.
-        let Some(delivery) = store.delivery_mut(&region, &input.id) else {
-            return Err(
+        let not_found = || {
+            UpdateDeliveryConfigurationError::from(
                 UpdateDeliveryConfigurationErrorModeled::ResourceNotFoundException(
                     ResourceNotFoundException {
                         message: Some(crate::state::DELIVERY_NOT_FOUND_MESSAGE.to_string()),
                     },
+                ),
+            )
+        };
+        let Some((source_name, delivery_destination_type)) =
+            store.delivery(&region, &input.id).map(|delivery| {
+                (
+                    delivery.delivery_source_name.clone(),
+                    delivery.delivery_destination_type.clone(),
+                )
+            })
+        else {
+            return Err(not_found());
+        };
+
+        // Which CONFIGURATION TEMPLATE governs this delivery, as `CreateDelivery` resolves it:
+        // the one published for the log type the delivery's SOURCE sends to the kind of
+        // destination the delivery pairs it with. It is what says which values this
+        // reconfiguration may take and what the ones it leaves unstated default to.
+        let template = store
+            .delivery_source(&region, &source_name)
+            .zip(delivery_destination_type.as_deref())
+            .and_then(|(source, destination_type)| {
+                crate::state::delivery_configuration_template(source, destination_type)
+            });
+
+        // "If the delivery's log source has mandatory fields, they must be included in this
+        // list": narrowing the delivered fields is the caller leaving some OUT, so a log source
+        // that publishes no field a delivery may drop supports no selection at all — the call
+        // is refused and the delivery keeps the configuration it had, rather than the caller
+        // believing it narrowed what will be delivered.
+        if input.record_fields.is_some()
+            && crate::state::record_fields_selection_unsupported(template.as_ref())
+        {
+            return Err(
+                UpdateDeliveryConfigurationErrorModeled::ValidationException(
+                    ValidationException {
+                        message: Some(
+                            crate::state::RECORD_FIELDS_SELECTION_UNSUPPORTED_MESSAGE.to_string(),
+                        ),
+                    },
                 )
                 .into(),
             );
+        }
+
+        let Some(delivery) = store.delivery_mut(&region, &input.id) else {
+            return Err(not_found());
         };
 
         // "Use this operation to update the configuration of a delivery to change EITHER the
@@ -223,6 +267,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some(s3_delivery_configuration) = input.s3_delivery_configuration.as_ref() {
             delivery.s3_delivery_configuration = Some(s3_delivery_configuration.clone());
         }
+        // The delivery still delivers under a WHOLE configuration afterwards, so a member this
+        // reconfiguration left unstated — including one inside the S3 object layout it
+        // restated in part — takes the template's default again rather than becoming
+        // unreported.
+        delivery.resolve_configuration(template.as_ref());
 
         // "You can't use this operation to change the source or destination of the delivery":
         // the delivery keeps its source, its destination, the destination type read off that

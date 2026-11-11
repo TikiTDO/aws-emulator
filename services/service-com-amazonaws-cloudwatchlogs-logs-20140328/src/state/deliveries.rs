@@ -100,6 +100,62 @@ impl DeliveryRecord {
         }
     }
 
+    /// Resolve this delivery's EFFECTIVE configuration, from the configuration template that
+    /// governs it ([`delivery_configuration_template`]).
+    ///
+    /// A delivery delivers under one configuration whether or not the request that created it
+    /// stated the whole of it: a member the request named is the caller's, and a member it did
+    /// not name takes the value the template publishes as the default for this log type and
+    /// this kind of destination ("the valid and default values that are used when creating
+    /// delivery sources, delivery destinations, and deliveries"). So every reader of the
+    /// delivery reports what will actually be delivered rather than which members of the
+    /// create happened to be filled in, and a caller can tell a defaulted value from a
+    /// configured one by comparing it with the template.
+    ///
+    /// The two members that apply to every delivery are resolved even where the template
+    /// publishes no default for them: a delivery that states no delimiter joins its record
+    /// fields with none ([`CONFIGURATION_TEMPLATE_DEFAULT_FIELD_DELIMITER`]), and one that
+    /// states no S3 object layout writes under no suffix path, with the Hive-compatible prefix
+    /// structure off ([`CONFIGURATION_TEMPLATE_DEFAULT_HIVE_COMPATIBLE_PATH`]). `recordFields`
+    /// is left unreported when no template governs the delivery: which fields its records
+    /// carry is published by the sending service, and nothing published says.
+    pub fn resolve_configuration(
+        &mut self,
+        template: Option<&crate::ops::types::ConfigurationTemplate>,
+    ) {
+        let defaults = template.and_then(|template| template.default_delivery_config_values.as_ref());
+        if self.record_fields.is_none() {
+            self.record_fields = defaults.and_then(|defaults| defaults.record_fields.clone());
+        }
+        if self.field_delimiter.is_none() {
+            self.field_delimiter = Some(
+                defaults
+                    .and_then(|defaults| defaults.field_delimiter.clone())
+                    .unwrap_or_else(|| CONFIGURATION_TEMPLATE_DEFAULT_FIELD_DELIMITER.to_string()),
+            );
+        }
+        let published = defaults.and_then(|defaults| defaults.s3_delivery_configuration.as_ref());
+        let configured = self.s3_delivery_configuration.take();
+        self.s3_delivery_configuration = Some(crate::ops::types::S3DeliveryConfiguration {
+            enable_hive_compatible_path: Some(
+                configured
+                    .as_ref()
+                    .and_then(|configured| configured.enable_hive_compatible_path)
+                    .or_else(|| {
+                        published.and_then(|published| published.enable_hive_compatible_path)
+                    })
+                    .unwrap_or(CONFIGURATION_TEMPLATE_DEFAULT_HIVE_COMPATIBLE_PATH),
+            ),
+            suffix_path: Some(
+                configured
+                    .as_ref()
+                    .and_then(|configured| configured.suffix_path.clone())
+                    .or_else(|| published.and_then(|published| published.suffix_path.clone()))
+                    .unwrap_or_default(),
+            ),
+        });
+    }
+
     /// This delivery as the model's `Delivery` structure, which is what `CreateDelivery`,
     /// `GetDelivery` and `DescribeDeliveries` all report, so one record renders the same way
     /// through any of them.
@@ -154,6 +210,16 @@ pub const MAX_DELIVERIES: usize = 1_000;
 /// that the requested delivery is not in the account and interpolates no id, so every id the
 /// account does not hold is refused identically.
 pub const DELIVERY_NOT_FOUND_MESSAGE: &str = "Requested Delivery does not exist in this account.";
+
+/// The refusal the vended-log delivery ENUMERATIONS answer a `nextToken` they cannot resume
+/// from with — one this service never minted, one whose payload it cannot decode, and one
+/// minted for a different enumeration than the request carrying it describes.
+///
+/// The delivery-pipeline reads word that class their own way rather than with the sentence the
+/// rest of this service's paginated reads word it with ([`INVALID_NEXT_TOKEN_MESSAGE`]): the
+/// text states only that the next token is invalid, carrying neither the token nor the
+/// operation, so a paginating reader that keys on it restarts from the head of the stream.
+pub const INVALID_DELIVERY_NEXT_TOKEN_MESSAGE: &str = "Invalid Next Token.";
 
 /// The refusal CloudWatch Logs answers a delivery operation with when the
 /// `deliverySourceName` it names is not one this account holds. Like

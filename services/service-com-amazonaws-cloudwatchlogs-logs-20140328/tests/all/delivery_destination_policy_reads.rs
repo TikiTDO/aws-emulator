@@ -30,7 +30,7 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::Logs;
+use crate::harness::{Logs, REGION};
 
 /// The operation under test, plus the operations a round trip and the namespace cases go
 /// through.
@@ -90,9 +90,17 @@ impl Row {
     }
 }
 
+/// Every delivery destination this account holds in this Region, named by the ARN this
+/// service builds for one — the resource a delivery destination policy grants access to, so
+/// no account id is written here.
+fn delivery_destinations() -> String {
+    ::engine::emulator_arn("logs", REGION, "delivery-destination:*")
+}
+
 /// The two statements the assignment operation's documentation describes — "One statement
 /// enables general logs delivery, and the other allows delivery to the chosen destination" —
-/// as one IAM policy document.
+/// as one IAM policy document: each grants an account the delivery actions on the delivery
+/// resources it names.
 fn two_statement_policy(destination_arn: &str) -> String {
     json!({
         "Version": "2012-10-17",
@@ -100,16 +108,16 @@ fn two_statement_policy(destination_arn: &str) -> String {
             {
                 "Sid": "AllowLogDeliveryActions",
                 "Effect": "Allow",
-                "Principal": {"Service": "delivery.logs.amazonaws.com"},
-                "Action": ["logs:PutLogEvents", "logs:CreateLogStream"],
-                "Resource": destination_arn,
+                "Principal": {"AWS": "arn:aws:iam::210987654321:root"},
+                "Action": ["logs:PutDeliverySource", "logs:CreateDelivery"],
+                "Resource": "*",
             },
             {
-                "Sid": "AllowLogDeliveryForResource",
+                "Sid": "AllowDeliveryToDestination",
                 "Effect": "Allow",
-                "Principal": {"Service": "delivery.logs.amazonaws.com"},
-                "Action": "logs:PutDeliverySource",
-                "Resource": "*",
+                "Principal": {"AWS": "arn:aws:iam::210987654321:root"},
+                "Action": "logs:CreateDelivery",
+                "Resource": destination_arn,
             },
         ],
     })
@@ -126,7 +134,7 @@ fn rows() -> Vec<Row> {
             label: "an S3 bucket destination holding the two documented statements",
             name: "vended-logs-bucket".to_string(),
             resource_arn: Some(BUCKET_ARN),
-            policy: Some(two_statement_policy(BUCKET_ARN)),
+            policy: Some(two_statement_policy(&delivery_destinations())),
         },
         Row {
             label: "a log group destination holding no policy",
@@ -135,10 +143,10 @@ fn rows() -> Vec<Row> {
             policy: None,
         },
         Row {
-            label: "a Firehose destination holding a one-statement policy",
+            label: "a Firehose destination holding two statements with no Sid",
             name: "vended-logs-stream".to_string(),
             resource_arn: Some(FIREHOSE_ARN),
-            policy: Some(one_statement_policy("stream")),
+            policy: Some(sid_policy("stream")),
         },
         Row {
             label: "a trace destination holding no policy",
@@ -150,22 +158,31 @@ fn rows() -> Vec<Row> {
             label: "a name at the minimum length, holding a non-ASCII policy",
             name: "d".to_string(),
             resource_arn: Some(BUCKET_ARN),
-            policy: Some(one_statement_policy(
+            policy: Some(sid_policy(
                 "lieferung-\u{00fc}ber-gr\u{00f6}\u{00df}e-\u{65e5}\u{672c}",
             )),
         },
         Row {
-            label: "a name at the maximum length, holding a statement written as an object",
+            label: "a name at the maximum length, holding statements spelled as lists",
             name: "n".repeat(NAME_MAX_LENGTH),
             resource_arn: Some(FIREHOSE_ARN),
             policy: Some(
                 json!({
                     "Version": "2012-10-17",
-                    "Statement": {
-                        "Effect": "Allow",
-                        "Principal": "*",
-                        "Action": "logs:PutLogEvents",
-                    },
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": ["*", "arn:aws:iam::210987654321:root"],
+                            "Action": ["logs:GetDeliveryDestination", "logs:GetDelivery"],
+                            "Resource": [delivery_destinations(), "*"],
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Principal": ["*", "arn:aws:iam::210987654321:root"],
+                            "Action": ["logs:CreateDelivery", "logs:PutDeliverySource"],
+                            "Resource": [delivery_destinations(), "*"],
+                        },
+                    ],
                 })
                 .to_string(),
             ),
@@ -173,18 +190,27 @@ fn rows() -> Vec<Row> {
     ]
 }
 
-/// One resource-policy statement carrying `sid`: an effect, the service principal that
-/// delivers vended logs and the action it may take — the elements the IAM policy language
-/// requires of a resource-based statement.
-fn one_statement_policy(sid: &str) -> String {
+/// The two statements a delivery destination policy declares, the first carrying `sid`: each
+/// grants an account one of the delivery actions on this account's delivery destinations — the
+/// elements a delivery destination policy's statements state.
+fn sid_policy(sid: &str) -> String {
     json!({
         "Version": "2012-10-17",
-        "Statement": [{
-            "Sid": sid,
-            "Effect": "Allow",
-            "Principal": {"Service": "delivery.logs.amazonaws.com"},
-            "Action": "logs:PutLogEvents",
-        }],
+        "Statement": [
+            {
+                "Sid": sid,
+                "Effect": "Allow",
+                "Principal": {"AWS": "arn:aws:iam::210987654321:root"},
+                "Action": "logs:GetDeliveryDestinationPolicy",
+                "Resource": delivery_destinations(),
+            },
+            {
+                "Effect": "Allow",
+                "Principal": {"AWS": "arn:aws:iam::210987654321:root"},
+                "Action": "logs:CreateDelivery",
+                "Resource": delivery_destinations(),
+            },
+        ],
     })
     .to_string()
 }
@@ -368,7 +394,7 @@ async fn a_namesake_of_another_resource_is_not_a_delivery_destination() {
         "case \"the delivery destination, newly created\": expected no policy, got {reported:?}"
     );
 
-    let document = two_statement_policy(BUCKET_ARN);
+    let document = two_statement_policy(&delivery_destinations());
     assign_policy(&logs, name, &document).await;
     let reported = read_policy(&logs, name).await;
     assert_eq!(
@@ -412,7 +438,7 @@ async fn a_name_is_matched_exactly() {
         }),
     )
     .await;
-    let document = two_statement_policy(BUCKET_ARN);
+    let document = two_statement_policy(&delivery_destinations());
     assign_policy(&logs, held, &document).await;
 
     // Near misses that all satisfy `DeliveryDestinationName` (1..60, `^[\w-]*$`): case,
