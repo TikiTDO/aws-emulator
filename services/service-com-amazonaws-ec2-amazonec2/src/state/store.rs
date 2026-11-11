@@ -1227,6 +1227,11 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// Traffic Mirror target until `CreateTrafficMirrorTarget` mints one, and
     /// `DeleteTrafficMirrorTarget` takes one back out. See [`traffic_mirror_targets`].
     pub traffic_mirror_targets: BTreeMap<String, crate::ops::types::TrafficMirrorTarget>,
+    /// A `CreateTrafficMirrorTarget` `ClientToken` and the Traffic Mirror target id it
+    /// minted, so a repeat of the same request answers with that target instead of creating
+    /// a second one — the same seam [`Self::traffic_mirror_filter_client_tokens`] is for a
+    /// filter.
+    pub traffic_mirror_target_client_tokens: HashMap<String, String>,
     /// Reservations by `ReservationId`.
     pub reservations: HashMap<String, ReservationRecord>,
     /// Reservation ids in launch order: the stable order `DescribeInstances`
@@ -3217,6 +3222,7 @@ impl Default for ComAmazonawsEc2Amazonec2State {
             traffic_mirror_filter_client_tokens: HashMap::new(),
             traffic_mirror_sessions: BTreeMap::new(),
             traffic_mirror_targets: BTreeMap::new(),
+            traffic_mirror_target_client_tokens: HashMap::new(),
             reservations: HashMap::new(),
             reservation_order: Vec::new(),
             instances: HashMap::new(),

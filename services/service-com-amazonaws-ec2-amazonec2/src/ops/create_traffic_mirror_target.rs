@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateTrafficMirrorTarget
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateTrafficMirrorTarget`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateTrafficMirrorTarget::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -152,18 +143,325 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateTrafficMirrorTarget` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateTrafficMirrorTargetErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateTrafficMirrorTarget"))
+        use crate::scaffolded::Scaffolded;
+        use crate::state::{
+            id_not_found, idempotent_parameter_mismatch, invalid_id_message,
+            invalid_network_interface_id_malformed, invalid_network_interface_id_not_found,
+            invalid_parameter_combination, load_balancer_arn_is_well_formed,
+            network_interface_id_is_well_formed, require_service_state,
+            tags_from_specifications, traffic_mirror_target_limit_exceeded,
+            vpc_endpoint_id_is_well_formed, TrafficMirrorTargetRoom,
+            INVALID_VPC_ENDPOINT_ID_MALFORMED, INVALID_VPC_ENDPOINT_ID_NOT_FOUND,
+            MAX_CLIENT_TOKEN_CHARS, MAX_STORED_BYTES,
+            TRAFFIC_MIRROR_TARGET_TAGGABLE_RESOURCE,
+            TRAFFIC_MIRROR_TARGET_TYPE_GATEWAY_LOAD_BALANCER_ENDPOINT,
+            TRAFFIC_MIRROR_TARGET_TYPE_NETWORK_INTERFACE,
+            TRAFFIC_MIRROR_TARGET_TYPE_NETWORK_LOAD_BALANCER,
+            VPC_ENDPOINT_TYPE_GATEWAY_LOAD_BALANCER,
+        };
+
+        // `ctx` carries request metadata only; this operation reads none of it — the modelled
+        // `TrafficMirrorTarget` names no Region and no ARN of its own. The store is reached
+        // through the engine held on `self`.
+        let _ = ctx;
+
+        // "A Traffic Mirror target can be a network interface, a Network Load Balancer, or a
+        // Gateway Load Balancer endpoint" (`CreateTrafficMirrorTarget`): a target is ONE of
+        // the three, and the member the request carries is what says which — so a request
+        // naming more than one names more than one destination, and one naming none leaves
+        // the target with nothing to mirror to. Which member was named also decides the
+        // `Type` the record is reported with, so the two cannot disagree.
+        let named: Vec<(&str, &str)> = [
+            (
+                TRAFFIC_MIRROR_TARGET_TYPE_NETWORK_INTERFACE,
+                input.network_interface_id.as_deref(),
+            ),
+            (
+                TRAFFIC_MIRROR_TARGET_TYPE_NETWORK_LOAD_BALANCER,
+                input.network_load_balancer_arn.as_deref(),
+            ),
+            (
+                TRAFFIC_MIRROR_TARGET_TYPE_GATEWAY_LOAD_BALANCER_ENDPOINT,
+                input.gateway_load_balancer_endpoint_id.as_deref(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(kind, value)| value.map(|value| (kind, value)))
+        .collect();
+        let target_type = match named.as_slice() {
+            // Each member is valid on its own and only the COMBINATION is not, which is what
+            // EC2's `InvalidParameterCombination` says.
+            [_, _, ..] => {
+                return Err(invalid_parameter_combination(
+                    "You must specify one of networkInterfaceId, networkLoadBalancerArn or \
+                     gatewayLoadBalancerEndpointId, but not more than one",
+                ))
+            }
+            // None of the three is required on its own, so a request carrying none of them is
+            // not missing one named parameter: it is a request this operation cannot accept,
+            // which is EC2's `InvalidParameter`.
+            [] => {
+                return Err(invalid_parameter(
+                    "Either networkInterfaceId, networkLoadBalancerArn or \
+                     gatewayLoadBalancerEndpointId must be specified",
+                ))
+            }
+            [(kind, _)] => *kind,
+        };
+
+        // What the ONE named member has to look like, before the store is asked anything: an
+        // id of this service's own resources is held to the id form this crate reads
+        // everywhere, and the load balancer is a resource of ANOTHER service, so its ARN is
+        // held to the form of a load balancer ARN and no further — the reading
+        // `crate::state::load_balancer_arn_is_well_formed` records.
+        if let Some(network_interface_id) = input.network_interface_id.as_deref() {
+            if !network_interface_id_is_well_formed(network_interface_id) {
+                return Err(invalid_network_interface_id_malformed(network_interface_id));
+            }
+        }
+        if let Some(gateway_load_balancer_endpoint_id) =
+            input.gateway_load_balancer_endpoint_id.as_deref()
+        {
+            if !vpc_endpoint_id_is_well_formed(gateway_load_balancer_endpoint_id) {
+                // The one wording this crate refuses an unreadable resource id with
+                // (`crate::state::invalid_id_message`), under the endpoint id's own
+                // `Malformed` code.
+                return Err(Scaffolded::service_error(
+                    INVALID_VPC_ENDPOINT_ID_MALFORMED,
+                    400,
+                    invalid_id_message(gateway_load_balancer_endpoint_id),
+                ));
+            }
+        }
+        if let Some(network_load_balancer_arn) = input.network_load_balancer_arn.as_deref() {
+            if !load_balancer_arn_is_well_formed(network_load_balancer_arn) {
+                return Err(Scaffolded::invalid_parameter_value(format!(
+                    "Value ({network_load_balancer_arn}) for parameter networkLoadBalancerArn \
+                     is invalid. This is not the ARN of a load balancer."
+                )));
+            }
+        }
+
+        // "The tags to assign to the Traffic Mirror target"
+        // (`CreateTrafficMirrorTargetRequest$TagSpecifications`): the target is the only
+        // resource this call creates, so a specification naming any other resource type is
+        // refused rather than accepted and discarded. The tag payload's own bounds are the
+        // ones every create in this crate holds its tags to, so they are applied by the one
+        // shared reader.
+        let tags: Vec<Tag> = tags_from_specifications(
+            input.tag_specifications.as_deref(),
+            TRAFFIC_MIRROR_TARGET_TAGGABLE_RESOURCE,
+            Self::NAME,
+        )?;
+        if input
+            .client_token
+            .as_ref()
+            .is_some_and(|token| token.chars().count() > MAX_CLIENT_TOKEN_CHARS)
+        {
+            return Err(Scaffolded::invalid_parameter_value(format!(
+                "clientToken accepts at most {MAX_CLIENT_TOKEN_CHARS} characters"
+            )));
+        }
+
+        // The record this call would store, built BEFORE the store is locked. Only the member
+        // the request named is carried, the other two staying absent: a target points at one
+        // resource, and `Type` is read off which member that was.
+        let target = TrafficMirrorTarget {
+            // Minted by the store at the insert, so an id is never chosen twice.
+            traffic_mirror_target_id: None,
+            network_interface_id: input.network_interface_id.clone(),
+            network_load_balancer_arn: input.network_load_balancer_arn.clone(),
+            r#type: Some(target_type.to_string()),
+            description: input.description.clone(),
+            // "The ID of the account that owns the Traffic Mirror target"
+            // (`TrafficMirrorTarget$OwnerId`) — this emulator's one account.
+            owner_id: Some(::engine::emulator_account_id().to_string()),
+            tags: Some(tags),
+            gateway_load_balancer_endpoint_id: input.gateway_load_balancer_endpoint_id.clone(),
+        };
+
+        let state = require_service_state(&*self.engine)?;
+        let mut store = state.lock();
+
+        // Whichever resource the request named has to be one this account holds: a target
+        // that mirrors to an interface or an endpoint that is not there would mirror nowhere.
+        // The load balancer belongs to another service, which this store holds none of, so
+        // the ARN is taken as given — the same reading `CreateVpcEndpointServiceConfiguration`
+        // takes of the load balancers behind a service.
+        if let Some(network_interface_id) = input.network_interface_id.as_deref() {
+            if !store.network_interfaces.contains_key(network_interface_id) {
+                return Err(invalid_network_interface_id_not_found(network_interface_id));
+            }
+        }
+        if let Some(gateway_load_balancer_endpoint_id) =
+            input.gateway_load_balancer_endpoint_id.as_deref()
+        {
+            let Some(endpoint) = store
+                .vpc_endpoints
+                .get(gateway_load_balancer_endpoint_id)
+            else {
+                // The sentence this service answers a named endpoint it cannot resolve with,
+                // as `DescribeVpcEndpoints` words it: the shape's noun spelt `Vpc Endpoint
+                // Id`, carrying the id the REQUEST named.
+                return Err(id_not_found(
+                    INVALID_VPC_ENDPOINT_ID_NOT_FOUND,
+                    "Vpc Endpoint Id",
+                    gateway_load_balancer_endpoint_id,
+                ));
+            };
+            // "The ID of the Gateway Load Balancer endpoint"
+            // (`CreateTrafficMirrorTargetRequest$GatewayLoadBalancerEndpointId`): an endpoint
+            // of one of the other `VpcEndpointType` kinds is not one, so it is refused rather
+            // than stored as a destination that mirrors nowhere — EC2's sentence for a value
+            // this parameter cannot take, naming the value the request gave.
+            if endpoint.vpc_endpoint_type.as_deref()
+                != Some(VPC_ENDPOINT_TYPE_GATEWAY_LOAD_BALANCER)
+            {
+                return Err(Scaffolded::invalid_parameter_value(format!(
+                    "Value ({gateway_load_balancer_endpoint_id}) for parameter \
+                     gatewayLoadBalancerEndpointId is invalid. This is not a Gateway Load \
+                     Balancer endpoint."
+                )));
+            }
+        }
+
+        // Idempotency: "Unique, case-sensitive identifier that you provide to ensure the
+        // idempotency of the request" (`CreateTrafficMirrorTargetRequest$ClientToken`) — one
+        // token names the one target it created, so a replay reports that target and creates
+        // nothing. Read here, answered below the DryRun check, because a replay stores
+        // nothing and so passes the ceilings a fresh create has to clear.
+        let replayed = input
+            .client_token
+            .as_deref()
+            .and_then(|token| store.traffic_mirror_target_client_tokens.get(token).cloned())
+            // A token whose target the store no longer holds names no target at all — a
+            // delete takes the token out with the record — so a create carrying it is a
+            // fresh create rather than a replay or a mismatch.
+            .filter(|traffic_mirror_target_id| {
+                store
+                    .traffic_mirror_targets
+                    .contains_key(traffic_mirror_target_id)
+            });
+
+        // A token names ONE request, not merely one target: a repeat of it describing a
+        // different target is not that request, which is EC2's `IdempotentParameterMismatch`
+        // (the code and the fixed sentence `crate::state::idempotent_parameter_mismatch`
+        // holds for the whole error class). Asked before the ceilings and before DryRun, the
+        // way every other refusal of this operation is.
+        if let Some(traffic_mirror_target_id) = replayed.as_deref() {
+            if !store
+                .traffic_mirror_targets
+                .get(traffic_mirror_target_id)
+                .is_some_and(|stored| describes_the_same_target(stored, &target))
+            {
+                return Err(idempotent_parameter_mismatch());
+            }
+        }
+
+        // A count ceiling first, then the byte budget, both asked through the store's ONE
+        // definition of "has room" — which says WHICH bound refused, so each refusal is
+        // worded for the bound that gave it. A record count on its own admits gigabytes,
+        // because each record holds strings the caller chose the length of.
+        if replayed.is_none() {
+            match store.traffic_mirror_target_room(&target, input.client_token.as_deref()) {
+                TrafficMirrorTargetRoom::Available => {}
+                TrafficMirrorTargetRoom::AtCeiling => return Err(at_target_ceiling()),
+                TrafficMirrorTargetRoom::OverByteBudget { requested, held } => {
+                    return Err(traffic_mirror_target_limit_exceeded(format!(
+                        "This emulator holds {held} of at most {MAX_STORED_BYTES} bytes of \
+                         caller-supplied data, so it cannot store {requested} more"
+                    )))
+                }
+            }
+        }
+
+        // DryRun sits AFTER every parameter has been validated and every named resource
+        // resolved, and BEFORE the first write: the flag asks whether the request WOULD have
+        // worked, so one that would have been refused is refused with that reason instead,
+        // and one that would have succeeded leaves state untouched.
+        if input.dry_run == Some(true) {
+            return Err(Scaffolded::dry_run_operation());
+        }
+
+        let traffic_mirror_target_id = match replayed {
+            Some(traffic_mirror_target_id) => traffic_mirror_target_id,
+            None => store
+                .insert_traffic_mirror_target(target, input.client_token.as_deref())
+                .ok_or_else(at_target_ceiling)?,
+        };
+
+        // Read the response back OUT of the store, so the caller sees what a later
+        // `DescribeTrafficMirrorTargets` will see rather than the request object.
+        store
+            .traffic_mirror_targets
+            .get(&traffic_mirror_target_id)
+            .cloned()
+            .map(|traffic_mirror_target| CreateTrafficMirrorTargetOutput {
+                traffic_mirror_target: Some(traffic_mirror_target),
+                // "Unique, case-sensitive identifier that you provide"
+                // (`CreateTrafficMirrorTargetResult$ClientToken`): the token the REQUEST
+                // carried, echoed, and nothing at all when it carried none.
+                client_token: input.client_token.clone(),
+            })
+            .ok_or_else(|| {
+                Scaffolded::internal_error(format!(
+                    "the newly created Traffic Mirror target '{traffic_mirror_target_id}' \
+                     could not be read back"
+                ))
+            })
     }
+}
+
+/// The refusal a create earns when the store already holds as many Traffic Mirror targets as
+/// it stores: HTTP 400 `TrafficMirrorTargetLimitExceeded`.
+///
+/// Worded ONCE, so the pre-check that refuses before any write and the insert's own backstop
+/// cannot drift apart.
+fn at_target_ceiling() -> CreateTrafficMirrorTargetError {
+    crate::state::traffic_mirror_target_limit_exceeded(format!(
+        "This emulator holds {max} Traffic Mirror targets, which is as many as it stores",
+        max = crate::state::MAX_TRAFFIC_MIRROR_TARGETS,
+    ))
+}
+
+/// Does the stored Traffic Mirror target `stored` describe the same target as `requested`,
+/// the record this create would have stored?
+///
+/// Everything a REQUEST decides is compared — the resource the target points at, the `Type`
+/// that implies, the description and the tags — and nothing the SERVICE decides, the id being
+/// minted at the insert and the owner being this emulator's one account either way. The tags
+/// go through the crate's one comparison of a modelled tag list,
+/// [`crate::state::tag_pairs`], which is sorted because "tag keys must be unique per
+/// resource" makes a tag list a set.
+fn describes_the_same_target(
+    stored: &TrafficMirrorTarget,
+    requested: &TrafficMirrorTarget,
+) -> bool {
+    use crate::state::tag_pairs;
+
+    fn tags(tags: Option<&[Tag]>) -> Vec<(Option<&str>, Option<&str>)> {
+        tag_pairs(tags.unwrap_or_default())
+    }
+
+    stored.network_interface_id == requested.network_interface_id
+        && stored.network_load_balancer_arn == requested.network_load_balancer_arn
+        && stored.gateway_load_balancer_endpoint_id == requested.gateway_load_balancer_endpoint_id
+        && stored.r#type == requested.r#type
+        && stored.description == requested.description
+        && tags(stored.tags.as_deref()) == tags(requested.tags.as_deref())
+}
+
+/// `InvalidParameter` (HTTP 400): the request's members do not describe a target this
+/// operation can create.
+///
+/// EC2's own code for a parameter that is wrong in a way `InvalidParameterValue` does not
+/// cover — here a request that names none of the three resources a Traffic Mirror target can
+/// be, no one of which is required on its own, so nothing is MISSING and no single value is
+/// invalid.
+fn invalid_parameter(message: impl Into<String>) -> CreateTrafficMirrorTargetError {
+    crate::scaffolded::Scaffolded::service_error(
+        crate::state::INVALID_PARAMETER,
+        400,
+        message,
+    )
 }

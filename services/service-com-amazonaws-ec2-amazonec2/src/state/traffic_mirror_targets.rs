@@ -24,6 +24,20 @@ pub const TRAFFIC_MIRROR_TARGET_ID_PREFIX: &str = "tmt";
 /// `ResourceType` enum spells it (`smithy_query(query="shape",shape="ResourceType")`).
 pub const TRAFFIC_MIRROR_TARGET_TAGGABLE_RESOURCE: &str = "traffic-mirror-target";
 
+/// The `TrafficMirrorTargetType` of a target that mirrors to a network interface, spelled as
+/// the modelled enum spells it (`smithy_query(query="shape",shape="TrafficMirrorTargetType")`).
+pub const TRAFFIC_MIRROR_TARGET_TYPE_NETWORK_INTERFACE: &str = "network-interface";
+
+/// The `TrafficMirrorTargetType` of a target that mirrors to a Network Load Balancer, from
+/// the same modelled enum as [`TRAFFIC_MIRROR_TARGET_TYPE_NETWORK_INTERFACE`].
+pub const TRAFFIC_MIRROR_TARGET_TYPE_NETWORK_LOAD_BALANCER: &str = "network-load-balancer";
+
+/// The `TrafficMirrorTargetType` of a target that mirrors to a Gateway Load Balancer
+/// endpoint, from the same modelled enum as
+/// [`TRAFFIC_MIRROR_TARGET_TYPE_NETWORK_INTERFACE`].
+pub const TRAFFIC_MIRROR_TARGET_TYPE_GATEWAY_LOAD_BALANCER_ENDPOINT: &str =
+    "gateway-load-balancer-endpoint";
+
 /// How many Traffic Mirror targets this emulator stores before a create is refused.
 ///
 /// CHOSEN, like [`super::MAX_TRAFFIC_MIRROR_SESSIONS`] and for the same reason: nothing in
@@ -53,15 +67,18 @@ pub const MAX_TRAFFIC_MIRROR_TARGETS_PAGE_SIZE: usize = 1_000;
 pub const INVALID_TRAFFIC_MIRROR_TARGET_ID_NOT_FOUND: &str = "InvalidTrafficMirrorTargetId.NotFound";
 
 /// The caller-chosen bytes one stored Traffic Mirror target holds for as long as the store
-/// holds it: its tags, its description, and the Network Load Balancer ARN a caller named it
-/// by.
+/// holds it: its tags, its description, the Network Load Balancer ARN a caller named it by,
+/// and the client token the token map keeps for it.
 ///
 /// Everything else on the record — its own id, the owning account, the type word drawn from
 /// a modelled enum, and the ids of the network interface and the Gateway Load Balancer
 /// endpoint it points at — is derived by this crate or bounded by the model, so it is not
 /// counted here. The ONE definition of that charge, so a writer cannot store bytes the
 /// store's budget never saw and a removal gives back exactly what the insert took.
-pub fn traffic_mirror_target_payload_bytes(target: &TrafficMirrorTarget) -> usize {
+pub fn traffic_mirror_target_payload_bytes(
+    target: &TrafficMirrorTarget,
+    client_token: Option<&str>,
+) -> usize {
     tag_list_bytes(target.tags.as_deref().unwrap_or_default())
         .saturating_add(target.description.as_ref().map_or(0, String::len))
         .saturating_add(
@@ -70,6 +87,18 @@ pub fn traffic_mirror_target_payload_bytes(target: &TrafficMirrorTarget) -> usiz
                 .as_ref()
                 .map_or(0, String::len),
         )
+        .saturating_add(client_token.map_or(0, str::len))
+}
+
+/// EC2's quota code for one Traffic Mirror target too many, named the way every other
+/// per-resource EC2 quota code is (`VolumeLimitExceeded`,
+/// [`super::TRAFFIC_MIRROR_FILTER_LIMIT_EXCEEDED`]).
+pub const TRAFFIC_MIRROR_TARGET_LIMIT_EXCEEDED: &str = "TrafficMirrorTargetLimitExceeded";
+
+/// Refuse a create that would take the store past [`MAX_TRAFFIC_MIRROR_TARGETS`] or past the
+/// store's byte budget: HTTP 400 [`TRAFFIC_MIRROR_TARGET_LIMIT_EXCEEDED`].
+pub fn traffic_mirror_target_limit_exceeded<E>(message: impl Into<String>) -> Scaffolded<E> {
+    Scaffolded::service_error(TRAFFIC_MIRROR_TARGET_LIMIT_EXCEEDED, 400, message)
 }
 
 /// Refuse a request that named a Traffic Mirror target id this account holds no target for:
@@ -109,16 +138,64 @@ pub fn require_known_traffic_mirror_target<E>(
     ))
 }
 
+/// What the store answers a create asking whether it can hold one more Traffic Mirror
+/// target: room, or the reason there is none.
+///
+/// A create has to word a different refusal for each reason, and the store has to keep ONE
+/// definition of "has room", so the reason travels with the answer rather than being decided
+/// a second time by the caller ([`ComAmazonawsEc2Amazonec2State::traffic_mirror_target_room`],
+/// which [`ComAmazonawsEc2Amazonec2State::has_traffic_mirror_target_capacity`] is the
+/// yes-or-no form of).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrafficMirrorTargetRoom {
+    /// The store can hold the target.
+    Available,
+    /// The store already holds [`MAX_TRAFFIC_MIRROR_TARGETS`] targets.
+    AtCeiling,
+    /// Holding the target's caller-chosen bytes would take the store past
+    /// [`super::MAX_STORED_BYTES`]: `requested` is what the record would hold and `held` what
+    /// the store holds already.
+    OverByteBudget { requested: usize, held: usize },
+}
+
 impl ComAmazonawsEc2Amazonec2State {
+    /// Whether the store can hold one more Traffic Mirror target, and when it cannot, which
+    /// of its two bounds says so.
+    ///
+    /// A create asks this first so it can refuse with EC2's own quota code, worded for the
+    /// bound that refused it, instead of overshooting; the count ceiling is asked before the
+    /// byte budget because a record count on its own admits gigabytes.
+    pub fn traffic_mirror_target_room(
+        &self,
+        target: &TrafficMirrorTarget,
+        client_token: Option<&str>,
+    ) -> TrafficMirrorTargetRoom {
+        if self.traffic_mirror_targets.len() >= MAX_TRAFFIC_MIRROR_TARGETS {
+            return TrafficMirrorTargetRoom::AtCeiling;
+        }
+        let requested = traffic_mirror_target_payload_bytes(target, client_token);
+        if self.would_exceed_stored_bytes(requested) {
+            return TrafficMirrorTargetRoom::OverByteBudget {
+                requested,
+                held: self.stored_bytes(),
+            };
+        }
+        TrafficMirrorTargetRoom::Available
+    }
+
     /// Whether another Traffic Mirror target fits inside the store's ceiling
     /// ([`MAX_TRAFFIC_MIRROR_TARGETS`]) and its byte budget.
     ///
-    /// The same contract as [`Self::has_traffic_mirror_session_capacity`]: a create asks
-    /// first so it can refuse with EC2's own quota code instead of overshooting, and
-    /// [`Self::insert_traffic_mirror_target`] asks it again for itself.
-    pub fn has_traffic_mirror_target_capacity(&self, target: &TrafficMirrorTarget) -> bool {
-        self.traffic_mirror_targets.len() < MAX_TRAFFIC_MIRROR_TARGETS
-            && !self.would_exceed_stored_bytes(traffic_mirror_target_payload_bytes(target))
+    /// The same contract as [`Self::has_traffic_mirror_session_capacity`], and the yes-or-no
+    /// form of [`Self::traffic_mirror_target_room`], so there is one definition of "has
+    /// room": a create asks it so it can refuse with EC2's own quota code instead of
+    /// overshooting, and [`Self::insert_traffic_mirror_target`] asks it again for itself.
+    pub fn has_traffic_mirror_target_capacity(
+        &self,
+        target: &TrafficMirrorTarget,
+        client_token: Option<&str>,
+    ) -> bool {
+        self.traffic_mirror_target_room(target, client_token) == TrafficMirrorTargetRoom::Available
     }
 
     /// Store `target` under a freshly minted `TrafficMirrorTargetId`, charge the
@@ -132,20 +209,24 @@ impl ComAmazonawsEc2Amazonec2State {
     /// [`Self::insert_traffic_mirror_session`] enforces its own, so a writer that forgets to
     /// ask cannot grow the store without bound.
     ///
-    /// `CreateTrafficMirrorTarget` is still a scaffold stub with an issue of its own, so for
-    /// now this is reached only from this crate's tests, which seed targets the way that
-    /// create will. It lives here rather than in a test so the create lands on this one
-    /// record instead of a second copy of a target beside it.
+    /// `client_token` is the `ClientToken` the create carried, if any: it is remembered as
+    /// naming the target this insert minted, so a repeat of that request reports this target
+    /// rather than minting a second one, and its bytes are charged with the record's.
     pub fn insert_traffic_mirror_target(
         &mut self,
         mut target: TrafficMirrorTarget,
+        client_token: Option<&str>,
     ) -> Option<String> {
-        if !self.has_traffic_mirror_target_capacity(&target) {
+        if !self.has_traffic_mirror_target_capacity(&target, client_token) {
             return None;
         }
         let traffic_mirror_target_id = self.next_id(TRAFFIC_MIRROR_TARGET_ID_PREFIX);
         target.traffic_mirror_target_id = Some(traffic_mirror_target_id.clone());
-        self.add_stored_bytes(traffic_mirror_target_payload_bytes(&target));
+        self.add_stored_bytes(traffic_mirror_target_payload_bytes(&target, client_token));
+        if let Some(token) = client_token {
+            self.traffic_mirror_target_client_tokens
+                .insert(token.to_string(), traffic_mirror_target_id.clone());
+        }
         self.traffic_mirror_targets
             .insert(traffic_mirror_target_id.clone(), target);
         Some(traffic_mirror_target_id)
@@ -160,16 +241,28 @@ impl ComAmazonawsEc2Amazonec2State {
     /// state for a deleted target to be reported in and the id simply stops resolving.
     ///
     /// The answer is the record the removal took OUT of the store, so what a delete reports
-    /// is what the readers reported — never a second copy built beside it. The bytes the
-    /// record held go back to the store's budget on exactly the terms
-    /// [`Self::insert_traffic_mirror_target`] took them on
-    /// ([`traffic_mirror_target_payload_bytes`]).
+    /// is what the readers reported — never a second copy built beside it. The token that
+    /// named this target stops naming it, so a later create carrying it mints a new target
+    /// rather than reporting one nothing holds, and the bytes the record held go back to the
+    /// store's budget on exactly the terms [`Self::insert_traffic_mirror_target`] took them
+    /// on ([`traffic_mirror_target_payload_bytes`]).
     pub fn remove_traffic_mirror_target(
         &mut self,
         traffic_mirror_target_id: &str,
     ) -> Option<TrafficMirrorTarget> {
         let target = self.traffic_mirror_targets.remove(traffic_mirror_target_id)?;
-        self.release_stored_bytes(traffic_mirror_target_payload_bytes(&target));
+        let client_token = self
+            .traffic_mirror_target_client_tokens
+            .iter()
+            .find(|(_, named)| named.as_str() == traffic_mirror_target_id)
+            .map(|(token, _)| token.clone());
+        if let Some(token) = client_token.as_deref() {
+            self.traffic_mirror_target_client_tokens.remove(token);
+        }
+        self.release_stored_bytes(traffic_mirror_target_payload_bytes(
+            &target,
+            client_token.as_deref(),
+        ));
         Some(target)
     }
 

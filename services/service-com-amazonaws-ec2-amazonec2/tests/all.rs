@@ -739,7 +739,6 @@ mod delete_vpn_connection;
 mod create_snapshots;
 // What `CreateSnapshot` makes of one volume, and the refusals that store nothing. Declared
 // here for the reason the suite above gives: the head and the tail of this list are where
-// concurrent ec2 landings insert their lines.
 #[path = "all/create_snapshot.rs"]
 mod create_snapshot;
 // What `DescribeSnapshots` reports of the snapshots the account holds — the members, the
@@ -1857,3 +1856,10 @@ mod attach_network_interface;
 // that gives up nothing. Declared at the tail of this list, where every new ec2 suite inserts
 #[path = "all/release_address.rs"]
 mod release_address;
+// The Traffic Mirror TARGET slice: what `CreateTrafficMirrorTarget` mints from the one
+// destination member a request names, what it refuses, and what
+// `DescribeTrafficMirrorTargets` then reports, narrows and pages over. Declared at the tail
+// of this file, which is where every new ec2 suite lands, for the reason the note at the top
+// records.
+#[path = "all/traffic_mirror_target_creation.rs"]
+mod traffic_mirror_target_creation;

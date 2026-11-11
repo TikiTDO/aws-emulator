@@ -31,10 +31,11 @@
 //!    caller-chosen text holds go back to the store's byte budget when the delete removes
 //!    it — the charge the insert took, given back on the same terms.
 //!
-//! `CreateTrafficMirrorTarget` and `CreateTrafficMirrorSession` are still scaffold stubs
-//! with issues of their own, so the targets and sessions here are seeded through the
-//! store's own write paths (`insert_traffic_mirror_target`,
-//! `insert_traffic_mirror_session`), which is where those creates will write them.
+//! `CreateTrafficMirrorSession` is still a scaffold stub with an issue of its own, and the
+//! targets here are seeded through the store's own write path
+//! (`insert_traffic_mirror_target`), which is where `CreateTrafficMirrorTarget` writes them,
+//! so this suite's fixtures do not depend on that create's own refusals
+//! (`traffic_mirror_target_creation` covers those).
 //!
 //! Each table row is a distinct input along what the rule generalises over — which kind of
 //! target it is, which members it carries, how many targets the store holds, which of them
@@ -131,7 +132,7 @@ fn seed(engine: &engine::InMemoryEngine, case: &str, row: &TargetRow, n: usize) 
     let id = engine
         .state::<Ec2State>()
         .lock()
-        .insert_traffic_mirror_target(target(row, n));
+        .insert_traffic_mirror_target(target(row, n), None);
     let id = id.unwrap_or_else(|| {
         panic!("case {case:?}: the store must have room for the few targets this suite seeds")
     });
@@ -558,9 +559,9 @@ fn the_target_store_gives_its_byte_charge_back_and_is_bounded() {
         let mut store = store.lock();
         let before = store.stored_bytes();
         let record = target(row, 0);
-        let charge = traffic_mirror_target_payload_bytes(&record);
+        let charge = traffic_mirror_target_payload_bytes(&record, None);
         let id = store
-            .insert_traffic_mirror_target(record)
+            .insert_traffic_mirror_target(record, None)
             .unwrap_or_else(|| panic!("case {case:?}: the store must have room for one target"));
         assert_eq!(
             store.stored_bytes(),
@@ -587,21 +588,21 @@ fn the_target_store_gives_its_byte_charge_back_and_is_bounded() {
     let record = target(&TARGET_ROWS[0].1, 0);
     for n in 0..MAX_TRAFFIC_MIRROR_TARGETS {
         assert!(
-            store.has_traffic_mirror_target_capacity(&record),
+            store.has_traffic_mirror_target_capacity(&record, None),
             "case {n}: the store must take {MAX_TRAFFIC_MIRROR_TARGETS} targets, it refused at {n}"
         );
         assert!(
-            store.insert_traffic_mirror_target(target(&TARGET_ROWS[0].1, n)).is_some(),
+            store.insert_traffic_mirror_target(target(&TARGET_ROWS[0].1, n), None).is_some(),
             "case {n}: the insert must store the target the capacity check admitted"
         );
     }
     assert!(
-        !store.has_traffic_mirror_target_capacity(&record),
+        !store.has_traffic_mirror_target_capacity(&record, None),
         "the store must be full at {MAX_TRAFFIC_MIRROR_TARGETS} targets, it holds {}",
         store.traffic_mirror_targets.len()
     );
     assert!(
-        store.insert_traffic_mirror_target(record.clone()).is_none(),
+        store.insert_traffic_mirror_target(record.clone(), None).is_none(),
         "the insert must store nothing once the store is full, it holds {}",
         store.traffic_mirror_targets.len()
     );
@@ -617,7 +618,7 @@ fn the_target_store_gives_its_byte_charge_back_and_is_bounded() {
         "the store must give back the target it stored"
     );
     assert!(
-        store.has_traffic_mirror_target_capacity(&record),
+        store.has_traffic_mirror_target_capacity(&record, None),
         "a removal must make room again, the store holds {} of {full}",
         store.traffic_mirror_targets.len()
     );
