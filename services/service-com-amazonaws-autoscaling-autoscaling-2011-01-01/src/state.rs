@@ -41,7 +41,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, SystemTime};
 
 use crate::ops::types::{
-    AvailabilityZoneDistribution, AvailabilityZoneImpairmentPolicy, BlockDeviceMapping,
+    Activity, AvailabilityZoneDistribution, AvailabilityZoneImpairmentPolicy, BlockDeviceMapping,
     CapacityReservationSpecification, DesiredConfiguration, InstanceLifecyclePolicy,
     InstanceMaintenancePolicy, InstanceMetadataOptions, LaunchTemplateSpecification,
     MixedInstancesPolicy, Operator, RefreshPreferences, Tag, TrafficSourceIdentifier,
@@ -217,6 +217,16 @@ pub const ACTIVITY_FAILED: &str = "Failed";
 pub const GROUP_STATE_IN_SERVICE: &str = "InService";
 /// `Activity$AutoScalingGroupState` for a group that has been deleted.
 pub const GROUP_STATE_DELETED: &str = "Deleted";
+
+/// What the activities of a termination request record as the reason they began: a
+/// caller named the instance, which is what tells the activity log a manual termination
+/// apart from the scale-in a capacity change chose for itself.
+///
+/// Reads as the subject of [`AutoScalingState::capacity_change_cause`] when the request
+/// also asked for the desired capacity to be decremented, and as a sentence of its own
+/// when it did not.
+pub const TERMINATE_INSTANCE_REASON: &str =
+    "a user request explicitly terminated an instance of the group";
 
 /// The most instances this emulator will hold for one Auto Scaling group, and so
 /// the largest `MinSize`, `MaxSize` or `DesiredCapacity` any operation accepts.
@@ -465,6 +475,27 @@ impl StoredGroup {
     pub fn attached_target_groups(&self) -> &[String] {
         self.target_group_arns.as_deref().unwrap_or_default()
     }
+
+    /// The instances `instance_ids` names that a termination would take out of service:
+    /// each one ONCE, in request order.
+    ///
+    /// An id this group does not hold contributes nothing, an id the request repeats
+    /// names one instance, and one already `Terminating` is already on its way out — so
+    /// this is both what a termination acts on and what its decrement of the desired
+    /// capacity counts.
+    pub fn instances_to_terminate(&self, instance_ids: &[String]) -> Vec<String> {
+        let mut taken: Vec<String> = Vec::new();
+        for instance_id in instance_ids {
+            let still_in_service = self.instances.iter().any(|instance| {
+                instance.instance_id == *instance_id
+                    && instance.lifecycle_state != LIFECYCLE_TERMINATING
+            });
+            if still_in_service && !taken.contains(instance_id) {
+                taken.push(instance_id.clone());
+            }
+        }
+        taken
+    }
 }
 
 /// A stored scaling activity — the `Activity` resource a capacity change produces.
@@ -483,6 +514,47 @@ pub struct StoredActivity {
     pub auto_scaling_group_state: Option<String>,
     /// When this activity finishes, if it has not finished yet.
     pub completes_at: Option<SystemTime>,
+}
+
+impl StoredActivity {
+    /// This activity as the API reports it — the `Activity` shape.
+    ///
+    /// THE ONE projection of a stored activity onto the wire shape, so the activity an
+    /// operation answers with and a later read of the same activity report it
+    /// identically.
+    ///
+    /// `group_held` is whether the account still holds the group the activity belongs to,
+    /// which is what `AutoScalingGroupState` reports: a group deleted since the activity
+    /// was recorded is reported deleted on every activity of its own.
+    pub fn to_activity(&self, group_held: bool) -> Activity {
+        Activity {
+            activity_id: self.activity_id.clone(),
+            auto_scaling_group_name: self.auto_scaling_group_name.clone(),
+            description: self.description.clone(),
+            cause: self.cause.clone(),
+            start_time: to_date_time(self.start_time),
+            end_time: self.end_time.map(to_date_time),
+            status_code: self.status_code.clone(),
+            // "If an attempt to launch instances failed, the StatusCode value is Failed or
+            // Cancelled and the StatusMessage element in the response indicates the cause
+            // of the failure" (`DescribeScalingActivities`'s own documentation): the
+            // sentence the failed activity recorded IS that cause, and an activity that
+            // did not fail has none.
+            status_message: (self.status_code == ACTIVITY_FAILED)
+                .then(|| self.description.clone())
+                .flatten(),
+            progress: Some(self.progress),
+            details: self.details.clone(),
+            auto_scaling_group_state: Some(if group_held {
+                self.auto_scaling_group_state
+                    .clone()
+                    .unwrap_or_else(|| GROUP_STATE_IN_SERVICE.to_string())
+            } else {
+                GROUP_STATE_DELETED.to_string()
+            }),
+            auto_scaling_group_arn: self.auto_scaling_group_arn.clone(),
+        }
+    }
 }
 
 /// A stored instance refresh — the `InstanceRefresh` resource `StartInstanceRefresh`
@@ -696,6 +768,31 @@ impl AutoScalingState {
             self.instance_refreshes.drain(..excess);
         }
         instance_refresh_id
+    }
+
+    /// The activity `activity_id` names, if this store still holds it.
+    ///
+    /// An operation that reports the activity it just recorded reads the STORED record
+    /// back rather than building a second copy of it, so what it answers with and what a
+    /// later read of the log reports are one activity.
+    pub fn activity(&self, activity_id: &str) -> Option<&StoredActivity> {
+        self.activities
+            .iter()
+            .find(|activity| activity.activity_id == activity_id)
+    }
+
+    /// The group that holds the instance `instance_id`, if one does.
+    ///
+    /// An Amazon EC2 instance is part of at most one Auto Scaling group, so a request
+    /// that names an instance without naming its group is answered from the group the
+    /// instance itself belongs to.
+    pub fn group_holding_instance(&self, instance_id: &str) -> Option<&StoredGroup> {
+        self.groups.values().find(|group| {
+            group
+                .instances
+                .iter()
+                .any(|instance| instance.instance_id == instance_id)
+        })
     }
 
     /// The group's ACTIVE instance refresh, if it has one: the one still running.
@@ -1120,6 +1217,106 @@ impl AutoScalingState {
                 now,
             );
         }
+    }
+
+    /// Take the instances `instance_ids` names out of service because a CALLER asked
+    /// for those instances by id, and answer the scaling activities that did it.
+    ///
+    /// A termination request is not a capacity change: it names the instances to
+    /// terminate, so the `TerminationPolicies` and the scale-in protection that decide
+    /// WHICH instances a capacity change picks do not apply to them. Each named instance
+    /// the group still holds is reported `Terminating` until [`LIFECYCLE_TRANSITION`] is
+    /// due and the same Amazon EC2 instance is terminated where it lives, and each
+    /// records its own activity.
+    ///
+    /// `should_decrement` is what the request says about the group's size: with it the
+    /// desired capacity goes down by the number of instances this call took out of
+    /// service, so nothing replaces them; without it the capacity stands and the group
+    /// launches a replacement for each, which is the convergence
+    /// [`Self::apply_capacity`] performs for every change. The decrement is held at the
+    /// group's own `MinSize`, because a group never holds a desired capacity below the
+    /// minimum it is configured with — the floor under the caller, which refuses a
+    /// request that would take the capacity under it
+    /// ([`min_size_breach_message`]) rather than quietly applying less than it asked
+    /// for.
+    ///
+    /// An id the group does not hold, an id the request repeats, and one already on its
+    /// way out contribute nothing: the first is refused by the caller, and neither of the
+    /// others takes an instance out of service twice or decrements the capacity twice.
+    /// Answers no activity when the call has nothing left to take out of service, since
+    /// nothing was owed.
+    pub fn terminate_instances_in_group<Eng: Send + Sync + 'static>(
+        &mut self,
+        engine: &Eng,
+        group_name: &str,
+        instance_ids: &[String],
+        should_decrement: bool,
+        now: SystemTime,
+    ) -> Vec<StoredActivity> {
+        let Some(group) = self.groups.get(group_name) else {
+            return Vec::new();
+        };
+        let arn = group.arn.clone();
+        let desired_capacity = group.desired_capacity;
+        let (min_size, max_size) = (group.min_size, group.max_size);
+        // Each instance ONCE, in request order: an id a request repeats names one
+        // instance, and one already `Terminating` is already leaving.
+        let taken = group.instances_to_terminate(instance_ids);
+        if taken.is_empty() {
+            return Vec::new();
+        }
+
+        let count = i32::try_from(taken.len()).unwrap_or(i32::MAX);
+        let new_desired_capacity = if should_decrement {
+            desired_capacity
+                .saturating_sub(count)
+                .clamp(min_size, max_size)
+        } else {
+            desired_capacity
+        };
+        let cause = if should_decrement {
+            Self::capacity_change_cause(
+                TERMINATE_INSTANCE_REASON,
+                desired_capacity,
+                new_desired_capacity,
+            )
+        } else {
+            format!("{TERMINATE_INSTANCE_REASON}.")
+        };
+
+        let due = now + LIFECYCLE_TRANSITION;
+        self.terminate_group_instances(engine, group_name, &taken, due);
+        // Each termination is recorded — and its event queued — through THE ONE path a
+        // lifecycle step of a group's instance goes down, so a termination a caller named
+        // is announced exactly like one a capacity change chose. The activity it stored is
+        // what this call answers with, read back by the id that path minted.
+        let activity_ids: Vec<String> = taken
+            .iter()
+            .map(|instance_id| {
+                self.record_instance_lifecycle_change(
+                    engine,
+                    &InstanceLifecycleChange {
+                        kind: InstanceLifecycle::Terminated,
+                        group_name,
+                        group_arn: &arn,
+                        instance_id,
+                        cause: &cause,
+                        start_time: now,
+                        due,
+                    },
+                )
+            })
+            .collect();
+        let activities: Vec<StoredActivity> = activity_ids
+            .iter()
+            .filter_map(|activity_id| self.activity(activity_id).cloned())
+            .collect();
+        // The group then converges on the capacity the request leaves it with: with the
+        // decrement there is nothing to replace, and without it every instance this call
+        // took out of service is replaced — the same convergence, and the same cooldown,
+        // as every other change to the group's size.
+        self.apply_capacity(engine, group_name, new_desired_capacity, &cause, now);
+        activities
     }
 
     /// Launch instances into the group through the account's own Amazon EC2 store and
@@ -1980,6 +2177,74 @@ pub fn instances_not_in_group_message(instance_ids: &[String]) -> String {
         "Trying to update Instances that are not part of the group: {}",
         instance_ids.join(", ")
     )
+}
+
+/// The token this service's refusals carry where a message names a part of the request
+/// the request did not supply, as [`ABSENT_GROUP_MESSAGE_WITHOUT_DETAIL`] carries it.
+pub const UNFILLED_DETAIL_TOKEN: &str = "null";
+
+/// The message a TERMINATION request that names an instance which is not part of the
+/// Auto Scaling group it is terminated from is refused with.
+///
+/// One sentence per offending instance, as the refusal class is worded: the fixed text
+/// is `Instance ` / ` is not part of Auto Scaling group ` / `.`, and the two variable
+/// parts are the instance id and the group name, both from the request. A request that
+/// names no group at all leaves that part unfilled, so it travels as
+/// [`UNFILLED_DETAIL_TOKEN`] — there is no group the instance could be part of.
+///
+/// This is a different class from [`instances_not_in_group_message`], which refuses a
+/// group-scoped UPDATE over a set of instances as one unit of work and names the whole
+/// offending set; a termination acts on the instance itself.
+pub fn instance_not_in_group_message(instance_id: &str, group_name: Option<&str>) -> String {
+    let group_name = group_name.unwrap_or(UNFILLED_DETAIL_TOKEN);
+    format!("Instance {instance_id} is not part of Auto Scaling group {group_name}.")
+}
+
+/// The message a termination request that names no instance at all is refused with: the
+/// operation terminates the instances a request names, so one of the two members that
+/// name them has to be there.
+///
+/// Same shape as the create's own "Valid requests must contain …" refusal: fixed text
+/// naming the members a valid request may use, with nothing taken from the request.
+pub const NO_INSTANCE_TO_TERMINATE_MESSAGE: &str =
+    "Valid requests must contain either the InstanceId or the InstanceIds parameter.";
+
+/// The message a termination request naming instances through `InstanceIds` without the
+/// group that holds them is refused with.
+///
+/// From the model's own documentation for
+/// `TerminateInstanceInAutoScalingGroupType$InstanceIds`: "This parameter requires that
+/// you also specify AutoScalingGroupName." Fixed text, with nothing taken from the
+/// request.
+pub const GROUP_NAME_REQUIRED_WITH_INSTANCE_IDS_MESSAGE: &str =
+    "Valid requests must contain the AutoScalingGroupName parameter when the InstanceIds \
+     parameter is specified.";
+
+/// The message a termination that asks to decrement the desired capacity below the
+/// group's own `MinSize` is refused with, and what to change instead.
+///
+/// A group's desired capacity never goes below the minimum it is configured with, so the
+/// decrement is refused rather than applied in part. A request naming ONE instance can
+/// only cross the minimum when the desired capacity is already AT it — the capacity is
+/// never under it — which is the sentence's first form, and the size the two bounds share
+/// is its only variable part. A request naming several states the two sizes it crossed
+/// and how many instances it asked to terminate; the rest of the sentence is the same
+/// fixed text.
+pub fn min_size_breach_message(desired_capacity: i32, min_size: i32, terminating: usize) -> String {
+    let remedy = "Either set shouldDecrementDesiredCapacity flag to false or lower group's \
+                  min size.";
+    if desired_capacity == min_size {
+        format!(
+            "Currently, desiredSize equals minSize ({min_size}). Terminating instance without \
+             replacement will violate group's min size constraint. {remedy}"
+        )
+    } else {
+        format!(
+            "Currently, desiredSize is {desired_capacity} and minSize is {min_size}. \
+             Terminating {terminating} instances without replacement will violate group's min \
+             size constraint. {remedy}"
+        )
+    }
 }
 
 /// The absent-group refusal whose detail QUOTES the name it was asked for.

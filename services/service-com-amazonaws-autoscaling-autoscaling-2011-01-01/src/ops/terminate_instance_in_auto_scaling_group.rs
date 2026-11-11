@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op TerminateInstanceInAutoScalingGroup
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `TerminateInstanceInAutoScalingGroup`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`TerminateInstanceInAutoScalingGroup::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Takes the instances a request NAMES out of service: each one the group still holds is
+//! reported `Terminating` and the same Amazon EC2 instance is terminated where it lives
+//! ([`crate::state::ec2_instances`]), and each records the scaling activity this
+//! operation answers with — `Activity` for a request that names one instance through
+//! `InstanceId`, `Activities` for one that names them through `InstanceIds`, as the model
+//! documents. `ShouldDecrementDesiredCapacity` is what the request says about the group's
+//! size: with it the desired capacity goes down by the number of instances terminated,
+//! and without it the capacity stands, so the group launches a replacement for each. A
+//! decrement that would take the capacity below the group's own `MinSize` is refused: a
+//! group's desired capacity never goes under the minimum it is configured with.
 //!
 //! ## Shape of an operation
 //!
@@ -165,18 +166,160 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `TerminateInstanceInAutoScalingGroup` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(TerminateInstanceInAutoScalingGroupErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("TerminateInstanceInAutoScalingGroup"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                TerminateInstanceInAutoScalingGroupErrorModeled::ResourceContentionFault(
+                    ResourceContentionFault {
+                        message: Some(
+                            "the Auto Scaling store is not mounted on this engine".to_string(),
+                        ),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // Which instances the request names, and in which form it names them: the model
+        // documents `InstanceIds` as the way "to terminate multiple instances in a single
+        // call … instead of InstanceId", and the response "populates Activities instead of
+        // Activity" when it is used — so the form the request took decides which output
+        // member carries the activities, whatever the list's length. How MANY ids one call
+        // may name is the model's own `TerminationInstanceIds` length (1..100, "you can
+        // specify up to 100 instances"), refused before this handler runs, so the per-id
+        // work below is bounded by that hundred.
+        let named_as_list = input
+            .instance_ids
+            .as_ref()
+            .is_some_and(|instance_ids| !instance_ids.is_empty());
+        let requested: Vec<String> = match (input.instance_ids, input.instance_id) {
+            (Some(instance_ids), _) if !instance_ids.is_empty() => instance_ids,
+            (_, Some(instance_id)) => vec![instance_id],
+            _ => {
+                return Err(crate::scaffolded::Scaffolded::validation_error(
+                    crate::state::NO_INSTANCE_TO_TERMINATE_MESSAGE,
+                ));
+            }
+        };
+        // `InstanceIds` "requires that you also specify AutoScalingGroupName": the group
+        // is not inferred for the list form, so a request that omits it is refused.
+        if named_as_list && input.auto_scaling_group_name.is_none() {
+            return Err(crate::scaffolded::Scaffolded::validation_error(
+                crate::state::GROUP_NAME_REQUIRED_WITH_INSTANCE_IDS_MESSAGE,
+            ));
+        }
+
+        let should_decrement = input.should_decrement_desired_capacity;
+        let now = ::std::time::SystemTime::now();
+        let mut state = state.lock();
+        state.materialize_due(&*self.engine, now);
+
+        // The group the instances are terminated from: the one the request names, or —
+        // for a request that names one instance and no group — the group that instance is
+        // part of.
+        let group_name = match input.auto_scaling_group_name {
+            Some(name) => name,
+            None => {
+                let Some(instance_id) = requested.first() else {
+                    return Err(crate::scaffolded::Scaffolded::validation_error(
+                        crate::state::NO_INSTANCE_TO_TERMINATE_MESSAGE,
+                    ));
+                };
+                match state.group_holding_instance(instance_id) {
+                    Some(group) => group.name.clone(),
+                    // An instance of no Auto Scaling group is part of none, and the
+                    // request named no group for the message to report.
+                    None => {
+                        return Err(crate::scaffolded::Scaffolded::validation_error(
+                            crate::state::instance_not_in_group_message(instance_id, None),
+                        ));
+                    }
+                }
+            }
+        };
+        // A name no group answers to is refused with the wording this service's
+        // group-scoped writes answer with, its detail field left unfilled.
+        let Some(group) = state.groups.get(&group_name) else {
+            return Err(crate::scaffolded::Scaffolded::validation_error(
+                crate::state::ABSENT_GROUP_MESSAGE_WITHOUT_DETAIL,
+            ));
+        };
+
+        // Checked for EVERY named instance before anything is terminated: an instance
+        // that is not part of the group is refused, and the instances of the group the
+        // same request named stay exactly as they were.
+        if let Some(foreign) = requested.iter().find(|instance_id| {
+            !group
+                .instances
+                .iter()
+                .any(|instance| instance.instance_id == **instance_id)
+        }) {
+            return Err(crate::scaffolded::Scaffolded::validation_error(
+                crate::state::instance_not_in_group_message(foreign, Some(&group_name)),
+            ));
+        }
+
+        // The decrement a request asks for is a change to the group's SIZE, and a group's
+        // desired capacity never goes below the `MinSize` it is configured with: a
+        // request that would take it under is refused, rather than terminating the
+        // instances and decrementing by less than it asked for.
+        let taken = group.instances_to_terminate(&requested);
+        if should_decrement {
+            let count = i32::try_from(taken.len()).unwrap_or(i32::MAX);
+            if group.desired_capacity.saturating_sub(count) < group.min_size {
+                return Err(crate::scaffolded::Scaffolded::validation_error(
+                    crate::state::min_size_breach_message(
+                        group.desired_capacity,
+                        group.min_size,
+                        taken.len(),
+                    ),
+                ));
+            }
+        }
+
+        let activities: Vec<Activity> = state
+            .terminate_instances_in_group(
+                &*self.engine,
+                &group_name,
+                &requested,
+                should_decrement,
+                now,
+            )
+            .iter()
+            // The group these activities belong to is the one this call just terminated
+            // instances of, so the account holds it.
+            .map(|activity| activity.to_activity(true))
+            .collect();
+
+        crate::state::audit(
+            ctx.parts(),
+            "TerminateInstanceInAutoScalingGroup",
+            &group_name,
+            if should_decrement {
+                "instances terminated and the desired capacity decremented"
+            } else {
+                "instances terminated"
+            },
+        );
+        // The instances this call took out of service, and any replacement it launched,
+        // settle on the clock, and the lifecycle events that report them are published as
+        // they fall due, with no further call from anybody. The store's lock is released
+        // first: the pump takes it itself.
+        drop(state);
+        crate::state::drive_lifecycle_clock(ctx, &self.engine);
+        // One member or the other, never both: a request naming one instance answers with
+        // the one activity its termination recorded, and a list request with the
+        // activities of all of them.
+        if named_as_list {
+            Ok(TerminateInstanceInAutoScalingGroupOutput {
+                activity: None,
+                activities: Some(activities),
+            })
+        } else {
+            Ok(TerminateInstanceInAutoScalingGroupOutput {
+                activity: activities.into_iter().next(),
+                activities: None,
+            })
+        }
     }
 }
+

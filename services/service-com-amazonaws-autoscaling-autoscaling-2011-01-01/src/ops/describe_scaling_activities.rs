@@ -284,7 +284,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .filter(|activity| criteria.admits(activity))
             .filter_map(|activity| {
                 let group_held = state.groups.contains_key(&activity.auto_scaling_group_name);
-                (group_held || include_deleted_groups).then(|| activity_view(activity, group_held))
+                (group_held || include_deleted_groups).then(|| activity.to_activity(group_held))
             })
             .collect();
         // "Activities are sorted by start time. Activities still in progress are
@@ -501,37 +501,7 @@ fn seconds_since_epoch(time: SystemTime) -> f64 {
     crate::state::to_date_time(time).as_secs_f64()
 }
 
-/// The `Activity` the service reports for a stored activity.
-///
-/// `group_held` is whether the account still holds the group the activity belongs to,
-/// which is what `AutoScalingGroupState` reports: a group deleted since the activity was
-/// recorded is reported deleted on every activity of its own.
-fn activity_view(activity: &crate::state::StoredActivity, group_held: bool) -> Activity {
-    Activity {
-        activity_id: activity.activity_id.clone(),
-        auto_scaling_group_name: activity.auto_scaling_group_name.clone(),
-        auto_scaling_group_arn: activity.auto_scaling_group_arn.clone(),
-        description: activity.description.clone(),
-        cause: activity.cause.clone(),
-        start_time: crate::state::to_date_time(activity.start_time),
-        end_time: activity.end_time.map(crate::state::to_date_time),
-        status_code: activity.status_code.clone(),
-        // "If an attempt to launch instances failed, the StatusCode value is Failed or
-        // Cancelled and the StatusMessage element in the response indicates the cause of
-        // the failure" (this operation's own documentation): the sentence the failed
-        // activity recorded IS that cause, and an activity that did not fail has none.
-        status_message: (activity.status_code == crate::state::ACTIVITY_FAILED)
-            .then(|| activity.description.clone())
-            .flatten(),
-        progress: Some(activity.progress),
-        details: activity.details.clone(),
-        auto_scaling_group_state: Some(if group_held {
-            activity
-                .auto_scaling_group_state
-                .clone()
-                .unwrap_or_else(|| crate::state::GROUP_STATE_IN_SERVICE.to_string())
-        } else {
-            crate::state::GROUP_STATE_DELETED.to_string()
-        }),
-    }
-}
+// The `Activity` this operation reports for a stored activity is
+// `crate::state::StoredActivity::to_activity`, THE ONE projection of a stored activity
+// onto the wire shape — the activity an operation answers with when it RECORDS one and the
+// activity this read reports are then one record, reported one way.
