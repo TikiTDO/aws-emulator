@@ -61,6 +61,12 @@ pem = "3"
 # Decodes the DER inside one `CERTIFICATE` PEM block as an X.509 certificate, so a trust
 # store's `NumberOfCaCertificates` counts certificates a real parser accepted.
 x509-cert = "0.2"
+# The two content codings a cache behaviour's automatic compression serves an answer under
+# (`service::edge::compression`): `brotli` produces the `br` bytes a viewer that negotiated
+# Brotli receives, `flate2` the `gzip` ones. The bytes the edge serves are the encoders' own,
+# so what a viewer decodes is what the origin sent.
+brotli = "9"
+flate2 = "1"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -68,6 +74,10 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+# DECODE the two content codings the edge compresses an answer under, so the edge suite reads
+# the bytes it served and proves they really are that coding's rather than mislabelled.
+brotli = "9"
+flate2 = "1"
 # Generates the real self-signed CA certificates the trust store suite stages as a bundle,
 # so the certificate count it expects back comes from certificates a parser produced rather
 # than from the code under test. TEST-ONLY.

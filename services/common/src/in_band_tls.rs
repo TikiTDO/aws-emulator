@@ -44,9 +44,25 @@ pub const TLS_RECORD_FIRST_BYTE: u8 = 0x16;
 /// this emulator could not complete — in each case there is nothing to serve on the
 /// connection.
 pub async fn negotiated(
-    mut conn: ListenerConn,
+    conn: ListenerConn,
     upgrader: Option<TlsUpgrader>,
 ) -> Option<ListenerConn> {
+    negotiated_scheme(conn, upgrader)
+        .await
+        .map(|(conn, _encrypted)| conn)
+}
+
+/// [`negotiated`], reporting WHICH half of the address the client dialled: `true` when the
+/// connection was opened with a TLS record and is now read decrypted, `false` when the
+/// client sent its request in the clear.
+///
+/// One announced address serves both schemes, so a service that tells a client (or an origin
+/// behind it) which scheme the client used reads it here — there is nothing else on the
+/// connection that says so.
+pub async fn negotiated_scheme(
+    mut conn: ListenerConn,
+    upgrader: Option<TlsUpgrader>,
+) -> Option<(ListenerConn, bool)> {
     let mut first = [0u8; 1];
     match conn.read(&mut first).await {
         Ok(1) => {}
@@ -58,13 +74,13 @@ pub async fn negotiated(
         inner: conn,
     });
     if first[0] != TLS_RECORD_FIRST_BYTE {
-        return Some(prefixed);
+        return Some((prefixed, false));
     }
     let upgrader = upgrader?;
     // ALPN `None`: a client of such a plane offers `http/1.1` or nothing, and what follows
     // is HTTP/1.1 either way.
     match upgrader.accept(prefixed, None).await {
-        Ok((upgraded, _negotiated)) => Some(upgraded),
+        Ok((upgraded, _negotiated)) => Some((upgraded, true)),
         Err(error) => {
             ::tracing::debug!(%error, "a TLS handshake on a data-plane listener was not completed");
             None

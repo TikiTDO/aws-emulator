@@ -108,6 +108,14 @@
 //! (origin-form URI plus a `Host` header), so `ViewerProtocolPolicy` — which is about
 //! HTTP versus HTTPS from the viewer — is not decided here.
 
+/// The content encodings the edge compresses an answer with, and the bytes they produce.
+pub mod compression;
+/// WHICH headers, cookies and query strings the behaviour's policies key on and forward.
+pub mod forwarding;
+/// The `CloudFront-*` request headers the edge generates itself, and the viewer-stated ones
+/// it drops.
+pub mod generated_headers;
+
 use aws_smithy_runtime_api::client::http::HttpConnector;
 use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse, StatusCode};
 use aws_smithy_types::body::SdkBody;
@@ -116,11 +124,12 @@ use std::time::{Duration, SystemTime};
 
 use super::edge_metrics;
 use super::origin_access::{self, OriginAccess};
+use compression::Encoding;
 use crate::ops::types::{AllowedMethods, CacheBehavior, DefaultCacheBehavior, Origin};
 use crate::state::{
-    managed_cache_policy, managed_origin_request_policy, matches_path_pattern, same_domain,
-    CachedEdgeResponse, ComAmazonawsCloudfrontCloudfront20200531State, StoredDistribution,
-    DEFAULT_ALLOWED_METHODS, DEFAULT_ORIGIN_READ_TIMEOUT, GEO_RESTRICTION_BLACKLIST,
+    managed_cache_policy, matches_path_pattern, same_domain, CachedEdgeResponse,
+    ComAmazonawsCloudfrontCloudfront20200531State, StoredDistribution, DEFAULT_ALLOWED_METHODS,
+    DEFAULT_COMPRESS, DEFAULT_ORIGIN_READ_TIMEOUT, GEO_RESTRICTION_BLACKLIST,
     GEO_RESTRICTION_WHITELIST,
 };
 
@@ -183,19 +192,6 @@ const NO_ORIGIN_DETAIL: &str = "CloudFront wasn't able to connect to the origin.
 const GEO_RESTRICTED_DETAIL: &str =
     "The Amazon CloudFront distribution is configured to block access from your country.";
 
-/// The header a viewer states the country it is in with, as CloudFront spells the one it
-/// adds to an origin request from the viewer's location: a `Location` of
-/// `GeoRestriction$Items` is "a two-letter, uppercase country code" (`ISO 3166-1
-/// alpha-2`), and this header carries exactly that.
-///
-/// CloudFront itself resolves the country from the VIEWER'S ADDRESS, through the MaxMind
-/// GeoIP databases `GeoRestriction` names. Nothing of that is reachable here: every viewer
-/// of this emulator dials a loopback address, which is in no country any database places,
-/// and no database is consulted off this machine. So the country travels on the request,
-/// in the one header CloudFront states it in — the same addressing choice [`resolve`]
-/// makes for the host a viewer cannot resolve either.
-const VIEWER_COUNTRY_HEADER: &str = "cloudfront-viewer-country";
-
 /// The headers that belong to ONE hop of an HTTP connection and are never forwarded to an
 /// origin, as RFC 9110 lists them, plus the viewer's own `Authorization` and the headers
 /// CloudFront itself puts on an origin request.
@@ -204,12 +200,13 @@ const VIEWER_COUNTRY_HEADER: &str = "cloudfront-viewer-country";
 /// by the distribution's stored configuration, so forwarding a caller's credential there
 /// would hand it to a destination the caller of THIS request did not choose. Every other
 /// viewer header is forwarded exactly as the behaviour's origin request policy says
-/// ([`forwards_header`]).
+/// ([`forwarding`]).
 ///
 /// [`X_AMZ_CF_ID`] is here for the other reason: it is CloudFront's OWN identifier for the
 /// request it is serving ([`stamp`] mints one per request), so an origin request carries the
 /// edge's value and never a viewer's — a header a viewer sent under that name describes a
-/// request the edge did not serve.
+/// request the edge did not serve. The whole `CloudFront-*` family is dropped for that same
+/// reason, through [`generated_headers::is_generated`].
 const HEADERS_NEVER_FORWARDED: [&str; 11] = [
     "authorization",
     "connection",
@@ -224,27 +221,20 @@ const HEADERS_NEVER_FORWARDED: [&str; 11] = [
     X_AMZ_CF_ID,
 ];
 
-/// An `OriginRequestPolicyHeadersConfig$HeaderBehavior` that forwards every viewer header.
-const HEADERS_ALL_VIEWER: &str = "allViewer";
+/// The header a viewer asks for a content coding with, and the one an answer states its
+/// coding in: `Accept-Encoding` is normalized by the cache policy that enables gzip or
+/// Brotli ([`forwarding::accept_encoding`]), and `Content-Encoding` says what decodes the
+/// bytes the edge served.
+const ACCEPT_ENCODING: &str = "accept-encoding";
 
-/// An `OriginRequestPolicyHeadersConfig$HeaderBehavior` that forwards every viewer header
-/// but the `Host` one, which the origin request carries as the origin's own host.
-const HEADERS_ALL_VIEWER_EXCEPT_HOST: &str = "allViewerExceptHostHeader";
+/// The response header naming the coding the served bytes are under.
+const CONTENT_ENCODING: &str = "content-encoding";
 
-/// A header behaviour that forwards exactly the named headers.
-const HEADERS_WHITELIST: &str = "whitelist";
+/// The header the viewer's cookies travel in, as one `name=value` list.
+const COOKIE: &str = "cookie";
 
-/// The `CachePolicyCookiesConfig$CookieBehavior` that puts no cookie in the cache key.
-const COOKIES_NONE: &str = "none";
-
-/// An `OriginRequestPolicyHeadersConfig$HeaderBehavior` that forwards every viewer header
-/// and, beside them, the named CloudFront-generated ones — which this emulator does not
-/// add, so for a VIEWER header it decides exactly what `allViewer` does.
-const HEADERS_ALL_VIEWER_AND_CLOUDFRONT: &str = "allViewerAndWhitelistCloudFront";
-
-/// An `OriginRequestPolicyHeadersConfig$HeaderBehavior` that forwards the named headers
-/// beside the ones the cache key already carries.
-const HEADERS_ALL_EXCEPT: &str = "allExcept";
+/// The response (and request) header naming the media type of a body.
+const CONTENT_TYPE: &str = "content-type";
 
 /// What a viewer request addresses, as the wire carries it: the request's host — absent
 /// on a request that carries neither a `Host` header nor an absolute URI — its path, and
@@ -538,6 +528,9 @@ struct Behavior {
     allowed_methods: Option<AllowedMethods>,
     cache_policy_id: Option<String>,
     origin_request_policy_id: Option<String>,
+    /// `Compress` — "whether you want CloudFront to automatically compress certain files
+    /// for this cache behavior", and [`DEFAULT_COMPRESS`] for a behaviour that states none.
+    compress: bool,
     /// The legacy per-behaviour TTL, for a behaviour that names no cache policy.
     default_ttl: Option<i64>,
     max_ttl: Option<i64>,
@@ -552,6 +545,7 @@ impl Behavior {
             allowed_methods: behavior.allowed_methods.clone(),
             cache_policy_id: behavior.cache_policy_id.clone(),
             origin_request_policy_id: behavior.origin_request_policy_id.clone(),
+            compress: behavior.compress.unwrap_or(DEFAULT_COMPRESS),
             default_ttl: behavior.default_ttl,
             max_ttl: behavior.max_ttl,
         }
@@ -565,6 +559,7 @@ impl Behavior {
             allowed_methods: behavior.allowed_methods.clone(),
             cache_policy_id: behavior.cache_policy_id.clone(),
             origin_request_policy_id: behavior.origin_request_policy_id.clone(),
+            compress: behavior.compress.unwrap_or(DEFAULT_COMPRESS),
             default_ttl: behavior.default_ttl,
             max_ttl: behavior.max_ttl,
         }
@@ -628,12 +623,11 @@ fn select_behavior(distribution: &StoredDistribution, viewer_path: &str) -> Beha
     }
 }
 
-/// The country a viewer request states it comes from, or `None` when it states none.
-///
-/// Read from [`VIEWER_COUNTRY_HEADER`], which is where CloudFront itself states a viewer's
-/// country; the value travels as the two-letter code a `Location` is spelled with.
-fn viewer_country(req: &RtRequest) -> Option<&str> {
-    req.headers().get(VIEWER_COUNTRY_HEADER)
+/// The country a viewer request comes from, as the edge resolves it
+/// ([`generated_headers::viewer_country`]): the ONE value this request's country has, read
+/// by the geographic restriction below and by the header the origin receives alike.
+fn viewer_country(req: &RtRequest) -> String {
+    generated_headers::viewer_country(req)
 }
 
 /// Whether this distribution's GEOGRAPHIC RESTRICTION refuses a viewer in `country`,
@@ -648,10 +642,9 @@ fn viewer_country(req: &RtRequest) -> Option<&str> {
 /// also what a configuration carrying no `Restrictions` at all means
 /// ([`crate::state::GEO_RESTRICTION_NONE`]).
 ///
-/// A `Location` is "a two-letter, uppercase country code", so what the VIEWER stated is
-/// matched without regard to its case; a viewer that stated no country at all is in none
-/// of the listed locations, which a blocklist does not reach and a whitelist cannot admit.
-fn geo_restricts(distribution: &StoredDistribution, country: Option<&str>) -> bool {
+/// A `Location` is "a two-letter, uppercase country code", so the country the edge resolved
+/// is matched without regard to its case.
+fn geo_restricts(distribution: &StoredDistribution, country: &str) -> bool {
     let Some(restrictions) = distribution.config.restrictions.as_ref() else {
         return false;
     };
@@ -661,7 +654,7 @@ fn geo_restricts(distribution: &StoredDistribution, country: Option<&str>) -> bo
         .as_deref()
         .unwrap_or_default()
         .iter()
-        .any(|location| country.is_some_and(|country| location.eq_ignore_ascii_case(country)));
+        .any(|location| location.eq_ignore_ascii_case(country));
     match geo.restriction_type.as_str() {
         GEO_RESTRICTION_BLACKLIST => listed,
         GEO_RESTRICTION_WHITELIST => !listed,
@@ -714,53 +707,6 @@ fn cache_ttl(
     (seconds > 0).then(|| Duration::from_secs(seconds))
 }
 
-/// The headers of the viewer request that are forwarded to the origin, as the behaviour's
-/// ORIGIN REQUEST POLICY names them.
-///
-/// `OriginRequestPolicyHeadersConfig$HeaderBehavior`: `none` forwards none of the viewer's
-/// headers, `whitelist` forwards the ones named, `allViewer` forwards all of them,
-/// `allViewerExceptHostHeader` all but `Host` — which the origin request carries as the
-/// origin's own host either way — and `allExcept` all but the ones named. A behaviour that
-/// names no origin request policy forwards none, which is CloudFront's default.
-fn forwards_header(
-    store: &ComAmazonawsCloudfrontCloudfront20200531State,
-    behavior: &Behavior,
-    header: &str,
-) -> bool {
-    let Some(id) = behavior.origin_request_policy_id.as_deref() else {
-        return false;
-    };
-    let (header_behavior, named): (String, Vec<String>) = match store.origin_request_policies.get(id)
-    {
-        Some(stored) => (
-            stored.config.headers_config.header_behavior.clone(),
-            stored
-                .config
-                .headers_config
-                .headers
-                .as_ref()
-                .and_then(|headers| headers.items.clone())
-                .unwrap_or_default(),
-        ),
-        None => match managed_origin_request_policy(id) {
-            Some(managed) => (
-                managed.header_behavior.to_string(),
-                managed.headers.iter().map(|&name| name.to_string()).collect(),
-            ),
-            None => return false,
-        },
-    };
-    let is_named = |header: &str| named.iter().any(|name| name.eq_ignore_ascii_case(header));
-    match header_behavior.as_str() {
-        HEADERS_ALL_VIEWER | HEADERS_ALL_VIEWER_AND_CLOUDFRONT => true,
-        HEADERS_ALL_VIEWER_EXCEPT_HOST => !header.eq_ignore_ascii_case("host"),
-        HEADERS_WHITELIST => is_named(header),
-        HEADERS_ALL_EXCEPT => !is_named(header),
-        // `none`, and any behaviour this emulator does not know: no viewer header.
-        _ => false,
-    }
-}
-
 /// What the edge does with one viewer request, decided from the stored configuration
 /// alone.
 ///
@@ -772,9 +718,32 @@ enum Plan {
     /// error page carries.
     Generated { status: u16, detail: &'static str },
     /// The edge cache holds the answer.
-    Hit { status: u16, body: Vec<u8> },
+    Hit {
+        /// The ORIGIN's own answer, as the entry holds it.
+        answer: OriginAnswer,
+        /// The coding the edge compresses it with, when the behaviour asks for compression
+        /// and this viewer accepts one ([`compression`]).
+        encode: Option<Encoding>,
+    },
     /// The origin must answer it.
     Fetch(Box<OriginFetch>),
+}
+
+/// One answer an ORIGIN produced, as the edge holds it and serves it: the status, the bytes,
+/// and the two things the origin said about those bytes.
+///
+/// What the edge serves FROM it — the content coding one viewer negotiated — is computed per
+/// request rather than held ([`served_origin_answer`]), so one viewer's negotiation is never
+/// served to another.
+#[derive(Debug)]
+struct OriginAnswer {
+    status: u16,
+    body: Vec<u8>,
+    /// `Content-Type` as the origin stated it, or `None` when it stated none.
+    content_type: Option<String>,
+    /// `Content-Encoding` as the origin stated it — the coding its own bytes are under — or
+    /// `None` for bytes the origin did not encode.
+    content_encoding: Option<String>,
 }
 
 /// One origin fetch the edge is to make, and what to do with what comes back.
@@ -794,6 +763,9 @@ struct OriginFetch {
     /// The cache key and TTL a cacheable answer is held under, or `None` when this
     /// request's answer is not cached at all.
     cache: Option<CacheDirective>,
+    /// The coding the edge compresses the origin's answer with, when the behaviour asks for
+    /// compression and this viewer accepts one ([`compression`]).
+    encode: Option<Encoding>,
     /// The viewer path, which an invalidation is matched against.
     viewer_path: String,
 }
@@ -852,7 +824,9 @@ pub async fn serve<Eng: Send + Sync + 'static>(
         Some(refusal) => refused_by_web_acl(refusal, &cf_id),
         None => match plan {
             Plan::Generated { status, detail } => generated(status, detail, &cf_id),
-            Plan::Hit { status, body } => served(status, body, CACHE_HIT, &cf_id),
+            Plan::Hit { answer, encode } => {
+                served_origin_answer(&answer, encode, CACHE_HIT, &cf_id)
+            }
             Plan::Fetch(fetch) => fetch_origin(engine, ctx, *fetch, &cf_id, req).await,
         },
     };
@@ -970,7 +944,7 @@ fn plan_resolved(
     // either, so a restriction cannot be stepped around by asking for an object another
     // viewer already fetched.
     let country = viewer_country(req);
-    if geo_restricts(resolved.distribution, country) {
+    if geo_restricts(resolved.distribution, &country) {
         ::tracing::debug!(
             distribution = %distribution_id,
             "this distribution's geographic restriction refuses this viewer's country; the \
@@ -999,7 +973,26 @@ fn plan_resolved(
         };
     }
     let ttl = cache_ttl(store, &behavior);
-    let cache_key = cache_key(&method, &viewer_path, addressed.query, &keyed_values(store, &behavior, req));
+    // What the behaviour's POLICIES make of this request: which of its parts take part in
+    // the cache key, which of them reach the origin, and what the cache policy makes of the
+    // viewer's `Accept-Encoding` ([`forwarding`]).
+    let keyed = forwarding::cache_key_parameters(store, &behavior);
+    let forwarded = forwarding::forwarded_parameters(store, &behavior);
+    let accept_encoding =
+        forwarding::accept_encoding(&keyed, req.headers().get(ACCEPT_ENCODING));
+    // "Whether you want CloudFront to automatically compress certain files for this cache
+    // behavior": the coding this viewer gets, or none when the behaviour asks for no
+    // compression or the viewer accepts neither coding the cache policy enables.
+    let encode = if behavior.compress {
+        accept_encoding.preferred()
+    } else {
+        None
+    };
+    let cache_key = cache_key(
+        &method,
+        &viewer_path,
+        &keyed_values(&keyed, &accept_encoding, addressed.query, req),
+    );
     // "The HTTP methods for which CloudFront caches responses": a cacheable method under
     // a caching cache policy may be answered from the cache; everything else goes to the
     // origin every time.
@@ -1007,8 +1000,13 @@ fn plan_resolved(
     if cacheable.is_some() {
         if let Some(entry) = resolved.distribution.cached_edge_response(&cache_key, now) {
             return Plan::Hit {
-                status: entry.status,
-                body: entry.body.clone(),
+                answer: OriginAnswer {
+                    status: entry.status,
+                    body: entry.body.clone(),
+                    content_type: entry.content_type.clone(),
+                    content_encoding: entry.content_encoding.clone(),
+                },
+                encode,
             };
         }
     }
@@ -1050,7 +1048,7 @@ fn plan_resolved(
     // configuration: what it says about this fetch is decided after the lock is released
     // (see [`origin_access`]), because the origin's own resource policy is read from the
     // origin's own service.
-    let uri = origin_uri(origin, &viewer_path, addressed.query);
+    let uri = origin_uri(origin, &viewer_path, &origin_query(&keyed, &forwarded, addressed.query));
     let access = origin_access::of_fetch(
         store,
         resolved.distribution,
@@ -1069,154 +1067,106 @@ fn plan_resolved(
             key: cache_key,
             ttl,
         }),
+        encode,
         viewer_path,
     };
     Plan::Fetch(Box::new(fetch))
 }
 
-/// The key one request's answer is cached under: the method, the path, the query, and the
-/// values of the headers and cookies the behaviour's cache policy puts in the cache key
+/// The query string the ORIGIN is asked for: the viewer's own parameters that either policy
+/// names, in the order the viewer sent them.
+///
+/// "The headers, cookies, and query strings that are included in the cache key are also
+/// included in requests that CloudFront sends to the origin", and the origin request policy
+/// names what reaches the origin beside those — so the origin sees the UNION of the two, and
+/// a parameter neither policy names is withheld from it.
+fn origin_query(
+    keyed: &forwarding::CacheKeyParameters,
+    forwarded: &forwarding::ForwardedParameters,
+    query: &str,
+) -> String {
+    forwarding::selected_query(query, |name| {
+        keyed.query_strings.contains(name) || forwarded.query_strings.contains(name)
+    })
+}
+
+/// The key one request's answer is cached under: the method, the path, and the values of the
+/// parts of the request the behaviour's cache policy puts in the cache key
 /// ([`keyed_values`]).
 ///
-/// The query string is part of the key whatever the policy's query-string behaviour says:
-/// keying on more of the request than the policy names can only make an answer MISS that
-/// a real edge would have hit, never serve one request's answer to a different request.
-fn cache_key(method: &str, viewer_path: &str, query: &str, keyed: &str) -> String {
-    format!("{method} {viewer_path}?{query}#{keyed}")
+/// Nothing the cache policy does NOT name takes part in it — "the headers, cookies, and
+/// query strings that are included in the cache key" are what separates one object from
+/// another — so two requests the policy says are the same object share one entry however
+/// they differ elsewhere. Every part the request contributes is rendered under its own LENGTH
+/// ([`keyed_values`]), so no value a viewer chooses can reproduce the rendering of a
+/// different request: the key reads as the list of parts it is rather than as text.
+fn cache_key(method: &str, viewer_path: &str, keyed: &str) -> String {
+    format!("{method} {}:{viewer_path}#{keyed}", viewer_path.len())
 }
 
-/// Which viewer HEADERS a cache policy puts in the cache key, as
-/// `CachePolicyHeadersConfig$HeaderBehavior` names them.
-#[derive(Debug, PartialEq, Eq)]
-enum KeyedHeaders {
-    /// `none`, and a behaviour with no cache policy to read: the key carries no header.
-    None,
-    /// `whitelist`: the named headers, and only those.
-    Named(Vec<String>),
-    /// `allViewer` (and the `allViewerAndWhitelistCloudFront` spelling): every header the
-    /// viewer sent.
-    Every,
-    /// `allExcept`: every header the viewer sent but the named ones.
-    EveryExcept(Vec<String>),
-}
-
-impl KeyedHeaders {
-    /// Whether `header` — already lowercased — takes part in the cache key.
-    fn keys_on(&self, header: &str) -> bool {
-        match self {
-            Self::None => false,
-            Self::Named(named) => named.iter().any(|name| name.eq_ignore_ascii_case(header)),
-            Self::Every => true,
-            Self::EveryExcept(named) => !named.iter().any(|name| name.eq_ignore_ascii_case(header)),
-        }
-    }
-
-    /// The names this reports on their own, so a header the policy keys on that the viewer
-    /// did NOT send still separates the key from one where it was sent.
-    fn named(&self) -> &[String] {
-        match self {
-            Self::Named(named) => named,
-            _ => &[],
-        }
-    }
-}
-
-/// Which headers and cookies the behaviour's CACHE POLICY puts in the cache key.
-///
-/// A behaviour that names no cache policy, or one whose policy cannot be read, keys on
-/// none of them: what such a behaviour forwards is its own legacy `ForwardedValues`
-/// member, not a cache policy's.
-fn keyed_parameters(
-    store: &ComAmazonawsCloudfrontCloudfront20200531State,
-    behavior: &Behavior,
-) -> (KeyedHeaders, bool) {
-    let Some(id) = behavior.cache_policy_id.as_deref() else {
-        return (KeyedHeaders::None, false);
-    };
-    let (header_behavior, headers, cookie_behavior) = match store.cache_policies.get(id) {
-        Some(stored) => match &stored.config.parameters_in_cache_key_and_forwarded_to_origin {
-            Some(parameters) => (
-                parameters.headers_config.header_behavior.clone(),
-                parameters
-                    .headers_config
-                    .headers
-                    .as_ref()
-                    .and_then(|headers| headers.items.clone())
-                    .unwrap_or_default(),
-                parameters.cookies_config.cookie_behavior.clone(),
-            ),
-            None => return (KeyedHeaders::None, false),
-        },
-        None => match managed_cache_policy(id) {
-            Some(managed) => (
-                managed.header_behavior.to_string(),
-                managed
-                    .headers
-                    .iter()
-                    .map(|&name| name.to_ascii_lowercase())
-                    .collect(),
-                managed.cookie_behavior.to_string(),
-            ),
-            None => return (KeyedHeaders::None, false),
-        },
-    };
-    let keyed = match header_behavior.as_str() {
-        HEADERS_WHITELIST => KeyedHeaders::Named(
-            headers
-                .iter()
-                .map(|name| name.to_ascii_lowercase())
-                .collect(),
-        ),
-        HEADERS_ALL_VIEWER | HEADERS_ALL_VIEWER_AND_CLOUDFRONT => KeyedHeaders::Every,
-        HEADERS_ALL_EXCEPT => KeyedHeaders::EveryExcept(
-            headers
-                .iter()
-                .map(|name| name.to_ascii_lowercase())
-                .collect(),
-        ),
-        // `none`, and a behaviour this emulator does not know: no header.
-        _ => KeyedHeaders::None,
-    };
-    // Any cookie behaviour but `none` keys on cookies the viewer sent. The names travel in
-    // the one `Cookie` header, so that header's whole value carries every value the key
-    // needs; a behaviour that names a subset therefore keys on more of it than it has to,
-    // which can only MISS where a real edge would have hit, never serve one request's
-    // answer to a different one.
-    (keyed, cookie_behavior != COOKIES_NONE)
-}
-
-/// The values of the headers and cookies the behaviour's cache policy keys on, rendered as
+/// The values of the parts of the request the behaviour's cache policy keys on, rendered as
 /// the part of the cache key they contribute.
 ///
 /// "The headers, cookies, and query strings that are included in the cache key": two
 /// requests that differ in any value the policy names therefore have different cache keys,
 /// so one viewer's answer is never served to a request the policy says is a different one.
-/// The values are rendered in name order, so the key does not depend on the order the
-/// viewer sent its headers in.
+/// Each kind of part is rendered under a prefix of its own, so a header and a query string
+/// of the same name are two values rather than one, and each kind is rendered in the order
+/// that kind reaches the origin in: headers and cookies by name, the query string as the
+/// viewer sent it — a query string is keyed on whole, so two requests that carry the same
+/// parameters in a different order are two objects. The normalized `Accept-Encoding` is
+/// keyed on last — "includes the normalized header in the cache key".
+///
+/// Each part is rendered under its own LENGTH, so a delimiter inside a value a viewer chose
+/// cannot make one request's parts render as another's.
 fn keyed_values(
-    store: &ComAmazonawsCloudfrontCloudfront20200531State,
-    behavior: &Behavior,
+    keyed: &forwarding::CacheKeyParameters,
+    accept_encoding: &forwarding::AcceptEncoding,
+    query: &str,
     req: &RtRequest,
 ) -> String {
-    let (keyed, keys_on_cookies) = keyed_parameters(store, behavior);
     let mut parts: Vec<String> = Vec::new();
     for (name, value) in req.headers().iter() {
         let name = name.to_ascii_lowercase();
-        if keyed.keys_on(&name) {
-            parts.push(format!("{name}={value}"));
+        if keyed.headers.contains_header(&name) {
+            parts.push(format!("h:{name}={value}"));
         }
     }
-    for name in keyed.named() {
+    for name in keyed.headers.named() {
         if req.headers().get(name).is_none() {
-            parts.push(format!("{name}="));
+            parts.push(format!("h:{}", name.to_ascii_lowercase()));
         }
-    }
-    if keys_on_cookies {
-        let value = req.headers().get("cookie").unwrap_or_default();
-        parts.push(format!("cookie={value}"));
     }
     parts.sort();
-    parts.join(";")
+    let cookie = req.headers().get(COOKIE).unwrap_or_default();
+    parts.extend(
+        forwarding::keyed_pairs(
+            &forwarding::cookie_pairs(cookie),
+            &keyed.cookies,
+            forwarding::PairOrder::ByName,
+        )
+        .into_iter()
+        .map(|pair| format!("c:{pair}")),
+    );
+    parts.extend(
+        forwarding::keyed_pairs(
+            &forwarding::query_pairs(query),
+            &keyed.query_strings,
+            forwarding::PairOrder::AsSent,
+        )
+        .into_iter()
+        .map(|pair| format!("q:{pair}")),
+    );
+    if let Some(value) = accept_encoding.header_value() {
+        parts.push(format!("{ACCEPT_ENCODING}={value}"));
+    }
+    // Each part under its own length, so a `;` (or a `#`, or an `=`) inside a value a viewer
+    // chose cannot render as the boundary between two parts.
+    parts
+        .iter()
+        .map(|part| format!("{}:{part}", part.len()))
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 /// Whether `req` has already been through a CloudFront edge: its `Via` names CloudFront,
@@ -1299,11 +1249,16 @@ fn origin_read_timeout(origin: &Origin) -> Duration {
 /// request"), the `Host` of the origin, the `X-Amz-Cf-Id` of the request the origin is
 /// being fetched for, a `Via` naming CloudFront, the `User-Agent` CloudFront sends when
 /// the viewer's is not forwarded, the viewer headers the behaviour's ORIGIN REQUEST POLICY
-/// forwards ([`forwards_header`]), and the ones its CACHE POLICY keys on — "the headers,
-/// cookies, and query strings that are included in the cache key are also included in
-/// requests that CloudFront sends to the origin" ([`keyed_parameters`]). A header that
-/// belongs to one hop of a connection, and the viewer's own credential, are never
-/// forwarded ([`HEADERS_NEVER_FORWARDED`]).
+/// forwards, the ones its CACHE POLICY keys on — "the headers, cookies, and query strings
+/// that are included in the cache key are also included in requests that CloudFront sends
+/// to the origin" ([`forwarding`]) — and the headers the EDGE ITSELF generates that the
+/// origin request policy names ([`generated_headers`]).
+///
+/// The cookies travel as the two policies select them, one `name=value` at a time, and the
+/// `Accept-Encoding` travels normalized where the cache policy normalizes it. A header that
+/// belongs to one hop of a connection, the viewer's own credential, and a value the viewer
+/// stated for a header CloudFront generates itself are never forwarded
+/// ([`HEADERS_NEVER_FORWARDED`], [`generated_headers::is_generated`]).
 fn origin_request_headers(
     store: &ComAmazonawsCloudfrontCloudfront20200531State,
     behavior: &Behavior,
@@ -1311,20 +1266,54 @@ fn origin_request_headers(
     req: &RtRequest,
     cf_id: &str,
 ) -> Vec<(String, String)> {
-    let (keyed, keys_on_cookies) = keyed_parameters(store, behavior);
+    let keyed = forwarding::cache_key_parameters(store, behavior);
+    let forwarded = forwarding::forwarded_parameters(store, behavior);
+    let accept_encoding = forwarding::accept_encoding(&keyed, req.headers().get(ACCEPT_ENCODING));
+    let generated = generated_headers::Generated::of_request(req);
     let mut headers: Vec<(String, String)> = Vec::new();
     for (name, value) in req.headers().iter() {
         let name = name.to_ascii_lowercase();
         if HEADERS_NEVER_FORWARDED.contains(&name.as_str()) || name == "host" {
             continue;
         }
+        // A `CloudFront-*` header describes the viewer's CONNECTION, so the value the viewer
+        // stated for one is dropped here: the edge's own value is added below, where the
+        // policy names it.
+        if generated_headers::is_generated(&name) {
+            continue;
+        }
+        // The cookies and the negotiated content coding are selected and normalized below,
+        // rather than forwarded as the viewer sent them.
+        if name == COOKIE || (name == ACCEPT_ENCODING && accept_encoding.normalizes()) {
+            continue;
+        }
         // The body's own description travels with the body, whatever the policies say
         // about the viewer's other headers.
-        let carries_body = name == "content-type" || name == "content-length";
-        let in_cache_key = keyed.keys_on(&name) || (keys_on_cookies && name == "cookie");
-        if carries_body || in_cache_key || forwards_header(store, behavior, &name) {
+        let carries_body = name == CONTENT_TYPE || name == "content-length";
+        if carries_body
+            || keyed.headers.contains_header(&name)
+            || forwarded.headers.contains_header(&name)
+        {
             headers.push((name, value.to_string()));
         }
+    }
+    // The cookies the cache key carries, and the ones the origin request policy forwards
+    // beside them, in the order the viewer sent them; a cookie neither policy names is
+    // withheld from the origin, and a request whose cookies are all withheld carries no
+    // `Cookie` header at all.
+    if let Some(cookie) = req.headers().get(COOKIE) {
+        let selected = forwarding::selected_cookies(cookie, |name| {
+            keyed.cookies.contains(name) || forwarded.cookies.contains(name)
+        });
+        if let Some(selected) = selected {
+            headers.push((COOKIE.to_string(), selected));
+        }
+    }
+    // "CloudFront always includes the `Accept-Encoding` header in origin requests when the
+    // value of this field is `true`" — as the normalized value, which is also what the cache
+    // key carries.
+    if let Some(value) = accept_encoding.header_value() {
+        headers.push((ACCEPT_ENCODING.to_string(), value));
     }
     headers.push(("host".to_string(), origin.domain_name.clone()));
     headers.push((X_AMZ_CF_ID.to_string(), cf_id.to_string()));
@@ -1333,6 +1322,14 @@ fn origin_request_headers(
         format!("1.1 {cf_id}.cloudfront.net ({VIA_CLOUDFRONT})"),
     ));
     headers.push(("user-agent".to_string(), ORIGIN_USER_AGENT.to_string()));
+    // The headers the edge generated for this request, where the origin request policy names
+    // them: a behaviour with no origin request policy, or one whose policy does not list a
+    // generated header, sends the origin none of them.
+    for (name, value) in generated.headers() {
+        if forwarded.generated_headers.contains_header(&name) {
+            headers.push((name, value));
+        }
+    }
     for custom in origin
         .custom_headers
         .as_ref()
@@ -1453,6 +1450,17 @@ async fn fetch_origin<Eng: Send + Sync + 'static>(
         Ok(Ok(response)) => response,
     };
     let status = response.status().as_u16();
+    // What the ORIGIN said about its own bytes: the media type, which decides whether the
+    // edge may compress them, and the coding they are already under, which means it must
+    // not.
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .map(ToString::to_string);
+    let content_encoding = response
+        .headers()
+        .get(CONTENT_ENCODING)
+        .map(ToString::to_string);
     let body = response
         .into_body()
         .bytes()
@@ -1466,15 +1474,20 @@ async fn fetch_origin<Eng: Send + Sync + 'static>(
         );
         return generated(BAD_GATEWAY, NO_ORIGIN_DETAIL, cf_id);
     }
+    let answer = OriginAnswer {
+        status,
+        body,
+        content_type,
+        content_encoding,
+    };
     if let Some(directive) = fetch.cache {
-        if is_cacheable_status(status) && body.len() <= MAX_CACHED_BODY_BYTES {
+        if is_cacheable_status(status) && answer.body.len() <= MAX_CACHED_BODY_BYTES {
             cache(
                 engine,
                 &fetch.distribution_id,
                 directive,
                 &fetch.viewer_path,
-                status,
-                &body,
+                &answer,
             );
         }
     }
@@ -1486,7 +1499,7 @@ async fn fetch_origin<Eng: Send + Sync + 'static>(
     } else {
         CACHE_ERROR
     };
-    served(status, body, x_cache, cf_id)
+    served_origin_answer(&answer, fetch.encode, x_cache, cf_id)
 }
 
 /// The error types that are the in-process TRANSPORT's own refusal rather than an answer
@@ -1547,13 +1560,16 @@ fn is_cacheable_status(status: u16) -> bool {
 }
 
 /// Hold one origin answer in the distribution's edge cache.
+///
+/// The ORIGIN'S OWN bytes are held, under its own description of them: what the edge serves
+/// from the entry is computed for each viewer request ([`served_origin_answer`]), so an
+/// object cached for one viewer is not held under another viewer's content coding.
 fn cache<Eng: Send + Sync + 'static>(
     engine: &Eng,
     distribution_id: &str,
     directive: CacheDirective,
     viewer_path: &str,
-    status: u16,
-    body: &[u8],
+    answer: &OriginAnswer,
 ) {
     let Some(state) = crate::state::service_state(engine) else {
         return;
@@ -1578,13 +1594,55 @@ fn cache<Eng: Send + Sync + 'static>(
     distribution.store_edge_response(
         directive.key,
         CachedEdgeResponse {
-            status,
-            body: body.to_vec(),
+            status: answer.status,
+            body: answer.body.clone(),
+            content_type: answer.content_type.clone(),
+            content_encoding: answer.content_encoding.clone(),
             path: viewer_path.to_string(),
             stored_at: now,
             expires_at,
         },
     );
+}
+
+/// One answer the edge serves on an ORIGIN's behalf, whether the origin produced it for this
+/// request or the edge cache held it: the origin's bytes under the origin's own description
+/// of them, compressed with `encode` where the behaviour asks for compression and these
+/// bytes are compressible ([`compression`]).
+///
+/// An answer the origin already encoded keeps the origin's bytes and the origin's coding: it
+/// is not encoded twice, and nothing is relabelled. An answer larger than the size
+/// CloudFront's compression documents ([`compression::MAX_COMPRESSED_BYTES`]) is served as
+/// the origin sent it, which also bounds the work one viewer request asks of this process.
+fn served_origin_answer(
+    answer: &OriginAnswer,
+    encode: Option<Encoding>,
+    x_cache: &str,
+    cf_id: &str,
+) -> RtResponse {
+    let content_type = answer.content_type.as_deref();
+    let mut body = answer.body.clone();
+    let mut encoding = answer.content_encoding.clone();
+    if encoding.is_none() {
+        let compressible = compression::compressible(content_type)
+            && body.len() <= compression::MAX_COMPRESSED_BYTES;
+        if let Some(coding) = encode.filter(|_| compressible) {
+            if let Some(compressed) = coding.compress(&body) {
+                body = compressed;
+                encoding = Some(coding.token().to_string());
+            }
+        }
+    }
+    let mut response = served(answer.status, body, x_cache, cf_id);
+    if let Some(content_type) = content_type {
+        let _ = response
+            .headers_mut()
+            .try_insert(CONTENT_TYPE, content_type.to_string());
+    }
+    if let Some(encoding) = encoding {
+        let _ = response.headers_mut().try_insert(CONTENT_ENCODING, encoding);
+    }
+    response
 }
 
 /// One answer the edge serves on behalf of an origin, or out of its cache.
@@ -1876,6 +1934,7 @@ mod tests {
                 allowed_methods: None,
                 cache_policy_id: None,
                 origin_request_policy_id: policy.map(str::to_string),
+                compress: false,
                 default_ttl: None,
                 max_ttl: None,
             };
@@ -1930,63 +1989,237 @@ mod tests {
         }
     }
 
+    /// The policies one behaviour names, held in a store so the shaping below reads them
+    /// exactly as a served request does: a cache policy that keys on one cookie and
+    /// normalizes the content coding, and an origin request policy that forwards one other
+    /// cookie, one viewer header and one header the EDGE generates.
+    fn store_with_policies() -> ComAmazonawsCloudfrontCloudfront20200531State {
+        use crate::ops::types::{
+            CachePolicyConfig, CachePolicyCookiesConfig, CachePolicyHeadersConfig,
+            CachePolicyQueryStringsConfig, CookieNames, Headers,
+            OriginRequestPolicyConfig, OriginRequestPolicyCookiesConfig,
+            OriginRequestPolicyHeadersConfig, OriginRequestPolicyQueryStringsConfig,
+            ParametersInCacheKeyAndForwardedToOrigin, QueryStringNames,
+        };
+        let name_list = |names: &[&str]| {
+            Some((
+                i32::try_from(names.len()).unwrap_or_default(),
+                Some(names.iter().map(|name| (*name).to_string()).collect()),
+            ))
+        };
+        let mut store = ComAmazonawsCloudfrontCloudfront20200531State::default();
+        let cookies = name_list(&["sim_key"]).expect("the list is not empty");
+        store.cache_policies.insert(
+            CACHE_POLICY.to_string(),
+            crate::state::StoredCachePolicy {
+                id: CACHE_POLICY.to_string(),
+                config: CachePolicyConfig {
+                    name: "keys-on-one-cookie".to_string(),
+                    min_ttl: 0,
+                    default_ttl: Some(60),
+                    max_ttl: Some(60),
+                    comment: None,
+                    parameters_in_cache_key_and_forwarded_to_origin: Some(
+                        ParametersInCacheKeyAndForwardedToOrigin {
+                            enable_accept_encoding_gzip: true,
+                            enable_accept_encoding_brotli: Some(true),
+                            headers_config: CachePolicyHeadersConfig {
+                                header_behavior: "none".to_string(),
+                                headers: None,
+                            },
+                            cookies_config: CachePolicyCookiesConfig {
+                                cookie_behavior: "whitelist".to_string(),
+                                cookies: Some(CookieNames {
+                                    quantity: cookies.0,
+                                    items: cookies.1,
+                                }),
+                            },
+                            query_strings_config: CachePolicyQueryStringsConfig {
+                                query_string_behavior: "none".to_string(),
+                                query_strings: None,
+                            },
+                        },
+                    ),
+                },
+                last_modified_time: SystemTime::UNIX_EPOCH,
+                etag: "E1".to_string(),
+            },
+        );
+        let headers = name_list(&["x-fwd", "CloudFront-Viewer-Country"])
+            .expect("the list is not empty");
+        let forwarded_cookies = name_list(&["sim_fwd"]).expect("the list is not empty");
+        let forwarded_queries = name_list(&["keep"]).expect("the list is not empty");
+        store.origin_request_policies.insert(
+            ORIGIN_REQUEST_POLICY.to_string(),
+            crate::state::StoredOriginRequestPolicy {
+                id: ORIGIN_REQUEST_POLICY.to_string(),
+                config: OriginRequestPolicyConfig {
+                    name: "forwards-what-the-key-excludes".to_string(),
+                    comment: None,
+                    headers_config: OriginRequestPolicyHeadersConfig {
+                        header_behavior: "whitelist".to_string(),
+                        headers: Some(Headers {
+                            quantity: headers.0,
+                            items: headers.1,
+                        }),
+                    },
+                    cookies_config: OriginRequestPolicyCookiesConfig {
+                        cookie_behavior: "whitelist".to_string(),
+                        cookies: Some(CookieNames {
+                            quantity: forwarded_cookies.0,
+                            items: forwarded_cookies.1,
+                        }),
+                    },
+                    query_strings_config: OriginRequestPolicyQueryStringsConfig {
+                        query_string_behavior: "whitelist".to_string(),
+                        query_strings: Some(QueryStringNames {
+                            quantity: forwarded_queries.0,
+                            items: forwarded_queries.1,
+                        }),
+                    },
+                },
+                last_modified_time: SystemTime::UNIX_EPOCH,
+                etag: "E2".to_string(),
+            },
+        );
+        store
+    }
+
+    /// The id the cache policy of [`store_with_policies`] is held under.
+    const CACHE_POLICY: &str = "11111111-1111-1111-1111-111111111111";
+
+    /// The id the origin request policy of [`store_with_policies`] is held under.
+    const ORIGIN_REQUEST_POLICY: &str = "22222222-2222-2222-2222-222222222222";
+
+    /// RULE: the origin request carries the UNION of what the cache key names and what the
+    /// origin request policy forwards, and nothing else — and a header CloudFront generates
+    /// itself carries the EDGE's value, never a value the viewer stated for it.
+    ///
+    /// The rows differ along what the viewer sent and what is asked about: a cookie the cache
+    /// key names, a cookie only the origin request policy names, a cookie neither names, a
+    /// header the policy names, a header it does not, a header the edge generates (both for a
+    /// viewer that stated nothing and for one that stated a value of its own), and the
+    /// content coding the cache policy normalizes.
     #[test]
-    fn the_cache_key_carries_every_header_the_policy_keys_on() {
-        // Rows differ along the cache policy's header behaviour — every value
-        // `CachePolicyHeadersConfig$HeaderBehavior` and its origin-request-policy
-        // spellings take — and along the header asked about, including one named in a
-        // different case than the viewer sent it.
-        let cases: [(&str, KeyedHeaders, &str, bool); 8] = [
-            ("none keys on no header", KeyedHeaders::None, "x-viewer", false),
+    fn the_origin_request_carries_what_the_policies_name_and_the_edge_generated_values() {
+        let store = store_with_policies();
+        let origin = Origin {
+            id: "primary".to_string(),
+            domain_name: "origin.example.com".to_string(),
+            ..Origin::default()
+        };
+        let behavior = behavior_under_test();
+        // What one viewer sent: two cookies the policies name and one neither does, a header
+        // the policy names and one it does not, a value spoofed for a header the edge
+        // generates, and a content coding it accepts.
+        let mut req = RtRequest::new(SdkBody::empty());
+        req.set_uri("/obj?keep=1&drop=2").expect("a valid URI");
+        for (name, value) in [
+            (COOKIE, "sim_fwd=c1; sim_unl=leak; sim_key=k1"),
+            ("x-fwd", "forwarded"),
+            ("x-unlisted", "withheld"),
+            (generated_headers::VIEWER_COUNTRY, "ZZ"),
+            (ACCEPT_ENCODING, "gzip, deflate, br"),
+        ] {
+            req.headers_mut().insert(name.to_string(), value.to_string());
+        }
+        let headers = origin_request_headers(&store, &behavior, &origin, &req, "cfid");
+        let carried = |name: &str| {
+            headers
+                .iter()
+                .find(|(carried, _)| carried == name)
+                .map(|(_, value)| value.clone())
+        };
+
+        // (case, the header the origin request carries, the value it must carry)
+        let cases: [(&str, &str, Option<&str>); 7] = [
             (
-                "whitelist keys on a named header",
-                KeyedHeaders::Named(vec!["x-viewer".to_string()]),
-                "x-viewer",
-                true,
+                "the cookies the two policies name, in name order, and no other",
+                COOKIE,
+                Some("sim_fwd=c1; sim_key=k1"),
             ),
             (
-                "whitelist is case-insensitive about the name",
-                KeyedHeaders::Named(vec!["X-Viewer".to_string()]),
-                "x-viewer",
-                true,
+                "a viewer header the origin request policy names",
+                "x-fwd",
+                Some("forwarded"),
             ),
             (
-                "whitelist keys on nothing else",
-                KeyedHeaders::Named(vec!["x-viewer".to_string()]),
-                "accept-language",
-                false,
+                "a viewer header neither policy names",
+                "x-unlisted",
+                None,
             ),
             (
-                "allViewer keys on every header",
-                KeyedHeaders::Every,
-                "accept-language",
-                true,
+                "the country the EDGE resolved, not the one the viewer stated",
+                generated_headers::VIEWER_COUNTRY,
+                Some("US"),
             ),
             (
-                "allViewer keys on a header no list names",
-                KeyedHeaders::Every,
-                "x-anything",
-                true,
+                "a generated header the policy does not name",
+                generated_headers::FORWARDED_PROTO,
+                None,
             ),
             (
-                "allExcept keys on everything but the named",
-                KeyedHeaders::EveryExcept(vec!["host".to_string()]),
-                "accept-language",
-                true,
+                "the normalized content coding, which takes precedence for brotli",
+                ACCEPT_ENCODING,
+                Some("br"),
             ),
-            (
-                "allExcept does not key on a named header",
-                KeyedHeaders::EveryExcept(vec!["host".to_string()]),
-                "host",
-                false,
-            ),
+            ("the origin's own host", "host", Some("origin.example.com")),
         ];
-        for (case, keyed, header, expected) in cases {
-            let actual = keyed.keys_on(header);
+        for (case, header, expected) in cases {
+            let actual = carried(header);
+            assert_eq!(
+                actual.as_deref(),
+                expected,
+                "case {case:?}: expected the origin request to carry {header:?} == \
+                 {expected:?}, got {actual:?} (headers {headers:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn the_origin_is_asked_for_the_query_strings_the_policies_name() {
+        let store = store_with_policies();
+        let keyed = forwarding::cache_key_parameters(&store, &behavior_under_test());
+        let forwarded = forwarding::forwarded_parameters(&store, &behavior_under_test());
+        // Rows differ along the viewer's query: a named parameter, an unnamed one, both, the
+        // order they arrived in, and no query at all.
+        let cases: [(&str, &str, &str); 5] = [
+            ("a named parameter alone", "keep=1", "keep=1"),
+            ("an unnamed parameter is withheld", "drop=2", ""),
+            (
+                "the named one travels and the unnamed one does not",
+                "drop=2&keep=1",
+                "keep=1",
+            ),
+            (
+                "the viewer's order is kept",
+                "keep=1&drop=2&keep=3",
+                "keep=1&keep=3",
+            ),
+            ("no query at all", "", ""),
+        ];
+        for (case, query, expected) in cases {
+            let actual = origin_query(&keyed, &forwarded, query);
             assert_eq!(
                 actual, expected,
-                "case {case:?} ({header}): expected keys_on == {expected}, got {actual}"
+                "case {case:?}: expected the origin to be asked for {expected:?}, got \
+                 {actual:?}"
             );
+        }
+    }
+
+    /// The behaviour the two shaping tests above drive: it names both policies of
+    /// [`store_with_policies`] and asks for automatic compression.
+    fn behavior_under_test() -> Behavior {
+        Behavior {
+            path_pattern: None,
+            target_origin_id: "primary".to_string(),
+            allowed_methods: None,
+            cache_policy_id: Some(CACHE_POLICY.to_string()),
+            origin_request_policy_id: Some(ORIGIN_REQUEST_POLICY.to_string()),
+            compress: true,
+            default_ttl: None,
+            max_ttl: None,
         }
     }
 

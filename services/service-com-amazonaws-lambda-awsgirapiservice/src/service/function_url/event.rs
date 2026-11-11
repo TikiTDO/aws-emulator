@@ -126,15 +126,14 @@ pub fn url_event(request: &UrlRequest<'_>) -> Vec<u8> {
 /// arrived more than once joined by `,` — a JSON object holds one value per name, and
 /// joining is how the format carries the rest.
 ///
-/// The `Cookie` header is not among them: the format carries cookies in its own `cookies`
-/// array ([`cookies_of`]).
+/// The `Cookie` header is among them, exactly as the client sent it, beside the `cookies`
+/// array it is also split into ([`cookies_of`]): a function URL reports the request's headers
+/// whole, so a handler that reads the one header and a handler that reads the array both see
+/// the cookies the request carried.
 fn event_headers(headers: &[(String, String)]) -> BTreeMap<String, String> {
     let mut mapped: BTreeMap<String, String> = BTreeMap::new();
     for (name, value) in headers {
         let name = name.to_ascii_lowercase();
-        if name == COOKIE_HEADER {
-            continue;
-        }
         mapped
             .entry(name)
             .and_modify(|held| {
@@ -572,7 +571,7 @@ mod tests {
     }
 
     /// The event carries the request's own path, query and headers, and the `Cookie` header
-    /// as the format's `cookies` array.
+    /// both as a header and as the format's `cookies` array.
     #[test]
     fn the_event_carries_the_request_lower_cased_and_split() {
         let headers = [
@@ -597,6 +596,7 @@ mod tests {
                 json!({
                     "host": "example.lambda-url.us-east-1.on.aws",
                     "x-trace": "one,two",
+                    "cookie": "a=1; b=2",
                 }),
             ),
             (

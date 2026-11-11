@@ -127,6 +127,8 @@ mod edge_data_plane;
 mod edge_geo_restriction;
 #[path = "all/edge_request_metrics.rs"]
 mod edge_request_metrics;
+#[path = "all/edge_request_shaping.rs"]
+mod edge_request_shaping;
 #[path = "all/edge_web_acl.rs"]
 mod edge_web_acl;
 #[path = "all/enum_value_set_message.rs"]

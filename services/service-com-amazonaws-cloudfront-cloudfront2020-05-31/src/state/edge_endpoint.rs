@@ -196,7 +196,13 @@ async fn serve_connection(
     upgrader: Option<TlsUpgrader>,
     conn: ListenerConn,
 ) {
-    let Some(conn) = ::service_common::in_band_tls::negotiated(conn, upgrader).await else {
+    // WHICH half of this one address the viewer dialled is read here and nowhere else: the
+    // connection is all that says so, and the data plane is told through the scheme of the
+    // request it is handed ([`forwarded`]), which is where the edge reads the viewer's
+    // scheme from.
+    let Some((conn, encrypted)) =
+        ::service_common::in_band_tls::negotiated_scheme(conn, upgrader).await
+    else {
         return;
     };
     let io = ::hyper_util::rt::TokioIo::new(conn);
@@ -212,8 +218,11 @@ async fn serve_connection(
             // served normally.
             let facts = ::emulator_server::RequestFacts::from_request(&request);
             Ok::<_, ::std::convert::Infallible>(
-                ::emulator_server::contain_panics(facts, answer(distribution, callback, request))
-                    .await,
+                ::emulator_server::contain_panics(
+                    facts,
+                    answer(distribution, callback, request, encrypted),
+                )
+                .await,
             )
         }
     });
@@ -248,6 +257,7 @@ async fn answer(
     distribution: Arc<OnceLock<String>>,
     callback: EmbeddedEmulator,
     request: ::http::Request<::hyper::body::Incoming>,
+    encrypted: bool,
 ) -> ::http::Response<Full<Bytes>> {
     let Some(distribution) = distribution.get().cloned() else {
         // The create that opened this listener has not named its distribution yet, so there
@@ -272,7 +282,8 @@ async fn answer(
         let Ok(collected) = limited.collect().await else {
             return generated(PAYLOAD_TOO_LARGE, BODY_TOO_LARGE);
         };
-        let Some(forwarded) = forwarded(parts, collected.to_bytes(), &distribution) else {
+        let Some(forwarded) = forwarded(parts, collected.to_bytes(), &distribution, encrypted)
+        else {
             return generated(BAD_GATEWAY, NO_DISTRIBUTION);
         };
         match callback.http_connector().call(forwarded).await {
@@ -307,20 +318,37 @@ async fn answer(
 /// headers, addressed to this service's own endpoint under the reserved data-plane path of
 /// `distribution` — so the viewer path travels where this client can carry it.
 ///
-/// `None` when the viewer's own request does not render as one, which addresses nothing.
+/// The SCHEME of that address is the one the viewer dialled (`encrypted`), which is how the
+/// data plane learns it: this one address serves both halves, and the scheme is what the
+/// edge states to an origin as `CloudFront-Forwarded-Proto`.
+///
+/// The distribution segment is what makes this listener serve ONE distribution, so the
+/// viewer path may not be able to walk out from under it: a path carrying a dot segment is
+/// refused ([`within_the_distribution`]) rather than forwarded, and the built target is
+/// checked to still begin with this distribution's own prefix before it is sent. `None` for
+/// such a path, and for a viewer request that does not render as one — in both cases this
+/// listener addresses nothing.
 fn forwarded(
     parts: ::http::request::Parts,
     body: Bytes,
     distribution: &str,
+    encrypted: bool,
 ) -> Option<RtRequest> {
-    let viewer_path = parts.uri.path();
+    let viewer_path = within_the_distribution(parts.uri.path())?;
     let query = parts
         .uri
         .query()
         .map(|query| format!("?{query}"))
         .unwrap_or_default();
-    let uri =
-        format!("https://{SERVICE_ENDPOINT}{EDGE_PATH_PREFIX}/{distribution}{viewer_path}{query}");
+    let scheme = if encrypted { "https" } else { "http" };
+    let within = format!("{EDGE_PATH_PREFIX}/{distribution}");
+    let path = format!("{within}{viewer_path}");
+    // The built path still names THIS distribution's data plane: a path that does not is not
+    // forwarded at all, whatever it would have resolved to.
+    if !path.starts_with(&format!("{within}/")) {
+        return None;
+    }
+    let uri = format!("{scheme}://{SERVICE_ENDPOINT}{path}{query}");
     let mut builder = ::http::Request::builder()
         .method(parts.method.clone())
         .uri(uri)
@@ -333,6 +361,26 @@ fn forwarded(
     }
     let built = builder.body(SdkBody::from(body)).ok()?;
     RtRequest::try_from(built).ok()
+}
+
+/// The viewer path as this listener may forward it, or `None` for one that could address
+/// something other than this distribution's data plane.
+///
+/// The forwarded target carries the viewer path under `{EDGE_PATH_PREFIX}/{distribution}`,
+/// and a relative path reference (RFC 3986 `.` and `..` segments, in any spelling a decoder
+/// would read as one) is resolved by whoever resolves that target — so such a path could name
+/// a prefix above the distribution's own. It is refused here instead, which is the answer a
+/// listener gives a request it resolves to no distribution: a viewer addresses an object,
+/// never a path above the distribution it addressed.
+fn within_the_distribution(path: &str) -> Option<&str> {
+    if !path.starts_with('/') {
+        return None;
+    }
+    let dot_segment = path.split('/').any(|segment| {
+        let decoded = segment.replace("%2e", ".").replace("%2E", ".");
+        decoded == "." || decoded == ".."
+    });
+    (!dot_segment).then_some(path)
 }
 
 /// The transport-safety refusals the core applies to its OWN HTTP listeners, applied here
@@ -453,4 +501,39 @@ fn generated(status: u16, message: &str) -> ::http::Response<Full<Bytes>> {
             *response.status_mut() = ::http::StatusCode::BAD_GATEWAY;
             response
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_viewer_path_that_could_leave_the_distribution_is_not_forwarded() {
+        // Rows differ along WHERE the dot segment sits and HOW it is spelled — a leading,
+        // middle and trailing segment, a single dot, percent-encoded dots in either case —
+        // and along the ordinary paths that must still be forwarded: a dot inside a name, a
+        // hidden file, the root, and a path whose query carries dots.
+        let cases: [(&str, &str, bool); 12] = [
+            ("the root", "/", true),
+            ("an object", "/items/one.json", true),
+            ("a dot inside a segment", "/a..b/c", true),
+            ("a hidden file", "/.well-known/x", true),
+            ("three dots", "/.../x", true),
+            ("a leading parent segment", "/../2020-05-31/distribution", false),
+            ("a parent segment in the middle", "/items/../../x", false),
+            ("a trailing parent segment", "/items/..", false),
+            ("a single dot segment", "/./items", false),
+            ("a percent-encoded parent segment", "/%2e%2e/x", false),
+            ("a percent-encoded parent segment, upper case", "/%2E%2E/x", false),
+            ("a percent-encoded dot segment", "/%2e/x", false),
+        ];
+        for (case, path, forwarded) in cases {
+            let actual = within_the_distribution(path).is_some();
+            assert_eq!(
+                actual, forwarded,
+                "case {case:?} ({path:?}): expected the path to be forwarded == \
+                 {forwarded}, got {actual}"
+            );
+        }
+    }
 }

@@ -83,15 +83,22 @@ pub(super) fn matches_glob(pattern: &str, subject: &str) -> bool {
 
 /// One response a distribution's edge holds in its cache.
 ///
-/// The in-process transport this emulator fetches an origin over carries a status and a
-/// body (see `crate::service::edge`), so those are what an entry holds, beside the
-/// instants that decide whether it may still be served.
+/// The ORIGIN'S OWN answer: the status, the bytes, and the two things the origin said about
+/// those bytes — their media type and the content coding they are already under — beside the
+/// instants that decide whether the entry may still be served. What the edge serves FROM it
+/// (the content coding one viewer negotiated) is computed per request rather than held, so
+/// one viewer's negotiation is never served to another.
 #[derive(Debug, Clone)]
 pub struct CachedEdgeResponse {
     /// The status the origin answered.
     pub status: u16,
     /// The bytes the origin answered.
     pub body: Vec<u8>,
+    /// `Content-Type` as the origin stated it, or `None` when it stated none.
+    pub content_type: Option<String>,
+    /// `Content-Encoding` as the origin stated it — the coding its own bytes are under — or
+    /// `None` for bytes the origin did not encode.
+    pub content_encoding: Option<String>,
     /// The path the viewer request carried, so an invalidation can be matched against
     /// this entry when a batch is created.
     pub path: String,

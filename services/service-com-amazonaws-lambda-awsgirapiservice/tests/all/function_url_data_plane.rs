@@ -632,10 +632,11 @@ async fn the_event_carries_the_request_as_payload_format_two_states_it() {
         Some(&json!("one")),
         "case \"a header the request carried\": expected it lower-cased, got {headers:?}"
     );
-    assert!(
-        !headers.contains_key("cookie"),
-        "case \"the cookie header\": payload format 2.0 carries cookies in its own array, so \
-         the header is not among the event's headers, got {headers:?}"
+    assert_eq!(
+        headers.get("cookie"),
+        Some(&json!("a=1; b=2")),
+        "case \"the cookie header\": the event reports the request's headers whole, so the \
+         `Cookie` header is among them beside the cookies array, got {headers:?}"
     );
 
     // The body travels verbatim under a textual media type and base64 under every other
