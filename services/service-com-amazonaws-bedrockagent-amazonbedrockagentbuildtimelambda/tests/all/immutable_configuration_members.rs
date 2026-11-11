@@ -101,6 +101,7 @@ impl Emulator {
         // against AWS.
         for index in [
             "immutable-members-index",
+            "atomic-refusal-index",
             "resupplied-chunking-index",
             "no-chunking-index",
             "stored-kb-index",
@@ -488,6 +489,158 @@ async fn changing_a_stored_chunking_configuration_is_refused() {
             "immutable-members-source",
             "case {case}: a refused update writes none of the members it carried, got \
              {fetched:?}"
+        );
+    }
+}
+
+/// A refused update writes NO part of itself: the members it carries beside the
+/// chunking configuration stay at the values the last SERVED update left, not at
+/// the ones the refusal tried to write.
+///
+/// This is the whole sequence a caller runs: an update that re-supplies the
+/// stored chunking configuration and changes the mutable members is served, and
+/// every later update that would leave a different chunking configuration there
+/// is refused without disturbing what that served update wrote.
+#[tokio::test]
+async fn a_refused_update_writes_none_of_the_members_it_carries() {
+    let emulator = Emulator::new();
+    let (knowledge_base_configuration, storage_configuration) =
+        vector_configurations(EMBEDDING_MODEL, "atomic-refusal-index");
+    let knowledge_base_id = emulator
+        .knowledge_base_id(json!({
+            "name": "atomic-refusal-kb",
+            "roleArn": KB_ROLE,
+            "knowledgeBaseConfiguration": knowledge_base_configuration,
+            "storageConfiguration": storage_configuration,
+        }))
+        .await;
+
+    let stored_chunking = chunking("FIXED_SIZE", 300);
+    let data_source_id = emulator
+        .data_source_id(
+            &knowledge_base_id,
+            json!({
+                "name": "atomic-refusal-source",
+                "description": "the description the create supplied",
+                "dataSourceConfiguration": s3_configuration("atomic-refusal-docs"),
+                "vectorIngestionConfiguration": {
+                    "chunkingConfiguration": stored_chunking.clone(),
+                },
+            }),
+        )
+        .await;
+
+    // The served update: the stored chunking configuration, re-supplied as this
+    // operation's contract tells the caller to, beside new mutable members.
+    let served_name = "served-atomic-refusal-source";
+    let served_description = "the description the served update wrote";
+    let served = emulator
+        .update_data_source(
+            &knowledge_base_id,
+            &data_source_id,
+            json!({
+                "name": served_name,
+                "description": served_description,
+                "dataSourceConfiguration": s3_configuration("atomic-refusal-docs"),
+                "vectorIngestionConfiguration": {
+                    "chunkingConfiguration": stored_chunking.clone(),
+                },
+            }),
+        )
+        .await;
+    assert_eq!(
+        served.status, 200,
+        "case the served update: an update keeping the stored chunkingConfiguration is \
+         served, got {served:?}"
+    );
+    assert_eq!(
+        served.string(&["dataSource", "description"]),
+        served_description,
+        "case the served update: expected the description it supplied, got {:?}",
+        served.member(&["dataSource", "description"])
+    );
+
+    // The rows differ along HOW the effective chunking configuration would
+    // diverge: a different value inside the stored strategy, a different
+    // strategy, and the member left out of the request altogether (this
+    // operation replaces `vectorIngestionConfiguration` whole rather than
+    // patching it, so an omission drops the stored chunking).
+    let rows: Vec<(&str, Option<Value>)> = vec![
+        (
+            "a different maxTokens inside the stored strategy",
+            Some(json!({ "chunkingConfiguration": chunking("FIXED_SIZE", 512) })),
+        ),
+        (
+            "a different overlapPercentage inside the stored strategy",
+            Some(json!({
+                "chunkingConfiguration": {
+                    "chunkingStrategy": "FIXED_SIZE",
+                    "fixedSizeChunkingConfiguration": {
+                        "maxTokens": 300,
+                        "overlapPercentage": 10,
+                    },
+                },
+            })),
+        ),
+        (
+            "another strategy the model admits",
+            Some(json!({ "chunkingConfiguration": chunking("HIERARCHICAL", 300) })),
+        ),
+        (
+            "a strategy that carries no settings member",
+            Some(json!({ "chunkingConfiguration": chunking("NONE", 300) })),
+        ),
+        ("no vectorIngestionConfiguration at all", None),
+        (
+            "a vectorIngestionConfiguration carrying only a sibling member",
+            Some(json!({
+                "parsingConfiguration": { "parsingStrategy": "SMART_PARSING" },
+            })),
+        ),
+    ];
+
+    for (case, ingestion) in rows {
+        let refused = emulator
+            .update_data_source(
+                &knowledge_base_id,
+                &data_source_id,
+                update_request("refused-atomic-refusal-source", ingestion),
+            )
+            .await;
+        assert_immutable_member_refusal(
+            case,
+            "vectorIngestionConfiguration.chunkingConfiguration",
+            &refused,
+        );
+
+        let fetched = emulator
+            .get_data_source(&knowledge_base_id, &data_source_id)
+            .await;
+        assert_eq!(
+            fetched.status, 200,
+            "case {case}: expected GetDataSource -> 200, got {fetched:?}"
+        );
+        assert_eq!(
+            fetched.member(&[
+                "dataSource",
+                "vectorIngestionConfiguration",
+                "chunkingConfiguration"
+            ]),
+            &stored_chunking,
+            "case {case}: expected the stored chunkingConfiguration to be untouched, got {:?}",
+            fetched.member(&["dataSource", "vectorIngestionConfiguration"])
+        );
+        assert_eq!(
+            fetched.string(&["dataSource", "description"]),
+            served_description,
+            "case {case}: expected the description the served update wrote, got {:?}",
+            fetched.member(&["dataSource", "description"])
+        );
+        assert_eq!(
+            fetched.string(&["dataSource", "name"]),
+            served_name,
+            "case {case}: expected the name the served update wrote, got {:?}",
+            fetched.member(&["dataSource", "name"])
         );
     }
 }
