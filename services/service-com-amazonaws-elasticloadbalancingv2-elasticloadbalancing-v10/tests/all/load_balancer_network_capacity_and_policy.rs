@@ -1066,9 +1066,8 @@ async fn get_resource_policy_answers_the_policy_the_store_holds() {
     let (router, engine) = emulator();
 
     // A trust store that was shared carries the policy that share attached. Seeded,
-    // because `CreateTrustStore` is a scaffold stub with its own issue and no operation
-    // of this model attaches a policy: sharing is AWS RAM's, and this model only reads
-    // the policy back.
+    // because no operation of this model attaches a policy: sharing is AWS RAM's, and this
+    // model only reads the policy back.
     let shared = seed_trust_store(
         &engine,
         0,

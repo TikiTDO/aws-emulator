@@ -11,8 +11,7 @@
 //!
 //! This module also carries the harness every suite in this crate shares: the router
 //! over one engine ([`emulator`]), the awsQuery request helpers, the XML readers, and
-//! the seeding of a resource whose create is still a scaffold stub
-//! ([`seed_trust_store`]).
+//! the seeding of a record a suite needs at an exact instant ([`seed_trust_store`]).
 
 use service_com_amazonaws_elasticloadbalancingv2_elasticloadbalancing_v10::state::{
     ComAmazonawsElasticloadbalancingv2ElasticloadbalancingV10State as ElbState, TrustStoreRecord,
@@ -40,7 +39,7 @@ pub(crate) fn account() -> &'static str {
 
 /// A router carrying this service over one shared engine, plus that engine — what the
 /// production router mounts, minus the other services, with the store reachable so a
-/// suite can seed the record of a resource whose create is still a scaffold stub.
+/// suite can seed a record at an exact instant.
 pub(crate) fn emulator() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
@@ -73,12 +72,13 @@ fn seed_epoch() -> SystemTime {
 
 /// Put one trust store in the store at creation position `index` and answer its ARN.
 ///
-/// A suite seeds rather than creates because `CreateTrustStore` is still a scaffold stub
-/// with its own issue: reads and writes go through
-/// `service_..._v10::state::service_state`'s store, exactly as a handler's do, so a
-/// seeded record is the same record the handler serves. Seeding is also what lets the
-/// clock-owed `CREATING -> ACTIVE` move be asserted exactly — by placing the instant it
-/// is owed at either side of now — instead of sleeping for it.
+/// A suite seeds rather than creates when what it needs is a record at an exact INSTANT:
+/// reads and writes go through `service_..._v10::state::service_state`'s store, exactly as
+/// a handler's do, so a seeded record is the same record the handler serves, and placing
+/// the instant the `CREATING -> ACTIVE` move is owed at either side of now is what lets
+/// that move be asserted without sleeping for it. A suite that drives the whole create
+/// instead stages a CA certificates bundle in Amazon S3 and calls `CreateTrustStore`
+/// (`all/trust_store_lifecycle.rs`).
 ///
 /// The ARN is minted the way the service mints one — `emulator_arn` over this service's
 /// own namespace, with a 16-hex resource id — so a seeded record carries the same
@@ -108,6 +108,10 @@ pub(crate) fn seed_trust_store(
         },
         created_at: seed_epoch() + Duration::from_secs(index as u64),
         number_of_ca_certificates: seed.certificates,
+        // The Amazon S3 address those certificates were read from. A seeded record names
+        // none: nothing is staged for it, and only the bundle retrieval (its own issue)
+        // reads the address back.
+        ca_certificates_bundle: None,
         total_revoked_entries: seed.revoked,
         tags: seed
             .tags

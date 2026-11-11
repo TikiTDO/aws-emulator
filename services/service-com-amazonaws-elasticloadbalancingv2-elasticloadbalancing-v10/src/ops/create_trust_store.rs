@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateTrustStore
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateTrustStore`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateTrustStore::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Creates a trust store: the CA certificates bundle the request names is READ out of
+//! Amazon S3 ([`crate::state::ca_certificates_bundle`]) and the record this writes into
+//! `crate::state` reports the certificates that read counted, at the `CREATING` status
+//! the clock then owes its move to `ACTIVE`.
 //!
 //! ## Shape of an operation
 //!
@@ -159,18 +154,166 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateTrustStore` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateTrustStoreErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateTrustStore"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            // Only reachable on an engine that is not the shared `InMemoryEngine`,
+            // which this service has no store on — so nothing is implemented for it.
+            crate::scaffolded::Scaffolded::not_implemented("CreateTrustStore")
+        })?;
+        let region = crate::state::request_region(ctx);
+
+        // The tags FIRST: a list naming one key twice does not say what that key's value
+        // is, so nothing is read or minted for a request that carries one.
+        let tags = tag_map(input.tags.as_deref())?;
+        if tags.len() > crate::state::TAGS_PER_RESOURCE {
+            return Err(CreateTrustStoreErrorModeled::TooManyTagsException(
+                TooManyTagsException {
+                    message: Some(crate::state::TOO_MANY_TAGS_MESSAGE.to_string()),
+                },
+            )
+            .into());
+        }
+
+        // The name is unique per Region — "This name must be unique per region and can't
+        // be changed after creation" — so a name this account already holds a trust store
+        // under is refused before the bundle is read: the create cannot be served
+        // whatever that object says.
+        if state.lock().name_to_trust_store_arn.contains_key(&input.name) {
+            return Err(duplicate_name(&input.name));
+        }
+
+        // `NumberOfCaCertificates` is a property of the BUNDLE's bytes, so the create
+        // cannot answer without reading the object the request named.
+        let location = crate::state::CaCertificatesBundleLocation {
+            bucket: input.ca_certificates_bundle_s3_bucket.clone(),
+            key: input.ca_certificates_bundle_s3_key.clone(),
+            version: input.ca_certificates_bundle_s3_object_version.clone(),
+        };
+        let number_of_ca_certificates =
+            match crate::state::counted_ca_certificates(ctx, &region, &location).await {
+                Ok(counted) => counted,
+                Err(refusal) => return Err(bundle_refusal(refusal)),
+            };
+
+        let now = std::time::SystemTime::now();
+        let mut guard = state.lock();
+        // The clock first, so the status every stored trust store reports is the one it is
+        // owed at this instant rather than the one it last answered with.
+        guard.settle(now);
+
+        // Re-checked under the ONE guard the insert happens under: the name check above
+        // released the lock to read the bundle, so this is what makes the name unique.
+        if guard.name_to_trust_store_arn.contains_key(&input.name) {
+            return Err(duplicate_name(&input.name));
+        }
+        // The store's own bound, enforced before the insert: past it the emulator answers
+        // the modelled quota error instead of growing without end.
+        if guard.trust_stores.len() >= crate::state::TRUST_STORE_QUOTA {
+            return Err(CreateTrustStoreErrorModeled::TooManyTrustStoresException(
+                TooManyTrustStoresException {
+                    message: Some(crate::state::too_many_trust_stores_message()),
+                },
+            )
+            .into());
+        }
+
+        let arn = guard.mint_trust_store_arn(&input.name, &region);
+        let record = crate::state::TrustStoreRecord {
+            arn: arn.clone(),
+            name: input.name.clone(),
+            // "The current status of the trust store": a trust store AWS has just
+            // accepted is not ready yet, and the CLOCK — not a later call — owes it its
+            // move to `ACTIVE` ([`crate::state::trust_store_active_at`]).
+            status: crate::state::TRUST_STORE_CREATING.to_string(),
+            active_at: crate::state::trust_store_active_at(now),
+            created_at: now,
+            number_of_ca_certificates,
+            ca_certificates_bundle: Some(location),
+            // "The number of revoked certificates in the trust store": a trust store is
+            // created with no revocation list, so nothing is revoked in it yet.
+            total_revoked_entries: 0,
+            tags,
+            // A policy is what SHARING this trust store with another account attaches, and
+            // the create shares nothing.
+            resource_policy: None,
+        };
+        guard
+            .name_to_trust_store_arn
+            .insert(record.name.clone(), arn.clone());
+        guard.trust_stores.insert(arn.clone(), record);
+        let stored = guard
+            .trust_stores
+            .get(&arn)
+            .expect("the trust store just inserted");
+        Ok(CreateTrustStoreOutput {
+            trust_stores: Some(vec![stored.to_shape()]),
+        })
     }
+}
+
+/// The modelled refusal for a `Name` a trust store of this account already holds.
+fn duplicate_name(name: &str) -> CreateTrustStoreError {
+    CreateTrustStoreErrorModeled::DuplicateTrustStoreNameException(
+        DuplicateTrustStoreNameException {
+            message: Some(crate::state::duplicate_trust_store_name_message(name)),
+        },
+    )
+    .into()
+}
+
+/// The refusal this operation answers a bundle it could not count with.
+///
+/// The SPLIT is read once in `crate::state` ([`crate::state::counted_ca_certificates`]) —
+/// which read outcome is "the bundle does not exist" and which is "these bytes are no CA
+/// certificates bundle" — so the create and `ModifyTrustStore` cannot word it differently;
+/// this maps those three onto the errors THIS operation declares. A read NOTHING answered
+/// is neither refusal: no object store is mounted to ask, so this emulator cannot serve the
+/// operation at all and says so rather than blaming the caller's request or storing a trust
+/// store whose certificates were never counted.
+fn bundle_refusal(refusal: crate::state::CaCertificatesBundleRefusal) -> CreateTrustStoreError {
+    match refusal {
+        crate::state::CaCertificatesBundleRefusal::NotFound => {
+            CreateTrustStoreErrorModeled::CaCertificatesBundleNotFoundException(
+                CaCertificatesBundleNotFoundException {
+                    message: Some(
+                        crate::state::CA_CERTIFICATES_BUNDLE_NOT_FOUND_MESSAGE.to_string(),
+                    ),
+                },
+            )
+            .into()
+        }
+        crate::state::CaCertificatesBundleRefusal::Invalid => {
+            CreateTrustStoreErrorModeled::InvalidCaCertificatesBundleException(
+                InvalidCaCertificatesBundleException {
+                    message: Some(crate::state::INVALID_CA_CERTIFICATES_BUNDLE_MESSAGE.to_string()),
+                },
+            )
+            .into()
+        }
+        crate::state::CaCertificatesBundleRefusal::Unanswered => {
+            crate::scaffolded::Scaffolded::not_implemented("CreateTrustStore")
+        }
+    }
+}
+
+/// The tags to store, refusing a list that names one key twice — the modelled
+/// `DuplicateTagKeys`, worded as every other `Tags`-taking operation of this service words
+/// it.
+fn tag_map(
+    tags: Option<&[Tag]>,
+) -> Result<std::collections::HashMap<String, String>, CreateTrustStoreError> {
+    let mut map = std::collections::HashMap::new();
+    for tag in tags.unwrap_or_default() {
+        if map
+            .insert(tag.key.clone(), tag.value.clone().unwrap_or_default())
+            .is_some()
+        {
+            return Err(CreateTrustStoreErrorModeled::DuplicateTagKeysException(
+                DuplicateTagKeysException {
+                    message: Some(crate::state::duplicate_tag_key_message(&tag.key)),
+                },
+            )
+            .into());
+        }
+    }
+    Ok(map)
 }

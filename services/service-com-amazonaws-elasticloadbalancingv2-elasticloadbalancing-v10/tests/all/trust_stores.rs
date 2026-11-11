@@ -7,14 +7,14 @@
 //! body in, `<DescribeTrustStoresResponse>` XML out — so these tests exercise the wire
 //! protocol as well as the handler.
 //!
-//! The records are SEEDED through the shared engine, the way a suite does for an
-//! operation whose creating sibling is still a scaffold stub (`CreateTrustStore` is
-//! one, with its own issue): the harness that does it lives beside the other shared
-//! helpers in `provisioning_loop`, so reads and writes go through
+//! The records are SEEDED through the shared engine, which is how a suite puts a record
+//! at an exact INSTANT: the harness that does it lives beside the other shared helpers in
+//! `provisioning_loop`, so reads and writes go through
 //! `service_..._v10::state::service_state`'s store, exactly as a handler's do, and a
-//! seeded record is the same record the handler serves. Seeding is also what lets the
+//! seeded record is the same record the handler serves. Seeding is what lets the
 //! clock-owed `CREATING -> ACTIVE` move be asserted exactly — by placing the instant it
-//! is owed at either side of now — instead of sleeping for it.
+//! is owed at either side of now — instead of sleeping for it. The create that mints such
+//! a record, bundle read and all, is driven end to end in `trust_store_lifecycle`.
 //!
 //! The rule under test is not one trust store: the describe reports every trust store
 //! of the account, narrowed to the ARNs or names asked for, paginated in one stable

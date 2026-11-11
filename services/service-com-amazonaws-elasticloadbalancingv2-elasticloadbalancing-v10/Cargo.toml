@@ -45,6 +45,12 @@ http-body-util = "0.1"
 rustls = { workspace = true }
 rustls-pemfile = "2"
 tokio-rustls = "0.26"
+# Decodes the DER inside one PEM block of a trust store's CA certificates bundle as an X.509
+# certificate, which is what makes `TrustStore$NumberOfCaCertificates` a count of
+# certificates a parser accepted rather than of markers in the text
+# (`src/state/ca_certificates_bundle.rs`). The PEM framing is read by `rustls-pemfile`
+# above; this reads the certificate inside it.
+x509-cert = "0.2"
 serde_json = { workspace = true }
 tracing = { workspace = true }
 # The AWS SDK for EC2, driven over the in-process callback
@@ -121,6 +127,15 @@ service-com-amazonaws-sqs-amazonsqs = { workspace = true }
 # The .zip deployment package such a function is created from, written in memory the way a
 # caller uploads one — the same reader/writer the Lambda crate's own invoke suites use.
 zip = { version = "9", default-features = false, features = ["deflate"] }
+# A trust store is built from an object Amazon S3 holds, so the object store is MOUNTED
+# beside this service on the suite's own engine and every CA certificates bundle a case
+# names is staged through Amazon S3's own `PutObject` — the very seam the handler reads it
+# over (`tests/all/trust_store_lifecycle.rs`).
+service-com-amazonaws-s3-amazons3 = { workspace = true }
+# The client that staging goes through, built by the one shared constructor
+# (`service_common::s3_client`): only the generated client is needed, the emulator supplies
+# the transport.
+aws-sdk-s3 = { version = "1", default-features = false }
 
 [lints]
 workspace = true

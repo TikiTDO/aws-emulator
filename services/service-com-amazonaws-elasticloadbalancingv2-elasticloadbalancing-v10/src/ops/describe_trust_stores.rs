@@ -157,7 +157,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             let mut arns: Vec<String> = Vec::new();
             for arn in input.trust_store_arns.iter().flatten() {
                 if !guard.trust_stores.contains_key(arn) {
-                    return Err(not_found(arn));
+                    return Err(arn_not_found(arn));
                 }
                 if !arns.contains(arn) {
                     arns.push(arn.clone());
@@ -165,7 +165,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             for name in input.names.iter().flatten() {
                 let Some(arn) = guard.name_to_trust_store_arn.get(name) else {
-                    return Err(not_found(name));
+                    return Err(name_not_found(name));
                 };
                 if !arns.contains(arn) {
                     arns.push(arn.clone());
@@ -198,10 +198,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     }
 }
 
-/// The modelled refusal for an ARN or name no trust store in state carries.
-fn not_found(identifier: &str) -> DescribeTrustStoresError {
+/// The modelled refusal for an ARN no trust store in state carries.
+///
+/// The refusal names the KIND of identifier the request gave as well as the value, which
+/// is how Elastic Load Balancing words it: an ARN that resolved to nothing and a NAME that
+/// resolved to nothing are different corrections for the caller to make, so they are not
+/// reported in one sentence ([`crate::state::trust_store_arn_not_found_message`],
+/// [`crate::state::trust_store_name_not_found_message`] — the same two sentences every
+/// other trust-store operation of this service answers with).
+fn arn_not_found(arn: &str) -> DescribeTrustStoresError {
     DescribeTrustStoresErrorModeled::TrustStoreNotFoundException(TrustStoreNotFoundException {
-        message: Some(format!("Trust store '{identifier}' not found")),
+        message: Some(crate::state::trust_store_arn_not_found_message(arn)),
+    })
+    .into()
+}
+
+/// The modelled refusal for a NAME no trust store in state carries; see
+/// [`arn_not_found`].
+fn name_not_found(name: &str) -> DescribeTrustStoresError {
+    DescribeTrustStoresErrorModeled::TrustStoreNotFoundException(TrustStoreNotFoundException {
+        message: Some(crate::state::trust_store_name_not_found_message(name)),
     })
     .into()
 }

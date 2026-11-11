@@ -21,8 +21,8 @@
 //! sibling suites already carry (`provisioning_loop`, `listener_rules`,
 //! `resource_tags`), so a tag write is driven against resources created exactly as every
 //! other suite creates them. A trust store is SEEDED through the shared engine, as
-//! `resource_tags` seeds one, because `CreateTrustStore` is still a scaffold stub with
-//! its own issue.
+//! `resource_tags` seeds one: a seeded record needs no CA certificates bundle staged in
+//! Amazon S3, which is what the create reads one from.
 
 use crate::listener_rules::{add_rule, create_listener, create_load_balancer, forward_to, host_header};
 use crate::provisioning_loop::{

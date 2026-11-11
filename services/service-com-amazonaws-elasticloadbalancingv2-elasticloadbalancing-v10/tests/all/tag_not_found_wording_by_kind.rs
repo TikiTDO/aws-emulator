@@ -130,8 +130,8 @@ async fn every_tag_operation_refuses_an_absent_arn_with_the_wording_of_its_kind(
 
     // A live resource, so a selection can mix one that resolves with one that does not,
     // and so the suite can witness that a refused write stored nothing. Seeded through the
-    // shared engine for the trust store kind, as the sibling tag suites seed one, because
-    // `CreateTrustStore` is still a scaffold stub with its own issue.
+    // shared engine for the trust store kind, as the sibling tag suites seed one: a seeded
+    // record needs no CA certificates bundle staged in Amazon S3.
     let live = create_http_target_group(&router, "tagkind-live-tg").await;
     let live_tags = owned(&[("env", "prod")]);
     assert_eq!(

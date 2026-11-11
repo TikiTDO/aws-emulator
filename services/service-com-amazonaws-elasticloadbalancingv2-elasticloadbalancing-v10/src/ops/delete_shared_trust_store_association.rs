@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteSharedTrustStoreAssociation
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteSharedTrustStoreAssociation`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteSharedTrustStoreAssociation::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Takes the association between one trust store and a resource of ANOTHER account off
+//! that trust store: this emulator holds one account, so the resource a request names is
+//! either of that same account — whose association is not a shared one — or of an account
+//! this emulator holds no resource for, in which case there is no such association.
 //!
 //! ## Shape of an operation
 //!
@@ -139,18 +134,73 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteSharedTrustStoreAssociation` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteSharedTrustStoreAssociationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteSharedTrustStoreAssociation"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            // Only reachable on an engine that is not the shared `InMemoryEngine`,
+            // which this service has no store on — so nothing is implemented for it.
+            crate::scaffolded::Scaffolded::not_implemented("DeleteSharedTrustStoreAssociation")
+        })?;
+
+        let mut guard = state.lock();
+        guard.settle(std::time::SystemTime::now());
+
+        // The trust store the association belongs to has to exist: the call is about ONE
+        // trust store's association, so a `TrustStoreArn` this store holds none under is
+        // the modelled refusal before anything about the resource is read.
+        let Some(trust_store) = guard.trust_stores.get(&input.trust_store_arn) else {
+            return Err(
+                DeleteSharedTrustStoreAssociationErrorModeled::TrustStoreNotFoundException(
+                    TrustStoreNotFoundException {
+                        message: Some(crate::state::trust_store_arn_not_found_message(
+                            &input.trust_store_arn,
+                        )),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // "The specified association can't be within the same account": this operation
+        // revokes the association of a trust store SHARED with another account, so a
+        // resource of the trust store's own account is refused for that reason — including
+        // every listener of this account that really does authenticate against it, which
+        // is an association `DescribeTrustStoreAssociations` reports and `ModifyListener`
+        // (not this call) takes off.
+        let owning_account = ::service_common::arn::parse(&trust_store.arn)
+            .map(|arn| arn.account.to_string())
+            .unwrap_or_default();
+        let resource_account = ::service_common::arn::parse(&input.resource_arn)
+            .map(|arn| arn.account.to_string())
+            .unwrap_or_default();
+        if resource_account == owning_account {
+            return Err(
+                DeleteSharedTrustStoreAssociationErrorModeled::DeleteAssociationSameAccountException(
+                    DeleteAssociationSameAccountException {
+                        message: Some(crate::state::delete_association_same_account_message(
+                            &input.trust_store_arn,
+                            &input.resource_arn,
+                        )),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // The resource belongs to another account, and a cross-account share is recorded
+        // on the trust store by the account that accepted it. Nothing of another account
+        // is held here — this emulator serves one account, so no resource outside it is
+        // associated with anything in it — so the association the request named does not
+        // exist, which is what the model declares for exactly this case.
+        Err(
+            DeleteSharedTrustStoreAssociationErrorModeled::TrustStoreAssociationNotFoundException(
+                TrustStoreAssociationNotFoundException {
+                    message: Some(crate::state::trust_store_association_not_found_message(
+                        &input.trust_store_arn,
+                        &input.resource_arn,
+                    )),
+                },
+            )
+            .into(),
+        )
     }
 }

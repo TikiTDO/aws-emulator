@@ -17,10 +17,10 @@
 //! read by ARN) is one row of it.
 //!
 //! A trust store is SEEDED through the shared engine, using the harness in
-//! `provisioning_loop` that the `trust_stores` suite also uses, because
-//! `CreateTrustStore` is still a scaffold stub with its own issue: reads and writes go
-//! through `service_..._v10::state::service_state`'s store exactly as a handler's do, so
-//! a seeded record is the same record the handler serves.
+//! `provisioning_loop` that the `trust_stores` suite also uses: a seeded record needs no
+//! CA certificates bundle staged in Amazon S3 (which is what the create reads one from),
+//! and reads and writes go through `service_..._v10::state::service_state`'s store exactly
+//! as a handler's do, so a seeded record is the same record the handler serves.
 
 use crate::provisioning_loop::{
     account, action, call, emulator, first_text, members, p, seed_trust_store, Reply,
@@ -167,8 +167,7 @@ async fn create_listener(
 }
 
 /// Seed a trust store named `name` at creation position `index`, carrying `tags`, and
-/// answer its ARN — through the shared seeder, because `CreateTrustStore` is still a
-/// scaffold stub with its own issue.
+/// answer its ARN — through the shared seeder, which needs no bundle staged for it.
 fn seed_tagged_trust_store(
     engine: &Arc<engine::InMemoryEngine>,
     index: usize,

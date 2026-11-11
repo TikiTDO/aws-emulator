@@ -12427,6 +12427,7 @@ dependencies = [
  "aws-emulator-smithy-server-runtime",
  "aws-sdk-ec2",
  "aws-sdk-lambda",
+ "aws-sdk-s3",
  "aws-smithy-runtime-api",
  "aws-smithy-schema 0.2.1",
  "aws-smithy-types",
@@ -12447,6 +12448,7 @@ dependencies = [
  "service-com-amazonaws-ec2-amazonec2",
  "service-com-amazonaws-elasticloadbalancing-elasticloadbalancing-v7",
  "service-com-amazonaws-lambda-awsgirapiservice",
+ "service-com-amazonaws-s3-amazons3",
  "service-com-amazonaws-sqs-amazonsqs",
  "service-com-amazonaws-wafv2-awswaf-20190729",
  "service-common",
@@ -12454,6 +12456,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "x509-cert",
  "zip",
 ]
 

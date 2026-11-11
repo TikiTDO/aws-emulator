@@ -91,6 +91,27 @@ pub mod cascaded_releases;
 
 pub use cascaded_releases::CascadedReleases;
 
+/// The TRUST-STORE half of this store: the associations a trust store derives from the
+/// listeners that authenticate against it, and the wording its refusals share.
+pub mod trust_stores;
+
+pub use trust_stores::{
+    delete_association_same_account_message, duplicate_trust_store_name_message,
+    too_many_trust_stores_message, trust_store_active_at, trust_store_arn_not_found_message,
+    trust_store_association_not_found_message, trust_store_in_use_message,
+    trust_store_name_not_found_message, TRUST_STORE_QUOTA,
+};
+
+/// Where a trust store's CA certificates come from: the Amazon S3 object a create or a
+/// modification names, and what reading it established.
+pub mod ca_certificates_bundle;
+
+pub use ca_certificates_bundle::{
+    ca_certificates_in, counted_ca_certificates, resolve_ca_certificates_bundle,
+    CaCertificatesBundle, CaCertificatesBundleLocation, CaCertificatesBundleRefusal,
+    CA_CERTIFICATES_BUNDLE_NOT_FOUND_MESSAGE, INVALID_CA_CERTIFICATES_BUNDLE_MESSAGE,
+};
+
 /// The ADDRESS a load balancer publishes as its `DNSName`, and the socket of this
 /// emulator's own that answers there.
 pub mod load_balancer_endpoint;
@@ -2597,9 +2618,11 @@ pub fn availability_zone_records(
 /// Built from the request: the ARN it names is the only thing the caller can act on, and
 /// what the caller has to fix is that ARN — whether it named a trust store this account
 /// does not have, one no policy is attached to, or a resource that carries no resource
-/// policy at all.
+/// policy at all. It is the same sentence every refusal about a trust store ADDRESSED BY
+/// ARN carries ([`trust_store_arn_not_found_message`]), read from there rather than spelled
+/// again, so one endpoint cannot word that one fact two ways.
 pub fn trust_store_policy_not_found_message(arn: &str) -> String {
-    format!("Trust store ARN '{arn}' not found")
+    trust_store_arn_not_found_message(arn)
 }
 
 /// The message Elastic Load Balancing answers a `LoadBalancerNotFound` with for an
@@ -3455,10 +3478,9 @@ pub const TRUST_STORE_ACTIVE: &str = "ACTIVE";
 /// the two instants that decide the order it is reported in and when the clock owes it
 /// its move to [`TRUST_STORE_ACTIVE`].
 ///
-/// `CreateTrustStore` — the operation that mints one, counting
-/// `number_of_ca_certificates` from the CA certificates bundle it is given — is still
-/// a scaffold stub with its own issue; this is the record it fills, and the one
-/// `DescribeTrustStores` reads.
+/// `CreateTrustStore` mints one — counting `number_of_ca_certificates` from the CA
+/// certificates bundle it is given ([`ca_certificates_bundle`]) — `ModifyTrustStore`
+/// rotates that bundle, and `DescribeTrustStores` reads the record back.
 #[derive(Debug, Clone)]
 pub struct TrustStoreRecord {
     pub arn: String,
@@ -3472,6 +3494,10 @@ pub struct TrustStoreRecord {
     /// How many CA certificates the trust store's bundle holds — counted from that
     /// bundle's bytes when it is stored, never guessed.
     pub number_of_ca_certificates: i32,
+    /// WHERE those certificates came from: the Amazon S3 object the create named, as the
+    /// modification that rotates the bundle leaves it. `None` for a record no bundle
+    /// address was stored with.
+    pub ca_certificates_bundle: Option<CaCertificatesBundleLocation>,
     /// How many revoked certificates the trust store's revocation lists hold. Written
     /// by `AddTrustStoreRevocations`/`RemoveTrustStoreRevocations`, both still scaffold
     /// stubs, so the shape is read off this field rather than restated: it follows the

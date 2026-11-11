@@ -282,11 +282,12 @@ async fn a_declared_but_unimplemented_elbv2_action_is_reached_not_refused_as_unk
         ("DescribeSSLPolicies", &[]),
         ("DescribeAccountLimits", &[]),
         (
-            // `DescribeTrustStores` was this row until it was implemented (its own stub
-            // issue is closed); `DescribeTrustStoreAssociations`, which reads a named
-            // trust store's associations, is the stub that stands in for the same shape
-            // of answer.
-            "DescribeTrustStoreAssociations",
+            // `DescribeTrustStores` was this row until it was implemented, and
+            // `DescribeTrustStoreAssociations` stood in for it until its own stub issue was
+            // closed too; `DescribeTrustStoreRevocations`, which reads a named trust
+            // store's revocation entries, is the stub that stands in for the same shape of
+            // answer.
+            "DescribeTrustStoreRevocations",
             &[(
                 "TrustStoreArn",
                 "arn:aws:elasticloadbalancing:us-west-2:000000000000:truststore/t/0",
@@ -294,10 +295,12 @@ async fn a_declared_but_unimplemented_elbv2_action_is_reached_not_refused_as_unk
         ),
         (
             // `AddTags` was this row until it was implemented, `RemoveTags` stood in for
-            // it until it was implemented too, and `ModifyRule` stood in for them until
-            // its own stub issue was closed; `DeleteTrustStore`, a write addressing one
-            // named resource, is the stub that stands in for the same shape of answer.
-            "DeleteTrustStore",
+            // it until it was implemented too, `ModifyRule` stood in for them until its
+            // own stub issue was closed, and `DeleteTrustStore` stood in after that until
+            // the trust-store control plane was implemented; `AddTrustStoreRevocations`, a
+            // write addressing one named resource, is the stub that stands in for the same
+            // shape of answer.
+            "AddTrustStoreRevocations",
             &[(
                 "TrustStoreArn",
                 "arn:aws:elasticloadbalancing:us-west-2:000000000000:truststore/t/0",

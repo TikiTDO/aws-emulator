@@ -22,8 +22,8 @@
 //! sibling suites already carry (`provisioning_loop`, `listener_rules`, `resource_tags`,
 //! `tag_writes`), so a removal is driven against resources created and tagged exactly as
 //! every other suite creates and tags them. A trust store is SEEDED through the shared
-//! engine, as those suites seed one, because `CreateTrustStore` is still a scaffold stub
-//! with its own issue.
+//! engine, as those suites seed one: a seeded record needs no CA certificates bundle
+//! staged in Amazon S3, which is what the create reads one from.
 
 use crate::listener_rules::{
     add_rule, create_listener, create_load_balancer, forward_to, host_header,

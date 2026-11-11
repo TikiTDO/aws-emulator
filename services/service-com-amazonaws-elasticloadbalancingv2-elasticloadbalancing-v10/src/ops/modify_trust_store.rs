@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ModifyTrustStore
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ModifyTrustStore`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ModifyTrustStore::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Rotates the CA certificates bundle of one trust store: the object the request names is
+//! READ out of Amazon S3 ([`crate::state::ca_certificates_bundle`]) and the stored record's
+//! certificate count and bundle address become that read's, so a later describe reports the
+//! bundle in force now.
 //!
 //! ## Shape of an operation
 //!
@@ -147,18 +142,101 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ModifyTrustStore` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ModifyTrustStoreErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ModifyTrustStore"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            // Only reachable on an engine that is not the shared `InMemoryEngine`,
+            // which this service has no store on — so nothing is implemented for it.
+            crate::scaffolded::Scaffolded::not_implemented("ModifyTrustStore")
+        })?;
+        let region = crate::state::request_region(ctx);
+
+        // The trust store this call is about has to exist before its bundle is read: a
+        // rotation of a trust store this account does not hold is the modelled refusal
+        // whatever the object store says about the object.
+        if !state
+            .lock()
+            .trust_stores
+            .contains_key(&input.trust_store_arn)
+        {
+            return Err(not_found(&input.trust_store_arn));
+        }
+
+        // "Update the ca certificate bundle for the specified trust store":
+        // `NumberOfCaCertificates` is a property of the NEW bundle's bytes, so the
+        // modification cannot answer without reading the object the request named.
+        let location = crate::state::CaCertificatesBundleLocation {
+            bucket: input.ca_certificates_bundle_s3_bucket.clone(),
+            key: input.ca_certificates_bundle_s3_key.clone(),
+            version: input.ca_certificates_bundle_s3_object_version.clone(),
+        };
+        let number_of_ca_certificates =
+            match crate::state::counted_ca_certificates(ctx, &region, &location).await {
+                Ok(counted) => counted,
+                Err(refusal) => return Err(bundle_refusal(refusal)),
+            };
+
+        let now = std::time::SystemTime::now();
+        let mut guard = state.lock();
+        // The clock first, so the status the answer carries is the one this trust store is
+        // owed at this instant.
+        guard.settle(now);
+        let Some(record) = guard.trust_stores.get_mut(&input.trust_store_arn) else {
+            // Released between the two guards: the trust store is gone, which is the same
+            // refusal as never having held it.
+            return Err(not_found(&input.trust_store_arn));
+        };
+        // The bundle in force is the one just read, and the count reported with it is that
+        // read's. Nothing else about the trust store changes: the name "can't be changed
+        // after creation", the revocation lists are their own operations', and a trust
+        // store that is already `ACTIVE` keeps serving its listeners while the bundle is
+        // replaced — so no status moves here.
+        record.number_of_ca_certificates = number_of_ca_certificates;
+        record.ca_certificates_bundle = Some(location);
+        Ok(ModifyTrustStoreOutput {
+            trust_stores: Some(vec![record.to_shape()]),
+        })
+    }
+}
+
+/// The modelled refusal for a `TrustStoreArn` this store holds no trust store under,
+/// worded as every refusal about a trust store addressed by ARN is.
+fn not_found(arn: &str) -> ModifyTrustStoreError {
+    ModifyTrustStoreErrorModeled::TrustStoreNotFoundException(TrustStoreNotFoundException {
+        message: Some(crate::state::trust_store_arn_not_found_message(arn)),
+    })
+    .into()
+}
+
+/// The refusal this operation answers a bundle it could not count with.
+///
+/// The SPLIT is read once in `crate::state` ([`crate::state::counted_ca_certificates`]) —
+/// which read outcome is "the bundle does not exist" and which is "these bytes are no CA
+/// certificates bundle" — so this rotation and `CreateTrustStore` cannot word it
+/// differently; this maps those three onto the errors THIS operation declares. A read
+/// NOTHING answered is neither refusal: no object store is mounted to ask, so this emulator
+/// cannot serve the operation at all, and the trust store is left on the bundle it had
+/// rather than reporting one nothing counted.
+fn bundle_refusal(refusal: crate::state::CaCertificatesBundleRefusal) -> ModifyTrustStoreError {
+    match refusal {
+        crate::state::CaCertificatesBundleRefusal::NotFound => {
+            ModifyTrustStoreErrorModeled::CaCertificatesBundleNotFoundException(
+                CaCertificatesBundleNotFoundException {
+                    message: Some(
+                        crate::state::CA_CERTIFICATES_BUNDLE_NOT_FOUND_MESSAGE.to_string(),
+                    ),
+                },
+            )
+            .into()
+        }
+        crate::state::CaCertificatesBundleRefusal::Invalid => {
+            ModifyTrustStoreErrorModeled::InvalidCaCertificatesBundleException(
+                InvalidCaCertificatesBundleException {
+                    message: Some(crate::state::INVALID_CA_CERTIFICATES_BUNDLE_MESSAGE.to_string()),
+                },
+            )
+            .into()
+        }
+        crate::state::CaCertificatesBundleRefusal::Unanswered => {
+            crate::scaffolded::Scaffolded::not_implemented("ModifyTrustStore")
+        }
     }
 }
