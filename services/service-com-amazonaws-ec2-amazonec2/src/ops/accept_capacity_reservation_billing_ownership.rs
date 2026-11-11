@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op AcceptCapacityReservationBillingOwnership
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `AcceptCapacityReservationBillingOwnership`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`AcceptCapacityReservationBillingOwnership::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: answers the billing assignment request [`crate::state`] holds for the named
+//! Capacity Reservation — the one SENT TO the calling account — by moving it from `pending`
+//! to `accepted`, and reports `Return=true`. A value outside the Capacity Reservation id
+//! form EC2 issues is refused malformed before any lookup, an id this account was sent no
+//! request for is reported not found, and a request that is not `pending` is refused for the
+//! state it is in — none of them writing anything. This is the ONLY file to touch for this
+//! operation.
 //!
 //! ## Shape of an operation
 //!
@@ -137,18 +135,104 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `AcceptCapacityReservationBillingOwnership` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(AcceptCapacityReservationBillingOwnershipErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        use crate::scaffolded::Scaffolded;
+        use crate::state;
+
+        // `ctx` carries request metadata only; this operation reads none of it — a billing
+        // assignment is between two ACCOUNTS, so the Region a request was signed for does not
+        // narrow the requests the store holds, exactly as it does not for
+        // `DescribeCapacityReservationBillingRequests`. The store is reached through the
+        // engine held on `self`.
+        let _ = ctx;
+
+        // "The ID of the Capacity Reservation for which to accept the request": its FORM is
+        // read before anything is looked up, so a value EC2 could never have issued is
+        // refused as malformed rather than reported as a request this account was not sent —
+        // a recorded call naming the all-zero `cr-` placeholder is answered
+        // `InvalidCapacityReservationId.Malformed`.
+        let reservation_id = input.capacity_reservation_id.as_str();
+        state::require_well_formed_capacity_reservation_id(reservation_id)?;
+
+        // ONE reading of the wall clock for this call, so the instant the answer is judged at
+        // is the instant it is recorded as given at.
+        let now = ::std::time::SystemTime::now();
+        let service_state = state::require_service_state(&*self.engine)?;
+        let mut store = service_state.lock();
+
+        // The request this call can answer is the one SENT TO the calling account: "Accepts a
+        // request to assign billing of the available capacity of a shared Capacity Reservation
+        // to YOUR account". Every call of this emulator is made by the emulator's own account,
+        // so that is the consumer account each stored request is compared against — one sent
+        // to another account is not this account's to answer, and is reported the way an id no
+        // request was sent for is. The reservation itself belongs to the OWNER account, so it
+        // is not a record this account's reservation store could be asked for.
+        let account = ::engine::emulator_account_id();
+        let status = store
+            .capacity_reservation_billing_request_sent_to(reservation_id, account)
+            .ok_or_else(|| {
+                state::invalid_capacity_reservation_id_not_found::<
+                    AcceptCapacityReservationBillingOwnershipErrorModeled,
+                >(reservation_id)
+            })?
+            .status
+            .clone()
+            // Every stored request carries a catalog member: the only writers of one are
+            // `crate::state`'s insert and answer, which both take a `&'static str` from the
+            // catalog. So the default stands for a record this service cannot have written,
+            // and it is not `pending`, so such a record is refused rather than accepted.
+            .unwrap_or_default();
+
+        // Only a request that is still waiting on this account can be accepted: a request
+        // already answered, withdrawn, revoked or expired carries no pending assignment to
+        // take on, so it is refused for the state it IS in and nothing is written.
+        if status != state::CAPACITY_RESERVATION_BILLING_REQUEST_STATUS_PENDING {
+            return Err(state::incorrect_state_of(
+                CAPACITY_RESERVATION_BILLING_REQUEST,
+                reservation_id,
+                &status,
+            ));
+        }
+
+        // DryRun sits AFTER the request has been resolved and its state checked, and BEFORE
+        // the only write: "Checks whether you have the required permissions for the action,
+        // without actually making the request" (`DryRun`), so a request that would have been
+        // refused is refused with that reason instead, and one that would have succeeded
+        // leaves the store untouched.
+        if input.dry_run == Some(true) {
+            return Err(Scaffolded::dry_run_operation());
+        }
+
+        // The accepted assignment, written through the ONE place this crate answers a stored
+        // billing request: the status becomes `accepted` and `LastUpdateTime` the instant the
+        // answer was given. The status carries no message — the model's `StatusMessage` is
+        // "Information about the status", and an accepted request's status says all there is.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("AcceptCapacityReservationBillingOwnership"))
+        // The write cannot report "no such request" here — it is the same key, resolved under
+        // the lock this call still holds — so the arm below is unreachable by construction and
+        // is the internal-error channel rather than a refusal the caller could provoke.
+        if !store.answer_capacity_reservation_billing_request(
+            reservation_id,
+            state::CAPACITY_RESERVATION_BILLING_REQUEST_STATUS_ACCEPTED,
+            None,
+            now,
+        ) {
+            return Err(Scaffolded::internal_error(format!(
+                "the billing request for the Capacity Reservation '{reservation_id}' could \
+                 not be read back to accept it"
+            )));
+        }
+
+        // "Returns true if the request succeeds; otherwise, it returns an error" (`$Return`).
+        Ok(AcceptCapacityReservationBillingOwnershipOutput {
+            r#return: Some(true),
+        })
     }
 }
+
+/// The KIND of resource this operation's state refusal names: the billing assignment request
+/// itself, which is what the call answers, identified by the Capacity Reservation it is held
+/// under.
+///
+/// Worded for the resource rather than for the operation, the way every refusal of this crate
+/// that EC2 answers `IncorrectState` for is ([`crate::state::incorrect_state_of`]).
+const CAPACITY_RESERVATION_BILLING_REQUEST: &str = "Capacity Reservation billing request";

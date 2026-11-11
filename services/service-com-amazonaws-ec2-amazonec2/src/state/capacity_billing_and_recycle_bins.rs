@@ -68,6 +68,14 @@ pub(super) fn either_of(values: &[&str]) -> String {
 /// [`crate::ops::types::CAPACITY_RESERVATION_BILLING_REQUEST_STATUS_VALUES`].
 pub const CAPACITY_RESERVATION_BILLING_REQUEST_STATUS_PENDING: &str = "pending";
 
+/// `CapacityReservationBillingRequestStatus`'s `accepted` member: the consumer account the
+/// request was sent to took the billing of the reservation's unused capacity on, which is
+/// what `AcceptCapacityReservationBillingOwnership` makes of a `pending` request. From the
+/// same catalog as
+/// [`CAPACITY_RESERVATION_BILLING_REQUEST_STATUS_PENDING`]
+/// ([`crate::ops::types::CAPACITY_RESERVATION_BILLING_REQUEST_STATUS_VALUES`]).
+pub const CAPACITY_RESERVATION_BILLING_REQUEST_STATUS_ACCEPTED: &str = "accepted";
+
 /// How many Capacity Reservation billing requests this emulator stores before a writer must
 /// refuse.
 ///
@@ -187,6 +195,66 @@ impl ComAmazonawsEc2Amazonec2State {
         self.add_stored_bytes(capacity_reservation_billing_request_payload_bytes(&request));
         self.capacity_reservation_billing_requests
             .insert(spec.capacity_reservation_id, request);
+        true
+    }
+
+    /// The billing assignment request `account` is the CONSUMER of — the one sent to it for
+    /// `capacity_reservation_id` — or `None` when the store holds none.
+    ///
+    /// The one place a request is resolved from the side it was SENT to, so an operation the
+    /// consumer account answers a request with and
+    /// `DescribeCapacityReservationBillingRequests`' `unused-reservation-billing-owner` role
+    /// select the same records: a request between two OTHER accounts is not one this account
+    /// can see, let alone answer.
+    pub fn capacity_reservation_billing_request_sent_to(
+        &self,
+        capacity_reservation_id: &str,
+        account: &str,
+    ) -> Option<&CapacityReservationBillingRequest> {
+        self.capacity_reservation_billing_requests
+            .get(capacity_reservation_id)
+            .filter(|request| {
+                request.unused_reservation_billing_owner_id.as_deref() == Some(account)
+            })
+    }
+
+    /// Move the billing assignment request stored for `capacity_reservation_id` to `status`,
+    /// as of `now`, and answer whether it was moved.
+    ///
+    /// The one place a stored request's status is answered, so every operation that answers
+    /// one — and the describe that reports it — agrees on what an answered request carries:
+    /// the status, the message it is reported with, and `LastUpdateTime` as the instant the
+    /// answer was given ("When the request was last updated"). `status` is a `&'static str`,
+    /// so only a member of the modelled `CapacityReservationBillingRequestStatus` catalog can
+    /// be written. The bytes the record holds are re-charged here, so a status message that
+    /// grows or shrinks the record cannot drift from [`MAX_STORED_BYTES`].
+    ///
+    /// `false` means the store holds no request for that reservation and NOTHING was written.
+    pub fn answer_capacity_reservation_billing_request(
+        &mut self,
+        capacity_reservation_id: &str,
+        status: &'static str,
+        status_message: Option<String>,
+        now: SystemTime,
+    ) -> bool {
+        let Some((held, charged)) = self
+            .capacity_reservation_billing_requests
+            .get_mut(capacity_reservation_id)
+            .map(|request| {
+                let held = capacity_reservation_billing_request_payload_bytes(request);
+                request.status = Some(status.to_string());
+                request.status_message = status_message;
+                request.last_update_time = Some(system_time_to_date_time(now));
+                (
+                    held,
+                    capacity_reservation_billing_request_payload_bytes(request),
+                )
+            })
+        else {
+            return false;
+        };
+        self.release_stored_bytes(held);
+        self.add_stored_bytes(charged);
         true
     }
 }

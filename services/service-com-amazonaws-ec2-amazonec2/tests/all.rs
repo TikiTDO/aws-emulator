@@ -702,6 +702,12 @@ mod capacity_manager_disable;
 // result, over the account histories behind it and the Regions it is asked for in.
 #[path = "all/capacity_manager_attributes.rs"]
 mod capacity_manager_attributes;
+// What `AcceptCapacityReservationBillingOwnership` makes of the billing assignment request
+// this account was sent for a shared Capacity Reservation, and what it refuses. Declared in
+// the MIDDLE of this list rather than at either end: the head and the tail are both where
+// concurrent ec2 landings insert their lines.
+#[path = "all/accept_capacity_reservation_billing_ownership.rs"]
+mod accept_capacity_reservation_billing_ownership;
 #[path = "all/capacity_reservation_billing_requests.rs"]
 mod capacity_reservation_billing_requests;
 // What `CreateCapacityReservationCancellationQuote` quotes for cancelling a future-dated
