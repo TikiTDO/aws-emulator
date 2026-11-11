@@ -364,10 +364,13 @@ async fn created_flows_round_trip_through_get_flow() {
             }
         }
 
-        // A flow nothing has failed on carries no validation findings.
-        assert!(
-            fetched.member(&["validations"]).is_null(),
-            "case {case}: a flow with no failed operation reports no validations, got {:?}",
+        // A flow nothing has failed on reports an EMPTY findings list: the list
+        // is the report, so its emptiness is the answer.
+        assert_eq!(
+            fetched.member(&["validations"]),
+            &json!([]),
+            "case {case}: expected a flow with no failed operation to report an empty \
+             validations list, got {:?}",
             fetched.member(&["validations"])
         );
     }

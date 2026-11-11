@@ -444,7 +444,8 @@ async fn prepare_flow_accepts_and_the_clock_reports_the_outcome() {
         );
 
         // Read back while the preparation is still in flight: the flow is being
-        // prepared, and nothing has failed yet, so it publishes no findings.
+        // prepared, and nothing has failed yet, so it reports an EMPTY findings
+        // list rather than no list at all.
         let during = emulator.get_flow(&flow_id).await;
         assert_eq!(
             during.status, 200,
@@ -456,9 +457,11 @@ async fn prepare_flow_accepts_and_the_clock_reports_the_outcome() {
             "case {name}: a flow still being prepared reports Preparing, got {:?}",
             during.body
         );
-        assert!(
-            during.member(&["validations"]).is_null(),
-            "case {name}: nothing has failed while the flow is being prepared, got {:?}",
+        assert_eq!(
+            during.member(&["validations"]),
+            &json!([]),
+            "case {name}: expected an empty findings list while the flow is being prepared, \
+             got {:?}",
             during.member(&["validations"])
         );
 
@@ -481,9 +484,11 @@ async fn prepare_flow_accepts_and_the_clock_reports_the_outcome() {
             );
         }
         if case.expected_types.is_empty() {
-            assert!(
-                after.member(&["validations"]).is_null(),
-                "case {name}: a preparation that succeeded publishes no findings, got {:?}",
+            assert_eq!(
+                after.member(&["validations"]),
+                &json!([]),
+                "case {name}: expected a preparation that succeeded to publish an empty \
+                 findings list, got {:?}",
                 after.member(&["validations"])
             );
         } else {
@@ -660,9 +665,11 @@ async fn updating_a_flow_cancels_the_preparation_in_flight() {
             "case {case}: a cancelled preparation never reports an outcome, got {:?}",
             after.body
         );
-        assert!(
-            after.member(&["validations"]).is_null(),
-            "case {case}: the update succeeded, so the flow carries no findings, got {:?}",
+        assert_eq!(
+            after.member(&["validations"]),
+            &json!([]),
+            "case {case}: the update succeeded, so the flow reports an empty findings list, \
+             got {:?}",
             after.member(&["validations"])
         );
     }
@@ -891,4 +898,170 @@ async fn prepare_flow_refuses_an_identifier_that_names_no_flow() {
         "case flow ARN: both identifier forms must name the same flow, got {:?}",
         by_arn.body
     );
+}
+
+/// `GetFlow` reports the flow's `validations` LIST whatever status the flow is
+/// in: the member carries the findings of the last operation on the flow, and
+/// an empty list is the report that there are none — not an absent member a
+/// polling client cannot tell from "nothing reported".
+///
+/// The rows differ along every status the modelled `FlowStatus` admits —
+/// `NotPrepared` (freshly created and freshly updated), `Preparing`, `Prepared`
+/// and `Failed` — crossed with each `IncludedData` value the model admits
+/// (`ALL_DATA`, `METADATA_ONLY`, `smithy_query(query="shape",
+/// shape="IncludedData")`) and the omitted member.
+#[tokio::test]
+async fn get_flow_always_reports_the_validations_list() {
+    let emulator = Emulator::new();
+
+    /// How far a row drives the flow before it is read back.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Drive {
+        /// Read the flow as `CreateFlow` left it.
+        AsCreated,
+        /// Store a new definition first, as `UpdateFlow` leaves it.
+        Updated,
+        /// Accept a preparation and read while it is still in flight.
+        Preparing,
+        /// Accept a preparation and let the clock reach its outcome.
+        Settled,
+    }
+
+    // Rows: the status to expect, how to get the flow there, and the definition
+    // stored for it — valid definitions of two different sizes, and two
+    // different fatal defects.
+    let rows: [(&str, Drive, Value, &str); 6] = [
+        (
+            "freshly created",
+            Drive::AsCreated,
+            passthrough_definition(),
+            "NotPrepared",
+        ),
+        (
+            "freshly updated",
+            Drive::Updated,
+            fan_out_definition(),
+            "NotPrepared",
+        ),
+        (
+            "preparation in flight",
+            Drive::Preparing,
+            passthrough_definition(),
+            "Preparing",
+        ),
+        (
+            "preparation succeeded",
+            Drive::Settled,
+            fan_out_definition(),
+            "Prepared",
+        ),
+        (
+            "preparation failed on a missing ending node",
+            Drive::Settled,
+            input_only_definition(),
+            "Failed",
+        ),
+        (
+            "preparation failed on a connection that does not resolve",
+            Drive::Settled,
+            dangling_connection_definition(),
+            "Failed",
+        ),
+    ];
+
+    for (row, drive, definition, expected_status) in rows {
+        for included_data in [None, Some("ALL_DATA"), Some("METADATA_ONLY")] {
+            let case = format!("{row} / includedData {included_data:?}");
+            let created = emulator
+                .create_flow(
+                    &case,
+                    json!({
+                        "name": "validations-member-flow",
+                        "executionRoleArn": EXECUTION_ROLE,
+                        "definition": if drive == Drive::Updated {
+                            passthrough_definition()
+                        } else {
+                            definition.clone()
+                        },
+                    }),
+                )
+                .await;
+            let flow_id = created.string(&["id"]);
+
+            match drive {
+                Drive::AsCreated => {}
+                Drive::Updated => {
+                    let updated = emulator
+                        .update_flow(
+                            &flow_id,
+                            json!({
+                                "name": "validations-member-flow",
+                                "executionRoleArn": EXECUTION_ROLE,
+                                "definition": definition.clone(),
+                            }),
+                        )
+                        .await;
+                    assert_eq!(
+                        updated.status, 200,
+                        "case {case}: expected UpdateFlow -> 200, got {updated:?}"
+                    );
+                }
+                Drive::Preparing => {
+                    let prepared = emulator.prepare_flow(&flow_id).await;
+                    assert_eq!(
+                        prepared.status, 202,
+                        "case {case}: expected PrepareFlow -> 202, got {prepared:?}"
+                    );
+                }
+                Drive::Settled => {
+                    let prepared = emulator.prepare_flow(&flow_id).await;
+                    assert_eq!(
+                        prepared.status, 202,
+                        "case {case}: expected PrepareFlow -> 202, got {prepared:?}"
+                    );
+                    emulator.make_preparation_due(&case, &flow_id);
+                }
+            }
+
+            let uri = match included_data {
+                None => format!("/flows/{flow_id}/"),
+                Some(value) => format!("/flows/{flow_id}/?includedData={value}"),
+            };
+            let fetched = emulator.call("GET", &uri, None).await;
+            assert_eq!(
+                fetched.status, 200,
+                "case {case}: expected GetFlow -> 200, got {fetched:?}"
+            );
+            assert_eq!(
+                fetched.string(&["status"]),
+                expected_status,
+                "case {case}: expected status {expected_status}, got {:?}",
+                fetched.body
+            );
+
+            let reported = fetched.member(&["validations"]);
+            let findings = reported.as_array().unwrap_or_else(|| {
+                panic!("case {case}: expected a validations array, got {reported:?}")
+            });
+            if expected_status == "Failed" {
+                assert!(
+                    !findings.is_empty(),
+                    "case {case}: a failed operation reports what it found, got {reported:?}"
+                );
+                assert!(
+                    fetched
+                        .validation_severities()
+                        .iter()
+                        .any(|severity| severity == "Error"),
+                    "case {case}: a failed preparation reports at least one Error finding, \
+                     got {reported:?}"
+                );
+            } else {
+                assert!(
+                    findings.is_empty(),
+                    "case {case}: nothing has failed, so the list is empty, got {reported:?}"
+                );
+            }
+        }
+    }
 }

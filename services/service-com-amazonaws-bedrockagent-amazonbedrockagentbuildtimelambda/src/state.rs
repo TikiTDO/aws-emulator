@@ -487,8 +487,13 @@ impl FlowRecord {
     }
 
     /// This record as the `GetFlow` response. `with_definition` is false for a
-    /// metadata-only read, which drops the flow definition and nothing else;
-    /// `validations` is reported only while the flow actually carries findings.
+    /// metadata-only read, which drops the flow definition and nothing else.
+    ///
+    /// `validations` is the flow's findings LIST, and an empty list is a value
+    /// rather than an absence: the member reports what the last operation on the
+    /// flow found, so a flow nothing has failed on reports that it carries no
+    /// findings — `[]` — instead of leaving a polling client unable to tell "no
+    /// problems" from "not reported".
     pub fn to_get_output(&self, with_definition: bool) -> GetFlowOutput {
         GetFlowOutput {
             name: self.name.clone(),
@@ -502,7 +507,7 @@ impl FlowRecord {
             updated_at: to_date_time(self.updated_at),
             version: self.version.clone(),
             definition: with_definition.then(|| self.definition.clone()).flatten(),
-            validations: (!self.validations.is_empty()).then(|| self.validations.clone()),
+            validations: Some(self.validations.clone()),
         }
     }
 

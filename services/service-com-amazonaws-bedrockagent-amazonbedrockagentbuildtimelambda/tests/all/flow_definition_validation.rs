@@ -1060,9 +1060,11 @@ async fn validating_a_definition_changes_no_stored_flow() {
         created.member(&["definition"]),
         "case stored flow: validating a definition must not touch a stored flow"
     );
-    assert!(
-        fetched.member(&["validations"]).is_null(),
-        "case stored flow: the validated definition belongs to no flow, so the stored flow carries no findings, got {:?}",
+    assert_eq!(
+        fetched.member(&["validations"]),
+        &json!([]),
+        "case stored flow: the validated definition belongs to no flow, so the stored flow \
+         reports an empty findings list, got {:?}",
         fetched.member(&["validations"])
     );
 }
