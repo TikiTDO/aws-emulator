@@ -185,7 +185,7 @@ const PENDING_PROTOCOLS: &[(&str, &str)] = &[
 /// confirms the subscription itself.
 const CONFIRMED_PROTOCOLS: &[(&str, &str)] = &[
     ("sqs", "arn:aws:sqs:us-east-1:000000000000:q"),
-    ("sqs", "arn:aws:sqs:eu-west-1:000000000000:other-queue.fifo"),
+    ("sqs", "arn:aws:sqs:eu-west-1:000000000000:other-queue"),
     ("sms", "+15550100"),
     ("sms", "+44 20 7946 0958"),
     (

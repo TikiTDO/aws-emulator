@@ -178,32 +178,46 @@ async fn an_empty_value_removes_a_policy_attribute() {
             None,
             "case {case:?}: an empty {name} at Subscribe must leave none held, got {held:?}"
         );
-        // A re-subscribe of the same endpoint applies what it carries to the subscription
-        // that already exists, so an empty value removes the policy it holds.
-        let set_on_subscribe = subscribe(
-            &sns,
-            case,
-            &other,
-            protocol,
-            endpoint,
-            &[(name, document)],
-        )
-        .await;
+        // A re-subscribe is idempotent only in what the subscription already holds: one
+        // that asks for a policy the subscription does not have is refused, and the
+        // subscription is left holding none of it.
+        let answer = sns
+            .call(
+                "Subscribe",
+                &[
+                    ("TopicArn", &other),
+                    ("Protocol", protocol),
+                    ("Endpoint", endpoint),
+                    ("ReturnSubscriptionArn", "true"),
+                    ("Attributes.entry.1.key", name),
+                    ("Attributes.entry.1.value", document),
+                ],
+            )
+            .await;
         assert_eq!(
-            set_on_subscribe, carried,
-            "case {case:?}: re-subscribing one endpoint must answer the same subscription"
+            answer.status, 400,
+            "case {case:?}: a re-subscribe carrying a policy the subscription does not hold \
+             must be refused, got {} / {}",
+            answer.status, answer.body
         );
-        assert!(
-            read(&sns, case, &carried).await.contains_key(*name),
-            "case {case:?}: the re-subscribe must apply the policy it carried"
-        );
-        let cleared = subscribe(&sns, case, &other, protocol, endpoint, &[(name, "")]).await;
-        let held = read(&sns, case, &cleared).await;
+        let held = read(&sns, case, &carried).await;
         assert_eq!(
             held.get(*name),
             None,
-            "case {case:?}: an empty {name} must remove the policy the subscription held, \
-             got {held:?}"
+            "case {case:?}: the refused re-subscribe must leave none held, got {held:?}"
+        );
+        // While the IDENTICAL request — the empty value again, on a subscription that
+        // holds no such policy — answers the subscription that already exists.
+        let repeated = subscribe(&sns, case, &other, protocol, endpoint, &[(name, "")]).await;
+        assert_eq!(
+            repeated, carried,
+            "case {case:?}: an identical re-subscribe must answer the same subscription"
+        );
+        let held = read(&sns, case, &carried).await;
+        assert_eq!(
+            held.get(*name),
+            None,
+            "case {case:?}: the subscription must still hold no {name}, got {held:?}"
         );
     }
 

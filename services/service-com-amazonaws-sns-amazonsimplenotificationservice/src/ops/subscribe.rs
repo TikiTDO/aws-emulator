@@ -147,6 +147,31 @@ const LAMBDA_FUNCTION_PREFIX: &str = "function:";
 /// (`arn:aws:firehose:<region>:<account>:deliverystream/<name>`).
 const FIREHOSE_STREAM_PREFIX: &str = "deliverystream/";
 
+/// The sentence SNS refuses a FIFO SQS queue subscribed to a STANDARD topic with.
+///
+/// A FIFO queue is delivered to in the order its messages were published, with the
+/// ordering members only a FIFO topic carries, so the pairing is one SNS cannot deliver
+/// through at all — it is refused outright rather than created and left undeliverable.
+/// Entirely fixed text, the doubled leading clause and the `Endpoint Reason: ` segment
+/// included: that is the sentence the service states, and the endpoint is what it is
+/// about.
+const FIFO_QUEUE_ON_STANDARD_TOPIC_REFUSAL: &str =
+    "Invalid parameter: Invalid parameter: Endpoint Reason: FIFO SQS Queues can not be \
+     subscribed to standard SNS topics";
+
+/// The sentence SNS refuses a re-subscribe of a (topic, protocol, endpoint) triple that
+/// already holds a subscription with when the request asks for attributes that
+/// subscription does not have.
+///
+/// `Subscribe` is idempotent only in a request that asks for what the subscription
+/// already is; a request asking for anything else would change a live subscription's
+/// delivery under its consumer, so it is refused and nothing is written. Entirely fixed
+/// text — neither the attribute nor either value is in it — the counterpart of the
+/// sentence a conflicting re-create of a topic answers.
+const SUBSCRIPTION_ALREADY_EXISTS_REFUSAL: &str =
+    "Invalid parameter: Attributes Reason: Subscription already exists with different \
+     attributes";
+
 /// The fewest digits a phone number of an SMS-enabled device may hold: an E.164
 /// subscriber number is never shorter than a country code plus a handful of digits,
 /// and the point of the floor is only to refuse a string that is not a phone number
@@ -450,6 +475,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> Subscribe<Eng> {
             .into());
         }
 
+        // A FIFO queue may be subscribed only to a FIFO topic: it is delivered to in
+        // the published order, which only a FIFO topic's messages carry. The pairing is
+        // judged BEFORE any subscription record or subscription counter is written, so a
+        // topic SNS refuses the endpoint for keeps an empty subscriber list. The queue's
+        // kind is read through the crate's one definition of it
+        // ([`state::addresses_fifo_queue`]), the same one a delivery reads. The other
+        // direction is NOT refused: a FIFO topic delivers to a standard queue.
+        let endpoint_is_fifo_queue = protocol == "sqs"
+            && input
+                .endpoint
+                .as_deref()
+                .is_some_and(state::addresses_fifo_queue);
+        let topic_is_fifo = store
+            .topics
+            .get(&input.topic_arn)
+            .is_some_and(|topic| topic.is_fifo);
+        if endpoint_is_fifo_queue && !topic_is_fifo {
+            return Err(SubscribeErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(FIFO_QUEUE_ON_STANDARD_TOPIC_REFUSAL.to_string()),
+                },
+            )
+            .into());
+        }
+
         // Subscribe is idempotent in the endpoint: one topic holds at most one
         // subscription per (protocol, endpoint) pair, so re-subscribing the same
         // endpoint answers with the subscription that already exists.
@@ -549,34 +599,35 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> Subscribe<Eng> {
         // archive again to a subscription that already holds one.
         let asked_for_replay = attributes.contains_key(state::REPLAY_POLICY_ATTRIBUTE);
 
-        let (arn, pending_confirmation) = match existing {
+        let (arn, pending_confirmation, wrote_attributes) = match existing {
             Some((arn, pending_confirmation)) => {
-                // The attributes a re-subscribe carries are APPLIED to the subscription
-                // that already exists, the way SetSubscriptionAttributes would apply
-                // them, so no caller input is dropped under a success status. The
-                // merged map is measured BEFORE it is stored, so a repeated
-                // re-subscribe cannot grow this one record past the ceiling.
-                let mut merged = store
+                // Subscribe is idempotent only in a request that asks for what the
+                // subscription already is: one asking for an attribute value it does not
+                // hold — a value of its own, or the removal of one it holds — would
+                // change the delivery a running consumer is already receiving, so it is
+                // refused and NOTHING is written. A request that carries no attribute at
+                // all asks for no change, so it is the idempotent one.
+                let held = store
                     .subscriptions
                     .get(&arn)
                     .map(|held| held.attributes.clone())
                     .unwrap_or_default();
-                for (name, value) in attributes {
-                    merged.insert(name, value);
-                }
-                for name in &cleared {
-                    merged.remove(name);
-                }
-                if let Some(refusal) = oversized(&merged) {
-                    return Err(refusal);
-                }
-                if let Some(held) = store.subscriptions.get_mut(&arn) {
-                    held.attributes = merged;
+                let asks_for_a_change = attributes
+                    .iter()
+                    .any(|(name, value)| held.get(name) != Some(value))
+                    || cleared.iter().any(|name| held.contains_key(name));
+                if asks_for_a_change {
+                    return Err(SubscribeErrorModeled::InvalidParameterException(
+                        InvalidParameterException {
+                            message: Some(SUBSCRIPTION_ALREADY_EXISTS_REFUSAL.to_string()),
+                        },
+                    )
+                    .into());
                 }
                 // Its confirmation token is left as it is: the token already sent to
                 // that endpoint still names this subscription, so a subscriber part way
                 // through confirming is not stranded by a re-subscribe.
-                (arn, pending_confirmation)
+                (arn, pending_confirmation, false)
             }
             None => {
                 if let Some(refusal) = oversized(&attributes) {
@@ -623,14 +674,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> Subscribe<Eng> {
                         replay: None,
                     },
                 );
-                (arn, pending_confirmation)
+                (arn, pending_confirmation, true)
             }
         };
 
-        // A `ReplayPolicy` this call wrote asks for the topic's archived messages to be
+        // A `ReplayPolicy` this call WROTE asks for the topic's archived messages to be
         // redelivered to this subscription, which is the same redelivery
-        // `SetSubscriptionAttributes` starts when it writes one.
-        let replay = if asked_for_replay {
+        // `SetSubscriptionAttributes` starts when it writes one. An idempotent
+        // re-subscribe writes nothing, so it starts no second replay of a policy the
+        // subscription already holds.
+        let replay = if asked_for_replay && wrote_attributes {
             super::publish::replay_deliveries(&mut store, &arn)
         } else {
             super::publish::Deliveries::default()

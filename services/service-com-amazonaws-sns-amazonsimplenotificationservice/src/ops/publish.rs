@@ -633,12 +633,11 @@ impl QueueLocation {
         })
     }
 
-    /// Whether this is a FIFO queue: "the name of a FIFO queue must end with the .fifo
-    /// suffix" (`CreateQueueInput$QueueName` doc), and the resource part of a queue's ARN
-    /// is its name. A FIFO queue is the only kind that takes the ordering members of a
-    /// published message.
+    /// Whether this is a FIFO queue, read off the queue's own ARN through the crate's one
+    /// definition of a queue's kind ([`crate::state::addresses_fifo_queue`]). A FIFO queue
+    /// is the only kind that takes the ordering members of a published message.
     fn is_fifo(&self) -> bool {
-        self.queue_arn.ends_with(crate::state::FIFO_SUFFIX)
+        crate::state::addresses_fifo_queue(&self.queue_arn)
     }
 }
 

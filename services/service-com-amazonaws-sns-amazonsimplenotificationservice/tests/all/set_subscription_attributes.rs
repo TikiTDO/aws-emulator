@@ -780,7 +780,6 @@ async fn setting_an_attribute_of_a_subscription_that_is_not_there_is_refused() {
 #[tokio::test]
 async fn subscribe_holds_its_attributes_to_the_same_rules() {
     let sns = Sns::new();
-    let topic = sns.topic("subscribe-attribute-rules").await;
     let cases: &[(&str, &str, &str, &str, bool)] = &[
         (
             "raw delivery on an sqs subscription",
@@ -854,7 +853,13 @@ async fn subscribe_holds_its_attributes_to_the_same_rules() {
         ),
     ];
 
-    for (case, protocol, name, value, accepted) in cases {
+    // Each row subscribes its own TOPIC: `Subscribe` is idempotent only in a request
+    // that asks for what the subscription already holds, so one row's attributes must
+    // not be asked of the subscription another row created.
+    for (index, (case, protocol, name, value, accepted)) in cases.iter().enumerate() {
+        let topic = sns
+            .topic(&format!("subscribe-attribute-rules-{index:02}"))
+            .await;
         let answer = sns
             .call(
                 "Subscribe",

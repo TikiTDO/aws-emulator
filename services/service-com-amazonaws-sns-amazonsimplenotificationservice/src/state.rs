@@ -22,6 +22,9 @@ pub mod authorization;
 /// The address-matching condition of a filter policy (`cidr`), which
 /// [`filter_policy`] reads beside the conditions that compare values.
 pub mod message_filter;
+/// The documented bounds of the retry policy a delivery policy document carries, held
+/// against every write of one.
+pub mod retry_policy_bounds;
 /// What a topic configured with delivery-status feedback roles LOGS about each delivery
 /// it attempted.
 pub mod delivery_status;
@@ -1283,6 +1286,25 @@ pub fn flag_attribute_enabled(value: &str) -> bool {
     flag_attribute_value(value) == Some("true")
 }
 
+/// The WHOLE sentence SNS refuses a FLAG-valued attribute's value with: the attribute,
+/// the value it rejected in brackets, and the two words a flag takes.
+///
+/// The rejected value is echoed because SNS's own sentence echoes it — it is the only
+/// place the service states WHICH value it would not take, and it is what the caller has
+/// to change. Everything around it is fixed text. Recorded evidence: a
+/// `RawMessageDelivery` of `yes` answers `400 InvalidParameter` with exactly `Invalid
+/// parameter: Attributes Reason: RawMessageDelivery: Invalid value [yes]. Must be true or
+/// false.`
+///
+/// ONE sentence for every attribute whose value is a flag, so the refusal does not depend
+/// on which flag, or which call, carried the value.
+pub fn flag_attribute_refusal(name: &str, value: &str) -> String {
+    format!(
+        "Invalid parameter: {ATTRIBUTES_MEMBER} Reason: {name}: Invalid value [{value}]. \
+         Must be {RAW_MESSAGE_DELIVERY_ENABLED} or {RAW_MESSAGE_DELIVERY_DISABLED}."
+    )
+}
+
 // =============================================================================
 // What a subscription attribute may be SET to
 // =============================================================================
@@ -1584,12 +1606,9 @@ pub fn subscription_attribute_refusal(name: &str, value: &str) -> Option<String>
     match name {
         // A flag, carried as a word because SNS carries every attribute value as a
         // string (see [`attribute_flag`]), in either case.
-        RAW_MESSAGE_DELIVERY_ATTRIBUTE => flag_attribute_value(value).is_none().then(|| {
-            attribute_reason(format!(
-                "{name} - the value must be {RAW_MESSAGE_DELIVERY_ENABLED} or \
-                 {RAW_MESSAGE_DELIVERY_DISABLED}"
-            ))
-        }),
+        RAW_MESSAGE_DELIVERY_ATTRIBUTE => flag_attribute_value(value)
+            .is_none()
+            .then(|| flag_attribute_refusal(name, value)),
         FILTER_POLICY_SCOPE_ATTRIBUTE => {
             (!FILTER_POLICY_SCOPES.contains(&value)).then(|| filter_policy_scope_refusal(value))
         }
@@ -1608,9 +1627,12 @@ pub fn subscription_attribute_refusal(name: &str, value: &str) -> Option<String>
             ))),
         },
         // The SAME parse the stored, normalized document is computed with, so a
-        // document the read path could not honour is never stored.
+        // document the read path could not honour is never stored — and then the
+        // document's numbers against their documented bounds, so a retry budget SNS
+        // would never run under is refused rather than stored.
         DELIVERY_POLICY_ATTRIBUTE => subscription_delivery_policy_refusal(value)
-            .map(|reason| attribute_reason(format!("{name} - {reason}"))),
+            .map(|reason| attribute_reason(format!("{name} - {reason}")))
+            .or_else(|| retry_policy_bounds::subscription_delivery_policy_bounds_refusal(value)),
         REDRIVE_POLICY_ATTRIBUTE => match json_object(value) {
             // A value that is not a policy document at all carries no dead-letter
             // target either, which is the member the document is refused for.
@@ -4338,6 +4360,17 @@ pub fn subscription_arn(topic_arn: &str, id: &str) -> String {
 /// The suffix SNS requires on a FIFO topic's name: "For a FIFO (first-in-first-out)
 /// topic, the name must end with the .fifo suffix" (`CreateTopicInput$Name` doc).
 pub const FIFO_SUFFIX: &str = ".fifo";
+
+/// Whether `arn` addresses a FIFO QUEUE: "the name of a FIFO queue must end with the .fifo
+/// suffix" (`CreateQueueInput$QueueName` doc), and the resource part of a queue's ARN is
+/// its name, so the endpoint itself says which kind of queue it names.
+///
+/// ONE reading of a queue's kind, shared by the `Subscribe` that binds a queue to a topic
+/// and the delivery that hands one a published message, so the two cannot disagree about
+/// the same endpoint.
+pub fn addresses_fifo_queue(arn: &str) -> bool {
+    arn.ends_with(FIFO_SUFFIX)
+}
 
 /// The longest topic name SNS accepts: "must be between 1 and 256 characters long"
 /// (`CreateTopicInput$Name` doc).

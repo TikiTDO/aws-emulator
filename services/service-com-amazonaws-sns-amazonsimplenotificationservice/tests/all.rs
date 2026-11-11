@@ -29,6 +29,9 @@ mod data_protection_policy;
 #[path = "all/delivery_policy_and_message_branches.rs"]
 mod delivery_policy_and_message_branches;
 
+#[path = "all/delivery_policy_retry_bounds.rs"]
+mod delivery_policy_retry_bounds;
+
 #[path = "all/delivery_status_logging.rs"]
 mod delivery_status_logging;
 
@@ -43,6 +46,9 @@ mod fifo_archive_replay;
 
 #[path = "all/fifo_message_deduplication.rs"]
 mod fifo_message_deduplication;
+
+#[path = "all/fifo_pairing_and_subscribe_conflicts.rs"]
+mod fifo_pairing_and_subscribe_conflicts;
 
 #[path = "all/fifo_topic_deduplication_attribute.rs"]
 mod fifo_topic_deduplication_attribute;

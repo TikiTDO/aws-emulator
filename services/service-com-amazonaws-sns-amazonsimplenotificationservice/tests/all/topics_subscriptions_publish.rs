@@ -610,19 +610,15 @@ async fn subscribe_reports_an_unconfirmed_subscription_as_pending() {
     }
 }
 
-/// One re-subscribe case: its name, the form parameters it carries, and the
-/// attribute values the subscription must hold afterwards.
-type ReSubscribe<'a> = (
-    &'a str,
-    &'a [(&'static str, &'static str)],
-    &'a [(&'a str, &'a str)],
-);
+/// One re-subscribe case: its name, the form parameters it carries, and whether the
+/// request asks for what the subscription already holds.
+type ReSubscribe<'a> = (&'a str, &'a [(&'static str, &'static str)], bool);
 
 /// A re-subscribe of the same (protocol, endpoint) pair answers the subscription that
-/// already exists AND applies the attributes it carries, so no caller input is dropped
-/// under a success status.
+/// already exists only when it asks for the attributes that subscription already holds;
+/// one asking for anything else is refused and changes nothing.
 #[tokio::test]
-async fn re_subscribing_applies_the_attributes_it_carries() {
+async fn re_subscribing_is_idempotent_only_in_the_attributes_already_held() {
     let sns = Sns::new();
     let topic = sns.topic("attributed-subscription").await;
     let subscribe = |attributes: &[(&'static str, &'static str)]| {
@@ -651,66 +647,109 @@ async fn re_subscribing_applies_the_attributes_it_carries() {
     );
     let arn = first.element("SubscriptionArn").unwrap_or_default();
 
-    // (case, attributes asked for, the value each must hold afterwards)
+    // The sentence SNS refuses a conflicting re-subscribe with: entirely fixed text,
+    // naming neither the attribute nor either value.
+    let conflict = "Invalid parameter: Attributes Reason: Subscription already exists with \
+                    different attributes";
+
+    // (case, attributes asked for, whether the request asks for what is already held)
     let cases: &[ReSubscribe] = &[
+        ("no attributes at all", &[], true),
+        (
+            "the attribute value the subscription holds",
+            &[
+                ("Attributes.entry.1.key", "RawMessageDelivery"),
+                ("Attributes.entry.1.value", "true"),
+            ],
+            true,
+        ),
+        (
+            "the same value written in another case",
+            &[
+                ("Attributes.entry.1.key", "RawMessageDelivery"),
+                ("Attributes.entry.1.value", "TRUE"),
+            ],
+            true,
+        ),
+        (
+            "another value for an attribute it holds",
+            &[
+                ("Attributes.entry.1.key", "RawMessageDelivery"),
+                ("Attributes.entry.1.value", "false"),
+            ],
+            false,
+        ),
         (
             "an attribute the subscription does not hold",
             &[
                 ("Attributes.entry.1.key", "FilterPolicy"),
                 ("Attributes.entry.1.value", r#"{"kind":["alert"]}"#),
             ],
-            &[
-                ("RawMessageDelivery", "true"),
-                ("FilterPolicy", r#"{"kind":["alert"]}"#),
-            ],
+            false,
         ),
         (
-            "a new value for an attribute it holds",
+            "the removal of an attribute it does not hold",
             &[
-                ("Attributes.entry.1.key", "RawMessageDelivery"),
-                ("Attributes.entry.1.value", "false"),
+                ("Attributes.entry.1.key", "FilterPolicy"),
+                ("Attributes.entry.1.value", ""),
             ],
-            &[
-                ("RawMessageDelivery", "false"),
-                ("FilterPolicy", r#"{"kind":["alert"]}"#),
-            ],
-        ),
-        (
-            "no attributes at all",
-            &[],
-            &[
-                ("RawMessageDelivery", "false"),
-                ("FilterPolicy", r#"{"kind":["alert"]}"#),
-            ],
+            true,
         ),
     ];
 
-    for (case, attributes, expected) in cases {
+    for (case, attributes, idempotent) in cases {
         let answer = sns.call("Subscribe", &subscribe(attributes)).await;
-        assert_eq!(
-            answer.status, 200,
-            "case {case:?}: expected 200, got {} / {}",
-            answer.status, answer.body
-        );
-        assert_eq!(
-            answer.element("SubscriptionArn").unwrap_or_default(),
-            arn,
-            "case {case:?}: a re-subscribe must answer the same subscription ARN"
-        );
+        if *idempotent {
+            assert_eq!(
+                answer.status, 200,
+                "case {case:?}: expected 200, got {} / {}",
+                answer.status, answer.body
+            );
+            assert_eq!(
+                answer.element("SubscriptionArn").unwrap_or_default(),
+                arn,
+                "case {case:?}: an idempotent re-subscribe must answer the same subscription \
+                 ARN"
+            );
+        } else {
+            assert_eq!(
+                answer.status, 400,
+                "case {case:?}: expected 400, got {} / {}",
+                answer.status, answer.body
+            );
+            assert_eq!(
+                answer.code(),
+                "InvalidParameter",
+                "case {case:?}: expected the InvalidParameter code, got {}",
+                answer.body
+            );
+            assert_eq!(
+                answer.element("Message").unwrap_or_default(),
+                conflict,
+                "case {case:?}: expected SNS's own sentence, got {}",
+                answer.body
+            );
+        }
+        // Whichever way it was answered, the subscription is the one the first call
+        // created, holding exactly what that call gave it.
         let stored = sns.state();
         let stored = stored.lock();
         let held = stored
             .subscriptions
             .get(&arn)
             .expect("the subscription must still be stored");
-        for (name, value) in *expected {
-            assert_eq!(
-                held.attributes.get(*name).map(String::as_str),
-                Some(*value),
-                "case {case:?}: {name} must hold {value:?}, got {:?}",
-                held.attributes
-            );
-        }
+        assert_eq!(
+            held.attributes.get("RawMessageDelivery").map(String::as_str),
+            Some("true"),
+            "case {case:?}: the stored subscription must keep its attribute, got {:?}",
+            held.attributes
+        );
+        assert_eq!(
+            held.attributes.get("FilterPolicy"),
+            None,
+            "case {case:?}: a refused re-subscribe must store nothing, got {:?}",
+            held.attributes
+        );
         assert_eq!(
             stored.subscriptions.len(),
             1,
@@ -2012,14 +2051,18 @@ async fn the_attribute_maps_are_a_closed_set_and_bounded_in_bytes() {
         ("a name SNS does not define", "NotAnAttribute", "x", false),
         ("a value past the per-record ceiling", "FilterPolicy", over.as_str(), false),
     ];
-    for (case, name, value, accepted) in subscription_cases {
+    for (index, (case, name, value, accepted)) in subscription_cases.iter().enumerate() {
+        // Each row subscribes its OWN queue: a re-subscribe of one endpoint is
+        // idempotent only in the attributes the subscription already holds, so a row
+        // must not ask another row's subscription for a different value.
+        let endpoint = format!("arn:aws:sqs:us-east-1:000000000000:closed-set-{index:02}");
         let answer = sns
             .call(
                 "Subscribe",
                 &[
                     ("TopicArn", &topic),
                     ("Protocol", "sqs"),
-                    ("Endpoint", "arn:aws:sqs:us-east-1:000000000000:q"),
+                    ("Endpoint", &endpoint),
                     ("Attributes.entry.1.key", name),
                     ("Attributes.entry.1.value", value),
                 ],

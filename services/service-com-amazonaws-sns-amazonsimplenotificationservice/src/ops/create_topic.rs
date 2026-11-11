@@ -274,6 +274,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         }
+        // A delivery policy this create carries is held to the SAME published bounds a
+        // write of one through `SetTopicAttributes` is: the document's retry members are
+        // the topic's whichever call wrote them, so a retry budget SNS would never
+        // deliver under is refused here too, before the topic exists.
+        if let Some(message) = attributes
+            .get(state::DELIVERY_POLICY_ATTRIBUTE)
+            .and_then(|value| {
+                state::retry_policy_bounds::topic_delivery_policy_bounds_refusal(value)
+            })
+        {
+            return Err(CreateTopicErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(message),
+                },
+            )
+            .into());
+        }
         let fifo_requested = attributes
             .get(FIFO_TOPIC_ATTRIBUTE)
             .is_some_and(|value| state::flag_attribute_enabled(value));

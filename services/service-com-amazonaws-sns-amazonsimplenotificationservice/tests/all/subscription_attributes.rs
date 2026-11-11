@@ -174,7 +174,7 @@ async fn subscription_attributes_are_projected_from_the_persisted_subscription()
             "an sqs subscription with raw delivery and a filter policy",
             "sub-attrs-sqs-filtered",
             "sqs",
-            "arn:aws:sqs:eu-west-1:000000000000:filtered.fifo",
+            "arn:aws:sqs:eu-west-1:000000000000:filtered-queue",
             &[("RawMessageDelivery", "true"), ("FilterPolicy", FILTER_POLICY)],
             false,
             &[

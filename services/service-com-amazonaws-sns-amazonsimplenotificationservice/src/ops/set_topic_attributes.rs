@@ -124,6 +124,13 @@ fn attribute_value_refusal(name: &str, value: &str) -> Option<String> {
             // stored only to be left out of the effective policy.
             state::delivery_policy_refusal(value)
                 .map(|reason| format!("Invalid parameter: AttributeValue Reason: {name} - {reason}"))
+                // …and the numbers IN that document carry their own documented bounds,
+                // so a retry budget SNS would never deliver under is refused rather
+                // than stored. The sentence is the service's own whole one, naming the
+                // member and the bound it crossed.
+                .or_else(|| {
+                    state::retry_policy_bounds::topic_delivery_policy_bounds_refusal(value)
+                })
         }
         state::MAXIMUM_MESSAGE_SIZE_ATTRIBUTE => match value.parse::<u64>() {
             Ok(size)

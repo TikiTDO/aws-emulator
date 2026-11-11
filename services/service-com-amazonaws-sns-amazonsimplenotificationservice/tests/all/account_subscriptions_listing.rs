@@ -226,7 +226,7 @@ const ROWS: &[(usize, &str, &str, bool)] = &[
     (
         0,
         "sqs",
-        "arn:aws:sqs:eu-west-1:000000000000:absent-queue.fifo",
+        "arn:aws:sqs:eu-west-1:000000000000:absent-queue",
         false,
     ),
     (0, "http", "http://example.test/hook", true),

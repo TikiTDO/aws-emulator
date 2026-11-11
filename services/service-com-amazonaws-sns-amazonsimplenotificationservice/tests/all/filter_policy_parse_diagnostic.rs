@@ -217,9 +217,21 @@ async fn a_filter_policy_with_no_offending_word_is_refused_for_the_parse_alone()
         );
     }
 
-    // An EMPTY value is no document at all: it REMOVES the policy, so it is accepted and
-    // the subscription that held the well-formed policy above holds none afterwards.
-    let answer = subscribe_with(&sns, &topic, &[("FilterPolicy", "")]).await;
+    // An EMPTY value is no document at all: it asks for a subscription that holds no such
+    // policy. The subscription above HOLDS the well-formed policy, so asking the same
+    // endpoint for none of it is a different attribute set, and the re-subscribe is
+    // refused rather than failing to parse…
+    let refused = subscribe_with(&sns, &topic, &[("FilterPolicy", "")]).await;
+    assert_eq!(
+        refused.status, 400,
+        "a re-subscribe asking for none of the policy the subscription holds must be \
+         refused, got {} / {}",
+        refused.status, refused.body
+    );
+    // …while on a subscription of its own the empty value is accepted, and that
+    // subscription holds no filter policy at all.
+    let fresh = sns.topic("filter-policy-empty").await;
+    let answer = subscribe_with(&sns, &fresh, &[("FilterPolicy", "")]).await;
     assert_eq!(
         answer.status, 200,
         "an empty filter policy removes the policy rather than failing to parse, got {} / {}",
