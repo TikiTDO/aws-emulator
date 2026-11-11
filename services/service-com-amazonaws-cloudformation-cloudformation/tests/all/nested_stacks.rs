@@ -29,10 +29,15 @@ use service_com_amazonaws_cloudformation_cloudformation::state::status;
 use smithy_server_runtime::MultiServiceRouter;
 
 /// The type a nested stack is declared as.
-const STACK_RESOURCE_TYPE: &str = "AWS::CloudFormation::Stack";
+///
+/// `pub(crate)` because more than one suite declares a nested stack: the hierarchy a built-in
+/// resource type is submitted in (`built_in_types_in_submitted_hierarchies.rs`) is declared the
+/// same way, so there is ONE spelling of the type and ONE way a test addresses a staged child
+/// template.
+pub(crate) const STACK_RESOURCE_TYPE: &str = "AWS::CloudFormation::Stack";
 
 /// The URL one staged child template is addressed by, path-style.
-fn staged_url(key: &str) -> String {
+pub(crate) fn staged_url(key: &str) -> String {
     format!("https://s3.{REGION}.amazonaws.com/{STAGING_BUCKET}/{key}")
 }
 
@@ -377,7 +382,7 @@ async fn settled_chain(
 }
 
 /// The `PhysicalResourceId` the parent reports for one of its resources.
-async fn physical_resource_id(
+pub(crate) async fn physical_resource_id(
     case: &str,
     router: &MultiServiceRouter,
     stack: &str,

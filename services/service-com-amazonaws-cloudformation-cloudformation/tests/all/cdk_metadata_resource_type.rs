@@ -32,7 +32,7 @@
 //! rules give it — which is what this suite asserts is STABLE across an update, not what its
 //! characters are.
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use service_com_amazonaws_cloudformation_cloudformation::state::resource_types::{
     is_published, is_recognized, BUILT_IN_RESOURCE_TYPES, CDK_METADATA,
 };
@@ -46,7 +46,12 @@ use crate::stack_lifecycle::{
 use crate::stack_resources::{element, resources_of, wire_resources};
 
 /// The logical id the AWS CDK gives the resource it adds to every stack it synthesizes.
-const CDK_LOGICAL_ID: &str = "CDKMetadata";
+///
+/// `pub(crate)` with [`ANALYTICS_PROPERTY`] and [`template_declaring`] because the suite that
+/// carries the same rule into a nested stack's and a StackSet's template
+/// (`built_in_types_in_submitted_hierarchies.rs`) declares the same resource, so the id, the
+/// property and the template shape are spelled ONCE.
+pub(crate) const CDK_LOGICAL_ID: &str = "CDKMetadata";
 
 /// The name of the condition the AWS CDK guards that resource with.
 const CDK_CONDITION: &str = "CDKMetadataAvailable";
@@ -57,7 +62,7 @@ const ANALYTICS: &str = "v2:deflate64:H4sIAAAAAAAA";
 /// The property that report is carried in. Source: the issue's own template and the AWS CDK
 /// Developer Guide's "Version reporting" section, which is where this resource's one property
 /// is published.
-const ANALYTICS_PROPERTY: &str = "Analytics";
+pub(crate) const ANALYTICS_PROPERTY: &str = "Analytics";
 
 /// One accepted row: a template and what the deployment owes for the declared resource.
 struct Accepted {
@@ -84,7 +89,11 @@ fn region_condition(regions: &[&str]) -> Value {
 
 /// The stack name one row of `resource_type` runs under: the type's segments, lower-cased,
 /// which is inside a stack name's own alphabet.
-fn stack_name_for(resource_type: &str, suffix: &str) -> String {
+///
+/// `pub(crate)` because the suite that carries the same rule into a nested stack's and a
+/// StackSet's template (`built_in_types_in_submitted_hierarchies.rs`) names its stacks and its
+/// staged objects the same way, so there is ONE spelling of it.
+pub(crate) fn stack_name_for(resource_type: &str, suffix: &str) -> String {
     let spelled = resource_type.replace("::", "-").to_ascii_lowercase();
     format!("{spelled}-{suffix}")
 }
@@ -496,17 +505,44 @@ async fn a_near_miss_of_a_built_in_type_is_still_refused() {
     }
 }
 
+/// A template declaring ONE resource of `resource_type` under `logical_id`, carrying the
+/// version report where `analytics` names one and no `Properties` at all where it does not,
+/// plus a bucket of the template's own where `bucket` names one.
+///
+/// The ONE template builder of the suites that declare a built-in type: a StackSet's body and
+/// the document a nested stack's `TemplateURL` addresses are the same template a `CreateStack`
+/// carries inline, so no suite spells that shape itself.
+pub(crate) fn template_declaring(
+    resource_type: &str,
+    logical_id: &str,
+    analytics: Option<&str>,
+    bucket: Option<&str>,
+) -> String {
+    let mut declaration = Map::new();
+    declaration.insert("Type".to_string(), json!(resource_type));
+    if let Some(analytics) = analytics {
+        declaration.insert(
+            "Properties".to_string(),
+            json!({ ANALYTICS_PROPERTY: analytics }),
+        );
+    }
+    let mut resources = Map::new();
+    resources.insert(logical_id.to_string(), Value::Object(declaration));
+    if let Some(bucket) = bucket {
+        resources.insert(
+            "Data".to_string(),
+            json!({
+                "Type": "AWS::S3::Bucket",
+                "Properties": { "BucketName": bucket }
+            }),
+        );
+    }
+    json!({ "Resources": resources }).to_string()
+}
+
 /// The template a stack of one built-in type is created with, carrying `analytics`.
 fn analytics_template(resource_type: &str, analytics: &str) -> String {
-    json!({
-        "Resources": {
-            CDK_LOGICAL_ID: {
-                "Type": resource_type,
-                "Properties": { ANALYTICS_PROPERTY: analytics }
-            }
-        }
-    })
-    .to_string()
+    template_declaring(resource_type, CDK_LOGICAL_ID, Some(analytics), None)
 }
 
 /// A property change updates the resource IN PLACE — the same physical resource id, reported

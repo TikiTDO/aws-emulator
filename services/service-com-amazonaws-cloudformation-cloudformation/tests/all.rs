@@ -41,6 +41,8 @@ mod bucket_metrics_and_lifecycle_configurations;
 mod bucket_notification_configuration;
 #[path = "all/bucket_property_updates.rs"]
 mod bucket_property_updates;
+#[path = "all/built_in_types_in_submitted_hierarchies.rs"]
+mod built_in_types_in_submitted_hierarchies;
 #[path = "all/callback_signature.rs"]
 mod callback_signature;
 #[path = "all/cancelled_update.rs"]
