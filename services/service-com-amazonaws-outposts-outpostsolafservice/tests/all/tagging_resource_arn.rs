@@ -7,9 +7,12 @@
 //!
 //! The rule under test, stated once and then exercised over a SET of inputs:
 //! every operation that binds `ResourceArn` reads that member by the same rule and
-//! words its refusal from the same report, so ONE ARN value gets the same HTTP
-//! status, the same wire error code and the same message whichever of them was
-//! called — and a refusal of the ARN's syntax renders none of the value it refused.
+//! words its refusal from the same report, so ONE ARN value is classified the same
+//! way — the same HTTP status, the same wire error code and the same message —
+//! whichever of them was called, and a refusal of the ARN's syntax renders none of
+//! the value it refused. A value the operations SERVE is answered by each with its
+//! own success status: the read's 200 carries the tag map, and the mutation's
+//! no-content status carries nothing.
 //!
 //! The rows span the classes a `ResourceArn` falls in: one naming a stored resource
 //! of each taggable kind, one that is readable but names nothing (including a
@@ -22,7 +25,7 @@
 use serde_json::{json, Value};
 
 use crate::error_classification::reported_tags;
-use crate::site_and_outpost_lifecycle::{segment, text, Outposts};
+use crate::site_and_outpost_lifecycle::{segment, text, Outposts, TAG_MUTATION_SUCCESS_STATUS};
 
 /// The account id every generated emulator presents, which its ARNs carry.
 const ACCOUNT_ID: &str = "000000000000";
@@ -38,6 +41,11 @@ struct Arn {
     case: String,
     arn: String,
     status: u16,
+    /// The status the tag MUTATION answers for the same value. A refusal is ONE
+    /// status for every operation that binds the member; a served tag reports
+    /// nothing back about the resource, so it is answered with the no-content
+    /// status instead of the read's 200.
+    mutation_status: u16,
     /// The wire error code, empty for a row the operations serve.
     code: &'static str,
 }
@@ -136,6 +144,11 @@ async fn resource_arns(outposts: &Outposts) -> Vec<Arn> {
             case: case.to_string(),
             arn,
             status,
+            mutation_status: if code.is_empty() {
+                TAG_MUTATION_SUCCESS_STATUS
+            } else {
+                status
+            },
             code,
         })
         .collect()
@@ -179,10 +192,10 @@ async fn every_tagging_operation_reads_one_resource_arn_the_same_way() {
                 tagged.error_code.as_str(),
                 tagged.errortype_header.as_str()
             ),
-            (row.status, row.code, row.code),
+            (row.mutation_status, row.code, row.code),
             "case {case:?}: TagResource must answer {} {:?} for the same ResourceArn, \
              got {} {:?}",
-            row.status,
+            row.mutation_status,
             row.code,
             tagged.status,
             tagged.body

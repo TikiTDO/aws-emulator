@@ -3517,6 +3517,24 @@ pub const CATALOG_ITEM_ID_MEMBER: &str = "catalogItemId";
 /// change that would take a resource past it is therefore refused.
 pub const TAG_MAP_MAX: i64 = 50;
 
+/// The HTTP status a tag mutation answers on success: 204 No Content.
+///
+/// `TagResource` and `UntagResource` write only the tag set of the resource their
+/// `ResourceArn` names and report nothing back about it — `TagResourceResponse`
+/// and `UntagResourceResponse` declare no members — so there is no entity for a
+/// caller to parse, and the recorded Amazon Web Services Outposts responses
+/// answer those calls with the no-content status. A 200 there promises a body the
+/// response does not carry, and every client path gated on the no-content status
+/// (conditional body parsing, caches and proxies that key on it) takes the wrong
+/// branch. Both operations share the `/tags/{ResourceArn}` route and this one
+/// status — which is the `@http` code the model declares for each of them — so the
+/// rule is stated here rather than twice in the handlers.
+///
+/// It does NOT extend to every output this service declares no members for:
+/// `DeleteSite`, `DeleteOutpost` and `DeleteQuote` report nothing either, and the
+/// recorded responses answer those with the modelled 200, which they keep.
+pub const TAG_MUTATION_SUCCESS_STATUS: u16 = 204;
+
 /// The `@pattern` the model declares on `Arn`, the shape every tagging
 /// operation's `ResourceArn` targets, verbatim. See [`SITE_ID_PATTERN`].
 pub const RESOURCE_ARN_PATTERN: &str =

@@ -265,19 +265,14 @@ async fn each_endpoints_own_tagging_arn_is_served_only_at_that_endpoint() {
         // At its own endpoint the ARN is served: a tag written through it is the tag
         // read back through it.
         let case = format!("the ARN of a {region} site, at the {region} endpoint");
-        let written = outposts
-            .ok_in(
+        outposts
+            .no_content_in(
                 region,
                 "POST",
                 &tags_path(own_arn),
                 Some(&json!({ "Tags": { NEW_KEY: "written here" } })),
             )
             .await;
-        assert_eq!(
-            written,
-            json!({}),
-            "case {case:?}: TagResource answers an empty 200, got {written:?}"
-        );
         let mut expected = stored_map();
         expected.insert(NEW_KEY.to_string(), "written here".to_string());
         let listed = outposts.ok_in(region, "GET", &tags_path(own_arn), None).await;

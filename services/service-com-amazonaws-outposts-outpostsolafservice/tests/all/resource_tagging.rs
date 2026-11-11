@@ -20,6 +20,10 @@
 //!    that maximum is the modelled `ValidationException` (HTTP 400) and writes
 //!    nothing; a change that lands ON the maximum, or that only replaces values, is
 //!    accepted.
+//! 4. A successful tag reports nothing back about the resource, so it is answered
+//!    with [`crate::site_and_outpost_lifecycle::TAG_MUTATION_SUCCESS_STATUS`] and an
+//!    empty body — asserted on every accepted row below, through the one helper that
+//!    issues the call.
 
 use std::collections::BTreeMap;
 
@@ -44,15 +48,16 @@ const TAG_KEY_MAX: usize = 128;
 /// See [`TAG_KEY_MAX`].
 const TAG_VALUE_MAX: usize = 256;
 
-/// `POST /tags/{ResourceArn}` with `tags` as the request's `Tags` map.
-async fn tag_resource(outposts: &Outposts, arn: &str, tags: &Value) -> Value {
+/// `POST /tags/{ResourceArn}` with `tags` as the request's `Tags` map, which answers
+/// the no-content status every tag mutation reports success with.
+async fn tag_resource(outposts: &Outposts, arn: &str, tags: &Value) {
     outposts
-        .ok(
+        .no_content(
             "POST",
             &format!("/tags/{}", segment(arn)),
             Some(&json!({ "Tags": tags })),
         )
-        .await
+        .await;
 }
 
 /// What `TagResource` must leave behind: the tags the resource had, with every entry
@@ -190,12 +195,7 @@ async fn tag_resource_merges_its_map_into_the_stored_tags_for_every_reader() {
             let case = format!("{}: {row}", taggable.case);
             let expected = merged(&taggable.stored, request);
 
-            let answered = tag_resource(&outposts, &taggable.arn, request).await;
-            assert_eq!(
-                answered,
-                json!({}),
-                "case {case:?}: TagResource answers an empty 200, got {answered:?}"
-            );
+            tag_resource(&outposts, &taggable.arn, request).await;
 
             // Every reader of the resource answers the tags as they now stand: the
             // tagging API's own read, and the resource's own projection.

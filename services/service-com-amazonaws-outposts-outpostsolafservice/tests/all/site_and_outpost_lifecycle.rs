@@ -69,6 +69,11 @@ pub(crate) const ABSENT_SITE_ID: &str = "os-00000000000000000";
 /// See [`ABSENT_SITE_ID`].
 pub(crate) const ABSENT_OUTPOST_ID: &str = "op-00000000000000000";
 
+/// The HTTP status a successful tag mutation (`TagResource`, `UntagResource`)
+/// answers with: 204 No Content, which is what the recorded Amazon Web Services
+/// Outposts responses carry for a call whose output declares no members at all.
+pub(crate) const TAG_MUTATION_SUCCESS_STATUS: u16 = 204;
+
 /// One Outposts emulator over one shared engine, reached the way the router reaches it.
 pub(crate) struct Outposts {
     router: MultiServiceRouter,
@@ -355,6 +360,39 @@ impl Outposts {
     /// Dispatch `method path` and require HTTP 200, returning the body.
     pub(crate) async fn ok(&self, method: &str, path: &str, body: Option<&Value>) -> Value {
         self.ok_in(HOME_REGION, method, path, body).await
+    }
+
+    /// Dispatch `method path` in `region` and require the no-content answer a tag
+    /// mutation reports success with: [`TAG_MUTATION_SUCCESS_STATUS`], and a body
+    /// carrying no member at all — the operation's output declares none, so there is
+    /// nothing for a caller to read out of it.
+    pub(crate) async fn no_content_in(
+        &self,
+        region: &str,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) {
+        let reply = self.call_in(region, method, path, body).await;
+        let empty = match &reply.body {
+            // No bytes at all, and the empty JSON object the framework writes for an
+            // output structure with no members: neither carries a member.
+            Value::Null => true,
+            Value::Object(members) => members.is_empty(),
+            _ => false,
+        };
+        assert!(
+            (reply.status, empty) == (TAG_MUTATION_SUCCESS_STATUS, true),
+            "case {method} {path} in {region}: expected HTTP {TAG_MUTATION_SUCCESS_STATUS} \
+             carrying no member, got {} {}",
+            reply.status,
+            reply.body
+        );
+    }
+
+    /// The same, in [`HOME_REGION`]. See [`Outposts::no_content_in`].
+    pub(crate) async fn no_content(&self, method: &str, path: &str, body: Option<&Value>) {
+        self.no_content_in(HOME_REGION, method, path, body).await
     }
 
     /// `CreateSite`, returning the `Site` it answered with.

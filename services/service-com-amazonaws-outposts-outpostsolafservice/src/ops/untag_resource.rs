@@ -13,6 +13,8 @@
 //! `NotFoundException` (404); a change that empties the map leaves the resource
 //! carrying no tags; an ARN that is not an Outposts resource ARN is refused at the
 //! boundary with HTTP 400 `BadRequestException` (see `EmulatedService::override_refusal`).
+//! A successful removal reports nothing back, so it answers HTTP 204 No Content
+//! (`crate::state::TAG_MUTATION_SUCCESS_STATUS`).
 //!
 //! ## Shape of an operation
 //!
@@ -133,7 +135,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     const NAME: &'static str = "UntagResource";
     const INPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::UNTAG_RESOURCE_INPUT_SCHEMA;
     const OUTPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::UNTAG_RESOURCE_OUTPUT_SCHEMA;
-    const SUCCESS_STATUS: u16 = 200u16;
+    const SUCCESS_STATUS: u16 = crate::state::TAG_MUTATION_SUCCESS_STATUS;
 
     async fn handle(
         &self,

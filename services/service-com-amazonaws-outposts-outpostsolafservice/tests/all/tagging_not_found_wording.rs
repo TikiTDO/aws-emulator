@@ -210,18 +210,13 @@ async fn a_stored_resource_is_served_through_the_arn_the_refusals_name() {
     let site_id = text(&site, "SiteId");
     let arn = text(&site, "SiteArn");
 
-    let written = outposts
-        .ok(
+    outposts
+        .no_content(
             "POST",
             &tags_path(&arn),
             Some(&json!({ "Tags": { PROBE_KEY: PROBE_VALUE } })),
         )
         .await;
-    assert_eq!(
-        written,
-        json!({}),
-        "case \"TagResource on the stored site\": expected an empty 200, got {written:?}"
-    );
 
     let listed = outposts.ok("GET", &tags_path(&arn), None).await;
     assert_eq!(
@@ -230,8 +225,8 @@ async fn a_stored_resource_is_served_through_the_arn_the_refusals_name() {
         "case \"ListTagsForResource on the stored site\": expected the written tag, got {listed:?}"
     );
 
-    let _ = outposts
-        .ok("DELETE", &untag_path(&arn, PROBE_KEY), None)
+    outposts
+        .no_content("DELETE", &untag_path(&arn, PROBE_KEY), None)
         .await;
     let listed = outposts.ok("GET", &tags_path(&arn), None).await;
     assert!(

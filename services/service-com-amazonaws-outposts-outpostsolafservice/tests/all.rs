@@ -47,6 +47,8 @@ mod catalog_items;
 mod configured_instance_types;
 #[path = "all/connection_store_bound.rs"]
 mod connection_store_bound;
+#[path = "all/created_identity_and_tag_state.rs"]
+mod created_identity_and_tag_state;
 #[path = "all/delete_conflicts.rs"]
 mod delete_conflicts;
 #[path = "all/dependent_resource_conflict.rs"]

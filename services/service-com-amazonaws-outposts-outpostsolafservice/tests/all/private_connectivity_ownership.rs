@@ -136,7 +136,7 @@ impl Change {
             }
             Change::Tag(key, value) => {
                 outposts
-                    .ok(
+                    .no_content(
                         "POST",
                         &format!("/tags/{}", segment(outpost_arn)),
                         Some(&json!({ "Tags": { *key: *value } })),

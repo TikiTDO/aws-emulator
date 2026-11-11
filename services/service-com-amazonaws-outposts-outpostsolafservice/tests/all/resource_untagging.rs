@@ -134,7 +134,7 @@ async fn taggables(outposts: &Outposts) -> Vec<Taggable> {
 /// removed comes back), and answer the map it now carries.
 async fn restore(outposts: &Outposts, arn: &str, tags: &Value) -> BTreeMap<String, String> {
     outposts
-        .ok(
+        .no_content(
             "POST",
             &format!("/tags/{}", segment(arn)),
             Some(&json!({ "Tags": tags })),
@@ -201,15 +201,11 @@ async fn untag_resource_removes_exactly_the_named_keys_for_every_reader() {
             // Sending the same removal twice: the first call makes the change, the
             // second finds every named key already gone and must leave the rest alone.
             for attempt in 1..=2 {
-                let answered = outposts
-                    .ok("DELETE", &untag_path(&taggable.arn, keys), None)
+                // The removal reports nothing back about the resource, so it answers
+                // the no-content status with no body at all.
+                outposts
+                    .no_content("DELETE", &untag_path(&taggable.arn, keys), None)
                     .await;
-                assert_eq!(
-                    answered,
-                    json!({}),
-                    "case {case:?} (attempt {attempt}): UntagResource answers an empty 200, \
-                     got {answered:?}"
-                );
 
                 // Every reader of the resource answers the tags as they now stand: the
                 // tagging API's own read, and the resource's own projection.
@@ -373,7 +369,9 @@ async fn a_maximum_sized_key_list_is_accepted_and_can_empty_the_tag_map() {
         keys.len()
     );
 
-    outposts.ok("DELETE", &untag_path(&arn, &keys), None).await;
+    outposts
+        .no_content("DELETE", &untag_path(&arn, &keys), None)
+        .await;
     let expected = without(&stored, &keys);
     let listed = outposts.ok("GET", &path, None).await;
     assert_eq!(
@@ -392,7 +390,7 @@ async fn a_maximum_sized_key_list_is_accepted_and_can_empty_the_tag_map() {
 
     // The last key removed: the resource is still there, now carrying no tags.
     outposts
-        .ok("DELETE", &untag_path(&arn, &["keep".to_string()]), None)
+        .no_content("DELETE", &untag_path(&arn, &["keep".to_string()]), None)
         .await;
     let listed = outposts.ok("GET", &path, None).await;
     assert!(
