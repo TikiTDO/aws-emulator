@@ -196,7 +196,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // callback — runs with no store lock held; both checks are made again under the
         // guard that writes, because a crawler can have started running in between.
         {
-            let store = state.lock();
+            let mut store = state.lock();
+            // Everything the clock already owed the stored crawlers is materialised first,
+            // so a crawl the clock has already finished does not refuse this write.
+            store.settle_due_crawls(::std::time::SystemTime::now());
             let Some(entry) = store.crawlers.get(&input.name) else {
                 return Err(crawler_not_found(&input.name));
             };
@@ -285,6 +288,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the guard that actually writes, and a crawler whose crawl started during the
         // resolution is refused rather than written to.
         let mut store = state.lock();
+        store.settle_due_crawls(::std::time::SystemTime::now());
         let Some(entry) = store.crawlers.get_mut(&input.name) else {
             return Err(crawler_not_found(&input.name));
         };

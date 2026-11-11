@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op StartCrawler
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `StartCrawler`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`StartCrawler::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Starts a crawl of the crawler's data stores: the crawler leaves the state with no run in
+//! it, the objects under each of its Amazon S3 targets are walked, and the datasets found
+//! behind them are written into the crawler's target database as tables — their columns read
+//! off the data, their partition keys off the folder levels below each target, and one
+//! partition per distinct value of those levels. The clock owes the crawler its way back to
+//! `READY` one span later, which is when the crawl's `LastCrawl` and its table counts become
+//! readable.
+//!
+//! What a crawl READS and how a dataset is classified live in
+//! [`crate::state::crawl_source`]; what it WRITES into the catalog in
+//! [`crate::state::ComAmazonawsGlueAwsglueState::apply_crawl`].
 //!
 //! ## Shape of an operation
 //!
@@ -138,18 +141,149 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `StartCrawler` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(StartCrawlerErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("StartCrawler"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            // This operation models no server fault, so an unreachable store is reported
+            // as the operation's own timeout error, the same way `GetCrawler` reports it.
+            return Err(StartCrawlerErrorModeled::OperationTimeoutException(
+                OperationTimeoutException {
+                    message: Some("the Glue crawler store is unavailable".into()),
+                },
+            )
+            .into());
+        };
+
+        let now = ::std::time::SystemTime::now();
+        let region = crate::state::request_region(ctx.parts());
+
+        // What the crawl has to do is resolved under the store's guard, and the guard is
+        // released before any data is read: nothing is awaited while the store is held, so
+        // the crawl walks the targets the crawler carried when it started.
+        let plan = {
+            let mut store = state.lock();
+            // Everything the clock already owed the stored crawlers is materialised before
+            // they are consulted, so a crawl the clock has already finished does not count
+            // as one in progress.
+            store.settle_due_crawls(now);
+            let Some(crawler) = store.crawler(&input.name) else {
+                return Err(StartCrawlerErrorModeled::EntityNotFoundException(
+                    EntityNotFoundException {
+                        message: Some(crate::state::messages::crawler_not_found(&input.name)),
+                        from_federation_source: None,
+                    },
+                )
+                .into());
+            };
+            // "If the crawler is already running, returns a CrawlerRunningException": a
+            // crawl in progress is what blocks another of the SAME crawler, whatever any
+            // other crawler is doing.
+            if crawler.crawl_in_progress() {
+                return Err(already_running(&input.name));
+            }
+            crate::state::CrawlPlan::of(crawler)
+        };
+
+        // Only an Amazon S3 target is a data store this crawl reads. A crawler whose
+        // targets name another kind would have its data walked by machinery that is not
+        // written yet, and answering 200 for a crawl that read none of it would report a
+        // crawl nothing carried out — so the start says so instead.
+        if !plan.has_readable_target() {
+            return Err(crate::scaffolded::Scaffolded::not_implemented(
+                "StartCrawler for a crawler whose Targets name no Amazon S3 path",
+            ));
+        }
+
+        // The crawl is PERFORMED here, with no store guard held: it walks the objects under
+        // each target out of the emulator's own Amazon S3 and classifies the datasets behind
+        // them. What it answered is what the crawl writes and what its status reports.
+        let outcome = crate::state::perform_crawl(ctx, &region, &plan).await;
+
+        // The catalog's security configuration is "applied to every catalog write
+        // thereafter" (`PutDataCatalogEncryptionSettings`), so the key the crawl's own
+        // writes are encrypted under is read from the stored setting and the data key
+        // produced through KMS before anything is stored — exactly as `CreateTable` does
+        // it. A key KMS refuses is a catalog that cannot take the crawl's tables, which is
+        // a crawl that failed rather than a refused start: the walk already happened.
+        let write_key = crate::state::catalog_encryption::write_key(&state.lock(), &plan.catalog_id);
+        let sealed =
+            crate::state::catalog_encryption::seal(ctx, &region, write_key.as_deref()).await;
+
+        // The instants the crawl reports are stamped AFTER the walk, so the span the clock
+        // owes the crawler starts when the crawl was recorded: a caller that reads the
+        // crawler straight after this call still observes the crawl in flight, however long
+        // the walk took.
+        let started_at = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        // Everything the clock owed the stored crawlers at that instant is materialised
+        // again before they are consulted a second time, for the reason the first block
+        // does it: the walk above may have taken longer than the span a crawl owes.
+        store.settle_due_crawls(started_at);
+        // The crawler is re-read under the guard the crawl is recorded under: a delete or
+        // another start that landed while the data was being walked decides this start.
+        let Some(crawler) = store.crawler(&input.name) else {
+            return Err(StartCrawlerErrorModeled::EntityNotFoundException(
+                EntityNotFoundException {
+                    message: Some(crate::state::messages::crawler_not_found(&input.name)),
+                    from_federation_source: None,
+                },
+            )
+            .into());
+        };
+        if crawler.crawl_in_progress() {
+            return Err(already_running(&input.name));
+        }
+
+        // What the crawl did: the datasets it found are written into the crawler's target
+        // database, and a crawl that could not be carried out — or whose output has nowhere
+        // to go — records why instead.
+        let record = match (outcome, sealed) {
+            (crate::state::CrawlOutcome::Failed(reason), _) => {
+                crate::state::CrawlRecord::failed(started_at, reason)
+            }
+            (crate::state::CrawlOutcome::Discovered(_), Err(reason)) => {
+                crate::state::CrawlRecord::failed(started_at, reason)
+            }
+            (crate::state::CrawlOutcome::Discovered(discovered), Ok(encryption)) => {
+                match store.apply_crawl(&plan, &discovered, started_at, encryption) {
+                    Ok(counts) => crate::state::CrawlRecord::succeeded(started_at, counts),
+                    Err(reason) => crate::state::CrawlRecord::failed(started_at, reason),
+                }
+            }
+        };
+        let status = record.status.clone();
+        let (created, updated, deleted) = (
+            record.tables_created,
+            record.tables_updated,
+            record.tables_deleted,
+        );
+        // The crawler leaves the state with no run in it, and the clock owes it its way
+        // back; what the crawl did is published when that falls due.
+        if let Some(crawler) = store.crawlers.get_mut(&input.name) {
+            crawler.start_crawl(record, started_at);
+        }
+        drop(store);
+
+        ::tracing::info!(
+            operation = "StartCrawler",
+            crawler = %input.name,
+            status = %status,
+            tables_created = created,
+            tables_updated = updated,
+            tables_deleted = deleted,
+            "started a Glue crawl"
+        );
+
+        Ok(StartCrawlerOutput {})
     }
+}
+
+/// This operation's modelled conflict: "the operation cannot be performed because the
+/// crawler is already running."
+///
+/// ONE constructor, so the refusal a crawl in progress earns is worded the same whether it
+/// is read before the data is walked or after it.
+fn already_running(name: &str) -> StartCrawlerError {
+    StartCrawlerErrorModeled::CrawlerRunningException(CrawlerRunningException {
+        message: Some(crate::state::messages::crawler_already_started(name)),
+    })
+    .into()
 }

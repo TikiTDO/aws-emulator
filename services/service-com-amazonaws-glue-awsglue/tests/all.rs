@@ -105,6 +105,8 @@ mod crawler_listing;
 mod crawler_metrics;
 #[path = "all/crawler_role_trust.rs"]
 mod crawler_role_trust;
+#[path = "all/crawler_runs.rs"]
+mod crawler_runs;
 #[path = "all/crawler_schedule_suspension.rs"]
 mod crawler_schedule_suspension;
 #[path = "all/crawler_schedules.rs"]

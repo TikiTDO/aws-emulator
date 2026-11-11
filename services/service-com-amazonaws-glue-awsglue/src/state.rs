@@ -265,6 +265,8 @@ mod classifiers;
 mod column_statistics;
 mod column_statistics_source;
 mod column_statistics_values;
+mod crawl;
+mod crawl_source;
 mod crawler_roles_and_connections;
 mod crawlers;
 mod data_assets;
@@ -288,6 +290,8 @@ pub use classifiers::*;
 pub use column_statistics::*;
 pub use column_statistics_source::*;
 pub use column_statistics_values::*;
+pub use crawl::*;
+pub use crawl_source::*;
 pub use crawler_roles_and_connections::*;
 pub use crawlers::*;
 pub use data_assets::*;
@@ -346,7 +350,7 @@ use crate::ops::types::{
     Edge, EncryptionAtRest, EncryptionConfiguration, ErrorDetail, EventBatchingCondition,
     ExecutionAttempt, ExecutionProperty, FederatedCatalog, FederatedDatabase,
     FederatedTable, GlueTable, GrokClassifier, IcebergOptimizationPropertiesOutput, Job,
-    JsonClassifier, MLTransform,
+    JsonClassifier, LastCrawlInfo, MLTransform,
     CreateUsageProfileInput,
     JobCommand, JobNodeDetails, JobRun, JobUpdate, LakeFormationConfiguration,
     LineageConfiguration,
@@ -354,8 +358,9 @@ use crate::ops::types::{
     PrincipalPermissions,
     ProfileConfiguration,
     RLSProperties,
-    RecrawlPolicy, RegistryId, Schedule,
-    SchemaChangePolicy, SchemaColumn, SchemaId, SecurityConfiguration, Session, SessionCommand,
+    RecrawlPolicy, RegistryId, S3Target, Schedule,
+    SchemaChangePolicy, SchemaColumn, SchemaId, SecurityConfiguration, SerDeInfo, Session,
+    SessionCommand,
     SourceControlDetails,
     SourceProcessingProperties, SourceTableConfig,
     StartColumnStatisticsTaskRunInput,

@@ -56,6 +56,10 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", 
 # owns those grants, so they are read from it rather than kept a second time here (no
 # network client feature is enabled: the transport is the emulator's own).
 aws-sdk-lakeformation = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# The glob patterns a crawler's `S3Target$Exclusions` are written in, matched against each
+# object's path relative to the target — `**`, `{a,b}` and character classes included — by
+# the globset crate rather than by a hand-rolled matcher.
+globset = "0.4"
 # Reads the delimited text behind a Data Catalog table when a column statistics task run
 # aggregates its columns; a library computing over data in this process, with no native or
 # build-time code.

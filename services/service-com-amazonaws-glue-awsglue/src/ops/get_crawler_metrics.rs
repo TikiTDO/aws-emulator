@@ -185,7 +185,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .filter(|names| !names.is_empty())
             .map(|names| names.iter().map(String::as_str).collect());
 
-        let store = state.lock();
+        let mut store = state.lock();
+        // The one write this read performs: every crawl the clock had already finished is
+        // finished before the metrics are computed, exactly as `GetCrawler` does it, so the
+        // crawl a metrics read reports on is the crawl a crawler read reports as its last.
+        store.settle_due_crawls(::std::time::SystemTime::now());
         // Name order, so one page follows another deterministically however the store
         // happens to hash its keys. The crawler namespace is per account rather than per
         // Region, so every crawler the store holds is in scope.

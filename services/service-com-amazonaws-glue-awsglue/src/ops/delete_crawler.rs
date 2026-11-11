@@ -160,6 +160,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // resolved, its state judged and the record removed under ONE guard, so no crawl
         // can start between the judgement and the removal.
         let mut store = state.lock();
+        // Everything the clock already owed the stored crawlers is materialised first, so a
+        // crawl the clock has already finished does not refuse this delete.
+        store.settle_due_crawls(::std::time::SystemTime::now());
         let Some(entry) = store.crawlers.get(&input.name) else {
             return Err(DeleteCrawlerErrorModeled::EntityNotFoundException(
                 EntityNotFoundException {

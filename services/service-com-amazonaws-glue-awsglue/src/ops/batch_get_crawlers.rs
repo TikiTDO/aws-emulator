@@ -167,12 +167,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // critical section scoped to the lookups alone, bounded above by that modelled
         // list length, with the guard dropped before the answer is built.
         let (crawlers, crawlers_not_found) = {
-            let store = state.lock();
+            let now = ::std::time::SystemTime::now();
+            let mut store = state.lock();
+            // The one write this read performs: every crawl the clock had already finished
+            // is finished before the crawlers are reported, exactly as `GetCrawler` does
+            // it, so a batch and a single read agree about a crawler's run state.
+            store.settle_due_crawls(now);
             let mut crawlers = Vec::new();
             let mut crawlers_not_found = Vec::new();
             for name in &input.crawler_names {
                 match store.crawlers.get(name) {
-                    Some(entry) => crawlers.push(entry.to_crawler()),
+                    Some(entry) => crawlers.push(entry.to_crawler(now)),
                     None => crawlers_not_found.push(name.clone()),
                 }
             }

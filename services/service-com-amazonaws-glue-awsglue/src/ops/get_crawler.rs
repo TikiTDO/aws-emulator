@@ -2,8 +2,10 @@
 
 //! @op GetCrawler
 //!
-//! Reports the metadata stored for one crawler by name. A pure read: it answers from
-//! the store and writes nothing.
+//! Reports the metadata stored for one crawler by name. A reporting operation: it answers
+//! from the store, and the only write it performs is to materialise the run state the CLOCK
+//! already owed the crawler — a crawl that was due to finish before this call finishes it,
+//! whether or not anybody asked.
 //!
 //! ## Shape of an operation
 //!
@@ -144,7 +146,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
-        let store = state.lock();
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        // The one write this read performs: a crawl was due to finish at the instant the
+        // start recorded on the crawler, whether or not anybody called, so the state the
+        // clock had already reached is materialised before the crawler is reported.
+        store.settle_due_crawls(now);
         let Some(entry) = store.crawlers.get(&input.name) else {
             return Err(GetCrawlerErrorModeled::EntityNotFoundException(
                 EntityNotFoundException {
@@ -156,7 +163,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         Ok(GetCrawlerOutput {
-            crawler: Some(entry.to_crawler()),
+            crawler: Some(entry.to_crawler(now)),
         })
     }
 }

@@ -19,6 +19,17 @@ pub fn crawler_running(name: &str) -> String {
     format!("Crawler with name {name} is running")
 }
 
+/// `StartCrawler` for a crawler whose crawl is already in progress: "if the crawler is
+/// already running, returns a `CrawlerRunningException`" (the operation's own
+/// documentation). NOT recorded: what is pinned is the behaviour — 400 with the
+/// operation's modelled `CrawlerRunningException` — and, like the crawler miss above, a
+/// sentence carrying only the requested `Name`. Worded for the START it refuses rather
+/// than reusing [`crawler_running`], which is the refusal a WRITE to the crawler's
+/// definition earns.
+pub fn crawler_already_started(name: &str) -> String {
+    format!("Crawler with name {name} has already started")
+}
+
 /// A request to suspend the schedule of a crawler that has no schedule running —
 /// one whose schedule is already suspended, or that carries no cron expression at
 /// all. NOT recorded: what is pinned is the behaviour — 400 with the operation's

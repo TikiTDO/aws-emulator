@@ -752,6 +752,10 @@ pub fn split_s3_location(location: &str) -> Option<(String, String)> {
 
 /// An Amazon S3 client over the in-process callback into this same emulator.
 ///
+/// Shared with the CRAWL that walks a crawler's Amazon S3 targets
+/// ([`super::crawl_source`]), so every read this service makes of the emulator's own object
+/// store goes over ONE client configuration.
+///
 /// The callback is the framework's documented seam for calling another emulated service:
 /// it routes IN PROCESS, so no network client is configured here and the `endpoint_url`
 /// below is an address the in-process router reads rather than a host any resolver looks
@@ -763,7 +767,7 @@ pub fn split_s3_location(location: &str) -> Option<(String, String)> {
 /// need a sleep implementation this client is not given. The same goes for caching the
 /// identity: the credentials the callback hands over are used directly, and they only sign
 /// this operation's in-process calls.
-fn s3_client(
+pub(super) fn s3_client(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
 ) -> ::aws_sdk_s3::Client {

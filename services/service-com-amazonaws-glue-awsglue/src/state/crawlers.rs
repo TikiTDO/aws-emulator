@@ -22,9 +22,9 @@ pub(super) fn stated_schedule_state(expression: Option<&str>) -> String {
 /// A stored crawler.
 ///
 /// Every member of the modelled `Crawler` shape that a create can fill is held here, so
-/// a later `GetCrawler` reports what the create stored and nothing else: the members
-/// only a crawl produces (`LastCrawl`, `CrawlElapsedTime`) are not stored, because no
-/// crawl has run.
+/// a later `GetCrawler` reports what the create stored and nothing else. The members only
+/// a CRAWL produces (`LastCrawl`, `CrawlElapsedTime`) are held here too, written by the
+/// crawl that produced them: a crawler nothing has crawled reports neither.
 #[derive(Debug, Clone)]
 pub struct CrawlerEntry {
     /// The crawler's name, which is also its key in [`ComAmazonawsGlueAwsglueState::crawlers`].
@@ -65,6 +65,25 @@ pub struct CrawlerEntry {
     /// The request's `Tags`, which are not part of the `Crawler` shape — they are read
     /// back through the tagging operations.
     pub tags: HashMap<String, String>,
+    /// When the crawl IN FLIGHT began, or `None` while no crawl is. What
+    /// `CrawlElapsedTime` is measured from: "if the crawler is running, contains the total
+    /// time elapsed since the last crawl began" (`Crawler$CrawlElapsedTime`).
+    pub crawl_started_at: Option<SystemTime>,
+    /// The instant the clock owes this crawler its way back to [`CRAWLER_STATE_READY`];
+    /// `None` once the crawl has settled, which is also every crawler that has none in
+    /// flight.
+    pub crawl_settles_at: Option<SystemTime>,
+    /// What the crawl in flight did, to be published when the clock settles it
+    /// ([`Self::settle_crawl_if_due`]). The work itself was done where the crawl was
+    /// STARTED, so this is what it answered — which is why the status, the error message
+    /// and the table counts a settled crawl reports are its own reading's.
+    pub pending_crawl: Option<CrawlRecord>,
+    /// The most recent crawl that has FINISHED, which is what `LastCrawl` reports and
+    /// where a metrics read takes this crawler's table counts from. `None` until one has.
+    pub last_crawl: Option<CrawlRecord>,
+    /// How long each of the last [`MAX_CRAWL_DURATIONS`] finished crawls took, oldest
+    /// first: the durations `MedianRuntimeSeconds` is the median of.
+    pub crawl_durations: Vec<Duration>,
 }
 
 impl CrawlerEntry {
@@ -98,6 +117,13 @@ impl CrawlerEntry {
             creation_time: now,
             last_updated: now,
             tags: input.tags.clone().unwrap_or_default(),
+            // A freshly created crawler has crawled nothing: no crawl is in flight, none
+            // has finished, and there is no duration to report.
+            crawl_started_at: None,
+            crawl_settles_at: None,
+            pending_crawl: None,
+            last_crawl: None,
+            crawl_durations: Vec::new(),
         }
     }
 
@@ -230,6 +256,72 @@ impl CrawlerEntry {
         self.state != CRAWLER_STATE_READY
     }
 
+    /// Record the crawl `record` as this crawler's crawl IN FLIGHT: the crawler leaves
+    /// [`CRAWLER_STATE_READY`] for [`CRAWLER_STATE_RUNNING`], and the clock owes it its way
+    /// back [`CRAWL_SETTLES_AFTER`] later.
+    ///
+    /// The crawl's own work was already done by the caller that performed it, and `record`
+    /// is what it answered; nothing of it is published yet — a crawl in flight leaves the
+    /// PREVIOUS crawl's `LastCrawl` and table counts in place, which is what a read of a
+    /// running crawler reports.
+    ///
+    /// The crawler's definition is untouched: a crawl writes no member of it, so `Version`
+    /// does not move. `LastUpdated` does, because the crawler record did change.
+    pub fn start_crawl(&mut self, record: CrawlRecord, now: SystemTime) {
+        self.state = CRAWLER_STATE_RUNNING.to_string();
+        self.crawl_started_at = Some(now);
+        self.crawl_settles_at = Some(now.checked_add(CRAWL_SETTLES_AFTER).unwrap_or(now));
+        self.pending_crawl = Some(record);
+        self.last_updated = now;
+    }
+
+    /// Move this crawler into the state the clock owed it at `now`, if it owed one.
+    ///
+    /// The crawl was due to finish at [`Self::crawl_settles_at`] whether or not anybody
+    /// called, and the instants recorded are that DUE instant, not the instant somebody read
+    /// it — so two reads of a settled crawl report the same crawl. Finishing it is what
+    /// publishes the crawl's `LastCrawl` and its table counts, and what puts the crawler back
+    /// in [`CRAWLER_STATE_READY`]: the state with no run in it.
+    pub fn settle_crawl_if_due(&mut self, now: SystemTime) {
+        let Some(due) = self.crawl_settles_at else {
+            return;
+        };
+        if due > now {
+            return;
+        }
+        self.crawl_settles_at = None;
+        self.crawl_started_at = None;
+        self.state = CRAWLER_STATE_READY.to_string();
+        self.last_updated = due;
+        let Some(mut record) = self.pending_crawl.take() else {
+            return;
+        };
+        record.finished_at = Some(due);
+        if let Some(duration) = record.duration() {
+            self.crawl_durations.push(duration);
+            if self.crawl_durations.len() > MAX_CRAWL_DURATIONS {
+                let overflow = self.crawl_durations.len() - MAX_CRAWL_DURATIONS;
+                self.crawl_durations.drain(..overflow);
+            }
+        }
+        self.last_crawl = Some(record);
+    }
+
+    /// How long the crawl in flight has been running at `now`, in milliseconds: "if the
+    /// crawler is running, contains the total time elapsed since the last crawl began"
+    /// (`Crawler$CrawlElapsedTime`).
+    ///
+    /// Zero for a crawler with no crawl in flight: no crawl has begun for any time to have
+    /// elapsed since.
+    fn crawl_elapsed_time(&self, now: SystemTime) -> i64 {
+        let Some(started) = self.crawl_started_at else {
+            return 0;
+        };
+        now.duration_since(started)
+            .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+            .unwrap_or(0)
+    }
+
     /// Rebuild the modelled `CrawlerMetrics` shape from what is stored: "Metrics for a
     /// specified crawler".
     ///
@@ -245,24 +337,37 @@ impl CrawlerEntry {
     ///   there is no estimate to report for a run still being estimated, and none at all
     ///   for a crawler that is not running.
     /// * `LastRuntimeSeconds` and `MedianRuntimeSeconds` are durations of this crawler's
-    ///   runs, and `TablesCreated`/`TablesUpdated`/`TablesDeleted` the catalog tables its
-    ///   crawls have written; no crawl has run, which is why [`Self::to_crawler`] reports
-    ///   no `LastCrawl` either, so each is zero.
+    ///   runs, so they are read off the crawls that have FINISHED
+    ///   ([`Self::crawl_durations`]) — zero for a crawler none of whose crawls has
+    ///   finished, because it has no run to have taken any time.
+    /// * `TablesCreated`, `TablesUpdated` and `TablesDeleted` are the catalog tables this
+    ///   crawler's crawls wrote, so they are the ones the LAST finished crawl wrote
+    ///   ([`Self::last_crawl`]) — the same crawl [`Self::to_crawler`] reports as
+    ///   `LastCrawl`, so a metrics read and a crawler read cannot disagree about which
+    ///   crawl they describe.
     pub fn to_crawler_metrics(&self) -> CrawlerMetrics {
+        let finished = self.last_crawl.as_ref();
         CrawlerMetrics {
             crawler_name: Some(self.name.clone()),
             time_left_seconds: 0.0,
             still_estimating: self.crawl_in_progress(),
-            last_runtime_seconds: 0.0,
-            median_runtime_seconds: 0.0,
-            tables_created: 0,
-            tables_updated: 0,
-            tables_deleted: 0,
+            last_runtime_seconds: finished
+                .and_then(CrawlRecord::duration)
+                .map_or(0.0, |duration| duration.as_secs_f64()),
+            median_runtime_seconds: median_seconds(&self.crawl_durations),
+            tables_created: finished.map_or(0, |crawl| crawl.tables_created),
+            tables_updated: finished.map_or(0, |crawl| crawl.tables_updated),
+            tables_deleted: finished.map_or(0, |crawl| crawl.tables_deleted),
         }
     }
 
     /// Rebuild the modelled `Crawler` output shape from what is stored.
-    pub fn to_crawler(&self) -> Crawler {
+    ///
+    /// `now` is the instant the read is served, which the one time-derived member needs:
+    /// `CrawlElapsedTime` is measured from the instant the crawl in flight began. Every
+    /// other member comes from the store, so repeated reads of a crawler with no crawl in
+    /// flight agree.
+    pub fn to_crawler(&self, now: SystemTime) -> Crawler {
         Crawler {
             name: Some(self.name.clone()),
             role: Some(self.role.clone()),
@@ -280,18 +385,39 @@ impl CrawlerEntry {
                 state: Some(self.schedule_state.clone()),
             }),
             // "If the crawler is running, contains the total time elapsed since the
-            // last crawl began" — nothing has run, so no time has elapsed.
-            crawl_elapsed_time: 0,
+            // last crawl began".
+            crawl_elapsed_time: self.crawl_elapsed_time(now),
             creation_time: Some(to_date_time(self.creation_time)),
             last_updated: Some(to_date_time(self.last_updated)),
             // "Status and error information about the most recent crawl": absent until
-            // a crawl has produced one.
-            last_crawl: None,
+            // a crawl has FINISHED and produced one — a crawl in flight has produced no
+            // status yet, so it leaves the previous crawl's report in place.
+            last_crawl: self.last_crawl.as_ref().map(CrawlRecord::to_last_crawl_info),
             version: self.version,
             configuration: self.configuration.clone(),
             crawler_security_configuration: self.crawler_security_configuration.clone(),
             lake_formation_configuration: self.lake_formation_configuration.clone(),
             catalog_id: Some(self.catalog_id.clone()),
         }
+    }
+}
+
+/// The median of `durations`, in seconds, or zero for a crawler whose crawls have produced
+/// none.
+///
+/// The median of an even number of durations is the mean of the two in the middle, which is
+/// what a median of a sample of runtimes is. The input is at most
+/// [`MAX_CRAWL_DURATIONS`] long, so the sort is a bounded cost.
+fn median_seconds(durations: &[Duration]) -> f64 {
+    if durations.is_empty() {
+        return 0.0;
+    }
+    let mut sorted: Vec<Duration> = durations.to_vec();
+    sorted.sort_unstable();
+    let middle = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        (sorted[middle - 1].as_secs_f64() + sorted[middle].as_secs_f64()) / 2.0
+    } else {
+        sorted[middle].as_secs_f64()
     }
 }

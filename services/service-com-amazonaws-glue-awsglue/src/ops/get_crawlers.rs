@@ -160,7 +160,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .unwrap_or(MAX_PAGE_SIZE as usize)
             .clamp(1, MAX_PAGE_SIZE as usize);
 
-        let store = state.lock();
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        // The one write this read performs: every crawl the clock had already finished is
+        // finished before the crawlers are reported, exactly as `GetCrawler` does it, so a
+        // listing and a single read agree about a crawler's run state.
+        store.settle_due_crawls(now);
         // Name order, so one page follows another deterministically however the store
         // happens to hash its keys.
         let mut ordered: Vec<&crate::state::CrawlerEntry> = store.crawlers.values().collect();
@@ -189,7 +194,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // The listing serves the SAME projection as the single-crawler read, element
             // by element, so a client that works from a listing is never less informed
             // than one that re-reads each crawler.
-            crawlers: Some(page.iter().map(|crawler| crawler.to_crawler()).collect()),
+            crawlers: Some(page.iter().map(|crawler| crawler.to_crawler(now)).collect()),
             next_token,
         })
     }
