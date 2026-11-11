@@ -53,12 +53,14 @@ aws-types = { version = "1", default-features = false }
 # feature flag's declared attribute constraints give about its authored values
 # (`state::feature_flags`).
 boon = "0.6"
+# Where one target of a gradual rollout stands is derived from the key that identifies
+# that target, by hashing it (`state::rollout`).
+sha2 = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
-sha2 = { workspace = true }
 # `tokio::time` drives the tests' wait past an action point's due instant.
 tokio = { workspace = true, features = ["time"] }
 # An extension action's target lives in another service, and an invocation is asserted

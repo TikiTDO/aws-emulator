@@ -4,9 +4,12 @@
 //! (application, environment, configuration profile) triple.
 //!
 //! RULE: the deprecated configuration read answers the configuration the MOST RECENT
-//! deployment still in force put in service for the named configuration profile in the
-//! named environment — in force from the moment its rollout begins until a caller's stop
-//! withdraws it — reporting that hosted version's number as `ConfigurationVersion`, its
+//! deployment in force FOR THE CALLING CLIENT put in service for the named configuration
+//! profile in the named environment — a deployment's rollout reaches its targets
+//! gradually, and `ClientId` is what places the caller among them, so a client a rollout
+//! under way has not reached yet keeps being answered the configuration that preceded it
+//! until the rollout grows past the client, and a caller's stop withdraws the new one
+//! from every client — reporting that hosted version's number as `ConfigurationVersion`, its
 //! MIME type as `ContentType`, and as `Content` whatever the profile's `Type` makes of
 //! the version's stored bytes; it addresses each of the three levels by name or by id,
 //! refuses with the modelled `ResourceNotFoundException` the first level it cannot
@@ -35,7 +38,7 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use service_com_amazonaws_appconfig_amazonappconfig::state::{
-    FEATURE_FLAGS_PROFILE_TYPE, FREEFORM_PROFILE_TYPE,
+    FEATURE_FLAGS_PROFILE_TYPE, FREEFORM_PROFILE_TYPE, STAGE_DURATION,
 };
 
 use crate::appconfig_workflow::{
@@ -772,8 +775,9 @@ async fn an_unresolvable_level_or_an_undeployed_configuration_is_the_modelled_40
     );
 }
 
-/// RULE: a configuration is in force from the moment its rollout BEGINS, and a caller's
-/// stop withdraws it while that rollout is still under way.
+/// RULE: a configuration is in force for the targets its rollout has REACHED — so a
+/// rollout that has reached none of them serves none, one that has reached all of them
+/// serves every client while it is still in flight — and a caller's stop withdraws it.
 #[tokio::test]
 async fn a_rolling_out_configuration_is_in_force_and_a_stop_withdraws_it() {
     let router = router();
@@ -791,8 +795,11 @@ async fn a_rolling_out_configuration_is_in_force_and_a_stop_withdraws_it() {
     )
     .await;
 
-    // A strategy whose rollout window is long enough that the deployment is still
-    // DEPLOYING when it is read, so what is asserted is the in-flight half of the rule.
+    // A strategy that declares a rollout window and a bake time, so the deployment is
+    // still in flight throughout: its one growth step falls due at the end of that
+    // window (`state::stage_duration`), which is what makes both halves of the rule
+    // observable — nothing reached at the start instant, every target reached once the
+    // window has passed, and the deployment baking rather than complete either way.
     let strategy = json_call(
         &router,
         "POST",
@@ -800,7 +807,7 @@ async fn a_rolling_out_configuration_is_in_force_and_a_stop_withdraws_it() {
         &json!({
             "Name": "slow-rollout",
             "DeploymentDurationInMinutes": 1440,
-            "GrowthFactor": 1.0,
+            "GrowthFactor": 100.0,
             "GrowthType": "LINEAR",
             "FinalBakeTimeInMinutes": 1440,
             "ReplicateTo": "NONE",
@@ -820,8 +827,19 @@ async fn a_rolling_out_configuration_is_in_force_and_a_stop_withdraws_it() {
         "a rollout under way",
     )
     .await;
+    // The rollout has reached nobody yet, and nothing preceded it here, so there is no
+    // configuration in force for this caller.
+    assert_not_found(
+        "a rollout that has reached nobody",
+        &get_configuration(&router, &application, &environment, &profile, None).await,
+        &[&application, &environment, &profile],
+    );
+
+    // Once the rollout window has passed every target is reached, while the deployment
+    // is still in flight (it is baking): the configuration is in force for every client.
+    tokio::time::sleep(STAGE_DURATION + std::time::Duration::from_millis(300)).await;
     assert_served(
-        "a rollout under way",
+        "a rollout that reached every target",
         &get_configuration(&router, &application, &environment, &profile, None).await,
         b"gradual",
         "1",

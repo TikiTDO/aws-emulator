@@ -46,7 +46,7 @@ use sha2::{Digest, Sha256};
 
 use ::service_com_amazonaws_appconfig_amazonappconfig::state::{
     configuration_version_not_hosted, no_deployed_configuration,
-    ComAmazonawsAppconfigAmazonappconfigState as AppConfigState,
+    ComAmazonawsAppconfigAmazonappconfigState as AppConfigState, RolloutBucket,
 };
 
 /// How long a configuration token stays usable after it is minted.
@@ -128,6 +128,19 @@ pub struct Session {
     /// once is bounded by the same two limits as the sessions themselves — each entry's
     /// expiry and [`MAX_SESSIONS`].
     pub bound_configuration: Option<Arc<ServedConfiguration>>,
+    /// Where this session stands in a gradual rollout: the position the control plane
+    /// compares against a deployment's `PercentageComplete` when it decides which
+    /// deployment is in force for this session
+    /// (`service_com_amazonaws_appconfig_amazonappconfig::state::RolloutBucket`).
+    ///
+    /// A configuration session is one TARGET of a deployment, and a rollout reaches its
+    /// targets gradually, so a session opened while a rollout is part-way through is
+    /// served either the new version or the previous one depending on where it stands —
+    /// never a blend of the two. The position is minted with the session
+    /// ([`ComAmazonawsAppconfigdataAppconfigdataState::mint_rollout_bucket`]) and carried
+    /// by every token of its poll chain, so a session the rollout has reached stays
+    /// reached and one it has not is reached only when the rollout grows past it.
+    pub rollout_bucket: RolloutBucket,
     /// When the session itself was started.
     pub created_at: SystemTime,
     /// When THIS token stops being usable ([`TOKEN_LIFETIME`] after it was minted).
@@ -298,7 +311,11 @@ impl ComAmazonawsAppconfigdataAppconfigdataState {
     /// token that resolves to it.
     ///
     /// `bound_configuration` is what the triple resolved to as the session was started
-    /// ([`Session::bound_configuration`]).
+    /// ([`Session::bound_configuration`]), and `rollout_bucket` where the session stands
+    /// in a rollout ([`Session::rollout_bucket`]) — the one this resolution was made
+    /// with, so what the session polls and what it is bound to are decided for the same
+    /// target.
+    #[allow(clippy::too_many_arguments)]
     pub fn start_session(
         &mut self,
         application_identifier: &str,
@@ -306,6 +323,7 @@ impl ComAmazonawsAppconfigdataAppconfigdataState {
         configuration_profile_identifier: &str,
         required_minimum_poll_interval_in_seconds: Option<i32>,
         bound_configuration: Option<Arc<ServedConfiguration>>,
+        rollout_bucket: RolloutBucket,
         now: SystemTime,
     ) -> String {
         let session = Session {
@@ -315,12 +333,34 @@ impl ComAmazonawsAppconfigdataAppconfigdataState {
             required_minimum_poll_interval_in_seconds,
             last_served_version: None,
             bound_configuration,
+            rollout_bucket,
             created_at: now,
             expires_at: expiry(now),
             last_polled_at: None,
             last_used_at: None,
         };
         self.store_session(session, now)
+    }
+
+    /// Mint the position a session being started stands at in a gradual rollout
+    /// ([`Session::rollout_bucket`]).
+    ///
+    /// Derived the way a token is — from this store's mint counter and the current
+    /// instant, under its own domain tag so it is not the token's own hash — so the
+    /// positions sessions are minted at are spread over the whole range and independent
+    /// of each other, which is what makes a partial rollout split the sessions polling
+    /// it. Reads the counter without advancing it: a call that mints no session writes
+    /// nothing, and the counter has moved on by the time the next session is minted,
+    /// because minting one mints a token.
+    pub fn mint_rollout_bucket(&self, now: SystemTime) -> RolloutBucket {
+        let nanos = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        RolloutBucket::of_key(&format!(
+            "configuration-session-rollout-bucket:{}:{nanos}",
+            self.tokens_minted
+        ))
     }
 
     /// Store `session` under a freshly minted token and return that token.
@@ -623,6 +663,11 @@ pub struct SessionBinding {
 /// served is a separate question, answered per poll by [`served_configuration`]: what
 /// makes a session possible is that the profile HAS been deployed here.
 ///
+/// `target` is where the session being started stands in a gradual rollout
+/// ([`Session::rollout_bucket`]), which is what the configuration it is bound to is
+/// resolved for: a session a rollout under way has not reached yet is bound to the
+/// version that preceded it.
+///
 /// A one-directional, guard-free read of the AppConfig store: it takes that store's
 /// lock, holds no other while it does, and hands back owned values — so it is called
 /// with NO guard of this service's own store held. Nothing is written: existence of a
@@ -633,6 +678,7 @@ pub fn resolve_deployed_triple<Eng: Send + Sync + 'static>(
     application_identifier: &str,
     environment_identifier: &str,
     configuration_profile_identifier: &str,
+    target: RolloutBucket,
     now: SystemTime,
 ) -> Option<Result<SessionBinding, UnresolvedResource>> {
     let state = app_config_state(engine)?;
@@ -672,6 +718,7 @@ pub fn resolve_deployed_triple<Eng: Send + Sync + 'static>(
         application_identifier,
         environment_identifier,
         configuration_profile_identifier,
+        target,
         now,
     )
     .and_then(Result::ok)
@@ -690,6 +737,12 @@ pub fn resolve_deployed_triple<Eng: Send + Sync + 'static>(
 /// to, or has restored, the configuration that preceded it, so its own version is not
 /// what the data plane serves.
 ///
+/// A rollout still under way has reached only part of its targets, and a configuration
+/// session is one target: `target` is where this session stands
+/// ([`Session::rollout_bucket`]), so a session a rollout has not reached yet is served
+/// the previous version's exact bytes until it does, and the fleet converges on the new
+/// version as the rollout grows.
+///
 /// What that version's stored bytes MEAN is the configuration profile's `Type`, so the
 /// content handed back is the profile's own
 /// `ConfigurationProfile::served_content` of them rather than the stored bytes: a
@@ -707,6 +760,7 @@ pub fn served_configuration<Eng: Send + Sync + 'static>(
     application_identifier: &str,
     environment_identifier: &str,
     configuration_profile_identifier: &str,
+    target: RolloutBucket,
     now: SystemTime,
 ) -> Option<Result<ServedConfiguration, UnresolvedResource>> {
     let state = app_config_state(engine)?;
@@ -729,6 +783,7 @@ pub fn served_configuration<Eng: Send + Sync + 'static>(
         application_identifier,
         environment_identifier,
         configuration_profile_identifier,
+        target,
         now,
     )
 }
@@ -739,12 +794,14 @@ pub fn served_configuration<Eng: Send + Sync + 'static>(
 ///
 /// `None` only for ids the store does not hold, which cannot happen for a resolution
 /// this store itself produced.
+#[allow(clippy::too_many_arguments)]
 fn served_in(
     store: &AppConfigState,
     resolved: &ResolvedTriple,
     application_identifier: &str,
     environment_identifier: &str,
     configuration_profile_identifier: &str,
+    target: RolloutBucket,
     now: SystemTime,
 ) -> Option<Result<ServedConfiguration, UnresolvedResource>> {
     let application = store.application(&resolved.application_id)?;
@@ -757,7 +814,8 @@ fn served_in(
     let mut environment = environment.clone();
     environment.materialize(now);
 
-    let Some(deployment) = environment.in_force_deployment(&resolved.configuration_profile_id)
+    let Some(deployment) =
+        environment.in_force_deployment(&resolved.configuration_profile_id, target)
     else {
         return Some(Err(UnresolvedResource::configuration(
             no_deployed_configuration(

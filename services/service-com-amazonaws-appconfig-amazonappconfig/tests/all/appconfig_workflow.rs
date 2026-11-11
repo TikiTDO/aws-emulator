@@ -1680,16 +1680,17 @@ fn a_deployments_progress_follows_the_strategys_documented_schedule() {
         let new = new_deployment();
 
         // Each stage the strategy declares a non-zero window for is paced by one span here
-        // (`state::stage_duration`), so the schedule is walked in those spans rather than in
-        // the declared minutes.
-        let rollout = state::stage_duration(predefined.deployment_duration_in_minutes);
+        // (`state::stage_duration`), and the rollout stage by one span per growth INTERVAL
+        // the strategy takes to reach every target (`Deployment::rollout_duration`), so the
+        // schedule is walked in those spans rather than in the declared minutes.
+        let at_start = Deployment::start(new.clone(), &strategy, started_at);
+        let rollout = at_start.rollout_duration();
         let bake = state::stage_duration(predefined.final_bake_time_in_minutes);
 
         // At the start instant: nothing has rolled out yet, so a strategy with a rollout
         // window reports 0% of targets and is still DEPLOYING, while one with no window at
         // all has already reached every target and is baking (every predefined strategy
         // has a bake time, so none of them completes instantly).
-        let at_start = Deployment::start(new.clone(), &strategy, started_at);
         let expected_at_start = if rollout.is_zero() {
             state::DEPLOYMENT_BAKING
         } else {

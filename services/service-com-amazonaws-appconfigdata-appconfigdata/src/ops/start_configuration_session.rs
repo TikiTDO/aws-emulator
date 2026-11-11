@@ -241,14 +241,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // poll is served from that binding when the control plane can no longer resolve
         // the triple, instead of making the records' continued existence a precondition
         // of every poll (`crate::state::Session::bound_configuration`).
+        //
+        // WHICH configuration that is depends on where this session stands in a rollout
+        // still under way: a configuration session is one TARGET of a deployment, and a
+        // rollout reaches its targets gradually, so the session's position is minted here
+        // (`crate::state::Session::rollout_bucket`) and the control plane resolves what is
+        // in force FOR that position — the new version for a session the rollout has
+        // reached, the previous version's exact bytes for one it has not. The position is
+        // minted before the configuration is resolved and stored with the session, so the
+        // session's binding and its every poll are answered for one target.
         let now = std::time::SystemTime::now();
-        let bindings = state.lock().name_bindings();
+        let (bindings, rollout_bucket) = {
+            let store = state.lock();
+            (store.name_bindings(), store.mint_rollout_bucket(now))
+        };
         let Some(resolution) = crate::state::resolve_deployed_triple(
             &*self.engine,
             &bindings,
             &input.application_identifier,
             &input.environment_identifier,
             &input.configuration_profile_identifier,
+            rollout_bucket,
             now,
         ) else {
             return Err(StartConfigurationSessionErrorModeled::InternalServerException(
@@ -299,6 +312,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 &input.configuration_profile_identifier,
                 input.required_minimum_poll_interval_in_seconds,
                 binding.configuration,
+                rollout_bucket,
                 now,
             )
         };

@@ -23,9 +23,15 @@ mod identity_authorization;
 mod name_bindings_survive_renames;
 #[path = "all/next_poll_token_poll_rate.rs"]
 mod next_poll_token_poll_rate;
+#[path = "all/rollout_percentage_splits_sessions.rs"]
+mod rollout_percentage_splits_sessions;
 #[path = "all/session_requires_a_deployment.rs"]
 mod session_requires_a_deployment;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/token_validation_and_lifetime.rs"]
 mod token_validation_and_lifetime;
+// A clock-driven suite: it waits out a rollout's growth intervals rather than writing a
+// percentage into the store, so its file name sorts it last.
+#[path = "all/zz_timing.rs"]
+mod zz_timing;

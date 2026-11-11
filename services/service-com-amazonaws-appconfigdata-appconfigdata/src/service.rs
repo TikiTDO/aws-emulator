@@ -127,19 +127,18 @@ fn effective_protocol(svc: &dyn Service) -> &dyn ServerHttpProtocol {
         .unwrap_or_else(|| svc.definition().protocol())
 }
 
-/// Checks one operation's input against that operation's OWN schema, and answers any
-/// refusal in the operation's modelled error shape — then hands a well-formed request
-/// to the generated handler untouched.
+/// Claims one operation's route so the request reaches that operation at all, and words
+/// every refusal of its input in the operation's modelled error shape — then hands the
+/// framework's own answer back untouched.
 ///
 /// Both operations model `BadRequestException` (HTTP 400) as the answer to input that
 /// "fails to satisfy the constraints specified by the service", which is exactly what
 /// an absent `@required` member or a value outside a modelled bound is. Two things make
-/// the framework answer such a request differently, and both are why the check sits
-/// here:
+/// the framework answer such a request differently, and both are why this sits here:
 ///
-/// * the framework's pre-dispatch envelope states the refusal under its own message
-///   key, not under the `Message` member this service's `BadRequestException` declares,
-///   so a client reading the modelled shape finds no message at all; and
+/// * the framework's refusal envelope states the message under its own key, not under the
+///   `Message` member this service's `BadRequestException` declares, so a client reading
+///   the modelled shape finds no message at all; and
 /// * a route whose `@required` query binding the request omits matches no operation at
 ///   all — `GetLatestConfiguration` binds `ConfigurationToken` to `@httpQuery` — so a
 ///   tokenless poll would be answered `501 NotImplemented`, a server-fault class an SDK
@@ -149,9 +148,15 @@ fn effective_protocol(svc: &dyn Service) -> &dyn ServerHttpProtocol {
 /// `service_common::validation::refusing_violations`, the shared collecting half built
 /// on the framework's own machinery (the protocol's deserializer plus
 /// `constraints::validate` over the built input), so this wrapper cannot find a
-/// different violation set from the walk that follows it, and a model change needs no
-/// change here. A failure that is not a refusal of the input — a body the codec cannot
-/// read at all — yields no violations and is passed through for the framework to word.
+/// different violation set from the walk that refused the request, and a model change
+/// needs no change here. A failure that is not a refusal of the input — a body the codec
+/// cannot read at all — yields no violations, so the framework's answer stands.
+///
+/// That collecting walk runs over a request the framework REFUSED, never over one it
+/// served, so a served request carries the walk's cost once rather than twice. For a
+/// POLLING data plane the difference is not incidental: the `Token` shape's `@pattern` is
+/// the dearest check in the walk, every poll carries a token, and a client watching a
+/// deployment roll out makes one poll per session it samples.
 struct ModeledInputCheck<O> {
     /// The operation whose schema is checked; its `INPUT_SCHEMA`, `Input` type and
     /// `NAME` are all that is used, so no instance of it is held — the generated
@@ -175,11 +180,29 @@ impl<O: Operation> ErasedOperation for ModeledInputCheck<O> {
         ctx: &'r OperationContext<'r>,
     ) -> BoxFuture<'r, aws_smithy_runtime_api::http::Response> {
         Box::pin(async move {
-            let started = std::time::Instant::now();
+            // The framework's own walk decides the request: deserialize, validate,
+            // handle, serialize, plus its telemetry over the same bytes. Reached through
+            // the routing table rather than through `override_operation`, which would
+            // route straight back here.
+            let answered = match svc.definition().routing_table().get(O::NAME) {
+                Some(operation) => operation.run(svc, req, ctx).await,
+                None => {
+                    return svc.definition().framework_error_response(
+                        ProtocolError::UnknownOperation(O::NAME.to_string()),
+                        req,
+                    );
+                }
+            };
+            // A request the framework SERVED is answered as it answered it. Only a
+            // refusal is looked at, and then only to state it in the modelled error
+            // shape.
+            if answered.status().is_success() {
+                return answered;
+            }
             // The protocol is read, used and dropped inside this one block:
-            // `&dyn ErasedServiceDefinition` is not `Sync`, so holding it across the
-            // await below would make this future non-`Send`.
-            let refused = {
+            // `&dyn ErasedServiceDefinition` is not `Sync`, so holding it across an await
+            // would make this future non-`Send`.
+            let reworded = {
                 let protocol = effective_protocol(svc);
                 let violations =
                     service_common::validation::refusing_violations::<O>(protocol, req);
@@ -206,28 +229,16 @@ impl<O: Operation> ErasedOperation for ModeledInputCheck<O> {
                         })
                 })
             };
-            if let Some(response) = refused {
-                tracing::debug!(
-                    operation = O::NAME,
-                    outcome = BAD_REQUEST_EXCEPTION,
-                    "refused an input the model does not allow"
-                );
-                // The row the framework sequence would have recorded for this request,
-                // so a refused one is not a hole in the telemetry series.
-                record_refusal::<O>(ctx, started.elapsed());
-                return response;
-            }
-            // The input is one the model allows: the generated handler serves it, which
-            // runs the whole framework sequence (deserialize, validate, handle,
-            // serialize) plus its telemetry over the same bytes. Reached through the
-            // routing table rather than through `override_operation`, which would route
-            // straight back here.
-            match svc.definition().routing_table().get(O::NAME) {
-                Some(operation) => operation.run(svc, req, ctx).await,
-                None => svc.definition().framework_error_response(
-                    ProtocolError::UnknownOperation(O::NAME.to_string()),
-                    req,
-                ),
+            match reworded {
+                Some(response) => {
+                    tracing::debug!(
+                        operation = O::NAME,
+                        outcome = BAD_REQUEST_EXCEPTION,
+                        "refused an input the model does not allow"
+                    );
+                    response
+                }
+                None => answered,
             }
         })
     }
@@ -237,29 +248,6 @@ impl<O: Operation> ErasedOperation for ModeledInputCheck<O> {
 const BAD_REQUEST_EXCEPTION: &str = "BadRequestException";
 /// See [`BAD_REQUEST_EXCEPTION`]: the shape's `@httpError`.
 const BAD_REQUEST_EXCEPTION_STATUS: u16 = 400;
-
-/// Record the refusal answered above as the operation row the framework sequence would
-/// have recorded, so a request refused by the wrapper is not a hole in the telemetry
-/// series: the same classification (from the refusal's status and error shape), the same
-/// folded handle (this service's signing name and the operation's own name), and the
-/// same already-sanitized request metadata. Everything is gated on a client collecting,
-/// exactly as the framework gates it.
-fn record_refusal<O: Operation>(ctx: &OperationContext<'_>, latency: std::time::Duration) {
-    if !emulator_telemetry::recording_active() {
-        return;
-    }
-    let handle =
-        emulator_telemetry::OperationHandle::folded(ctx.identity().signing_name_static(), O::NAME);
-    emulator_telemetry::record_generated_operation_with_handle(
-        &handle,
-        latency,
-        Some(emulator_telemetry::OperationFailure::classify(
-            BAD_REQUEST_EXCEPTION_STATUS,
-            BAD_REQUEST_EXCEPTION,
-        )),
-        smithy_server_runtime::RequestTelemetry::from_headers(&ctx.parts().headers).into_metadata(),
-    );
-}
 
 /// Whether this service serves the request these `parts` came from.
 ///

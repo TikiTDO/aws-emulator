@@ -188,12 +188,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut store = state.lock();
 
         // `ClientId` identifies the client asking, which is what AppConfig paces a
-        // gradual rollout by. What is in force for a configuration profile is ONE record
-        // of this service's state — the deployment the control plane holds — so every
-        // client is served that record, exactly as the `appconfigdata` poll over the same
-        // deployment is; how far the rollout has got is reported by the deployment's own
-        // `PercentageComplete` rather than by picking a different version per client.
-        // Nothing about the client is stored: a read records no caller.
+        // gradual rollout by: the member's own doc is "a unique, user-specified ID to
+        // identify the client for the configuration. This ID enables AppConfig to deploy
+        // the configuration in intervals, as defined in the deployment strategy". So the
+        // client id is this caller's position in the rollout — where it stands among the
+        // targets a deployment's `PercentageComplete` has reached — and a deployment
+        // still rolling out is in force for this caller only once the rollout has passed
+        // that position, while a caller it has not reached is served what was in force
+        // before (`crate::state::RolloutBucket`). The position is derived from the id and
+        // from nothing else, so the same client keeps it across its polls; nothing about
+        // the client is stored — a read records no caller.
+        let target = crate::state::RolloutBucket::of_key(&input.client_id);
 
         // Each of the three path members is documented as "the <level> name or the
         // <level> ID", so each resolves either way, and the levels are resolved
@@ -246,7 +251,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         environment.materialize(now);
         let in_force = environment
-            .in_force_deployment(&profile_id)
+            .in_force_deployment(&profile_id, target)
             .map(|deployment| deployment.configuration_version.clone());
         let Some(deployed_version) = in_force else {
             return Err(not_found(

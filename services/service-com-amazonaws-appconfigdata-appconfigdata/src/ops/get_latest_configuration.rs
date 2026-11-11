@@ -394,12 +394,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // against whatever the control plane says carries that name now, so renaming a
         // record does not redirect or break a session already polling it. The poll binds
         // nothing itself: a read must not change what a later caller sees.
+        //
+        // The configuration is resolved FOR this session's own position in a rollout
+        // (`crate::state::Session::rollout_bucket`, minted with the session and carried by
+        // every token of its poll chain): a deployment still rolling out is in force for
+        // the targets it has reached, so a session it has not reached keeps being served
+        // the previous version until the rollout grows past it.
         let Some(deployed) = crate::state::served_configuration(
             &*self.engine,
             &bindings,
             &session.application_identifier,
             &session.environment_identifier,
             &session.configuration_profile_identifier,
+            session.rollout_bucket,
             now,
         ) else {
             return Err(control_plane_unavailable());

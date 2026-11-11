@@ -40,8 +40,11 @@ use crate::ops::types::{
 
 pub mod extension_actions;
 pub mod feature_flags;
+pub mod rollout;
 pub mod treatment_assignments;
 pub mod validators;
+
+pub use rollout::RolloutBucket;
 
 /// `DeploymentState` values this service moves a deployment through. Each is a member
 /// of `DEPLOYMENT_STATE_VALUES` in `crate::ops::types` (the model's `DeploymentState`
@@ -1019,6 +1022,11 @@ const ROLLBACK_DURATION: Duration = Duration::from_millis(500);
 /// minutes are a property of the strategy and are reported back unchanged: they pace a
 /// stage, they are not a value this record derives anything it reports from.
 ///
+/// The ROLLOUT stage is made of one growth interval per step the strategy's growth factor
+/// takes to reach every target, and each interval is a transition of its own, so the
+/// rollout is paced by one of these spans PER interval
+/// ([`Deployment::rollout_duration`]).
+///
 /// A stage the strategy declares NO window for is not paced by this and takes no time at
 /// all: see [`stage_duration`].
 pub const STAGE_DURATION: Duration = Duration::from_secs(3);
@@ -1915,20 +1923,29 @@ impl Environment {
             .max_by_key(|deployment| deployment.deployment_number)
     }
 
-    /// The deployment whose configuration is in force for `configuration_profile_id`:
-    /// the most recent deployment of that profile into this environment whose
-    /// configuration AppConfig is still serving
-    /// ([`Deployment::serves_the_configuration`]), or `None` when that profile has
-    /// nothing deployed here.
+    /// The deployment whose configuration is in force for `configuration_profile_id` AT
+    /// the target `target`: the most recent deployment of that profile into this
+    /// environment whose configuration AppConfig serves that target
+    /// ([`Deployment::serves_the_configuration_to`]), or `None` when that profile has
+    /// nothing in force here for it.
+    ///
+    /// Asked per TARGET because a rollout is gradual: while one is under way the newest
+    /// deployment is in force for the share of targets it has reached, and the targets it
+    /// has not reached yet stay on the deployment that preceded it — which is the
+    /// previous version's exact bytes, never a blend — until the rollout grows past them.
     ///
     /// Reads the records as they stand, so a caller that wants the clock's effect on
     /// them calls [`Self::materialize`] first.
-    pub fn in_force_deployment(&self, configuration_profile_id: &str) -> Option<&Deployment> {
+    pub fn in_force_deployment(
+        &self,
+        configuration_profile_id: &str,
+        target: RolloutBucket,
+    ) -> Option<&Deployment> {
         self.deployments
             .values()
             .filter(|deployment| {
                 deployment.configuration_profile_id == configuration_profile_id
-                    && deployment.serves_the_configuration()
+                    && deployment.serves_the_configuration_to(target)
             })
             .max_by_key(|deployment| deployment.deployment_number)
     }
@@ -2623,18 +2640,34 @@ impl Deployment {
     }
 
     /// Whether the configuration this deployment deployed is the one AppConfig serves
-    /// for its configuration profile.
+    /// to the target at `target`.
     ///
-    /// It is from the moment the rollout begins (`DEPLOYING`, then `BAKING`, then
-    /// `COMPLETE`) and stops being so once a caller's stop starts rolling it back: a
-    /// rollback is returning to, or has returned to, the configuration that preceded
-    /// this one, so a rolled-back or reverted deployment's own version is not what a
-    /// consumer is served.
+    /// A rollout reaches its targets GRADUALLY, and the deployment's own
+    /// `PercentageComplete` — "the percentage of targets for which the deployment is
+    /// available" — says how far it has got: the configuration is in force for exactly
+    /// the targets the rollout has already passed ([`RolloutBucket`]) and the
+    /// configuration that preceded it is still in force for the others
+    /// ([`Environment::in_force_deployment`]). So a rollout at 0% of its targets serves
+    /// none of them, one at 100% serves all of them, and a partial one is partial in
+    /// what consumers are served rather than only in what it reports.
+    ///
+    /// A rollout serves anything at all from the moment it begins (`DEPLOYING`, then
+    /// `BAKING`, then `COMPLETE`) and stops doing so once a caller's stop starts rolling
+    /// it back: a rollback is returning to, or has returned to, the configuration that
+    /// preceded this one, so a rolled-back or reverted deployment's own version is not
+    /// what any consumer is served.
     ///
     /// The one place this service decides it, so every reader of a deployed
     /// configuration — this service's own `GetConfiguration` and the `appconfigdata`
-    /// poll — agrees about which deployment is in force.
-    pub fn serves_the_configuration(&self) -> bool {
+    /// poll — agrees about which deployment is in force for a given target.
+    pub fn serves_the_configuration_to(&self, target: RolloutBucket) -> bool {
+        self.rollout_stands() && target.is_reached_at(self.percentage_complete)
+    }
+
+    /// Whether this deployment's rollout stands: it has begun, and nothing has undone
+    /// it. Which TARGETS it has reached is a separate question
+    /// ([`Self::serves_the_configuration_to`]).
+    fn rollout_stands(&self) -> bool {
         self.is_in_flight() || self.state == DEPLOYMENT_COMPLETE
     }
 
@@ -2656,6 +2689,12 @@ impl Deployment {
     /// it is `REVERTED` at once. A deployment in any other state is refused and left
     /// exactly as it was.
     ///
+    /// Either way the deployment ends up available to NO target, which is what its
+    /// `PercentageComplete` then reports: the member is "the percentage of targets for
+    /// which the deployment is available", and a rollback has returned every target the
+    /// rollout had reached to the configuration that preceded it, so the share it reached
+    /// is not the share it is available to any more ([`Self::withdraw_from_targets`]).
+    ///
     /// "Still working on it" is read as the deployment being IN PROGRESS — rolling out
     /// or baking — rather than as the single state `DEPLOYING`: the model's own sentence
     /// about what a stop does speaks of "an in-progress deployment", and a deployment
@@ -2665,6 +2704,8 @@ impl Deployment {
     pub fn stop(&mut self, allow_revert: bool, now: SystemTime) -> Result<(), StopRefusal> {
         if self.is_in_flight() {
             self.state = DEPLOYMENT_ROLLED_BACK.to_string();
+            // Available to nobody now: see the note above.
+            self.withdraw_from_targets();
             // Nothing is due: the rollback is over when the stop answers, so no reader is
             // owed a transition and the deployment has no stage left to tick through.
             self.rollback_completion_due = None;
@@ -2693,6 +2734,8 @@ impl Deployment {
             return Err(StopRefusal::RevertWindowElapsed);
         }
         self.state = DEPLOYMENT_REVERTED.to_string();
+        // Available to nobody now: see the note above.
+        self.withdraw_from_targets();
         // `CompletedAt` is left where it was: the deployment did complete then, and the
         // revert is a later event of its own rather than a second completion.
         self.event_log.push(deployment_event(
@@ -2717,6 +2760,11 @@ impl Deployment {
             return Err(StopRefusal::NotStoppable);
         }
         self.state = DEPLOYMENT_ROLLING_BACK.to_string();
+        // The rollback withdraws the configuration from the targets the rollout had
+        // reached, and from this instant on no consumer is served it
+        // ([`Self::serves_the_configuration_to`]), so it is available to no target: see
+        // [`Self::withdraw_from_targets`].
+        self.withdraw_from_targets();
         self.rollback_completion_due = Some(now + ROLLBACK_DURATION);
         self.event_log.push(deployment_event(
             EVENT_ROLLBACK_STARTED,
@@ -2725,6 +2773,15 @@ impl Deployment {
             now,
         ));
         Ok(())
+    }
+
+    /// Report this deployment as available to NO target, which a rollback makes it:
+    /// `PercentageComplete` is "the percentage of targets for which the deployment is
+    /// available", and a deployment whose rollout has been undone is served to none of
+    /// them ([`Self::serves_the_configuration_to`]) — the share the rollout had reached is
+    /// the share it was withdrawn from, not a share it still holds.
+    fn withdraw_from_targets(&mut self) {
+        self.percentage_complete = 0.0;
     }
 
     /// Bring a deployment whose environment has been deleted up to what the clock still
@@ -2742,14 +2799,31 @@ impl Deployment {
         }
     }
 
-    /// How long the rollout itself lasts: one stage span for a strategy that declares a
-    /// rollout window ([`stage_duration`]).
+    /// How long the rollout itself lasts: one stage span ([`stage_duration`]) for each
+    /// growth INTERVAL the strategy performs.
+    ///
+    /// A growth interval is a transition the clock owes — it makes the configuration
+    /// available to a further share of the targets, which is a share consumers are then
+    /// served at ([`Self::serves_the_configuration_to`]) — so each one is paced like every
+    /// other owed transition instead of the whole rollout being squeezed into one span: a
+    /// rollout growing 25% per interval passes through 25%, 50% and 75% of its targets,
+    /// and a consumer polling while it does observes each of those shares. A rollout that
+    /// reaches every target in ONE interval therefore lasts one span, and a 1%-per-interval
+    /// rollout lasts a hundred.
     ///
     /// Not floored: a strategy declaring a duration of 0 minutes (`AppConfig.AllAtOnce`,
     /// or any created strategy with `DeploymentDurationInMinutes` 0) reaches every target
     /// at the instant the deployment starts, which is what AppConfig answers for one —
     /// with no bake time to follow, `StartDeployment` reports it `COMPLETE`.
-    fn rollout_duration(&self) -> Duration {
+    ///
+    /// `pub` because it is the span a test walks a deployment's schedule over.
+    pub fn rollout_duration(&self) -> Duration {
+        self.growth_interval() * u32::try_from(self.growth_grid().len()).unwrap_or(u32::MAX)
+    }
+
+    /// How long ONE growth interval of this rollout takes: a stage span for a strategy
+    /// that declares a rollout window, and no time at all for one that declares none.
+    fn growth_interval(&self) -> Duration {
         stage_duration(self.deployment_duration_in_minutes)
     }
 
@@ -2770,22 +2844,18 @@ impl Deployment {
         self.rollout_end() + self.bake_duration()
     }
 
-    /// The rollout schedule: for each growth step the strategy performs, the instant
-    /// it falls due and the cumulative percentage of targets it reaches.
+    /// The cumulative percentage of targets each growth interval of this rollout reaches,
+    /// in order, ending at 100%.
     ///
-    /// `LINEAR` adds `GrowthFactor` percent of targets per step; `EXPONENTIAL` reaches
-    /// `GrowthFactor * 2^N` percent at step `N`, the formula the model's `GrowthType`
-    /// documentation gives. A step is one INTERVAL of the rollout window, so the steps
-    /// are spread evenly across that window with the first one due at the END of the
-    /// first interval and the last exactly at the window's end:
-    /// `AppConfig.Linear50PercentEvery30Seconds` reaches 50% thirty seconds in and 100% at
-    /// sixty, and a deployment just started has reached nobody yet.
+    /// `LINEAR` adds `GrowthFactor` percent of targets per interval; `EXPONENTIAL` reaches
+    /// `GrowthFactor * 2^N` percent at interval `N`, the formula the model's `GrowthType`
+    /// documentation gives.
     ///
-    /// The step count is bounded by [`MAX_ROLLOUT_STEPS`] and the loop runs over a
+    /// The interval count is bounded by [`MAX_ROLLOUT_STEPS`] and the loop runs over a
     /// fixed range, so this terminates whatever the stored growth factor is — a growth
     /// factor is request-derived for a caller-created strategy, and a non-finite one
     /// survives `f32::clamp`, which propagates NaN instead of mapping it into range.
-    fn rollout_schedule(&self) -> Vec<(SystemTime, f32)> {
+    fn growth_grid(&self) -> Vec<f32> {
         // A growth factor that is not a finite percentage cannot pace anything, so it
         // is normalised to a single-step rollout before it reaches the loop below.
         let growth_factor = if self.growth_factor.is_finite() {
@@ -2809,14 +2879,26 @@ impl Deployment {
                 break;
             }
         }
-
-        let rollout = self.rollout_duration();
-        let steps = percentages.len() as f64;
         percentages
+    }
+
+    /// The rollout schedule: for each growth step the strategy performs, the instant
+    /// it falls due and the cumulative percentage of targets it reaches
+    /// ([`Self::growth_grid`]).
+    ///
+    /// A step is one INTERVAL of the rollout window, each paced by one span
+    /// ([`Self::rollout_duration`]), so the first falls due at the end of the first
+    /// interval and the last exactly at the window's end:
+    /// `AppConfig.Linear50PercentEvery30Seconds` reaches 50% one interval in and 100% at
+    /// the second, and a deployment just started has reached nobody yet.
+    fn rollout_schedule(&self) -> Vec<(SystemTime, f32)> {
+        let interval = self.growth_interval();
+        self.growth_grid()
             .into_iter()
             .enumerate()
             .map(|(index, reached)| {
-                let due = self.started_at + rollout.mul_f64((index as f64 + 1.0) / steps);
+                let due = self.started_at
+                    + interval * u32::try_from(index + 1).unwrap_or(u32::MAX);
                 (due, reached)
             })
             .collect()
