@@ -879,8 +879,8 @@ async fn values_naming_no_signer_resource_are_refused() {
         "arn:aws:signer:{REGION}:{ACCOUNT_ID}:/signing-profiles/{}",
         seeded.profile_name
     );
-    let short_version_arn = format!(
-        "arn:aws:signer:{REGION}:{ACCOUNT_ID}:/signing-profiles/{}/v1",
+    let empty_version_arn = format!(
+        "arn:aws:signer:{REGION}:{ACCOUNT_ID}:/signing-profiles/{}/",
         seeded.profile_name
     );
     let rows: Vec<(&str, &str, &str, &str, &str)> = vec![
@@ -948,11 +948,11 @@ async fn values_naming_no_signer_resource_are_refused() {
             &profile_arn_without_version,
         ),
         (
-            "a profileVersionArn whose version is outside the modelled form",
+            "a profileVersionArn whose version segment is empty",
             &seeded.platform_id,
-            &short_version_arn,
+            &empty_version_arn,
             &seeded.job_arn,
-            &short_version_arn,
+            &empty_version_arn,
         ),
         (
             "a jobArn carrying a signing profile's ARN",

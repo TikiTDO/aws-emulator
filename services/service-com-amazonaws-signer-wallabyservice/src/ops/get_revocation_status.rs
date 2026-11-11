@@ -222,13 +222,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // Both members name a resource of THIS service, and each names a resource
         // of ONE kind: `profileVersionArn` "The version of a signing profile" and
-        // `jobArn` "The ARN of a signing job". So a value that is not a
-        // well-formed ARN of the kind its member names resolves to no resource
-        // this endpoint could hold and is refused for the value it carried, named
-        // by the member that carried it. A well-formed one is not: the operation
-        // models no not-found, so an ARN naming a resource this endpoint holds
-        // none of — another account's, another region's, an id nothing was
-        // created under — is answered as a resource that is simply not revoked.
+        // `jobArn` "The ARN of a signing job". So a value that is not an ARN of
+        // the SHAPE its member names — the fields an ARN of this service carries
+        // plus that kind's resource form — resolves to no resource this endpoint
+        // could hold and is refused for the value it carried, named by the member
+        // that carried it. Shape is all that is judged: the identifiers inside an
+        // ARN the caller was handed are not held to the bounds the model places
+        // on the members that carry a profile name or a version directly, so an
+        // ARN-shaped value is answered rather than refused. The operation models
+        // no not-found, so one naming a resource this endpoint holds none of —
+        // another account's, another region's, a name or id nothing was created
+        // under — is answered as a resource that is simply not revoked.
         let Some((_, profile_name, profile_version)) =
             crate::state::profile_version_in_arn(&input.profile_version_arn)
         else {

@@ -14,6 +14,9 @@
 #[path = "all/absent_required_query_parameter.rs"]
 mod absent_required_query_parameter;
 
+#[path = "all/arn_segment_shape.rs"]
+mod arn_segment_shape;
+
 #[path = "all/cancel_profile_status_transitions.rs"]
 mod cancel_profile_status_transitions;
 

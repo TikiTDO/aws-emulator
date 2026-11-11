@@ -1140,14 +1140,16 @@ pub fn profile_name_in_arn(arn: &str) -> Option<&str> {
 /// Both fields are part of a profile's identity: Signer is regional, so the
 /// region an ARN names is the region whose profile it names (see [`ProfileKey`]).
 /// `None` for anything else: an ARN of another service, one whose resource is not
-/// a signing profile, one carrying a profile VERSION after the name (tags belong
-/// to the profile, not to one of its versions), or a name outside
-/// [`is_profile_name`]'s alphabet. It is a judgement on the STRING alone, so it
-/// says nothing about whether such a profile exists.
+/// a signing profile, one carrying no name, or one carrying a profile VERSION
+/// after the name (tags belong to the profile, not to one of its versions). It is
+/// a judgement on the ARN's SHAPE alone — the name is whatever one segment of the
+/// resource form holds, never a value held to the `ProfileName` member's own
+/// bounds (see [`is_arn_resource_segment`]) — so it says nothing about whether
+/// such a profile exists.
 pub fn profile_region_and_name_in_arn(arn: &str) -> Option<(&str, &str)> {
     let (region, resource) = signer_region_and_resource(arn)?;
     let name = resource.strip_prefix(PROFILE_ARN_RESOURCE_PREFIX)?;
-    is_profile_name(name).then_some((region, name))
+    is_arn_resource_segment(name).then_some((region, name))
 }
 
 /// The region, profile name and profile version inside `arn`, when `arn` is a
@@ -1157,16 +1159,36 @@ pub fn profile_region_and_name_in_arn(arn: &str) -> Option<(&str, &str)> {
 /// `PutSigningProfile` reports as `profileVersionArn`.
 ///
 /// `None` for anything else: an ARN of another service or another resource, one
-/// carrying no version after the name, a name outside [`is_profile_name`]'s
-/// alphabet or a version outside [`is_profile_version`]'s. Like
-/// [`profile_region_and_name_in_arn`] it is a judgement on the STRING alone, so
-/// it says nothing about whether such a version exists.
+/// carrying no version after the name, and one whose name or version segment is
+/// empty or carries a further `/`-separated part. Like
+/// [`profile_region_and_name_in_arn`] it is a judgement on the ARN's SHAPE alone
+/// ([`is_arn_resource_segment`]), so it says nothing about whether such a version
+/// exists.
 pub fn profile_version_in_arn(arn: &str) -> Option<(&str, &str, &str)> {
     let (region, resource) = signer_region_and_resource(arn)?;
     let (name, version) = resource
         .strip_prefix(PROFILE_ARN_RESOURCE_PREFIX)?
         .split_once('/')?;
-    (is_profile_name(name) && is_profile_version(version)).then_some((region, name, version))
+    (is_arn_resource_segment(name) && is_arn_resource_segment(version))
+        .then_some((region, name, version))
+}
+
+/// True when `value` is one whole segment of an ARN's resource portion: present
+/// and carrying no further `/`-separated part.
+///
+/// The ONE judgement this service makes about a resource identifier it reads out
+/// of an `Arn`-typed request value, which the model leaves unconstrained beyond
+/// its length: such a value is judged on the ARN's SHAPE — the fields a Signer
+/// ARN carries ([`signer_region_and_resource`]) plus the resource form of the
+/// kind of resource the member names — and never against the length or character
+/// class the model places on the MEMBER that carries the same identifier
+/// directly ([`is_profile_name`] and `ProfileVersion`'s fixed width). Those bind
+/// the operations that take a name or a version as their own member; a name
+/// inside an ARN a client was handed is not held to them, and a segment this
+/// admits that no resource was created under is simply a resource this endpoint
+/// holds nothing for.
+fn is_arn_resource_segment(value: &str) -> bool {
+    !value.is_empty() && !value.contains('/')
 }
 
 /// The resource portion every signing-job ARN carries before the job id — see
@@ -1191,11 +1213,12 @@ pub fn job_arn(job_id: &str, region: &str) -> String {
 /// The region and the job id inside `arn`, when `arn` is a well-formed
 /// signing-job ARN — the form [`job_arn`] builds. `None` for anything else: an
 /// ARN of another service, one whose resource is not a signing job, and one
-/// carrying no id or a further `/`-separated part after it.
+/// carrying no id or a further `/`-separated part after it
+/// ([`is_arn_resource_segment`]).
 pub fn job_region_and_id_in_arn(arn: &str) -> Option<(&str, &str)> {
     let (region, resource) = signer_region_and_resource(arn)?;
     let job_id = resource.strip_prefix(JOB_ARN_RESOURCE_PREFIX)?;
-    (!job_id.is_empty() && !job_id.contains('/')).then_some((region, job_id))
+    is_arn_resource_segment(job_id).then_some((region, job_id))
 }
 
 /// The refusal prose for a member that carries the ARN of one kind of resource
@@ -2091,24 +2114,17 @@ pub fn workflow_unsupported_message(workflow: SigningWorkflow, platform_id: &str
 /// `^[a-zA-Z0-9_]{2,}$`.
 ///
 /// The boundary validator already refuses a modelled `ProfileName` member, so
-/// this is for a name read out of a value the model does not constrain: the
-/// profile name a tagging `resourceArn` carries, and the one a decoded
-/// pagination token resumes at.
+/// this is for a name THIS service minted or stored and then read back out of a
+/// value nothing else constrains: the one a decoded pagination token resumes at,
+/// which a listing only ever issued for a stored profile. A name read out of an
+/// ARN the CLIENT supplies is judged on the ARN's shape instead
+/// ([`is_arn_resource_segment`]): that value's member carries no `ProfileName`,
+/// so these bounds are not its to enforce.
 pub fn is_profile_name(value: &str) -> bool {
     (2..=64).contains(&value.len())
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-}
-
-/// True when `value` satisfies `ProfileVersion`'s `@length(10, 10)` and
-/// `^[a-zA-Z0-9]{10}$` — the form
-/// [`ComAmazonawsSignerWallabyserviceState::mint_profile_version`] mints.
-///
-/// For a version read out of a value the model does not constrain: the one a
-/// signing-profile VERSION ARN carries.
-pub fn is_profile_version(value: &str) -> bool {
-    value.len() == 10 && value.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 /// True when `value` has the form
