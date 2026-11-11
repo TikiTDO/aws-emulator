@@ -260,6 +260,7 @@ async fn serve_session(
         settings: std::collections::BTreeMap::new(),
         databases: facts.databases.clone(),
         endpoint_host: facts.endpoint_host.clone(),
+        read_only: facts.read_only,
         runtime: facts.runtime.clone(),
         sessions: context.sessions.clone(),
     };
@@ -734,7 +735,15 @@ async fn run_simple_query(
 }
 
 /// The copy-in target `sql` names, for the statements that are one.
+///
+/// A session that serves no writes enters copy-in mode for nothing: the statement is handed
+/// to the engine instead, which refuses it as the write it is
+/// (`super::read_only::refused_command`), so the client is told why rather than being asked
+/// for rows nothing will load.
 fn copy_target(facts: &SessionFacts, sql: &str) -> Option<super::pg_copy::CopyTarget> {
+    if facts.read_only {
+        return None;
+    }
     let tokens = wire_session::significant_tokens(facts.wire, sql).ok()?;
     super::pg_copy::copy_in_target(facts, &tokens)
 }
@@ -842,8 +851,9 @@ async fn run_statement(
     sql: String,
     params: Vec<Option<String>>,
 ) -> Result<wire_session::StatementAnswer, EngineError> {
-    if let Some(runtime) = context.engine_runtime() {
+    if let Some((runtime, read_only)) = context.engine_now() {
         facts.runtime = runtime;
+        facts.read_only = read_only;
     }
     context.sessions.running(
         facts.connection_id,
@@ -1174,6 +1184,9 @@ fn sqlstate(kind: EngineErrorKind) -> &'static str {
         // serves.
         EngineErrorKind::LimitExceeded => "54000",
         EngineErrorKind::InsufficientPrivilege => "42501",
+        // `read_only_sql_transaction`: the statement would write on a session that serves
+        // no writes.
+        EngineErrorKind::ReadOnlySqlTransaction => super::read_only::POSTGRES_READ_ONLY_SQLSTATE,
         // `duplicate_object` and `object_in_use`: the general class of each, which a
         // statement whose own condition names a narrower one overrides
         // ([`EngineError::with_sqlstate`]).

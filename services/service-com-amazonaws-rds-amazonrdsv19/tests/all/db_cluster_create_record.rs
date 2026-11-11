@@ -298,7 +298,9 @@ struct IdentityCase {
 /// The clusters the identity test creates.
 ///
 /// Two of them share an engine, so an identity that varied only with the engine would not
-/// pass, and the last is a Multi-AZ DB cluster, whose identity is minted the same way.
+/// pass; one is a Multi-AZ DB cluster, whose identity is minted the same way; and the last
+/// is an engine this emulator serves no wire for, which publishes the DNS form of its
+/// endpoints.
 const IDENTITY_CASES: &[IdentityCase] = &[
     IdentityCase {
         identifier: "emu-identity-one",
@@ -325,35 +327,64 @@ const IDENTITY_CASES: &[IdentityCase] = &[
             ("Iops", "1000"),
         ],
     },
+    IdentityCase {
+        identifier: "emu-identity-five",
+        // An engine whose wire this emulator serves no data plane for, so its cluster
+        // publishes the DNS form of both endpoints — which is where the minted endpoint
+        // label is read.
+        engine: "docdb",
+        extra: &[],
+    },
 ];
+
+/// Whether this emulator serves the native wire of `engine`, which is what decides the form
+/// of the addresses its cluster publishes.
+fn serves_the_wire(engine: &str) -> bool {
+    service_com_amazonaws_rds_amazonrdsv19::state::cluster_engine_wire(engine).is_some()
+}
 
 /// What one cluster envelope reports as the cluster's OWN identity: the values RDS mints
 /// for it rather than taking from the request.
 #[derive(Debug, PartialEq, Eq)]
 struct Identity {
     resource_id: String,
-    /// The server-assigned label inside the cluster's endpoints.
-    endpoint_label: String,
+    /// The cluster's reader endpoint, which is its own whichever form it takes: the address
+    /// of the read-only listener a served cluster opened, or the DNS name carrying the
+    /// server-assigned label.
+    reader_endpoint: String,
     arn: String,
 }
 
-/// The server-assigned label of a cluster endpoint, asserting the published form
-/// `<identifier>.cluster-ro-<label>.<region>.rds.amazonaws.com` on the way.
+/// The cluster's READER endpoint, asserting its published form on the way.
 ///
-/// Read from the READER endpoint: a cluster whose engine this emulator serves publishes the
-/// address of its own engine listener as its writer `Endpoint` (see
-/// `state::data_plane::cluster_endpoint`), and the reader endpoint is where the minted
-/// label is still visible.
-fn endpoint_label(case: &str, identifier: &str, endpoint: &str) -> String {
+/// A cluster whose engine this emulator serves publishes the address of its own engine
+/// listeners — the writer's host as `Endpoint`, and the read-only listener's `host:port` as
+/// the reader endpoint, which carries no port member of its own (see
+/// `state::data_plane::cluster_endpoint`). Every other cluster publishes the documented DNS
+/// form `<identifier>.cluster-ro-<label>.<region>.<domain>`, where the server-assigned label
+/// is visible.
+fn reader_endpoint(case: &str, identifier: &str, serves_the_wire: bool, endpoint: &str) -> String {
+    if serves_the_wire {
+        assert!(
+            endpoint
+                .strip_prefix("127.0.0.1:")
+                .and_then(|port| port.parse::<u16>().ok())
+                .is_some_and(|port| port != 0),
+            "case {case:?}: expected the address of the cluster's read-only listener, got \
+             {endpoint:?}"
+        );
+        return endpoint.to_string();
+    }
     let prefix = format!("{identifier}.cluster-ro-");
-    let suffix = format!(".{REGION}.rds.amazonaws.com");
+    let suffix = format!(".{REGION}.");
     let label = endpoint
         .strip_prefix(&prefix)
-        .and_then(|rest| rest.strip_suffix(&suffix))
+        .and_then(|rest| rest.split_once(suffix.as_str()))
+        .map(|(label, _domain)| label)
         .unwrap_or_else(|| {
             panic!(
-                "case {case:?}: expected an endpoint of the form {prefix}<label>{suffix}, got \
-                 {endpoint:?}"
+                "case {case:?}: expected an endpoint of the form \
+                 {prefix}<label>{suffix}<domain>, got {endpoint:?}"
             )
         });
     assert!(
@@ -363,12 +394,12 @@ fn endpoint_label(case: &str, identifier: &str, endpoint: &str) -> String {
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit()),
         "case {case:?}: expected a 12-character server-assigned endpoint label, got {label:?}"
     );
-    label.to_string()
+    endpoint.to_string()
 }
 
 /// The identity one cluster envelope reports, asserting the published form of each member
 /// on the way.
-fn identity_of(case: &str, identifier: &str, cluster: &str) -> Identity {
+fn identity_of(case: &str, identifier: &str, serves_the_wire: bool, cluster: &str) -> Identity {
     let resource_id = text(cluster, "DbClusterResourceId");
     // "The Amazon Web Services Region-unique, immutable identifier for the DB cluster",
     // written `cluster-` plus server-minted characters.
@@ -384,19 +415,27 @@ fn identity_of(case: &str, identifier: &str, cluster: &str) -> Identity {
     );
 
     let endpoint = text(cluster, "Endpoint");
-    // The writer endpoint is the address a client dials: the host the cluster's own engine
-    // listener is bound to, which the core binds on loopback.
-    assert_eq!(
-        endpoint, "127.0.0.1",
-        "case {case:?}: expected the host the cluster's engine listener is bound to, got \
-         {endpoint:?}"
-    );
+    // The writer endpoint of a cluster this emulator serves the wire of is the address a
+    // client dials: the host its own engine listener is bound to, which the core binds on
+    // loopback. Every other cluster publishes its control plane's DNS form.
+    if serves_the_wire {
+        assert_eq!(
+            endpoint, "127.0.0.1",
+            "case {case:?}: expected the host the cluster's engine listener is bound to, got \
+             {endpoint:?}"
+        );
+    } else {
+        assert!(
+            endpoint.starts_with(&format!("{identifier}.cluster-")),
+            "case {case:?}: expected the published DNS form of the cluster endpoint, got \
+             {endpoint:?}"
+        );
+    }
     let reader = text(cluster, "ReaderEndpoint");
-    let label = endpoint_label(case, identifier, &reader);
 
     Identity {
         resource_id,
-        endpoint_label: label,
+        reader_endpoint: reader_endpoint(case, identifier, serves_the_wire, &reader),
         arn: text(cluster, "DBClusterArn"),
     }
 }
@@ -423,7 +462,12 @@ async fn every_cluster_is_minted_an_identity_of_its_own() {
         let cluster = the_cluster(row.identifier, &body);
         created.push((
             row.identifier,
-            identity_of(row.identifier, row.identifier, &cluster),
+            identity_of(
+                row.identifier,
+                row.identifier,
+                serves_the_wire(row.engine),
+                &cluster,
+            ),
         ));
     }
 
@@ -436,9 +480,9 @@ async fn every_cluster_is_minted_an_identity_of_its_own() {
                 left_identity.resource_id
             );
             assert_ne!(
-                left_identity.endpoint_label, right_identity.endpoint_label,
-                "clusters {left} and {right} were minted the same endpoint label {:?}",
-                left_identity.endpoint_label
+                left_identity.reader_endpoint, right_identity.reader_endpoint,
+                "clusters {left} and {right} publish the same reader endpoint {:?}",
+                left_identity.reader_endpoint
             );
             assert_ne!(
                 left_identity.arn, right_identity.arn,
@@ -453,7 +497,13 @@ async fn every_cluster_is_minted_an_identity_of_its_own() {
     wait_for_settle();
     for (identifier, identity) in &created {
         let read_back = describe_one(&router, identifier, identifier).await;
-        let read_identity = identity_of(identifier, identifier, &read_back);
+        let engine = IDENTITY_CASES
+            .iter()
+            .find(|row| row.identifier == *identifier)
+            .map(|row| row.engine)
+            .unwrap_or_default();
+        let read_identity =
+            identity_of(identifier, identifier, serves_the_wire(engine), &read_back);
         assert_eq!(
             read_identity, *identity,
             "cluster {identifier}: expected the identity the create minted {identity:?}, got \

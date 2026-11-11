@@ -908,19 +908,48 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // listening. The instance still reports `creating` until the clock makes
         // `available` due, and a session opened before then is refused by the engine
         // exactly as it is against a DB instance that is still coming up.
-        let endpoint = match crate::state::engine_wire(&record.engine) {
-            Some(wire) => Some(
-                crate::state::open_engine_endpoint(
-                    &*self.engine,
-                    &state,
-                    crate::state::SessionTarget::DbInstance {
+        //
+        // A MEMBER of a DB cluster runs no engine of its own: "each Aurora DB cluster hosts
+        // copies of its data" on one cluster volume, so the member's endpoint is another
+        // address onto THAT storage, admitted against the cluster's own master user, and it
+        // serves writes exactly while this member is the one the cluster writes through.
+        let plan = match record
+            .db_cluster_identifier
+            .as_deref()
+            .and_then(|named| state.lock().cluster_volume_of(&region, named))
+        {
+            Some((wire, cluster_resource_id, storage)) => Some(crate::state::EngineEndpointPlan {
+                target: crate::state::SessionTarget::DbCluster {
+                    region: region.clone(),
+                    resource_id: cluster_resource_id,
+                },
+                wire,
+                role: crate::state::EndpointRole::ClusterMember(record.identifier.clone()),
+                reader: false,
+                storage: Some(storage),
+            }),
+            // An instance that runs its own engine, for the engines whose wire this emulator
+            // speaks.
+            None => crate::state::engine_wire(&record.engine).map(|wire| {
+                crate::state::EngineEndpointPlan {
+                    target: crate::state::SessionTarget::DbInstance {
                         region: region.clone(),
                         resource_id: record.dbi_resource_id.clone(),
                     },
                     wire,
-                )
-                .await
-                .map_err(CreateDBInstanceError::internal_failure)?,
+                    role: crate::state::EndpointRole::Writer,
+                    // A DB instance publishes ONE address, its own `Endpoint`: no read-only
+                    // endpoint is opened for it.
+                    reader: false,
+                    storage: None,
+                }
+            }),
+        };
+        let endpoint = match plan {
+            Some(plan) => Some(
+                crate::state::open_engine_endpoint(&*self.engine, &state, plan)
+                    .await
+                    .map_err(CreateDBInstanceError::internal_failure)?,
             ),
             // An engine whose native wire this emulator does not speak: no listener is
             // opened and the instance keeps the DNS-form endpoint this service has always

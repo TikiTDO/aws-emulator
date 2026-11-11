@@ -834,11 +834,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 crate::state::open_engine_endpoint(
                     &*self.engine,
                     &state,
-                    crate::state::SessionTarget::DbInstance {
-                        region: region.clone(),
-                        resource_id: record.dbi_resource_id.clone(),
+                    crate::state::EngineEndpointPlan {
+                        target: crate::state::SessionTarget::DbInstance {
+                            region: region.clone(),
+                            resource_id: record.dbi_resource_id.clone(),
+                        },
+                        wire,
+                        role: crate::state::EndpointRole::Writer,
+                        // A DB instance publishes ONE address, its own `Endpoint`: no
+                        // read-only endpoint is opened for it.
+                        reader: false,
+                        storage: None,
                     },
-                    wire,
                 )
                 .await
                 .map_err(RestoreDBInstanceFromDBSnapshotError::internal_failure)?,

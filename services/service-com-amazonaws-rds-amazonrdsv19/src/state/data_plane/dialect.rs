@@ -450,8 +450,15 @@ fn session_function(facts: &SessionFacts, lowered: &str, called: bool) -> Option
 }
 
 /// `value` as a SQL literal, or `NULL` where the session has no such value.
+///
+/// A system variable whose value is a WHOLE NUMBER is a numeric variable of the server
+/// (`read_only`, `max_connections`), and both engines answer one as a number rather than as
+/// text — which is the type the wire then reports for the column, and what a client reads it
+/// back as. Every other value is text, quoted so the statement the engine runs carries it as
+/// one literal whatever it contains.
 fn quote_value(value: Option<String>) -> String {
     match value {
+        Some(value) if value.trim().parse::<i64>().is_ok() => value.trim().to_string(),
         Some(value) => format!("'{}'", value.replace('\'', "''")),
         None => "NULL".to_string(),
     }

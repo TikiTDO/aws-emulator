@@ -22,8 +22,9 @@
 //!
 //! * this module — the endpoint record the store holds per instance, which engine speaks
 //!   which wire, and the facts a session is admitted against ([`InstanceFacts`]);
-//! * [`cluster_endpoint`] — the same for a DB CLUSTER's writer endpoint, whose facts come
-//!   from the cluster's own record;
+//! * [`cluster_endpoint`] — the same for the endpoints of a DB CLUSTER — its writer
+//!   endpoint, its reader endpoint and the endpoint of each of its member instances —
+//!   whose facts come from the cluster's own record;
 //! * [`sql_engine`] — the in-process SQLite database each of an instance's databases runs
 //!   its statements against;
 //! * [`session_transactions`] — the transaction each SESSION has open on it, and the rows
@@ -43,6 +44,8 @@
 //!   under the IAM role their parameter group names;
 //! * [`iam_auth_token`] — the authentication token an IAM-authenticated login presents in
 //!   place of a password;
+//! * [`read_only`] — the statements an endpoint that serves no writes refuses, and how each
+//!   engine words that refusal;
 //! * [`pg_wire`] and [`mysql_wire`] — the server half of each protocol.
 //!
 //! The endpoint is the RESOURCE: dropping the stored [`DbEngineEndpoint`] closes the port
@@ -69,12 +72,37 @@ pub mod pg_grants;
 pub mod pg_server;
 pub mod pg_sessions;
 pub mod pg_wire;
+pub mod read_only;
 pub mod row_locks;
 pub mod server_statements;
 pub mod session_transactions;
 pub mod sql_engine;
 pub mod tls_probe;
 pub mod wire_session;
+
+/// WHICH of a resource's endpoints a listener is, which decides whether the sessions on it
+/// may write.
+///
+/// An Amazon RDS DB cluster publishes two addresses for its one engine — the writer
+/// endpoint, "the connection endpoint for the primary instance of the DB cluster", and the
+/// reader endpoint, which "load-balances connections across the Aurora Replicas that are
+/// available in a DB cluster" (read-only instances) — and each of its MEMBER instances
+/// publishes "the connection endpoint for the DB instance" of its own. All of them are
+/// served by the same wires over the same cluster volume; what differs is whether the
+/// session is answered as one on a standby.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EndpointRole {
+    /// The endpoint writes go through: a DB instance's own endpoint, a cluster's writer
+    /// endpoint.
+    Writer,
+    /// A READ-ONLY endpoint: a DB cluster's reader endpoint.
+    Reader,
+    /// The endpoint of ONE MEMBER instance of a DB cluster, named by its
+    /// `DBInstanceIdentifier`: whether it serves writes follows which member the cluster
+    /// currently writes through, so a `FailoverDBCluster` that moves the writer moves it
+    /// under the live sessions of both.
+    ClusterMember(String),
+}
 
 /// Which native wire an engine speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,10 +121,10 @@ pub enum EngineWire {
 /// protocol. The Oracle, SQL Server and Db2 engines speak neither protocol, and this
 /// emulator runs no engine for them.
 ///
-/// An AURORA DB instance is deliberately not here: its data plane is addressed through its
-/// DB CLUSTER's reader and writer endpoints, which `CreateDBCluster` publishes and which
-/// [`cluster_endpoint`] serves, so opening a listener on the member endpoint alone would
-/// publish half a cluster's data plane.
+/// An AURORA DB instance is deliberately not here: it runs no engine of its own, so its
+/// endpoint is a second address onto its DB CLUSTER's volume, opened with the cluster's wire
+/// and the cluster's storage ([`ComAmazonawsRdsAmazonrdsv19State::cluster_volume_of`]) and
+/// served in the [`EndpointRole::ClusterMember`] role.
 #[must_use]
 pub fn engine_wire(engine: &str) -> Option<EngineWire> {
     match engine.to_ascii_lowercase().as_str() {
@@ -191,6 +219,10 @@ pub struct ServedEndpoint {
 pub struct DbEngineEndpoint {
     /// Where the control plane publishes it.
     pub endpoint: ServedEndpoint,
+    /// Where the control plane publishes this engine's READ-ONLY endpoint, for a resource
+    /// that has one: a DB cluster's reader endpoint. `None` for a resource that publishes
+    /// only the one address ([`EndpointRole`]).
+    pub reader: Option<ServedEndpoint>,
     /// Which protocol the listener speaks.
     pub wire: EngineWire,
     /// The instance's databases, shared with every session on the listener.
@@ -203,6 +235,9 @@ pub struct DbEngineEndpoint {
     generation: watch::Sender<u64>,
     /// Held only to keep the port open; the core owns the socket and its TLS.
     _listener: ::emulator_server::ResourceListener,
+    /// The same, for the read-only endpoint of this engine where it has one: dropping the
+    /// record closes both ports.
+    _reader_listener: Option<::emulator_server::ResourceListener>,
 }
 
 /// Written by hand rather than derived: the endpoint holds a core `ResourceListener` and a
@@ -212,6 +247,7 @@ impl std::fmt::Debug for DbEngineEndpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DbEngineEndpoint")
             .field("endpoint", &self.endpoint)
+            .field("reader", &self.reader)
             .field("wire", &self.wire)
             .field("generation", &*self.generation.borrow())
             .finish()
@@ -405,12 +441,61 @@ async fn capture_storage(
 }
 
 /// Open the engine endpoint of `target` — a DB instance's own endpoint or a DB cluster's
-/// writer endpoint — on the wire its engine speaks.
+/// writer endpoint — on the wire its engine speaks, plus the resource's READ-ONLY endpoint
+/// where it publishes one (`reader`).
 ///
 /// The core binds the socket and assigns the port; this only hands it the protocol
 /// handler and reports back where it landed. The caller stores the returned endpoint in
 /// the state — which is what keeps the port open — and publishes
-/// [`DbEngineEndpoint::endpoint`] as the resource's `Endpoint`.
+/// [`DbEngineEndpoint::endpoint`] as the resource's `Endpoint` and
+/// [`DbEngineEndpoint::reader`] as its reader endpoint.
+///
+/// The read-only endpoint is a SECOND listener over the SAME storage, which is what an
+/// Aurora reader endpoint is: "the reader endpoint ... load-balances connections across the
+/// Aurora Replicas", and every instance of an Aurora cluster reads one cluster volume. So
+/// the rows the writer endpoint committed are the rows a session on the reader endpoint
+/// reads, and the difference between the two is that the reader's sessions may not write
+/// ([`EndpointRole`]).
+///
+/// `Err` when this service was mounted on an engine with no listener surface, or when the
+/// core could not bind: the caller answers that with a modelled failure rather than
+/// publishing an address nothing serves.
+/// WHAT to open: which resource's endpoint it is, on which wire, in which role, and over
+/// which storage.
+///
+/// One struct rather than five arguments, because the five belong together: the role and the
+/// storage are what make a cluster MEMBER's endpoint a second address onto the cluster's
+/// volume rather than an engine of its own.
+pub struct EngineEndpointPlan {
+    /// The resource whose record a session on this endpoint is admitted against.
+    pub target: wire_session::SessionTarget,
+    /// The wire its engine speaks.
+    pub wire: EngineWire,
+    /// WHICH of that resource's endpoints the listener is.
+    pub role: EndpointRole,
+    /// Open the resource's READ-ONLY endpoint beside the writing one, which a DB cluster
+    /// publishes as its reader endpoint.
+    pub reader: bool,
+    /// The storage to serve: the volume of the DB cluster an endpoint belongs to, where
+    /// that storage already exists. `None` starts the resource's own engine.
+    pub storage: Option<Arc<sql_engine::InstanceDatabase>>,
+}
+
+/// Open the engine endpoint `plan` describes, and the resource's READ-ONLY endpoint where it
+/// publishes one ([`EngineEndpointPlan::reader`]).
+///
+/// The core binds the socket and assigns the port; this only hands it the protocol
+/// handler and reports back where it landed. The caller stores the returned endpoint in
+/// the state — which is what keeps the port open — and publishes
+/// [`DbEngineEndpoint::endpoint`] as the resource's `Endpoint` and
+/// [`DbEngineEndpoint::reader`] as its reader endpoint.
+///
+/// The read-only endpoint is a SECOND listener over the SAME storage, which is what an
+/// Aurora reader endpoint is: "the reader endpoint ... load-balances connections across the
+/// Aurora Replicas", and every instance of an Aurora cluster reads one cluster volume. So
+/// the rows the writer endpoint committed are the rows a session on the reader endpoint
+/// reads, and the difference between the two is that the reader's sessions may not write
+/// ([`EndpointRole`]).
 ///
 /// `Err` when this service was mounted on an engine with no listener surface, or when the
 /// core could not bind: the caller answers that with a modelled failure rather than
@@ -418,49 +503,83 @@ async fn capture_storage(
 pub async fn open_engine_endpoint<Eng: Send + Sync + 'static>(
     engine: &Eng,
     state: &::engine::ServiceState<ComAmazonawsRdsAmazonrdsv19State>,
-    target: wire_session::SessionTarget,
-    wire: EngineWire,
+    plan: EngineEndpointPlan,
 ) -> Result<DbEngineEndpoint, String> {
+    let EngineEndpointPlan {
+        target,
+        wire,
+        role,
+        reader,
+        storage,
+    } = plan;
     let listeners = shared_engine(engine)
         .ok_or_else(|| "this emulator's engine has no listener surface".to_string())?
         .listeners();
-    let upgrader = listeners
-        .tls_upgrader()
-        .map_err(|error| format!("the engine endpoint's TLS could not be prepared: {error}"))?;
-    let database = Arc::new(
-        sql_engine::InstanceDatabase::open()
-            .map_err(|error| format!("the SQL engine could not be started: {}", error.message))?,
-    );
+    let database = match storage {
+        Some(shared) => shared,
+        None => Arc::new(sql_engine::InstanceDatabase::open().map_err(|error| {
+            format!("the SQL engine could not be started: {}", error.message)
+        })?),
+    };
     let (generation, generation_rx) = watch::channel(0u64);
     let sessions = pg_sessions::SessionRegistry::default();
-    let context = wire_session::SessionContext {
-        state: state.clone(),
-        target,
-        database: Arc::clone(&database),
-        sessions: sessions.clone(),
-        upgrader,
-        // The object store the S3 import statements read through, on the same engine this
-        // service is mounted on: what Amazon S3's own `PutObject` wrote is what such a
-        // statement loads.
-        objects: mysql_s3_load::object_store(engine),
-        generation: generation_rx,
-        next_connection_id: Arc::new(AtomicU32::new(1)),
+    let next_connection_id = Arc::new(AtomicU32::new(1));
+    // What a session on either of this engine's endpoints is served from, built per
+    // endpoint so each carries the role of the address the client dialled. The TLS server
+    // is the core's, taken per listener.
+    let context_for = |role: EndpointRole| -> Result<wire_session::SessionContext, String> {
+        Ok(wire_session::SessionContext {
+            state: state.clone(),
+            target: target.clone(),
+            role,
+            database: Arc::clone(&database),
+            sessions: sessions.clone(),
+            upgrader: listeners.tls_upgrader().map_err(|error| {
+                format!("the engine endpoint's TLS could not be prepared: {error}")
+            })?,
+            // The object store the S3 import statements read through, on the same engine
+            // this service is mounted on: what Amazon S3's own `PutObject` wrote is what
+            // such a statement loads.
+            objects: mysql_s3_load::object_store(engine),
+            generation: generation_rx.clone(),
+            next_connection_id: Arc::clone(&next_connection_id),
+        })
     };
-    let listener = match wire {
-        EngineWire::Postgres => listeners.tcp_plaintext(pg_wire::PostgresWire::new(context)).await,
-        EngineWire::MySql => listeners.tcp_plaintext(mysql_wire::MySqlWire::new(context)).await,
-    }
-    .map_err(|error| format!("the engine endpoint could not be opened: {error}"))?;
+    let open = |context: wire_session::SessionContext| async {
+        match wire {
+            EngineWire::Postgres => {
+                listeners
+                    .tcp_plaintext(pg_wire::PostgresWire::new(context))
+                    .await
+            }
+            EngineWire::MySql => {
+                listeners
+                    .tcp_plaintext(mysql_wire::MySqlWire::new(context))
+                    .await
+            }
+        }
+        .map_err(|error| format!("the engine endpoint could not be opened: {error}"))
+    };
+    let listener = open(context_for(role)?).await?;
+    let reader_listener = match reader {
+        true => Some(open(context_for(EndpointRole::Reader)?).await?),
+        false => None,
+    };
     Ok(DbEngineEndpoint {
         endpoint: ServedEndpoint {
             host: listener.host(),
             port: i32::from(listener.port()),
         },
+        reader: reader_listener.as_ref().map(|listener| ServedEndpoint {
+            host: listener.host(),
+            port: i32::from(listener.port()),
+        }),
         wire,
         database,
         sessions,
         generation,
         _listener: listener,
+        _reader_listener: reader_listener,
     })
 }
 

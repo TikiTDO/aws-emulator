@@ -271,6 +271,8 @@ mod query_catalog_reads;
 mod query_error_envelope;
 #[path = "all/rds_s3_integration.rs"]
 mod rds_s3_integration;
+#[path = "all/read_only_engine_endpoints.rs"]
+mod read_only_engine_endpoints;
 #[path = "all/reboot_db_shard_group.rs"]
 mod reboot_db_shard_group;
 #[path = "all/refusal_class_by_cause.rs"]

@@ -234,6 +234,7 @@ async fn serve_session(
         settings: std::collections::BTreeMap::new(),
         databases: facts.databases.clone(),
         endpoint_host: facts.endpoint_host.clone(),
+        read_only: facts.read_only,
         runtime: facts.runtime.clone(),
         sessions: context.sessions.clone(),
     };
@@ -500,9 +501,11 @@ async fn serve_query(
     };
     let answer = {
         // The instance's engine runtime as it is NOW, so a parameter group a caller
-        // modifies under a live session is what this statement runs against.
-        if let Some(runtime) = context.engine_runtime() {
+        // modifies under a live session is what this statement runs against — and so is the
+        // endpoint's write role, which a failover moves.
+        if let Some((runtime, read_only)) = context.engine_now() {
             facts.runtime = runtime;
+            facts.read_only = read_only;
         }
         // `LOAD DATA FROM S3` is not a statement the SQL engine runs: the rows come from an
         // Amazon S3 object the engine reads under the role this resource is configured with.
@@ -812,6 +815,9 @@ fn statement_error(kind: EngineErrorKind) -> (u16, &'static str) {
         // which is not one of the server's own numbered conditions.
         EngineErrorKind::LimitExceeded => (1105, "HY000"),
         EngineErrorKind::InsufficientPrivilege => (1227, "42000"),
+        // `ER_OPTION_PREVENTS_STATEMENT`: the server's `read_only` setting permits no client
+        // update, which is what a read-only endpoint's session is held to.
+        EngineErrorKind::ReadOnlySqlTransaction => super::read_only::MYSQL_READ_ONLY_ERROR,
         // `ER_TABLE_EXISTS_ERROR` and `ER_ROW_IS_REFERENCED`: the general number of each
         // class, which a statement whose own condition names a narrower one overrides
         // ([`EngineError::with_mysql_error`]).

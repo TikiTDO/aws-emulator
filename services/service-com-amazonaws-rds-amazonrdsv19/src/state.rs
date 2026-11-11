@@ -282,8 +282,8 @@ pub use service_principal_call::*;
 pub use master_user_credentials::*;
 pub use data_plane::{
     capture_cluster_storage, capture_instance_storage, cluster_endpoint::cluster_engine_wire,
-    engine_wire, open_engine_endpoint, wire_session::SessionTarget, DbEngineEndpoint, EngineWire,
-    ServedEndpoint,
+    engine_wire, open_engine_endpoint, wire_session::SessionTarget, DbEngineEndpoint, EndpointRole,
+    EngineEndpointPlan, EngineWire, ServedEndpoint,
 };
 pub use ec2_subnets::{invalid_subnets_message, subnet_zones, SubnetZones};
 pub use default_subnet_group::{default_vpc_network, DefaultSubnetGroupNetwork};

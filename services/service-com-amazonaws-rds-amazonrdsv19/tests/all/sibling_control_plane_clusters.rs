@@ -227,11 +227,22 @@ fn assert_engine_defaults(case: &str, label: &str, cluster: &str, row: &EngineCa
         );
     }
     let reader = text(cluster, "ReaderEndpoint");
-    assert!(
-        reader.contains(".cluster-ro-") && reader.ends_with(&suffix),
-        "case {case:?}: expected a <ReaderEndpoint> of the form \
-         <identifier>.cluster-ro-<label>{suffix}, got {reader:?}"
-    );
+    // The READER endpoint of such a cluster is its read-only listener's own address, written
+    // whole (`host:port`) because the `Port` beside it is the writer's; every other
+    // cluster's is the published DNS form.
+    if row.serves_the_engines_wire {
+        assert!(
+            reader.starts_with("127.0.0.1:"),
+            "case {case:?}: expected the address of the cluster's read-only listener, got \
+             {reader:?} in {cluster}"
+        );
+    } else {
+        assert!(
+            reader.contains(".cluster-ro-") && reader.ends_with(&suffix),
+            "case {case:?}: expected a <ReaderEndpoint> of the form \
+             <identifier>.cluster-ro-<label>{suffix}, got {reader:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -262,11 +273,14 @@ async fn a_cluster_members_endpoint_sits_in_the_same_domain_as_its_cluster() {
     let router = emulator();
 
     // The rule holds for the member INSTANCES of a cluster too: an instance of an engine
-    // another control plane owns is reached under that control plane's domain.
-    let rows: [(&str, &str, &str); 3] = [
-        ("a DocumentDB cluster member", "docdb", DOCDB_DOMAIN),
-        ("a Neptune cluster member", "neptune", NEPTUNE_DOMAIN),
-        ("an Aurora MySQL cluster member", "aurora-mysql", RDS_DOMAIN),
+    // another control plane owns is reached under that control plane's domain. An Aurora
+    // member is the exception, and for the same reason its cluster's endpoints are: this
+    // emulator SERVES that engine's wire, so the member's endpoint is the address of the
+    // listener it opened onto the cluster's volume rather than a name nothing resolves.
+    let rows: [(&str, &str, Option<&str>); 3] = [
+        ("a DocumentDB cluster member", "docdb", Some(DOCDB_DOMAIN)),
+        ("a Neptune cluster member", "neptune", Some(NEPTUNE_DOMAIN)),
+        ("an Aurora MySQL cluster member", "aurora-mysql", None),
     ];
 
     for (index, (case, engine, domain)) in rows.iter().enumerate() {
@@ -288,12 +302,21 @@ async fn a_cluster_members_endpoint_sits_in_the_same_domain_as_its_cluster() {
             .await,
         );
         let address = text(&body, "Address");
-        let suffix = format!(".{REGION}.{domain}");
-        assert!(
-            address.starts_with(&instance) && address.ends_with(&suffix),
-            "case {case:?}: expected an endpoint of the form {instance}.<label>{suffix}, got \
-             {address:?}"
-        );
+        match domain {
+            Some(domain) => {
+                let suffix = format!(".{REGION}.{domain}");
+                assert!(
+                    address.starts_with(&instance) && address.ends_with(&suffix),
+                    "case {case:?}: expected an endpoint of the form {instance}.<label>\
+                     {suffix}, got {address:?}"
+                );
+            }
+            None => assert_eq!(
+                address, "127.0.0.1",
+                "case {case:?}: expected the host the member's own engine listener is bound \
+                 to, got {address:?}"
+            ),
+        }
     }
 }
 

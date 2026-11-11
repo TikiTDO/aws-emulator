@@ -11,10 +11,15 @@
 //! not an endpoint. A cluster whose engine speaks neither wire keeps the DNS-form endpoint
 //! this service has always reported and gets no listener.
 //!
-//! Only the WRITER endpoint is served. The reader endpoint load-balances across a cluster's
-//! Aurora Replicas, which reject writes; publishing the writer's address under it would let
-//! a client write through a connection that AWS answers read-only, so the reader endpoint
-//! keeps its DNS name.
+//! BOTH cluster endpoints are served, and so is each MEMBER instance's own. The reader
+//! endpoint "load-balances connections across the Aurora Replicas that are available in a DB
+//! cluster", and those replicas are read-only instances reading the same cluster volume: it
+//! is a second listener of the same engine over the same storage, whose sessions are answered
+//! read-only ([`super::EndpointRole`], [`super::read_only`]). A member instance's endpoint is
+//! a third kind of address onto that one volume — "each Aurora DB cluster hosts copies of its
+//! data" — and it serves writes exactly while that member is the one the cluster writes
+//! through, which `FailoverDBCluster` moves ([`serves_reads_only`]). A cluster whose engine
+//! speaks neither wire publishes the DNS name for all of them, and gets no listener for any.
 //!
 //! Everything a session on such a listener needs is the same as on a DB instance's — the
 //! two wires, the SQL engine, the server statements are shared — except WHERE the facts of
@@ -28,7 +33,7 @@ use super::wire_session::{
     facts_of, parameter_group_family, running_engine, EndpointKind, EngineRuntime, InstanceFacts,
     RecordFacts,
 };
-use super::EngineWire;
+use super::{EndpointRole, EngineWire};
 use crate::state::{ComAmazonawsRdsAmazonrdsv19State, DbClusterRecord};
 
 /// The wire the engine of a DB CLUSTER speaks, or `None` for a cluster this emulator
@@ -83,6 +88,27 @@ impl ComAmazonawsRdsAmazonrdsv19State {
         key: &crate::state::RegionalKey,
     ) -> Option<&super::DbEngineEndpoint> {
         self.db_cluster_engine_endpoints.get(key)
+    }
+
+    /// What a MEMBER instance's own endpoint is opened onto: the wire the DB cluster `named`
+    /// speaks, the cluster's immutable resource id, and the cluster's STORAGE — "Aurora
+    /// cluster volumes ... each Aurora DB cluster hosts copies of its data", one volume every
+    /// member reads and the primary writes.
+    ///
+    /// `None` when the cluster is not held here, or speaks no wire this emulator serves, or
+    /// has no listener of its own: such a member keeps the DNS-form endpoint it has always
+    /// reported rather than publishing a port onto nothing.
+    #[must_use]
+    pub fn cluster_volume_of(
+        &self,
+        region: &str,
+        named: &str,
+    ) -> Option<(EngineWire, String, Arc<InstanceDatabase>)> {
+        let cluster = self.resolve_db_cluster(region, named)?;
+        let wire = cluster_engine_wire(&cluster.engine)?;
+        let endpoint =
+            self.cluster_engine_endpoint(&(cluster.region.clone(), cluster.identifier.clone()))?;
+        Some((wire, cluster.resource_id.clone(), endpoint.database()))
     }
 
     /// Move a cluster's engine endpoint with the cluster when `ModifyDBCluster` renames it,
@@ -148,31 +174,95 @@ pub(super) fn cluster_facts(
     region: &str,
     resource_id: &str,
     database: &Arc<InstanceDatabase>,
+    role: EndpointRole,
 ) -> Option<InstanceFacts> {
     let record = store.cluster_by_resource_id(region, resource_id)?;
     let wire = cluster_engine_wire(&record.engine)?;
     let endpoint =
         store.cluster_engine_endpoint(&(record.region.clone(), record.identifier.clone()));
+    // The MEMBER instance this endpoint belongs to, for the one role that names one: its own
+    // record carries the status a session on it is admitted against and the address it was
+    // published at, while everything a login is checked against — the master user, the
+    // engine version, the database — is the CLUSTER's, which is where an Aurora member's
+    // credential lives ("the password is managed by the DB cluster").
+    let member = match &role {
+        EndpointRole::ClusterMember(identifier) => {
+            Some(store.db_instances.get(&(
+                record.region.clone(),
+                identifier.to_ascii_lowercase(),
+            ))?)
+        }
+        EndpointRole::Writer | EndpointRole::Reader => None,
+    };
+    // The address of the endpoint the client DIALLED, which is the one an authentication
+    // token has to have been generated for and the one a refusal names.
+    let served = match &role {
+        EndpointRole::Writer => endpoint.map(|endpoint| &endpoint.endpoint),
+        EndpointRole::Reader => endpoint.and_then(|endpoint| endpoint.reader.as_ref()),
+        EndpointRole::ClusterMember(_) => {
+            member.and_then(|member| member.served_endpoint.as_ref())
+        }
+    };
     Some(facts_of(
         RecordFacts {
-            kind: EndpointKind::DbCluster,
-            identifier: record.identifier.clone(),
+            // A session on a member's own endpoint is the MEMBER's: that is the resource a
+            // record of it is attributable to, and the status it is admitted against.
+            kind: match member {
+                Some(_) => EndpointKind::DbInstance,
+                None => EndpointKind::DbCluster,
+            },
+            identifier: member.map_or_else(
+                || record.identifier.clone(),
+                |member| member.identifier.clone(),
+            ),
             engine: record.engine.clone(),
-            status: record.status.clone(),
+            status: member.map_or_else(
+                || record.status.clone(),
+                |member| member.status.clone(),
+            ),
             wire,
             engine_version: record.engine_version.clone(),
             database_name: record.database_name.clone(),
             master_username: record.master_username.clone(),
             password: record.master_user_password.clone(),
             requires_secure_transport: store.cluster_requires_secure_transport(record),
-            served_host: endpoint.map(|endpoint| endpoint.endpoint.host.clone()),
-            served_port: endpoint.and_then(|endpoint| u16::try_from(endpoint.endpoint.port).ok()),
+            served_host: served.map(|served| served.host.clone()),
+            served_port: served.and_then(|served| u16::try_from(served.port).ok()),
             region: record.region.clone(),
             iam_database_authentication_enabled: record.iam_database_authentication_enabled,
+            // A cluster's writer endpoint is "the connection endpoint for the primary
+            // instance of the DB cluster", which is what writes go through; its reader
+            // endpoint reaches the read-only instances. A MEMBER's own endpoint serves
+            // writes exactly while that member is the one the cluster writes through, which
+            // `FailoverDBCluster` moves.
+            read_only: serves_reads_only(store, record, &role),
             runtime: cluster_runtime_of(store, record),
         },
         database,
     ))
+}
+
+/// Whether an endpoint of the cluster `record` in the role `role` serves NO writes, read
+/// under the state lock the caller holds.
+///
+/// The one reading of it, so a login and every later statement of the same session agree:
+/// the writer endpoint writes, the reader endpoint never does, and a MEMBER's own endpoint
+/// writes exactly while that member is the one the cluster writes through — the member
+/// `DBClusterMembers` reports `IsClusterWriter` for, which is what `FailoverDBCluster`
+/// moves.
+pub(super) fn serves_reads_only(
+    store: &ComAmazonawsRdsAmazonrdsv19State,
+    record: &DbClusterRecord,
+    role: &EndpointRole,
+) -> bool {
+    match role {
+        EndpointRole::Writer => false,
+        EndpointRole::Reader => true,
+        EndpointRole::ClusterMember(identifier) => store
+            .cluster_members(record)
+            .first()
+            .is_none_or(|writer| !writer.identifier.eq_ignore_ascii_case(identifier)),
+    }
 }
 
 /// The engine runtime of the cluster `record`, read under the state lock the caller holds.

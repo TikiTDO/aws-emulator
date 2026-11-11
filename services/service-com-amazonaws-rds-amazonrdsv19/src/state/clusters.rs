@@ -52,6 +52,11 @@ pub struct DbClusterRecord {
     /// listener, which keeps the DNS-form endpoint. What [`Self::endpoint`] and
     /// [`Self::published_port`] report.
     pub served_endpoint: Option<ServedEndpoint>,
+    /// The address of the cluster's READER endpoint — the second listener of the same engine,
+    /// whose sessions serve no writes — for a cluster that has one; `None` for a cluster with
+    /// no listener, which keeps the DNS-form reader name. What [`Self::reader_endpoint`]
+    /// reports.
+    pub served_reader_endpoint: Option<ServedEndpoint>,
     /// `Status`.
     pub status: String,
     /// The transition the clock owes this cluster, if any.
@@ -272,7 +277,20 @@ impl DbClusterRecord {
     /// The reader endpoint, which "load-balances connections across the Aurora Replicas
     /// that are available in a DB cluster": the same form as [`Self::endpoint`] with the
     /// published `cluster-ro-` label.
+    ///
+    /// A cluster whose engine this emulator SERVES publishes the address of the READ-ONLY
+    /// listener it opened instead, as `host:port`: the member carries no port of its own
+    /// (the `Port` beside it is the writer's), so the one address a client can dial the
+    /// cluster's replicas at is written whole — the same way every other data plane of this
+    /// emulator publishes a listener it opened
+    /// (`service_common::data_plane_addressing::listener_authority`).
     pub fn reader_endpoint(&self) -> String {
+        if let Some(served) = &self.served_reader_endpoint {
+            return ::service_common::data_plane_addressing::host_port_authority(
+                &served.host,
+                u16::try_from(served.port).unwrap_or_default(),
+            );
+        }
         format!(
             "{}.cluster-ro-{}.{}.{}",
             self.identifier,

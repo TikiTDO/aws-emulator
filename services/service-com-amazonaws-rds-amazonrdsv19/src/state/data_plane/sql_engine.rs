@@ -156,6 +156,9 @@ pub enum EngineErrorKind {
     LimitExceeded,
     /// The caller is not allowed to do this.
     InsufficientPrivilege,
+    /// The statement would write and the session is on an endpoint that serves no writes:
+    /// see [`super::read_only`].
+    ReadOnlySqlTransaction,
     /// An object the statement would create is already there.
     DuplicateObject,
     /// The object the statement would remove is still in use, or something still depends

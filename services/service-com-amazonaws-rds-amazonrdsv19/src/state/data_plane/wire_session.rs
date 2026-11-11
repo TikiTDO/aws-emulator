@@ -21,7 +21,9 @@ use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
 use tokio::sync::watch;
 
 use super::sql_engine::{Cell, ColumnInfo, EngineError, EngineErrorKind, InstanceDatabase, ResultSet};
-use super::{dialect, lock_plan, row_locks, server_statements, EngineWire};
+use super::{
+    dialect, lock_plan, read_only, row_locks, server_statements, EndpointRole, EngineWire,
+};
 use crate::state::ComAmazonawsRdsAmazonrdsv19State;
 
 /// How many bytes of SQL one statement may carry, matching the engine's own statement
@@ -165,6 +167,10 @@ pub struct SessionContext {
     pub state: ::engine::ServiceState<ComAmazonawsRdsAmazonrdsv19State>,
     /// The resource whose endpoint this listener is, and how to find its record.
     pub target: SessionTarget,
+    /// WHICH of that resource's endpoints this listener is, which is half of whether a
+    /// session on it may write ([`EndpointRole`]); the other half is what the resource's own
+    /// record says.
+    pub role: EndpointRole,
     /// The databases behind the endpoint.
     pub database: Arc<InstanceDatabase>,
     /// The sessions open on this endpoint, which is what `pg_stat_activity` reports and
@@ -215,6 +221,7 @@ impl SessionContext {
                     region,
                     resource_id,
                     &self.database,
+                    self.role.clone(),
                 )
             }
             SessionTarget::DbInstance {
@@ -242,21 +249,31 @@ impl SessionContext {
                     .and_then(|endpoint| u16::try_from(endpoint.endpoint.port).ok()),
                 region: record.region.clone(),
                 iam_database_authentication_enabled: record.iam_database_authentication_enabled,
+                // An instance created as a READ REPLICA is replaying its source's writes:
+                // "RDS then uses the asynchronous replication method for the DB engine to
+                // update the read replica", and such a replica serves reads only. The
+                // relationship is what says so, so an instance `PromoteReadReplica` has
+                // promoted — which clears it — serves writes from then on, under the same
+                // session.
+                read_only: record.read_replica_source_db_instance_identifier.is_some(),
                 runtime: engine_runtime_of(&store, record),
             },
             &self.database,
         ))
     }
 
-    /// The instance's engine RUNTIME as it is now, re-read for each statement a session
-    /// runs: the parameters in force, when the engine last came up, and whether it is
-    /// replaying from a primary.
+    /// The endpoint's engine as it is NOW, re-read for each statement a session runs: the
+    /// parameters in force, when the engine last came up, whether it is replaying from a
+    /// primary, and whether the endpoint serves writes at all.
     ///
     /// Read fresh rather than taken at login, because a parameter group a caller modifies
     /// mid-session changes what the engine reports from then on — "changes to dynamic
     /// parameters are applied immediately" — and a session that is already open must see
-    /// that, not the values its login happened to find.
-    pub fn engine_runtime(&self) -> Option<EngineRuntime> {
+    /// that, not the values its login happened to find. The write role moves for the same
+    /// reason: a `FailoverDBCluster` moves it between a cluster's members, and
+    /// `PromoteReadReplica` gives a replica its own, which the next statement of a live
+    /// session is served under.
+    pub fn engine_now(&self) -> Option<(EngineRuntime, bool)> {
         let store = self.state.lock();
         match &self.target {
             SessionTarget::DbInstance {
@@ -264,14 +281,26 @@ impl SessionContext {
                 resource_id,
             } => {
                 let record = store.instance_by_resource_id(region, resource_id)?;
-                Some(engine_runtime_of(&store, record))
+                let read_only = record.read_replica_source_db_instance_identifier.is_some();
+                Some((
+                    replaying(engine_runtime_of(&store, record), read_only),
+                    read_only,
+                ))
             }
             SessionTarget::DbCluster {
                 region,
                 resource_id,
             } => {
                 let record = store.cluster_by_resource_id(region, resource_id)?;
-                Some(super::cluster_endpoint::cluster_runtime_of(&store, record))
+                let read_only =
+                    super::cluster_endpoint::serves_reads_only(&store, record, &self.role);
+                Some((
+                    replaying(
+                        super::cluster_endpoint::cluster_runtime_of(&store, record),
+                        read_only,
+                    ),
+                    read_only,
+                ))
             }
         }
     }
@@ -280,7 +309,7 @@ impl SessionContext {
     /// now, in the order the resource reports them.
     ///
     /// Read fresh for each statement that needs them, for the same reason
-    /// [`Self::engine_runtime`] is: an association a caller makes — or drops — under a live
+    /// [`Self::engine_now`] is: an association a caller makes — or drops — under a live
     /// session is what the next statement of that session acts under, so an engine
     /// capability the association gates cannot be decided from what the login happened to
     /// find.
@@ -395,6 +424,9 @@ pub(super) struct RecordFacts {
     /// Whether the resource has IAM database authentication turned on
     /// (`IAMDatabaseAuthenticationEnabled`).
     pub iam_database_authentication_enabled: bool,
+    /// Whether a session on this endpoint serves NO WRITES: see [`EndpointRole`] and
+    /// [`read_only`].
+    pub read_only: bool,
     pub runtime: EngineRuntime,
 }
 
@@ -462,7 +494,22 @@ pub(super) fn facts_of(record: RecordFacts, database: &Arc<InstanceDatabase>) ->
         endpoint_port: record.served_port.unwrap_or_default(),
         region: record.region,
         iam_database_authentication_enabled: record.iam_database_authentication_enabled,
-        runtime: record.runtime,
+        read_only: record.read_only,
+        runtime: replaying(record.runtime, record.read_only),
+    }
+}
+
+/// `runtime` with the endpoint's write role written into it.
+///
+/// An endpoint that serves no writes is served by an engine that is REPLAYING someone
+/// else's: a read replica's own engine, or one of the Aurora Replicas a reader endpoint
+/// connects to. That is what `pg_is_in_recovery()` reports, so the runtime a session's
+/// statements read is the record's with the role written into it, and the two cannot
+/// disagree.
+pub(super) fn replaying(runtime: EngineRuntime, read_only: bool) -> EngineRuntime {
+    EngineRuntime {
+        in_recovery: read_only,
+        ..runtime
     }
 }
 
@@ -489,10 +536,8 @@ pub(super) fn parameter_group_family(
 /// publishes in `catalog`, with the values the resource's own group sets over them), when
 /// the engine came up, and the master user that owns its databases.
 ///
-/// The endpoint this serves is a DB instance's own endpoint or a DB cluster's WRITER
-/// endpoint, and neither is replaying from a primary: `pg_is_in_recovery()` is true on a
-/// standby, an instance is one only where it was created as a read replica (still a scaffold
-/// in this crate, its own stub issue) and a cluster's writer never is.
+/// Whether the engine is REPLAYING a primary's writes is not decided here: it follows the
+/// role of the endpoint the session is on, which [`replaying`] writes onto the runtime.
 pub(super) fn running_engine(
     family: &str,
     catalog: Option<&'static [crate::state::ClusterParameterSpec]>,
@@ -600,6 +645,9 @@ pub struct InstanceFacts {
     /// (`IAMDatabaseAuthenticationEnabled`), which is the control-plane half of admitting a
     /// login that presents an authentication token.
     pub iam_database_authentication_enabled: bool,
+    /// Whether a session on this endpoint serves NO WRITES: a read replica's endpoint, or a
+    /// DB cluster's reader endpoint ([`EndpointRole`]).
+    pub read_only: bool,
     /// What the instance's engine is running with: its parameters, its start time, its
     /// role.
     pub runtime: EngineRuntime,
@@ -895,6 +943,10 @@ pub struct SessionFacts {
     /// The host the instance's listener is bound to, which is the host a refusal names —
     /// and the host a MySQL `USER()` reports the session as connecting from.
     pub endpoint_host: String,
+    /// Whether this session serves NO WRITES: it is on a read replica's endpoint or on a DB
+    /// cluster's reader endpoint ([`EndpointRole`]), so the statements [`read_only`] names
+    /// are refused and the engine reports itself as replaying from a primary.
+    pub read_only: bool,
     /// What the instance's engine is running with. Re-read before each statement, so a
     /// parameter group a caller changes mid-session is visible to this session from then
     /// on.
@@ -970,7 +1022,7 @@ pub const MYSQL_MASTER_HOST_PATTERN: &str = "%";
 
 /// The settings the SERVER itself answers for, by name — the ones that are not
 /// parameter-group parameters at all. See [`server_setting`], which answers each of them.
-pub const SERVER_SETTING_NAMES: [&str; 23] = [
+pub const SERVER_SETTING_NAMES: [&str; 27] = [
     "ssl",
     "server_version",
     "version",
@@ -994,6 +1046,10 @@ pub const SERVER_SETTING_NAMES: [&str; 23] = [
     "rds.force_ssl",
     "require_secure_transport",
     "ssl_version",
+    "read_only",
+    "super_read_only",
+    "transaction_read_only",
+    "default_transaction_read_only",
 ];
 
 /// The settings the server itself answers for, by lowercased name.
@@ -1052,6 +1108,19 @@ fn server_setting(facts: &SessionFacts, lowered: &str) -> Option<String> {
             .tls
             .as_ref()
             .map(|tls| tls.protocol.clone().unwrap_or_default()),
+        // Whether the server permits a client update, which is what each engine calls the
+        // state a read-only endpoint's session is in: MySQL's `read_only` (and
+        // `super_read_only`, which is on whenever `read_only` is on a replica this emulator
+        // serves no SUPER-privileged user on) and PostgreSQL's transaction read-only mode,
+        // which a session on a standby is in and cannot leave.
+        "read_only" | "super_read_only" => match facts.wire {
+            EngineWire::MySql => Some(if facts.read_only { "1" } else { "0" }.to_string()),
+            EngineWire::Postgres => None,
+        },
+        "transaction_read_only" | "default_transaction_read_only" => match facts.wire {
+            EngineWire::Postgres => on_off(facts.read_only),
+            EngineWire::MySql => None,
+        },
         _ => None,
     }
 }
@@ -1190,6 +1259,14 @@ pub fn run_statement(
         return Ok(StatementAnswer::new(String::new(), ResultSet::default()));
     }
     let words = leading_words(&tokens, 3);
+    // An endpoint that serves no writes refuses the statements that write, exactly as the
+    // engine it runs on refuses them. Decided before anything else is served, so no
+    // statement of a read-only session reaches the storage its engine only replays.
+    if facts.read_only {
+        if let Some(command) = read_only::refused_command(&tokens) {
+            return Err(read_only::refusal(facts.wire, &command));
+        }
+    }
     if let Some(answer) = server_command(database, facts, &words, &tokens)? {
         // The isolation level a transaction runs at belongs to THAT transaction: a `BEGIN`
         // that names one sets it for the transaction it opens, a `BEGIN` that names none
@@ -1739,6 +1816,20 @@ fn postgres_set(facts: &SessionFacts, tokens: &[Token]) -> Result<StatementAnswe
         return Ok(StatementAnswer::new("SET", ResultSet::default()));
     };
     let lowered = name.to_ascii_lowercase();
+    // A session on a standby cannot put itself into read-write mode: there is no read-write
+    // mode on an engine that is replaying a primary's writes.
+    if facts.read_only
+        && matches!(
+            lowered.as_str(),
+            "transaction_read_only" | "default_transaction_read_only"
+        )
+        && !matches!(
+            value.trim().trim_matches('\'').to_ascii_lowercase().as_str(),
+            "on" | "true" | "yes" | "1"
+        )
+    {
+        return Err(read_only::postgres_cannot_leave_read_only());
+    }
     // A name with a namespace (`my.setting`) is one PostgreSQL lets a session define for
     // itself; a bare name has to be a setting this server has.
     if !lowered.contains('.') && facts.setting(&lowered).is_none() {
@@ -1760,11 +1851,22 @@ fn postgres_set(facts: &SessionFacts, tokens: &[Token]) -> Result<StatementAnswe
 fn mysql_set(facts: &SessionFacts, tokens: &[Token]) -> Result<StatementAnswer, EngineError> {
     let mut answer = StatementAnswer::new("SET", ResultSet::default());
     if let Some((name, value)) = assignment(tokens) {
-        answer.setting_changed = Some(recorded_setting(
-            facts,
-            name.trim_start_matches('@').to_ascii_lowercase(),
-            value,
-        )?);
+        let lowered = name.trim_start_matches('@').to_ascii_lowercase();
+        // `read_only` and `super_read_only` have no session scope at all: "Variable
+        // 'read_only' is a GLOBAL variable and should be set with SET GLOBAL" is what the
+        // server answers a session that assigns one, so a session cannot give itself the
+        // writes the server does not serve. (`SET GLOBAL` itself is refused before this: the
+        // master user holds no such privilege.)
+        if matches!(lowered.as_str(), "read_only" | "super_read_only") {
+            return Err(EngineError::new(
+                EngineErrorKind::InsufficientPrivilege,
+                format!(
+                    "Variable '{lowered}' is a GLOBAL variable and should be set with SET GLOBAL"
+                ),
+            )
+            .with_mysql_error(1229, "HY000"));
+        }
+        answer.setting_changed = Some(recorded_setting(facts, lowered, value)?);
     }
     Ok(answer)
 }

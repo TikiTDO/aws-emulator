@@ -1151,6 +1151,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // Filled in below from the cluster's own engine listener, for a cluster whose
             // engine speaks a wire this emulator serves.
             served_endpoint: None,
+            served_reader_endpoint: None,
             // A newly created DB cluster is not yet usable: RDS answers `creating`, and the
             // cluster reaches `available` on its own. The due instant is stored on the
             // record, so nothing sleeps on this thread.
@@ -1330,11 +1331,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 match crate::state::open_engine_endpoint(
                     &*self.engine,
                     &state,
-                    crate::state::SessionTarget::DbCluster {
-                        region: region.clone(),
-                        resource_id: record.resource_id.clone(),
+                    crate::state::EngineEndpointPlan {
+                        target: crate::state::SessionTarget::DbCluster {
+                            region: region.clone(),
+                            resource_id: record.resource_id.clone(),
+                        },
+                        wire,
+                        role: crate::state::EndpointRole::Writer,
+                        // A DB cluster publishes a READER endpoint beside its writer one, so
+                        // both are opened: see `open_engine_endpoint`.
+                        reader: true,
+                        storage: None,
                     },
-                    wire,
                 )
                 .await
                 {
@@ -1363,6 +1371,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             None => None,
         };
         record.served_endpoint = endpoint.as_ref().map(|endpoint| endpoint.endpoint.clone());
+        record.served_reader_endpoint = endpoint.as_ref().and_then(|endpoint| endpoint.reader.clone());
 
         // A cluster placed in the account's `default` DB subnet group reports that group,
         // and the members created in it report the group's own record: the default VPC's

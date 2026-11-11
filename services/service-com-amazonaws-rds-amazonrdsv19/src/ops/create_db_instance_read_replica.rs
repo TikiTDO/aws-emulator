@@ -834,11 +834,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 crate::state::open_engine_endpoint(
                     &*self.engine,
                     &state,
-                    crate::state::SessionTarget::DbInstance {
-                        region: region.clone(),
-                        resource_id: record.dbi_resource_id.clone(),
+                    crate::state::EngineEndpointPlan {
+                        target: crate::state::SessionTarget::DbInstance {
+                            region: region.clone(),
+                            resource_id: record.dbi_resource_id.clone(),
+                        },
+                        wire,
+                        // A DB instance publishes ONE address, its own `Endpoint`. The
+                        // replica SERVES no writes, which its record says and every session
+                        // on that endpoint is held to
+                        // (`crate::state::data_plane::read_only`), rather than being a
+                        // second endpoint of something else.
+                        role: crate::state::EndpointRole::Writer,
+                        reader: false,
+                        storage: None,
                     },
-                    wire,
                 )
                 .await
                 .map_err(CreateDBInstanceReadReplicaError::internal_failure)?,

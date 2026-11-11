@@ -929,6 +929,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // Filled in below from the cluster's own engine listener, for a cluster whose
             // engine speaks a wire this emulator serves.
             served_endpoint: None,
+            served_reader_endpoint: None,
             // A restored DB cluster is not usable the instant the call returns: RDS answers
             // `creating` and the cluster reaches `available` on its own — "You can create DB
             // instances only after the RestoreDBClusterFromSnapshot operation has completed
@@ -1150,11 +1151,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 crate::state::open_engine_endpoint(
                     &*self.engine,
                     &state,
-                    crate::state::SessionTarget::DbCluster {
-                        region: region.clone(),
-                        resource_id: record.resource_id.clone(),
+                    crate::state::EngineEndpointPlan {
+                        target: crate::state::SessionTarget::DbCluster {
+                            region: region.clone(),
+                            resource_id: record.resource_id.clone(),
+                        },
+                        wire,
+                        role: crate::state::EndpointRole::Writer,
+                        // A DB cluster publishes a READER endpoint beside its writer one, so
+                        // both are opened: see `open_engine_endpoint`.
+                        reader: true,
+                        storage: None,
                     },
-                    wire,
                 )
                 .await
                 .map_err(RestoreDBClusterFromSnapshotError::internal_failure)?,
@@ -1165,6 +1173,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             None => None,
         };
         record.served_endpoint = endpoint.as_ref().map(|endpoint| endpoint.endpoint.clone());
+        record.served_reader_endpoint =
+            endpoint.as_ref().and_then(|endpoint| endpoint.reader.clone());
 
         // THE RESTORE ITSELF: the data the snapshot holds is loaded into the new cluster's
         // own storage, by the engine, before the endpoint is published — so the first
