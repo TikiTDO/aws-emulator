@@ -62,7 +62,7 @@ fn invalid_name(member: &str) -> String {
 }
 
 /// The envelope AWS states one clause in.
-fn one_error(clause: &str) -> String {
+pub(crate) fn one_error(clause: &str) -> String {
     format!("1 validation error detected: {clause}")
 }
 
@@ -84,7 +84,7 @@ fn absent_collection(member: &str) -> String {
 
 /// The clause for a value outside its member's `@pattern`: the member, the expression as
 /// AWS publishes it, and nothing of the value.
-fn outside_pattern(member: &str, published: &str) -> String {
+pub(crate) fn outside_pattern(member: &str, published: &str) -> String {
     one_error(&format!(
         "Value at '{member}' failed to satisfy constraint: Member must satisfy regular \
          expression pattern: {published}"
@@ -92,14 +92,18 @@ fn outside_pattern(member: &str, published: &str) -> String {
 }
 
 /// One row: the call to make, and the whole message its refusal must carry.
-struct RefusalCase {
-    case: String,
-    action: &'static str,
-    params: Vec<(String, String)>,
-    expected: String,
+///
+/// Shared with the suite that drives the same rule for a value nested inside one of an
+/// input's collections (`tests/all/nested_member_clause_wording.rs`), so an input refusal is
+/// asserted exactly one way across this crate.
+pub(crate) struct RefusalCase {
+    pub(crate) case: String,
+    pub(crate) action: &'static str,
+    pub(crate) params: Vec<(String, String)>,
+    pub(crate) expected: String,
     /// The value the request carried that the refusal must not echo, when the row carries
     /// one at all (an absent-member row carries none).
-    rejected: Option<String>,
+    pub(crate) rejected: Option<String>,
 }
 
 /// One row of an ABSENT-member table: the case, the call, and the member whose absence the
@@ -134,7 +138,7 @@ type SentenceRow = (
 
 /// Assert `row` is refused 400 under the one input-refusal code, with exactly the message it
 /// states and with nothing of the value it carried.
-async fn assert_refused(router: &MultiServiceRouter, row: RefusalCase) {
+pub(crate) async fn assert_refused(router: &MultiServiceRouter, row: RefusalCase) {
     let RefusalCase {
         case,
         action,

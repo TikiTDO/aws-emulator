@@ -19,7 +19,8 @@
 //!   requirement about a value reached INSIDE one of the input's collections keeps the
 //!   framework's own clause instead — the value it carried and the expression as the model
 //!   writes it — which is the clause this service answers one with
-//!   (`tests/all/server_certificate_untag_input_bounds.rs`);
+//!   (`tests/all/nested_member_clause_wording.rs`,
+//!   `tests/all/server_certificate_untag_input_bounds.rs`);
 //! * an enumerated set is stated in the order IAM publishes for that enum
 //!   ([`PUBLISHED_ENUM_ORDERS`]) rather than the model's declaration order.
 //!
@@ -32,7 +33,8 @@
 //! Every rule covers its whole CLASS rather than one member: the bound, the set, the pattern
 //! and the member path all come from the model, so the same rule answers for every member of
 //! every operation that carries one (`tests/all/range_refusal_wording.rs`,
-//! `tests/all/enum_refusal_wording.rs`, `tests/all/validation_error_clauses.rs`).
+//! `tests/all/enum_refusal_wording.rs`, `tests/all/validation_error_clauses.rs`,
+//! `tests/all/nested_member_clause_wording.rs`).
 
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
@@ -215,9 +217,12 @@ fn names_a_top_level_member(path: &str) -> bool {
 /// The restatement is for a member of the input ITSELF. A value reached inside one of the
 /// input's collections keeps the framework's own clause — the value it carried and the
 /// model's expression as written — which is the clause this service answers one with
-/// (`tests/all/server_certificate_untag_input_bounds.rs` pins one key of a list, and
-/// `tests/all/validation_error_clauses.rs` with `tests/all/range_refusal_wording.rs` the
-/// restated form over the input's own members).
+/// (`tests/all/nested_member_clause_wording.rs` pins that class across the collections,
+/// positions and operations that carry it, `tests/all/server_certificate_untag_input_bounds.rs`
+/// one key of one list, and `tests/all/validation_error_clauses.rs` with
+/// `tests/all/range_refusal_wording.rs` the restated form over the input's own members). A
+/// map's KEYS are not reached by the walk at all, so the clause a key gets is the
+/// operation's own ([`crate::state::account_property_key_refusal`]).
 fn pattern_clause(violation: &Violation, pattern: &str) -> Option<String> {
     if !names_a_top_level_member(&violation.path) {
         return None;

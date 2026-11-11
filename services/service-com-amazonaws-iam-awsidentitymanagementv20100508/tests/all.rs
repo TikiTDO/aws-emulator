@@ -165,6 +165,8 @@ mod member_format_refusal_wording;
 mod mfa_device_reads;
 #[path = "all/missing_entity_message_wording.rs"]
 mod missing_entity_message_wording;
+#[path = "all/nested_member_clause_wording.rs"]
+mod nested_member_clause_wording;
 #[path = "all/net_new_refusal_wording.rs"]
 mod net_new_refusal_wording;
 #[path = "all/network_condition_authorization.rs"]

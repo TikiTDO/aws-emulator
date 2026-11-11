@@ -67,8 +67,7 @@ const MAX_TAG_KEY_CHARACTERS: usize = 128;
 const MAX_CERTIFICATE_NAME_CHARACTERS: usize = 128;
 
 /// The envelope the boundary walk states for ONE broken requirement whose value this
-/// service does not echo — a value outside a bound its member declares, and a value outside
-/// its member's `@pattern`.
+/// service does not echo — a value outside a bound its member declares.
 fn one_unechoed_violation(member: &str, requirement: &str) -> String {
     format!(
         "1 validation error detected: Value at '{member}' failed to satisfy constraint: \
@@ -79,8 +78,8 @@ fn one_unechoed_violation(member: &str, requirement: &str) -> String {
 /// The envelope the boundary walk states for ONE broken requirement whose value it KEEPS:
 /// a value reached INSIDE one of the input's collections, which the restating leaves the
 /// framework's own clause for — the value it carried and the model's expression as written
-/// (`src/service/refusal_clauses.rs`'s `pattern_clause`, which restates a member reached at
-/// the top of an operation's input and returns the framework's clause for a nested one).
+/// (`src/service/refusal_clauses.rs`'s `pattern_clause`, whose class
+/// `tests/all/nested_member_clause_wording.rs` owns).
 fn one_echoed_violation(member: &str, value: &str, requirement: &str) -> String {
     format!(
         "1 validation error detected: Value '{value}' at '{member}' failed to satisfy \
