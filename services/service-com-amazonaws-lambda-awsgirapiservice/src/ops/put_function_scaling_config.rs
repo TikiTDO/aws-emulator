@@ -217,8 +217,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     // this operation answers: a name that names no function is refused the
                     // service's canonical `ResourceNotFoundException` sentence, the same one
                     // a qualifier naming no version gets below, so the read and the write of
-                    // this resource word their 404 alike.
-                    crate::state::ResolveFailure::NotFound(_) => not_found(),
+                    // this resource word their 404 alike. A Region this endpoint does not
+                    // serve is settled before any of that and is stated as itself.
+                    crate::state::ResolveFailure::NotFound(_) => unreachable_region_or_absent(
+                        &input.function_name,
+                        &region,
+                    ),
                 })?;
 
         // The qualifier has to name something before a configuration can be set on it: a
@@ -282,6 +286,26 @@ fn not_found() -> PutFunctionScalingConfigError {
         message: Some(crate::state::RESOURCE_NOT_FOUND_MESSAGE.to_string()),
     })
     .into()
+}
+
+/// The modelled 404 for an identifier that resolved to nothing: the Region refusal when the
+/// identifier named a Region this endpoint does not serve
+/// (`crate::state::unreachable_region_message`), else this operation's own sentence for a
+/// resource that does not exist.
+fn unreachable_region_or_absent(
+    function_name: &str,
+    region: &str,
+) -> PutFunctionScalingConfigError {
+    match crate::state::unreachable_region_message(function_name, region) {
+        Some(message) => PutFunctionScalingConfigErrorModeled::ResourceNotFoundException(
+            ResourceNotFoundException {
+                r#type: None,
+                message: Some(message),
+            },
+        )
+        .into(),
+        None => not_found(),
+    }
 }
 
 /// The modelled 500 for a failure of the store itself.

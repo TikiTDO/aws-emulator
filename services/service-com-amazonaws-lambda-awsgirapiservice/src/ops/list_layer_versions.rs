@@ -164,16 +164,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
+        // A layer is a REGIONAL resource: it is published into one Region and its ARNs
+        // carry that Region, so the versions this call can enumerate are the ones
+        // published in the Region the caller addressed. The Region of the call comes from
+        // its own SigV4 credential scope and the comparison is against the Region stored
+        // on the record.
+        let region = crate::state::request_region(ctx);
+
         // "The name or Amazon Resource Name (ARN) of the layer": both forms name the
-        // same record, exactly as every other operation on a layer resolves it.
-        let name = crate::state::parse_layer_name(&input.layer_name).ok_or_else(|| {
-            invalid_parameter(format!(
-                "1 validation error detected: Value '{}' at 'layerName' failed to satisfy \
-                 constraint: Member must satisfy one of the documented layer name formats \
-                 (name or layer ARN)",
-                input.layer_name
-            ))
-        })?;
+        // same record, exactly as every other operation on a layer resolves it — and the
+        // ARN form names a layer of THIS endpoint only when the Region it carries is the
+        // endpoint's own (see [`crate::state::layer_store`]).
+        let name = crate::state::layer_name_in(&input.layer_name, &region)
+            .map_err(invalid_parameter)?;
 
         // The model declares `MaxItems` as `@range(min: 1, max: 50)`, so the boundary
         // validator has already refused anything outside it; this handler enforces the
@@ -205,13 +208,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })?),
             None => None,
         };
-
-        // A layer is a REGIONAL resource: it is published into one Region and its ARNs
-        // carry that Region, so the versions this call can enumerate are the ones
-        // published in the Region the caller addressed. The Region of the call comes from
-        // its own SigV4 credential scope and the comparison is against the Region stored
-        // on the record.
-        let region = crate::state::request_region(ctx);
 
         // "Specify a runtime identifier to list only versions that indicate that they're
         // compatible with that runtime. Specify a compatible architecture to include only

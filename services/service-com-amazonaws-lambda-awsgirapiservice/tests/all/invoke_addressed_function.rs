@@ -24,8 +24,9 @@
 //! three is acted on, so each row is driven through all of them. Two controls keep the table
 //! honest: a request that resolves is NOT refused, and the refusal for a function that
 //! exists under a version that does not carries that version rather than `$LATEST`. A Region
-//! this endpoint does not serve is settled BEFORE a version is, so its refusal names the
-//! function and no version at all.
+//! this endpoint does not serve is settled BEFORE a version is, so its refusal resolves no
+//! version to name and states the two Regions that disagree instead:
+//! `Functions from '<named region>' are not reachable in this region ('<endpoint region>')`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -228,7 +229,7 @@ struct NotFoundRow {
     /// for a name no version is resolved for at all, which is an ARN of another Region:
     /// that is refused on the Region, before a version is resolved.
     resolved_qualifier: Option<&'static str>,
-    /// The Region the refused ARN must name: the one the reference itself named when it
+    /// The Region the refusal must name: the one the reference itself named when it
     /// carried one, else this endpoint's.
     addressed_region: &'static str,
     /// The function the refused ARN must name — the one the request addressed, which for the
@@ -319,9 +320,9 @@ fn not_found_rows() -> Vec<NotFoundRow> {
             function: HELD,
         },
         // A function this endpoint DOES hold, addressed through another Region's ARN: the
-        // function is regional, so this endpoint holds no such function. The Region is
-        // settled before a version is, so the refusal names the function the caller
-        // addressed and no version.
+        // function is regional, so it is not reachable from here. The Region is settled
+        // before a version is, so no version is resolved and the refusal states the two
+        // Regions instead of naming a resolved ARN.
         NotFoundRow {
             case: "a held function addressed through another Region",
             reference: |held| format!("arn:aws:lambda:{OTHER_REGION}:{ACCOUNT}:function:{held}"),
@@ -354,13 +355,19 @@ async fn the_invoke_refusal_names_the_qualified_arn_the_invocation_resolved() {
     for row in not_found_rows() {
         let case = row.case;
         let reference = (row.reference)(HELD);
-        let qualified = row
-            .resolved_qualifier
-            .map_or_else(String::new, |qualifier| format!(":{qualifier}"));
-        let expected = format!(
-            "Function not found: arn:aws:lambda:{}:{ACCOUNT}:function:{}{qualified}",
-            row.addressed_region, row.function
-        );
+        // A reference naming another Region is refused on the Region before any version is
+        // resolved, so there is no resolved ARN to name: those rows resolve no qualifier
+        // and are refused on the two Regions that disagree instead.
+        let expected = match row.resolved_qualifier {
+            Some(qualifier) => format!(
+                "Function not found: arn:aws:lambda:{}:{ACCOUNT}:function:{}:{qualifier}",
+                row.addressed_region, row.function
+            ),
+            None => format!(
+                "Functions from '{}' are not reachable in this region ('{REGION}')",
+                row.addressed_region
+            ),
+        };
         // The resolution happens before the invocation type is acted on, so every type is
         // refused the same way — including the asynchronous one, which never queues an
         // event for a resource that does not exist.

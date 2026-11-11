@@ -349,6 +349,8 @@ mod recursive_loop_guardrail;
 mod refusal_message_rules;
 #[path = "all/refused_value_echo.rs"]
 mod refused_value_echo;
+#[path = "all/regional_identifier_refusals.rs"]
+mod regional_identifier_refusals;
 #[path = "all/resource_policy.rs"]
 mod resource_policy;
 #[path = "all/resource_policy_document.rs"]

@@ -3675,30 +3675,6 @@ pub fn resolve_capacity_provider<'a>(
     Ok(record)
 }
 
-/// The bare layer name a `LayerName` names.
-///
-/// The model documents the member as "The name or Amazon Resource Name (ARN) of the
-/// layer", and both forms name the same record, so a layer ARN resolves here to the name
-/// it carries. `None` when the value is neither form.
-#[must_use]
-pub fn parse_layer_name(value: &str) -> Option<String> {
-    let parts: Vec<&str> = value.split(':').collect();
-    let name = if parts.first() == Some(&"arn") {
-        // arn:<partition>:lambda:<region>:<account>:layer:<name>. The resource type is
-        // required, so an ARN of another Lambda resource is not read as a layer named
-        // after its resource type.
-        if parts.len() != 7 || parts[2] != ARN_NAMESPACE || parts[5] != "layer" {
-            return None;
-        }
-        parts[6]
-    } else if parts.len() == 1 {
-        parts[0]
-    } else {
-        return None;
-    };
-    is_layer_name(name).then(|| name.to_string())
-}
-
 /// Whether `name` is a layer name, which the model's `LayerName` pattern spells
 /// `[a-zA-Z0-9-_]+`.
 #[must_use]
@@ -4468,10 +4444,11 @@ pub fn addressed_arn_of(
 /// A Lambda function is a REGIONAL resource: it lives in the Region it was created in and is
 /// reachable only through that Region's endpoint. The full-ARN form is the only documented
 /// `FunctionName` that carries a Region, so it is the only one this can refuse; a bare name,
-/// the `function:` prefix form and the partial ARN address the endpoint's own Region. The
-/// refusal is the one a name no function is held under gets, naming the function the request
-/// addressed IN THE REGION IT NAMED, because that is what is true of it here: this endpoint
-/// holds no such function.
+/// the `function:` prefix form and the partial ARN address the endpoint's own Region.
+///
+/// The refusal states the two Regions that DISAGREE — the one the identifier named and the
+/// one this endpoint serves — rather than naming the resource: the function it addressed may
+/// well exist, so what is wrong is that it is not reachable from here.
 ///
 /// [`resolve_function`] applies this to every operation that resolves a `FunctionName`
 /// through it; an operation that keys the store by name itself applies it where it parses
@@ -4485,7 +4462,24 @@ pub fn foreign_region_function_message(
         .region
         .as_deref()
         .filter(|named| *named != region)
-        .map(|named| format!("Function not found: {}", function_arn(named, &reference.name)))
+        .map(|named| {
+            format!("Functions from '{named}' are not reachable in this region ('{region}')")
+        })
+}
+
+/// The Region refusal a `FunctionName` gets, for an operation that answers its OWN sentence
+/// for a resource it could not find.
+///
+/// A Region this endpoint does not serve is a fact about the REQUEST, settled before
+/// anything is looked up, so it is not one of the things such an operation's not-found
+/// sentence stands for — a resource that is absent here, or that holds no document of the
+/// kind asked for. The two are told apart by reading the identifier, which is what this
+/// does; `None` is an identifier naming no Region or naming this endpoint's own, and then
+/// the refusal is the operation's own to word
+/// ([`foreign_region_function_message`] states the refusal itself).
+#[must_use]
+pub fn unreachable_region_message(function_name: &str, region: &str) -> Option<String> {
+    foreign_region_function_message(&parse_function_reference(function_name)?, region)
 }
 
 /// The refusal a request whose `FunctionName` qualifies one version and whose `Qualifier`
@@ -4624,18 +4618,13 @@ pub struct ResolvedLayerVersionRef<'a> {
     pub version: &'a LayerVersionRecord,
 }
 
-/// The bare name a `LayerName` names, or the refusal a malformed one gets.
+/// The bare name a `LayerName` names for a request made in `region`, or the refusal the
+/// value gets ([`layer_name_in`]).
 ///
 /// "The name or Amazon Resource Name (ARN) of the layer": both forms name the same
 /// record, so both resolvers below start here.
-fn layer_name_of(layer_name: &str) -> Result<String, ResolveFailure> {
-    parse_layer_name(layer_name).ok_or_else(|| {
-        ResolveFailure::Malformed(format!(
-            "1 validation error detected: Value '{layer_name}' at 'layerName' failed to satisfy \
-             constraint: Member must satisfy one of the documented layer name formats (name or \
-             layer ARN)"
-        ))
-    })
+fn layer_name_of(layer_name: &str, region: &str) -> Result<String, ResolveFailure> {
+    layer_name_in(layer_name, region).map_err(ResolveFailure::Malformed)
 }
 
 /// The refusal a `LayerName`/`VersionNumber` pair naming no stored version gets on the
@@ -4671,10 +4660,10 @@ pub fn resolve_layer_version<'a>(
     version_number: i64,
     region: &str,
 ) -> Result<ResolvedLayerVersion<'a>, ResolveFailure> {
-    let name = layer_name_of(layer_name)?;
-
     // A layer is a REGIONAL resource, so the record is the one published in the Region
-    // this request addressed; a layer of any other Region is not held here at all.
+    // this request addressed; a layer of any other Region is not held here at all, and a
+    // `LayerName` that NAMES another Region is refused rather than read as this one's.
+    let name = layer_name_of(layer_name, region)?;
     let record = store
         .layer_mut(region, &name)
         .ok_or_else(|| no_such_layer_version(region, &name, version_number))?;
@@ -4694,9 +4683,8 @@ pub fn resolve_layer_version_ref<'a>(
     version_number: i64,
     region: &str,
 ) -> Result<ResolvedLayerVersionRef<'a>, ResolveFailure> {
-    let name = layer_name_of(layer_name)?;
-
     // Region-scoped for the same reason as [`resolve_layer_version`].
+    let name = layer_name_of(layer_name, region)?;
     let record = store
         .layer(region, &name)
         .ok_or_else(|| no_such_layer_version(region, &name, version_number))?;

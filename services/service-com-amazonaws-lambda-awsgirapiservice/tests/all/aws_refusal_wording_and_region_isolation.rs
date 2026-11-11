@@ -11,12 +11,13 @@
 //!    the request. The rows span the invocation type (named, defaulted) and the size class
 //!    (under, exactly at, one byte over, far over each type's own quota).
 //! 2. **A Lambda function is a REGIONAL resource, so a `FunctionName` given as a full ARN
-//!    whose Region field is not the endpoint's names no function at that endpoint** and is
-//!    refused exactly as a name no function is held under is — naming the function the
-//!    caller addressed, with no version, because the Region is settled before a version is.
-//!    The rows span the operation (an invocation, a read, a write, a publish, a listing),
-//!    the Region named, and the control that the same function IS reachable through its own
-//!    Region's endpoint.
+//!    whose Region field is not the endpoint's names a function this endpoint cannot reach**
+//!    and is refused with the modelled 404 naming the two Regions that disagree —
+//!    `Functions from '<named region>' are not reachable in this region ('<endpoint
+//!    region>')` — with no resource named, because the Region is settled before a version
+//!    is. The rows span the operation (an invocation, a read, a policy read, a write, a
+//!    publish, a listing), the Region named, and the control that the same function IS
+//!    reachable through its own Region's endpoint.
 //! 3. **A refusal names the resource the request ADDRESSED**: the `FunctionName` and
 //!    `Qualifier` pair, with the qualifier only when the request named one; a pair naming
 //!    two different qualifiers is refused with the fixed sentence for that disagreement;
@@ -418,18 +419,40 @@ fn json_payload_of(bytes: usize) -> Vec<u8> {
     format!("\"{}\"", "p".repeat(inner)).into_bytes()
 }
 
-/// RULE 2: a function ARN whose Region is not the endpoint's names no function there — one
-/// row per operation, with the same-Region call as the control for each.
+/// RULE 2: a function ARN whose Region is not the endpoint's names a function this endpoint
+/// cannot reach — one row per operation, with the same-Region call as the control for each.
 ///
-/// The refusal is the one a name no function is held under gets, and it names the function
-/// the caller addressed in the Region the caller named. The Region is settled BEFORE a
-/// version is, so no version is appended to it — not even by the invoking operations, whose
-/// refusal for a name of this Region does carry the version it resolved.
+/// The refusal states the two Regions that disagree and names no resource: the Region is
+/// settled BEFORE a version is, so no operation — not even an invoking one, whose refusal
+/// for a name of this Region does carry the version it resolved — has a resolved resource to
+/// name.
 #[tokio::test]
 async fn a_function_arn_from_another_region_names_no_function_at_this_endpoint() {
     let engine = Arc::new(engine::InMemoryEngine::new());
     let router = router_on(&engine);
     create_function_in(&router, REGION, "region-probe", ECHO_SOURCE).await;
+    // A statement on the function's resource policy, so the POLICY read below has a policy
+    // of this Region's function to report: what the foreign-ARN rows then show is the
+    // Region refusal rather than an absent policy.
+    let granted = call(
+        &router,
+        "POST",
+        &format!("{FUNCTIONS_URI}/region-probe/policy"),
+        &serde_json::to_vec(&json!({
+            "StatementId": "region-probe-grant",
+            "Action": "lambda:InvokeFunction",
+            "Principal": "s3.amazonaws.com",
+        }))
+        .expect("the permission body serializes"),
+        &[],
+    )
+    .await;
+    assert!(
+        granted.status < 400,
+        "the control grant must be served, got {} {}",
+        granted.status,
+        granted.text()
+    );
 
     let home = format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:region-probe");
     let foreign = format!("arn:aws:lambda:{OTHER_REGION}:{ACCOUNT}:function:region-probe");
@@ -444,10 +467,10 @@ async fn a_function_arn_from_another_region_names_no_function_at_this_endpoint()
         body: Option<Vec<u8>>,
     }
 
-    // One row per operation kind — an invocation, a read, a write, a publish, a listing —
-    // each driven with the ARN of this endpoint's own Region (which must resolve), the bare
-    // and partial forms (which name no Region at all, so they resolve too), and another
-    // Region's ARN (which names nothing here).
+    // One row per operation kind — an invocation, a read, a policy read, a write, a publish,
+    // a listing — each driven with the ARN of this endpoint's own Region (which must
+    // resolve), the bare and partial forms (which name no Region at all, so they resolve
+    // too), and another Region's ARN (which this endpoint cannot reach).
     let operations: Vec<RegionOperation> = vec![
         RegionOperation {
             operation: "Invoke",
@@ -465,6 +488,12 @@ async fn a_function_arn_from_another_region_names_no_function_at_this_endpoint()
             operation: "GetFunctionConfiguration",
             method: "GET",
             suffix: "/configuration",
+            body: None,
+        },
+        RegionOperation {
+            operation: "GetPolicy",
+            method: "GET",
+            suffix: "/policy",
             body: None,
         },
         RegionOperation {
@@ -555,8 +584,10 @@ async fn a_function_arn_from_another_region_names_no_function_at_this_endpoint()
                 answer.error_code()
             );
             // The Region is settled before a version is, so every operation — the
-            // invocation included — names the function the caller addressed and no version.
-            let expected = format!("Function not found: {foreign}");
+            // invocation included — states the two Regions and names no resource.
+            let expected = format!(
+                "Functions from '{OTHER_REGION}' are not reachable in this region ('{REGION}')"
+            );
             assert_eq!(
                 answer.message(),
                 expected,
@@ -606,7 +637,9 @@ async fn a_function_arn_from_another_region_names_no_function_at_this_endpoint()
             refused.status,
             refused.text()
         );
-        let expected = format!("Function not found: {foreign}");
+        let expected = format!(
+            "Functions from '{OTHER_REGION}' are not reachable in this region ('{REGION}')"
+        );
         assert_eq!(
             refused.message(),
             expected,

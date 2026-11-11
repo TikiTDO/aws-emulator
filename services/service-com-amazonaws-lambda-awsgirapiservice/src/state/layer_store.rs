@@ -12,8 +12,17 @@
 //! [`ComAmazonawsLambdaAwsgirapiserviceState::layer`],
 //! [`ComAmazonawsLambdaAwsgirapiserviceState::layer_mut`] or
 //! [`ComAmazonawsLambdaAwsgirapiserviceState::layers_in`] — a layer published elsewhere is
-//! not held under the Region a request addressed, so every operation that resolves a layer
-//! reports it as absent exactly as it reports a name nobody ever published.
+//! not held under the Region a request addressed, so a bare name no layer of that Region
+//! was ever published under reports as absent.
+//!
+//! # What a `LayerName` may name
+//!
+//! Because the Region is part of a layer's identity, a `LayerName` given in its ARN form
+//! names a layer of THIS endpoint only when the Region the ARN carries is the endpoint's
+//! own: an ARN of any other Region is not the name of a layer here at all, so it is refused
+//! as an invalid layer name rather than resolved to whatever this Region happens to hold
+//! under the same bare name. [`layer_name_in`] is that one reading of the member, shared by
+//! every operation that takes it.
 //!
 //! # What a function's `Layers` may name
 //!
@@ -73,6 +82,92 @@ impl ComAmazonawsLambdaAwsgirapiserviceState {
             .take_while(move |((held, _), _)| held == region)
             .map(|(_, record)| record)
     }
+}
+
+/// What a `LayerName` NAMES: the bare layer name, and the Region when the value carried
+/// one.
+///
+/// The member is documented as "The name or Amazon Resource Name (ARN) of the layer", and
+/// only the ARN form carries a Region — a bare name addresses the Region the request was
+/// made in — so the Region is optional here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LayerReference {
+    /// The Region the value named, or `None` when it named none.
+    region: Option<String>,
+    /// The bare layer name the value carries.
+    name: String,
+}
+
+/// Split a `LayerName` into the parts that identify a layer, or `None` when the value is
+/// neither documented form.
+///
+/// Private, because the parts are not what an operation resolving the member reads: the
+/// Region is part of WHICH layer the value names, so every caller goes through
+/// [`layer_name_in`], which is the one reading of it.
+fn parse_layer_reference(value: &str) -> Option<LayerReference> {
+    let parts: Vec<&str> = value.split(':').collect();
+    let (region, name) = if parts.first() == Some(&"arn") {
+        // arn:<partition>:lambda:<region>:<account>:layer:<name>. The resource type is
+        // required, so an ARN of another Lambda resource is not read as a layer named
+        // after its resource type.
+        if parts.len() != 7 || parts[2] != ARN_NAMESPACE || parts[5] != "layer" {
+            return None;
+        }
+        (Some(parts[3].to_string()), parts[6])
+    } else if parts.len() == 1 {
+        (None, parts[0])
+    } else {
+        return None;
+    };
+    is_layer_name(name).then(|| LayerReference {
+        region,
+        name: name.to_string(),
+    })
+}
+
+/// The refusal a `LayerName` this endpoint cannot read as the name of one of ITS layers
+/// gets: the fixed prefix and the value exactly as the request supplied it, because what
+/// the caller has to change is that value.
+fn invalid_layer_name_message(layer_name: &str) -> String {
+    format!("Invalid Layer name: {layer_name}")
+}
+
+/// The bare layer name a `LayerName` names for a request made in `region`, or the message
+/// refusing the value.
+///
+/// A layer is a REGIONAL resource (see this module's header), and the ARN form of the
+/// member carries the Region the layer was published into, so a `LayerName` names a layer
+/// of this endpoint only when it names this endpoint's own Region or names no Region at
+/// all. An ARN of another Region therefore names no layer this endpoint can address at
+/// all — it is not a layer name HERE — and is refused as an invalid layer name rather
+/// than resolved to whatever the same bare name happens to be published as locally.
+///
+/// ONE resolution, shared by every operation that takes a `LayerName`
+/// (`GetLayerVersion`, `ListLayerVersions`, `DeleteLayerVersion`, `PublishLayerVersion`
+/// and the layer-version policy operations through
+/// [`crate::state::resolve_layer_version`]), so none of them can read the member by a
+/// rule of its own.
+pub fn layer_name_in(value: &str, region: &str) -> Result<String, String> {
+    let reference =
+        parse_layer_reference(value).ok_or_else(|| malformed_layer_name_message(value))?;
+    if reference
+        .region
+        .as_deref()
+        .is_some_and(|named| named != region)
+    {
+        return Err(invalid_layer_name_message(value));
+    }
+    Ok(reference.name)
+}
+
+/// The refusal a `LayerName` in neither documented form gets, which states the member and
+/// the forms it admits.
+fn malformed_layer_name_message(layer_name: &str) -> String {
+    format!(
+        "1 validation error detected: Value '{layer_name}' at 'layerName' failed to satisfy \
+         constraint: Member must satisfy one of the documented layer name formats (name or \
+         layer ARN)"
+    )
 }
 
 /// The refusal a function's `Layers` gets for an entry naming a layer version of another

@@ -174,17 +174,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         // "The name or Amazon Resource Name (ARN) of the layer": both forms name the
-        // same record.
-        let name = crate::state::parse_layer_name(&input.layer_name).ok_or_else(|| {
-            invalid_parameter(format!(
-                "1 validation error detected: Value '{}' at 'layerName' failed to satisfy \
-                 constraint: Member must satisfy one of the documented layer name formats \
-                 (name or layer ARN)",
-                input.layer_name
-            ))
-        })?;
-
+        // same record, and the ARN form names a layer of THIS endpoint only when the
+        // Region it carries is the endpoint's own (see [`crate::state::layer_store`]).
         let region = crate::state::request_region(ctx);
+        let name = crate::state::layer_name_in(&input.layer_name, &region)
+            .map_err(invalid_parameter)?;
+
         let store = state.lock();
         let detail = store
             .layer(&region, &name)

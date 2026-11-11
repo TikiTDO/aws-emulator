@@ -185,12 +185,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // resource this store holds no record of and a resource holding no policy are
             // both "there is no policy to retrieve here", so both are the one fixed
             // sentence below rather than the resource-identifying refusal the resolver
-            // words for an operation that acts ON the resource.
+            // words for an operation that acts ON the resource. A Region this endpoint
+            // does not serve is neither of those: it is settled before the policy is
+            // looked up (`crate::state::unreachable_region_message`).
             crate::state::ResolveFailure::NotFound(_) => {
                 GetResourcePolicyErrorModeled::ResourceNotFoundException(
                     ResourceNotFoundException {
                         r#type: None,
-                        message: Some(crate::state::NO_RESOURCE_POLICY_MESSAGE.to_string()),
+                        message: Some(
+                            crate::state::unreachable_region_message(
+                                &input.resource_arn,
+                                &region,
+                            )
+                            .unwrap_or_else(|| {
+                                crate::state::NO_RESOURCE_POLICY_MESSAGE.to_string()
+                            }),
+                        ),
                     },
                 )
             }

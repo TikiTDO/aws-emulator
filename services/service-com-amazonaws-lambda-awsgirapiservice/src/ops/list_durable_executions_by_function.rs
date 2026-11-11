@@ -236,8 +236,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::ResolveFailure::Malformed(message) => invalid_parameter(message),
             // The resolver's own sentence NAMES the function it resolved the request's
             // reference to; this operation's does not (see [`FUNCTION_NOT_FOUND`]), so the
-            // 404 is re-worded here rather than carried through.
-            crate::state::ResolveFailure::NotFound(_) => not_found(),
+            // 404 is re-worded here rather than carried through. A Region this endpoint
+            // does not serve is not a function it could not find: it is settled before the
+            // lookup, so it is stated as itself.
+            crate::state::ResolveFailure::NotFound(_) => {
+                unreachable_region_or_absent(&input.function_name, &region)
+            }
         })?;
         let record = &*record;
         // An alias names the version it invokes, so filtering by an alias filters by
@@ -391,4 +395,24 @@ fn not_found() -> ListDurableExecutionsByFunctionError {
         },
     )
     .into()
+}
+
+/// The modelled 404 for an identifier that resolved to nothing: the Region refusal when the
+/// identifier named a Region this endpoint does not serve
+/// (`crate::state::unreachable_region_message`), else this operation's own sentence for a
+/// function it does not hold.
+fn unreachable_region_or_absent(
+    function_name: &str,
+    region: &str,
+) -> ListDurableExecutionsByFunctionError {
+    match crate::state::unreachable_region_message(function_name, region) {
+        Some(message) => ListDurableExecutionsByFunctionErrorModeled::ResourceNotFoundException(
+            ResourceNotFoundException {
+                r#type: None,
+                message: Some(message),
+            },
+        )
+        .into(),
+        None => not_found(),
+    }
 }

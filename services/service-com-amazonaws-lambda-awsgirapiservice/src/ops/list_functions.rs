@@ -169,14 +169,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "For Lambda@Edge functions, the Amazon Web Services Region of the master
         // function. [...] If specified, you must set FunctionVersion to ALL."
+        //
+        // The refusal names the PAIR the caller sent, because the combination is what is
+        // not supported and either half of it is what the caller has to change; a
+        // `FunctionVersion` the request omitted is named as the absent value it is.
         let master_region = input.master_region.as_deref();
         if master_region.is_some() && !all_versions {
             return Err(ListFunctionsErrorModeled::InvalidParameterValueException(
                 InvalidParameterValueException {
                     r#type: None,
-                    message: Some(
-                        "MasterRegion can only be set when FunctionVersion is ALL".to_string(),
-                    ),
+                    message: Some(format!(
+                        "The combination MasterArn={master} and FunctionVersion={version} is \
+                         not supported. Please see our documentation for valid combinations of \
+                         ListFunctions options.",
+                        master = master_region.unwrap_or(ABSENT_PARAMETER),
+                        version = input.function_version.as_deref().unwrap_or(ABSENT_PARAMETER),
+                    )),
                 },
             )
             .into());
@@ -256,3 +264,8 @@ const FUNCTION_VERSION_ALL: &str = "ALL";
 /// The `MasterRegion` value that asks for no master-region filtering, from the
 /// member's own pattern (`^ALL|<region>$`).
 const MASTER_REGION_ALL: &str = "ALL";
+
+/// How a parameter the request did not carry is named in a refusal about the COMBINATION
+/// of parameters: the combination includes the absent one, so the sentence names it as
+/// absent rather than leaving a gap where a value would be.
+const ABSENT_PARAMETER: &str = "NULL";

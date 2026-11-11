@@ -340,50 +340,64 @@ async fn a_pair_that_names_no_function_is_the_modelled_not_found() {
     // for each of the two invocation types — the refusal is about resolution, so it does
     // not depend on what the caller asked to be done once resolved. The expected message
     // names the resource the invocation addressed: the function AT the version it would
-    // have run, which is `$LATEST` when the request names no qualifier, in the Region the
-    // name itself named when it carried one.
-    for (label, reference, qualifier, addressed) in [
+    // have run, which is `$LATEST` when the request names no qualifier. A name of ANOTHER
+    // Region resolves no version at all — the Region is settled first — so its refusal
+    // states the two Regions that disagree instead of naming a resolved ARN.
+    let not_found = |arn: &str| format!("Function not found: {arn}");
+    for (label, reference, qualifier, expected) in [
         (
             "a function that does not exist",
             "stream-absent".to_string(),
             None,
-            format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:stream-absent:{LATEST}"),
+            not_found(&format!(
+                "arn:aws:lambda:{REGION}:{ACCOUNT}:function:stream-absent:{LATEST}"
+            )),
         ),
         (
             "a function arn that names no function",
             format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:stream-absent"),
             None,
-            format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:stream-absent:{LATEST}"),
+            not_found(&format!(
+                "arn:aws:lambda:{REGION}:{ACCOUNT}:function:stream-absent:{LATEST}"
+            )),
         ),
         (
             "a partial arn that names no function",
             format!("{ACCOUNT}:function:stream-absent"),
             None,
-            format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:stream-absent:{LATEST}"),
+            not_found(&format!(
+                "arn:aws:lambda:{REGION}:{ACCOUNT}:function:stream-absent:{LATEST}"
+            )),
         ),
         (
             "a held function addressed through another Region",
             format!("arn:aws:lambda:us-west-2:{ACCOUNT}:function:stream-held"),
             None,
-            format!("arn:aws:lambda:us-west-2:{ACCOUNT}:function:stream-held"),
+            format!("Functions from 'us-west-2' are not reachable in this region ('{REGION}')"),
         ),
         (
             "a version a known function has not published",
             "stream-held".to_string(),
             Some("9"),
-            format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:stream-held:9"),
+            not_found(&format!(
+                "arn:aws:lambda:{REGION}:{ACCOUNT}:function:stream-held:9"
+            )),
         ),
         (
             "an alias a known function does not hold",
             "stream-held".to_string(),
             Some("absent-alias"),
-            format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:stream-held:absent-alias"),
+            not_found(&format!(
+                "arn:aws:lambda:{REGION}:{ACCOUNT}:function:stream-held:absent-alias"
+            )),
         ),
         (
             "a version named in the function name that does not exist",
             "stream-held:9".to_string(),
             None,
-            format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:stream-held:9"),
+            not_found(&format!(
+                "arn:aws:lambda:{REGION}:{ACCOUNT}:function:stream-held:9"
+            )),
         ),
     ] {
         for invocation_type in [None, Some("DryRun"), Some("RequestResponse")] {
@@ -410,9 +424,8 @@ async fn a_pair_that_names_no_function_is_the_modelled_not_found() {
             );
             assert_eq!(
                 answer.message(),
-                format!("Function not found: {addressed}"),
-                "case {label:?} ({invocation_type:?}): the refusal names the resource the \
-                 invocation addressed, got {:?}",
+                expected,
+                "case {label:?} ({invocation_type:?}): expected {expected:?}, got {:?}",
                 answer.message()
             );
         }

@@ -552,29 +552,41 @@ async fn an_invocation_that_resolves_to_nothing_names_the_qualified_resource() {
         json!({}),
     )
     .await;
+    // The third column is the whole expected message: a pair that resolved an ARN is
+    // refused naming that ARN, and a name of another Region resolves none — the Region is
+    // settled first — so it is refused on the two Regions that disagree.
     let cases: &[(&str, &str, String)] = &[
         (
             "a function that does not exist",
             "absent-function",
-            format!("arn:aws:lambda:us-east-1:{ACCOUNT}:function:absent-function:$LATEST"),
+            format!(
+                "Function not found: arn:aws:lambda:us-east-1:{ACCOUNT}:function:\
+                 absent-function:$LATEST"
+            ),
         ),
         (
             "a function of another Region",
             "arn:aws:lambda:us-west-2:000000000000:function:probe-missing",
-            format!("arn:aws:lambda:us-west-2:{ACCOUNT}:function:probe-missing"),
+            "Functions from 'us-west-2' are not reachable in this region ('us-east-1')"
+                .to_string(),
         ),
         (
             "a version that does not exist",
             "probe-missing:7",
-            format!("arn:aws:lambda:us-east-1:{ACCOUNT}:function:probe-missing:7"),
+            format!(
+                "Function not found: arn:aws:lambda:us-east-1:{ACCOUNT}:function:probe-missing:7"
+            ),
         ),
         (
             "an alias that does not exist",
             "probe-missing:staging",
-            format!("arn:aws:lambda:us-east-1:{ACCOUNT}:function:probe-missing:staging"),
+            format!(
+                "Function not found: arn:aws:lambda:us-east-1:{ACCOUNT}:function:probe-missing:\
+                 staging"
+            ),
         ),
     ];
-    for (case, reference, addressed) in cases {
+    for (case, reference, expected) in cases {
         let answered = invoke(&router, reference, b"{}", &[]).await;
         assert_eq!(
             answered.status,
@@ -583,10 +595,9 @@ async fn an_invocation_that_resolves_to_nothing_names_the_qualified_resource() {
             answered.status,
             answered.text()
         );
-        let expected = format!("Function not found: {addressed}");
         assert_eq!(
             answered.message(),
-            expected,
+            *expected,
             "case {case}: expected {expected:?}, got {}",
             answered.text()
         );

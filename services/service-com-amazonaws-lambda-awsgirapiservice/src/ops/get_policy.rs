@@ -204,10 +204,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // resolved the request to, and this operation does not state it — so the
             // refusal is the service's fixed not-found sentence, naming nothing of the
             // request, exactly as the refusal below for a resource that holds no policy.
+            // A Region this endpoint does not serve is not one of those: it is settled
+            // before the policy is looked up at all, so it is stated as itself
+            // (`crate::state::unreachable_region_message`).
             crate::state::ResolveFailure::NotFound(_) => {
                 GetPolicyErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
                     r#type: None,
-                    message: Some(crate::state::RESOURCE_NOT_FOUND_MESSAGE.to_string()),
+                    message: Some(
+                        crate::state::unreachable_region_message(&input.function_name, &region)
+                            .unwrap_or_else(|| {
+                                crate::state::RESOURCE_NOT_FOUND_MESSAGE.to_string()
+                            }),
+                    ),
                 })
             }
         })?;
