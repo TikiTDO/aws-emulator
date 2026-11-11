@@ -33,7 +33,7 @@ use aws_smithy_runtime_api::http::StatusCode;
 use aws_smithy_types::body::SdkBody;
 use serde_json::{json, Value};
 use service_com_amazonaws_firehose_firehose_20150804::state::delivery::{
-    deliver_due, Extractions,
+    deliver_due, DeliveryHop, Extractions,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -438,7 +438,10 @@ impl Emulator {
                 &*self.engine,
                 SystemTime::now(),
                 Extractions::Run,
-                transport,
+                // The case's own transport, and no emulator to put a delivery's
+                // authorization question to: this suite drives the endpoint it serves
+                // itself.
+                &DeliveryHop::over_transport(transport.clone()),
             )
             .await;
             if ready() {

@@ -31,6 +31,12 @@
 //! * UNDER WHICH KEY — the `AWSKMSKeyARN` of `EncryptionConfiguration`'s
 //!   `KMSEncryptionConfig`, "the encryption key" the destination's objects are encrypted at
 //!   rest with ([`kms_key_arn`], [`object_encryption`]).
+//! * UNDER WHOSE PERMISSIONS — the `RoleARN` the destination configuration names, which is
+//!   the role Firehose makes the write under, so the write happens only where the
+//!   permissions in force on that role allow it ([`withheld_writes`]). A delivery the
+//!   destination did not take is reported through the destination's own
+//!   `CloudWatchLoggingOptions` ([`destination_logging`]) and the records stay buffered for
+//!   a later attempt, which is all a producer can observe of it.
 //!
 //! ## An HTTP endpoint destination
 //!
@@ -77,18 +83,79 @@ use crate::ops::types::{
     BufferingHints, EncryptionConfiguration, ProcessingConfiguration, S3DestinationConfiguration,
 };
 use crate::state::cloudwatch_logs_pipeline::{CloudWatchLogsPipeline, Processed};
+use crate::state::delivery::destination_logging::{
+    DeliveryErrorReport, DestinationError, DestinationLogging, S3_ACCESS_DENIED,
+    S3_NO_SUCH_BUCKET,
+};
 use crate::state::delivery::time_zone::DeliveryTimeZone;
 use crate::state::{
     service_state, ComAmazonawsFirehoseFirehose20150804State, DeliveryStream,
     DestinationConfigKind, StoredRecord,
 };
 
-/// The zone a destination's time fields are rendered in.
-pub mod time_zone;
-
+/// Where a delivery the destination did not take is reported.
+pub mod destination_logging;
 /// Converting a buffer's records to the format a `DataFormatConversionConfiguration` asks
 /// for, against the column information of the Glue table it binds.
 pub mod format_conversion;
+/// The zone a destination's time fields are rendered in.
+pub mod time_zone;
+
+/// The action an object write is authorized under, which is the one the destination's role
+/// has to allow for a delivery to be made: Amazon S3's own write of an object.
+const S3_PUT_OBJECT_ACTION: &str = "s3:PutObject";
+
+/// The vendor field of a Firehose stream ARN, which is what the Region a delivery asks its
+/// authorization question in is read out of ([`delivery_region`]).
+const FIREHOSE_ARN_VENDOR: &str = "firehose";
+
+/// How a delivery reaches the OTHER services it needs: the in-process transport an HTTP
+/// endpoint destination's buffer is POSTed over, and the emulator the delivery puts its
+/// authorization question to IAM through.
+///
+/// Both are the emulator this delivery runs within ([`DeliveryHop::through`]), so a delivery
+/// opens no socket and reaches nothing outside this process. A hop built over a transport
+/// ALONE ([`DeliveryHop::over_transport`]) can ask no one about a role, which is read the way
+/// every other unanswerable authorization question here is: nothing is withheld, exactly as
+/// `service_common::iam_role::role_withholds_action` reads a hop that could not be made.
+#[derive(Debug, Clone)]
+pub struct DeliveryHop {
+    transport: SharedHttpConnector,
+    emulator: Option<::smithy_server_runtime::EmbeddedEmulator>,
+}
+
+impl DeliveryHop {
+    /// The hop of the emulator a request is running within: its own in-process transport,
+    /// and the emulator itself for the questions a delivery has to ask another service.
+    #[must_use]
+    pub fn through(emulator: &::smithy_server_runtime::EmbeddedEmulator) -> Self {
+        Self {
+            transport: emulator.http_connector(),
+            emulator: Some(emulator.clone()),
+        }
+    }
+
+    /// A hop over `transport` and nothing else — for a caller that drives one delivery over a
+    /// transport of its own and has no emulator to ask about a role.
+    #[must_use]
+    pub fn over_transport(transport: SharedHttpConnector) -> Self {
+        Self {
+            transport,
+            emulator: None,
+        }
+    }
+
+    /// The transport an HTTP endpoint destination is POSTed over.
+    fn transport(&self) -> &SharedHttpConnector {
+        &self.transport
+    }
+
+    /// The emulator a delivery asks IAM about a destination role through, and `None` where
+    /// there is none to ask.
+    fn emulator(&self) -> Option<&::smithy_server_runtime::EmbeddedEmulator> {
+        self.emulator.as_ref()
+    }
+}
 
 /// Bytes in one MiB: `BufferingHints$SizeInMBs` buffers "to the specified size, in MiBs".
 const BYTES_PER_MIB: usize = 1024 * 1024;
@@ -554,6 +621,17 @@ pub struct S3Target {
     /// The bucket named by `BucketARN`, whose resource part IS the bucket name
     /// (`arn:<partition>:s3:::<name>`).
     pub bucket: String,
+    /// `BucketARN` itself, verbatim: the resource an authorization question about a write
+    /// here names, and the `destination` a reported failure to write it names.
+    pub bucket_arn: String,
+    /// The destination's `RoleARN` — "the Amazon Resource Name (ARN) of the Amazon Web
+    /// Services credentials" (`S3DestinationConfiguration$RoleARN`) — which is the role the
+    /// write is made under.
+    pub role_arn: String,
+    /// Where a delivery this location did not take is reported: the group and stream the
+    /// destination's `CloudWatchLoggingOptions` name, and `None` where they report nothing
+    /// ([`destination_logging`]).
+    pub logging: Option<DestinationLogging>,
     /// `Prefix`, verbatim; the expansion happens per delivered object.
     pub prefix: String,
     /// `ErrorOutputPrefix`, verbatim.
@@ -665,6 +743,32 @@ struct DeliveredObject {
     /// The KMS key this object is stored encrypted with, from the destination's
     /// `EncryptionConfiguration` ([`S3Target::kms_key_arn`]).
     kms_key_arn: Option<String>,
+    /// The destination this object belongs to, for the decisions that are the DESTINATION's
+    /// rather than this object's.
+    destination: ObjectDestination,
+}
+
+/// What a delivered object's own DESTINATION decides: whether the write may be made at all,
+/// and where a failure to make it is reported.
+#[derive(Debug, Clone)]
+struct ObjectDestination {
+    /// The destination's `BucketARN` ([`S3Target::bucket_arn`]).
+    bucket_arn: String,
+    /// The destination's `RoleARN` ([`S3Target::role_arn`]).
+    role_arn: String,
+    /// Where a failure to write this object is reported ([`S3Target::logging`]).
+    logging: Option<DestinationLogging>,
+}
+
+impl S3Target {
+    /// This location as the destination of the objects written to it.
+    fn destination(&self) -> ObjectDestination {
+        ObjectDestination {
+            bucket_arn: self.bucket_arn.clone(),
+            role_arn: self.role_arn.clone(),
+            logging: self.logging.clone(),
+        }
+    }
 }
 
 /// The size in bytes at which a buffer with these hints is full, and the longest it is
@@ -721,6 +825,9 @@ pub(crate) fn bucket_name(bucket_arn: &str) -> Option<&str> {
 fn plain_target(config: &S3DestinationConfiguration) -> Option<S3Target> {
     Some(S3Target {
         bucket: bucket_name(&config.bucket_arn)?.to_string(),
+        bucket_arn: config.bucket_arn.clone(),
+        role_arn: config.role_arn.clone(),
+        logging: DestinationLogging::of(config.cloud_watch_logging_options.as_ref()),
         prefix: config.prefix.clone().unwrap_or_default(),
         error_output_prefix: config.error_output_prefix.clone().unwrap_or_default(),
         hints: config.buffering_hints.clone(),
@@ -841,6 +948,11 @@ pub fn s3_targets(config: &DestinationConfigKind) -> Vec<S3Target> {
                     .is_some_and(|partitioning| partitioning.enabled == Some(true));
                 targets.push(S3Target {
                     bucket: name.to_string(),
+                    bucket_arn: config.bucket_arn.clone(),
+                    role_arn: config.role_arn.clone(),
+                    logging: DestinationLogging::of(
+                        config.cloud_watch_logging_options.as_ref(),
+                    ),
                     prefix: config.prefix.clone().unwrap_or_default(),
                     error_output_prefix: config.error_output_prefix.clone().unwrap_or_default(),
                     hints: config.buffering_hints.clone(),
@@ -1317,13 +1429,13 @@ fn restore(
 ///
 /// The one entry point: a handler calls it (so a put also materialises what an earlier
 /// buffer was owed), and so does the delivery pump. `extractions` is what separates the
-/// two — see [`Extractions`]. `transport` is the in-process emulator transport an HTTP
-/// endpoint destination is POSTed over; a stream with no such destination never uses it.
+/// two — see [`Extractions`]. `hop` is how a delivery reaches the other services it needs —
+/// see [`DeliveryHop`].
 pub async fn deliver_due<Eng: Send + Sync + 'static>(
     engine: &Eng,
     now: SystemTime,
     extractions: Extractions,
-    transport: &SharedHttpConnector,
+    hop: &DeliveryHop,
 ) {
     let Some(state) = service_state(engine) else {
         return;
@@ -1340,7 +1452,8 @@ pub async fn deliver_due<Eng: Send + Sync + 'static>(
         let mut parked = Vec::new();
         let mut owed = false;
         for (ordinal, endpoint) in delivery.endpoints.iter().enumerate() {
-            let Err(failure) = post_to_endpoint(transport, &delivery, endpoint, now).await else {
+            let Err(failure) = post_to_endpoint(hop.transport(), &delivery, endpoint, now).await
+            else {
                 continue;
             };
             if !retries_spent(&delivery, endpoint.hints.as_ref(), endpoint.retry_duration, now) {
@@ -1416,7 +1529,39 @@ pub async fn deliver_due<Eng: Send + Sync + 'static>(
             continue;
         };
         objects.append(&mut parked);
-        if write_objects(engine, objects) {
+        // The write is the destination ROLE's to make, so what that role is allowed to do
+        // decides whether it is made at all: a delivery the role may not write is not
+        // written, is reported through the destination's own logging and is owed again, which
+        // is what a producer observes of it (nothing but the error event).
+        let region = delivery_region(&delivery.source_arn).unwrap_or_default();
+        let (withheld, mut reported) = withheld_writes(hop, region, &objects).await;
+        if withheld {
+            destination_logging::report_delivery_errors(
+                engine,
+                region,
+                &delivery.source_arn,
+                delivery.version_id,
+                &reported,
+                now,
+            );
+            let mut store = state.lock();
+            restore(&mut store, delivery, now);
+            continue;
+        }
+        let written = write_objects(engine, objects);
+        reported.extend(written.reported);
+        // A destination that did not take this delivery reports it, whether the rest of the
+        // delivery was written or not: the records of the part that was not written are owed
+        // again below, and the error event is the only thing a producer can observe of them.
+        destination_logging::report_delivery_errors(
+            engine,
+            region,
+            &delivery.source_arn,
+            delivery.version_id,
+            &reported,
+            now,
+        );
+        if written.any {
             // Written, so these records are no longer held anywhere in this process and
             // the budget they were charged against is theirs no longer.
             let mut store = state.lock();
@@ -1684,6 +1829,7 @@ fn backup_object(
         ),
         body,
         kms_key_arn: target.kms_key_arn.clone(),
+        destination: target.destination(),
     })
 }
 
@@ -1901,6 +2047,7 @@ fn search_backup_object(
         ),
         body,
         kms_key_arn: target.kms_key_arn.clone(),
+        destination: target.destination(),
     })
 }
 
@@ -1985,24 +2132,53 @@ fn object_encryption(
     }
 }
 
-/// Write `objects` into the one object store, answering whether the destination took
-/// them.
+/// What the write of one delivery's objects did.
+#[derive(Debug, Default)]
+struct Written {
+    /// Whether any object reached the destination. `false` means the delivery is owed again
+    /// as a whole; `true` with failures beside it means part of it was written, which is
+    /// reported rather than retried, because retrying would deliver the written object twice.
+    any: bool,
+    /// The failures the destinations' own `CloudWatchLoggingOptions` report
+    /// ([`destination_logging`]).
+    reported: Vec<DeliveryErrorReport>,
+}
+
+/// Write `objects` into the one object store, answering what reached the destination and
+/// what each destination's logging has to report.
 ///
-/// `false` means NOTHING was written and the delivery is owed again: the bucket a
-/// `BucketARN` names was never created, or the object store refused every write. A write
-/// the store refuses once some object of the same delivery is already in it is reported
-/// rather than retried, because retrying would deliver the written object twice.
-fn write_objects<Eng: Send + Sync + 'static>(engine: &Eng, objects: Vec<DeliveredObject>) -> bool {
+/// A bucket a `BucketARN` names that was never created takes nothing, and neither does a
+/// store this engine does not hold: both are deliveries the destination did not take, so the
+/// records stay buffered and the destination's logging reports the condition.
+fn write_objects<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    objects: Vec<DeliveredObject>,
+) -> Written {
     if objects.is_empty() {
-        return true;
+        return Written {
+            any: true,
+            reported: Vec::new(),
+        };
     }
     let Some(state) = ::service_com_amazonaws_s3_amazons3::state::service_state(engine) else {
         ::tracing::warn!("the object store is not reachable from this engine, so nothing was delivered");
-        return false;
+        return Written::default();
     };
     let mut store = state.lock();
     let mut written = 0usize;
+    let mut reported = Vec::new();
     for object in objects {
+        // The bucket the destination names does not exist, so there is nothing to write
+        // into: the condition Amazon S3 answers such a write with, reported through the
+        // destination's own logging.
+        if store.bucket(&object.bucket).is_none() {
+            ::tracing::warn!(
+                bucket = %object.bucket,
+                "the destination bucket does not exist, so this delivery was not written"
+            );
+            report(&mut reported, &object.destination, S3_NO_SUCH_BUCKET);
+            continue;
+        }
         let encryption = object_encryption(&store, &object);
         let stored = ::service_com_amazonaws_s3_amazons3::state::Object {
             // The entity tag is computed from the bytes the object is stored with,
@@ -2065,7 +2241,103 @@ fn write_objects<Eng: Send + Sync + 'static>(engine: &Eng, objects: Vec<Delivere
             ),
         }
     }
-    written > 0
+    Written {
+        any: written > 0,
+        reported,
+    }
+}
+
+/// Note one failed delivery for the destination's logging to report, once per
+/// (destination, condition): a delivery writing several objects to one destination failed
+/// ONCE, so it is reported once however many of its objects the destination did not take.
+///
+/// A destination whose `CloudWatchLoggingOptions` report nothing has nothing noted here; the
+/// records are owed again either way, which is what the caller decides from.
+fn report(
+    reports: &mut Vec<DeliveryErrorReport>,
+    destination: &ObjectDestination,
+    error: DestinationError,
+) {
+    let Some(logging) = destination.logging.clone() else {
+        return;
+    };
+    let report = DeliveryErrorReport {
+        logging,
+        destination: destination.bucket_arn.clone(),
+        error,
+    };
+    if !reports.contains(&report) {
+        reports.push(report);
+    }
+}
+
+/// The objects of this delivery the destination's ROLE may not write, as the failures its
+/// logging reports — paired with whether any object was withheld at all.
+///
+/// Firehose writes a delivered object under the role the destination configuration names
+/// ("the Amazon Resource Name (ARN) of the Amazon Web Services credentials" —
+/// `S3DestinationConfiguration$RoleARN`), so the write is that role's to make: it happens
+/// only where the permissions in force on the role allow Amazon S3's own write of the object
+/// it would create. That decision is IAM's, asked of IAM
+/// ([`service_common::iam_role::role_withholds_action_through`]), so the documents in force
+/// are collected and decided by the service that holds them.
+///
+/// Nothing is withheld where there is no one to ask (a hop built over a transport alone), nor
+/// for a destination naming no role at all, nor for anything that is not IAM ANSWERING that
+/// the role does not allow the write — a role this account's IAM holds nothing under
+/// included, exactly as that question is read everywhere else in this emulator.
+async fn withheld_writes(
+    hop: &DeliveryHop,
+    region: &str,
+    objects: &[DeliveredObject],
+) -> (bool, Vec<DeliveryErrorReport>) {
+    let Some(emulator) = hop.emulator() else {
+        return (false, Vec::new());
+    };
+    let mut withheld = false;
+    let mut reported = Vec::new();
+    for object in objects {
+        let destination = &object.destination;
+        if destination.role_arn.is_empty() {
+            continue;
+        }
+        // The resource is the object this write would create, which is what an
+        // object-granting statement (`arn:<partition>:s3:::<bucket>/<key pattern>`) is
+        // written about.
+        let resource = format!("{}/{}", destination.bucket_arn, object.key);
+        if !::service_common::iam_role::role_withholds_action_through(
+            emulator,
+            region,
+            &destination.role_arn,
+            S3_PUT_OBJECT_ACTION,
+            &resource,
+        )
+        .await
+        {
+            continue;
+        }
+        ::tracing::warn!(
+            bucket = %object.bucket,
+            key = %object.key,
+            "the destination role is not allowed to write this object, so this delivery was \
+             not written"
+        );
+        withheld = true;
+        report(&mut reported, destination, S3_ACCESS_DENIED);
+    }
+    (withheld, reported)
+}
+
+/// The Region a delivery of `stream_arn` asks its authorization question in: the Region that
+/// stream lives in, read off its own ARN.
+///
+/// A delivery is made by no request of its own, so there is no credential scope to read it
+/// from; the stream's ARN was minted in the Region the request that created the stream was
+/// signed for, which is the Region its roles and destinations are resolved in. A value that
+/// is not a Firehose stream ARN names no Region, which leaves the question unanswerable and
+/// so withholds nothing.
+fn delivery_region(stream_arn: &str) -> Option<&str> {
+    ::service_common::arn::region_of(stream_arn, FIREHOSE_ARN_VENDOR)
 }
 
 /// The objects one delivery writes: one per destination location and, where dynamic
@@ -2226,6 +2498,7 @@ async fn objects_of<Eng: Send + Sync + 'static>(
                 key: format!("{prefix}{name}{extension}"),
                 body,
                 kms_key_arn: target.kms_key_arn.clone(),
+                destination: target.destination(),
             });
         }
     }
@@ -3331,13 +3604,10 @@ fn fit(value: &str, width: usize) -> String {
 /// [`MAX_DELIVERY_WAKE_UPS`] wake-ups, and with no async runtime to spawn onto there is no
 /// pump — the deliveries are then made by the next operation instead.
 ///
-/// `transport` is the in-process emulator transport the pump POSTs an HTTP endpoint
-/// destination's buffer over, taken from the request that started the pump: the pump
-/// outlives that request, so it holds a clone of the transport rather than borrowing it.
-pub fn drive_delivery_clock<Eng: Send + Sync + 'static>(
-    engine: &Arc<Eng>,
-    transport: SharedHttpConnector,
-) {
+/// `hop` is how the pump reaches the other services a delivery needs, taken from the request
+/// that started the pump: the pump outlives that request, so it holds a clone of the hop
+/// rather than borrowing it.
+pub fn drive_delivery_clock<Eng: Send + Sync + 'static>(engine: &Arc<Eng>, hop: DeliveryHop) {
     let Some(state) = service_state(&**engine) else {
         return;
     };
@@ -3372,7 +3642,7 @@ pub fn drive_delivery_clock<Eng: Send + Sync + 'static>(
             // by no Firehose call at all, so the wake-up reads what the source has taken
             // since before it delivers what that made due.
             crate::state::kinesis_source::ingest_from_sources(&*engine, SystemTime::now());
-            deliver_due(&*engine, SystemTime::now(), Extractions::Run, &transport).await;
+            deliver_due(&*engine, SystemTime::now(), Extractions::Run, &hop).await;
         }
         if capped {
             // Only THIS pump's claim, so a pump started since is left holding its own.
@@ -3387,7 +3657,7 @@ pub fn drive_delivery_clock<Eng: Send + Sync + 'static>(
             // this one released and stands down itself as soon as nothing is owed. The cap
             // still bounds what one task does, which is what it is for.
             if still_owed {
-                drive_delivery_clock(&engine, transport);
+                drive_delivery_clock(&engine, hop);
             }
         }
     });

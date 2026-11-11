@@ -349,10 +349,28 @@ pub async fn role_withholds_action(
     action: &str,
     resource: &str,
 ) -> bool {
+    role_withholds_action_through(ctx.callback(), region, role_arn, action, resource).await
+}
+
+/// [`role_withholds_action`] from the emulator callback itself rather than from a request's
+/// own context.
+///
+/// The question is the same and so is the hop; what differs is who is asking, exactly as for
+/// [`crate::iam_client::iam_client_through`]. A service that acts under a caller-supplied role
+/// OUTSIDE the request that named it — on a task it spawned, or on work the clock made due,
+/// which holds a clone of the callback and no `OperationContext` — asks through this, so there
+/// is still one route to that answer.
+pub async fn role_withholds_action_through(
+    callback: &smithy_server_runtime::EmbeddedEmulator,
+    region: &str,
+    role_arn: &str,
+    action: &str,
+    resource: &str,
+) -> bool {
     if role_name(role_arn).is_none() {
         return false;
     }
-    let answer = crate::iam_client::iam_client(ctx, region)
+    let answer = crate::iam_client::iam_client_through(callback, region)
         .simulate_principal_policy()
         .policy_source_arn(role_arn)
         .action_names(action)

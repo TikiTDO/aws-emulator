@@ -451,7 +451,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if takes_a_source {
             crate::state::delivery::drive_delivery_clock(
                 &self.engine,
-                ctx.callback().http_connector(),
+                crate::state::delivery::DeliveryHop::through(ctx.callback()),
             );
         }
 

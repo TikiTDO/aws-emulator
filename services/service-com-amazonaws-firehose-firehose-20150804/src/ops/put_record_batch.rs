@@ -292,17 +292,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // this batch is in can be due yet) and starts the task that waits for the clock,
         // so the delivery happens without any further Firehose call.
         // An HTTP endpoint destination is delivered to over the in-process transport of
-        // the emulator this handler runs within, so a delivery reaches only what this
+        // the emulator this handler runs within, and the authorization question a delivery
+        // has to put to IAM goes the same way, so a delivery reaches only what this
         // emulator itself serves.
-        let transport = ctx.callback().http_connector();
+        let hop = crate::state::delivery::DeliveryHop::through(ctx.callback());
         crate::state::delivery::deliver_due(
             &*self.engine,
             now,
             crate::state::delivery::Extractions::LeaveToThePump,
-            &transport,
+            &hop,
         )
         .await;
-        crate::state::delivery::drive_delivery_clock(&self.engine, transport);
+        crate::state::delivery::drive_delivery_clock(&self.engine, hop);
 
         Ok(PutRecordBatchOutput {
             failed_put_count: i32::try_from(failed_put_count).unwrap_or(i32::MAX),

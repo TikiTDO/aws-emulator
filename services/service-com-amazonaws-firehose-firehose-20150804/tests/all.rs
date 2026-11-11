@@ -49,6 +49,8 @@ mod destination_bucket_resolution;
 mod destination_configuration_echo;
 #[path = "all/destination_delivery.rs"]
 mod destination_delivery;
+#[path = "all/destination_delivery_errors.rs"]
+mod destination_delivery_errors;
 #[path = "all/destination_update.rs"]
 mod destination_update;
 #[path = "all/direct_put_source_gate.rs"]
