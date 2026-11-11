@@ -57,7 +57,11 @@ struct RefusalRow {
 /// The table every data-plane case writes, and the rows the SNAPSHOT holds: a table a
 /// client creates over the wire, so the restored instance's rows can only come from the
 /// copy the snapshot took.
-const LEDGER_ROWS: [(i32, &str); 3] = [
+///
+/// `pub(crate)` with the four helpers below: the DB CLUSTER restore suite proves the same
+/// rule about a cluster's storage, so it drives the same ledger rather than keeping a second
+/// copy of it.
+pub(crate) const LEDGER_ROWS: [(i32, &str); 3] = [
     (1, "the first entry"),
     (2, "the second entry"),
     (3, "the third entry"),
@@ -66,8 +70,8 @@ const LEDGER_ROWS: [(i32, &str); 3] = [
 /// Open a session on `endpoint` as the master user, against the instance's own database.
 ///
 /// TLS, because RDS for PostgreSQL 15 and later force it by default and these instances are
-/// created on the catalogue's default version.
-async fn session_on(endpoint: &(String, u16), case: &str) -> PostgresSession {
+/// created on the catalogue's default version. See [`LEDGER_ROWS`] for why this is shared.
+pub(crate) async fn session_on(endpoint: &(String, u16), case: &str) -> PostgresSession {
     postgres_login(
         &endpoint.0,
         endpoint.1,
@@ -83,19 +87,19 @@ async fn session_on(endpoint: &(String, u16), case: &str) -> PostgresSession {
 }
 
 /// Run one statement that returns no rows, and fail the case if the engine refused it.
-async fn run(session: &mut PostgresSession, case: &str, sql: &str) {
+pub(crate) async fn run(session: &mut PostgresSession, case: &str, sql: &str) {
     if let Err(refusal) = session.query(sql).await {
         panic!("case {case:?}: the engine must run {sql:?}, got {refusal:?}");
     }
 }
 
 /// The `(id, note)` rows of the ledger table, as a session reads them.
-async fn ledger_of(session: &mut PostgresSession, case: &str) -> Vec<(i32, String)> {
+pub(crate) async fn ledger_of(session: &mut PostgresSession, case: &str) -> Vec<(i32, String)> {
     let answer: Rows = session
         .query("SELECT id, note FROM ledger ORDER BY id")
         .await
         .unwrap_or_else(|refusal| {
-            panic!("case {case:?}: the restored instance must hold the ledger, got {refusal:?}")
+            panic!("case {case:?}: the ledger must be readable, got {refusal:?}")
         });
     answer
         .rows
@@ -119,7 +123,7 @@ async fn ledger_of(session: &mut PostgresSession, case: &str) -> Vec<(i32, Strin
 }
 
 /// The rows [`LEDGER_ROWS`] stands for, as a reader sees them.
-fn expected_ledger() -> Vec<(i32, String)> {
+pub(crate) fn expected_ledger() -> Vec<(i32, String)> {
     LEDGER_ROWS
         .iter()
         .map(|(id, note)| (*id, (*note).to_string()))
@@ -127,7 +131,7 @@ fn expected_ledger() -> Vec<(i32, String)> {
 }
 
 /// Create the ledger and fill it with [`LEDGER_ROWS`].
-async fn fill_ledger(session: &mut PostgresSession, case: &str) {
+pub(crate) async fn fill_ledger(session: &mut PostgresSession, case: &str) {
     run(
         session,
         case,

@@ -89,11 +89,16 @@ fn stored_snapshot(region: &str, identifier: &str, cluster: &str) -> DbClusterSn
         engine: "aurora-postgresql".to_string(),
         engine_version: Some("15.4".to_string()),
         engine_mode: Some("provisioned".to_string()),
+        database_name: Some("ledger".to_string()),
         // An Aurora cluster carries no `DBClusterInstanceClass` of its own.
         db_instance_class: None,
         allocated_storage: Some(1),
         holds_data: true,
         master_username: Some("postgres".to_string()),
+        // A record built by hand holds no master credential and no copy of a cluster's
+        // storage: both are taken from a live cluster by the operations that snapshot one.
+        master_user_password: None,
+        storage: None,
         availability_zones: vec![format!("{region}a"), format!("{region}b")],
         port: 5432,
         storage_type: Some("aurora".to_string()),

@@ -1306,6 +1306,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .enable_global_write_forwarding
                 .unwrap_or(false),
             cluster_create_time: crate::state::now_as_wire_timestamp(),
+            // Every cluster this operation creates is placed in the account's VPC and is
+            // reached inside it: `CreateDBCluster` publishes no member that turns the VPC
+            // network interface off or puts an internet access gateway in front of the
+            // cluster, so those two are the settings it is created with.
+            vpc_networking_enabled: true,
+            internet_access_gateway_enabled: false,
             // Nothing has moved the writer of a cluster this call has just created, so the
             // member created first is its primary; see `DbClusterRecord::writer_identifier`.
             writer_identifier: None,
@@ -1497,9 +1503,13 @@ const IOPS_STORAGE_RATIO_MAX: f64 = 50.0;
 /// refusal states in words, which is why the two live together here.
 const MULTI_AZ_CLUSTER_ZONES: usize = 3;
 
-/// Refuse a Multi-AZ DB cluster create whose named DB subnet group cannot cover enough
+/// Refuse a Multi-AZ DB cluster whose named DB subnet group cannot cover enough
 /// Availability Zones; `Ok(())` when it can, so this reads like the `check_*` gates of
 /// `crate::state` it sits beside.
+///
+/// `pub(crate)` because a cluster is PLACED by `CreateDBCluster` and by the restores that
+/// create one, and the subnets a group covers are a precondition of the cluster TYPE rather
+/// than of the operation: the two answer it with the one rule and the one sentence.
 ///
 /// What the refusal rests on is what the STORED GROUP settles: a subnet lies in exactly one
 /// Availability Zone, and WHICH zone is the fact the group KEEPS for each of its subnets, as
@@ -1517,7 +1527,7 @@ const MULTI_AZ_CLUSTER_ZONES: usize = 3;
 /// `DescribeDBSubnetGroups` reports — so the refusal and the report cannot name different
 /// zones for one group. They come from the stored group and the region, never from the
 /// request.
-fn check_multi_az_subnet_coverage(
+pub(crate) fn check_multi_az_subnet_coverage(
     region: &str,
     group: &crate::state::DbSubnetGroupRecord,
 ) -> Result<(), String> {

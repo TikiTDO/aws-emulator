@@ -51,6 +51,8 @@ mod db_cluster_deletion;
 mod db_cluster_engine_endpoint;
 #[path = "all/db_cluster_envelope_members.rs"]
 mod db_cluster_envelope_members;
+#[path = "all/db_cluster_snapshot_restore.rs"]
+mod db_cluster_snapshot_restore;
 #[path = "all/db_cluster_read_replica_promotion.rs"]
 mod db_cluster_read_replica_promotion;
 #[path = "all/db_cluster_snapshots.rs"]

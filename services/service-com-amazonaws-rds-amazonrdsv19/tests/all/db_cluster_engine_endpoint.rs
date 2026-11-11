@@ -58,7 +58,10 @@ struct Row {
 /// The four settings a Multi-AZ DB cluster is required to be created with, each documented
 /// "This setting is required to create a Multi-AZ DB cluster", with an `Iops` inside the
 /// documented ratio of the allocated storage.
-const MULTI_AZ_SETTINGS: &[(&str, &str)] = &[
+///
+/// `pub(crate)` so the sibling suites of this one test target create the other cluster type
+/// the same way rather than each writing the four settings again.
+pub(crate) const MULTI_AZ_SETTINGS: &[(&str, &str)] = &[
     ("AllocatedStorage", "400"),
     ("DBClusterInstanceClass", "db.m5d.large"),
     ("Iops", "3000"),

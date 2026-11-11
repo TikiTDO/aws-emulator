@@ -41,6 +41,9 @@
 //! `MAX_REGIONS * DB_SNAPSHOT_QUOTA_PER_REGION` snapshots — each holding a copy of the
 //! source instance's database, itself bounded by the page ceiling every database of this
 //! service's data plane carries ([`data_plane::sql_engine`]) —
+//! `MAX_REGIONS * DB_CLUSTER_SNAPSHOT_QUOTA_PER_REGION` DB cluster snapshots — each holding
+//! a copy of the source cluster's database under that same page ceiling, which is what a
+//! restore of one loads —
 //! `MAX_REGIONS * DB_CLUSTER_QUOTA_PER_REGION` DB clusters — each carrying at most
 //! [`MAX_CLUSTER_LIST_VALUES`] values in each of its stored string lists —
 //! `MAX_REGIONS * DB_SHARD_GROUP_QUOTA_PER_REGION` DB shard groups,
@@ -278,8 +281,8 @@ pub use storage_encryption_key::*;
 pub use service_principal_call::*;
 pub use master_user_credentials::*;
 pub use data_plane::{
-    capture_instance_storage, cluster_endpoint::cluster_engine_wire, engine_wire,
-    open_engine_endpoint, wire_session::SessionTarget, DbEngineEndpoint, EngineWire,
+    capture_cluster_storage, capture_instance_storage, cluster_endpoint::cluster_engine_wire,
+    engine_wire, open_engine_endpoint, wire_session::SessionTarget, DbEngineEndpoint, EngineWire,
     ServedEndpoint,
 };
 pub use ec2_subnets::{invalid_subnets_message, subnet_zones, SubnetZones};

@@ -1104,7 +1104,7 @@ fn resolve_source(
                 port: snapshot.port,
                 backup_retention_period: snapshot.backup_retention_period,
                 preferred_backup_window: snapshot.preferred_backup_window.clone(),
-                tags: inherited_tags(
+                tags: crate::state::inherited_snapshot_tags(
                     store
                         .db_instances
                         .get(&(region.to_string(), snapshot.db_instance_identifier.clone()))
@@ -1186,7 +1186,7 @@ fn resolve_source(
                 port: snapshot.port,
                 backup_retention_period: snapshot.backup_retention_period.unwrap_or_default(),
                 preferred_backup_window: snapshot.preferred_backup_window.clone(),
-                tags: inherited_tags(
+                tags: crate::state::inherited_snapshot_tags(
                     store
                         .db_clusters
                         .get(&(region.to_string(), snapshot.db_cluster_identifier.clone()))
@@ -1196,24 +1196,6 @@ fn resolve_source(
                 storage: None,
             })
         }
-    }
-}
-
-/// The tags a restore that names none of its own gives the restored instance.
-///
-/// `CopyTagsToSnapshot` states the rule: "RDS checks whether you specify new tags. If yes,
-/// the new tags are added to the restored DB instance. If there are no new tags, RDS looks
-/// for the tags from the source DB instance for the DB snapshot, and then adds those tags
-/// to the restored DB instance." `source` is that resource's tags where this region still
-/// holds it; where it is gone — the final snapshot of a deleted instance — what is left of
-/// them is what the snapshot itself carries.
-fn inherited_tags(
-    source: Option<Vec<crate::ops::types::Tag>>,
-    snapshot: &[crate::ops::types::Tag],
-) -> Vec<crate::ops::types::Tag> {
-    match source {
-        Some(tags) if !tags.is_empty() => tags,
-        _ => snapshot.to_vec(),
     }
 }
 

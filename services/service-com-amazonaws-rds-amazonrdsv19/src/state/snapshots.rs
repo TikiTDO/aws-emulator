@@ -7,9 +7,9 @@ use super::*;
 ///
 /// `CreateDBClusterSnapshot` writes one (a snapshot OF a cluster, through
 /// [`DbClusterSnapshotRecord::from_cluster`]), `CopyDBClusterSnapshot` writes one (a copy
-/// of another snapshot) and `DeleteDBClusterSnapshot` removes one; the final snapshot
-/// `DeleteDBCluster` takes is still scaffolded in this crate and is its own stub issue, so
-/// it writes none yet. The reading operations are implemented against these records rather
+/// of another snapshot), the final snapshot `DeleteDBCluster` takes is one more and
+/// `DeleteDBClusterSnapshot` removes one; `RestoreDBClusterFromSnapshot` is what READS one
+/// back into a cluster. The reading operations are implemented against these records rather
 /// than against a canned answer, so they report exactly what is stored.
 #[derive(Debug, Clone)]
 pub struct DbClusterSnapshotRecord {
@@ -25,6 +25,11 @@ pub struct DbClusterSnapshotRecord {
     pub engine: String,
     pub engine_version: Option<String>,
     pub engine_mode: Option<String>,
+    /// `DatabaseName` of the cluster the snapshot was taken from — the database its data
+    /// lives in — which is the name a cluster restored from this snapshot carries when the
+    /// restore names none of its own. Not a member of the `DBClusterSnapshot` wire shape:
+    /// it is one of the cluster settings the snapshot copied, like the ones below.
+    pub database_name: Option<String>,
     /// `DBClusterInstanceClass` of the cluster the snapshot was taken from — the compute
     /// and memory capacity of each DB instance in a Multi-AZ DB cluster — which is the
     /// class a DB instance restored from this snapshot is provisioned with when the
@@ -38,6 +43,13 @@ pub struct DbClusterSnapshotRecord {
     /// whether the snapshot holds any data at all.
     pub holds_data: bool,
     pub master_username: Option<String>,
+    /// The master user's password as the source cluster held it, kept only as the DIGESTS a
+    /// login can be verified against — the password itself is `@sensitive`, is never
+    /// reported and is not stored ([`data_plane::wire_session::MasterPasswordHash`]). It is
+    /// part of what the snapshot copied off the cluster, because a cluster restored from it
+    /// keeps the source's master credential: the restore mints no new one. `None` for a
+    /// source cluster that had no master password of its own.
+    pub master_user_password: Option<data_plane::wire_session::MasterPasswordHash>,
     pub availability_zones: Vec<String>,
     pub port: i32,
     pub storage_type: Option<String>,
@@ -71,6 +83,20 @@ pub struct DbClusterSnapshotRecord {
     /// `DescribeDBClusterSnapshotAttributes` reports; see [`SNAPSHOT_RESTORE_ATTRIBUTE`].
     /// A set, so authorizing an account twice changes nothing and the report is ordered.
     pub restore_attribute: BTreeSet<String>,
+    /// A COPY of the data the source cluster's storage held when the snapshot was taken,
+    /// taken by the engine itself ([`data_plane::sql_engine::InstanceDatabase::capture`]):
+    /// this is what makes a cluster snapshot restorable, because
+    /// `RestoreDBClusterFromSnapshot` loads it into the restored cluster's own storage.
+    /// `None` for a snapshot of a cluster that has no engine endpoint at all — an engine
+    /// whose wire this emulator serves no data plane for
+    /// ([`data_plane::cluster_endpoint::cluster_engine_wire`]).
+    ///
+    /// The copy is in memory and private to this snapshot, it is never written to the host,
+    /// and its size is bounded by the same per-database page ceiling every database of this
+    /// service's data plane carries; the number of copies is bounded by
+    /// [`DB_CLUSTER_SNAPSHOT_QUOTA_PER_REGION`] and [`MAX_REGIONS`], like every other record
+    /// here. Deleting the snapshot drops it.
+    pub storage: Option<::std::sync::Arc<data_plane::sql_engine::InstanceDatabase>>,
     pub tags: Vec<Tag>,
 }
 
@@ -85,10 +111,14 @@ impl DbClusterSnapshotRecord {
     /// snapshot still being taken. `source_snapshot_arn` is absent because nothing was
     /// copied: that member names "the DB cluster snapshot that was copied to create this
     /// one".
+    /// `storage` is the copy of the cluster's storage the caller took before it locked the
+    /// store ([`capture_cluster_storage`]), so the settings the snapshot reports and the
+    /// data it holds are from one instant.
     pub fn from_cluster(
         cluster: &DbClusterRecord,
         cluster_has_instances: bool,
         snapshot_identifier: &str,
+        storage: Option<::std::sync::Arc<data_plane::sql_engine::InstanceDatabase>>,
         tags: Vec<Tag>,
     ) -> Self {
         Self {
@@ -99,6 +129,7 @@ impl DbClusterSnapshotRecord {
             engine: cluster.engine.clone(),
             engine_version: cluster.engine_version.clone(),
             engine_mode: Some(cluster.engine_mode.clone()),
+            database_name: cluster.database_name.clone(),
             db_instance_class: cluster.db_cluster_instance_class.clone(),
             // "The allocated storage size of the DB cluster snapshot in gibibytes (GiB)":
             // the storage of the cluster the snapshot is being taken from, which is what
@@ -106,6 +137,9 @@ impl DbClusterSnapshotRecord {
             allocated_storage: cluster.reported_allocated_storage(),
             holds_data: cluster_has_instances,
             master_username: cluster.master_username.clone(),
+            // The credential a restored cluster logs its master user in with; see the
+            // field's own note.
+            master_user_password: cluster.master_user_password.clone(),
             availability_zones: cluster.availability_zones.clone(),
             // "The port that the DB cluster was listening on at the time of the snapshot":
             // a fact about the cluster's DB INSTANCES, so it is the port the cluster
@@ -136,6 +170,7 @@ impl DbClusterSnapshotRecord {
             snapshot_create_time: now_as_wire_timestamp(),
             source_snapshot_arn: None,
             restore_attribute: BTreeSet::new(),
+            storage,
             tags,
         }
     }
@@ -247,6 +282,27 @@ pub fn copied_snapshot_tags(copy_tags: Option<bool>, requested: &[Tag], source: 
         }
     }
     tags
+}
+
+/// The tags a RESTORE that names none of its own gives the resource it creates.
+///
+/// `CopyTagsToSnapshot` states the rule: "RDS checks whether you specify new tags. If yes,
+/// the new tags are added to the restored DB instance. If there are no new tags, RDS looks
+/// for the tags from the source DB instance for the DB snapshot, and then adds those tags to
+/// the restored DB instance." `source` is that resource's tags where this region still holds
+/// it; where it is gone — the final snapshot of a deleted instance or cluster — what is left
+/// of them is what the snapshot itself carries.
+///
+/// The one rule for every restore, the DB instance's and the DB cluster's, beside
+/// [`copied_snapshot_tags`] — the same question answered for a snapshot COPY.
+pub fn inherited_snapshot_tags(
+    source: Option<Vec<Tag>>,
+    snapshot: &[Tag],
+) -> Vec<Tag> {
+    match source {
+        Some(tags) if !tags.is_empty() => tags,
+        _ => snapshot.to_vec(),
+    }
 }
 
 /// How Amazon RDS words the not-found fault for the SOURCE of a snapshot copy, looked for

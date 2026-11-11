@@ -186,6 +186,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(crate::scaffolded::Scaffolded::not_implemented(Self::NAME));
         };
+        // The DATA the snapshot will hold: a copy of the source cluster's storage, taken
+        // BEFORE the store is locked and on a blocking task, because it is engine work (see
+        // `crate::state::capture_cluster_storage`). It is what makes the snapshot
+        // restorable; it is dropped unused when a refusal below answers the request.
+        let storage = crate::state::capture_cluster_storage(
+            &state,
+            &(
+                region.clone(),
+                crate::state::db_cluster_identifier_of(&input.db_cluster_identifier)
+                    .to_ascii_lowercase(),
+            ),
+        )
+        .await
+        .map_err(CreateDBClusterSnapshotError::internal_failure)?;
         let mut store = state.lock();
         // The transitions the clock already made due, so the snapshot is taken of the
         // cluster as it really stands.
@@ -282,6 +296,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // `DbClusterSnapshotRecord::from_cluster`.
             !store.cluster_members(cluster).is_empty(),
             &snapshot_key,
+            storage,
             tags,
         );
         // The answer is the record this call stored, so a following describe reports the

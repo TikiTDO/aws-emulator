@@ -206,6 +206,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(crate::scaffolded::Scaffolded::not_implemented(Self::NAME));
         };
+        // The DATA a final DB cluster snapshot holds: a copy of the cluster's storage, taken
+        // BEFORE the store is locked and on a blocking task, because it is engine work (see
+        // `crate::state::capture_cluster_storage`). Only a delete that asks for a final
+        // snapshot copies anything, and the copy is dropped unused when a refusal below
+        // answers the request.
+        let final_snapshot_storage = match &input.final_db_snapshot_identifier {
+            Some(_) => crate::state::capture_cluster_storage(
+                &state,
+                &(region.clone(), identifier.clone()),
+            )
+            .await
+            .map_err(DeleteDBClusterError::internal_failure)?,
+            None => None,
+        };
         let mut store = state.lock();
         store.settle_due_transitions(&region);
 
@@ -424,6 +438,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     // storage the snapshot holds and the port it was taken on.
                     !live_members.is_empty(),
                     &snapshot_identifier,
+                    final_snapshot_storage,
                     tags,
                 );
                 store.db_cluster_snapshots.insert(snapshot_key, snapshot);

@@ -348,19 +348,57 @@ pub async fn capture_instance_storage(
     state: &::engine::ServiceState<ComAmazonawsRdsAmazonrdsv19State>,
     key: &RegionalKey,
 ) -> Result<Option<Arc<sql_engine::InstanceDatabase>>, String> {
-    let Some(database) = state
+    let database = state
         .lock()
         .engine_endpoint(key)
-        .map(DbEngineEndpoint::database)
-    else {
+        .map(DbEngineEndpoint::database);
+    capture_storage(database, "DB instance").await
+}
+
+/// A COPY of the data the DB CLUSTER `key` names holds right now: what a DB cluster
+/// snapshot of that cluster holds, so restoring the snapshot brings those rows back.
+///
+/// The cluster sibling of [`capture_instance_storage`], under the same contract: `Ok(None)`
+/// for a cluster with no engine endpoint — an engine whose wire this emulator serves no
+/// data plane for ([`cluster_endpoint::cluster_engine_wire`]), and an identifier this store
+/// holds no cluster under — and `Err` when the engine could not make the copy, which the
+/// caller answers as a failure of this emulator rather than storing a snapshot that holds
+/// nothing. The store lock is taken only to read the database HANDLE, the copy runs on a
+/// blocking task, and the call belongs BEFORE the handler takes the store lock for the work
+/// the snapshot is part of.
+pub async fn capture_cluster_storage(
+    state: &::engine::ServiceState<ComAmazonawsRdsAmazonrdsv19State>,
+    key: &RegionalKey,
+) -> Result<Option<Arc<sql_engine::InstanceDatabase>>, String> {
+    let database = state
+        .lock()
+        .cluster_engine_endpoint(key)
+        .map(DbEngineEndpoint::database);
+    capture_storage(database, "DB cluster").await
+}
+
+/// The copy itself, for a resource whose database handle has already been read out of the
+/// store: the one body the two captures above share, so a DB instance's snapshot and a DB
+/// cluster's are taken by the same engine call under the same bounds and report the same
+/// failure, each naming its own `resource`.
+///
+/// `database` is `None` for a resource with no engine endpoint, which has no storage to copy
+/// — the `Ok(None)` both callers document. The handle is read under the store's guard by the
+/// caller and the guard is released before this is awaited, so no state lock is held across
+/// the copy.
+async fn capture_storage(
+    database: Option<Arc<sql_engine::InstanceDatabase>>,
+    resource: &str,
+) -> Result<Option<Arc<sql_engine::InstanceDatabase>>, String> {
+    let Some(database) = database else {
         return Ok(None);
     };
     let copied = ::tokio::task::spawn_blocking(move || database.capture())
         .await
-        .map_err(|error| format!("the DB instance's storage could not be copied: {error}"))?;
+        .map_err(|error| format!("the {resource}'s storage could not be copied: {error}"))?;
     copied.map(|copy| Some(Arc::new(copy))).map_err(|error| {
         format!(
-            "the DB instance's storage could not be copied: {}",
+            "the {resource}'s storage could not be copied: {}",
             error.message
         )
     })

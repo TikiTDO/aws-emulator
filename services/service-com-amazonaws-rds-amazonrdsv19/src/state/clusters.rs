@@ -179,6 +179,16 @@ pub struct DbClusterRecord {
     /// Whether `EnableGlobalWriteForwarding` asked for write forwarding to a global
     /// database's primary.
     pub global_write_forwarding_requested: bool,
+    /// `VPCNetworkingEnabled`: whether the cluster uses VPC-based networking. True for
+    /// every cluster placed in the account's VPC, which is every cluster a create makes;
+    /// `RestoreDBClusterFromSnapshot$EnableVPCNetworking` is the one member that can turn it
+    /// off, for a cluster restored without a VPC network interface.
+    pub vpc_networking_enabled: bool,
+    /// `InternetAccessGatewayEnabled`: whether clients reach the cluster over the internet
+    /// through an internet access gateway, which
+    /// `RestoreDBClusterFromSnapshot$EnableInternetAccessGateway` is the one member that
+    /// asks for; false for a cluster that is reached inside its VPC.
+    pub internet_access_gateway_enabled: bool,
     /// `ClusterCreateTime`.
     pub cluster_create_time: ::aws_smithy_types::DateTime,
     /// The member instance the cluster currently WRITES through — the one
@@ -524,12 +534,13 @@ impl DbClusterRecord {
             // neither reports a window.
             earliest_restorable_time: restorable.map(|(earliest, _)| earliest),
             latest_restorable_time: restorable.map(|(_, latest)| latest),
-            // The two settings express configuration turns on. A cluster created through
-            // this operation reaches its VPC's network and nothing else: it is VPC-based,
-            // and it has no internet access gateway in front of it, which is what the two
-            // members report rather than leaving a client to guess.
-            vpc_networking_enabled: Some(true),
-            internet_access_gateway_enabled: Some(false),
+            // The two settings express configuration turns on, as this cluster was created
+            // or restored with them: a cluster placed in its VPC is VPC-based and has no
+            // internet access gateway in front of it, and a cluster restored without the VPC
+            // network interface reports the gateway it reaches clients through instead. Both
+            // are reported rather than left for a client to guess.
+            vpc_networking_enabled: Some(self.vpc_networking_enabled),
+            internet_access_gateway_enabled: Some(self.internet_access_gateway_enabled),
             backup_retention_period: Some(self.backup_retention_period),
             preferred_backup_window: Some(self.preferred_backup_window.clone()),
             preferred_maintenance_window: Some(self.preferred_maintenance_window.clone()),
