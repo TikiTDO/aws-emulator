@@ -222,7 +222,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let end = matched.len().min(start + LIST_CLUSTERS_PAGE_SIZE);
         let clusters: Vec<ClusterSummary> = matched[start..end]
             .iter()
-            .map(|cluster| cluster.to_summary())
+            .map(|cluster| cluster.to_summary(now))
             .collect();
         let marker = matched.get(end).map(|cluster| cluster.id.clone());
 

@@ -25,7 +25,7 @@ use ::aws_smithy_types::error::metadata::ProvideErrorMetadata;
 /// watch for a stalled stream — each of those would need a sleep implementation this client
 /// is not given — and the credentials the callback hands over are used directly rather than
 /// cached.
-fn ec2_client(
+pub(super) fn ec2_client(
     ctx: &::smithy_server_runtime::OperationContext<'_>,
     region: &str,
 ) -> ::aws_sdk_ec2::Client {

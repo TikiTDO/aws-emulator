@@ -56,13 +56,18 @@ shell-words = "1"
 # generated client is needed — the emulator supplies the transport.
 aws-sdk-s3 = { version = "1", default-features = false }
 # The notebook a headless execution names has to RUN for the execution to reach the status
-# its own cells answered, and its cells are caller-supplied Python. They are run in the
-# CONTAINED interpreter this workspace already holds for exactly that
-# (`state::execution::python` of the crate below): one interpreter per run, built with its
-# host-reaching surface compiled out, its native modules narrowed to an allow-list, and the
-# deadline, step, memory, recursion and output bounds enforced in host code the cells cannot
-# reach. No second execution substrate is introduced here — this crate adds no engine
-# dependency of its own and runs the cells through that one (`state::notebook_run`).
+# its own cells answered, and so does the Spark application a `spark-submit` step submits:
+# both are caller-supplied Python. They are run in the CONTAINED interpreter this workspace
+# already holds for exactly that (`state::execution::python` of the crate below): one
+# interpreter per run, built with its host-reaching surface compiled out, its native modules
+# narrowed to an allow-list, and the deadline, step, memory, recursion and output bounds
+# enforced in host code the caller's code cannot reach. No second execution substrate is
+# introduced here — this crate adds no engine dependency of its own and runs both through
+# that one (`state::notebook_run`, `state::spark_step_run`). The Spark surface those
+# applications compute through is ordinary Python this crate supplies on their import path
+# (`state::spark_runtime`), and the only thing outside the interpreter it reaches is this
+# emulator's own object store, over the in-process callback the runtime gives a guest's AWS
+# SDK.
 service-com-amazonaws-lambda-awsgirapiservice = { workspace = true }
 
 [build-dependencies]
@@ -71,11 +76,16 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
-# A notebook execution's notebook is an object in Amazon S3, so the suite that asserts a
-# notebook RUNS writes it through Amazon S3's own `CreateBucket`/`PutObject`, with that
-# service mounted beside Amazon EMR on ONE engine: the cells that run are the ones a client
-# put in the bucket.
+# A notebook execution's notebook is an object in Amazon S3, and a submitted Spark
+# application's file is too, so the suites that assert either RUNS write it through Amazon
+# S3's own `CreateBucket`/`PutObject` and read what it wrote back with `GetObject`, with that
+# service mounted beside Amazon EMR on ONE engine: the code that runs is the code a client
+# put in the bucket, and the output is a real object.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
+# A cluster's Availability Zone is the zone of the subnet its launch placed it in, which is
+# Amazon EC2's resource: the suite that asserts the resolved placement creates the VPC and
+# the subnet through Amazon EC2 itself, mounted on the same engine.
+service-com-amazonaws-ec2-amazonec2 = { workspace = true }
 
 [lints]
 workspace = true

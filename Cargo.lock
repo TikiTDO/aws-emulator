@@ -12530,6 +12530,7 @@ dependencies = [
  "hex",
  "http",
  "serde_json",
+ "service-com-amazonaws-ec2-amazonec2",
  "service-com-amazonaws-glue-awsglue",
  "service-com-amazonaws-lambda-awsgirapiservice",
  "service-com-amazonaws-s3-amazons3",

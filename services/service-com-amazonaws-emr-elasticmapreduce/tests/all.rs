@@ -23,6 +23,8 @@ mod cluster_defaults;
 mod cluster_id_refusal_code;
 #[path = "all/cluster_placement.rs"]
 mod cluster_placement;
+#[path = "all/cluster_read_facts.rs"]
+mod cluster_read_facts;
 #[path = "all/cluster_sessions.rs"]
 mod cluster_sessions;
 #[path = "all/cluster_step_execution.rs"]
@@ -97,6 +99,8 @@ mod resource_tags;
 mod security_configuration_listing;
 #[path = "all/security_configurations.rs"]
 mod security_configurations;
+#[path = "all/spark_step_application.rs"]
+mod spark_step_application;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/studio_session_mapping_listing.rs"]

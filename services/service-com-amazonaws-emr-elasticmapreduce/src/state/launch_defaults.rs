@@ -45,10 +45,63 @@ pub fn effective_scale_down_behavior(requested: Option<String>) -> String {
 /// Whether Amazon EMR replaces degraded core nodes of a cluster whose launch did not say.
 ///
 /// "Indicates whether Amazon EMR should gracefully replace core nodes that have degraded
-/// within the cluster" (`JobFlowInstancesConfig$UnhealthyNodeReplacement` doc): the
-/// service replaces them unless the launch turns the behaviour off, and
-/// `SetUnhealthyNodeReplacement` is what changes it afterwards.
+/// within the cluster" (`JobFlowInstancesConfig$UnhealthyNodeReplacement` doc). The member
+/// states no default, and the service's own answers settle it: a cluster launched without
+/// it is described with graceful replacement OFF, so the behaviour is one a launch opts
+/// into — `JobFlowInstancesConfig$UnhealthyNodeReplacement` at the launch, or
+/// `SetUnhealthyNodeReplacement` afterwards. Reporting it on for a cluster that never asked
+/// would hand a client a setting the operator did not choose.
+/// Whether Amazon EMR replaces degraded core nodes of a cluster whose launch did not say.
+///
+/// "Indicates whether Amazon EMR should gracefully replace core nodes that have degraded
+/// within the cluster" (`JobFlowInstancesConfig$UnhealthyNodeReplacement` doc). The member
+/// states no default, and the service's own answers settle it: a cluster launched without it
+/// is described with graceful replacement ON, so it is a behaviour a launch opts OUT of —
+/// with `JobFlowInstancesConfig$UnhealthyNodeReplacement` at the launch, or
+/// `SetUnhealthyNodeReplacement` afterwards.
 pub const DEFAULT_UNHEALTHY_NODE_REPLACEMENT: bool = true;
+
+/// Whether the cluster a launch created runs with graceful replacement of its degraded core
+/// nodes: what `DescribeCluster` reports for `Cluster$UnhealthyNodeReplacement`.
+///
+/// Two things decide it. A cluster with MORE THAN ONE primary node
+/// ([`MIN_HIGHLY_AVAILABLE_PRIMARY_NODES`]) is not offered the behaviour at all — Amazon EMR
+/// does not replace nodes of a highly available cluster that way, and describes such a
+/// cluster with the setting off however it was launched — so the primary count comes first.
+/// On every other cluster it is the launch's own value, or the service's default where the
+/// launch named none ([`DEFAULT_UNHEALTHY_NODE_REPLACEMENT`]).
+pub fn effective_unhealthy_node_replacement(primary_nodes: i64, requested: Option<bool>) -> bool {
+    if primary_nodes >= MIN_HIGHLY_AVAILABLE_PRIMARY_NODES {
+        return false;
+    }
+    requested.unwrap_or(DEFAULT_UNHEALTHY_NODE_REPLACEMENT)
+}
+
+/// The Amazon Linux release a cluster runs, out of what its launch asked for.
+///
+/// "The Amazon Linux release specified in a cluster launch RunJobFlow request. If no Amazon
+/// Linux release was specified, the default Amazon Linux release is shown in the response."
+/// (`Cluster$OSReleaseLabel` doc.) So a described cluster always states the Amazon Linux
+/// release it is running: the one the launch named, or the DEFAULT one for the generation
+/// the cluster's Amazon EMR release is built on — the newest release this emulator's catalog
+/// offers for that generation ([`os_releases_for`], the same catalog
+/// `DescribeReleaseLabel` publishes under `AvailableOSReleases`).
+///
+/// A launch that named no Amazon EMR release at all names no generation to resolve, so such
+/// a cluster states no Amazon Linux release rather than one invented for it.
+pub fn effective_os_release_label(
+    release_label: Option<&str>,
+    requested: Option<String>,
+) -> Option<String> {
+    if let Some(named) = requested {
+        return Some(named);
+    }
+    let (major, _, _) = release_label.and_then(catalog_release)?;
+    os_releases_for(major)
+        .iter()
+        .next_back()
+        .map(|&label| label.to_string())
+}
 
 /// The applications a cluster launched on `release_label` installs, out of the ones its
 /// launch asked for.

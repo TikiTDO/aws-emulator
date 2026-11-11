@@ -539,6 +539,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
             return Err(RunJobFlowErrorModeled::InternalServerError(InternalServerError {}).into());
         };
+
+        // Where this cluster will run, resolved before any store guard is taken because it
+        // is read in the service that owns the subnet.
+        let requested_instances = InstancesRecord::from_config(&input.instances);
+        let availability_zone =
+            crate::state::launched_availability_zone(ctx, &region, &requested_instances).await;
+
         let mut store = state.lock();
 
         // The account holds a bounded number of clusters: a cluster record is kept after
@@ -552,7 +559,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let (id, master_dns_name) = store.mint_cluster(&region);
         let arn = crate::state::cluster_arn(&region, &id);
-        let mut instances = InstancesRecord::from_config(&input.instances);
+        let mut instances = requested_instances;
+        // "The Availability Zone in which the cluster will run"
+        // (`Ec2InstanceAttributes$Ec2AvailabilityZone` doc): a launch that placed the
+        // cluster in a subnet rather than naming a zone has named it through that subnet,
+        // which Amazon EC2 is what holds. Resolved here, once, so the zone the cluster runs
+        // in is on its record from the launch on.
+        instances.ec2_availability_zone = availability_zone;
 
         // One InstanceFleetRecord per fleet the request configured, in request order,
         // each under the id EMR mints for it — the same records `AddInstanceFleet`
@@ -572,14 +585,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if group_configs.is_empty() {
             group_configs = implied_instance_group_configs(&input.instances);
         }
+        let primary_nodes = primary_node_count(&group_configs, &requested_fleet_configs);
         // A cluster with more than one primary node is highly available, and Amazon EMR
         // locks such a cluster against a shutdown it did not mean: termination protection
         // is forced on at the launch whatever the request asked for, and only
         // `SetTerminationProtection(false)` clears it afterwards.
-        if forces_termination_protection(primary_node_count(&group_configs, &requested_fleet_configs))
-        {
+        if forces_termination_protection(primary_nodes) {
             instances.termination_protected = true;
         }
+        // Graceful replacement of degraded core nodes follows the same primary count: a
+        // highly available cluster is not offered it at all, and every other cluster runs
+        // with the launch's own value or the service's default.
+        instances.unhealthy_node_replacement = crate::state::effective_unhealthy_node_replacement(
+            primary_nodes,
+            input.instances.unhealthy_node_replacement,
+        );
         let mut groups = Vec::with_capacity(group_configs.len());
         for config in group_configs {
             let group_id = store.mint_instance_group_id();
@@ -607,6 +627,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             input.applications.take().unwrap_or_default(),
         );
 
+        // "If no Amazon Linux release was specified, the default Amazon Linux release is
+        // shown in the response" (`Cluster$OSReleaseLabel` doc): the launch's own value, or
+        // the default for the generation this cluster's release is built on.
+        let os_release_label = crate::state::effective_os_release_label(
+            input.release_label.as_deref(),
+            input.os_release_label.take(),
+        );
+
         let record = ClusterRecord {
             id: id.clone(),
             arn: arn.clone(),
@@ -623,7 +651,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ),
             custom_ami_id: input.custom_ami_id,
             security_configuration: input.security_configuration,
-            os_release_label: input.os_release_label,
+            os_release_label,
             repo_upgrade_on_boot: input.repo_upgrade_on_boot,
             // "The VisibleToAllUsers parameter is no longer supported. By default, the
             // value is set to true. Setting it to false now has no effect."
@@ -638,7 +666,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ebs_root_volume_iops: input.ebs_root_volume_iops,
             ebs_root_volume_throughput: input.ebs_root_volume_throughput,
             extended_support: input.extended_support,
-            session_enabled: input.session_enabled,
+            // "Indicates whether Spark Connect sessions are enabled on the cluster"
+            // (`Cluster$SessionEnabled` doc): a cluster whose launch did not ask for them
+            // runs without them, and a described cluster states that rather than leaving
+            // the member out — `StartSession` on such a cluster is refused for it.
+            session_enabled: Some(input.session_enabled.unwrap_or(false)),
             // The applications this cluster installs, resolved to the release's versions
             // before the record is built (the release label is moved into it above).
             applications,

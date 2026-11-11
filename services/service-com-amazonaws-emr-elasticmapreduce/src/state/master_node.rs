@@ -64,3 +64,33 @@ pub fn master_dns_name(region: &str, sequence: u64) -> String {
     let host = master_private_ip_address(sequence).replace('.', "-");
     format!("ip-{host}.{domain}", domain = private_dns_domain(region))
 }
+
+/// The host this emulator ANSWERS on for the request being served, or `None` when it answers
+/// on none.
+///
+/// A cluster's `MasterPublicDnsName` is an address a client CONNECTS to, so where this
+/// emulator is served on a host, that host is the one it can be reached at and the one a
+/// cluster names its master node by ([`super::ClusterRecord::master_public_dns_name`]). The
+/// reading is the tree's one reading of that question
+/// ([`::service_common::data_plane_addressing`]), in the order every announced address here
+/// resolves it: the emulator's OWN endpoint when the request addressed it — a client that
+/// resolves nothing else — and otherwise the address this process is served at, which is
+/// what an in-process call of another service is told. The PORT is dropped, because what
+/// this names is a host.
+pub fn served_master_host(ctx: &::smithy_server_runtime::OperationContext<'_>) -> Option<String> {
+    let parts = ctx.parts();
+    let header = parts
+        .headers
+        .get(::http::header::HOST)
+        .and_then(|host| host.to_str().ok());
+    let authority = ::service_common::data_plane_addressing::reached_emulator_endpoint(
+        &parts.uri.to_string(),
+        header,
+    )
+    .or_else(|| {
+        ::service_common::data_plane_addressing::served_endpoint_authority(ctx.endpoint().as_str())
+    })?;
+    Some(
+        ::service_common::data_plane_addressing::host_only(&authority).to_string(),
+    )
+}

@@ -92,6 +92,40 @@ pub use instance_fleet_modification::*;
 mod launch_defaults;
 pub use launch_defaults::*;
 
+/// What a cluster has COST so far — the normalized instance hours every read of it
+/// derives — split out and re-exported the same way.
+mod normalized_hours;
+pub use normalized_hours::*;
+
+/// WHERE a cluster runs — the Availability Zone its launch placed it in, resolved in the
+/// service that owns the subnet — split out and re-exported the same way.
+mod launch_placement;
+pub use launch_placement::*;
+
+/// The launch's own INSTANCE configuration — what a cluster reports back of the
+/// `JobFlowInstancesConfig` it was created with — split out of this root as its own concern
+/// and re-exported the same way. Its file sits in the directory the release-catalog split
+/// created, which is what the `#[path]` names; the concern is this root's, not that
+/// catalog's, so the module is a sibling of it.
+#[path = "state/release_catalog/launch_placement.rs"]
+mod launch_instances;
+pub use launch_instances::*;
+
+/// WHAT a step submits when what it submits is a Spark application — the reading of its
+/// `spark-submit` command line — split out and re-exported the same way.
+mod spark_application;
+pub use spark_application::*;
+
+/// The Spark runtime a submitted application finds on its import path, split out and
+/// re-exported the same way.
+mod spark_runtime;
+pub use spark_runtime::*;
+
+/// RUNNING the application a step submitted — fetching it out of Amazon S3, executing it and
+/// reading what the step ends in off that run — split out and re-exported the same way.
+mod spark_step_run;
+pub use spark_step_run::*;
+
 /// The Spark Connect session surface of a cluster — which clusters carry sessions, what
 /// `StartSession` records and the states the clock walks one through — split out and
 /// re-exported the same way.
@@ -101,6 +135,8 @@ pub use sessions::*;
 /// The SPARK release family of the release catalog — the labels an Amazon EMR Spark
 /// release carries and what one bundles — split out and re-exported the same way.
 mod spark_releases;
+mod release_catalog;
+pub use release_catalog::*;
 pub use spark_releases::*;
 
 /// `com.amazonaws.emr#ClusterState`, as the wire carries it.
@@ -1179,12 +1215,14 @@ pub const STEP_RUN_SPAN: Duration = Duration::from_secs(2);
 /// `FailureDetails$Reason` — and `StepStateChangeReason$Message` — of a step whose
 /// lifecycle this service ran and whose application it did not.
 ///
-/// This emulator is a control plane: it accepts a step, queues it behind whatever its
-/// cluster is already running, starts it when a concurrency slot frees and records its
-/// timeline — but it executes no Hadoop jar, no `spark-submit` and no `s3-dist-cp`, so the
-/// application the step submitted produced no outcome. The step therefore ENDS in the
-/// modelled failure state, with this reason saying exactly why, rather than reporting
-/// `COMPLETED` for work nothing performed.
+/// This service always runs the step LIFECYCLE: it accepts a step, queues it behind whatever
+/// its cluster is already running, starts it when a concurrency slot frees and records its
+/// timeline. What it can RUN is the submission it holds an engine and bytes for — a
+/// `spark-submit` of a Python application in Amazon S3 ([`spark_step_run`]) and a read-only
+/// statement resolvable in the cluster's metastore ([`step_runner`]). Every other
+/// submission — a jar, a command this service performs nothing for — produced no outcome,
+/// so the step ENDS in the modelled failure state with this reason saying exactly why,
+/// rather than reporting `COMPLETED` for work nothing performed.
 pub const STEP_NOT_EXECUTED_REASON: &str =
     "This emulator runs the step lifecycle but executes no Hadoop jar, so the step ended \
      without running its application.";
@@ -1198,15 +1236,21 @@ pub const STEP_NOT_EXECUTED_MESSAGE: &str =
      did not happen.";
 
 /// `ClusterStatus$StateChangeReason.Message` for the shutdown a cluster that does not stay
-/// up takes once its step queue has emptied.
+/// up takes once its step queue has emptied and every step of it COMPLETED.
 ///
-/// The CODE is the modelled one for that shutdown (`ALL_STEPS_COMPLETED`), but the message
-/// states what became of those steps rather than claiming a completion the step records
-/// contradict: each of them ended without its application running
-/// ([`STEP_NOT_EXECUTED_REASON`]).
-pub const CLUSTER_QUEUE_DRAINED_REASON: &str =
-    "Shut down with no step left to run: this emulator ran no application for the \
-     cluster's steps, so none of them completed.";
+/// Recorded behavior for the text, beside the modelled code for that shutdown
+/// (`ALL_STEPS_COMPLETED`): the message is Amazon EMR's own fixed sentence, with nothing of
+/// the request or of the cluster interpolated into it.
+pub const CLUSTER_STEPS_COMPLETED_REASON: &str = "Steps completed";
+
+/// `ClusterStatus$StateChangeReason.Message` for the same shutdown of a cluster whose queue
+/// emptied with a step that did NOT complete — one that failed, was cancelled or was cut
+/// short.
+///
+/// Recorded behavior for the text, in the same fixed form: the queue has run either way, so
+/// the code is still `ALL_STEPS_COMPLETED`, and the message is what says the steps did not
+/// all succeed.
+pub const CLUSTER_STEPS_COMPLETED_WITH_ERRORS_REASON: &str = "Steps completed with errors";
 
 /// How long each phase of a notebook execution's status progression lasts
 /// ([`NOTEBOOK_EXECUTION_PROGRESSION`]).
@@ -2223,465 +2267,6 @@ pub fn caller_arn(parts: &::http::request::Parts) -> String {
 // form, which is why `release_bundles_application` compares names without regard to
 // case; they are not what the catalog reports.
 
-/// One Amazon EMR release line (`emr-<major>.<minor>`) and the patch releases published
-/// on it. The labels the catalog offers are exactly these `(line, patch)` pairs.
-#[derive(Debug, Clone, Copy)]
-pub struct ReleaseLine {
-    pub major: u32,
-    pub minor: u32,
-    pub patches: &'static [u32],
-}
-
-/// Every release line this emulator offers, oldest first.
-pub const RELEASE_LINES: &[ReleaseLine] = &[
-    ReleaseLine { major: 5, minor: 30, patches: &[0, 1, 2] },
-    ReleaseLine { major: 5, minor: 31, patches: &[0] },
-    ReleaseLine { major: 5, minor: 32, patches: &[0] },
-    ReleaseLine { major: 5, minor: 33, patches: &[0, 1] },
-    ReleaseLine { major: 5, minor: 34, patches: &[0] },
-    ReleaseLine { major: 5, minor: 35, patches: &[0] },
-    ReleaseLine { major: 5, minor: 36, patches: &[0, 1, 2] },
-    ReleaseLine { major: 6, minor: 0, patches: &[0, 1] },
-    ReleaseLine { major: 6, minor: 1, patches: &[0, 1] },
-    ReleaseLine { major: 6, minor: 2, patches: &[0, 1] },
-    ReleaseLine { major: 6, minor: 3, patches: &[0, 1] },
-    ReleaseLine { major: 6, minor: 4, patches: &[0] },
-    ReleaseLine { major: 6, minor: 5, patches: &[0] },
-    ReleaseLine { major: 6, minor: 6, patches: &[0] },
-    ReleaseLine { major: 6, minor: 7, patches: &[0] },
-    ReleaseLine { major: 6, minor: 8, patches: &[0] },
-    ReleaseLine { major: 6, minor: 9, patches: &[0] },
-    ReleaseLine { major: 6, minor: 10, patches: &[0, 1] },
-    ReleaseLine { major: 6, minor: 11, patches: &[0, 1] },
-    ReleaseLine { major: 6, minor: 12, patches: &[0] },
-    ReleaseLine { major: 6, minor: 13, patches: &[0] },
-    ReleaseLine { major: 6, minor: 14, patches: &[0] },
-    ReleaseLine { major: 6, minor: 15, patches: &[0] },
-    ReleaseLine { major: 7, minor: 0, patches: &[0] },
-    ReleaseLine { major: 7, minor: 1, patches: &[0] },
-    ReleaseLine { major: 7, minor: 2, patches: &[0] },
-    ReleaseLine { major: 7, minor: 3, patches: &[0] },
-    ReleaseLine { major: 7, minor: 4, patches: &[0] },
-    ReleaseLine { major: 7, minor: 5, patches: &[0] },
-    // The lines published since: Amazon EMR offers every release of the series, so a
-    // launch naming one of them resolves rather than being refused. Source for the labels
-    // is the Release Guide's release-version table, as for every line above; each bundles
-    // the application versions the newest row at or before its line carries
-    // ([`CatalogApplication::version_at`]), which is the rule that already gives a patch
-    // release its versions.
-    ReleaseLine { major: 7, minor: 6, patches: &[0] },
-    ReleaseLine { major: 7, minor: 7, patches: &[0] },
-    ReleaseLine { major: 7, minor: 8, patches: &[0] },
-    ReleaseLine { major: 7, minor: 9, patches: &[0] },
-];
-
-/// One application in the catalog.
-#[derive(Debug, Clone, Copy)]
-pub struct CatalogApplication {
-    /// `SimplifiedApplication$Name`: the one identifier Amazon EMR publishes for this
-    /// application, reported verbatim and never case-folded.
-    pub name: &'static str,
-    /// The version this application carries from a release line onward: a row applies
-    /// to every release at or after its line, up to the next row's line. Rows are in
-    /// ascending line order, and a release BEFORE the first row predates the
-    /// application, which such a release does not bundle at all.
-    pub versions: &'static [((u32, u32), &'static str)],
-    /// The line from which Amazon EMR no longer bundles this application, when it
-    /// dropped it.
-    pub removed_from: Option<(u32, u32)>,
-}
-
-impl CatalogApplication {
-    /// The version this application carries on the release line `(major, minor)`, or
-    /// `None` when that release does not bundle it.
-    pub fn version_at(&self, major: u32, minor: u32) -> Option<&'static str> {
-        if self.removed_from.is_some_and(|from| (major, minor) >= from) {
-            return None;
-        }
-        self.versions
-            .iter()
-            .rfind(|(line, _)| *line <= (major, minor))
-            .map(|&(_, version)| version)
-    }
-}
-
-/// The applications Amazon EMR bundles, with the version each release line carries.
-pub const APPLICATION_CATALOG: &[CatalogApplication] = &[
-    CatalogApplication {
-        name: "Flink",
-        versions: &[
-            ((5, 30), "1.10.0"),
-            ((5, 33), "1.12.1"),
-            ((5, 36), "1.14.2"),
-            ((6, 0), "1.9.1"),
-            ((6, 1), "1.11.2"),
-            ((6, 6), "1.14.2"),
-            ((6, 9), "1.15.2"),
-            ((6, 12), "1.17.0"),
-            ((6, 15), "1.17.1"),
-            ((7, 0), "1.18.0"),
-            ((7, 2), "1.19.0"),
-        ],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "Ganglia",
-        versions: &[((5, 30), "3.7.2"), ((6, 0), "3.7.2")],
-        // Amazon EMR 7.0.0 no longer bundles Ganglia.
-        removed_from: Some((7, 0)),
-    },
-    CatalogApplication {
-        name: "Hadoop",
-        versions: &[
-            ((5, 30), "2.8.5"),
-            ((5, 31), "2.10.0"),
-            ((5, 33), "2.10.1"),
-            ((6, 0), "3.2.1"),
-            ((6, 9), "3.3.3"),
-            ((6, 15), "3.3.6"),
-            ((7, 5), "3.4.0"),
-        ],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "HBase",
-        versions: &[
-            ((5, 30), "1.4.13"),
-            ((6, 0), "2.2.3"),
-            ((6, 6), "2.4.4"),
-            ((6, 9), "2.4.13"),
-            ((6, 15), "2.4.17"),
-            ((7, 2), "2.5.8"),
-        ],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "Hive",
-        versions: &[
-            ((5, 30), "2.3.6"),
-            ((5, 33), "2.3.7"),
-            ((5, 36), "2.3.9"),
-            ((6, 0), "3.1.2"),
-            ((6, 9), "3.1.3"),
-        ],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "Hudi",
-        versions: &[
-            ((5, 30), "0.5.2"),
-            ((5, 36), "0.10.0"),
-            ((6, 0), "0.5.0"),
-            ((6, 6), "0.10.1"),
-            ((6, 9), "0.12.1"),
-            ((6, 12), "0.13.1"),
-            ((6, 15), "0.14.0"),
-            ((7, 2), "0.15.0"),
-        ],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "Hue",
-        versions: &[
-            ((5, 30), "4.6.0"),
-            ((5, 36), "4.10.0"),
-            ((6, 0), "4.4.0"),
-            ((6, 6), "4.10.0"),
-            ((6, 9), "4.11.0"),
-        ],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "Iceberg",
-        // Amazon EMR offers Iceberg from 6.5.0 onward.
-        versions: &[
-            ((6, 5), "0.11.0"),
-            ((6, 9), "0.14.1"),
-            ((6, 12), "1.2.1"),
-            ((6, 15), "1.4.0"),
-            ((7, 0), "1.4.2"),
-            ((7, 2), "1.5.0"),
-        ],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "JupyterEnterpriseGateway",
-        versions: &[((6, 0), "2.1.0"), ((6, 9), "2.6.0")],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "JupyterHub",
-        versions: &[((5, 30), "1.1.0"), ((5, 36), "1.4.1"), ((6, 0), "1.1.0"), ((6, 6), "1.4.1")],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "Livy",
-        versions: &[((5, 30), "0.7.0"), ((5, 36), "0.7.1"), ((6, 0), "0.7.0"), ((6, 6), "0.7.1")],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "Oozie",
-        versions: &[
-            ((5, 30), "5.2.0"),
-            ((5, 36), "5.2.1"),
-            ((6, 0), "5.1.0"),
-            ((6, 1), "5.2.0"),
-            ((6, 6), "5.2.1"),
-        ],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "Phoenix",
-        versions: &[
-            ((5, 30), "4.14.3"),
-            ((6, 0), "5.0.0"),
-            ((6, 2), "5.1.2"),
-            ((7, 0), "5.1.3"),
-        ],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "Pig",
-        versions: &[((5, 30), "0.17.0"), ((6, 0), "0.17.0")],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "Presto",
-        versions: &[
-            ((5, 30), "0.232"),
-            ((5, 36), "0.267"),
-            ((6, 0), "0.230"),
-            ((6, 6), "0.267"),
-            ((6, 9), "0.276"),
-            ((6, 15), "0.283"),
-            ((7, 0), "0.284"),
-        ],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "Spark",
-        versions: &[
-            ((5, 30), "2.4.5"),
-            ((5, 33), "2.4.7"),
-            ((5, 36), "2.4.8"),
-            ((6, 0), "2.4.4"),
-            ((6, 1), "3.0.0"),
-            ((6, 3), "3.1.1"),
-            ((6, 6), "3.2.0"),
-            ((6, 8), "3.3.0"),
-            ((6, 12), "3.4.0"),
-            ((6, 15), "3.4.1"),
-            ((7, 0), "3.5.0"),
-            ((7, 2), "3.5.1"),
-            ((7, 5), "3.5.2"),
-        ],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "Tez",
-        versions: &[((5, 30), "0.9.2"), ((6, 0), "0.9.2"), ((6, 9), "0.10.2")],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "Trino",
-        // Amazon EMR offers Trino under that name from 6.4.0 onward.
-        versions: &[
-            ((6, 4), "359"),
-            ((6, 6), "367"),
-            ((6, 9), "398"),
-            ((6, 12), "414"),
-            ((6, 15), "426"),
-            ((7, 2), "435"),
-        ],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "Zeppelin",
-        versions: &[
-            ((5, 30), "0.8.2"),
-            ((5, 36), "0.10.0"),
-            ((6, 0), "0.9.0"),
-            ((6, 9), "0.10.1"),
-            ((7, 2), "0.11.1"),
-        ],
-        removed_from: None,
-    },
-    CatalogApplication {
-        name: "ZooKeeper",
-        versions: &[((5, 30), "3.4.14"), ((6, 0), "3.4.14"), ((6, 6), "3.5.10"), ((7, 0), "3.9.1")],
-        removed_from: None,
-    },
-];
-
-/// The Amazon Linux 2 releases offered for an Amazon EMR release built on it (Amazon
-/// EMR 5.30.0 through 6.x). `OSRelease$Label` documents the format: "as shown in Amazon
-/// Linux 2 Release Notes. For example, 2.0.20220218.1."
-const AMAZON_LINUX_2_OS_RELEASES: &[&str] = &["2.0.20230808.0", "2.0.20231116.0"];
-
-/// The Amazon Linux 2023 releases offered for an Amazon EMR release built on it (Amazon
-/// EMR 7.x), in the same dotted release-note form.
-const AMAZON_LINUX_2023_OS_RELEASES: &[&str] = &["2023.4.20240429.0", "2023.6.20241010.0"];
-
-/// The first Amazon EMR major release built on Amazon Linux 2023 rather than Amazon
-/// Linux 2.
-const FIRST_AMAZON_LINUX_2023_EMR_MAJOR: u32 = 7;
-
-/// The Amazon Linux releases available for an Amazon EMR release, by the generation its
-/// major release is built on.
-fn os_releases_for(major: u32) -> &'static [&'static str] {
-    if major >= FIRST_AMAZON_LINUX_2023_EMR_MAJOR {
-        AMAZON_LINUX_2023_OS_RELEASES
-    } else {
-        AMAZON_LINUX_2_OS_RELEASES
-    }
-}
-
-/// The label of the release `major.minor.patch`, as Amazon EMR spells it.
-pub fn release_label(major: u32, minor: u32, patch: u32) -> String {
-    format!("emr-{major}.{minor}.{patch}")
-}
-
-/// The `(major, minor, patch)` release an `emr-<major>.<minor>.<patch>` label names, or
-/// `None` when the label is not in that form.
-pub fn release_version(label: &str) -> Option<(u32, u32, u32)> {
-    let mut parts = label.strip_prefix("emr-")?.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next()?.parse().ok()?;
-    parts.next().is_none().then_some((major, minor, patch))
-}
-
-/// The release `label` names, when the catalog offers it.
-///
-/// A label has to be spelled exactly as [`release_label`] renders it — so a padded or
-/// differently cased variant names no release — AND name a patch release published on
-/// one of the lines in [`RELEASE_LINES`]. The Spark release family carries its own prefix
-/// and its own lines ([`spark_release`]), and a label of it resolves here too: it is one
-/// catalog.
-pub fn catalog_release(label: &str) -> Option<(u32, u32, u32)> {
-    if let Some(release) = spark_release(label) {
-        return Some(release);
-    }
-    let (major, minor, patch) = release_version(label)?;
-    if label != release_label(major, minor, patch) {
-        return None;
-    }
-    RELEASE_LINES
-        .iter()
-        .find(|line| line.major == major && line.minor == minor && line.patches.contains(&patch))
-        .map(|_| (major, minor, patch))
-}
-
-/// Every release label the catalog offers, NEWEST release first — the order
-/// `ListReleaseLabels` reports its first page in ("the first page of results are
-/// determined by other filtering parameters or by the latest version",
-/// `ListReleaseLabelsInput$NextToken` doc).
-pub fn catalog_release_labels() -> Vec<String> {
-    let mut releases: Vec<(u32, u32, u32)> = RELEASE_LINES
-        .iter()
-        .flat_map(|line| {
-            line.patches
-                .iter()
-                .map(move |&patch| (line.major, line.minor, patch))
-        })
-        .collect();
-    releases.sort_unstable_by(|left, right| right.cmp(left));
-    releases
-        .into_iter()
-        .map(|(major, minor, patch)| release_label(major, minor, patch))
-        .collect()
-}
-
-/// The applications the release line `(major, minor)` bundles, as the wire shapes, in
-/// application-name order so every caller sees the same list in the same order.
-pub fn release_line_applications(major: u32, minor: u32) -> Vec<SimplifiedApplication> {
-    let mut applications: Vec<SimplifiedApplication> = APPLICATION_CATALOG
-        .iter()
-        .filter_map(|application| {
-            Some(SimplifiedApplication {
-                name: Some(application.name.to_string()),
-                version: Some(application.version_at(major, minor)?.to_string()),
-            })
-        })
-        .collect();
-    applications.sort_by(|left, right| left.name.cmp(&right.name));
-    applications
-}
-
-/// What `DescribeReleaseLabel` reports for one release of the catalog.
-#[derive(Debug, Clone)]
-pub struct ReleaseLabelRecord {
-    pub label: String,
-    pub applications: Vec<SimplifiedApplication>,
-    pub available_os_releases: Vec<OSRelease>,
-}
-
-/// The catalog's entry for `label`, or `None` when it names no release this emulator
-/// offers.
-pub fn release_label_record(label: &str) -> Option<ReleaseLabelRecord> {
-    if let Some(record) = spark_release_label_record(label) {
-        return Some(record);
-    }
-    let (major, minor, patch) = catalog_release(label)?;
-    Some(ReleaseLabelRecord {
-        label: release_label(major, minor, patch),
-        applications: release_line_applications(major, minor),
-        available_os_releases: os_releases_for(major)
-            .iter()
-            .map(|&label| OSRelease {
-                label: Some(label.to_string()),
-            })
-            .collect(),
-    })
-}
-
-/// The `JobFlowInstancesConfig`-derived facts a cluster reports back.
-#[derive(Debug, Clone, Default)]
-pub struct InstancesRecord {
-    pub instance_collection_type: String,
-    pub master_instance_type: Option<String>,
-    pub slave_instance_type: Option<String>,
-    pub instance_count: Option<i32>,
-    pub ec2_key_name: Option<String>,
-    pub ec2_subnet_id: Option<String>,
-    pub requested_ec2_subnet_ids: Vec<String>,
-    pub ec2_availability_zone: Option<String>,
-    pub requested_ec2_availability_zones: Vec<String>,
-    pub emr_managed_master_security_group: Option<String>,
-    pub emr_managed_slave_security_group: Option<String>,
-    pub service_access_security_group: Option<String>,
-    pub additional_master_security_groups: Vec<String>,
-    pub additional_slave_security_groups: Vec<String>,
-    pub keep_job_flow_alive_when_no_steps: bool,
-    pub termination_protected: bool,
-    pub unhealthy_node_replacement: bool,
-}
-
-/// The ONE placement a cluster's instances were launched in, out of what its
-/// `JobFlowInstancesConfig` asked for.
-///
-/// A cluster states its placement either as a single value (`Ec2SubnetId`,
-/// `Placement$AvailabilityZone`) or — the instance-fleets form — as a LIST of candidates
-/// (`Ec2SubnetIds`, `Placement$AvailabilityZones`). A list is a request for a choice, not a
-/// placement: "Amazon EMR chooses the Amazon EC2 subnet with the best fit from among the
-/// list of `RequestedEc2SubnetIds`, and then launches all cluster instances within that
-/// Subnet" (`Ec2InstanceAttributes$RequestedEc2SubnetIds`), and the same for the zones
-/// ("chooses the Availability Zone with the best fit from among the list of
-/// `RequestedEc2AvailabilityZones`"). So a cluster configured with a candidate list is
-/// still running in exactly one subnet and one zone, and the singular member reports that
-/// one while the plural member keeps the candidates the caller named.
-///
-/// There is no capacity here to rank candidates by fit, so the choice is the FIRST
-/// candidate the request lists: a value the caller supplied, decided once when the cluster
-/// is created and recorded, so every later read reports the same placement. A single value
-/// already IS the placement and wins over the list, and a cluster that named neither is
-/// reported with no placement rather than one invented for it.
-fn launched_in(single: Option<&str>, candidates: &[String]) -> Option<String> {
-    single
-        .map(str::to_string)
-        .or_else(|| candidates.first().cloned())
-}
-
 impl InstancesRecord {
     /// Derive the summary from the `Instances` member of a `RunJobFlow` request.
     pub fn from_config(config: &JobFlowInstancesConfig) -> Self {
@@ -2996,14 +2581,23 @@ impl ClusterRecord {
             return;
         }
         self.status.state = cluster_state::TERMINATING.to_string();
+        // Every step of the queue has run: the cluster reports the modelled code for the
+        // shutdown that brings (`ClusterStateChangeReasonCode`), and the message Amazon EMR
+        // words it with — which says whether those steps all succeeded.
+        let every_step_completed = self
+            .steps
+            .iter()
+            .all(|step| step.state == step_state::COMPLETED);
         self.status.state_change_reason = Some(StateChangeReasonRecord {
-            // The modelled code for the shutdown an emptied queue brings
-            // (`ClusterStateChangeReasonCode`), beside a message that says what actually
-            // became of those steps: each of them ENDED without its application running
-            // ([`STEP_NOT_EXECUTED_REASON`]), so the cluster does not claim a completion
-            // its own step records contradict.
             code: cluster_state_change_reason_code::ALL_STEPS_COMPLETED.to_string(),
-            message: Some(CLUSTER_QUEUE_DRAINED_REASON.to_string()),
+            message: Some(
+                if every_step_completed {
+                    CLUSTER_STEPS_COMPLETED_REASON
+                } else {
+                    CLUSTER_STEPS_COMPLETED_WITH_ERRORS_REASON
+                }
+                .to_string(),
+            ),
         });
         self.status.terminated_due_at = Some(last_end + TRANSITION_SPAN);
     }
@@ -3174,8 +2768,9 @@ impl ClusterRecord {
         }
     }
 
-    /// The wire `Cluster` for this record — what `DescribeCluster` answers with.
-    pub fn to_cluster(&self) -> Cluster {
+    /// The wire `Cluster` for this record — what `DescribeCluster` answers with, as it
+    /// stands at `read`.
+    pub fn to_cluster(&self, read: &ClusterRead<'_>) -> Cluster {
         Cluster {
             id: Some(self.id.clone()),
             name: Some(self.name.clone()),
@@ -3183,10 +2778,14 @@ impl ClusterRecord {
             ec2_instance_attributes: Some(Ec2InstanceAttributes {
                 ec2_key_name: self.instances.ec2_key_name.clone(),
                 ec2_subnet_id: self.instances.ec2_subnet_id.clone(),
-                requested_ec2_subnet_ids: optional_list(&self.instances.requested_ec2_subnet_ids),
+                // The subnet and zone CANDIDATES the launch named, which are a collection
+                // the cluster carries: a launch that named none carries an empty one, and
+                // an absent list would say the member is unknown where the service knows it
+                // is empty.
+                requested_ec2_subnet_ids: Some(self.instances.requested_ec2_subnet_ids.clone()),
                 ec2_availability_zone: self.instances.ec2_availability_zone.clone(),
-                requested_ec2_availability_zones: optional_list(
-                    &self.instances.requested_ec2_availability_zones,
+                requested_ec2_availability_zones: Some(
+                    self.instances.requested_ec2_availability_zones.clone(),
                 ),
                 // "Also called instance profile and Amazon EC2 role" —
                 // RunJobFlow$JobFlowRole is what the cluster's instances assume.
@@ -3227,8 +2826,8 @@ impl ClusterRecord {
             applications: Some(self.applications.clone()),
             tags: Some(self.tags.clone()),
             service_role: self.service_role.clone(),
-            normalized_instance_hours: Some(self.normalized_instance_hours()),
-            master_public_dns_name: self.master_public_dns_name(),
+            normalized_instance_hours: Some(normalized_instance_hours(self, read.now)),
+            master_public_dns_name: self.master_public_dns_name(read.master_host),
             configurations: Some(served_configurations(&self.configurations)),
             security_configuration: self.security_configuration.clone(),
             auto_scaling_role: self.auto_scaling_role.clone(),
@@ -3251,13 +2850,14 @@ impl ClusterRecord {
         }
     }
 
-    /// The wire `ClusterSummary` for this record — what `ListClusters` answers with.
-    pub fn to_summary(&self) -> ClusterSummary {
+    /// The wire `ClusterSummary` for this record — what `ListClusters` answers with, as it
+    /// stands at `now`.
+    pub fn to_summary(&self, now: SystemTime) -> ClusterSummary {
         ClusterSummary {
             id: Some(self.id.clone()),
             name: Some(self.name.clone()),
             status: Some(self.to_status()),
-            normalized_instance_hours: Some(self.normalized_instance_hours()),
+            normalized_instance_hours: Some(normalized_instance_hours(self, now)),
             cluster_arn: Some(self.arn.clone()),
             outpost_arn: None,
         }
@@ -3270,19 +2870,34 @@ impl ClusterRecord {
     /// instant its status records as `ReadyDateTime` — and stays on the record from then
     /// on, a cluster that has since terminated included. A cluster that never became
     /// ready never had a master node to name, so it reports none.
-    fn master_public_dns_name(&self) -> Option<String> {
+    /// WHICH name that is follows the one rule an announced address obeys here: the member
+    /// exists for a client to REACH ("If the cluster is on a private subnet, this is the
+    /// private DNS name. On a public subnet, this is the public DNS name"), so where this
+    /// emulator answers on a host of its own, `host` is that host and the master node is
+    /// named by it — the one address a client of this emulator can reach the cluster at.
+    /// Where it answers on none, there is no address to announce and the node is named by
+    /// the Amazon-provided private hostname of the address it holds ([`master_dns_name`]),
+    /// which is the name AWS reports for a node with no public address.
+    fn master_public_dns_name(&self, host: Option<&str>) -> Option<String> {
         self.status
             .ready_date_time
-            .map(|_| self.master_dns_name.clone())
+            .map(|_| host.unwrap_or(&self.master_dns_name).to_string())
     }
+}
 
-    /// "An approximation of the cost of the cluster, represented in m1.small/hours.
-    /// This value is incremented one time for every hour an m1.small instance runs."
-    /// (`Cluster$NormalizedInstanceHours` doc.) No instance has run for an hour here,
-    /// so the count is zero rather than invented.
-    fn normalized_instance_hours(&self) -> i32 {
-        0
-    }
+/// What a read of a cluster needs beside the record: the instant it is read at, and the host
+/// this emulator answers on for the caller that read it.
+///
+/// Both are facts of the REQUEST rather than of the cluster: the accrued cost follows from
+/// how long the cluster has been up by now ([`normalized_instance_hours`]), and the address a
+/// client can reach the cluster's master node at is the one this emulator is served on
+/// ([`ClusterRecord::master_public_dns_name`]).
+#[derive(Debug, Clone, Copy)]
+pub struct ClusterRead<'a> {
+    /// The instant this read happens at.
+    pub now: SystemTime,
+    /// The host this emulator answers on, or `None` when it answers on none.
+    pub master_host: Option<&'a str>,
 }
 
 /// One persisted instance fleet, built from a submitted `InstanceFleetConfig`.
@@ -4086,6 +3701,12 @@ pub struct StepRecord {
     /// not-executed failure every other step ends in. `None` while nothing has been
     /// resolved for this step.
     pub outcome: Option<StepOutcome>,
+    /// The Spark application this step's command submits, read off that command once when
+    /// the step was submitted ([`submitted_spark_application`]), and `None` when the command
+    /// submits none this service can run. A step that submits one does not END until that
+    /// application has been RUN and its answer recorded in
+    /// [`StepRecord::outcome`] ([`run_due_step_applications`]).
+    pub application: Option<SparkApplication>,
 }
 
 impl StepRecord {
@@ -4113,6 +3734,9 @@ impl StepRecord {
         // changes, so it is read once here and resolved against the metastore when the
         // runner dispatches the step.
         let work = read_step_work(&config.hadoop_jar_step.jar, &args);
+        // The application the command submits, read the same way and for the same reason:
+        // the command never changes, and what it submits is what the step will RUN.
+        let application = submitted_spark_application(&config.hadoop_jar_step.jar, &args);
         Self {
             id,
             name: config.name,
@@ -4138,7 +3762,22 @@ impl StepRecord {
             stop_state: None,
             work,
             outcome: None,
+            application,
         }
+    }
+
+    /// Whether this step is still owed the RUN of the application it submitted: it submitted
+    /// one, nothing has answered for it yet, and the step is neither terminal nor stopping.
+    ///
+    /// Such a step does not end ([`Self::run_between`]): the state it ends in is the state
+    /// its application answered, so it stays `RUNNING` until there is an answer rather than
+    /// being reported COMPLETED or FAILED for work nothing has performed yet.
+    #[must_use]
+    pub fn awaits_application(&self) -> bool {
+        self.application.is_some()
+            && self.outcome.is_none()
+            && !self.is_terminal()
+            && self.stop_due_at.is_none()
     }
 
     /// Begin cancelling this step on the caller's request.
@@ -4238,18 +3877,20 @@ impl StepRecord {
     /// `RUNNING` and records when it started; one whose span has passed has ENDED, and it
     /// ends in the state this service can account for.
     ///
-    /// That end is the state the step's own WORK answered, when the step runner could
-    /// resolve it ([`StepOutcome`], [`run_due_steps`]): a statement whose only effect is
-    /// reading, submitted to a cluster whose Hive metastore this service holds, ends
-    /// `COMPLETED` when every table it names resolves and `FAILED` with the driver's
-    /// table-not-found when one does not.
+    /// That end is the state the step's own submission ANSWERED, when this service could run
+    /// or resolve it ([`StepOutcome`]): a Spark application the step submitted is RUN and the
+    /// step ends in what that run came to ([`run_due_step_applications`]) — such a step does
+    /// not end until it has ([`Self::awaits_application`]) — and a statement whose only
+    /// effect is reading, submitted to a cluster whose Hive metastore this service holds,
+    /// ends `COMPLETED` when every table it names resolves and `FAILED` with the driver's
+    /// table-not-found when one does not ([`run_due_steps`]).
     ///
     /// For every other step that end is the modelled FAILURE state, with the details
     /// saying why ([`STEP_NOT_EXECUTED_REASON`]): this service runs the step lifecycle —
-    /// the queue, the concurrency slots, the timeline — but it executes no Hadoop jar, so
-    /// the application the step submitted produced no outcome, and `COMPLETED` ("the step
-    /// completed successfully") would be a success for work nothing performed. The reason
-    /// is what tells a caller that apart from an application that really failed.
+    /// the queue, the concurrency slots, the timeline — but it executed nothing for that
+    /// submission, so it produced no outcome, and `COMPLETED` ("the step completed
+    /// successfully") would be a success for work nothing performed. The reason is what
+    /// tells a caller that apart from an application that really failed.
     ///
     /// Because that failure is this service's own rather than the application's, it does
     /// NOT stand in for one in deciding what becomes of the rest of the queue: the step's
@@ -4264,6 +3905,13 @@ impl StepRecord {
             return;
         }
         if now >= end {
+            // A step whose application has not run yet does not end: what it ends in is
+            // what that application answers ([`Self::awaits_application`]).
+            if self.awaits_application() {
+                self.state = step_state::RUNNING.to_string();
+                self.start_date_time = Some(start);
+                return;
+            }
             self.state = self
                 .outcome
                 .as_ref()
@@ -4318,9 +3966,20 @@ impl StepRecord {
         };
         StepStatus {
             state: Some(self.state.clone()),
-            state_change_reason: failed.then(|| StepStateChangeReason {
-                code: None,
-                message: Some(reason.clone()),
+            // A step that did NOT fail has nothing to report in the reason — it was not a
+            // failure and "currently, the service provides no code for the state change"
+            // (`StepStateChangeReason$Code` doc) — so it carries the EMPTY reason the
+            // service answers with rather than either a message or no member at all.
+            state_change_reason: Some(if failed {
+                StepStateChangeReason {
+                    code: None,
+                    message: Some(reason.clone()),
+                }
+            } else {
+                StepStateChangeReason {
+                    code: None,
+                    message: None,
+                }
             }),
             failure_details: failed.then_some(FailureDetails {
                 reason: Some(reason),

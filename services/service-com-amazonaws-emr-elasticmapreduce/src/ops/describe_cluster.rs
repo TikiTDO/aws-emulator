@@ -134,8 +134,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let now = ::std::time::SystemTime::now();
+        // The address a client of this emulator can reach the cluster's master node at,
+        // read before the store is taken because it is a fact of the request.
+        let master_host = crate::state::served_master_host(ctx);
 
         // The SHAPE of the cluster id is settled BEFORE any cluster is resolved: a value
         // carrying characters no cluster id is drawn from names no cluster the service
@@ -157,6 +159,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
+        // Reporting only, and before this service's store is taken: a step this cluster has
+        // started is OWED the run of the application it submitted — the cluster's own
+        // shutdown waits on its queue having run — and neither the Amazon S3 read nor the
+        // interpreter that runs it may happen under this service's lock.
+        crate::state::run_due_step_applications(
+            &*self.engine,
+            ctx,
+            &crate::state::request_region(ctx.parts()),
+            &input.cluster_id,
+            now,
+        )
+        .await;
+
         let mut store = state.lock();
 
         // Reporting only: `cluster_mut` materialises the transitions the clock already
@@ -170,7 +185,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         Ok(DescribeClusterOutput {
-            cluster: Some(cluster.to_cluster()),
+            cluster: Some(cluster.to_cluster(&crate::state::ClusterRead {
+                now,
+                master_host: master_host.as_deref(),
+            })),
         })
     }
 }

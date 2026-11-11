@@ -18,14 +18,17 @@
 //! The step's: a step submitted to a cluster is queued, and the cluster RUNS it once it is
 //! ready and one of its concurrency slots is free — "specifies the number of steps that
 //! can be executed concurrently" (`RunJobFlow$StepConcurrencyLevel`) — so the step leaves
-//! `PENDING` for `RUNNING` and then ENDS, reporting both instants in `Status.Timeline`. It
-//! ends in the modelled FAILURE state with the details saying why: this service holds the
-//! cluster's step state and executes no Hadoop jar, so the application the step submitted
-//! produced no outcome and `COMPLETED` would be a success for work nothing performed. A
-//! cluster shutting down takes its queue with it: a step still to run on it never does,
-//! and one that had started does not finish. And once the queue has run, a cluster that did
-//! not ask to stay up stops itself: "after the steps complete, the cluster stops"
-//! (`RunJobFlow`), which is what `Cluster$AutoTerminate` reports.
+//! `PENDING` for `RUNNING` and then ENDS, reporting both instants in `Status.Timeline`. The
+//! application every step of this suite submits is one no bytes of exist here (its file is
+//! in a bucket this emulator holds nothing in, and no object store is mounted beside Amazon
+//! EMR in this suite), so each step ends in the modelled FAILURE state with the details
+//! saying why — `COMPLETED` would be a success for work nothing performed. A step whose
+//! application this emulator DOES run is the sibling suite's subject
+//! (`tests/all/spark_step_application.rs`). A cluster shutting down takes its queue with it:
+//! a step still to run on it never does, and one that had started does not finish. And once
+//! the queue has run, a cluster that did not ask to stay up stops itself: "after the steps
+//! complete, the cluster stops" (`RunJobFlow`), which is what `Cluster$AutoTerminate`
+//! reports.
 //!
 //! The rows span what those rules generalise over: how many steps the queue holds (one,
 //! two, four), how many of them may run at once (the documented default of one, two, more
@@ -352,8 +355,8 @@ async fn a_cluster_comes_up_in_phases_and_then_runs_its_queue() {
             assert_eq!(
                 at(step, &["Status", "State"]).as_str(),
                 Some("FAILED"),
-                "case {label:?}: a step whose application nothing ran ends in the modelled \
-                 failure state, got {step}"
+                "case {label:?}: a step whose application nothing could run ends in the \
+                 modelled failure state, got {step}"
             );
             // The failure is this service's own, and it says so in both members the model
             // gives a step failure — which is what tells it apart from an application that

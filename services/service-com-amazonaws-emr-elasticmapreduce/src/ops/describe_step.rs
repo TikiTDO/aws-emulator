@@ -135,7 +135,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let now = ::std::time::SystemTime::now();
 
         // The SHAPE of the cluster id is settled BEFORE any cluster is resolved: a value
@@ -156,6 +155,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
+        // Reporting only, and before this service's store is taken: a step the cluster has
+        // started is OWED the run of the application it submitted, which was owed at this
+        // instant whether or not anybody described the step, and neither the Amazon S3 read
+        // nor the interpreter that runs it may happen under this service's lock.
+        crate::state::run_due_step_applications(
+            &*self.engine,
+            ctx,
+            &crate::state::request_region(ctx.parts()),
+            &input.cluster_id,
+            now,
+        )
+        .await;
+
         let mut store = state.lock();
 
         // Reporting only: the cluster's step runner materialises the step transitions the

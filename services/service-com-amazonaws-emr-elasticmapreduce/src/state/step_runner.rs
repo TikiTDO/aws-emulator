@@ -46,7 +46,6 @@ use super::*;
 /// documentation). Its arguments are the command line, which is why the work a step
 /// submits is read off them.
 pub const COMMAND_RUNNER_JAR: &str = "command-runner.jar";
-
 /// The property whose value selects the Hive metastore client a cluster's Hive and Spark
 /// SQL engines talk to, as a cluster configuration carries it.
 pub const HIVE_METASTORE_FACTORY_PROPERTY: &str = "hive.metastore.client.factory.class";
@@ -150,7 +149,7 @@ pub fn table_not_found_message(reference: &TableReference) -> String {
 pub const RESOLVABLE_WORK: &str = "a statement whose only effect is reading";
 
 /// Whether `jar` names [`COMMAND_RUNNER_JAR`], however the submitter spelled its path.
-fn names_command_runner(jar: &str) -> bool {
+pub fn names_command_runner(jar: &str) -> bool {
     jar.split('/')
         .next_back()
         .is_some_and(|basename| basename.eq_ignore_ascii_case(COMMAND_RUNNER_JAR))
