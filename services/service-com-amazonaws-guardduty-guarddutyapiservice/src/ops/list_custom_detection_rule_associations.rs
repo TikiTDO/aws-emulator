@@ -214,9 +214,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             bad_request(crate::service::refusals::page_token_rejection())
         })?;
 
+        // Every entry is the SHARED association projection with the member a
+        // summary does not carry dropped, so a listing reports the same identity,
+        // the same ARN and the same instants the create and the read report for the
+        // association ([`crate::state::detection_rule_association_summary`]).
         let rule_associations: Vec<AssociationSummary> = selected[window]
             .iter()
-            .map(|record| summary(record))
+            .map(|record| crate::state::detection_rule_association_summary(record))
             .collect();
 
         Ok(ListCustomDetectionRuleAssociationsOutput {
@@ -231,37 +235,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// (`smithy_query(operation="ListCustomDetectionRuleAssociations")`), so a request
 /// that names no page size is served the largest page that member can ask for.
 const MAX_ASSOCIATIONS_PER_PAGE: usize = 100;
-
-/// The `AssociationSummary` projection of a stored association.
-///
-/// `AssociationSummary` is `AssociationDetail` without `AccountId`
-/// (`smithy_query(shape="AssociationSummary,AssociationDetail")`), so every member
-/// is read off the same record the detail read reports and only the `Arn` is
-/// derived — through the shared
-/// [`crate::state::custom_detection_rule_association_arn`], so a list and a read
-/// cannot report different ARNs for one association.
-///
-/// `ExpiresAt` is the shape's only optional member and is read off the record, so
-/// the list reports the instant a mode that expires gives an association and
-/// nothing for one that does not — exactly as
-/// [`crate::state::detection_rule_association_view`] reports it.
-fn summary(record: &crate::state::DetectionRuleAssociationRecord) -> AssociationSummary {
-    AssociationSummary {
-        association_id: record.association_id.clone(),
-        arn: crate::state::custom_detection_rule_association_arn(
-            &record.region,
-            &record.rule_id,
-            &record.association_id,
-        ),
-        rule_id: record.rule_id.clone(),
-        mode: record.mode.clone(),
-        created_at: ::aws_smithy_types::DateTime::from_millis(record.created_at_millis),
-        updated_at: ::aws_smithy_types::DateTime::from_millis(record.updated_at_millis),
-        expires_at: record
-            .expires_at_millis
-            .map(::aws_smithy_types::DateTime::from_millis),
-    }
-}
 
 /// Refuse the request the way GuardDuty does: HTTP 400 under the
 /// `InvalidInputException` class, in both the body's `__type` and its `type` member.

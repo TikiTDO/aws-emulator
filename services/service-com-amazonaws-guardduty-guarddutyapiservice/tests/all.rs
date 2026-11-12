@@ -35,6 +35,8 @@ mod custom_detection_rule_association_arn_and_expiry;
 mod custom_detection_rule_association_delete;
 #[path = "all/custom_detection_rule_association_identity.rs"]
 mod custom_detection_rule_association_identity;
+#[path = "all/custom_detection_rule_association_listed_handle.rs"]
+mod custom_detection_rule_association_listed_handle;
 #[path = "all/custom_detection_rule_association_listing.rs"]
 mod custom_detection_rule_association_listing;
 #[path = "all/custom_detection_rule_association_update.rs"]

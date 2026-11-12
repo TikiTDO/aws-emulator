@@ -85,7 +85,7 @@ fn is_modelled_association_id(value: &str) -> bool {
 
 /// The id the ARN `arn` names, i.e. its trailing `/association/<id>` segment, or `None`
 /// for an ARN that names no association.
-fn arn_association_id(arn: &str) -> Option<&str> {
+pub(crate) fn arn_association_id(arn: &str) -> Option<&str> {
     let (head, id) = arn.rsplit_once('/')?;
     head.ends_with("/association").then_some(id)
 }
@@ -120,7 +120,7 @@ fn identity(payload: &Value, case: &str) -> String {
 
 /// Create an association for `rule_id` in `mode` through `region`'s endpoint, failing
 /// the test when the create does not succeed.
-async fn associate(router: &Router, region: &str, rule_id: &str, mode: &str) -> Value {
+pub(crate) async fn associate(router: &Router, region: &str, rule_id: &str, mode: &str) -> Value {
     let (status, body) = call_in(
         router,
         region,
@@ -177,7 +177,7 @@ async fn listed_associations(router: &Router, region: &str, query: &str) -> Vec<
 
 /// The listed entry whose own `arn` is `arn` — the way a caller discovers an
 /// association it then acts on by id.
-fn entry_with_arn(entries: &[Value], arn: &str, case: &str) -> Value {
+pub(crate) fn entry_with_arn(entries: &[Value], arn: &str, case: &str) -> Value {
     entries
         .iter()
         .find(|entry| entry["arn"].as_str() == Some(arn))

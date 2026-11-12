@@ -109,6 +109,28 @@ async fn call_signed(
 /// names another ([`call_at`]).
 const DEFAULT_HOST: &str = "guardduty.us-east-1.amazonaws.com";
 
+/// [`call_in`], answering with the response body's RAW bytes as the service
+/// serialized them rather than with a parsed `Value`.
+///
+/// A suite asserting the serialized FORM of a member — its JSON type, its case, the
+/// whitespace around it — has to read the bytes, because parsing collapses exactly
+/// those differences. Built on the same dispatch [`call`] uses, so the two cannot
+/// drift.
+pub(crate) async fn call_bytes_in(
+    router: &Router,
+    region: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> (u16, String) {
+    let (status, _, bytes) =
+        dispatch_at(router, &auth_for(region), DEFAULT_HOST, method, path, body).await;
+    (
+        status,
+        String::from_utf8(bytes.to_vec()).expect("a UTF-8 response body"),
+    )
+}
+
 async fn call_signed_at(
     router: &Router,
     authorization: &str,
@@ -117,6 +139,34 @@ async fn call_signed_at(
     path: &str,
     body: Option<Value>,
 ) -> (u16, Value) {
+    let (status, error_type, bytes) =
+        dispatch_at(router, authorization, host, method, path, body).await;
+    let mut parsed: Value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    // The `x-amzn-errortype` header is folded into the body under a key of its own,
+    // so an assertion can read the error SHAPE it carries beside the error CLASS the
+    // body's `__type` carries. The two are different facts on this service.
+    if !error_type.is_empty() {
+        if let Some(object) = parsed.as_object_mut() {
+            object.insert("__errorType".to_string(), Value::String(error_type));
+        }
+    }
+    (status, parsed)
+}
+
+/// Send one request over [`MultiServiceRouter::dispatch`] and return its status, its
+/// `x-amzn-errortype` header and the response body's raw bytes.
+async fn dispatch_at(
+    router: &Router,
+    authorization: &str,
+    host: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> (u16, String, bytes::Bytes) {
     let payload = match body {
         Some(value) => bytes::Bytes::from(serde_json::to_vec(&value).expect("serialize body")),
         None => bytes::Bytes::new(),
@@ -136,21 +186,7 @@ async fn call_signed_at(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let bytes = response.into_body();
-    let mut parsed: Value = if bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
-    };
-    // The `x-amzn-errortype` header is folded into the body under a key of its own,
-    // so an assertion can read the error SHAPE it carries beside the error CLASS the
-    // body's `__type` carries. The two are different facts on this service.
-    if !error_type.is_empty() {
-        if let Some(object) = parsed.as_object_mut() {
-            object.insert("__errorType".to_string(), Value::String(error_type));
-        }
-    }
-    (status, parsed)
+    (status, error_type, response.into_body())
 }
 
 /// The error CLASS an error response carries: the body's `__type` discriminator,

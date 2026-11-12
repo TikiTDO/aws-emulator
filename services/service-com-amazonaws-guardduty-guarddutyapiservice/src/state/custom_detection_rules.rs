@@ -449,6 +449,31 @@ pub fn detection_rule_association_view(
     }
 }
 
+/// The wire `AssociationSummary` for a stored association — the entry a listing
+/// reports it as.
+///
+/// `AssociationSummary` is `AssociationDetail` without `AccountId`
+/// (`smithy_query(shape="AssociationSummary,AssociationDetail")`), so it is built
+/// BY DROPPING that member from [`detection_rule_association_view`] rather than by
+/// reading the record a second time: one projection then serves the create, the
+/// read and every listing, and the identity a summary advertises
+/// (`AssociationId`) and the one its own `Arn` names cannot be derived from
+/// different values.
+pub fn detection_rule_association_summary(
+    record: &DetectionRuleAssociationRecord,
+) -> crate::ops::types::AssociationSummary {
+    let detail = detection_rule_association_view(record);
+    crate::ops::types::AssociationSummary {
+        association_id: detail.association_id,
+        arn: detail.arn,
+        rule_id: detail.rule_id,
+        mode: detail.mode,
+        created_at: detail.created_at,
+        updated_at: detail.updated_at,
+        expires_at: detail.expires_at,
+    }
+}
+
 /// The wire `DetectionRuleOrgConfiguration` for a stored organization
 /// configuration, as of `now`.
 ///
