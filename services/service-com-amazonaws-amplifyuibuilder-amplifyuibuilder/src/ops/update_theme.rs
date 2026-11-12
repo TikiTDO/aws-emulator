@@ -197,8 +197,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
-        let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
+        // The clock is read with the store HELD (as `UpdateComponent` and every
+        // other write of this crate reads it): the instant this call stamps into
+        // the record is the one it observed while it owned the store, so two
+        // concurrent updates stamp in the order they commit and `modifiedAt`
+        // reports the last call that changed the theme.
+        let now = ::std::time::SystemTime::now();
 
         // The target is resolved before anything is merged, and the two ways it can
         // fail to resolve are the two `GetTheme` and `DeleteTheme` tell apart (and

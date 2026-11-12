@@ -131,5 +131,8 @@ mod update_absent_id_refusal_class;
 #[path = "all/widened_error_contract.rs"]
 mod widened_error_contract;
 
+#[path = "all/write_stamp_under_the_store_lock.rs"]
+mod write_stamp_under_the_store_lock;
+
 #[path = "all/wrong_scope_sentence.rs"]
 mod wrong_scope_sentence;

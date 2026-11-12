@@ -249,8 +249,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
+        // The clock is read with the store HELD, never before taking it: the
+        // instant this call stamps into the record is then the instant it
+        // observed while it owned the store, so two concurrent updates stamp in
+        // the order they commit and the `modifiedAt` the record keeps is the one
+        // the update that committed LAST observed. Sampling before the lock lets
+        // the caller that observed the EARLIER instant commit last and write a
+        // `modifiedAt` older than the one already stored.
+        let now = ::std::time::SystemTime::now();
 
         // The target is resolved before anything is merged, and the two ways it
         // can fail to resolve are the two `GetComponent` and `DeleteComponent`

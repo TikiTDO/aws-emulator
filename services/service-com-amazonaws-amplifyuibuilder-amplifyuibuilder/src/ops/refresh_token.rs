@@ -190,7 +190,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        let now = ::std::time::SystemTime::now();
         // The session this refresh addresses. `provider` is an `@httpLabel` targeting
         // the `TokenProviders` enum, so the only values that reach here are the ones the
         // model declares.
@@ -200,6 +199,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             input.refresh_token_body.token,
         );
         let mut store = state.lock();
+        // The clock is read with the store HELD, as every write of this crate
+        // reads it: the instant this refresh settles the session with — and the
+        // expiry it stamps into it — is the one observed while it owned the
+        // store, so two concurrent refreshes of one session stamp in the order
+        // they commit.
+        let now = ::std::time::SystemTime::now();
         // The expiry the clock already owes, materialised before the bound below is
         // read, so a caller is never refused over access tokens that have run out.
         store.expire_provider_token_sessions(now);

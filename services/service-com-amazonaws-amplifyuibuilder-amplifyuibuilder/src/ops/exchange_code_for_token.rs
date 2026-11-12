@@ -203,8 +203,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
+        // The clock is read with the store HELD, as every write of this crate
+        // reads it: the instant this exchange starts the session at is the one
+        // observed while it owned the store.
+        let now = ::std::time::SystemTime::now();
         // The expiry the clock already owes, materialised before anything below
         // reads the store: a session whose access token has run out holds neither
         // its access code nor a place in the bound.

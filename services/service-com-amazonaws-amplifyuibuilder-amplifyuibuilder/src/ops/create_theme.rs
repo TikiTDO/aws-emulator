@@ -156,9 +156,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let data = input.theme_to_create;
-        let now = ::std::time::SystemTime::now();
         let key = (input.app_id.clone(), input.environment_name.clone());
         let mut store = state.lock();
+        // The clock is read with the store HELD, exactly as `CreateComponent`
+        // reads it: the instants this create stamps into the record are the ones
+        // it observed while it owned the store, so two concurrent creates stamp
+        // in the order they are inserted.
+        let now = ::std::time::SystemTime::now();
 
         // `clientToken` is an `@idempotencyToken`: the same token names the same
         // theme, so a retried create reports the first one rather than minting a

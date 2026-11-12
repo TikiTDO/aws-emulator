@@ -197,9 +197,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        let now = ::std::time::SystemTime::now();
         let key = (input.app_id.clone(), input.environment_name.clone());
         let mut store = state.lock();
+        // The clock is read with the store HELD: the instants this create stamps
+        // into the record are the ones it observed while it owned the store, so
+        // two concurrent creates stamp in the order they are inserted and the
+        // creation order the lists page over is also non-decreasing in
+        // `createdAt`.
+        let now = ::std::time::SystemTime::now();
 
         // `clientToken` is an `@idempotencyToken`: the same token names the same
         // component, so a retried create reports the first one rather than

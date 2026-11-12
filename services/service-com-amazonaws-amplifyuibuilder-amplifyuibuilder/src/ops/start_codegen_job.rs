@@ -158,10 +158,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
-        let now = ::std::time::SystemTime::now();
         let key = (input.app_id.clone(), input.environment_name.clone());
         let data = input.codegen_job_to_create;
         let mut store = state.lock();
+        // The clock is read with the store HELD: the instants this start stamps
+        // into the job — its `createdAt`, its `modifiedAt` and the instant its
+        // owed transition falls due — are the ones observed while it owned the
+        // store, so two concurrent starts stamp in the order they are inserted
+        // and no settle runs against an instant sampled before the lock.
+        let now = ::std::time::SystemTime::now();
 
         // Report what the clock has already made due before answering, so the job a
         // replayed token names carries the status it is owed rather than the one it

@@ -25,6 +25,13 @@
 //! which each codegen handler calls first: a read reports what the clock has
 //! already made due and never advances a job because it was polled.
 //!
+//! Every handler that stamps a record — and every one that settles what the
+//! clock has made due — reads the clock AFTER taking the store lock, never
+//! before it. The instant a record keeps is then the instant observed while its
+//! writer owned the store, so two concurrent writers stamp in the order they
+//! commit and a record's [`StoredComponent::modified_at`] (or a theme's, or a
+//! job's) cannot end up older than the value an already-committed write left.
+//!
 //! The form and the theme are the control plane's other app-environment
 //! resources, held the same way: `CreateForm` mints a form, `UpdateForm` merges
 //! into it, `GetForm` reports it from the single [`StoredForm`] record and
