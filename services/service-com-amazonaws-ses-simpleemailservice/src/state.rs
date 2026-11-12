@@ -3141,6 +3141,22 @@ pub fn unverified_from_address_message(from_email_address: &str) -> String {
     format!("The from email address {from_email_address} is not verified.")
 }
 
+/// How this service states the absence of an event destination, for every
+/// operation that resolves one on a configuration set that IS there.
+///
+/// `EventDestinationDoesNotExistException` is "Indicates that the event
+/// destination does not exist", and the sentence the service answers for it
+/// reports the lookup it made over the SET: the fixed text
+/// `No EventDestination found for ` followed by the configuration set the
+/// request named, bare, with no trailing period, and with the destination's own
+/// name absent — the service does not report which destination was asked for.
+/// One wording, for the same reason as [`illegal_address_message`]: the
+/// operations that resolve a destination out of one set report its absence
+/// identically.
+pub fn missing_event_destination_message(configuration_set_name: &str) -> String {
+    format!("No EventDestination found for {configuration_set_name}")
+}
+
 /// 64 bits of entropy this process did not choose, salting a minted id so it is
 /// opaque as well as unique.
 ///

@@ -490,9 +490,7 @@ async fn an_update_of_a_name_the_set_holds_no_destination_of_is_refused() {
             refusal(&body),
             (
                 Some("EventDestinationDoesNotExist".to_string()),
-                Some(format!(
-                    "Event destination <{name}> does not exist for configuration set <set>."
-                ))
+                Some("No EventDestination found for set".to_string())
             ),
             "case update absent {name:?}: expected the not-found refusal, got {body}"
         );

@@ -207,9 +207,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     EventDestinationDoesNotExistException {
                         configuration_set_name: Some(configuration_set_name.clone()),
                         event_destination_name: Some(destination_name.clone()),
-                        message: Some(format!(
-                            "Event destination <{destination_name}> does not exist for \
-                             configuration set <{configuration_set_name}>."
+                        message: Some(crate::state::missing_event_destination_message(
+                            &configuration_set_name,
                         )),
                     },
                 )

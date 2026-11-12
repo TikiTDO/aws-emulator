@@ -254,9 +254,7 @@ async fn a_delete_takes_off_the_destination_its_name_keys_and_leaves_the_rest() 
             refusal(&body),
             (
                 Some("EventDestinationDoesNotExist".to_string()),
-                Some(format!(
-                    "Event destination <{name}> does not exist for configuration set <{set}>."
-                ))
+                Some(format!("No EventDestination found for {set}"))
             ),
             "case {case} deleted twice: expected the not-found refusal, got {body}"
         );
@@ -304,9 +302,7 @@ async fn a_delete_of_a_name_the_set_holds_no_destination_of_is_refused() {
             refusal(&body),
             (
                 Some("EventDestinationDoesNotExist".to_string()),
-                Some(format!(
-                    "Event destination <{name}> does not exist for configuration set <set>."
-                ))
+                Some("No EventDestination found for set".to_string())
             ),
             "case delete absent {name:?}: expected the not-found refusal, got {body}"
         );

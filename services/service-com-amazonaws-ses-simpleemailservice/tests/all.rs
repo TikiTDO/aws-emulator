@@ -73,6 +73,8 @@ mod ses_identity_verification_token;
 mod ses_list_identities_cursor;
 #[path = "all/ses_missing_custom_verification_template_wording.rs"]
 mod ses_missing_custom_verification_template_wording;
+#[path = "all/ses_missing_event_destination_wording.rs"]
+mod ses_missing_event_destination_wording;
 #[path = "all/ses_production_access_gate_wording.rs"]
 mod ses_production_access_gate_wording;
 #[path = "all/ses_query_error_envelope.rs"]
