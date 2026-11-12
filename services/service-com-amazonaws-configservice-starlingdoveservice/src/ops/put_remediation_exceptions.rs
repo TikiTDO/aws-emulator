@@ -9,13 +9,15 @@
 //!
 //! The rules this handler applies: a rule the account holds no remediation
 //! configuration for has no remediation to except a resource from, so the whole request
-//! is refused 400 `InvalidParameterValueException`; one exception per rule and resource,
-//! so a second write for the same pair REVISES the one the rule holds (its explanation
-//! and the instant it falls due for deletion) rather than adding another; a resource the
-//! rule's own verdict places as COMPLIANT or NOT_APPLICABLE gets NO exception ("Placing
-//! an exception can only be performed on resources that are NON_COMPLIANT") and comes
-//! back in `FailedBatches`; and a key naming no resource is refused 400
-//! `InvalidParameterValueException`.
+//! is refused 400 `InvalidParameterValueException`; a resource key that resolves to no
+//! resource the rule has EVALUATED cannot be excepted from that rule's remediation, so
+//! the whole request is refused 400 `InvalidParameterValueException` naming the keys
+//! that could not be found; one exception per rule and resource, so a second write for
+//! the same pair REVISES the one the rule holds (its explanation and the instant it
+//! falls due for deletion) rather than adding another; a resource the rule's own verdict
+//! does not place as NON_COMPLIANT gets NO exception ("Placing an exception can only be
+//! performed on resources that are NON_COMPLIANT") and comes back in `FailedBatches`;
+//! and a key naming no resource is refused 400 `InvalidParameterValueException`.
 //!
 //! ## Shape of an operation
 //!
@@ -277,24 +279,54 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
-        // Which resources the rule's own verdicts already place outside auto-remediation:
-        // one it evaluated as COMPLIANT, or as NOT_APPLICABLE to it, gets no exception.
-        // Read before anything is written, so the decision is about the state this call
-        // arrived at.
+        // What the rule's own evaluation has to say about each resource, read before
+        // anything is written so every decision below is about the state this call
+        // arrived at: which resources it has evaluated AT ALL, and which of those it
+        // places as NON_COMPLIANT.
         let rule = store.config_rules.get(&input.config_rule_name);
-        let no_exception_for: ::std::collections::BTreeSet<(String, String)> = rule
+        let evaluated: ::std::collections::BTreeSet<(String, String)> = rule
+            .map(|rule| {
+                rule.evaluation_results
+                    .values()
+                    .map(|result| (result.resource_type.clone(), result.resource_id.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let non_compliant: ::std::collections::BTreeSet<(String, String)> = rule
             .map(|rule| {
                 rule.evaluation_results
                     .values()
                     .filter(|result| {
-                        result.compliance_type == crate::state::COMPLIANCE_TYPE_COMPLIANT
-                            || result.compliance_type
-                                == crate::state::COMPLIANCE_TYPE_NOT_APPLICABLE
+                        result.compliance_type == crate::state::COMPLIANCE_TYPE_NON_COMPLIANT
                     })
                     .map(|result| (result.resource_type.clone(), result.resource_id.clone()))
                     .collect()
             })
             .unwrap_or_default();
+
+        // An exception is placed on a resource the RULE knows: it is resolved against the
+        // resources that rule has evaluated, so a key naming a resource the rule holds no
+        // evaluation result for resolves to no resource at all and the whole request is
+        // refused, because nothing about any one key could have made such a key resolve.
+        let unresolved: Vec<(String, String)> = input
+            .resource_keys
+            .iter()
+            .map(key_identity)
+            .filter(|identity| !evaluated.contains(identity))
+            .collect();
+        if !unresolved.is_empty() {
+            return Err(
+                PutRemediationExceptionsErrorModeled::InvalidParameterValueException(
+                    InvalidParameterValueException {
+                        message: Some(could_not_find_resources_message(
+                            &input.config_rule_name,
+                            &unresolved,
+                        )),
+                    },
+                )
+                .into(),
+            );
+        }
 
         // Each key is written on its own, so one key the rule cannot hold an exception
         // for does not cost the others their write; the failures come back as the
@@ -313,7 +345,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             };
             let identity = (entry.resource_type.clone(), entry.resource_id.clone());
 
-            let reason = if no_exception_for.contains(&identity) {
+            let reason = if !non_compliant.contains(&identity) {
                 Some(not_non_compliant_message(&input.config_rule_name))
             } else if !store.put_remediation_exception(entry.clone()) {
                 Some(exceptions_per_rule_message(&input.config_rule_name))
@@ -347,6 +379,36 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// and is BUILT FROM THE REQUEST: the rule the request named is its one variable part.
 fn no_remediation_configuration_message(config_rule_name: &str) -> String {
     format!("No RemediationConfiguration found for {config_rule_name}")
+}
+
+/// The `(resourceType, resourceId)` one `RemediationExceptionResourceKey` names a
+/// resource by; a member the key omits names nothing, which is what the refusal above
+/// has already ruled out by the time this is read for a decision.
+fn key_identity(key: &RemediationExceptionResourceKey) -> (String, String) {
+    (
+        key.resource_type.clone().unwrap_or_default(),
+        key.resource_id.clone().unwrap_or_default(),
+    )
+}
+
+/// How Config words `InvalidParameterValueException` for the resource keys of this
+/// request that resolve to no resource the named rule has evaluated.
+///
+/// The message is BUILT FROM THE REQUEST: the rule the caller named, then each
+/// unresolved key as the `(resourceType, resourceId)` pair the caller sent it as, in the
+/// order the request carried them.
+fn could_not_find_resources_message(
+    config_rule_name: &str,
+    unresolved: &[(String, String)],
+) -> String {
+    let named: Vec<String> = unresolved
+        .iter()
+        .map(|(resource_type, resource_id)| format!("({resource_type}, {resource_id})"))
+        .collect();
+    format!(
+        "Could not find resources: {config_rule_name}: {}",
+        named.join(", ")
+    )
 }
 
 /// The `FailureMessage` for a resource the rule's own verdict places as COMPLIANT or as

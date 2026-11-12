@@ -20,10 +20,12 @@
 //! refusal this operation makes for that precondition. A resource key the request
 //! carries that cannot be remediated is reported back in `FailedItems` with the
 //! `FailureMessage` saying why, which is what that member is for ("For example, the
-//! resource is already compliant"): a resource the rule's own verdict already places as
-//! compliant has nothing to remediate, and one whose previous execution has not
-//! finished cannot be started again ("An existing StartRemediationExecution call for
-//! the specified resource keys must complete before you can call the API again").
+//! resource is already compliant"): what there is to remediate is what the rule's own
+//! evaluation FINDS, so a resource the rule holds no `NON_COMPLIANT` evaluation result
+//! for — one it placed as compliant or as not applicable, and one it has not evaluated
+//! at all — has nothing to remediate, and one whose previous execution has not finished
+//! cannot be started again ("An existing StartRemediationExecution call for the
+//! specified resource keys must complete before you can call the API again").
 //! `FailedItems` is the per-resource outcome of an accepted request, so an accepted
 //! request always reports it — empty when every resource key started.
 //!
@@ -234,17 +236,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             let remediation = remediation.clone();
             let target = remediation.target_id.clone();
 
-            // Which of the rule's own verdicts already place a resource as compliant: a
-            // resource that complies has nothing to remediate. Read before the executions
-            // are written, so the decision is about the state this call arrived at.
-            let compliant: ::std::collections::BTreeSet<(String, String)> = store
+            // What there is to remediate is what the rule's own evaluation FINDS: the
+            // resources it holds a NON_COMPLIANT evaluation result for. Read before the
+            // executions are written, so the decision is about the state this call
+            // arrived at.
+            let non_compliant: ::std::collections::BTreeSet<(String, String)> = store
                 .config_rules
                 .get(&input.config_rule_name)
                 .map(|rule| {
                     rule.evaluation_results
                         .values()
                         .filter(|result| {
-                            result.compliance_type == crate::state::COMPLIANCE_TYPE_COMPLIANT
+                            result.compliance_type == crate::state::COMPLIANCE_TYPE_NON_COMPLIANT
                         })
                         .map(|result| (result.resource_type.clone(), result.resource_id.clone()))
                         .collect()
@@ -270,8 +273,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         execution.state_at(now)
                             != crate::state::REMEDIATION_EXECUTION_STATE_SUCCEEDED
                     });
-                let reason = if compliant.contains(&identity) {
-                    Some(already_compliant_message(&input.config_rule_name))
+                let reason = if !non_compliant.contains(&identity) {
+                    Some(NO_NON_COMPLIANT_EVALUATION.to_string())
                 } else if running {
                     Some(EXECUTION_IN_FLIGHT.to_string())
                 } else {
@@ -342,15 +345,18 @@ fn no_remediation_configuration_message(config_rule_name: &str) -> String {
     )
 }
 
-/// The `FailureMessage` for a resource the rule's own evaluation already places as
-/// COMPLIANT, which is the example the member documents ("Returns a failure message.
+/// The `FailureMessage` for a resource the rule holds no `NON_COMPLIANT` evaluation
+/// result for, which is the example the member documents ("Returns a failure message.
 /// For example, the resource is already compliant").
-fn already_compliant_message(config_rule_name: &str) -> String {
-    format!(
-        "The resource is already compliant with the AWS Config rule {config_rule_name}, \
-         so there is nothing to remediate."
-    )
-}
+///
+/// FIXED, and it carries no part of the request: the sentence states the precondition
+/// the resources of one request share — Config remediates a FINDING — and tells the
+/// caller what to do about it, so it reads the same whichever resources the request
+/// named.
+const NO_NON_COMPLIANT_EVALUATION: &str =
+    "There are no non-compliant EvaluationResult for the resource(s) that are trying to \
+     be remediated. Please wait several minutes and try again when the resource(s) are \
+     non-compliant.";
 
 /// The `FailureMessage` for a resource whose previous remediation execution has not
 /// finished, which is the precondition this operation documents: "An existing

@@ -20,7 +20,13 @@ use service_com_amazonaws_configservice_starlingdoveservice::state::{
 };
 use service_com_amazonaws_configservice_starlingdoveservice::ComAmazonawsConfigserviceStarlingdoveserviceState as ConfigState;
 
-use crate::config_setup_and_rule_loop::{managed_rule, with_recorder_and_channel, Emulator};
+use crate::config_setup_and_rule_loop::{
+    managed_rule, with_recorder_and_channel, with_verdicts, Emulator,
+};
+
+/// The verdict a rule has to hold about a resource before there is anything to
+/// remediate, from `smithy_query(query="shape", shape="ComplianceType")`.
+const NON_COMPLIANT: &str = "NON_COMPLIANT";
 
 /// The remediation target a configuration names: an SSM automation document, the only
 /// published `RemediationTargetType`
@@ -217,6 +223,10 @@ async fn an_accepted_start_always_reports_the_keys_that_failed() {
     {
         let name = "failed-items-rule";
         let emulator = emulator_with_remediated_rule(name).await;
+        // Every key the request names is one the rule FOUND non-compliant, which is what
+        // makes it startable at all; the ones this row calls compliant are then placed as
+        // compliant instead, so they are the only keys with nothing to remediate.
+        with_verdicts(&emulator, name, NON_COMPLIANT, &keys);
         already_compliant(&emulator, name, &compliant);
 
         let answered = emulator
@@ -269,6 +279,7 @@ async fn the_empty_report_is_read_back_on_every_accepted_call() {
     let name = "repeat-start-rule";
     let emulator = emulator_with_remediated_rule(name).await;
     let keys = vec![key(S3_BUCKET, "config-bucket")];
+    with_verdicts(&emulator, name, NON_COMPLIANT, &keys);
 
     for case in ["the first accepted call", "the call after it finished"] {
         let answered = emulator

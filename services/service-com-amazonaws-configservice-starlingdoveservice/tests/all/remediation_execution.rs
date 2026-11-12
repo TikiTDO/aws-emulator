@@ -30,7 +30,13 @@ use service_com_amazonaws_configservice_starlingdoveservice::state::{
     REMEDIATION_EXECUTION_STATE_SUCCEEDED,
 };
 
-use crate::config_setup_and_rule_loop::{managed_rule, with_recorder_and_channel, Emulator};
+use crate::config_setup_and_rule_loop::{
+    managed_rule, with_recorder_and_channel, with_verdicts, Emulator,
+};
+
+/// The verdict a rule has to hold about a resource before there is anything to
+/// remediate, from `smithy_query(query="shape", shape="ComplianceType")`.
+const NON_COMPLIANT: &str = "NON_COMPLIANT";
 
 /// The remediation target a configuration names: an SSM automation document, the only
 /// published `RemediationTargetType`.
@@ -86,6 +92,22 @@ async fn emulator_with_rule(name: &str, remediated: bool) -> Emulator {
         );
     }
     emulator
+}
+
+/// Record the rule's own NON_COMPLIANT finding for every key of `keys` that names a
+/// resource: a remediation acts on a FINDING, so a resource the rule holds no
+/// non-compliant evaluation result for starts nothing.
+fn found_non_compliant(emulator: &Emulator, rule: &str, keys: &[(&str, &str)]) {
+    let resources: Vec<(String, String)> = keys
+        .iter()
+        .filter(|(resource_type, resource_id)| {
+            !resource_type.trim().is_empty() && !resource_id.trim().is_empty()
+        })
+        .map(|(resource_type, resource_id)| {
+            ((*resource_type).to_string(), (*resource_id).to_string())
+        })
+        .collect();
+    with_verdicts(emulator, rule, NON_COMPLIANT, &resources);
 }
 
 /// The `StartRemediationExecution` body for `name` over `keys`.
@@ -202,7 +224,9 @@ async fn a_rule_with_no_remediation_configuration_is_refused_as_that() {
     {
         let name = "remediated-rule";
         let emulator = if exists {
-            emulator_with_rule(name, remediated).await
+            let emulator = emulator_with_rule(name, remediated).await;
+            found_non_compliant(&emulator, name, keys);
+            emulator
         } else {
             let emulator = Emulator::new();
             with_recorder_and_channel(&emulator).await;
@@ -246,6 +270,7 @@ async fn an_execution_moves_from_queued_through_running_to_succeeded() {
     let name = "moving-rule";
     let emulator = emulator_with_rule(name, true).await;
     let keys: &[(&str, &str)] = &[(S3_BUCKET, "config-bucket"), (EC2_VOLUME, "vol-0001")];
+    found_non_compliant(&emulator, name, keys);
 
     // Nothing has run yet, so the rule reports no execution at all.
     assert!(
@@ -391,6 +416,11 @@ async fn one_execution_is_invoked_per_resource_key_up_to_the_published_maximum()
         // Each key names a DISTINCT resource, so one request carries `keys` of them and
         // the report must hold one execution per key rather than one per request.
         let ids: Vec<String> = (0..keys).map(|index| format!("bucket-{index:04}")).collect();
+        let found: Vec<(String, String)> = ids
+            .iter()
+            .map(|resource_id| (S3_BUCKET.to_string(), resource_id.clone()))
+            .collect();
+        with_verdicts(&emulator, name, NON_COMPLIANT, &found);
         let request = json!({
             "ConfigRuleName": name,
             "ResourceKeys": ids
@@ -499,7 +529,9 @@ async fn a_key_that_names_no_resource_is_refused_as_an_invalid_parameter() {
         let emulator = emulator_with_rule(name, true).await;
         // The incomplete key travels BESIDE a well-formed one, so what is pinned is the
         // judgement of the request rather than of a single-key request.
-        let request = start(name, &[(S3_BUCKET, "config-bucket-ok"), key]);
+        let keys = [(S3_BUCKET, "config-bucket-ok"), key];
+        found_non_compliant(&emulator, name, &keys);
+        let request = start(name, &keys);
 
         match expected {
             Some(expected) => {
@@ -540,6 +572,7 @@ async fn reports_only_the_resource_keys_the_request_names() {
         (EC2_VOLUME, "vol-0001"),
         (ACCOUNT, "000000000000"),
     ];
+    found_non_compliant(&emulator, name, keys);
     emulator
         .ok("StartRemediationExecution", &start(name, keys))
         .await;
@@ -624,6 +657,7 @@ async fn a_resource_whose_execution_has_not_finished_is_not_started_again() {
     let name = "in-flight-rule";
     let emulator = emulator_with_rule(name, true).await;
     let keys: &[(&str, &str)] = &[(S3_BUCKET, "config-bucket")];
+    found_non_compliant(&emulator, name, keys);
     emulator
         .ok("StartRemediationExecution", &start(name, keys))
         .await;
@@ -672,34 +706,22 @@ async fn a_resource_whose_execution_has_not_finished_is_not_started_again() {
 #[tokio::test]
 async fn a_resource_the_rule_already_found_compliant_is_not_remediated() {
     // "Returns a failure message. For example, the resource is already compliant": a
-    // resource the rule's own verdict places as COMPLIANT has nothing to remediate, so
-    // no execution is invoked for it and the key comes back.
+    // resource the rule's own verdict places as COMPLIANT is a resource it holds no
+    // non-compliant evaluation result for, so there is nothing to remediate, no execution
+    // is invoked for it and the key comes back.
     let name = "compliant-rule";
     let emulator = emulator_with_rule(name, true).await;
 
-    // The verdict is delivered the way a rule's evaluation delivers one: through the
+    // The verdicts are delivered the way a rule's evaluation delivers them: through the
     // state the compliance reads report, seeded here because this rule is a managed one
     // whose evaluations Config computes rather than takes from a caller.
-    {
-        use service_com_amazonaws_configservice_starlingdoveservice::state::{
-            EvaluationResultEntry, EVALUATION_MODE_DETECTIVE,
-        };
-        use service_com_amazonaws_configservice_starlingdoveservice::ComAmazonawsConfigserviceStarlingdoveserviceState as ConfigState;
-        let state = emulator.engine.state::<ConfigState>();
-        let mut store = state.lock();
-        let rule = store
-            .config_rules
-            .get_mut(name)
-            .unwrap_or_else(|| panic!("the rule {name:?} was created"));
-        let entry = EvaluationResultEntry::new(
-            S3_BUCKET,
-            "config-bucket",
-            EVALUATION_MODE_DETECTIVE,
-            "COMPLIANT",
-            std::time::SystemTime::UNIX_EPOCH,
-        );
-        rule.record_evaluation_result(entry);
-    }
+    with_verdicts(
+        &emulator,
+        name,
+        "COMPLIANT",
+        &[(S3_BUCKET.to_string(), "config-bucket".to_string())],
+    );
+    found_non_compliant(&emulator, name, &[(EC2_VOLUME, "vol-0001")]);
 
     let answered = emulator
         .ok(
@@ -721,7 +743,7 @@ async fn a_resource_the_rule_already_found_compliant_is_not_remediated() {
     assert!(
         answered["FailureMessage"]
             .as_str()
-            .is_some_and(|message| message.contains("already compliant")),
+            .is_some_and(|message| message.contains("no non-compliant EvaluationResult")),
         "the failure message says why nothing ran, got {answered}"
     );
 

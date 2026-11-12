@@ -9,11 +9,12 @@
 //! specified Config rule"), so every member a read reports is the one the LAST write
 //! carried — an explanation the request omitted is absent rather than empty; a rule the
 //! account holds no remediation configuration for takes no exception at all and is
-//! refused 400 `InvalidParameterValueException`; a resource the rule's own verdict
-//! places as COMPLIANT or NOT_APPLICABLE takes no exception at all and comes back in
-//! `FailedBatches`; a key naming no resource is refused 400
-//! `InvalidParameterValueException`; and a read of every exception a rule holds is
-//! paged, while a read that names its resources in batch is not.
+//! refused 400 `InvalidParameterValueException`; a key that resolves to no resource the
+//! rule has EVALUATED is refused 400 `InvalidParameterValueException` naming the keys it
+//! could not find; a resource the rule's own verdict does not place as NON_COMPLIANT
+//! takes no exception at all and comes back in `FailedBatches`; a key naming no resource
+//! is refused 400 `InvalidParameterValueException`; and a read of every exception a rule
+//! holds is paged, while a read that names its resources in batch is not.
 //!
 //! Every case drives the emulator the way a client does — an `awsJson1_1` `POST /`
 //! through the same `MultiServiceRouter` the production router builds, using the
@@ -26,7 +27,9 @@
 
 use serde_json::{json, Value};
 
-use crate::config_setup_and_rule_loop::{managed_rule, with_recorder_and_channel, Emulator};
+use crate::config_setup_and_rule_loop::{
+    managed_rule, with_recorder_and_channel, with_verdicts, Emulator,
+};
 use crate::put_evaluations::{custom_lambda_rule, result_token};
 
 /// Resource types a key names, from `smithy_query(query="shape", shape="ResourceType")`;
@@ -101,6 +104,27 @@ async fn with_remediation_configuration(emulator: &Emulator, rule: &str) {
 /// A resource key naming both members, which is what identifies a resource in Config.
 fn key(resource_type: &str, resource_id: &str) -> Value {
     json!({ "ResourceType": resource_type, "ResourceId": resource_id })
+}
+
+/// Record `rule`'s own NON_COMPLIANT verdict about every resource `keys` names.
+///
+/// A put resolves each key against the resources the rule has EVALUATED, and generates
+/// the exception only for one the rule finds NON_COMPLIANT, so a case about an accepted
+/// put has to say that the rule found the resources it names.
+fn found_non_compliant(emulator: &Emulator, rule: &str, keys: &[Value]) {
+    let resources: Vec<(String, String)> = keys
+        .iter()
+        .map(|named| {
+            (
+                named["ResourceType"].as_str().unwrap_or_default().to_string(),
+                named["ResourceId"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .filter(|(resource_type, resource_id)| {
+            !resource_type.trim().is_empty() && !resource_id.trim().is_empty()
+        })
+        .collect();
+    with_verdicts(emulator, rule, NON_COMPLIANT, &resources);
 }
 
 /// The `PutRemediationExceptions` body for `rule` over `keys`, with the explanation and
@@ -291,6 +315,7 @@ async fn a_put_writes_an_exception_per_resource_key_and_a_read_reports_it() {
 
     for (case, keys, message, expires_at) in cases {
         let emulator = emulator_with_rules().await;
+        found_non_compliant(&emulator, RULE, &keys);
         assert!(
             described(case, &emulator, RULE, None).await.is_empty(),
             "case {case:?}: a rule nothing has excepted holds no exception"
@@ -395,6 +420,7 @@ async fn a_second_put_for_the_same_resource_revises_the_exception_it_holds() {
     for (case, first, second) in cases {
         let emulator = emulator_with_rules().await;
         let keys = [key(EC2_VOLUME, "vol-0001")];
+        found_non_compliant(&emulator, RULE, &keys);
 
         emulator
             .ok("PutRemediationExceptions", &put(RULE, &keys, first.0, first.1))
@@ -483,10 +509,21 @@ async fn a_key_that_names_no_resource_is_refused_and_writes_nothing() {
     }
 }
 
+/// What a put answers for the verdict the rule holds about the resource: the exception is
+/// generated, the key comes back in `FailedBatches` because the rule does not place the
+/// resource as NON_COMPLIANT, or the whole request is refused because the key resolves to
+/// no resource the rule has evaluated at all.
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    Generated,
+    FailedBatch,
+    Refused,
+}
+
 /// One row of the verdict table: what it is called, the verdict the rule already
-/// recorded — the resource it is about and the compliance it reports, if any — and
-/// whether the put generates the exception.
-type VerdictCase = (&'static str, Option<(&'static str, &'static str)>, bool);
+/// recorded — the resource it is about and the compliance it reports, if any — and what
+/// the put then answers.
+type VerdictCase = (&'static str, Option<(&'static str, &'static str)>, Outcome);
 
 #[tokio::test]
 async fn an_exception_is_generated_only_where_the_rule_does_not_place_the_resource_as_compliant() {
@@ -495,30 +532,30 @@ async fn an_exception_is_generated_only_where_the_rule_does_not_place_the_resour
     // accepts COMPLIANT, NON_COMPLIANT and NOT_APPLICABLE), no verdict at all, and a
     // verdict about ANOTHER resource. The exception is always placed on `vol-0001`.
     let cases: [VerdictCase; 5] = [
-        ("no verdict recorded at all", None, true),
+        ("no verdict recorded at all", None, Outcome::Refused),
         (
             "the rule evaluated it NON_COMPLIANT",
             Some(("vol-0001", NON_COMPLIANT)),
-            true,
+            Outcome::Generated,
         ),
         (
             "the rule evaluated it COMPLIANT",
             Some(("vol-0001", COMPLIANT)),
-            false,
+            Outcome::FailedBatch,
         ),
         (
             "the rule does not apply to it",
             Some(("vol-0001", NOT_APPLICABLE)),
-            false,
+            Outcome::FailedBatch,
         ),
         (
             "the rule placed another resource as compliant",
             Some(("vol-9999", COMPLIANT)),
-            true,
+            Outcome::Refused,
         ),
     ];
 
-    for (case, verdict, generated) in cases {
+    for (case, verdict, expected) in cases {
         let emulator = Emulator::new();
         with_recorder_and_channel(&emulator).await;
         emulator
@@ -543,16 +580,39 @@ async fn an_exception_is_generated_only_where_the_rule_does_not_place_the_resour
         }
 
         let keys = [key(EC2_VOLUME, "vol-0001")];
-        let answered = emulator
-            .ok(
-                "PutRemediationExceptions",
-                &put(RULE, &keys, Some("waiting"), None),
-            )
-            .await;
+        let request = put(RULE, &keys, Some("waiting"), None);
+
+        if expected == Outcome::Refused {
+            // A resource the rule has not evaluated resolves to nothing, so the request
+            // is refused and the rule holds no exception.
+            let (status, parsed) = emulator.call("PutRemediationExceptions", &request).await;
+            let code = parsed["__type"]
+                .as_str()
+                .map(|wire| wire.rsplit('#').next().unwrap_or(wire))
+                .unwrap_or("<none>");
+            assert_eq!(
+                (status, code, parsed["message"].as_str()),
+                (
+                    400,
+                    "InvalidParameterValueException",
+                    Some(format!("Could not find resources: {RULE}: ({EC2_VOLUME}, vol-0001)").as_str()),
+                ),
+                "case {case:?}: expected the key to resolve to no evaluated resource, got \
+                 {status} {parsed}"
+            );
+            assert_eq!(
+                described(case, &emulator, RULE, None).await,
+                Vec::new(),
+                "case {case:?}: a refused put leaves the rule holding no exception"
+            );
+            continue;
+        }
+
+        let answered = emulator.ok("PutRemediationExceptions", &request).await;
         let failed = failed_items(case, &answered);
         let held = described(case, &emulator, RULE, None).await;
 
-        if generated {
+        if expected == Outcome::Generated {
             assert_eq!(
                 failed,
                 Vec::new(),
@@ -687,6 +747,7 @@ async fn a_read_of_every_exception_a_rule_holds_is_paged() {
         let case = format!("Limit {limit:?}");
         let case = case.as_str();
         let emulator = emulator_with_rules().await;
+        found_non_compliant(&emulator, RULE, &keys);
         let answered = emulator
             .ok(
                 "PutRemediationExceptions",
@@ -726,6 +787,7 @@ async fn a_next_token_this_report_did_not_issue_is_refused() {
 
     for (case, token) in cases {
         let emulator = emulator_with_rules().await;
+        found_non_compliant(&emulator, RULE, &[key(EC2_VOLUME, "vol-0001")]);
         emulator
             .ok(
                 "PutRemediationExceptions",
@@ -769,6 +831,7 @@ async fn an_exception_the_clock_has_taken_past_its_expiration_is_reported_by_no_
     for (case, expires_at, message) in cases {
         let emulator = emulator_with_rules().await;
         let keys = [key(EC2_VOLUME, "vol-0001"), key(S3_BUCKET, "reports")];
+        found_non_compliant(&emulator, RULE, &keys);
         emulator
             .ok(
                 "PutRemediationExceptions",

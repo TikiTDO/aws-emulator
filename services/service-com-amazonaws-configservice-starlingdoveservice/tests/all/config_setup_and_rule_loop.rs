@@ -179,6 +179,40 @@ pub(crate) fn managed_rule(name: &str) -> Value {
     })
 }
 
+/// Record the rule `rule`'s own verdict `compliance` about each resource of `resources`,
+/// the way an evaluation pass of that rule records one.
+///
+/// The remediation surface acts on what a rule FINDS, so a case about it has to say what
+/// the rule found. A MANAGED rule's verdicts are computed by Config rather than delivered
+/// by a caller, so they are seeded in the store the handlers reach (`service_state`, as
+/// `delete_remediation_exceptions` seeds the exceptions its deletes run over); a case
+/// about a Custom Lambda rule delivers them through `PutEvaluations` instead.
+pub(crate) fn with_verdicts(
+    emulator: &Emulator,
+    rule: &str,
+    compliance: &str,
+    resources: &[(String, String)],
+) {
+    use service_com_amazonaws_configservice_starlingdoveservice::state::{
+        service_state, EvaluationResultEntry, EVALUATION_MODE_DETECTIVE,
+    };
+    let state = service_state(&*emulator.engine).expect("the test engine is the shared engine");
+    let mut store = state.lock();
+    let entry = store
+        .config_rules
+        .get_mut(rule)
+        .unwrap_or_else(|| panic!("the rule {rule:?} must exist before it can find anything"));
+    for (resource_type, resource_id) in resources {
+        entry.record_evaluation_result(EvaluationResultEntry::new(
+            resource_type,
+            resource_id,
+            EVALUATION_MODE_DETECTIVE,
+            compliance,
+            std::time::SystemTime::UNIX_EPOCH,
+        ));
+    }
+}
+
 /// Put the recorder and the delivery channel every rule case needs.
 pub(crate) async fn with_recorder_and_channel(emulator: &Emulator) {
     emulator

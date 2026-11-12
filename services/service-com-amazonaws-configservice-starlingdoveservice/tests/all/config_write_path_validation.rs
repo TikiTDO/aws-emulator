@@ -34,7 +34,9 @@ use serde_json::{json, Value};
 
 use crate::config_connectors::refusal;
 use crate::config_discovered_resource_counts::counts_of;
-use crate::config_setup_and_rule_loop::{managed_rule, with_recorder_and_channel, Emulator};
+use crate::config_setup_and_rule_loop::{
+    managed_rule, with_recorder_and_channel, with_verdicts, Emulator,
+};
 
 /// The name Config assigns a configuration recorder created without one
 /// (`ConfigurationRecorder$name`: "Config automatically assigns the name of
@@ -535,11 +537,18 @@ async fn a_remediation_exception_needs_the_rules_remediation_configuration() {
     }
 
     // Once the rule HOLDS a remediation configuration, the same request is accepted and
-    // the exception is read back.
+    // the exception is read back — for a resource the rule FOUND non-compliant, which is
+    // what a put resolves its keys against.
     let emulator = Emulator::new();
     let rule = "remediated";
     with_recorder_and_channel(&emulator).await;
     emulator.ok("PutConfigRule", &managed_rule(rule)).await;
+    with_verdicts(
+        &emulator,
+        rule,
+        "NON_COMPLIANT",
+        &[("AWS::EC2::Volume".to_string(), "vol-0001".to_string())],
+    );
     emulator
         .ok(
             "PutRemediationConfigurations",
