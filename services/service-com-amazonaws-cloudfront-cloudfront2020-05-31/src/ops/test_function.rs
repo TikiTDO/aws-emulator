@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op TestFunction
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `TestFunction`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`TestFunction::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: a test RUNS the stored function code over the event object the request
+//! carries — on the JavaScript engine embedded in this process
+//! ([`crate::state::function_runtime`]) — and reports what that run produced: the event
+//! object the function returned, the lines it logged, the error it raised and how much of the
+//! allowed execution time it took. It PERSISTS nothing: the code, the configuration and the
+//! version token it runs against are read from the one stored function record, and a test
+//! leaves that record exactly as it stands. This is the ONLY file to touch for this
+//! operation.
 //!
 //! ## Shape of an operation
 //!
@@ -158,20 +157,176 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `TestFunction` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(TestFunctionErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("TestFunction"))
+        // The engine is reachable from `&self` (constructor-injected); this operation needs
+        // nothing from the request metadata the context carries.
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(crate::state::store_unavailable());
+        };
+
+        // "To test a function, you provide the function's name and version (ETag value)
+        // along with the event object": the stage, the code and the version token this test
+        // runs against are read from the ONE stored function record, under the lock, and the
+        // lock is released before any of that code runs — the run is the caller's own code,
+        // so it never happens while the store is held. Nothing here writes: a test reports
+        // what the function did and leaves the record as it stands.
+        let prepared = {
+            let now = ::std::time::SystemTime::now();
+            let mut store = state.lock();
+            store.settle(now);
+
+            // "The stage of the function that you are testing, either DEVELOPMENT or LIVE";
+            // a request that names none addresses the stage a function is created in. A name
+            // no function holds, and a function that has never been published to the stage
+            // the request names, are both "The function does not exist".
+            let stage = input
+                .stage
+                .as_deref()
+                .unwrap_or(crate::state::DEFAULT_FUNCTION_STAGE);
+            let Some(function) = store.function(&input.name) else {
+                return Err(TestFunctionErrorModeled::NoSuchFunctionExists(
+                    crate::state::no_such_function_exists(),
+                )
+                .into());
+            };
+            let Some(tested) = function.stage(stage) else {
+                return Err(TestFunctionErrorModeled::NoSuchFunctionExists(
+                    crate::state::no_such_function_exists(),
+                )
+                .into());
+            };
+
+            // `IfMatch` is "The current version (ETag value) of the function that you are
+            // testing, which you can get using DescribeFunction", and it is checked against
+            // the STORED version of the stage being tested — so a test only runs the code its
+            // caller actually read. This operation models NO failed-precondition error, so
+            // both a header that carries no version token at all and one carrying a token
+            // that is not the current one are "The If-Match version is missing or not valid":
+            // not valid FOR THIS FUNCTION, the way `DeleteContinuousDeploymentPolicy` reads
+            // the same wording.
+            if crate::state::if_match_version(Some(input.if_match.as_str()))
+                != Some(tested.etag.as_str())
+            {
+                return Err(TestFunctionErrorModeled::InvalidIfMatchVersion(
+                    crate::state::invalid_if_match_version(),
+                )
+                .into());
+            }
+
+            // The summary this result reports is the projection of the stage that was
+            // tested — "Contains configuration information and metadata about the CloudFront
+            // function that was tested" — read from the record, never from the request.
+            (
+                stage.to_string(),
+                tested.code.clone(),
+                tested.to_summary(&function.name, &function.arn),
+            )
+        };
+        let (stage, code, function_summary) = prepared;
+
+        // "You provide an event object that represents an HTTP request or response that your
+        // CloudFront distribution could receive in production", and the function is handed
+        // THAT object: it is the argument of the call, so a payload that is not a JSON object
+        // describes no event CloudFront could pass to a function, and is refused with the
+        // modelled `InvalidArgument` rather than run. The sentence the caller is served is
+        // the FIXED one for the condition — the parser's own account of where the document
+        // stopped is a detail of this emulator, so it is logged rather than put on the wire.
+        let event = match ::serde_json::from_slice::<::serde_json::Value>(&input.event_object) {
+            Ok(event @ ::serde_json::Value::Object(_)) => event.to_string(),
+            Ok(_) => return Err(invalid_argument(NOT_AN_EVENT_OBJECT).into()),
+            Err(error) => {
+                ::tracing::debug!(
+                    operation = Self::NAME,
+                    detail = %error,
+                    "the event object a function test carried is not JSON",
+                );
+                return Err(invalid_argument(NOT_JSON).into());
+            }
+        };
+
+        // The run itself: the code the store holds, over that event object, under every bound
+        // the runtime module declares, on a blocking thread.
+        let run = crate::state::run_function(code, event).await;
+        let compute_utilization = run.compute_utilization();
+
+        // One record per invocation: which function and stage ran and what the run came to.
+        // The event object, the output and the logged lines are the caller's own content and
+        // are what the response carries, so none of them is recorded here.
+        ::tracing::info!(
+            operation = Self::NAME,
+            function = %input.name,
+            stage = %stage,
+            outcome = outcome_kind(&run.outcome),
+            "a CloudFront function was tested",
+        );
+
+        let (function_output, function_error_message) = match run.outcome {
+            // "Returns the function's result (the modified event object) in the response."
+            crate::state::FunctionOutcome::Returned(output) => (Some(output), None),
+            // "If the result of testing the function was an error, this field contains the
+            // error message": the function ran and failed, which is a result this operation
+            // reports with the error message of that failure rather than a server fault.
+            crate::state::FunctionOutcome::Failed(message) => (None, Some(message)),
+            // The run did not happen at all, so there is no result to report and nothing is
+            // known about the code: "The CloudFront function failed" is what the service
+            // answers for a test it could not carry out.
+            crate::state::FunctionOutcome::Unavailable(reason) => {
+                ::tracing::warn!(
+                    detail = %reason,
+                    "a CloudFront function was not run, so its test could not be answered",
+                );
+                return Err(TestFunctionErrorModeled::TestFunctionFailed(TestFunctionFailed {
+                    message: Some(TEST_FUNCTION_FAILED_MESSAGE.to_string()),
+                })
+                .into());
+            }
+        };
+
+        Ok(TestFunctionOutput {
+            test_result: Some(TestResult {
+                function_summary: Some(function_summary),
+                // "The amount of time that the function took to run as a percentage of the
+                // maximum allowed time", measured over the run that just happened.
+                compute_utilization: Some(compute_utilization),
+                // "Contains the log lines that the function wrote (if any) when running the
+                // test" — the lines that run wrote, in the order it wrote them.
+                function_execution_logs: Some(run.logs),
+                function_error_message,
+                function_output,
+            }),
+        })
     }
 }
+
+/// The modelled `InvalidArgument` ("An argument is invalid") for an event object this
+/// operation refuses, carrying `reason`.
+fn invalid_argument(reason: impl ::std::fmt::Display) -> TestFunctionErrorModeled {
+    TestFunctionErrorModeled::InvalidArgument(InvalidArgument {
+        message: Some(format!("An argument is invalid: {reason}")),
+    })
+}
+
+/// What a run came to, in one word, for the record of the call: the outcome's kind and
+/// nothing of its content, which is the caller's own.
+fn outcome_kind(outcome: &crate::state::FunctionOutcome) -> &'static str {
+    match outcome {
+        crate::state::FunctionOutcome::Returned(_) => "returned",
+        crate::state::FunctionOutcome::Failed(_) => "failed",
+        crate::state::FunctionOutcome::Unavailable(_) => "not run",
+    }
+}
+
+/// The reason an event object that is valid JSON but not a JSON OBJECT is refused: an event
+/// is an object with the request or response the function is handed.
+const NOT_AN_EVENT_OBJECT: &str =
+    "the event object is not a JSON object, so it describes no event a function can be \
+     passed";
+
+/// The reason an event object that is not JSON at all is refused.
+const NOT_JSON: &str = "the event object is not valid JSON";
+
+/// `TestFunctionFailed`'s message: the sentence the model states for the condition ("The
+/// CloudFront function failed."), served for a test this emulator could not carry out at
+/// all. It names no run of its own, because nothing about the code was learned.
+const TEST_FUNCTION_FAILED_MESSAGE: &str = "The CloudFront function failed.";

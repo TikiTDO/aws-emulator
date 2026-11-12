@@ -167,6 +167,8 @@ mod function_lifecycle;
 mod function_list;
 #[path = "all/function_publish.rs"]
 mod function_publish;
+#[path = "all/function_test_run.rs"]
+mod function_test_run;
 #[path = "all/function_update.rs"]
 mod function_update;
 #[path = "all/invalidation_list.rs"]

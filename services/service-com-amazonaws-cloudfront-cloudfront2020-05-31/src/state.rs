@@ -117,6 +117,15 @@ use crate::ops::types::{
 pub mod functions;
 pub use functions::*;
 
+/// RUNNING a function's code: the engine the code a caller stored is compiled and executed
+/// in, the bounds one run is held to, and what a run reports back (the event object the
+/// function returned, the lines it logged, the failure it raised). A SUBMODULE for the same
+/// reason [`functions`] is one — it is the one place this service executes caller-supplied
+/// code, and nothing in it reads or writes the store; `pub use` keeps every name reachable as
+/// `crate::state::<name>`.
+pub mod function_runtime;
+pub use function_runtime::*;
+
 /// The CONNECTION FUNCTION slice of this store: the connection function record, its two
 /// stages, their quotas, the id, ARN and path one is addressed by, and the modelled errors
 /// the connection function operations answer with. A SUBMODULE for the same reason

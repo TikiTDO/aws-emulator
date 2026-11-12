@@ -49,6 +49,24 @@ service-com-amazonaws-cloudwatch-graniteserviceversion20100801 = { workspace = t
 # let through is answered 403 at the edge, with no origin request made.
 service-com-amazonaws-wafv2-awswaf-20190729 = { workspace = true }
 
+# `rquickjs` is the QuickJS JavaScript engine, embedded in this process, which is what RUNS a
+# CloudFront function: `TestFunction` answers with "the function's result (the modified event
+# object)", the lines the function logged and the error it raised, and all three are produced by
+# the caller's OWN code, so that code is executed rather than interpreted by hand
+# (`state::function_runtime`).
+# It is an EXECUTION SUBSTRATE, so the confinement and the bounds of one run are stated and
+# enforced in that module: a fresh engine per run with the engine's own memory and stack
+# ceilings, a wall-clock and a step budget spent by its interrupt handler, a latch the running
+# code cannot reach, caps on what one run may report, a concurrency permit and a caller-wait
+# ceiling, the run on a blocking thread, and ONE host function reachable from the engine (the
+# console's writer). The `loader` feature is left OUT, so no module resolver is built at all
+# and an `import` reaches nothing; `dyn-load` is left out too, so no host library can be
+# loaded. QuickJS itself registers no filesystem, process, environment, network or thread API.
+# It is also a NATIVE component: `rquickjs-sys` compiles the QuickJS C sources with `cc` inside
+# this build, so nothing is fetched or started outside this process, and the C it compiles is
+# the engine's own. 0.14 is the version this workspace's other services already run it at, and
+# it carries no advisory.
+rquickjs = "0.14"
 # The account's S3 OBJECT a trust store's CA certificates bundle is: `CreateTrustStore`
 # reads the bundle in the one object store this emulator holds, over the in-process
 # callback, so the certificate count it reports comes from those bytes

@@ -10341,6 +10341,7 @@ dependencies = [
  "hyper-util",
  "pem",
  "rcgen",
+ "rquickjs",
  "serde_json",
  "service-com-amazonaws-cloudwatch-graniteserviceversion20100801",
  "service-com-amazonaws-s3-amazons3",
