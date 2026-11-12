@@ -61,6 +61,8 @@ mod batch_job_role_trust;
 mod batch_job_status;
 #[path = "all/batch_job_tagging.rs"]
 mod batch_job_tagging;
+#[path = "all/batch_job_unconfirmed_run.rs"]
+mod batch_job_unconfirmed_run;
 #[path = "all/empty_body_success_status.rs"]
 mod empty_body_success_status;
 #[path = "all/multi_region_access_point_lifecycle.rs"]

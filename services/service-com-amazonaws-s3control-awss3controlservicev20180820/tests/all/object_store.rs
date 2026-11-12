@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::access_point_lifecycle::{call_in_region, Reply, ACCOUNT, REGION};
+use crate::access_point_lifecycle::{call_in_region, xml_escape, Reply, ACCOUNT, REGION};
 
 /// The XML namespace an Amazon S3 request payload carries.
 const S3_XMLNS: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
@@ -221,6 +221,43 @@ impl ObjectStore {
             String::from_utf8_lossy(&body)
         );
         elements(&String::from_utf8_lossy(&body), "Key")
+    }
+
+    /// Put `tags` on `key` through Amazon S3's own `PutObjectTagging`, so a
+    /// suite that pins what a job's action does to an object's tag set can start
+    /// from an object that already carries one.
+    pub(crate) async fn put_object_tags(
+        &self,
+        case: &str,
+        region: &str,
+        bucket: &str,
+        key: &str,
+        tags: &[(&str, &str)],
+    ) {
+        let mut body = format!("<Tagging xmlns=\"{S3_XMLNS}\"><TagSet>");
+        for (tag_key, value) in tags {
+            body.push_str(&format!(
+                "<Tag><Key>{}</Key><Value>{}</Value></Tag>",
+                xml_escape(tag_key),
+                xml_escape(value)
+            ));
+        }
+        body.push_str("</TagSet></Tagging>");
+        let (status, answered) = self
+            .s3(
+                region,
+                "PUT",
+                &format!("/{bucket}/{key}?tagging"),
+                body.as_bytes(),
+            )
+            .await;
+        assert_eq!(
+            status,
+            200,
+            "case {case:?}: the tags of {bucket}/{key} must be written first, got {status} with \
+             body {:?}",
+            String::from_utf8_lossy(&answered)
+        );
     }
 
     /// The tag set `bucket` holds on `key`, as (key, value) pairs in the order

@@ -146,7 +146,11 @@ pub(crate) async fn poll_terminal(store: &ObjectStore, case: &str, job_id: &str)
 }
 
 /// The three `ProgressSummary` counters a settled job reports.
-fn progress(case: &str, described: &Reply) -> (i64, i64, i64) {
+///
+/// `pub(crate)`: the suite that pins what a job needing no confirmation settles
+/// as ([`crate::batch_job_unconfirmed_run`]) reads the same counters rather than
+/// owning a second reader of them.
+pub(crate) fn progress(case: &str, described: &Reply) -> (i64, i64, i64) {
     let read = |element: &str| -> i64 {
         described
             .text(element)
