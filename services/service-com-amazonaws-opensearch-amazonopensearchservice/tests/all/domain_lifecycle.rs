@@ -111,6 +111,21 @@ impl Emulator {
         emulator
     }
 
+    /// The same emulator with the AWS KMS service mounted on the SAME shared engine, so a
+    /// suite can create, disable and schedule the deletion of the keys a domain's
+    /// encryption at rest names through that service's OWN operations — the store this
+    /// service resolves an `EncryptionAtRestOptions$KmsKeyId` in — rather than by
+    /// hand-building a key record.
+    pub(crate) fn with_kms() -> Self {
+        let mut emulator = Self::new();
+        emulator.router.register_service(
+            service_com_amazonaws_kms_trentservice::EmulatedService::new(std::sync::Arc::clone(
+                &emulator.engine,
+            )),
+        );
+        emulator
+    }
+
     /// This emulator's store, reached exactly as a handler reaches it. A suite uses it
     /// to put the record into a state no implemented operation can reach yet — the
     /// service software a landed deployment leaves behind, say, whose deploying
@@ -290,6 +305,57 @@ impl Emulator {
         assert_eq!(
             answer.status, 200,
             "case DeleteLogGroup({name:?}): expected 200, got {} with {:?}",
+            answer.status, answer.body
+        );
+    }
+
+    /// Call `operation` of the AWS KMS service mounted on the same router
+    /// ([`Emulator::with_kms`]) in `region`, the way an SDK drives it: `POST /` with
+    /// `X-Amz-Target: TrentService.<Op>`, signed for that service in that Region — keys
+    /// are regional, so the Region a call is signed for is the Region its key lives in.
+    pub(crate) async fn kms_call(&self, region: &str, operation: &str, body: Value) -> Answer {
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("host", format!("kms.{region}.amazonaws.com"))
+            .header("content-type", "application/x-amz-json-1.1")
+            .header("x-amz-target", format!("TrentService.{operation}"))
+            .header(
+                "authorization",
+                format!(
+                    "AWS4-HMAC-SHA256 \
+                     Credential={DEFAULT_ACCESS_KEY_ID}/20260101/{region}/kms/aws4_request, \
+                     SignedHeaders=host;x-amz-target, Signature=0"
+                ),
+            )
+            .body(Bytes::from(body.to_string()))
+            .expect("the test request is well formed");
+        self.dispatch(request).await
+    }
+
+    /// Create a customer managed key in `region` through KMS's own `CreateKey`, answering
+    /// the key ARN it minted — the value an `EncryptionAtRestOptions$KmsKeyId` names it by.
+    pub(crate) async fn created_key(&self, region: &str) -> String {
+        let answer = self.kms_call(region, "CreateKey", json!({})).await;
+        assert_eq!(
+            answer.status, 200,
+            "case CreateKey({region:?}): expected 200, got {} with {:?}",
+            answer.status, answer.body
+        );
+        answer.body["KeyMetadata"]["Arn"]
+            .as_str()
+            .unwrap_or_else(|| panic!("case CreateKey({region:?}): expected a key ARN"))
+            .to_string()
+    }
+
+    /// Move the key `key_id` of `region` through one of KMS's own key-state operations
+    /// (`DisableKey`, `EnableKey`, `ScheduleKeyDeletion`), so what this service resolves is
+    /// the state that service wrote.
+    pub(crate) async fn kms_key_operation(&self, region: &str, operation: &str, body: Value) {
+        let answer = self.kms_call(region, operation, body).await;
+        assert_eq!(
+            answer.status, 200,
+            "case {operation}({region:?}): expected 200, got {} with {:?}",
             answer.status, answer.body
         );
     }

@@ -383,6 +383,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 &*self.engine,
                 input.cognito_options.as_ref(),
             ),
+            // A domain whose encryption at rest is enabled is provisioned THROUGH the KMS
+            // key the request names, so that key is resolved before the domain is created:
+            // a key the domain's own Region holds none of — a key ARN of another Region
+            // among them — or one in a key state KMS performs no cryptographic operation
+            // in encrypts nothing, so the create is refused and no domain exists
+            // afterwards ([`crate::state::encryption_at_rest`]).
+            crate::state::encryption_at_rest::kms_key_refusal(
+                &*self.engine,
+                &region,
+                input.encryption_at_rest_options.as_ref(),
+            ),
         ]
         .into_iter()
         .flatten()

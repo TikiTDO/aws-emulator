@@ -57,6 +57,11 @@ service-com-amazonaws-s3-amazons3 = { workspace = true }
 # resolved in the store `logs:CreateLogGroup` writes (`state::log_destinations`) — the
 # way the IAM, Cognito and S3 stores above are read.
 service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
+# The AWS KMS key store, which holds the customer managed keys a domain's encryption at
+# rest can name: an `EncryptionAtRestOptions$KmsKeyId` is resolved — at the domain's own
+# Region, and for the key state KMS serves it in — in the store `kms:CreateKey` and
+# `kms:DisableKey` write (`state::encryption_at_rest`), the way the stores above are read.
+service-com-amazonaws-kms-trentservice = { workspace = true }
 # UAX#29 word segmentation: the word boundaries the engine's standard tokenizer splits
 # text on (`state::analysis`), rather than a hand-written scanner here.
 unicode-segmentation = "1"

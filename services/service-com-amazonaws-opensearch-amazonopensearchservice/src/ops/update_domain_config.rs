@@ -592,6 +592,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(UpdateDomainConfigErrorModeled::ValidationException(refusal).into());
         }
 
+        // The KMS key a domain's encryption at rest is enabled with has to be a key the
+        // domain can be encrypted with, whichever call sets it, and by the same rule the
+        // create path applies — encryption at rest "can only be used when creating a new
+        // domain or enabling encryption at rest for the first time on an existing domain"
+        // (`smithy_query(query="doc",shape="EncryptionAtRestOptions")`), so this call is
+        // the other place a key is named. It is checked on the REQUEST's container, which
+        // REPLACES the stored one whole: the container the request carries IS the
+        // encryption this change would leave the domain with, and a request carrying none
+        // changes nothing about the key its data is encrypted under. A dry run is refused
+        // too — it reports what applying the change would do, and this change cannot be
+        // applied.
+        if let Some(refusal) = crate::state::encryption_at_rest::kms_key_refusal(
+            &*self.engine,
+            &crate::state::request_region(ctx.parts()),
+            input.encryption_at_rest_options.as_ref(),
+        ) {
+            return Err(UpdateDomainConfigErrorModeled::ValidationException(refusal).into());
+        }
+
         let touched = merge(&mut merged, input, &placements, now);
         // A block the update INTRODUCES is completed the same way the create completes
         // one: a volume switched to `gp3` gets the baseline performance the service
