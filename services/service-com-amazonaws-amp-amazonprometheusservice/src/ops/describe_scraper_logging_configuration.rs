@@ -216,7 +216,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             scraper_id: configuration.scraper_id.clone(),
             logging_destination: configuration.logging_destination.clone(),
             scraper_components: configuration.scraper_components.clone(),
-            modified_at: ::aws_smithy_types::DateTime::from(configuration.modified_at),
+            modified_at: crate::state::wire_instant(configuration.modified_at),
         })
     }
 }

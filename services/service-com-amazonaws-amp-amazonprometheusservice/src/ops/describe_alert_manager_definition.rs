@@ -193,16 +193,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         Ok(DescribeAlertManagerDefinitionOutput {
-            alert_manager_definition: AlertManagerDefinitionDescription {
-                status: AlertManagerDefinitionStatus {
-                    status_code: definition.status_code.clone(),
-                    status_reason: None,
-                },
-                // "The actual alert manager definition" — the stored bytes, unchanged.
-                data: definition.data.clone(),
-                created_at: ::aws_smithy_types::DateTime::from(definition.created_at),
-                modified_at: ::aws_smithy_types::DateTime::from(definition.modified_at),
-            },
+            // Every member read back off the persisted record — its status (reason
+            // included) and the instants it was stamped with.
+            alert_manager_definition: crate::state::alert_manager_definition_description(definition),
         })
     }
 }

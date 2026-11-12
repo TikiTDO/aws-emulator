@@ -1987,6 +1987,52 @@ fn string_map(
     )
 }
 
+/// One stored instant as the wire timestamp a response carries: the instant truncated to
+/// whole MILLISECONDS.
+///
+/// Every modelled `Timestamp` member of this service targets `smithy.api#Timestamp` with
+/// no `@timestampFormat` override, so restJson1 writes it as epoch seconds with a
+/// fractional part — a JSON number. RECORDED BEHAVIOUR: the instants real aps publishes
+/// carry at most millisecond resolution, so the clock's finer remainder is no part of the
+/// value a caller receives; an `f64` holds today's epoch seconds to about a quarter of a
+/// microsecond anyway, so a nanosecond remainder would not survive a client's round trip
+/// of the number it was sent.
+///
+/// ONE derivation for every instant this service reports, so no two paths publish the same
+/// stored instant at two different resolutions.
+pub fn wire_instant(at: SystemTime) -> ::aws_smithy_types::DateTime {
+    let millis = match at.duration_since(UNIX_EPOCH) {
+        Ok(since) => i64::try_from(since.as_millis()).unwrap_or(i64::MAX),
+        // An instant BEFORE the epoch, reported as the milliseconds it precedes the epoch
+        // by: truncated towards the epoch, as the forward direction is truncated towards
+        // it too.
+        Err(before) => i64::try_from(before.duration().as_millis())
+            .map_or(i64::MIN, |millis| -millis),
+    };
+    ::aws_smithy_types::DateTime::from_millis(millis)
+}
+
+/// The `statusReason` a status structure reports while NOTHING has failed: the empty
+/// reason.
+///
+/// RECORDED BEHAVIOUR: the member is "The reason for the failure, if any" and the model
+/// leaves open whether it is emitted when there has been no failure. Every recorded read
+/// of a rule groups namespace or an alert manager definition carries `statusReason`
+/// PRESENT and empty beside `statusCode`, so a client that reads the member
+/// unconditionally — the member is modelled, and a deserializer that distinguishes absent
+/// from empty branches on it — finds a value there rather than a missing key.
+pub const NO_FAILURE_STATUS_REASON: &str = "";
+
+/// The `statusReason` a read path publishes for a stored record: the reason the record
+/// holds, or [`NO_FAILURE_STATUS_REASON`] while it holds none. Never absent, which is why
+/// it answers a `String` and each caller does the one `Some` wrap the member needs.
+///
+/// ONE derivation, so a resource's description and its summary cannot report a stored
+/// reason two different ways.
+pub fn published_status_reason(stored: Option<&str>) -> String {
+    stored.unwrap_or(NO_FAILURE_STATUS_REASON).to_string()
+}
+
 /// The operator an expression APPLIES outermost, when it leads with one: the identifier
 /// the expression STARTS with, immediately followed by its argument list (`sum(x)`) or by
 /// an aggregation modifier (`sum by (job) (x)`, `sum without (job) (x)`) — the form
@@ -2097,8 +2143,8 @@ pub fn query_logging_metadata(
         status: query_logging_status(configuration),
         workspace: configuration.workspace_id.clone(),
         destinations: wire_query_logging_destinations(&configuration.destinations),
-        created_at: ::aws_smithy_types::DateTime::from(configuration.created_at),
-        modified_at: ::aws_smithy_types::DateTime::from(configuration.modified_at),
+        created_at: wire_instant(configuration.created_at),
+        modified_at: wire_instant(configuration.modified_at),
     }
 }
 
@@ -2563,6 +2609,55 @@ pub const RESERVED_LABEL_NAME_PREFIX: &str = "__";
 // Rule groups namespaces
 // =============================================================================
 
+/// The `RuleGroupsNamespaceStatus` a stored namespace reports.
+///
+/// ONE derivation for every path that publishes a namespace's status, so the describe, the
+/// listing and any later reader cannot drift apart: the status code the record holds, and
+/// the reason it holds ([`published_status_reason`], which reports the service's
+/// no-failure reason while nothing has failed).
+pub fn rule_groups_namespace_status(
+    namespace: &RuleGroupsNamespace,
+) -> crate::ops::types::RuleGroupsNamespaceStatus {
+    crate::ops::types::RuleGroupsNamespaceStatus {
+        status_code: namespace.status_code.clone(),
+        status_reason: Some(published_status_reason(namespace.status_reason.as_deref())),
+    }
+}
+
+/// The stored namespace as the `RuleGroupsNamespaceDescription` `DescribeRuleGroupsNamespace`
+/// reports — every member read back off the persisted record, including the rules file it
+/// holds, byte for byte as it was written.
+pub fn rule_groups_namespace_description(
+    namespace: &RuleGroupsNamespace,
+) -> crate::ops::types::RuleGroupsNamespaceDescription {
+    crate::ops::types::RuleGroupsNamespaceDescription {
+        arn: namespace.arn.clone(),
+        name: namespace.name.clone(),
+        status: rule_groups_namespace_status(namespace),
+        data: namespace.data.clone(),
+        created_at: wire_instant(namespace.created_at),
+        modified_at: wire_instant(namespace.modified_at),
+        tags: tag_map(&namespace.tags),
+    }
+}
+
+/// The stored namespace as the `RuleGroupsNamespaceSummary` `ListRuleGroupsNamespaces`
+/// reports — the same persisted record [`rule_groups_namespace_description`] reports,
+/// through the same status and the same instants, minus the rules file the summary shape
+/// does not carry.
+pub fn rule_groups_namespace_summary(
+    namespace: &RuleGroupsNamespace,
+) -> crate::ops::types::RuleGroupsNamespaceSummary {
+    crate::ops::types::RuleGroupsNamespaceSummary {
+        arn: namespace.arn.clone(),
+        name: namespace.name.clone(),
+        status: rule_groups_namespace_status(namespace),
+        created_at: wire_instant(namespace.created_at),
+        modified_at: wire_instant(namespace.modified_at),
+        tags: tag_map(&namespace.tags),
+    }
+}
+
 /// The bound BOTH operations that carry a rules file state in their own documentation:
 /// "The combined length of a rule group namespace and a rule group name cannot exceed
 /// 721 UTF-8 bytes."
@@ -2730,8 +2825,8 @@ pub fn scraper_summary(scraper: &Scraper) -> crate::ops::types::ScraperSummary {
             status_code: scraper.status_code.clone(),
         },
         status_reason: scraper.status_reason.clone(),
-        created_at: ::aws_smithy_types::DateTime::from(scraper.created_at),
-        last_modified_at: ::aws_smithy_types::DateTime::from(scraper.last_modified_at),
+        created_at: wire_instant(scraper.created_at),
+        last_modified_at: wire_instant(scraper.last_modified_at),
         tags: tag_map(&scraper.tags),
         source: scraper.source.clone(),
         destination: scraper.destination.clone(),
@@ -2754,8 +2849,8 @@ pub fn scraper_description(scraper: &Scraper) -> crate::ops::types::ScraperDescr
             status_code: scraper.status_code.clone(),
         },
         status_reason: scraper.status_reason.clone(),
-        created_at: ::aws_smithy_types::DateTime::from(scraper.created_at),
-        last_modified_at: ::aws_smithy_types::DateTime::from(scraper.last_modified_at),
+        created_at: wire_instant(scraper.created_at),
+        last_modified_at: wire_instant(scraper.last_modified_at),
         tags: tag_map(&scraper.tags),
         scrape_configuration: scraper.scrape_configuration.clone(),
         source: scraper.source.clone(),

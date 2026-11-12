@@ -248,8 +248,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         // reason to report beside the status code.
                         status_reason: None,
                     },
-                    created_at: ::aws_smithy_types::DateTime::from(detector.created_at),
-                    modified_at: ::aws_smithy_types::DateTime::from(detector.modified_at),
+                    created_at: crate::state::wire_instant(detector.created_at),
+                    modified_at: crate::state::wire_instant(detector.modified_at),
                     tags: crate::state::tag_map(&detector.tags),
                 })
                 .collect(),

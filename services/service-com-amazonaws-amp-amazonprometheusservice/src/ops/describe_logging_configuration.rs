@@ -203,8 +203,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 status: crate::state::logging_configuration_status(logging),
                 workspace: workspace.workspace_id.clone(),
                 log_group_arn: logging.log_group_arn.clone(),
-                created_at: ::aws_smithy_types::DateTime::from(logging.created_at),
-                modified_at: ::aws_smithy_types::DateTime::from(logging.modified_at),
+                created_at: crate::state::wire_instant(logging.created_at),
+                modified_at: crate::state::wire_instant(logging.modified_at),
             },
         })
     }

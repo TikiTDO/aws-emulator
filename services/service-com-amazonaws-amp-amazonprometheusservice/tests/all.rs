@@ -89,6 +89,8 @@ mod scraper_logging_configuration_update;
 mod scraper_update;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/status_reason_and_instant_resolution.rs"]
+mod status_reason_and_instant_resolution;
 #[path = "all/tag_key_constraints.rs"]
 mod tag_key_constraints;
 #[path = "all/taggable_resource_kinds.rs"]

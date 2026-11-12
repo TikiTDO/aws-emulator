@@ -243,19 +243,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         );
 
         Ok(ListRuleGroupsNamespacesOutput {
+            // Each entry is built by the SAME projection the describe path reports a
+            // namespace through, so a summary and a description of one namespace cannot
+            // report its status or its instants two different ways.
             rule_groups_namespaces: namespaces
                 .into_iter()
-                .map(|namespace| RuleGroupsNamespaceSummary {
-                    arn: namespace.arn.clone(),
-                    name: namespace.name.clone(),
-                    status: RuleGroupsNamespaceStatus {
-                        status_code: namespace.status_code.clone(),
-                        status_reason: namespace.status_reason.clone(),
-                    },
-                    created_at: ::aws_smithy_types::DateTime::from(namespace.created_at),
-                    modified_at: ::aws_smithy_types::DateTime::from(namespace.modified_at),
-                    tags: crate::state::tag_map(&namespace.tags),
-                })
+                .map(crate::state::rule_groups_namespace_summary)
                 .collect(),
             next_token,
         })

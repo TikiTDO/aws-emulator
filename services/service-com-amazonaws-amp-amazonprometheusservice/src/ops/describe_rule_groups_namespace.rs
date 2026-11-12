@@ -198,19 +198,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         Ok(DescribeRuleGroupsNamespaceOutput {
-            rule_groups_namespace: RuleGroupsNamespaceDescription {
-                arn: namespace.arn.clone(),
-                name: namespace.name.clone(),
-                status: RuleGroupsNamespaceStatus {
-                    status_code: namespace.status_code.clone(),
-                    status_reason: namespace.status_reason.clone(),
-                },
-                // The blob the namespace holds, byte for byte as it was written.
-                data: namespace.data.clone(),
-                created_at: ::aws_smithy_types::DateTime::from(namespace.created_at),
-                modified_at: ::aws_smithy_types::DateTime::from(namespace.modified_at),
-                tags: crate::state::tag_map(&namespace.tags),
-            },
+            // Every member read back off the persisted record, through the ONE projection
+            // the listing reports a namespace through too.
+            rule_groups_namespace: crate::state::rule_groups_namespace_description(namespace),
         })
     }
 }

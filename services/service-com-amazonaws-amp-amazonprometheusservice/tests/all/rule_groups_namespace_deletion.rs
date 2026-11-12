@@ -182,9 +182,11 @@ async fn delete_marks_the_namespace_deleting_then_the_clock_releases_it() {
                 NAMESPACE_STATUS_DELETING,
                 "case {label:?}: an accepted delete reports DELETING, got {pending:?}"
             );
-            assert!(
-                namespace["status"]["statusReason"].is_null(),
-                "case {label:?}: nothing failed, so statusReason must be absent, got {pending:?}"
+            assert_eq!(
+                namespace["status"]["statusReason"].as_str(),
+                Some(""),
+                "case {label:?}: nothing failed, so the describe reports the empty reason \
+                 the service sends, got {pending:?}"
             );
             assert_eq!(
                 blob(&label, &namespace["data"]),

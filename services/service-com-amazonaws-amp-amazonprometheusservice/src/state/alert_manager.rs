@@ -76,6 +76,11 @@ pub struct AlertManagerDefinition {
     pub data: Vec<u8>,
     /// One of the `DEFINITION_STATUS_*` constants above.
     pub status_code: String,
+    /// `AlertManagerDefinitionStatus$statusReason` — "If there is a failure, the reason for
+    /// the failure", so the record holds none while nothing has failed and the read path
+    /// publishes the service's no-failure reason for it
+    /// ([`crate::state::published_status_reason`]).
+    pub status_reason: Option<String>,
     /// When the definition was created — unchanged by a later update.
     pub created_at: SystemTime,
     /// When the definition was "most recently changed"
@@ -103,6 +108,7 @@ impl ::std::fmt::Debug for AlertManagerDefinition {
         f.debug_struct("AlertManagerDefinition")
             .field("data_bytes", &self.data.len())
             .field("status_code", &self.status_code)
+            .field("status_reason", &self.status_reason)
             .field("created_at", &self.created_at)
             .field("modified_at", &self.modified_at)
             .field("transition_due", &self.transition_due)
@@ -130,6 +136,37 @@ impl AlertManagerDefinition {
         }
         self.status_code = DEFINITION_STATUS_ACTIVE.to_string();
         false
+    }
+}
+
+/// The `AlertManagerDefinitionStatus` a stored definition reports.
+///
+/// ONE derivation for every path that publishes a definition's status, exactly as
+/// [`crate::state::rule_groups_namespace_status`] is for a rule groups namespace: the
+/// status code the record holds, and the reason it holds — the service's no-failure reason
+/// while nothing has failed, never an absent member.
+pub fn alert_manager_definition_status(
+    definition: &AlertManagerDefinition,
+) -> crate::ops::types::AlertManagerDefinitionStatus {
+    crate::ops::types::AlertManagerDefinitionStatus {
+        status_code: definition.status_code.clone(),
+        status_reason: Some(crate::state::published_status_reason(
+            definition.status_reason.as_deref(),
+        )),
+    }
+}
+
+/// The stored definition as the `AlertManagerDefinitionDescription`
+/// `DescribeAlertManagerDefinition` reports — the document byte for byte as it was written,
+/// its status, and the instants the record was stamped with.
+pub fn alert_manager_definition_description(
+    definition: &AlertManagerDefinition,
+) -> crate::ops::types::AlertManagerDefinitionDescription {
+    crate::ops::types::AlertManagerDefinitionDescription {
+        status: alert_manager_definition_status(definition),
+        data: definition.data.clone(),
+        created_at: crate::state::wire_instant(definition.created_at),
+        modified_at: crate::state::wire_instant(definition.modified_at),
     }
 }
 

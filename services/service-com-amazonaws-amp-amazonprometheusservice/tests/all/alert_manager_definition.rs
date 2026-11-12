@@ -41,22 +41,22 @@ const NESTING_PAST_PARSER_LIMIT: usize = 400;
 /// a YAML mapping whose `alertmanager_config` entry holds the Alertmanager configuration,
 /// with an optional `template_files` beside it:
 /// <https://docs.aws.amazon.com/prometheus/latest/APIReference/yaml-AlertManagerDefinitionData.html>
-fn block_scalar() -> Vec<u8> {
+pub(crate) fn block_scalar() -> Vec<u8> {
     b"alertmanager_config: |\n  route:\n    receiver: default\n  receivers:\n    - name: default\n"
         .to_vec()
 }
 
-fn with_template_files() -> Vec<u8> {
+pub(crate) fn with_template_files() -> Vec<u8> {
     b"alertmanager_config: |\n  route:\n    receiver: sns\n\
       template_files:\n  default_template: |\n    {{ define \"alert\" }}fired{{ end }}\n"
         .to_vec()
 }
 
-fn flow_style() -> Vec<u8> {
+pub(crate) fn flow_style() -> Vec<u8> {
     b"{alertmanager_config: \"route:\\n  receiver: default\\n\"}".to_vec()
 }
 
-fn non_ascii() -> Vec<u8> {
+pub(crate) fn non_ascii() -> Vec<u8> {
     "alertmanager_config: |\n  route:\n    receiver: 通知-équipe\n"
         .as_bytes()
         .to_vec()
@@ -90,15 +90,27 @@ fn uri(ws: &str) -> String {
     format!("/workspaces/{ws}/alertmanager/definition")
 }
 
-async fn create(amp: &Amp, region: &str, ws: &str, data: &[u8], token: Option<&str>) -> Reply {
+pub(crate) async fn create(
+    amp: &Amp,
+    region: &str,
+    ws: &str,
+    data: &[u8],
+    token: Option<&str>,
+) -> Reply {
     amp.call("POST", &uri(ws), region, &body(data, token)).await
 }
 
-async fn put(amp: &Amp, region: &str, ws: &str, data: &[u8], token: Option<&str>) -> Reply {
+pub(crate) async fn put(
+    amp: &Amp,
+    region: &str,
+    ws: &str,
+    data: &[u8],
+    token: Option<&str>,
+) -> Reply {
     amp.call("PUT", &uri(ws), region, &body(data, token)).await
 }
 
-async fn delete(amp: &Amp, region: &str, ws: &str, token: Option<&str>) -> Reply {
+pub(crate) async fn delete(amp: &Amp, region: &str, ws: &str, token: Option<&str>) -> Reply {
     let path = match token {
         Some(token) => format!("{}?clientToken={token}", uri(ws)),
         None => uri(ws),
@@ -106,7 +118,7 @@ async fn delete(amp: &Amp, region: &str, ws: &str, token: Option<&str>) -> Reply
     amp.call("DELETE", &path, region, "").await
 }
 
-async fn describe(amp: &Amp, region: &str, ws: &str) -> Reply {
+pub(crate) async fn describe(amp: &Amp, region: &str, ws: &str) -> Reply {
     amp.call("GET", &uri(ws), region, "").await
 }
 

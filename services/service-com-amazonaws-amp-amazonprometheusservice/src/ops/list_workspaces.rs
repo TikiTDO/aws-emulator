@@ -224,7 +224,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     status: WorkspaceStatus {
                         status_code: workspace.status_code.clone(),
                     },
-                    created_at: ::aws_smithy_types::DateTime::from(workspace.created_at),
+                    created_at: crate::state::wire_instant(workspace.created_at),
                     tags: crate::state::tag_map(&workspace.tags),
                     kms_key_arn: workspace.kms_key_arn.clone(),
                 })

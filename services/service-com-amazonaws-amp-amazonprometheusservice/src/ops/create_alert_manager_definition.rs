@@ -265,6 +265,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // `AlertManagerDefinitionStatusCode$CREATING`: "Definition is being
             // created" — and the clock owes the move to ACTIVE at `transition_due`.
             status_code: crate::state::DEFINITION_STATUS_CREATING.to_string(),
+            // "If there is a failure, the reason for the failure": nothing has failed.
+            status_reason: None,
             created_at: now,
             modified_at: now,
             transition_due: Some(now + crate::state::TRANSITION_DELAY),

@@ -20,8 +20,8 @@
 use crate::rule_groups_namespace_lifecycle::{create_body, create_namespace, describe_namespace};
 use crate::workspace_lifecycle::{encode_label, tags_of, text, wait_for_due_transition, Amp, Reply};
 use service_com_amazonaws_amp_amazonprometheusservice::state::{
-    NAMESPACE_STATUS_ACTIVE, NAMESPACE_STATUS_CREATING, RULE_GROUPS_NAMESPACE_PAGE_DEFAULT,
-    RULE_GROUPS_NAMESPACE_PAGE_LIMIT,
+    NAMESPACE_STATUS_ACTIVE, NAMESPACE_STATUS_CREATING, NO_FAILURE_STATUS_REASON,
+    RULE_GROUPS_NAMESPACE_PAGE_DEFAULT, RULE_GROUPS_NAMESPACE_PAGE_LIMIT,
 };
 use std::collections::BTreeMap;
 
@@ -262,9 +262,17 @@ async fn each_summary_reports_the_persisted_record() {
             NAMESPACE_STATUS_ACTIVE,
             "case {name:?}: the clock owes the move to ACTIVE, got {entry:?}"
         );
-        assert!(
-            entry["status"]["statusReason"].is_null(),
-            "case {name:?}: nothing failed, so statusReason must be absent, got {entry:?}"
+        assert_eq!(
+            entry["status"]["statusReason"].as_str(),
+            Some(NO_FAILURE_STATUS_REASON),
+            "case {name:?}: nothing failed, so the summary reports the empty reason the \
+             service sends, got {entry:?}"
+        );
+        assert_eq!(
+            entry["status"]["statusReason"].as_str(),
+            record["status"]["statusReason"].as_str(),
+            "case {name:?}: the summary's statusReason must be the one the describe \
+             reports, got {entry:?}"
         );
         assert_eq!(
             entry["createdAt"].as_f64(),
