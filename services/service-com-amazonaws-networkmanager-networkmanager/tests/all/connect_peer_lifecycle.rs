@@ -443,8 +443,9 @@ fn assert_peer(case: &PeerCase, attachment: &str, peer: &Value, state: &str) {
         case.subnet.then(|| case_subnet(case)),
         "case {name:?}: expected the subnet the create named, got {peer}"
     );
-    assert!(
-        peer["LastModificationErrors"].is_null(),
+    assert_eq!(
+        peer["LastModificationErrors"],
+        json!([]),
         "case {name:?}: a peer this service accepted has no modification error, got {peer}"
     );
 

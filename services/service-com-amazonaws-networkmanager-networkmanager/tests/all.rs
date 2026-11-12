@@ -175,6 +175,8 @@ mod list_peerings;
 mod list_tags_for_resource;
 #[path = "all/malformed_resource_arn_refusal.rs"]
 mod malformed_resource_arn_refusal;
+#[path = "all/modification_errors.rs"]
+mod modification_errors;
 #[path = "all/network_resource_counts.rs"]
 mod network_resource_counts;
 #[path = "all/network_resource_metadata.rs"]
