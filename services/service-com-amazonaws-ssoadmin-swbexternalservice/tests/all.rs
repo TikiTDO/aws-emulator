@@ -233,3 +233,5 @@ mod validation_message_wording;
 mod withdrawn_assignment_copy_in_place;
 #[path = "all/listed_instance_state_at_the_list_bound.rs"]
 mod listed_instance_state_at_the_list_bound;
+#[path = "all/listed_instance_state_across_read_edge_cases.rs"]
+mod listed_instance_state_across_read_edge_cases;
