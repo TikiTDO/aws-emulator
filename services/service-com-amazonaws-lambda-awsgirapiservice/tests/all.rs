@@ -255,6 +255,8 @@ mod handler_rds_data_sdk;
 mod handler_rest_api_sdk;
 #[path = "all/handler_step_functions_sdk.rs"]
 mod handler_step_functions_sdk;
+#[path = "all/handler_s3_bucket_policy_principal.rs"]
+mod handler_s3_bucket_policy_principal;
 #[path = "all/handler_s3_object_access.rs"]
 mod handler_s3_object_access;
 #[path = "all/handler_s3_prefix_deny_precedence.rs"]

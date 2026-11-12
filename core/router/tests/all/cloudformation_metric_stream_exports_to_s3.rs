@@ -59,13 +59,13 @@ const CLOUDWATCH_SIGNING_NAME: &str = "monitoring";
 const SETTLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const SETTLE_POLLS: usize = 400;
 
-/// How long a delivery is waited for before a row fails: far longer than the emulator's own
-/// delivery span, so a loaded machine does not fail a row the clock would have served.
+/// How long a delivery is waited for before a row fails: far longer than the span a delivery
+/// of a row's own buffering needs, so a loaded machine does not fail a row the clock would
+/// have served.
 ///
-/// A row's destination declares the buffering a metric-stream consumer configures
-/// (`IntervalInSeconds`), and what a row then waits for is the Firehose emulator's OWN
-/// delivery span, which that interval only caps — so this budget is about the span, not about
-/// the declared hint.
+/// A row's destination declares the shortest buffering interval the hint admits
+/// ([`buffering_hints`]), which is the wait its delivery is then held for, so this budget is
+/// about that wait and not about an interval a consumer might configure instead.
 const DELIVERY_DEADLINE: Duration = Duration::from_secs(20);
 
 /// How often the destination bucket is polled while waiting for a delivery.
@@ -173,11 +173,13 @@ fn json_template(
     .to_string()
 }
 
-/// The buffering every destination below declares, with the shortest interval a metric-stream
-/// consumer would configure: the emulator's own delivery span is what a row then waits for,
-/// capped by this.
+/// The buffering every destination below declares, with the SHORTEST interval the hint admits
+/// (`BufferingHints$IntervalInSeconds`, whose published range is 0 to 900): "buffer incoming
+/// data for the specified period of time, in seconds, before delivering it to the destination"
+/// is the wait a delivery is held for, so a row that asserts what the destination holds
+/// declares the shortest one rather than waiting out a consumer's own interval.
 fn buffering_hints() -> Value {
-    json!({"SizeInMBs": 1, "IntervalInSeconds": 60})
+    json!({"SizeInMBs": 1, "IntervalInSeconds": 0})
 }
 
 const ROWS: &[Row] = &[
@@ -285,7 +287,7 @@ Resources:
         CompressionFormat: UNCOMPRESSED
         BufferingHints:
           SizeInMBs: 1
-          IntervalInSeconds: 60
+          IntervalInSeconds: 0
   MetricStream:
     Type: AWS::CloudWatch::MetricStream
     Properties:
