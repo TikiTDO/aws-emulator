@@ -33,6 +33,8 @@ mod certificates;
 mod computer_account_unavailable_wording;
 #[path = "all/computer_attributes.rs"]
 mod computer_attributes;
+#[path = "all/computer_conflict_diagnostic.rs"]
+mod computer_conflict_diagnostic;
 #[path = "all/computers.rs"]
 mod computers;
 #[path = "all/conditional_forwarder_deletion.rs"]

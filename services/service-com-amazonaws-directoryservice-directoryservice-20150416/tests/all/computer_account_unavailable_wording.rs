@@ -251,7 +251,11 @@ async fn a_computer_account_write_on_a_directory_being_built_is_refused_as_no_su
 
 /// The sentence this service states for an account the directory already holds: fixed text
 /// closing with the call's own request id, after which the envelope's suffix repeats it.
-fn could_not_create_computer(request_id: &str) -> String {
+///
+/// THE one copy of that expectation in this crate's tests: the sibling suite
+/// `computer_conflict_diagnostic`, which asserts the same sentence over the directory, the
+/// unit and the attributes that collided, states it through this.
+pub(crate) fn could_not_create_computer(request_id: &str) -> String {
     format!("Could not create computer. RequestId: {request_id} : RequestId: {request_id}")
 }
 
