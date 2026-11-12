@@ -1441,3 +1441,9 @@ mod lakeformation_grant_principal_resolution;
 // it will not create — CloudFormation, Amazon MWAA and CloudWatch Logs at once.
 #[path = "all/cloudformation_provisions_mwaa_environments.rs"]
 mod cloudformation_provisions_mwaa_environments;
+// execution's status changes reaching an EventBridge rule's SQS target on a router that
+// VERIFIES request signatures — the axis the owning crate's own table cannot cover, since it
+// runs with authentication off and so cannot see whether the publication the clock makes with
+// no request in flight is accepted.
+#[path = "all/sfn_execution_status_change_on_an_authenticating_router.rs"]
+mod sfn_execution_status_change_on_an_authenticating_router;

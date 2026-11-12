@@ -293,6 +293,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // The settle this report owes, and the hand-over of everything it produces,
+        // happen BEFORE the execution is read: a status the clock made due is written by
+        // whichever call settles the store first — as often a report as a move — and that
+        // transition owes the same writes whichever call materialised it. Settling here
+        // ([`crate::state::events::publish`] settles under its own guard) is what lets
+        // this report answer and the event saying the execution ended go out from the one
+        // call, rather than the client being told it ended by a call that left the event
+        // to the clock. No store of this service is locked while another is written.
+        crate::state::events::publish(&self.engine, ctx.callback()).await;
+
         let mut store = state.lock();
         // The one write a report may make: the terminal status was owed at the instant
         // the clock made it due, whether or not anybody described the execution — and
@@ -415,11 +425,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             redrive_status: Some(redrive_status),
             redrive_status_reason,
         };
-        // The guard is released before what the settle above materialised is
-        // published: an outcome the clock made due is also what the execution
-        // publishes about having ended, and the two stores are never locked at once.
-        drop(store);
-        crate::state::observability::publish(&*self.engine);
 
         Ok(reported)
     }

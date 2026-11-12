@@ -433,18 +433,17 @@ async fn every_vended_refresh_token_is_a_compact_jose_value() {
         assert_compact_jose_form(case, token);
         // The credential inside is sealed: nothing of the sign-in it belongs to is
         // readable in it, and no segment decodes to a document its holder can read.
-        for secret in [
-            fixture.user_pool_id.as_str(),
-            fixture.client_id.as_str(),
-            "alice",
-            "bob",
-            "otp",
-            "newcomer",
-        ] {
+        //
+        // An identifier long enough that a chance match is impossible is looked for in the
+        // WHOLE token; the usernames are looked for in what a holder can actually READ (the
+        // segments that decode below), because a three-character name occurring somewhere
+        // inside a thousand base64url characters of ciphertext is a coincidence rather than
+        // a disclosure — asserting its absence from the ciphertext fails at random.
+        for identifier in [fixture.user_pool_id.as_str(), fixture.client_id.as_str()] {
             assert!(
-                !token.contains(secret),
+                !token.contains(identifier),
                 "case {case:?}: a refresh token states nothing of its sign-in, \
-                 found {secret:?} in {token}"
+                 found {identifier:?} in {token}"
             );
         }
         for (at, segment) in token.split('.').enumerate() {
@@ -455,6 +454,18 @@ async fn every_vended_refresh_token_is_a_compact_jose_value() {
                 "case {case:?}: only the header segment is readable, segment {at} decoded \
                  to {readable:?}"
             );
+            // The one segment a holder can read states the sealing itself and nothing of
+            // the sign-in: no user of this pool is named in it.
+            if let Some(document) = readable {
+                let stated = document.to_string();
+                for named in ["alice", "bob", "otp", "newcomer"] {
+                    assert!(
+                        !stated.contains(named),
+                        "case {case:?}: a readable segment states nothing of its sign-in, \
+                         found {named:?} in {stated}"
+                    );
+                }
+            }
         }
     }
 

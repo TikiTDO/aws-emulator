@@ -613,26 +613,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `ListExecutions` each refuse an Express execution, and `GetExecutionHistory`
         // is still scaffolded), so the record is what this emulator retains of the run
         // and not a resource the caller can address later.
-        let mut store = state.lock();
-        // Settled against the REAL clock, not against this run's stop instant: a
-        // definition's `Wait` states can date that instant in the future, and an
-        // outcome another execution owes is due when ITS clock says so.
-        store.settle(crate::state::now());
-        let keep = store
-            .state_machines
-            .get(&machine_arn)
-            .is_some_and(|machine| !machine.is_deleting())
-            && store
-                .execution_rejection(&machine_arn, executed.measure())
-                .is_none();
-        if keep {
-            store.insert_execution(executed);
+        {
+            let mut store = state.lock();
+            // Settled against the REAL clock, not against this run's stop instant: a
+            // definition's `Wait` states can date that instant in the future, and an
+            // outcome another execution owes is due when ITS clock says so.
+            store.settle(crate::state::now());
+            let keep = store
+                .state_machines
+                .get(&machine_arn)
+                .is_some_and(|machine| !machine.is_deleting())
+                && store
+                    .execution_rejection(&machine_arn, executed.measure())
+                    .is_none();
+            if keep {
+                store.insert_execution(executed);
+            }
         }
-        // Every guard on this service's store is released before the observations this
-        // run queued are published: the metric series an Express run is counted and
-        // billed in, and the history events its logging configuration delivers.
-        drop(store);
-        crate::state::observability::publish(&*self.engine);
+        // Every guard on this service's store is released before what this run and the
+        // settle above produced is handed over: the metric series an Express run is
+        // counted and billed in, the history events its logging configuration delivers,
+        // and the execution status changes that settle made due for the account's event
+        // bus.
+        crate::state::events::publish(&self.engine, ctx.callback()).await;
 
         Ok(response)
     }

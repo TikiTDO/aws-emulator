@@ -52,8 +52,8 @@ use crate::state_machine_lifecycle::{PAST_THE_EXECUTION_DELAY, REGION, ROLE_ARN}
 /// The `source` and the `detail-type` Step Functions publishes an execution status
 /// change under, spelled out here rather than imported from the implementation, so a
 /// wrong constant in the service cannot make a test pass.
-const EVENT_SOURCE: &str = "aws.states";
-const EXECUTION_STATUS_CHANGE: &str = "Step Functions Execution Status Change";
+pub(crate) const EVENT_SOURCE: &str = "aws.states";
+pub(crate) const EXECUTION_STATUS_CHANGE: &str = "Step Functions Execution Status Change";
 
 /// How long one poll of a rule's queue waits before reading again.
 const POLL: Duration = Duration::from_millis(25);
@@ -96,12 +96,12 @@ const REPLY_OUTPUT: &str = r#"{"approved":true}"#;
 /// nowhere to publish, so the path under test would not be exercised at all. Each service
 /// claims only the requests scoped to its own signing name, so no Step Functions request
 /// below is routed any differently for their presence.
-struct Emulator {
+pub(crate) struct Emulator {
     router: MultiServiceRouter,
 }
 
 impl Emulator {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
         let mut router = MultiServiceRouter::new();
         router.set_request_authentication(false);
@@ -160,7 +160,7 @@ impl Emulator {
     }
 
     /// Call one Step Functions operation, requiring a 200.
-    async fn sfn(&self, operation: &str, body: &Value) -> Value {
+    pub(crate) async fn sfn(&self, operation: &str, body: &Value) -> Value {
         let (status, parsed) = self
             .rpc("states", "AWSStepFunctions", "1.0", operation, body)
             .await;
@@ -235,7 +235,7 @@ async fn given_queue(emulator: &Emulator, name: &str) -> (String, String) {
 
 /// A rule called `name` on the default bus, matching `pattern`, with its own queue as its
 /// only target. Answers the queue's url, which is where the events it matches arrive.
-async fn given_rule(emulator: &Emulator, name: &str, pattern: &Value) -> String {
+pub(crate) async fn given_rule(emulator: &Emulator, name: &str, pattern: &Value) -> String {
     let (url, queue_arn) = given_queue(emulator, &format!("{name}-queue")).await;
     emulator
         .events(
@@ -253,7 +253,12 @@ async fn given_rule(emulator: &Emulator, name: &str, pattern: &Value) -> String 
 }
 
 /// Create a state machine of `sm_type` and answer its ARN.
-async fn given_machine(emulator: &Emulator, name: &str, definition: &str, sm_type: &str) -> String {
+pub(crate) async fn given_machine(
+    emulator: &Emulator,
+    name: &str,
+    definition: &str,
+    sm_type: &str,
+) -> String {
     let created = emulator
         .sfn(
             "CreateStateMachine",
@@ -272,7 +277,7 @@ async fn given_machine(emulator: &Emulator, name: &str, definition: &str, sm_typ
 }
 
 /// Start an execution and answer its ARN.
-async fn given_execution(
+pub(crate) async fn given_execution(
     emulator: &Emulator,
     state_machine_arn: &str,
     name: &str,
@@ -307,7 +312,7 @@ async fn delivered(emulator: &Emulator, url: &str, want: usize, case: &str) -> V
 }
 
 /// Every event `url` holds right now, oldest first.
-async fn read_once(emulator: &Emulator, url: &str, case: &str) -> Vec<Value> {
+pub(crate) async fn read_once(emulator: &Emulator, url: &str, case: &str) -> Vec<Value> {
     let received = emulator
         .sqs(
             "ReceiveMessage",

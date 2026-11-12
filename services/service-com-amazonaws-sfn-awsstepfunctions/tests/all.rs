@@ -95,6 +95,8 @@ mod execution_key_state;
 mod execution_observability;
 #[path = "all/execution_redrive.rs"]
 mod execution_redrive;
+#[path = "all/execution_reports_publish_what_they_settle.rs"]
+mod execution_reports_publish_what_they_settle;
 #[path = "all/execution_role_assumption.rs"]
 mod execution_role_assumption;
 #[path = "all/execution_status_change_events.rs"]

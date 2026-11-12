@@ -250,6 +250,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     })
                     .into());
                 };
+                // The settle this report owes, and the hand-over of everything it
+                // produces, happen BEFORE the executions are read: see the
+                // state-machine branch below.
+                crate::state::events::publish(&self.engine, ctx.callback()).await;
                 let mut store = state.lock();
                 store.settle(crate::state::now());
                 if !store.map_runs.contains_key(map_run) {
@@ -356,6 +360,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let page = crate::state::page_size(input.max_results);
 
+        // The settle this report owes, and the hand-over of everything it produces,
+        // happen BEFORE the executions are read: a status the clock made due is written
+        // by whichever call settles the store first — as often a report as a move — and
+        // that transition owes the same writes whichever call materialised it. Settling
+        // here ([`crate::state::events::publish`] settles under its own guard) is what
+        // lets this report answer and the event saying an execution ended go out from the
+        // one call, rather than the client being told it ended by a call that left the
+        // event to the clock. No store of this service is locked while another is
+        // written.
+        crate::state::events::publish(&self.engine, ctx.callback()).await;
+
         let mut store = state.lock();
         // The one write a report may make: every execution whose terminal status the
         // clock already owed is reported terminal here.
@@ -433,11 +448,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let next_token =
             crate::state::next_page_token(offset, executions.len(), matching.len());
-        // The guard is released before what the settle above materialised is
-        // published: an outcome the clock made due is also what the execution
-        // publishes about having ended.
-        drop(store);
-        crate::state::observability::publish(&*self.engine);
         Ok(ListExecutionsOutput {
             executions,
             next_token,

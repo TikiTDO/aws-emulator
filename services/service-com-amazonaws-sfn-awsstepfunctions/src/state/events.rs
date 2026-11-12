@@ -55,6 +55,14 @@
 //! execution owes may therefore wait for a client to call this service again — which is
 //! the only record there is of a workflow whose own reporting APIs do not serve it.
 //!
+//! Nor does it wait for the clock: a status the clock made due is written by whichever
+//! call settles the store first, and that is as often a REPORT of the execution (a
+//! describe, a list, a history read) as a call that moves it, so a report hands over what
+//! its own settle produced too — it settles through [`publish`] before it reads, so the
+//! facts it reports have already gone out. A client that polls until a describe tells it
+//! the execution has ended is therefore told so by the same call that sent the event
+//! saying it has.
+//!
 //! The queue is BOUNDED ([`MAX_PENDING_EVENTS`], oldest dropped first) because every
 //! transition appends to it, and the record of what has been published is pruned to the
 //! executions the store still holds, so neither grows with the number of calls served.
@@ -416,14 +424,20 @@ fn text(value: Option<&str>) -> Value {
 /// for CloudWatch and CloudWatch Logs, and the clock that keeps doing both for the
 /// transitions nobody will ask for.
 ///
-/// Called with NO lock held, by every operation that can move an execution's status:
-/// each batch of changes is taken out in one critical section, so nothing is published
+/// Called with NO lock held, by every operation whose own settle can materialise an
+/// execution's transition — a call that MOVES a status, and a REPORT that finds one the
+/// clock had already made due, alike: each batch of changes is taken out in one critical
+/// section, so nothing is published
 /// twice, and the in-process `PutEvents` runs outside it. The queue is drained until it
 /// is EMPTY — a batch is capped ([`MAX_PUBLISHED_PER_DRAIN`]), and the loop is what
 /// guarantees the tail of a burst is published by the call that produced it rather than
 /// waiting for the next one. Nothing about the answer changes what the caller of the
 /// operation is told — an emulator with no EventBridge mounted has nowhere to publish —
 /// so a failure is logged and the operation's own result stands.
+///
+/// It SETTLES as it drains, so a report calls it BEFORE it reads: what the report then
+/// tells its caller has already been handed over, rather than the caller being told an
+/// execution has ended by a call that left the event saying so for the clock.
 pub async fn publish<Eng: Send + Sync + 'static>(
     engine: &Arc<Eng>,
     callback: &smithy_server_runtime::EmbeddedEmulator,
