@@ -23,6 +23,8 @@ mod delete_transformer;
 mod edi_parsing;
 #[path = "all/generate_mapping.rs"]
 mod generate_mapping;
+#[path = "all/idempotent_create_in_flight_window.rs"]
+mod idempotent_create_in_flight_window;
 #[path = "all/jsonata_probe.rs"]
 mod jsonata_probe;
 #[path = "all/mapped_file_encoding.rs"]

@@ -118,12 +118,15 @@ pub const MAX_RECORDS_PER_STORE: usize = 1_000;
 /// could ever observe: the create a token started therefore reports in flight for this
 /// span, and a caller racing the original sees that transient state.
 ///
-/// The span is deliberately SHORT — shorter than the spread over which concurrent callers
-/// reach the service, and far shorter than one caller's own sequential retry — because
-/// both halves of that recording have to hold: a duplicate racing the original is refused,
-/// while the caller's NEXT call, issued after it has the original's answer, replays the
-/// resource rather than being refused.
-pub const IDEMPOTENT_CREATE_IN_FLIGHT: Duration = Duration::from_millis(5);
+/// The span is the one this emulator holds every transient state it owes the clock for, so
+/// a caller acting the instant it has the first answer still observes it — a window shorter
+/// than the gap between two of a client's own calls is no transient state at all, and the
+/// refusal that belongs to it would be served or not depending on how loaded the host is.
+/// The other half of that recording is reached by waiting it out: once the span has passed
+/// the same token replays the resource it minted. Nothing sleeps for it — the due instant
+/// is stored with the remembered token and compared when the next call reads it
+/// ([`ComAmazonawsB2biB2biState::replay`]).
+pub const IDEMPOTENT_CREATE_IN_FLIGHT: Duration = Duration::from_secs(3);
 
 /// How long after `StartTransformerJob` a transformer job reports `running`.
 ///

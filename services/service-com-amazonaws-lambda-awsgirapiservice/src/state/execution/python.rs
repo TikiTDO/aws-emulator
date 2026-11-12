@@ -1489,6 +1489,16 @@ mod tests {
         }
     }
 
+    /// The wall clock a row about the MEMORY ceiling is given.
+    ///
+    /// A row that names ONE bound has to be answerable by that bound alone, and the row
+    /// that names the ceiling reaches it by allocating: a run is stopped the moment the
+    /// allocation that passes the ceiling lands, so a row never spends this span — it only
+    /// keeps a host that faults those pages in slowly from answering the row with the clock
+    /// instead of with the ceiling. It stays well inside the span each row asserts the stop
+    /// arrives within.
+    const ROOM_TO_ALLOCATE: Duration = Duration::from_secs(20);
+
     /// Run `source` as the module `lambda_function` of a one-file package, on a thread with
     /// the stack a run is given — the same way [`super::run_invocation`] runs one.
     fn ran(source: &str, handler: &str, event: Option<&str>) -> Finished {
@@ -1760,6 +1770,9 @@ mod tests {
             // Small enough that an allocating handler passes it inside the step budget,
             // and far above what building the interpreter itself faults in.
             tight.memory_bytes = 64 * 1024 * 1024;
+            if *expected == Stop::Memory {
+                tight.wall_clock = ROOM_TO_ALLOCATE;
+            }
             let finished = ran_with(
                 &source,
                 "lambda_function.handler",
@@ -2039,23 +2052,27 @@ mod tests {
                  KEPT.extend(megabyte() for _ in range({ALLOCATIONS}))\n    \
                  return {{'held': len(KEPT)}}\n"
         );
-        let cases: &[(&str, &str, Stop)] = &[
+        let cases: &[(&str, &str, Stop, Duration)] = &[
             (
                 "the deadline, hunted for from inside a handler that never returns",
                 hunts_the_deadline.as_str(),
                 Stop::Deadline,
+                Duration::from_secs(1),
             ),
             (
                 "the memory baseline, hunted for while the module is being imported",
                 hunts_the_baseline.as_str(),
                 Stop::Memory,
+                ROOM_TO_ALLOCATE,
             ),
         ];
-        for (case, source, expected) in cases {
+        for (case, source, expected, wall_clock) in cases {
             let mut tight = budget();
-            tight.wall_clock = Duration::from_secs(1);
-            // Far more steps than a second of spinning spends, so the row about the
-            // DEADLINE is answered by the deadline and not by the step budget.
+            // The bound each row names has to be the only one that can answer it: the row
+            // about the DEADLINE is given a clock short enough to fall first and far more
+            // steps than a second of spinning spends, and the row about the BASELINE a
+            // clock far above what its allocations take.
+            tight.wall_clock = *wall_clock;
             tight.steps = 2_000_000_000;
             // Under what the two allocations hold together and over what either holds on
             // its own, so the row about the BASELINE is stopped only if the baseline stayed

@@ -652,8 +652,9 @@ async fn one_client_token_names_one_transformer_job() {
     };
 
     // The first call under the token starts the job every later row is compared with. Its
-    // in-flight window has to pass before a repeat is a replay rather than a racer, which
-    // is what `await_job` waits out.
+    // in-flight window has to pass before a repeat is a replay rather than a racer, and the
+    // job's own settle span is shorter than that window, so the window is waited out on top
+    // of `await_job`.
     let first = with_token(start_request(&transformer_id, "inbound/token-a.edi"));
     let (status, started) = call(&router, "StartTransformerJob", first.clone()).await;
     assert_eq!(
@@ -665,6 +666,7 @@ async fn one_client_token_names_one_transformer_job() {
         .expect("a transformerJobId")
         .to_string();
     await_job(&router, &transformer_id, &job_id).await;
+    tokio::time::sleep(service_com_amazonaws_b2bi_b2bi::state::IDEMPOTENT_CREATE_IN_FLIGHT).await;
 
     // Each row: the case, the request, and what it must be answered with — the job the
     // token already started, or a conflict.
