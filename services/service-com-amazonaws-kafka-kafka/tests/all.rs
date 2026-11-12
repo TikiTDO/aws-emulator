@@ -53,6 +53,8 @@ mod cluster_operation_listing_v2;
 mod cluster_operation_v2;
 #[path = "all/cluster_policy.rs"]
 mod cluster_policy;
+#[path = "all/cluster_resolved_before_member_values.rs"]
+mod cluster_resolved_before_member_values;
 #[path = "all/compatible_kafka_versions.rs"]
 mod compatible_kafka_versions;
 #[path = "all/configuration_arn_refusal.rs"]

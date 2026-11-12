@@ -181,29 +181,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let region = crate::state::request_region(ctx.parts());
 
-        // Request-only checks run first, before the registry lock is taken: none
-        // of them depends on stored state.
+        // The SHAPE of the reference this request acts on, decided from the
+        // request alone and before the registry lock is taken: a value that is
+        // not a cluster ARN names no cluster to resolve.
         if !crate::state::is_cluster_arn(&input.cluster_arn) {
             return Err(UpdateBrokerTypeErrorModeled::BadRequestException(
                 crate::state::malformed_arn(crate::state::CLUSTER_ARN_MEMBER),
             )
             .into());
-        }
-        // `TargetInstanceType` is a plain `__string` on the wire, so the boundary
-        // validator passes any value through; it becomes the cluster's
-        // `BrokerNodeGroupInfo$InstanceType`, which the model DOES constrain, so a
-        // value that could not be a broker type is refused rather than stored.
-        if !crate::state::is_broker_instance_type(&input.target_instance_type) {
-            return Err(bad_request(
-                "TargetInstanceType",
-                format!(
-                    "'{}' is not an Amazon MSK broker type: a broker type is \
-                     <prefix>.<family>.<size>, between {} and {} characters long.",
-                    input.target_instance_type,
-                    crate::state::INSTANCE_TYPE_MIN_LEN,
-                    crate::state::INSTANCE_TYPE_MAX_LEN
-                ),
-            ));
         }
 
         let now = std::time::SystemTime::now();
@@ -225,6 +210,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the borrow of the registry has to end here.
         let cluster_state = cluster.state.clone();
         let current_version = cluster.current_version.clone();
+
+        // Only now is the type the request asks for judged: the cluster the URI
+        // names is resolved first, so a cluster this endpoint holds nothing for
+        // is answered as a missing resource whatever type the request carries.
+        // `TargetInstanceType` is a plain `__string` on the wire, so the boundary
+        // validator passes any value through; it becomes the cluster's
+        // `BrokerNodeGroupInfo$InstanceType`, which the model DOES constrain, so a
+        // value that could not be a broker type is refused rather than stored.
+        if !crate::state::is_broker_instance_type(&input.target_instance_type) {
+            return Err(bad_request(
+                "TargetInstanceType",
+                format!(
+                    "'{}' is not an Amazon MSK broker type: a broker type is \
+                     <prefix>.<family>.<size>, between {} and {} characters long.",
+                    input.target_instance_type,
+                    crate::state::INSTANCE_TYPE_MIN_LEN,
+                    crate::state::INSTANCE_TYPE_MAX_LEN
+                ),
+            ));
+        }
 
         // This update changes the brokers' instance type, and a serverless
         // cluster has no brokers to change.

@@ -191,8 +191,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let region = crate::state::request_region(ctx.parts());
 
-        // Request-only checks run first, before the registry lock is taken: none of
-        // them depends on stored state.
+        // The SHAPE of the reference this request acts on, and WHICH members it
+        // carries, are decided from the request alone and before the registry
+        // lock is taken; the values those members carry are judged once the
+        // cluster the URI names has resolved.
         if !crate::state::is_cluster_arn(&input.cluster_arn) {
             return Err(UpdateBrokerStorageErrorModeled::BadRequestException(
                 crate::state::malformed_arn(crate::state::CLUSTER_ARN_MEMBER),
@@ -212,40 +214,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ),
             ));
         };
-        if target.kafka_broker_node_id != crate::state::ALL_BROKERS {
-            return Err(bad_request(
-                "TargetBrokerEBSVolumeInfo",
-                format!(
-                    "KafkaBrokerNodeId must be the keyword {}, not '{}': a broker storage update \
-                     applies to every broker in the cluster.",
-                    crate::state::ALL_BROKERS, target.kafka_broker_node_id
-                ),
-            ));
-        }
         if target.volume_size_gb.is_none() && target.provisioned_throughput.is_none() {
             return Err(bad_request(
                 "TargetBrokerEBSVolumeInfo",
                 "a broker storage update must set VolumeSizeGB, ProvisionedThroughput or both."
                     .to_string(),
             ));
-        }
-        if let Some(volume_size) = target.volume_size_gb {
-            // `VolumeSizeGB` is a plain `__integer` in the model, so the boundary
-            // validator passes any value through: the range the stored
-            // `EBSStorageInfo$VolumeSize` carries is enforced here instead, the
-            // same way `UpdateStorage` enforces it.
-            if !(crate::state::MIN_VOLUME_SIZE_GB..=crate::state::MAX_VOLUME_SIZE_GB)
-                .contains(&volume_size)
-            {
-                return Err(bad_request(
-                    "TargetBrokerEBSVolumeInfo",
-                    format!(
-                        "VolumeSizeGB must be between {} and {}, not {volume_size}.",
-                        crate::state::MIN_VOLUME_SIZE_GB,
-                        crate::state::MAX_VOLUME_SIZE_GB
-                    ),
-                ));
-            }
         }
 
         let now = std::time::SystemTime::now();
@@ -268,6 +242,38 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let cluster_state = cluster.state.clone();
         let current_version = cluster.current_version.clone();
         let current_volume_size = cluster.volume_size_gb();
+
+        // Only now are the VALUES the entry carries judged: the cluster the URI
+        // names is resolved first, so a cluster this endpoint holds nothing for
+        // is answered as a missing resource whatever volume the request asks for.
+        if target.kafka_broker_node_id != crate::state::ALL_BROKERS {
+            return Err(bad_request(
+                "TargetBrokerEBSVolumeInfo",
+                format!(
+                    "KafkaBrokerNodeId must be the keyword {}, not '{}': a broker storage update \
+                     applies to every broker in the cluster.",
+                    crate::state::ALL_BROKERS, target.kafka_broker_node_id
+                ),
+            ));
+        }
+        if let Some(volume_size) = target.volume_size_gb {
+            // `VolumeSizeGB` is a plain `__integer` in the model, so the boundary
+            // validator passes any value through: the range the stored
+            // `EBSStorageInfo$VolumeSize` carries is enforced here instead, the
+            // same way `UpdateStorage` enforces it.
+            if !(crate::state::MIN_VOLUME_SIZE_GB..=crate::state::MAX_VOLUME_SIZE_GB)
+                .contains(&volume_size)
+            {
+                return Err(bad_request(
+                    "TargetBrokerEBSVolumeInfo",
+                    format!(
+                        "VolumeSizeGB must be between {} and {}, not {volume_size}.",
+                        crate::state::MIN_VOLUME_SIZE_GB,
+                        crate::state::MAX_VOLUME_SIZE_GB
+                    ),
+                ));
+            }
+        }
 
         // This update reconfigures the brokers' EBS volumes, and a serverless
         // cluster has no brokers to reconfigure.

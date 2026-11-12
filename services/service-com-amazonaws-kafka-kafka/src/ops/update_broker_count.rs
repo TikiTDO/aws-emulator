@@ -176,29 +176,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let region = crate::state::request_region(ctx.parts());
 
-        // Request-only checks run first, before the registry lock is taken: none
-        // of them depends on stored state.
+        // The SHAPE of the reference this request acts on, decided from the
+        // request alone and before the registry lock is taken: a value that is
+        // not a cluster ARN names no cluster to resolve, so it cannot be
+        // answered as a cluster this endpoint does not hold.
         if !crate::state::is_cluster_arn(&input.cluster_arn) {
             return Err(UpdateBrokerCountErrorModeled::BadRequestException(
                 crate::state::malformed_arn(crate::state::CLUSTER_ARN_MEMBER),
             )
             .into());
-        }
-        // The target becomes the cluster's own broker count, so the range the
-        // model puts on it (`__integerMin1Max15`) is checked here as well as by
-        // the boundary validator: a request value is what sizes the broker list,
-        // the same reason `CreateCluster` checks the count it is given.
-        if input.target_number_of_broker_nodes < 1
-            || input.target_number_of_broker_nodes > crate::state::MAX_BROKER_NODES_PER_CLUSTER
-        {
-            return Err(bad_request(
-                "TargetNumberOfBrokerNodes",
-                format!(
-                    "TargetNumberOfBrokerNodes must be between 1 and {}, not {}.",
-                    crate::state::MAX_BROKER_NODES_PER_CLUSTER,
-                    input.target_number_of_broker_nodes
-                ),
-            ));
         }
 
         let now = std::time::SystemTime::now();
@@ -221,6 +207,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let cluster_state = cluster.state.clone();
         let current_version = cluster.current_version.clone();
         let is_serverless = cluster.is_serverless();
+
+        // Only now is the count the request asks for judged: the target becomes
+        // the cluster's own broker count, so the range the model puts on it
+        // (`__integerMin1Max15`) is enforced here — off the request boundary
+        // (`skip_validation` on `UpdateBrokerCountInput`), because the cluster
+        // the URI names is resolved first and a cluster this endpoint holds
+        // nothing for is answered as a missing resource whatever count the
+        // request carries.
+        if input.target_number_of_broker_nodes < 1
+            || input.target_number_of_broker_nodes > crate::state::MAX_BROKER_NODES_PER_CLUSTER
+        {
+            return Err(UpdateBrokerCountErrorModeled::BadRequestException(
+                crate::state::parameter_refusal(
+                    TARGET_NUMBER_OF_BROKER_NODES_MEMBER,
+                    crate::state::BAD_REQUEST_MESSAGE,
+                ),
+            )
+            .into());
+        }
 
         // This update creates or deletes broker nodes, and a serverless cluster
         // has none of its own: MSK Serverless scales the brokers itself.
@@ -280,6 +285,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })
     }
 }
+
+/// The member the broker-count refusal names, as the request spells it on the
+/// wire (`TargetNumberOfBrokerNodes`'s `jsonName`) — the spelling every refusal
+/// of this service reports in `BadRequestException$InvalidParameter`.
+const TARGET_NUMBER_OF_BROKER_NODES_MEMBER: &str = "targetNumberOfBrokerNodes";
 
 /// Refuse the request with the modeled `BadRequestException`, naming the member at
 /// fault and what was wrong with it — the caller has to fix the request from this

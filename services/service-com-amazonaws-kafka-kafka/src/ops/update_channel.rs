@@ -215,8 +215,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // in ONE step, so the request's shape is decided once and there is no arm
         // for a state the decision has already excluded. Both payloads carry
         // `dataFreshnessInSeconds` as a REQUIRED member under the same documented
-        // range, so the bound is checked wherever the member arrives rather than per
-        // destination kind — the same one reading `CreateChannel` applies.
+        // range; WHICH payload arrived is decided here, and the bound on the value
+        // it carries once the resources the URI names have resolved.
         let data_freshness_in_seconds = match (
             input.s3_destination_update.as_ref(),
             input.iceberg_destination_update.as_ref(),
@@ -241,12 +241,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 );
             }
         };
-        if !crate::state::is_data_freshness_in_range(data_freshness_in_seconds) {
-            return Err(UpdateChannelErrorModeled::BadRequestException(
-                crate::state::data_freshness_out_of_range(),
-            )
-            .into());
-        }
 
         let mut state = state.lock();
         // One instant for the whole request, so the resolution, the status gate
@@ -280,6 +274,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
+        // Only now is the VALUE the payload carries judged: the cluster and the
+        // channel the URI names are resolved first, so a request against a
+        // resource this endpoint holds nothing for is answered about that
+        // resource whatever freshness it asks for. The bound is the one reading
+        // `CreateChannel` applies, checked wherever the member arrives rather
+        // than per destination kind.
+        if !crate::state::is_data_freshness_in_range(data_freshness_in_seconds) {
+            return Err(UpdateChannelErrorModeled::BadRequestException(
+                crate::state::data_freshness_out_of_range(),
+            )
+            .into());
+        }
         // A destination update applies to the destination the channel was created
         // with: "Use only when the channel was created with an Apache Iceberg
         // destination" / "with an Amazon S3 destination", documented on the two

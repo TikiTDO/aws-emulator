@@ -11,7 +11,18 @@ use super::*;
 
 smithy_macros::smithy_model!("smithy-model/com-amazonaws-kafka-kafka.json");
 
-#[smithy_macros::smithy(shape = "com.amazonaws.kafka#UpdateBrokerCountRequest")]
+// `skip_validation = ["TargetNumberOfBrokerNodes"]`: the cluster this request
+// names in its URI is resolved before the value this member carries is judged,
+// so the bound its target shape declares (`__integerMin1Max15`) is taken off the
+// request boundary — which refuses a request before any handler runs — and
+// enforced by the handler once the cluster resolves. A request against a cluster
+// this endpoint holds nothing for is then the missing-resource refusal whatever
+// count it asks for. The bound itself still applies: see
+// `crate::ops::update_broker_count`.
+#[smithy_macros::smithy(
+    shape = "com.amazonaws.kafka#UpdateBrokerCountRequest",
+    skip_validation = ["TargetNumberOfBrokerNodes"]
+)]
 #[derive(Debug, Clone, Default)]
 pub struct UpdateBrokerCountInput {
     pub cluster_arn: String,
