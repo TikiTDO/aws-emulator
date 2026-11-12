@@ -142,6 +142,23 @@ impl Ses {
         Self { router, engine }
     }
 
+    /// The same emulator with AWS Identity and Access Management mounted beside this
+    /// service on the ONE engine, for a suite whose subject is a ROLE this service acts as:
+    /// the role's trust policy is created and read through the IAM API, which this service
+    /// reaches through the in-process callback.
+    pub(crate) fn with_iam() -> Self {
+        let engine = Arc::new(engine::InMemoryEngine::new());
+        let mut router = MultiServiceRouter::new();
+        router.set_request_authentication(false);
+        router.register_service(EmulatedService::new(Arc::clone(&engine)));
+        router.register_service(
+            service_com_amazonaws_iam_awsidentitymanagementv20100508::EmulatedService::new(
+                Arc::clone(&engine),
+            ),
+        );
+        Self { router, engine }
+    }
+
     /// The in-process callback into this same emulator: the seam a handler reaches
     /// another mounted service through, so a suite's setup reaches that service exactly
     /// the way the handler does.

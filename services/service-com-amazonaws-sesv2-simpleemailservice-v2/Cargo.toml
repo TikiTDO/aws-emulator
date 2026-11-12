@@ -29,6 +29,11 @@ tracing = { workspace = true }
 # generated client is needed — the emulator supplies the transport, so the SDK's own HTTPS
 # stack and runtime are left out.
 aws-sdk-sns = { version = "1", default-features = false }
+# The AWS SDK for Amazon Kinesis Data Firehose, driven over the same in-process callback:
+# an event destination that names a Firehose stream receives each matching email event as
+# a record put on that stream (`state::event_publication::firehose`). Only the generated
+# client is needed — the emulator supplies the transport.
+aws-sdk-firehose = { version = "1", default-features = false }
 # `mailparse`: the ONE reading of an RFC 5322 / MIME message's header block — the
 # headers a message sent as `Content.Raw` carried, which a published email event reports
 # (`state::event_publication::notification`). The same crate the classic SES surface reads
@@ -51,6 +56,13 @@ hex = { workspace = true }
 # authorization suite, because the topic an event destination names is created and given
 # its access policy through the SNS API the handler reads it through.
 service-com-amazonaws-sns-amazonsimplenotificationservice = { workspace = true }
+# IAM is mounted beside this service on one engine in the Firehose event-destination role
+# suite, because the role an event destination names is created and given its trust policy
+# through the IAM API the handler reads it through.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# The AWS SDK for IAM, used by that suite's setup to create those roles over the same
+# in-process hop the handler asks IAM about them through.
+aws-sdk-iam = { version = "1", default-features = false }
 # `percent-encoding`: the ONE encoder of a query-string component in this crate's suites —
 # a page cursor a listing refuses is sent on the query string exactly as a client sends it,
 # including its `+`, `/`, `=` and `!`.

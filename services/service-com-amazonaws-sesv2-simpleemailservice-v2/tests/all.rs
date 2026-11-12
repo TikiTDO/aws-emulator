@@ -43,6 +43,8 @@ mod configuration_set_event_destination_deletion;
 mod configuration_set_event_destinations;
 #[path = "all/configuration_set_event_publication_surface.rs"]
 mod configuration_set_event_publication_surface;
+#[path = "all/configuration_set_firehose_destination_role.rs"]
+mod configuration_set_firehose_destination_role;
 #[path = "all/configuration_set_listing.rs"]
 mod configuration_set_listing;
 #[path = "all/configuration_set_message_security.rs"]

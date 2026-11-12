@@ -3,15 +3,25 @@
 //! Whether the DESTINATION an event-destination definition names will take the events a
 //! configuration set publishes to it.
 //!
-//! An event destination is "a place that you can send information about these events to",
-//! and an `SnsDestination` names "the Amazon SNS topic to publish email events to"
-//! (`EventDestinationDefinition$SnsDestination`, `SnsDestination$TopicArn`) — a resource of
-//! ANOTHER service. This service reaches it as the service principal
-//! [`SES_SERVICE_PRINCIPAL`] rather than as the topic's owner, so attaching the destination
-//! asks the ordinary IAM question — may this principal publish to that topic? — which is
+//! An event destination is "a place that you can send information about these events to" —
+//! a resource of ANOTHER service, which this service reaches as the service principal
+//! [`SES_SERVICE_PRINCIPAL`] rather than as that resource's owner. So the RULE every
+//! operation that establishes an event destination follows: a destination the other service
+//! would not let this service publish to is a destination the request cannot establish, and
+//! is refused with that operation's modelled input error — asked here, once, for each
+//! destination kind whose grant this emulator can read, and decided by the service that
+//! HOLDS the grant rather than by a reading of this service's own store.
+//!
+//! An `SnsDestination` names "the Amazon SNS topic to publish email events to"
+//! (`EventDestinationDefinition$SnsDestination`, `SnsDestination$TopicArn`), so attaching
+//! it asks the ordinary IAM question — may this principal publish to that topic? — which is
 //! answered by the shared evaluation of policy documents
 //! ([`::service_common::iam_authorization`]) over the topic's own `Policy` attribute as the
 //! topic itself reports it, rather than by a reading of this service's own.
+//!
+//! A `KinesisFirehoseDestination` instead names a ROLE this service sends the events under
+//! (`KinesisFirehoseDestination$IamRoleArn`), so for that kind the question is whether the
+//! role's trust policy admits this service's assume at all — [`firehose`].
 //!
 //! What refuses the destination is an EXPLICIT deny of the publish for that principal: an
 //! explicit deny is the one decision a resource policy takes that nothing else can
@@ -40,6 +50,9 @@
 //! account's suppression list gains from that, and [`notification`] builds the documents
 //! those reactions produce and publishes each to every destination that matches it.
 
+/// The Firehose destination kind: the role its events are sent under, and the record each
+/// event is put on the stream as.
+pub mod firehose;
 /// The notifications a send produces, and their publication to a set's destinations.
 pub mod notification;
 /// What the recipients of an accepted message do with it, and what the suppression list
@@ -87,9 +100,25 @@ pub async fn destination_refusal(
     definition: &crate::ops::types::EventDestinationDefinition,
     configuration_set_name: &str,
 ) -> Option<String> {
-    // Only the SNS destination is decided here: every other destination kind an event
-    // destination may carry is reached through a grant of its own (a role it assumes, a bus
-    // policy), and nothing is invented for one this emulator cannot read.
+    // The role a Firehose destination's events are sent under is decided by the service
+    // that holds the role records; the topic policy below is decided by the topic itself.
+    // A definition carrying both has to satisfy both.
+    if let Some(refusal) = firehose::role_refusal(ctx, definition).await {
+        return Some(refusal);
+    }
+    topic_refusal(ctx, definition, configuration_set_name).await
+}
+
+/// The authorization failure the SNS destination `definition` names refuses this service's
+/// publish with, or `None` when it names none — including a definition naming no SNS topic
+/// at all. Every other destination kind an event destination may carry is reached through a
+/// grant of its own (a bus policy, a project's own permissions), and nothing is invented
+/// for one this emulator cannot read.
+async fn topic_refusal(
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    definition: &crate::ops::types::EventDestinationDefinition,
+    configuration_set_name: &str,
+) -> Option<String> {
     let topic_arn = definition.sns_destination.as_ref()?.topic_arn.as_str();
     // The Region out of the topic's own ARN, under the Region grammar every model states
     // for the field: it ends up in the endpoint the in-process call is addressed at, so a

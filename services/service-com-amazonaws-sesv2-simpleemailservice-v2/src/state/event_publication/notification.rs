@@ -20,9 +20,11 @@
 //! a side that never answered — a failure SES produced from its own suppression list names
 //! no mail server, because none was asked.
 //!
-//! The destination kind served here is the SNS topic, which is the one this service reads
-//! and decides the publish for ([`super`]); every other kind an event destination may
-//! carry is reached through a grant of its own and is not published to from here.
+//! The destination kinds served here are the ones this service reaches through a grant
+//! this emulator can read ([`super`]): the SNS topic a destination publishes to, and the
+//! Firehose stream a destination puts its events on as records ([`super::firehose`]).
+//! Every other kind an event destination may carry is reached through a grant of its own
+//! and is not published to from here.
 //!
 //! The publish itself goes through the in-process callback
 //! ([`smithy_server_runtime::OperationContext::callback`]), the way any emulated service
@@ -101,13 +103,6 @@ impl PublishedSend {
             if !destination.enabled {
                 continue;
             }
-            let Some(topic_arn) = destination
-                .sns_destination
-                .as_ref()
-                .map(|sns| sns.topic_arn.as_str())
-            else {
-                continue;
-            };
             for notification in &notifications {
                 if !destination
                     .matching_event_types
@@ -116,7 +111,15 @@ impl PublishedSend {
                 {
                     continue;
                 }
-                publish_to_topic(callback, topic_arn, &notification.document).await;
+                // "A single configuration set can include more than one event
+                // destination" and one destination's definition may name a resource of
+                // more than one service, so each resource it names receives the event.
+                if let Some(sns) = &destination.sns_destination {
+                    publish_to_topic(callback, &sns.topic_arn, &notification.document).await;
+                }
+                if let Some(stream) = &destination.kinesis_firehose_destination {
+                    super::firehose::put_event(callback, stream, &notification.document).await;
+                }
             }
         }
     }

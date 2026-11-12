@@ -18,6 +18,12 @@
 #[path = "all/cloudformation_fifo_resource_generated_names.rs"]
 mod cloudformation_fifo_resource_generated_names;
 // Declared here, in this same head region, for the reason the entry above records: what a
+// configuration set's Kinesis Data Firehose event destination does with a message's events
+// spans SESv2, IAM, Firehose and Amazon S3 at once, so no single service's test target can
+// follow a published event to the object it lands in.
+#[path = "all/ses_event_publication_reaches_firehose_s3.rs"]
+mod ses_event_publication_reaches_firehose_s3;
+// Declared here, in this same head region, for the reason the entry above records: what a
 // client of a CloudFormation-deployed HTTP api's `$default` Lambda route is served, and the
 // CORS decoration that answer carries, spans CloudFormation, API Gateway v2, AWS Lambda and
 // IAM at once, so no single service's test target can ask it.
