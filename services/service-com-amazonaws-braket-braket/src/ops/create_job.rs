@@ -412,6 +412,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             failure_reason: None,
             running_due: now + crate::state::JOB_RUNNING_SPAN,
             terminal_due: now + crate::state::JOB_TERMINAL_SPAN,
+            cancelled_due: None,
         };
         guard.jobs.insert(job_arn.clone(), job);
         guard.idempotency.insert(

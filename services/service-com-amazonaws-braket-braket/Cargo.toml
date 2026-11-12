@@ -30,6 +30,40 @@ tracing = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 
+# Lexes and parses the OpenQASM 3 program text a quantum task's action carries
+# (src/state/quantum_program.rs). These are the Qiskit project's own OpenQASM 3 lexer
+# and parser, and they are LIBRARIES: they turn text into tokens and into a stream of
+# tree-building steps, evaluate nothing, and their whole resolved graph is in-process
+# Rust (drop_bomb, ra_ap_limit, unicode-properties, unicode-xid) with no process,
+# socket, filesystem or native component in it. The crate that wraps them in a typed
+# syntax tree (`oq3_syntax`) is deliberately NOT used: it pulls `xshell`, a shell-command
+# runner, into the artifact for its own source-generation module, and this service needs
+# no tree builder of its own — `oq3_parser` reports the tree as a flat step stream, which
+# src/state/quantum_program.rs collects into an arena iteratively.
+#
+# The parse descends per nested construct, so the program text is bounded before it is
+# handed over (`MAX_PROGRAM_SOURCE_BYTES`) and the parse runs on a thread whose stack is
+# sized for that bound (src/state/quantum_simulation.rs, `execute`).
+oq3_parser = "0.7"
+# Runs the parsed gate-model circuit on a state-vector simulator and samples its
+# measurements (src/state/quantum_simulation.rs). A numeric library computing in
+# process: it applies matrices to a state vector and draws from it, with no
+# interpreter, listener, subprocess or native component in its graph (pure-Rust
+# numerics plus rayon and rand). Its default features are the configuration the crate
+# builds in: with `parallel` off, its own iterator macros still name rayon's methods
+# and the crate does not compile. The work one task costs it is bounded before a run
+# starts (`MAX_AMPLITUDE_UPDATES`).
+qip = "1.5"
+# Amazon S3 client a completed quantum task writes its result document through
+# (src/state/task_results.rs). The client itself is built by `service-common`, over
+# the in-process callback into this same emulator; this declaration is for the
+# request types that write names. No network client feature is enabled: the
+# transport is the emulator's own.
+aws-sdk-s3 = { version = "1", default-features = false, features = [
+    "rt-tokio",
+    "behavior-version-latest",
+] }
+
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
@@ -42,6 +76,10 @@ aws-sdk-iam = { version = "1", default-features = false }
 # end to end with it on the same engine. DEV-ONLY: this crate depends on no other service's
 # crate outside its tests.
 service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# The OWNER of the output location a quantum task's results are written to, mounted beside
+# this service in the execution suite's harness: a result object exists only because Amazon
+# S3 holds it. DEV-ONLY, as the IAM crate above.
+service-com-amazonaws-s3-amazons3 = { workspace = true }
 
 [lints]
 workspace = true

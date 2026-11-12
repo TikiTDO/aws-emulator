@@ -785,3 +785,144 @@ async fn create_job_holds_the_device_config_to_the_inventory() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// CancelJob
+// ---------------------------------------------------------------------------
+
+impl Braket {
+    async fn cancel_job(&self, arn: &str) -> Reply {
+        self.call("PUT", &format!("/job/{}/cancel", encode(arn)), None)
+            .await
+    }
+}
+
+/// What may be cancelled depends on the status the job is in: a job still in flight is
+/// accepted and moves to `CANCELLING`, the clock then owes `CANCELLED`, a job that
+/// reached a terminal status on its own is refused with `ConflictException` (409), and a
+/// well-formed ARN no job is held for is the modelled missing resource (404).
+#[tokio::test]
+async fn cancel_job_moves_the_record_and_conflicts_on_a_finished_job() {
+    use service_com_amazonaws_braket_braket::state::{CANCELLATION_SPAN, JOB_TERMINAL_SPAN};
+
+    let braket = Braket::new();
+    let device = braket.a_device_with_status("ONLINE").await;
+    let created = braket
+        .create_job(job_body("tok-cancel", "job-cancel", &device))
+        .await;
+    assert_eq!(
+        created.status, 201,
+        "case create: expected HTTP 201, got {} {}",
+        created.status, created.body
+    );
+    let arn = created.str_member("jobArn");
+
+    let cancelled = braket.cancel_job(&arn).await;
+    assert_eq!(
+        cancelled.status, 200,
+        "case cancel a queued job: expected 200, got {} {}",
+        cancelled.status, cancelled.body
+    );
+    assert_eq!(
+        member(&cancelled.body, "jobArn"),
+        arn,
+        "case cancel a queued job: the ARN must come back, got {}",
+        cancelled.body
+    );
+    assert_eq!(
+        member(&cancelled.body, "cancellationStatus"),
+        "CANCELLING",
+        "case cancel a queued job: expected CANCELLING, got {}",
+        cancelled.body
+    );
+    assert_eq!(
+        member(&braket.get_job(&arn).await.body, "status"),
+        "CANCELLING",
+        "case after cancel: GetJob must report the cancellation"
+    );
+
+    // `@idempotent`: cancelling again reports where the cancellation has got to.
+    let again = braket.cancel_job(&arn).await;
+    assert_eq!(
+        again.status, 200,
+        "case re-cancel: expected 200, got {} {}",
+        again.status, again.body
+    );
+    assert!(
+        matches!(
+            member(&again.body, "cancellationStatus"),
+            "CANCELLING" | "CANCELLED"
+        ),
+        "case re-cancel: expected a cancellation status, got {}",
+        again.body
+    );
+
+    // The CANCELLING -> CANCELLED transition is owed by the clock.
+    tokio::time::sleep(CANCELLATION_SPAN + CLOCK_GUARD).await;
+    let terminal = braket.get_job(&arn).await;
+    assert_eq!(
+        member(&terminal.body, "status"),
+        "CANCELLED",
+        "case past the cancellation span: expected CANCELLED, got {}",
+        terminal.body
+    );
+    assert!(
+        terminal.body.get("endedAt").is_some_and(|at| !at.is_null()),
+        "case a cancelled job: endedAt must be set, got {}",
+        terminal.body
+    );
+
+    // A job that finished without being cancelled can no longer be cancelled.
+    let other = braket
+        .create_job(job_body("tok-finished", "job-finished", &device))
+        .await;
+    let finished_arn = other.str_member("jobArn");
+    tokio::time::sleep(JOB_TERMINAL_SPAN + CLOCK_GUARD).await;
+    let finished = braket.get_job(&finished_arn).await;
+    assert_eq!(
+        member(&finished.body, "status"),
+        "FAILED",
+        "case setup: the job must have reached a terminal status, got {}",
+        finished.body
+    );
+    let conflict = braket.cancel_job(&finished_arn).await;
+    assert_eq!(
+        conflict.status, 409,
+        "case cancel a finished job: expected 409, got {} {}",
+        conflict.status, conflict.body
+    );
+    assert_eq!(
+        conflict.error.as_deref(),
+        Some("ConflictException"),
+        "case cancel a finished job: expected ConflictException, got {:?}",
+        conflict.error
+    );
+    assert_eq!(
+        member(&braket.get_job(&finished_arn).await.body, "status"),
+        "FAILED",
+        "case after the refused cancel: the status must stand"
+    );
+
+    // A well-formed ARN no job is held for is a missing resource, over every form such
+    // an ARN takes; a value that is not a `JobArn` at all is a 400 (asserted above).
+    for (case, ghost, identifier) in ABSENT_JOB_ARNS {
+        let reply = braket.cancel_job(ghost).await;
+        assert_eq!(
+            reply.status, 404,
+            "case cancel {case}: expected 404, got {} {}",
+            reply.status, reply.body
+        );
+        assert_eq!(
+            reply.error.as_deref(),
+            Some("ResourceNotFoundException"),
+            "case cancel {case}: expected ResourceNotFoundException, got {:?}",
+            reply.error
+        );
+        assert_eq!(
+            reply.message(),
+            format!("Job {identifier} not found"),
+            "case cancel {case}: expected the job named as the ARN carries it, got {:?}",
+            reply.message()
+        );
+    }
+}

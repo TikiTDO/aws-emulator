@@ -107,6 +107,13 @@ const DEVICE_FILTER_NAMES: &[&str] = &[
     "providerName",
 ];
 
+/// The input member the filter list is, and the members of one filter — the member path
+/// a per-member validation refusal is rendered from
+/// (`smithy_query(query="shape",shape="SearchDevicesFilter")`).
+const FILTERS_MEMBER: &str = "filters";
+const FILTER_NAME_MEMBER: &str = "name";
+const FILTER_VALUES_MEMBER: &str = "values";
+
 /// The value of one filterable member of a device, or `None` when `name` is not a
 /// member of `DeviceSummary`.
 fn device_member<'d>(device: &'d crate::state::Device, name: &str) -> Option<&'d str> {
@@ -186,26 +193,36 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 input.filters.len()
             )));
         }
-        for filter in &input.filters {
+        // A filter the service does not accept is refused with the per-member validation
+        // payload built from the REQUEST — the member path of the value that failed and
+        // the value itself — rather than with prose, so a client that parses it can point
+        // at the field it sent.
+        for (index, filter) in input.filters.iter().enumerate() {
             if !DEVICE_FILTER_NAMES.contains(&filter.name.as_str()) {
-                return Err(refuse(format!(
-                    "Unsupported filter name: {}. Supported filter names are: {}",
-                    filter.name,
-                    DEVICE_FILTER_NAMES.join(", ")
+                return Err(refuse(crate::state::unallowed_member_value(
+                    FILTERS_MEMBER,
+                    index,
+                    FILTER_NAME_MEMBER,
+                    &filter.name,
                 )));
             }
             if filter.values.is_empty() {
-                return Err(refuse(format!(
-                    "Filter {} must carry at least one value",
-                    filter.name
+                return Err(refuse(crate::state::member_value_refusal(
+                    FILTERS_MEMBER,
+                    index,
+                    FILTER_VALUES_MEMBER,
+                    "min length is 1",
                 )));
             }
             if filter.values.len() > crate::state::MAX_VALUES_PER_FILTER {
-                return Err(refuse(format!(
-                    "Filter {} may carry at most {} values, but {} were given",
-                    filter.name,
-                    crate::state::MAX_VALUES_PER_FILTER,
-                    filter.values.len()
+                return Err(refuse(crate::state::member_value_refusal(
+                    FILTERS_MEMBER,
+                    index,
+                    FILTER_VALUES_MEMBER,
+                    &format!(
+                        "max length is {}",
+                        crate::state::MAX_VALUES_PER_FILTER
+                    ),
                 )));
             }
         }

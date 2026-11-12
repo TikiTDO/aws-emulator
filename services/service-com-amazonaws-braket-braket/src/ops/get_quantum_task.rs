@@ -301,9 +301,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             job_arn: task.job_arn.clone(),
             queue_info: wants_queue_info.then(|| queue_info(&guard, &task)),
             associations: (!task.associations.is_empty()).then(|| task.associations.clone()),
-            // Set only once a run has produced shots. Nothing executed this task, so
-            // there is no shot count to report.
-            num_successful_shots: None,
+            // The shots that produced a measurement, which only a task whose run
+            // produced a result has (`crate::state::TaskOutcome`).
+            num_successful_shots: task
+                .status
+                .eq(crate::state::STATUS_COMPLETED)
+                .then(|| task.outcome.successful_shots())
+                .flatten(),
             action_metadata: action_metadata(&task.action),
             experimental_capabilities: task.experimental_capabilities.clone(),
         })

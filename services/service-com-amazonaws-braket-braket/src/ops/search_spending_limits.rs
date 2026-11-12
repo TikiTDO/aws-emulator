@@ -121,6 +121,14 @@ const SPENDING_LIMIT_FILTER_NAMES: &[&str] = &["deviceArn", "spendingLimitArn"];
 /// filter may carry (`SEARCH_SPENDING_LIMITS_FILTER_OPERATOR_VALUES`).
 const OPERATOR_EQUAL: &str = "EQUAL";
 
+/// The input member the filter list is, and the members of one filter — the member path
+/// a per-member validation refusal is rendered from
+/// (`smithy_query(query="shape",shape="SearchSpendingLimitsFilter")`).
+const FILTERS_MEMBER: &str = "filters";
+const FILTER_NAME_MEMBER: &str = "name";
+const FILTER_VALUES_MEMBER: &str = "values";
+const FILTER_OPERATOR_MEMBER: &str = "operator";
+
 /// The page size this operation uses when the caller names no `maxResults`.
 ///
 /// The model's own documentation of `SearchSpendingLimitsRequest$maxResults`: "Minimum
@@ -216,32 +224,40 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 filters.len()
             )));
         }
-        for filter in &filters {
+        for (index, filter) in filters.iter().enumerate() {
+            // A value outside what the member allows is refused with the per-member
+            // validation payload built from the REQUEST, as every filtered search in this
+            // service words it.
             if filter.values.len() > crate::state::MAX_VALUES_PER_FILTER {
-                return Err(refuse(format!(
-                    "Filter {} may carry at most {} values, but {} were given",
-                    filter.name,
-                    crate::state::MAX_VALUES_PER_FILTER,
-                    filter.values.len()
+                return Err(refuse(crate::state::member_value_refusal(
+                    FILTERS_MEMBER,
+                    index,
+                    FILTER_VALUES_MEMBER,
+                    &format!("max length is {}", crate::state::MAX_VALUES_PER_FILTER),
                 )));
             }
             if filter.values.is_empty() {
-                return Err(refuse(format!(
-                    "Filter {} with operator {} needs at least one value",
-                    filter.name, filter.operator
+                return Err(refuse(crate::state::member_value_refusal(
+                    FILTERS_MEMBER,
+                    index,
+                    FILTER_VALUES_MEMBER,
+                    "min length is 1",
                 )));
             }
             if !SPENDING_LIMIT_FILTER_NAMES.contains(&filter.name.as_str()) {
-                return Err(refuse(format!(
-                    "Unsupported filter name: {}. Supported filter names are: {}",
-                    filter.name,
-                    SPENDING_LIMIT_FILTER_NAMES.join(", ")
+                return Err(refuse(crate::state::unallowed_member_value(
+                    FILTERS_MEMBER,
+                    index,
+                    FILTER_NAME_MEMBER,
+                    &filter.name,
                 )));
             }
             if filter.operator != OPERATOR_EQUAL {
-                return Err(refuse(format!(
-                    "Filter {} accepts only the {} operator, not {}",
-                    filter.name, OPERATOR_EQUAL, filter.operator
+                return Err(refuse(crate::state::unallowed_member_value(
+                    FILTERS_MEMBER,
+                    index,
+                    FILTER_OPERATOR_MEMBER,
+                    &filter.operator,
                 )));
             }
         }

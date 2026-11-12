@@ -122,6 +122,18 @@ const INVALID_ARN_MEMBER: &str = "quantumTaskArn";
 /// operation).
 const QUANTUM_TASK_NOT_FOUND: &str = "Quantum task not found";
 
+/// How this operation refuses a cancellation of a task that can no longer be cancelled.
+///
+/// A task in a terminal status has already finished, so there is nothing left to cancel,
+/// and Amazon Braket says WHICH status closed it and WHICH device ran it — both read off
+/// the stored record, so the sentence follows the task rather than any one recording.
+fn cannot_cancel(status: &str, device_arn: &str) -> String {
+    format!(
+        "Amazon Braket cannot cancel a quantum task in the {status} status for device ARN \
+         {device_arn}."
+    )
+}
+
 /// The `CancelQuantumTask` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -220,10 +232,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if task.is_terminal() {
             return Err(CancelQuantumTaskErrorModeled::ConflictException(
                 ConflictException {
-                    message: Some(format!(
-                        "Quantum task {} is in status {} and can no longer be cancelled",
-                        task.quantum_task_arn, task.status
-                    )),
+                    message: Some(cannot_cancel(&task.status, &task.device_arn)),
                 },
             )
             .into());

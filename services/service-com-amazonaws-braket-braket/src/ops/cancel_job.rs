@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CancelJob
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CancelJob`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Cancels one hybrid job: the stored record moves into `CANCELLING`, and the clock owes
+//! the `CANCELLED` status that follows.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CancelJob::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! `@idempotent`: the answer depends only on the status the job is in, so a repeated call
+//! reports where the cancellation has got to rather than refusing. A job that has already
+//! reached a terminal status was never cancelled and can no longer be, which is the
+//! modelled `ConflictException` (409).
+//!
+//! `jobArn` carries the modelled `@pattern`
+//! (`^arn:aws[a-z\-]*:braket:[a-z0-9\-]+:[0-9]{12}:job/.*$`), which the framework's
+//! boundary validator enforces before this handler runs: a malformed ARN is already a 400
+//! `ValidationException`, so a value reaching here is well formed and the only question
+//! left is whether the store holds it (404 `ResourceNotFoundException`).
 //!
 //! ## Shape of an operation
 //!
@@ -132,6 +136,22 @@ pub(crate) fn invalid_arn_refusal(member: &str, value: Option<&str>) -> Option<S
     Some(crate::state::member_value_is_not_a_valid_arn(member, value?))
 }
 
+/// How this operation reports a well-formed `jobArn` no job is held for: the job the
+/// request named, as Amazon Braket names a hybrid job in its messages
+/// (`crate::state::job_identifier`, read out of the ARN the caller sent).
+fn not_found(job_arn: &str) -> String {
+    format!("Job {} not found", crate::state::job_identifier(job_arn))
+}
+
+/// How this operation refuses the cancellation of a job that can no longer be cancelled:
+/// the status that closed it and the job it names, both read off the stored record.
+fn cannot_cancel(status: &str, job_arn: &str) -> String {
+    format!(
+        "Amazon Braket cannot cancel a hybrid job in the {status} status: {}",
+        crate::state::job_identifier(job_arn)
+    )
+}
+
 /// The `CancelJob` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -168,18 +188,58 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CancelJob` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CancelJobErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CancelJob"))
+        // Nothing this operation answers depends on the request's metadata: it moves a
+        // stored record and mints no ARN, so there is no region to read off the
+        // credential scope.
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            CancelJobError::from(CancelJobErrorModeled::InternalServiceException(
+                InternalServiceException {
+                    message: Some("the Braket service store is unavailable".to_string()),
+                },
+            ))
+        })?;
+
+        let now = ::std::time::SystemTime::now();
+        let mut guard = state.lock();
+        guard.apply_due_transitions(now);
+
+        let Some(job) = guard.jobs.get_mut(&input.job_arn) else {
+            return Err(CancelJobErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: Some(not_found(&input.job_arn)),
+                },
+            )
+            .into());
+        };
+
+        // Already cancelled, or cancelling: report where the cancellation has got to.
+        if job.status == crate::state::STATUS_CANCELLED {
+            return Ok(CancelJobOutput {
+                job_arn: job.job_arn.clone(),
+                cancellation_status: crate::state::STATUS_CANCELLED.to_string(),
+            });
+        }
+        if job.status == crate::state::STATUS_CANCELLING {
+            return Ok(CancelJobOutput {
+                job_arn: job.job_arn.clone(),
+                cancellation_status: crate::state::STATUS_CANCELLING.to_string(),
+            });
+        }
+        // Any other terminal status was reached without a cancellation, and a job that
+        // has already finished cannot be cancelled.
+        if job.is_terminal() {
+            return Err(CancelJobErrorModeled::ConflictException(ConflictException {
+                message: Some(cannot_cancel(&job.status, &job.job_arn)),
+            })
+            .into());
+        }
+
+        job.status = crate::state::STATUS_CANCELLING.to_string();
+        job.cancelled_due = Some(now + crate::state::CANCELLATION_SPAN);
+        Ok(CancelJobOutput {
+            job_arn: job.job_arn.clone(),
+            cancellation_status: crate::state::STATUS_CANCELLING.to_string(),
+        })
     }
 }

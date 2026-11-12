@@ -124,6 +124,10 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+// The identifier Amazon Braket names a hybrid job by in its messages, read out of the
+// `jobArn` the REQUEST carried: `crate::state::job_identifier` is the one reading of that
+// ARN, so this door and `CancelJob` name a job they could not resolve identically.
+use crate::state::job_identifier;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -191,25 +195,6 @@ const EVENT_RUNNING: &str = "RUNNING";
 const EVENT_FAILED: &str = "FAILED";
 const EVENT_COMPLETED: &str = "COMPLETED";
 const EVENT_CANCELLED: &str = "CANCELLED";
-
-/// The identifier Amazon Braket names a hybrid job by in its messages: the account the
-/// job belongs to and the job's name, joined by `#`, as the `jobArn` carries them
-/// (`arn:<partition>:braket:<region>:<account>:job/<name>`).
-///
-/// Built from the REQUEST, so the wording follows the ARN the caller sent rather than
-/// any one recorded message. A value the ARN grammar cannot be read out of falls back
-/// to the ARN itself; the modelled `@pattern` makes that unreachable from the wire.
-fn job_identifier(job_arn: &str) -> String {
-    let mut fields = job_arn.splitn(6, ':');
-    let account = fields.nth(4);
-    let name = fields.next().and_then(|resource| {
-        resource.strip_prefix(crate::state::ARN_RESOURCE_JOB)?.strip_prefix('/')
-    });
-    match (account, name) {
-        (Some(account), Some(name)) => format!("{account}#{name}"),
-        _ => job_arn.to_string(),
-    }
-}
 
 /// Where the job sits in the jobs queue, counted from the stored jobs.
 ///

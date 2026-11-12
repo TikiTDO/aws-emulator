@@ -114,6 +114,14 @@ const TASK_FILTER_NAMES: &[&str] = &[
 /// The timestamp filter name, which compares as an instant rather than as text.
 const FILTER_CREATED_AT: &str = "createdAt";
 
+/// The input member the filter list is, and the members of one filter — the member path
+/// a per-member validation refusal is rendered from
+/// (`smithy_query(query="shape",shape="SearchQuantumTasksFilter")`).
+const FILTERS_MEMBER: &str = "filters";
+const FILTER_NAME_MEMBER: &str = "name";
+const FILTER_VALUES_MEMBER: &str = "values";
+const FILTER_OPERATOR_MEMBER: &str = "operator";
+
 /// The only operator a non-timestamp member accepts.
 ///
 /// AWS defines no ordering over an ARN or a status enum, so an ordering operator on
@@ -288,26 +296,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
         let mut filters: Vec<(&SearchQuantumTasksFilter, Bounds)> =
             Vec::with_capacity(input.filters.len());
-        for filter in &input.filters {
+        for (index, filter) in input.filters.iter().enumerate() {
+            // A value outside what the member allows is refused with the per-member
+            // validation payload built from the REQUEST — the member path and the value
+            // that failed — rather than with prose.
             if filter.values.len() > crate::state::MAX_VALUES_PER_FILTER {
-                return Err(refuse(format!(
-                    "Filter {} may carry at most {} values, but {} were given",
-                    filter.name,
-                    crate::state::MAX_VALUES_PER_FILTER,
-                    filter.values.len()
+                return Err(refuse(crate::state::member_value_refusal(
+                    FILTERS_MEMBER,
+                    index,
+                    FILTER_VALUES_MEMBER,
+                    &format!("max length is {}", crate::state::MAX_VALUES_PER_FILTER),
                 )));
             }
             if !TASK_FILTER_NAMES.contains(&filter.name.as_str()) {
-                return Err(refuse(format!(
-                    "Unsupported filter name: {}. Supported filter names are: {}",
-                    filter.name,
-                    TASK_FILTER_NAMES.join(", ")
+                return Err(refuse(crate::state::unallowed_member_value(
+                    FILTERS_MEMBER,
+                    index,
+                    FILTER_NAME_MEMBER,
+                    &filter.name,
                 )));
             }
             if !SEARCH_QUANTUM_TASKS_FILTER_OPERATOR_VALUES.contains(&filter.operator.as_str()) {
-                return Err(refuse(format!(
-                    "Unsupported filter operator: {}",
-                    filter.operator
+                return Err(refuse(crate::state::unallowed_member_value(
+                    FILTERS_MEMBER,
+                    index,
+                    FILTER_OPERATOR_MEMBER,
+                    &filter.operator,
                 )));
             }
             if filter.name != FILTER_CREATED_AT && filter.operator != OPERATOR_EQUAL {

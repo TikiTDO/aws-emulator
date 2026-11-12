@@ -23,6 +23,8 @@ mod device_refusal_wording;
 mod execution_role_resolution;
 #[path = "all/hybrid_job_loop.rs"]
 mod hybrid_job_loop;
+#[path = "all/quantum_task_execution.rs"]
+mod quantum_task_execution;
 #[path = "all/quantum_task_loop.rs"]
 mod quantum_task_loop;
 #[path = "all/quantum_task_not_found_wording.rs"]

@@ -2,10 +2,26 @@
 
 //! @op CreateQuantumTask
 //!
-//! Mints a quantum-task ARN, stores a record carrying every input member plus the
-//! derived `outputS3Directory`, the `CREATED` status and the instants at which this
-//! task's later statuses fall due, and returns the ARN. `GetQuantumTask`,
-//! `SearchQuantumTasks` and `CancelQuantumTask` all read that one record.
+//! Validates the request, RUNS the program the request carries on the device's
+//! simulator, writes its result document to the output location, then mints a
+//! quantum-task ARN and stores a record carrying every input member plus the derived
+//! `outputS3Directory`, the `CREATED` status, what the run produced and the instants at
+//! which this task's later statuses fall due. `GetQuantumTask`, `SearchQuantumTasks` and
+//! `CancelQuantumTask` all read that one record.
+//!
+//! Three things are resolved before a task is minted, because each of them decides
+//! whether the request can be served at all:
+//!
+//! * `action` has to be a Braket IR action document
+//!   (`crate::state::quantum_program::action_refusal`);
+//! * `shots` has to be inside the device's published `shotsRange`;
+//! * `outputS3Bucket` has to be a bucket Amazon S3 holds, which is where a client reads
+//!   the task's results from (`crate::state::task_results::output_bucket_is_absent`).
+//!
+//! The program's execution is what decides the TERMINAL status the clock later owes the
+//! task: a program that ran and whose result document was written completes, and one
+//! that produced no result ends in the failure status carrying the reason — so no task
+//! is ever reported as completed without results a client can read.
 //!
 //! `clientToken` is an `@idempotencyToken`: replaying it with the same request returns
 //! the ARN minted the first time and creates no second task.
@@ -173,6 +189,92 @@ fn request_digest(input: &CreateQuantumTaskInput) -> String {
 /// (`crate::state::DEVICE_ARN_NOT_FOUND`, which names no member and echoes nothing).
 const INVALID_ARN_MEMBER: &str = "deviceArn";
 
+/// Run the task's program on the device's simulator and write its result document to the
+/// output location, and report what that produced.
+///
+/// This is what decides the terminal status the clock later owes the task
+/// ([`crate::state::TaskOutcome`]): the program is lowered and executed, and the result
+/// document is written where a client reads it, BEFORE the task is minted — so a task
+/// this service reports as completed is one whose results are really there, and one that
+/// produced nothing carries the reason it did not.
+///
+/// Call it with NO guard of this service's store held: it awaits.
+async fn run_quantum_task(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    input: &CreateQuantumTaskInput,
+    quantum_task_arn: &str,
+    output_s3_directory: &str,
+    created_at: ::std::time::SystemTime,
+    ended_at: ::std::time::SystemTime,
+) -> (crate::state::TaskOutcome, Option<String>) {
+    let failed = |reason: String| (crate::state::TaskOutcome::Failed { reason }, None);
+    // Reading the program and running it are both CPU-bound and both descend the
+    // program's own structure, so they run together on a BLOCKING thread with a stack
+    // sized for the depth the lowering admits
+    // (`crate::state::quantum_simulation::execute`): a long or deep program must not
+    // stop the runtime answering health checks, timeouts or a shutdown signal, and the
+    // work itself is bounded before it starts.
+    let action = input.action.clone();
+    let shots = input.shots;
+    let simulated =
+        ::tokio::task::spawn_blocking(move || crate::state::quantum_simulation::execute(&action, shots))
+            .await;
+    let measurements = match simulated {
+        Ok(Ok(measurements)) => measurements,
+        Ok(Err(refusal)) => return failed(refusal.reason().to_string()),
+        Err(error) => {
+            // The thread that was running the program did not finish: nothing produced a
+            // result, so the task reports that rather than measurements nobody drew.
+            ::tracing::warn!(
+                error = %error,
+                "a quantum task's simulation did not finish"
+            );
+            return failed(
+                "The quantum task's program did not run to completion, so no result was \
+                 produced for it."
+                    .to_string(),
+            );
+        }
+    };
+    let key = format!(
+        "{output_s3_directory}/{}",
+        crate::state::task_results::RESULTS_OBJECT
+    );
+    let document = crate::state::task_results::gate_model_result(
+        crate::state::task_results::ResultContext {
+            quantum_task_arn,
+            device_arn: &input.device_arn,
+            action: &input.action,
+            shots: input.shots,
+            created_at: &crate::state::as_iso8601(created_at),
+            ended_at: &crate::state::as_iso8601(ended_at),
+            status: crate::state::STATUS_COMPLETED,
+        },
+        &measurements,
+    );
+    if crate::state::task_results::write_result_document(
+        ctx,
+        region,
+        &input.output_s3_bucket,
+        &key,
+        &document,
+    )
+    .await
+    {
+        let successful_shots = i64::try_from(measurements.rows.len()).unwrap_or(i64::MAX);
+        (
+            crate::state::TaskOutcome::Completed { successful_shots },
+            Some(key),
+        )
+    } else {
+        failed(crate::state::task_results::unwritten_results_reason(
+            &input.output_s3_bucket,
+            &key,
+        ))
+    }
+}
+
 /// The `CreateQuantumTask` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -216,6 +318,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 INVALID_ARN_MEMBER,
             )));
         }
+        // `action` carries a Braket IR document; one that is not an action document at
+        // all describes no program, so it is refused before a task is minted for it.
+        if let Some(reason) = crate::state::quantum_program::action_refusal(&input.action) {
+            return Err(refuse(reason.to_string()));
+        }
 
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             CreateQuantumTaskError::from(
@@ -229,74 +336,139 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let now = ::std::time::SystemTime::now();
         let fingerprint = request_digest(&input);
-        let mut guard = state.lock();
-        guard.apply_due_transitions(now);
+        let region = crate::state::request_region(ctx);
 
-        // `@idempotencyToken`: the same token with the same request is the same task.
-        // Checked against the surviving entries, so a token whose task has aged out of
-        // the store is not replayed to an ARN that no longer resolves.
-        guard.prune_idempotency(now);
-        if let Some(seen) = guard.idempotency.get(&input.client_token) {
-            if seen.fingerprint != fingerprint {
-                return Err(refuse(format!(
-                    "The clientToken {} was already used to create a quantum task with \
-                     different request parameters",
-                    input.client_token
+        // What the stored records decide — the idempotency replay, the device and the
+        // quotas — is read under the lock, which is released before anything awaits.
+        let device = {
+            let mut guard = state.lock();
+            guard.apply_due_transitions(now);
+
+            // `@idempotencyToken`: the same token with the same request is the same task.
+            // Checked against the surviving entries, so a token whose task has aged out of
+            // the store is not replayed to an ARN that no longer resolves.
+            guard.prune_idempotency(now);
+            if let Some(seen) = guard.idempotency.get(&input.client_token) {
+                if seen.fingerprint != fingerprint {
+                    return Err(refuse(format!(
+                        "The clientToken {} was already used to create a quantum task with \
+                         different request parameters",
+                        input.client_token
+                    )));
+                }
+                return Ok(CreateQuantumTaskOutput {
+                    quantum_task_arn: seen.resource_arn.clone(),
+                });
+            }
+
+            let Some(device) = guard.devices.get(&input.device_arn).cloned() else {
+                // `CreateQuantumTask` models no `ResourceNotFoundException`, so an unknown
+                // device is refused as an invalid `deviceArn` — in the service's own fixed
+                // sentence, which points the caller at the operation that enumerates the
+                // inventory instead of echoing the ARN that did not resolve.
+                return Err(refuse(crate::state::DEVICE_ARN_NOT_FOUND.to_string()));
+            };
+            if device.device_status == crate::state::DEVICE_RETIRED {
+                return Err(CreateQuantumTaskErrorModeled::DeviceRetiredException(
+                    DeviceRetiredException {
+                        message: Some(crate::state::DEVICE_RETIRED_REFUSAL.to_string()),
+                    },
+                )
+                .into());
+            }
+            if device.device_status != crate::state::DEVICE_ONLINE {
+                return Err(CreateQuantumTaskErrorModeled::DeviceOfflineException(
+                    DeviceOfflineException {
+                        message: Some(format!("Device {} is offline", device.device_arn)),
+                    },
+                )
+                .into());
+            }
+
+            // The device's capability document publishes `service.shotsRange`; a request
+            // outside it is one the device cannot run, and the refusal states the bounds
+            // the device published and the count the request asked for.
+            let (min_shots, max_shots) = device.shots_range;
+            if input.shots < min_shots || input.shots > max_shots {
+                return Err(refuse(crate::state::shots_out_of_range(
+                    min_shots,
+                    max_shots,
+                    &device.device_arn,
+                    input.shots,
                 )));
             }
-            return Ok(CreateQuantumTaskOutput {
-                quantum_task_arn: seen.resource_arn.clone(),
-            });
-        }
 
-        let Some(device) = guard.devices.get(&input.device_arn).cloned() else {
-            // `CreateQuantumTask` models no `ResourceNotFoundException`, so an unknown
-            // device is refused as an invalid `deviceArn` — in the service's own fixed
-            // sentence, which points the caller at the operation that enumerates the
-            // inventory instead of echoing the ARN that did not resolve.
-            return Err(refuse(crate::state::DEVICE_ARN_NOT_FOUND.to_string()));
+            // The per-device concurrency quota. Counted after the due transitions above,
+            // so a task the clock has already finished does not hold a slot.
+            let in_flight = guard.tasks_in_flight_on(&device.device_arn);
+            if in_flight >= crate::state::MAX_TASKS_IN_FLIGHT_PER_DEVICE {
+                return Err(CreateQuantumTaskErrorModeled::ServiceQuotaExceededException(
+                    ServiceQuotaExceededException {
+                        message: Some(format!(
+                            "Device {} already has {} quantum tasks in flight, which is its limit",
+                            device.device_arn,
+                            crate::state::MAX_TASKS_IN_FLIGHT_PER_DEVICE
+                        )),
+                    },
+                )
+                .into());
+            }
+            device
         };
-        if device.device_status == crate::state::DEVICE_RETIRED {
-            return Err(CreateQuantumTaskErrorModeled::DeviceRetiredException(
-                DeviceRetiredException {
-                    message: Some(crate::state::DEVICE_RETIRED_REFUSAL.to_string()),
-                },
-            )
-            .into());
-        }
-        if device.device_status != crate::state::DEVICE_ONLINE {
-            return Err(CreateQuantumTaskErrorModeled::DeviceOfflineException(
-                DeviceOfflineException {
-                    message: Some(format!("Device {} is offline", device.device_arn)),
-                },
-            )
-            .into());
+
+        // The output location belongs to Amazon S3, so it is resolved THERE: a bucket S3
+        // reports no such bucket for is one no result could ever be written to, which is
+        // what this operation refuses the request for.
+        if crate::state::task_results::output_bucket_is_absent(
+            ctx,
+            &region,
+            &input.output_s3_bucket,
+        )
+        .await
+        {
+            return Err(refuse(
+                crate::state::task_results::INACCESSIBLE_BUCKET_REFUSAL.to_string(),
+            ));
         }
 
-        // The device's capability document publishes `service.shotsRange`; a request
-        // outside it is one the device cannot run.
-        let (min_shots, max_shots) = device.shots_range;
-        if input.shots < min_shots || input.shots > max_shots {
+        let task_id = crate::state::new_task_id();
+        let quantum_task_arn = ::emulator_server::emulator_arn(
+            "braket",
+            &region,
+            &format!("quantum-task/{task_id}"),
+        );
+        let output_s3_directory = format!("{}/{}", input.output_s3_key_prefix, task_id);
+        let terminal_due = now + crate::state::TERMINAL_SPAN;
+        // The device runs the program and the result document is written where a client
+        // reads it; what that produced is the terminal status the clock owes the task.
+        let (outcome, result_object_key) = run_quantum_task(
+            ctx,
+            &region,
+            &input,
+            &quantum_task_arn,
+            &output_s3_directory,
+            now,
+            terminal_due,
+        )
+        .await;
+
+        let mut guard = state.lock();
+        guard.apply_due_transitions(now);
+        // The token index is re-read after the awaits above: a concurrent create holding
+        // the same token has already minted the task this one would, and a replay answers
+        // with that ARN rather than storing a second record for it.
+        guard.prune_idempotency(now);
+        if let Some(seen) = guard.idempotency.get(&input.client_token) {
+            if seen.fingerprint == fingerprint {
+                return Ok(CreateQuantumTaskOutput {
+                    quantum_task_arn: seen.resource_arn.clone(),
+                });
+            }
             return Err(refuse(format!(
-                "Device {} accepts between {} and {} shots, but {} were requested",
-                device.device_arn, min_shots, max_shots, input.shots
+                "The clientToken {} was already used to create a quantum task with \
+                 different request parameters",
+                input.client_token
             )));
-        }
-
-        // The per-device concurrency quota. Counted after the due transitions above,
-        // so a task the clock has already finished does not hold a slot.
-        let in_flight = guard.tasks_in_flight_on(&device.device_arn);
-        if in_flight >= crate::state::MAX_TASKS_IN_FLIGHT_PER_DEVICE {
-            return Err(CreateQuantumTaskErrorModeled::ServiceQuotaExceededException(
-                ServiceQuotaExceededException {
-                    message: Some(format!(
-                        "Device {} already has {} quantum tasks in flight, which is its limit",
-                        device.device_arn,
-                        crate::state::MAX_TASKS_IN_FLIGHT_PER_DEVICE
-                    )),
-                },
-            )
-            .into());
         }
         // Keep both stores bounded: past its capacity the task store drops its oldest
         // FINISHED records, and the token index drops the entries that can no longer
@@ -304,13 +476,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         guard.evict_finished_tasks_over_capacity();
         guard.prune_idempotency(now);
 
-        let task_id = crate::state::new_task_id();
-        let region = crate::state::request_region(ctx);
-        let quantum_task_arn = ::emulator_server::emulator_arn(
-            "braket",
-            &region,
-            &format!("quantum-task/{task_id}"),
-        );
         let task = crate::state::QuantumTask {
             quantum_task_arn: quantum_task_arn.clone(),
             status: crate::state::STATUS_CREATED.to_string(),
@@ -325,7 +490,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             shots: input.shots,
             output_s3_bucket: input.output_s3_bucket.clone(),
             output_s3_key_prefix: input.output_s3_key_prefix.clone(),
-            output_s3_directory: format!("{}/{}", input.output_s3_key_prefix, task_id),
+            output_s3_directory,
             created_at: now,
             ended_at: None,
             failure_reason: None,
@@ -340,8 +505,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .collect(),
             experimental_capabilities: input.experimental_capabilities.clone(),
             queued_due: now + crate::state::QUEUE_SPAN,
-            terminal_due: now + crate::state::TERMINAL_SPAN,
+            terminal_due,
             cancelled_due: None,
+            outcome,
+            result_object_key,
         };
         guard
             .quantum_tasks

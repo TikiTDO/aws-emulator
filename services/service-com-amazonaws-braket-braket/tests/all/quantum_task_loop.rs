@@ -24,7 +24,10 @@ use serde_json::{json, Value};
 use smithy_server_runtime::{EmbeddedEmulator, MultiServiceRouter};
 
 /// The region the test's SigV4 credential scope names, so a minted ARN must carry it.
-const REGION: &str = "eu-west-1";
+///
+/// `pub(crate)` so the suites beside this one sign for the same Region as the harness
+/// they borrow.
+pub(crate) const REGION: &str = "eu-west-1";
 
 /// The account id every emulated ARN carries.
 const ACCOUNT: &str = engine::EMULATOR_ACCOUNT_ID;
@@ -116,10 +119,32 @@ impl Braket {
         (Self { router, engine }, iam)
     }
 
+    /// This service mounted beside the OWNER of the output location a quantum task's
+    /// results go to — Amazon S3, which holds the bucket the create names and the result
+    /// object a finished task's results are read from — on ONE shared engine, plus an S3
+    /// SDK client over the router's own in-process callback: the very seam
+    /// `CreateQuantumTask` resolves the output bucket and writes the result document
+    /// through.
+    ///
+    /// Nothing in a suite using this reaches into S3's store: a bucket exists only
+    /// because S3 answered for it, and a result object is read back through S3's own API.
+    pub(crate) fn with_s3() -> (Self, ::aws_sdk_s3::Client) {
+        let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+        let mut router = MultiServiceRouter::new();
+        router.register_service(service_com_amazonaws_braket_braket::EmulatedService::new(
+            Arc::clone(&engine),
+        ));
+        router.register_service(service_com_amazonaws_s3_amazons3::EmulatedService::new(
+            Arc::clone(&engine),
+        ));
+        let callback = EmbeddedEmulator::from_router(router.clone());
+        let s3 = ::service_common::s3_client::s3_client(&callback, REGION);
+        (Self { router, engine }, s3)
+    }
+
     pub(crate) async fn call(&self, method: &str, path: &str, body: Option<Value>) -> Reply {
         self.call_in_region(REGION, method, path, body).await
     }
-
     /// As [`Braket::call`], with the request signed for `region` instead of this
     /// harness's own: a response that states the region the request was signed for can
     /// then be asserted over more than one region.
@@ -1398,8 +1423,12 @@ async fn search_quantum_tasks_applies_every_filter_name_and_operator() {
 // ---------------------------------------------------------------------------
 
 /// A task's status advances on the clock, not on a call: it is `CREATED` the instant
-/// after it is created, reaches `QUEUED`, and ends in the modelled failure status with
-/// `endedAt` and a reason — because nothing executed the program.
+/// after it is created, reaches `QUEUED`, and ends in a terminal status with `endedAt`.
+///
+/// This harness mounts no object store, so the result document of the run cannot be
+/// written anywhere and the task ends in the modelled failure status carrying that
+/// reason — a task is reported as completed only where its results really are (see
+/// `tests/all/quantum_task_execution.rs`, which mounts Amazon S3 beside this service).
 #[tokio::test]
 async fn a_quantum_task_advances_on_the_clock_and_ends_in_a_modelled_status() {
     use service_com_amazonaws_braket_braket::state::TERMINAL_SPAN;
@@ -1457,8 +1486,9 @@ async fn a_quantum_task_advances_on_the_clock_and_ends_in_a_modelled_status() {
         ended.body
     );
     assert!(
-        member(&ended.body, "failureReason").contains("does not execute"),
-        "case terminal task: expected a reason saying nothing ran, got {}",
+        member(&ended.body, "failureReason").contains("could not be written"),
+        "case terminal task: expected a reason saying the result could not be stored, \
+         got {}",
         member(&ended.body, "failureReason")
     );
     // The terminal status is stable: the clock owes nothing more.
@@ -1670,6 +1700,13 @@ fn synthetic_task(
         queued_due: terminal_due,
         terminal_due,
         cancelled_due: None,
+        // A seeded record stands in for one whose program produced no result, which is
+        // the terminal status the clock owes it.
+        outcome: service_com_amazonaws_braket_braket::state::TaskOutcome::Failed {
+            reason: service_com_amazonaws_braket_braket::state::NOT_EXECUTED_FAILURE_REASON
+                .to_string(),
+        },
+        result_object_key: None,
     }
 }
 

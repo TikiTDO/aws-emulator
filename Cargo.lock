@@ -5990,6 +5990,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-rational"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
+dependencies = [
+ "num-bigint 0.4.8",
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6089,6 +6100,27 @@ name = "optional"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "978aa494585d3ca4ad74929863093e87cac9790d81fe7aba2b3dc2890643a0fc"
+
+[[package]]
+name = "oq3_lexer"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a27bbc91e3e9d6193a44aac8f5d62c1507c41669af71a4e7e0ef66fd6470e960"
+dependencies = [
+ "unicode-properties",
+ "unicode-xid",
+]
+
+[[package]]
+name = "oq3_parser"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a72022fcb414e8a0912920a1cf46417b6aa95f19d4b38778df7450f8a3c17fa"
+dependencies = [
+ "drop_bomb",
+ "oq3_lexer",
+ "ra_ap_limit",
+]
 
 [[package]]
 name = "ordermap"
@@ -6745,7 +6777,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -6794,6 +6826,30 @@ dependencies = [
  "num-complex",
  "num-integer",
  "num-traits",
+]
+
+[[package]]
+name = "qip"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20ba56bc48566c64f4e2f32264490fd2309ed79fd9bc299340b2691c0bd2c732"
+dependencies = [
+ "num-complex",
+ "num-rational",
+ "num-traits",
+ "qip-iterators",
+ "rand 0.9.5",
+ "rayon",
+]
+
+[[package]]
+name = "qip-iterators"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cce276f36f6ea43254b66d5d0f2f43dcf0200b5cfde94deb7420b51455f906c9"
+dependencies = [
+ "num-traits",
+ "rayon",
 ]
 
 [[package]]
@@ -6927,6 +6983,12 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "ra_ap_limit"
+version = "0.0.188"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92d33758724f997689f84146e5401e28d875a061804f861f113696f44f5232aa"
 
 [[package]]
 name = "radium"
@@ -9833,14 +9895,18 @@ dependencies = [
  "aws-emulator-smithy-schema-server",
  "aws-emulator-smithy-server-runtime",
  "aws-sdk-iam",
+ "aws-sdk-s3",
  "aws-smithy-runtime-api",
  "aws-smithy-schema 0.2.1",
  "aws-smithy-types",
  "bytes",
  "hex",
  "http",
+ "oq3_parser",
+ "qip",
  "serde_json",
  "service-com-amazonaws-iam-awsidentitymanagementv20100508",
+ "service-com-amazonaws-s3-amazons3",
  "service-common",
  "sha2 0.10.9",
  "tokio",
@@ -21108,6 +21174,12 @@ checksum = "75cd3fb03d5288b3ba9a1ee103ac7e9cbb59f0b03d64f8ddfcc04dd42758a85d"
 dependencies = [
  "tinyvec",
 ]
+
+[[package]]
+name = "unicode-properties"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993ad287eb20e8ba755312801cfe1413e0f25d604075863acaddca10b04c1833"
 
 [[package]]
 name = "unicode-script"

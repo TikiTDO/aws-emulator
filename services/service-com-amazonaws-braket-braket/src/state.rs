@@ -22,6 +22,22 @@ use crate::ops::types::{
     InstanceConfig, JobCheckpointConfig, JobOutputDataConfig, JobStoppingCondition, TimePeriod,
 };
 
+/// The program a quantum task's `action` document carries, split out of this root as its
+/// own concern; its names are re-exported so every caller keeps reaching them through
+/// `crate::state`.
+pub mod quantum_program;
+pub use quantum_program::*;
+
+/// The simulator that RUNS a lowered gate-model program, split out and re-exported the
+/// same way.
+pub mod quantum_simulation;
+pub use quantum_simulation::*;
+
+/// A finished task's result document, and the Amazon S3 bucket it is written to — which
+/// Amazon S3 owns, so it is resolved there; split out and re-exported the same way.
+pub mod task_results;
+pub use task_results::*;
+
 // ---------------------------------------------------------------------------
 // Modelled enum values this service stores and emits.
 //
@@ -105,14 +121,17 @@ pub const JOB_RUNNING_SPAN: Duration = Duration::from_millis(600);
 /// the transition that starts it.
 pub const JOB_TERMINAL_SPAN: Duration = Duration::from_millis(1_200);
 
-/// Why a quantum task this emulator accepted ends in `FAILED`.
+/// Why a quantum task this emulator accepted ends in `FAILED` when its program never
+/// ran.
 ///
-/// The emulator has no quantum processor and runs no quantum simulator, so no
-/// program is ever executed and no result is ever written to the output bucket.
-/// Reporting `COMPLETED` would claim results that do not exist, so the task ends
-/// in the modelled failure status with this reason instead.
-pub const NOT_EXECUTED_FAILURE_REASON: &str = "This emulator does not execute quantum programs: \
-no device or simulator ran this quantum task, so no result was written to the output S3 location.";
+/// A task ends in the failure status exactly when there is no result to read: the program
+/// could not be lowered to a circuit, the simulator could not apply one of its gates, or
+/// the result document could not be written to the output location. The reason a task
+/// carries is the one its own run produced ([`QuantumTask::outcome`]), so what a client
+/// reads says which of those happened; this is the fallback for a task whose record
+/// carries none.
+pub const NOT_EXECUTED_FAILURE_REASON: &str =
+    "The quantum task produced no result, so no result was written to the output S3 location.";
 
 /// Why a hybrid job this emulator accepted ends in `FAILED`.
 ///
@@ -234,6 +253,44 @@ pub struct Device {
     pub cost_unit: String,
 }
 
+/// What the run of a quantum task produced, decided when the task was created: the
+/// program was executed against the device's simulator and its result document written,
+/// or it was not, with the reason why.
+///
+/// A task AWS accepts is returned in a non-terminal status and reaches its terminal one
+/// on the clock, so the status a caller reads is still owed by the clock
+/// ([`TERMINAL_SPAN`]); this is WHICH terminal status is owed, and it is decided by what
+/// actually ran rather than by the status being due.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskOutcome {
+    /// The program ran and its result document was written to the output location: this
+    /// many shots produced a measurement, which is the task's `numSuccessfulShots`.
+    Completed { successful_shots: i64 },
+    /// No result was produced, for the reason given — the task's `failureReason`.
+    Failed { reason: String },
+}
+
+impl TaskOutcome {
+    /// The terminal status this outcome reaches.
+    #[must_use]
+    pub fn terminal_status(&self) -> &'static str {
+        match self {
+            Self::Completed { .. } => STATUS_COMPLETED,
+            Self::Failed { .. } => STATUS_FAILED,
+        }
+    }
+
+    /// The shots that produced a measurement, or `None` for a task that produced no
+    /// result.
+    #[must_use]
+    pub fn successful_shots(&self) -> Option<i64> {
+        match self {
+            Self::Completed { successful_shots } => Some(*successful_shots),
+            Self::Failed { .. } => None,
+        }
+    }
+}
+
 /// A quantum task created through `CreateQuantumTask`.
 #[derive(Debug, Clone)]
 pub struct QuantumTask {
@@ -266,6 +323,12 @@ pub struct QuantumTask {
     pub terminal_due: SystemTime,
     /// When `CANCELLING` -> `CANCELLED` falls due; set by `CancelQuantumTask`.
     pub cancelled_due: Option<SystemTime>,
+    /// What the device's run of this task produced — the terminal status the clock owes
+    /// it, and the `numSuccessfulShots` or `failureReason` that goes with it.
+    pub outcome: TaskOutcome,
+    /// The key of the result object this task's run wrote under
+    /// [`QuantumTask::output_s3_directory`], for a task whose run produced one.
+    pub result_object_key: Option<String>,
 }
 
 impl QuantumTask {
@@ -323,6 +386,8 @@ pub struct HybridJob {
     pub running_due: SystemTime,
     /// When the terminal transition falls due.
     pub terminal_due: SystemTime,
+    /// When `CANCELLING` -> `CANCELLED` falls due; set by `CancelJob`.
+    pub cancelled_due: Option<SystemTime>,
 }
 
 impl HybridJob {
@@ -583,11 +648,10 @@ impl ComAmazonawsBraketBraketState {
     ///   charged, so it counts towards the queued amount;
     /// * a task that COMPLETED has been charged, so it counts towards the total.
     ///
-    /// A `CANCELLED` or `FAILED` task is charged for nothing, which is why this
-    /// emulator's totals are empty sums: it executes no program, so every task it
-    /// accepts ends in [`STATUS_FAILED`] (see [`NOT_EXECUTED_FAILURE_REASON`]) and
-    /// nothing is ever billed. The figures are computed from the records all the same,
-    /// so a device with queued work reports what that work has committed.
+    /// A `CANCELLED` or `FAILED` task is charged for nothing, so only the tasks whose
+    /// run produced a result count towards the total ([`TaskOutcome`]). The figures are
+    /// computed from the records, so a device with queued work reports what that work has
+    /// committed and a device whose tasks completed reports what they cost.
     ///
     /// A device charged per [`PRICE_UNIT_MINUTE`] contributes nothing: the emulator
     /// runs no simulation, so there is no duration to charge. Only a per-shot device
@@ -674,7 +738,18 @@ pub fn usd(amount: f64) -> String {
 /// [`JOB_TERMINAL_SPAN`] in `FAILED`: nothing ran the algorithm, so
 /// [`JOB_NOT_EXECUTED_FAILURE_REASON`] is the reason it carries.
 fn apply_due_transitions_to_job(job: &mut HybridJob, now: SystemTime) {
-    if job.is_terminal() || job.status == STATUS_CANCELLING {
+    if job.status == STATUS_CANCELLING {
+        // A cancellation the clock has finished leaves the job cancelled, exactly as one
+        // of a quantum task does.
+        if let Some(due) = job.cancelled_due {
+            if now >= due {
+                job.status = STATUS_CANCELLED.to_string();
+                job.ended_at = Some(due);
+            }
+        }
+        return;
+    }
+    if job.is_terminal() {
         return;
     }
     if now >= job.running_due && job.started_at.is_none() {
@@ -704,11 +779,15 @@ fn apply_due_transitions_to(task: &mut QuantumTask, now: SystemTime) {
         return;
     }
     if now >= task.terminal_due {
-        // Nothing executed the program, so the task cannot complete; it ends in
-        // the modelled failure status, carrying the reason why.
-        task.status = STATUS_FAILED.to_string();
+        // Which terminal status is owed was decided by the run itself: a task whose
+        // program ran and whose result was written completes, and one that produced no
+        // result ends in the failure status carrying the reason.
+        task.status = task.outcome.terminal_status().to_string();
         task.ended_at = Some(task.terminal_due);
-        task.failure_reason = Some(NOT_EXECUTED_FAILURE_REASON.to_string());
+        task.failure_reason = match &task.outcome {
+            TaskOutcome::Completed { .. } => None,
+            TaskOutcome::Failed { reason } => Some(reason.clone()),
+        };
     } else if now >= task.queued_due {
         task.status = STATUS_QUEUED.to_string();
     }
@@ -1577,7 +1656,8 @@ fn url_slug(name: &str) -> String {
 }
 
 /// An instant as the ISO-8601 `date-time` a JSON document carries.
-fn as_iso8601(at: SystemTime) -> String {
+#[must_use]
+pub fn as_iso8601(at: SystemTime) -> String {
     to_date_time(at)
         .fmt(::aws_smithy_types::date_time::Format::DateTime)
         .unwrap_or_default()
@@ -1803,6 +1883,28 @@ pub fn member_value_is_not_a_valid_arn(member: &str, value: &str) -> String {
     format!("{member} {value} is not a valid ARN.")
 }
 
+/// The identifier Amazon Braket names a hybrid job by in its messages: the account the
+/// job belongs to and the job's name, joined by `#`, as the `jobArn` carries them
+/// (`arn:<partition>:braket:<region>:<account>:job/<name>`).
+///
+/// Built from the REQUEST, so a refusal naming a job follows the ARN the caller sent
+/// rather than any one recorded message. A value the ARN grammar cannot be read out of
+/// falls back to the ARN itself; the modelled `@pattern` on `JobArn` makes that
+/// unreachable from the wire. ONE reading for every door that names a job it could not
+/// resolve, so `GetJob` and `CancelJob` cannot disagree about what identifies one.
+#[must_use]
+pub fn job_identifier(job_arn: &str) -> String {
+    let mut fields = job_arn.splitn(6, ':');
+    let account = fields.nth(4);
+    let name = fields
+        .next()
+        .and_then(|resource| resource.strip_prefix(ARN_RESOURCE_JOB)?.strip_prefix('/'));
+    match (account, name) {
+        (Some(account), Some(name)) => format!("{account}#{name}"),
+        _ => job_arn.to_string(),
+    }
+}
+
 /// How an operation that resolves a device ARN against the published inventory and models
 /// no not-found error refuses an ARN naming no published device.
 ///
@@ -1812,6 +1914,42 @@ pub fn member_value_is_not_a_valid_arn(member: &str, value: &str) -> String {
 pub const DEVICE_ARN_NOT_FOUND: &str =
     "Device ARN not found. Please use SearchDevices operation to get a list of supported \
      devices.";
+
+/// How a door that holds a request's `shots` to the device's own published range refuses
+/// one outside it: the bounds the device publishes, the device the request named, and the
+/// count it asked for — every part taken from the request and from the device's capability
+/// document.
+#[must_use]
+pub fn shots_out_of_range(min: i64, max: i64, device_arn: &str, shots: i64) -> String {
+    format!("Shot count should be between {min} and {max} on {device_arn}, but found {shots}.")
+}
+
+/// How this service reports a member of a LIST in the request whose value is not one the
+/// member allows: the per-member validation payload Amazon Braket answers with, rendered
+/// from the rejected member path and value.
+///
+/// The payload names the list member, the index of the element that failed, the member of
+/// that element that failed, and the value that was not allowed — so a client parsing it
+/// can point at the field it sent, which is what makes the message request-derived rather
+/// than one fixed sentence per operation:
+/// `{'filters': [{0: [{'name': ['unallowed value notAFilter']}]}]}`.
+#[must_use]
+pub fn unallowed_member_value(list_member: &str, index: usize, member: &str, value: &str) -> String {
+    format!("{{'{list_member}': [{{{index}: [{{'{member}': ['unallowed value {value}']}}]}}]}}")
+}
+
+/// How this service reports a member of a list element whose value is outside the bound
+/// the member carries, in the same per-member form as [`unallowed_member_value`]: the
+/// rejected member path and what the value failed.
+#[must_use]
+pub fn member_value_refusal(
+    list_member: &str,
+    index: usize,
+    member: &str,
+    failure: &str,
+) -> String {
+    format!("{{'{list_member}': [{{{index}: [{{'{member}': ['{failure}']}}]}}]}}")
+}
 
 /// How every door that refuses a device because the inventory publishes it as `RETIRED`
 /// words that refusal.
