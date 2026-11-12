@@ -245,6 +245,8 @@ mod list_stack_set_operation_results;
 mod list_stack_set_operations;
 #[path = "all/list_stack_sets.rs"]
 mod list_stack_sets;
+#[path = "all/list_type_versions_registry_scope.rs"]
+mod list_type_versions_registry_scope;
 #[path = "all/list_types.rs"]
 mod list_types;
 #[path = "all/logs_and_iot_resources.rs"]

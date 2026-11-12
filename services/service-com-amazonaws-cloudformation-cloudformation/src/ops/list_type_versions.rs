@@ -16,10 +16,14 @@
 //! extension's DEFAULT version, when it was registered and the public version number a
 //! publisher published it under.
 //!
-//! The registry also holds the public extensions Amazon Web Services publishes, which are in
-//! every account's registry without anybody registering them
-//! ([`crate::state::registry::aws_published`]), so an extension this account registered no
-//! record for is still read there — the same two sources `DescribeType` reads.
+//! What the listing is served from is therefore the registry's own VERSION records and
+//! nothing else. The public extensions Amazon Web Services publishes are in every account's
+//! registry without anybody registering them ([`crate::state::registry::aws_published`]),
+//! which is why `DescribeType` and `ListTypes` report them — but no version of one was ever
+//! added to THIS account and Region, so such an extension holds no version record to
+//! summarise and this read has nothing to list: it is refused with the registry's own
+//! modelled `CFNRegistryException`, the operation's only modelled error, exactly as a name
+//! or an ARN the registry holds nothing at all for is.
 //!
 //! ## What identifies the extension, and what narrows the listing
 //!
@@ -138,16 +142,6 @@ enum Identifier<'a> {
     },
 }
 
-impl Identifier<'_> {
-    /// What the request named the extension by, for the not-found message.
-    fn named(&self) -> &str {
-        match self {
-            Self::Arn(arn) => arn,
-            Self::Name { type_name, .. } => type_name,
-        }
-    }
-}
-
 /// Read which extension the request identifies, or `Err(message)` for a combination of
 /// members that identifies none.
 ///
@@ -221,12 +215,20 @@ fn registry_exception(message: String) -> ListTypeVersionsError {
     .into()
 }
 
-/// The same refusal for an extension the registry does not hold: this operation models no
-/// not-found error of its own, so the registry's exception is what carries it, with the
-/// sentence every read of a missing extension words
-/// ([`crate::state::extension_does_not_exist`]).
-fn type_not_found(identifier: &str) -> ListTypeVersionsError {
-    registry_exception(crate::state::extension_does_not_exist(identifier))
+/// The sentence the registry answers a request for the versions of an extension it holds no
+/// version record of.
+///
+/// Entirely FIXED text: nothing in it comes from the request or from the store — in
+/// particular it does not echo the `TypeName` or the `Arn` the request named — so there is
+/// nothing in it to template. (The operations that model a `TypeNotFoundException` of their
+/// own word their own, quoting the extension they could not resolve:
+/// [`crate::state::extension_does_not_exist`].)
+const TYPE_DOES_NOT_EXIST: &str = "The type does not exist";
+
+/// The same refusal for an extension the registry holds no version of: this operation models
+/// no not-found error of its own, so the registry's exception is what carries it.
+fn type_not_found() -> ListTypeVersionsError {
+    registry_exception(TYPE_DOES_NOT_EXIST.to_string())
 }
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
@@ -316,39 +318,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut store = state.lock();
         store.settle(::std::time::SystemTime::now());
 
-        let stored = match identifier {
+        // The extension whose VERSION records this account and Region's registry holds: one
+        // written by `RegisterType` for a private extension, or by `ActivateType` for a
+        // public one this account activated. Those records are the only source of a version
+        // summary — the public extensions Amazon Web Services publishes are in every
+        // registry without anybody registering them, and precisely because nothing
+        // registered or activated one of those here, this registry holds no version of it to
+        // summarise — so a request naming one of them is refused rather than answered out of
+        // the public catalogue `DescribeType` and `ListTypes` report the extension ITSELF
+        // from. The lookup is in the Region the request was served in: the registry is
+        // regional.
+        let extension = match identifier {
             Identifier::Arn(arn) => store.extension_by_arn(&region, arn),
             Identifier::Name {
                 type_kind,
                 type_name,
             } => store.extension_by_name(&region, type_kind, type_name),
-        };
-        // The registry also holds the public extensions Amazon Web Services publishes, which
-        // are in every account's registry without anybody registering them. A name this
-        // account registered cannot be one of those — `RegisterType` reserves the `AWS`
-        // namespace — so the two sources cannot disagree about one extension. Both are read
-        // in the Region the request was served in: the registry is regional whichever source
-        // holds a record.
-        let published = match (stored.is_none(), identifier) {
-            (false, _) => None,
-            (true, Identifier::Arn(arn)) => registry::aws_published_by_arn(&region, arn),
-            (
-                true,
-                Identifier::Name {
-                    type_kind,
-                    type_name,
-                },
-            ) => registry::aws_published(&region, type_kind, type_name),
-        };
-        let extension = stored
-            .or(published.as_ref())
-            .ok_or_else(|| type_not_found(identifier.named()))?;
+        }
+        // A record carrying no version at all is nothing this listing can summarise either,
+        // so it is the same refusal: what makes an extension listable here is the version
+        // record, not the name.
+        .filter(|extension| !extension.versions.is_empty())
+        .ok_or_else(type_not_found)?;
         // "The publisher ID of the extension publisher. Extensions published by Amazon
         // aren't assigned a publisher ID": a record some other publisher published, or one
         // nobody did, is not the extension the request named.
         if let Some(publisher_id) = input.publisher_id.as_deref() {
             if extension.publisher_id.as_deref() != Some(publisher_id) {
-                return Err(type_not_found(identifier.named()));
+                return Err(type_not_found());
             }
         }
 
