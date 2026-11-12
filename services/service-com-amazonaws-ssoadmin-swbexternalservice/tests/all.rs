@@ -149,6 +149,10 @@ mod list_instances_pagination;
 mod listed_instance_projection_matches_describe;
 #[path = "all/listed_instance_state_after_instance_writes.rs"]
 mod listed_instance_state_after_instance_writes;
+#[path = "all/listed_instance_state_every_entry.rs"]
+mod listed_instance_state_every_entry;
+#[path = "all/listed_instance_state_generated_accounts.rs"]
+mod listed_instance_state_generated_accounts;
 #[path = "all/listed_instance_state_at_the_list_bound.rs"]
 mod listed_instance_state_at_the_list_bound;
 #[path = "all/listed_instance_state_source.rs"]

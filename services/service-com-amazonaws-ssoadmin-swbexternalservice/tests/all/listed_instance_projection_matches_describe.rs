@@ -104,11 +104,16 @@ fn instance_in(
     instance
 }
 
-/// `DescribeInstance` for `instance_arn`, as a 200 body.
-async fn describe(case: &str, router: &MultiServiceRouter, instance_arn: &str) -> Value {
+/// `DescribeInstance` for `instance_arn` in `region`, as a 200 body.
+async fn describe(
+    case: &str,
+    router: &MultiServiceRouter,
+    region: &str,
+    instance_arn: &str,
+) -> Value {
     let (status, body) = call_in_region(
         router,
-        REGION,
+        region,
         "DescribeInstance",
         &json!({"InstanceArn": instance_arn}),
     )
@@ -123,13 +128,21 @@ async fn describe(case: &str, router: &MultiServiceRouter, instance_arn: &str) -
 /// THE RULE on one served entry: it carries its `State` view, and the single-instance read
 /// of the same `InstanceArn` serves that very projection — the same member set, the same
 /// value under each member, and a flat `Status` that agrees with both.
-async fn assert_one_projection(case: &str, router: &MultiServiceRouter, entry: &Value) {
+///
+/// Shared with `listed_instance_state_generated_accounts.rs`, whose drawn populations are
+/// enumerated in a Region of their own, so the Region the calls are made in is a parameter.
+pub(crate) async fn assert_one_projection(
+    case: &str,
+    router: &MultiServiceRouter,
+    region: &str,
+    entry: &Value,
+) {
     assert_state_mirrors_status(case, entry);
     let instance_arn = entry["InstanceArn"]
         .as_str()
         .unwrap_or_else(|| panic!("case {case:?}: the entry reports no InstanceArn: {entry}"));
 
-    let described = describe(case, router, instance_arn).await;
+    let described = describe(case, router, region, instance_arn).await;
     let envelope = described.get("Instance").unwrap_or_else(|| {
         panic!("case {case:?}: the describe carries no Instance envelope: {described}")
     });
@@ -213,7 +226,7 @@ async fn every_listed_entry_is_the_projection_the_single_instance_read_serves() 
 
         let mut seen = Vec::new();
         for entry in &entries {
-            assert_one_projection(&case, &router, entry).await;
+            assert_one_projection(&case, &router, REGION, entry).await;
             seen.push(
                 entry["State"]["Name"]
                     .as_str()
@@ -295,6 +308,6 @@ async fn an_instance_enabled_over_the_wire_is_listed_as_the_describe_reports_it(
             Some(expected_status),
             "case {case:?}: expected State.Name {expected_status:?}, got {entry}"
         );
-        assert_one_projection(&case, &router, entry).await;
+        assert_one_projection(&case, &router, REGION, entry).await;
     }
 }

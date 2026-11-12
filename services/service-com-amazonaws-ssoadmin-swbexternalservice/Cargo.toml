@@ -32,5 +32,12 @@ sha2 = { workspace = true }
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
+[dev-dependencies]
+# `rand`: the generator the property-based instance-projection suite draws its accounts
+# from (`tests/all/listed_instance_state_generated_accounts.rs`) — the instance count, each
+# instance's lifecycle value, name, kind and Region, and the page size the enumeration asks
+# for. Test-only: nothing in `src/` draws random values.
+rand = "0.9"
+
 [lints]
 workspace = true

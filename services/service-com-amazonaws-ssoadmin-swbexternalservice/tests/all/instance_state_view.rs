@@ -67,11 +67,32 @@ pub(crate) async fn listed(
     region: &str,
     max_results: Option<i64>,
 ) -> Vec<Value> {
-    let mut entries = Vec::new();
-    let mut next_token: Option<String> = None;
     // One more request than there can be pages: the enumeration ends on the page that
     // returns nothing, and the store holds at most a handful of instances.
-    for _ in 0..8 {
+    listed_pages(case, router, region, max_results, 8)
+        .await
+        .concat()
+}
+
+/// The same enumeration, PAGE BY PAGE: the entries each request served, in the order the
+/// requests were made, for a suite whose subject is how a listing is cut up rather than
+/// which entries it serves.
+///
+/// `requests` bounds how many requests the walk makes — the enumeration ends on the page
+/// that returns nothing, so a caller passes one more than the store can fill at the
+/// smallest page the model admits. Shared with
+/// `listed_instance_state_generated_accounts.rs`, whose populations are larger than the
+/// handful [`listed`] walks.
+pub(crate) async fn listed_pages(
+    case: &str,
+    router: &MultiServiceRouter,
+    region: &str,
+    max_results: Option<i64>,
+    requests: usize,
+) -> Vec<Vec<Value>> {
+    let mut pages = Vec::new();
+    let mut next_token: Option<String> = None;
+    for _ in 0..requests {
         let mut request = json!({});
         if let Some(max) = max_results {
             request["MaxResults"] = json!(max);
@@ -88,9 +109,10 @@ pub(crate) async fn listed(
             .as_array()
             .unwrap_or_else(|| panic!("case {case:?}: no Instances in {body}"))
             .clone();
-        entries.extend(page.iter().cloned());
+        let empty = page.is_empty();
+        pages.push(page);
         next_token = match body["NextToken"].as_str() {
-            Some(token) if !page.is_empty() => Some(token.to_string()),
+            Some(token) if !empty => Some(token.to_string()),
             _ => None,
         };
         if next_token.is_none() {
@@ -101,7 +123,7 @@ pub(crate) async fn listed(
         next_token.is_none(),
         "case {case:?}: the enumeration did not end within the pages this store can fill"
     );
-    entries
+    pages
 }
 
 /// THE RULE, asserted on one served entry: its `State` is a structure whose `Name` is the
