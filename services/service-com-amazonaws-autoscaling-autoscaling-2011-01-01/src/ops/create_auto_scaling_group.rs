@@ -686,6 +686,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // The hooks the request's own lifecycle hook specifications created, taken
             // against the same rules as a later `PutLifecycleHook`.
             lifecycle_hooks,
+            // A group is created with no notification configuration: `CreateAutoScalingGroup`
+            // carries no notification member, so the first one comes from
+            // `PutNotificationConfiguration`.
+            notification_configurations: crate::state::NotificationConfigurations::new(),
         };
         state.groups.insert(name.clone(), group);
 

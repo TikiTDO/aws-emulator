@@ -59,6 +59,12 @@ service-common = { path = "../common" }
 # bus as a group's capacity changes (`state::lifecycle_events`). Only the generated client
 # is needed — the emulator supplies the transport, so the SDK's own HTTPS stack is left out.
 aws-sdk-eventbridge = { version = "1", default-features = false }
+# The AWS SDK for Amazon SNS, driven over the same in-process callback: a group configured
+# with `PutNotificationConfiguration` publishes the confirmation of that configuration, and
+# the launch and termination of each of its instances, onto the configured topic
+# (`state::sns_notifications`). Only the generated client is needed — the emulator supplies
+# the transport, so the SDK's own HTTPS stack is left out.
+aws-sdk-sns = { version = "1", default-features = false }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -72,6 +78,10 @@ hex = { workspace = true }
 # without them mounted there is nothing for the publication to reach.
 service-com-amazonaws-eventbridge-awsevents = { workspace = true }
 service-com-amazonaws-sqs-amazonsqs = { workspace = true }
+# Amazon SNS is mounted beside them for the same reason: a group's notification
+# configuration publishes to an SNS topic, and the delivery is asserted on the SQS queue
+# subscribed to that topic.
+service-com-amazonaws-sns-amazonsimplenotificationservice = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op PutNotificationConfiguration
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `PutNotificationConfiguration`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`PutNotificationConfiguration::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Stores one Amazon SNS notification configuration of an Auto Scaling group and confirms
+//! it on the topic it names.
+//!
+//! The collection and the upsert rule are [`crate::state::notification_configurations`];
+//! the notification this call publishes, and the ones the group's later instance launches
+//! and terminations publish, are [`crate::state::sns_notifications`].
 //!
 //! ## Shape of an operation
 //!
@@ -172,18 +170,81 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `PutNotificationConfiguration` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(PutNotificationConfigurationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("PutNotificationConfiguration"))
+        let Some(store) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                PutNotificationConfigurationErrorModeled::ResourceContentionFault(
+                    ResourceContentionFault {
+                        message: Some(
+                            "the Auto Scaling store is not mounted on this engine".to_string(),
+                        ),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        let group_name = input.auto_scaling_group_name;
+        let topic_arn = input.topic_arn;
+        let notification_types = input.notification_types;
+
+        let now = ::std::time::SystemTime::now();
+        // The whole of the write, in ONE critical section that ENDS before the publish
+        // below: the store's lock is not held across an await, so nothing of this service's
+        // state is held while another service is called in process.
+        let confirmation: Vec<crate::state::sns_notifications::PendingNotification> = {
+            let mut state = store.lock();
+            state.materialize_due(&*self.engine, now);
+
+            // A notification configuration belongs to a group, so a name no group answers
+            // to is refused with the wording this service's group-scoped WRITE paths answer
+            // with: the detail field after the dash is left unfilled, so no part of the
+            // request appears in it.
+            let Some(group) = state.groups.get_mut(&group_name) else {
+                return Err(crate::scaffolded::Scaffolded::validation_error(
+                    crate::state::ABSENT_GROUP_MESSAGE_WITHOUT_DETAIL,
+                ));
+            };
+
+            group
+                .put_notification_configuration(&topic_arn, &notification_types)
+                .map_err(|refusal| {
+                    let message = refusal.message();
+                    match refusal {
+                        // The documented ceiling on the topics one group may notify is the
+                        // operation's modelled `LimitExceededFault`; a value outside this
+                        // service's own event catalog is about what the request carries,
+                        // which this service answers `ValidationError` for.
+                        crate::state::NotificationConfigurationRefusal::LimitExceeded => {
+                            PutNotificationConfigurationErrorModeled::LimitExceededFault(
+                                LimitExceededFault {
+                                    message: Some(message),
+                                },
+                            )
+                            .into()
+                        }
+                        _ => crate::scaffolded::Scaffolded::validation_error(message),
+                    }
+                })?;
+
+            // The notification that confirms the stored configuration on its topic,
+            // rendered against the group as it now stands.
+            crate::state::sns_notifications::test_notification(
+                group,
+                &topic_arn,
+                &::service_common::query_error_envelope::new_request_id(),
+                now,
+            )
+            .into_iter()
+            .collect()
+        };
+
+        crate::state::audit(
+            ctx.parts(),
+            "PutNotificationConfiguration",
+            &format!("{group_name}/{topic_arn}"),
+            "notification configuration stored",
+        );
+        crate::state::sns_notifications::publish(ctx.callback(), &confirmation).await;
+        Ok(PutNotificationConfigurationOutput)
     }
 }

@@ -61,6 +61,8 @@ mod scaling_policies;
 mod scaling_activity_log;
 #[path = "all/set_desired_capacity_on_subnet_placed_groups.rs"]
 mod set_desired_capacity_on_subnet_placed_groups;
+#[path = "all/sns_notifications.rs"]
+mod sns_notifications;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 // The shared harness the suites above drive the service through: the awsQuery POST

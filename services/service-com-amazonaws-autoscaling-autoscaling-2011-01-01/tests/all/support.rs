@@ -282,3 +282,49 @@ pub fn xml_unescape(text: &str) -> String {
 pub fn tag_value(xml: &str, tag: &str) -> String {
     tag_values(xml, tag).first().cloned().unwrap_or_default()
 }
+
+/// POST one `awsJson` RPC call against a service mounted BESIDE Auto Scaling, the way a
+/// client makes it: `POST /` with `X-Amz-Target: <target_prefix>.<operation>` and a
+/// credential scoped to `signing_name`, which is what the router picks the service from.
+///
+/// THE ONE COPY for every suite here that drives another emulated service over the wire —
+/// EventBridge, Amazon SQS — because a lifecycle step this service publishes is observed
+/// where a client observes it: on the queue it was delivered to.
+pub async fn json_rpc(
+    router: &MultiServiceRouter,
+    signing_name: &str,
+    target_prefix: &str,
+    json_version: &str,
+    operation: &str,
+    body: ::serde_json::Value,
+) -> (u16, ::serde_json::Value) {
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/")
+        .header("host", format!("{signing_name}.{REGION}.amazonaws.com"))
+        .header(
+            "content-type",
+            format!("application/x-amz-json-{json_version}"),
+        )
+        .header("x-amz-target", format!("{target_prefix}.{operation}"))
+        .header(
+            "authorization",
+            format!(
+                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20240101/{REGION}/{signing_name}\
+                 /aws4_request, SignedHeaders=host;x-amz-target, Signature=abc"
+            ),
+        )
+        .body(bytes::Bytes::from(body.to_string()))
+        .expect("a valid request");
+    let response = router.dispatch(request).await;
+    let status = response.status().as_u16();
+    let payload = response.body().clone();
+    let parsed = if payload.is_empty() {
+        ::serde_json::json!({})
+    } else {
+        ::serde_json::from_slice(&payload).unwrap_or_else(|_| {
+            ::serde_json::json!({ "__unparsed": String::from_utf8_lossy(&payload) })
+        })
+    };
+    (status, parsed)
+}

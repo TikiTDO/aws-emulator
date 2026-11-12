@@ -17,6 +17,13 @@
 // else appends to.
 #[path = "all/cloudformation_fifo_resource_generated_names.rs"]
 mod cloudformation_fifo_resource_generated_names;
+// Declared here, in this same head region, for the reason the entry above records: the
+// Amazon SNS notifications an Auto Scaling group's notification configuration publishes
+// span Auto Scaling, Amazon EC2, SNS and Amazon SQS at once, and the publish is addressed
+// the way a client's own `sns`-scoped call is, so no single crate's test target can ask
+// which mounted model claims it.
+#[path = "all/autoscaling_notification_reaches_its_subscribed_queue.rs"]
+mod autoscaling_notification_reaches_its_subscribed_queue;
 // Declared here, in this same head region, for the reason the entry above records: a
 // guardrail the Amazon Bedrock control plane creates and the Bedrock Runtime data plane
 // applies spans those two crates at once, so neither crate's own test target can see

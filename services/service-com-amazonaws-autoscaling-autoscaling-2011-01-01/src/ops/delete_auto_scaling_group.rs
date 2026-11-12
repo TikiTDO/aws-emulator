@@ -218,6 +218,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .collect();
         let desired_capacity = group.desired_capacity;
         let protection = group.deletion_protection.clone().unwrap_or_default();
+        // The topics the group was configured to be told about a termination, read off its
+        // own record for the same reason: a forced delete's terminations are the group's
+        // terminations, and its configurations are gone once the group is.
+        let notification_topics = group.notification_topics(
+            crate::state::InstanceLifecycle::Terminated.notification_event(),
+        );
 
         // Deletion protection controls whether this operation is allowed at all:
         // `prevent-all-deletion` forbids the delete, `prevent-force-deletion`
@@ -299,7 +305,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         for (instance_id, availability_zone) in instance_ids.iter().zip(instance_zones) {
             let subnet_id = crate::state::ec2_instances::subnet_of(&*self.engine, instance_id);
             state.queue_lifecycle_event(crate::state::PendingLifecycleEvent {
-                detail_type: crate::state::InstanceLifecycle::Terminated.detail_type(),
+                kind: crate::state::InstanceLifecycle::Terminated,
+                notification_topics: notification_topics.clone(),
                 group_name: name.clone(),
                 group_arn: arn.clone(),
                 region: region.clone(),

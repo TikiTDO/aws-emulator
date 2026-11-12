@@ -83,9 +83,8 @@ fn emulator() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     (router, engine)
 }
 
-/// One `awsJson` RPC call against a service mounted beside Auto Scaling, the way a client
-/// makes it: `POST /` with `X-Amz-Target: <target_prefix>.<operation>` and a credential
-/// scoped to `signing_name`, which is what the router picks the service from.
+/// One `awsJson` RPC call against a service mounted beside Auto Scaling, through the one
+/// copy of that call this crate's suites share ([`crate::support::json_rpc`]).
 async fn rpc(
     router: &MultiServiceRouter,
     signing_name: &str,
@@ -94,34 +93,15 @@ async fn rpc(
     operation: &str,
     body: Value,
 ) -> (u16, Value) {
-    let request = http::Request::builder()
-        .method("POST")
-        .uri("/")
-        .header("host", format!("{signing_name}.{REGION}.amazonaws.com"))
-        .header(
-            "content-type",
-            format!("application/x-amz-json-{json_version}"),
-        )
-        .header("x-amz-target", format!("{target_prefix}.{operation}"))
-        .header(
-            "authorization",
-            format!(
-                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20240101/{REGION}/{signing_name}\
-                 /aws4_request, SignedHeaders=host;x-amz-target, Signature=abc"
-            ),
-        )
-        .body(bytes::Bytes::from(body.to_string()))
-        .expect("a valid request");
-    let response = router.dispatch(request).await;
-    let status = response.status().as_u16();
-    let payload = response.body().clone();
-    let parsed = if payload.is_empty() {
-        json!({})
-    } else {
-        serde_json::from_slice(&payload)
-            .unwrap_or_else(|_| json!({ "__unparsed": String::from_utf8_lossy(&payload) }))
-    };
-    (status, parsed)
+    crate::support::json_rpc(
+        router,
+        signing_name,
+        target_prefix,
+        json_version,
+        operation,
+        body,
+    )
+    .await
 }
 
 /// One EventBridge call.

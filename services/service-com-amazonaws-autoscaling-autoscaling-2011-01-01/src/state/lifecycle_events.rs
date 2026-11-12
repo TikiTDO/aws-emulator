@@ -36,9 +36,15 @@
 //!
 //! A queued event is published with no lock held ([`publish_pending`]): EventBridge is
 //! reached the way every emulated service reaches another, through the framework's
-//! in-process callback, so this crate names no other service's crate. Publication is best
-//! effort — an emulator with no EventBridge mounted has nowhere to publish — so a failure
-//! is logged and the operation's own answer stands.
+//! in-process callback. Publication is best effort — an emulator with no EventBridge
+//! mounted has nowhere to publish — so a failure is logged and the operation's own answer
+//! stands.
+//!
+//! The SAME drain publishes the Amazon SNS notifications the step owes, onto the topics the
+//! group's own notification configurations selected for it when it was recorded
+//! ([`super::sns_notifications`], [`PendingLifecycleEvent::notification_topics`]): one
+//! lifecycle step is announced once, to the bus and to the configured topics together, so
+//! the two reports of it cannot disagree and neither can be published twice.
 //!
 //! WHICH call publishes: none of them. A door that changes a group's capacity starts the
 //! clock pump ([`drive_lifecycle_clock`]) and answers its caller; the pump waits for the
@@ -140,6 +146,17 @@ impl InstanceLifecycle {
         }
     }
 
+    /// The event type of this service's own notification catalog
+    /// ([`super::AUTO_SCALING_NOTIFICATION_TYPES`]) that a group's notification
+    /// configurations select this step by, and that the notification reporting it carries.
+    #[must_use]
+    pub fn notification_event(self) -> &'static str {
+        match self {
+            Self::Launched => super::sns_notifications::EC2_INSTANCE_LAUNCH,
+            Self::Terminated => super::sns_notifications::EC2_INSTANCE_TERMINATE,
+        }
+    }
+
     /// The `Activity$Description` the scaling activity for this step carries, naming the
     /// instance it moved — the one wording for it in this crate, so the activity log and
     /// the event agree about what happened.
@@ -177,8 +194,14 @@ pub struct InstanceLifecycleChange<'a> {
 /// placement the store held when the step was recorded.
 #[derive(Debug, Clone)]
 pub struct PendingLifecycleEvent {
-    /// The `detail-type` it is published under.
-    pub detail_type: &'static str,
+    /// WHICH step it reports, which is what the `detail-type` it is published under and
+    /// the notification event it is published as are both read from.
+    pub kind: InstanceLifecycle,
+    /// The Amazon SNS topics the group's notification configurations selected this step
+    /// for when it was recorded, which is where its notifications go
+    /// ([`super::sns_notifications`]). Empty for a group configured for no topic, or for
+    /// none that asked about this step.
+    pub notification_topics: Vec<String>,
     /// The group the step belongs to.
     pub group_name: String,
     /// That group's ARN, carried in the envelope's `resources`.
@@ -240,8 +263,18 @@ impl AutoScalingState {
             .unwrap_or_else(|| super::DEFAULT_REGION.to_string());
         let availability_zone = self.instance_zone(change.group_name, change.instance_id);
         let subnet_id = super::ec2_instances::subnet_of(engine, change.instance_id);
+        // The topics the group is configured to be told about THIS step, read while the
+        // group's own record is in hand: a configuration removed later did select the step
+        // that happened under it, and a group that is deleted still owes the terminations
+        // its delete performed.
+        let notification_topics = self
+            .groups
+            .get(change.group_name)
+            .map(|group| group.notification_topics(change.kind.notification_event()))
+            .unwrap_or_default();
         self.queue_lifecycle_event(PendingLifecycleEvent {
-            detail_type: change.kind.detail_type(),
+            kind: change.kind,
+            notification_topics,
             group_name: change.group_name.to_string(),
             group_arn: change.group_arn.to_string(),
             region,
@@ -534,10 +567,11 @@ fn instance_arn(region: &str, instance_id: &str) -> String {
 /// Publish every lifecycle event this store has made due, and leave none due behind.
 ///
 /// Called with NO lock held: each pass takes its events out in one critical section, so
-/// nothing is published twice, and the in-process `PutEvents` runs outside it. The passes
-/// repeat until nothing is due — one pass is capped ([`MAX_PUBLISHED_PER_DRAIN`]) so no
-/// single call is unbounded, and the loop is what guarantees the tail of a burst goes out
-/// with it. Nothing about the answer an operation gives changes either way.
+/// nothing is published twice, and the in-process `PutEvents` and `Publish` calls run
+/// outside it. The passes repeat until nothing is due — one pass is capped
+/// ([`MAX_PUBLISHED_PER_DRAIN`]) so no single call is unbounded, and the loop is what
+/// guarantees the tail of a burst goes out with it. Nothing about the answer an operation
+/// gives changes either way.
 async fn publish_pending<Eng: Send + Sync + 'static>(
     callback: &smithy_server_runtime::EmbeddedEmulator,
     engine: &Eng,
@@ -553,6 +587,14 @@ async fn publish_pending<Eng: Send + Sync + 'static>(
             return;
         }
         publish_batch(callback, &due).await;
+        // The same steps, to the topics the group's own notification configurations asked
+        // to be told about them: one step is announced once, to the bus and to those topics
+        // together.
+        let notifications: Vec<super::sns_notifications::PendingNotification> = due
+            .iter()
+            .flat_map(super::sns_notifications::owed_for_lifecycle_event)
+            .collect();
+        super::sns_notifications::publish(callback, &notifications).await;
     }
 }
 
@@ -577,7 +619,7 @@ async fn publish_batch(
                 let entry = ::aws_sdk_eventbridge::types::PutEventsRequestEntry::builder()
                     .event_bus_name(DEFAULT_EVENT_BUS)
                     .source(EVENT_SOURCE)
-                    .detail_type(event.detail_type)
+                    .detail_type(event.kind.detail_type())
                     // The event's `time` is WHEN the instance moved, not when the queue was
                     // drained: `PutEventsRequestEntry$Time` is "the time stamp of the
                     // event, per RFC3339. If no time stamp is provided, the time stamp of

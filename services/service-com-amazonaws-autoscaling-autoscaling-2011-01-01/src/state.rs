@@ -85,6 +85,21 @@ pub mod scaling_policies;
 
 pub use scaling_policies::{PolicyKey, StoredScalingPolicy};
 
+/// The Amazon SNS notification configurations of a group: the named collection
+/// `PutNotificationConfiguration` upserts into and `DescribeNotificationConfigurations`
+/// projects from, and the rules every writer of it shares.
+pub mod notification_configurations;
+
+pub use notification_configurations::{
+    too_many_topics_message, unknown_notification_type_message, NotificationConfigurationRefusal,
+    NotificationConfigurations, MAX_NOTIFICATION_TOPICS_PER_GROUP,
+};
+
+/// The Amazon SNS notifications this service publishes to the topics those configurations
+/// name: the one that confirms a configuration, and the ones a group's instance launches
+/// and terminations produce.
+pub mod sns_notifications;
+
 pub use lifecycle_events::{
     drive_lifecycle_clock, InstanceLifecycle, InstanceLifecycleChange, PendingLifecycleEvent,
 };
@@ -447,6 +462,10 @@ pub struct StoredGroup {
     /// every reader and writer of a hook of this group reaches
     /// ([`lifecycle_hooks`]), so deleting the group takes its hooks with it.
     pub lifecycle_hooks: LifecycleHooks,
+    /// The group's Amazon SNS notification configurations, keyed by `TopicARN`: the ONE
+    /// collection every reader and writer of a configuration of this group reaches
+    /// ([`notification_configurations`]), so deleting the group takes them with it.
+    pub notification_configurations: NotificationConfigurations,
 }
 
 impl StoredGroup {
