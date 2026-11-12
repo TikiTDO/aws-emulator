@@ -138,24 +138,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // in is half of the address: a message in transit in another region's
         // message flow is not reachable through this endpoint at all.
         let request_region = crate::state::request_region(ctx.parts());
-        let akid = ::emulator_server::extract_akid(&ctx.parts().headers);
         let state = crate::state::service_state(&*self.engine).ok_or_else(store_unavailable)?;
         let state = state.lock();
 
         // The bytes come out of the store and nowhere else: no canned MIME blob, and
         // nothing derived from the request beyond the region and id used to look the
         // message up.
+        //
+        // An access record belongs to the call that DECIDES something about a message:
+        // this service leaves one for every outcome of its mutating operation (see
+        // `crate::ops::put_raw_message_content`) and none here, because reporting the
+        // stored content decides nothing — a reader that recorded its own reads would
+        // make every poll of a message indistinguishable from a change to one.
         let message = state
             .message(&request_region, &input.message_id)
             .ok_or_else(|| {
-            ::tracing::info!(
-                operation = "GetRawMessageContent",
-                akid = %akid,
-                message_id = %input.message_id,
-                region = %request_region,
-                outcome = "ResourceNotFoundException",
-                "no in-transit message is stored under this id in this region"
-            );
             // The text is the service's own rule — the fixed prefix plus the
             // rejected id — and both operations render it from the one place that
             // states it, `crate::state::unknown_message_id`.
@@ -163,18 +160,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 message: Some(crate::state::unknown_message_id(&input.message_id)),
             })
         })?;
-
-        // The read itself is recorded (who asked, which message, how much content),
-        // so access to message content is observable. Never the content itself.
-        ::tracing::info!(
-            operation = "GetRawMessageContent",
-            akid = %akid,
-            message_id = %input.message_id,
-            region = %request_region,
-            content_octets = message.content.len(),
-            outcome = "success",
-            "reported the raw content of an in-transit message"
-        );
 
         Ok(GetRawMessageContentOutput {
             message_content: message.content.clone(),

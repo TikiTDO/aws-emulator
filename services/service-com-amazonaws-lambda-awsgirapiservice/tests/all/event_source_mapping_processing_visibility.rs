@@ -43,7 +43,7 @@ use smithy_server_runtime::MultiServiceRouter;
 use crate::event_source_mappings::{
     call, call_sqs, create_mapping, create_queue, create_timed_function, get_mapping,
     processing_result_within_budget, queue_attribute, router_with_queues, set_visibility_timeout,
-    MAPPINGS_URI,
+    CLOCK_BUDGET, MAPPINGS_URI,
 };
 
 /// The `State` a mapping reports once it is polling its event source.
@@ -77,6 +77,35 @@ async fn depths(
     let in_flight =
         queue_attribute(router, case, url, "ApproximateNumberOfMessagesNotVisible").await;
     (visible, in_flight)
+}
+
+/// Wait until the queue `url` addresses reports `expected` as its `(visible, in flight)`
+/// message counts, answering the LAST reading taken — which is the reading at the deadline
+/// when the counts never came to that pair, so the caller's own assertion is the one that
+/// reports the failure.
+///
+/// A hold LAPSING is work the clock owes, and the instant it is owed at is not one a caller
+/// controls: it falls a hold span after the attempt the batch was handed to was decided, and
+/// an attempt also waits for its share of this emulator's run capacity, so how long a loaded
+/// host takes over it moves that instant. So a row that is waiting for a lapse looks again
+/// until the queue reports it, inside the budget this suite gives every other piece of work
+/// the clock owes, rather than sleeping for a span of its own choosing and reading once.
+async fn depths_within_budget(
+    router: &MultiServiceRouter,
+    case: &str,
+    url: &str,
+    expected: (&str, &str),
+) -> (Option<String>, Option<String>) {
+    let deadline = Instant::now() + CLOCK_BUDGET;
+    loop {
+        let (visible, in_flight) = depths(router, case, url).await;
+        let settled =
+            (visible.as_deref(), in_flight.as_deref()) == (Some(expected.0), Some(expected.1));
+        if settled || Instant::now() >= deadline {
+            return (visible, in_flight);
+        }
+        tokio::time::sleep(LOOK_AGAIN).await;
+    }
 }
 
 /// One row: the queue's `VisibilityTimeout` while it is being polled, the mapped function's
@@ -394,13 +423,12 @@ async fn the_hold_lapses_once_the_attempt_can_no_longer_be_running() {
         "case {case:?}: the paused mapping must settle into {STATE_DISABLED}, got {state:?}"
     );
 
-    // Past the span the attempt could have lasted: the message is the queue's again, and
-    // nothing deleted it, because no deployment package ran.
-    tokio::time::sleep(
-        Duration::from_secs(u64::try_from(function_timeout).unwrap_or(0)) + SLACK,
-    )
-    .await;
-    let (visible, in_flight) = depths(&router, case, &url).await;
+    // Once the span the attempt could have lasted is up: the message is the queue's again,
+    // and nothing deleted it, because no deployment package ran. That lapse is waited FOR —
+    // see [`depths_within_budget`] — rather than waited OUT, because the instant it falls at
+    // depends on how long the attempt the batch was handed to took to be decided, which is
+    // not this test's to choose.
+    let (visible, in_flight) = depths_within_budget(&router, case, &url, ("1", "0")).await;
     assert_eq!(
         (visible.as_deref(), in_flight.as_deref()),
         (Some("1"), Some("0")),
