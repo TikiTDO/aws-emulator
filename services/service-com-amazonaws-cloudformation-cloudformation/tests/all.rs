@@ -263,6 +263,8 @@ mod management_event_recording;
 mod nested_resource_outputs;
 #[path = "all/nested_stack_output_attributes.rs"]
 mod nested_stack_output_attributes;
+#[path = "all/nested_stack_output_values.rs"]
+mod nested_stack_output_values;
 #[path = "all/nested_stacks.rs"]
 mod nested_stacks;
 #[path = "all/no_echo_parameters.rs"]

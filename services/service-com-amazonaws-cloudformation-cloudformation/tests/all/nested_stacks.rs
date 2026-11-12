@@ -654,6 +654,114 @@ async fn nested_stacks_are_stacks_of_their_own() {
     }
 }
 
+/// RULE: a tags-only deployment of a parent RE-ENTERS the nesting — `UsePreviousTemplate`
+/// re-deploys the template each carried-forward child already carries — so it is held to the
+/// same bounds as every other re-entry (the depth cap and the cycle check over the chain of
+/// template references), and within them it really does carry the new tag set down every
+/// level without creating a stack of its own.
+#[tokio::test]
+async fn a_tags_only_update_re_enters_the_nesting_under_the_same_bounds() {
+    let (router, engine) = router_with_engine();
+    create_staging_bucket(&router).await;
+    // Two levels below the parent, so the tags-only update re-enters the walk twice.
+    stage(
+        &router,
+        "nest-retag-grandchild.json",
+        &child_template("nest-retag-data"),
+    )
+    .await;
+    stage(
+        &router,
+        "nest-retag-child.json",
+        &json!({
+            "Resources": {
+                "Kid": {
+                    "Type": STACK_RESOURCE_TYPE,
+                    "Properties": {"TemplateURL": staged_url("nest-retag-grandchild.json")}
+                }
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let parent = "nest-retag";
+    let template = json!({
+        "Resources": {
+            "Child": {
+                "Type": STACK_RESOURCE_TYPE,
+                "Properties": {"TemplateURL": staged_url("nest-retag-child.json")}
+            }
+        }
+    })
+    .to_string();
+
+    let case = "a tags-only update of a nested hierarchy";
+    let (code, body) =
+        create_stack(&router, parent, &template, &tag_members(&[("owner", "first")])).await;
+    assert_eq!(
+        code, 200,
+        "case {case:?}: the parent must be created, got {code} {body}"
+    );
+    for _ in 0..8 {
+        settle_the_store(&router, &engine).await;
+    }
+    let created = settled_chain(case, &router, parent).await;
+    assert_eq!(
+        created.len(),
+        3,
+        "case {case:?}: expected the parent and two levels below it, got {created:?}"
+    );
+
+    // The SAME template, with a different stack-level tag set: nothing about any resource's
+    // declaration changed, so every child is carried forward and retagged rather than
+    // re-declared.
+    let mut members = vec![member("StackName", parent), member("TemplateBody", &template)];
+    members.extend(tag_members(&[("owner", "second")]));
+    let (code, body) = call(&router, "UpdateStack", &members).await;
+    assert_eq!(
+        code, 200,
+        "case {case:?}: the tags-only update must be accepted, got {code} {body}"
+    );
+    for _ in 0..8 {
+        settle_the_store(&router, &engine).await;
+    }
+
+    let (code, body) = describe_stack(&router, parent).await;
+    assert_eq!(
+        xml_text(&body, "StackStatus").as_deref(),
+        Some(status::UPDATE_COMPLETE),
+        "case {case:?}: expected the parent updated, got {code} {body}"
+    );
+    // The bounds refused nothing it should not have: the hierarchy is the same three stacks,
+    // and each one carries the tag the update asked for.
+    let settled = settled_chain(case, &router, parent).await;
+    assert_eq!(
+        settled.len(),
+        3,
+        "case {case:?}: expected the same three stacks after the update, got {settled:?}"
+    );
+    for (name, _, stack_id) in &settled {
+        let (code, body) = describe_stack(&router, stack_id).await;
+        assert_eq!(
+            code, 200,
+            "case {case:?}: {name} must be readable, got {code} {body}"
+        );
+        let tags: Vec<(String, String)> = match xml_blocks(&body, "Tags").into_iter().next() {
+            Some(block) => xml_texts(&block, "Key")
+                .into_iter()
+                .zip(xml_texts(&block, "Value"))
+                .collect(),
+            None => Vec::new(),
+        };
+        assert_eq!(
+            tags,
+            vec![("owner".to_string(), "second".to_string())],
+            "case {case:?}: expected {name} to carry the tag set the update asked for, got \
+             {tags:?}"
+        );
+    }
+}
+
 /// RULE: deleting the parent deletes the stacks it provisioned — a nested stack is the
 /// parent's resource, so the parent's teardown is its deletion, and the resources of the child
 /// go with it.

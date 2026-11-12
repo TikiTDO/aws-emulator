@@ -130,8 +130,11 @@ const TEMPLATE_URL: &str = "TemplateURL";
 const PARAMETERS: &str = "Parameters";
 
 /// The declaration's own tag set, which the child stack carries beside the ones
-/// CloudFormation propagates to it.
+/// CloudFormation propagates to it. It is also the member of the child's own `DescribeStacks`
+/// answer the set IN FORCE is read from, and the two members of each of its entries.
 const TAGS: &str = "Tags";
+const TAG_KEY: &str = "Key";
+const TAG_VALUE: &str = "Value";
 
 /// The topics the child stack publishes its own events to.
 const NOTIFICATION_ARNS: &str = "NotificationARNs";
@@ -402,9 +405,19 @@ pub(super) async fn update(
 /// The call that writes them is the child's own `UpdateStack`, over the template it already
 /// carries (`UsePreviousTemplate`), which is how a tags-only update of any stack is made.
 ///
-/// IDEMPOTENT: the set in force is read first (`DescribeStacks`), so a child whose tags
-/// already agree with it has nothing written — which also keeps a deployment that changed
-/// nothing from re-deploying the child's template.
+/// IDEMPOTENT: the set in force is read first (`DescribeStacks`), entry by entry so a tag the
+/// answer carries without a value cannot pair a later value with the wrong key
+/// ([`xml_member_structures`]) — so a child whose tags already agree with it has
+/// nothing written, which also keeps a deployment that changed nothing from re-deploying the
+/// child's template.
+///
+/// BOUNDED like every other re-entry: `UsePreviousTemplate` re-deploys the template the child
+/// already carries, so the walk enters every nested stack declared inside it again. The call
+/// is therefore held to the SAME two bounds the create and the update are
+/// ([`beyond_the_bounds`]) and made through [`called`], which extends the chain by the
+/// reference it is about — so a tags-only deployment grows the chain one entry per level it
+/// re-enters, is refused past [`MAX_NESTING_DEPTH`], and is refused as the cycle it is where
+/// the chain above it is already deploying the same reference.
 pub(super) async fn retag(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
@@ -413,7 +426,11 @@ pub(super) async fn retag(
     propagated: &[(String, String)],
 ) -> Result<(), Refusal> {
     let wanted = tag_set(declared, propagated);
+    let template_url = template_url(resource)?;
     let chain = chain_in_flight(ctx);
+    if let Some(refusal) = beyond_the_bounds(&chain, &resource.logical_id, template_url) {
+        return Err(refusal);
+    }
     let answer = called_carrying(
         ctx,
         region,
@@ -425,9 +442,13 @@ pub(super) async fn retag(
         &chain,
     )
     .await?;
-    let in_force: Vec<(String, String)> = super::xml_elements(&answer, "Key")
+    let in_force: Vec<(String, String)> = xml_member_structures(&answer, TAGS)
         .into_iter()
-        .zip(super::xml_elements(&answer, "Value"))
+        .filter_map(|tag| {
+            let key = tag.get(TAG_KEY).and_then(Value::as_str)?.to_string();
+            let value = tag.get(TAG_VALUE).and_then(Value::as_str).unwrap_or_default();
+            Some((key, value.to_string()))
+        })
         .collect();
     if tag_sets_agree(&in_force, &wanted) {
         return Ok(());
@@ -442,7 +463,7 @@ pub(super) async fn retag(
         parameters.push((format!("Tags.member.{position}.Key"), key.clone()));
         parameters.push((format!("Tags.member.{position}.Value"), value.clone()));
     }
-    match called_carrying(ctx, region, UPDATE_STACK, &parameters, &chain).await {
+    match called(ctx, region, UPDATE_STACK, &parameters, &chain, template_url).await {
         Ok(_) => Ok(()),
         // The child already carries them after all, which is nothing to do.
         Err(refusal) if refusal.message == NO_UPDATES => Ok(()),
