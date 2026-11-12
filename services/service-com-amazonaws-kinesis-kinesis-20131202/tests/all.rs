@@ -53,6 +53,8 @@ mod max_record_size;
 mod merge_adjacency;
 #[path = "all/pagination_token_classification.rs"]
 mod pagination_token_classification;
+#[path = "all/record_distribution_strategy.rs"]
+mod record_distribution_strategy;
 #[path = "all/record_flow.rs"]
 mod record_flow;
 #[path = "all/resource_policies.rs"]

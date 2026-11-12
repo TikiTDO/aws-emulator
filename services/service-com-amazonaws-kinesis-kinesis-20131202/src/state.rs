@@ -1018,6 +1018,23 @@ impl Stream {
             .unwrap_or(RECORD_DISTRIBUTION_USER_PARTITION_KEY)
     }
 
+    /// `RecordDistributionStrategy` as a READ of the stream reports it: the strategy the
+    /// stream places its records by ([`Self::record_distribution`]) for a stream whose
+    /// capacity mode carries the setting at all, and nothing for one whose mode does not.
+    ///
+    /// "This field is only present for streams that use the on-demand capacity mode"
+    /// (`StreamDescriptionSummary$RecordDistributionStrategy`), so the member is reported
+    /// exactly for an on-demand stream — with the documented default for one nothing has set
+    /// a strategy on — and omitted for a provisioned stream, which "does not support the
+    /// record distribution strategy setting" (`UpdateStreamRecordDistributionStrategy`).
+    ///
+    /// Derived from the stored mode and strategy rather than stored a second time, so a
+    /// stream that changes capacity mode cannot report a setting its mode does not have.
+    pub fn reported_record_distribution(&self) -> Option<String> {
+        (self.stream_mode == STREAM_MODE_ON_DEMAND)
+            .then(|| self.record_distribution().to_string())
+    }
+
     /// Which shard of the map a record carrying `explicit_hash_key` / `partition_key` is
     /// assigned to, by the index it occupies in [`Self::shards`].
     ///
@@ -1691,7 +1708,9 @@ impl Stream {
             // stream fell back to.
             max_record_size_in_ki_b: Some(self.max_record_size_in_ki_b),
             channel_count: Some(0),
-            record_distribution_strategy: self.record_distribution_strategy.clone(),
+            // "This field is only present for streams that use the on-demand capacity mode"
+            // (`StreamDescriptionSummary$RecordDistributionStrategy`).
+            record_distribution_strategy: self.reported_record_distribution(),
         }
     }
 }
