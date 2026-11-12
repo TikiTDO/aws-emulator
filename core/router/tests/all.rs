@@ -1492,3 +1492,8 @@ mod backup_job_state_change_invokes_its_lambda_target;
 // no single service crate's test target can ask it.
 #[path = "all/s3_notification_pipeline_lifecycle.rs"]
 mod s3_notification_pipeline_lifecycle;
+// S3 -> SNS -> Lambda chain, from an object write through the bucket's topic configuration onto
+// the function subscribed to that topic, which spans S3, SNS, Lambda, Amazon SQS, IAM and
+// CloudFormation at once — no single service crate's test target can see both hops.
+#[path = "all/s3_sns_lambda_chain_invoke_permission.rs"]
+mod s3_sns_lambda_chain_invoke_permission;
