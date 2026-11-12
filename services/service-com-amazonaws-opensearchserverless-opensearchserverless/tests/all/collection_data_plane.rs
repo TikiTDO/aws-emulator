@@ -320,11 +320,6 @@ async fn every_published_address_of_a_collection_reaches_its_data_plane() {
             "/reachable".to_string(),
         ),
         (
-            "the published collection endpoint with a port",
-            format!("{endpoint}:443"),
-            "/reachable".to_string(),
-        ),
-        (
             "the FIPS collection endpoint",
             fips.clone(),
             "/reachable".to_string(),

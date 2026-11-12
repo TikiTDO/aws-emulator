@@ -383,22 +383,27 @@ async fn a_created_collection_reports_fields_derived_from_its_own_id_and_region(
         );
 
         // The read-back: every member of `CollectionDetail` comes from the stored record,
-        // and the endpoints are derived from the id and the region.
+        // and every endpoint names the address this emulator SERVES the collection at
+        // (the collection's own listener, `crate::state::collection_plane`) rather than
+        // AWS's own host, which resolves nowhere on the machine the emulator runs on. The
+        // suite that drives those addresses is `announced_collection_endpoints`.
         let read = await_active(&router, region, &id).await;
-        assert_eq!(
-            text(&read, "collectionEndpoint"),
-            format!("https://{id}.{region}.aoss.amazonaws.com"),
-            "case {case}: collectionEndpoint is derived from the id, got {read}"
+        let endpoint = text(&read, "collectionEndpoint");
+        assert!(
+            !endpoint.contains("amazonaws.com") && endpoint.starts_with("https://"),
+            "case {case}: collectionEndpoint must name an address this emulator serves, got \
+             {read}"
         );
         assert_eq!(
             text(&read, "dashboardEndpoint"),
-            format!("https://{id}.{region}.aoss.amazonaws.com/_dashboards"),
+            format!("{endpoint}/_dashboards"),
             "case {case}: dashboardEndpoint is the collection endpoint plus /_dashboards, got {read}"
         );
         assert_eq!(
             text(&read, "fipsEndpoints.collectionEndpoint"),
-            format!("https://{id}.{region}.aoss-fips.amazonaws.com"),
-            "case {case}: the FIPS endpoint uses the aoss-fips host label, got {read}"
+            endpoint,
+            "case {case}: the FIPS endpoint names the one address this emulator serves the \
+             collection at, got {read}"
         );
         assert_eq!(
             text(&read, "type"),

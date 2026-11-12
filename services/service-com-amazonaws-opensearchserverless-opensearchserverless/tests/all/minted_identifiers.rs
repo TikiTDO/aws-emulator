@@ -292,8 +292,8 @@ async fn every_created_resource_carries_its_own_drawn_id() {
                 "case {case}: every resource is minted its OWN id, got a repeat of {id:?}"
             );
 
-            // The id is the key the collection is stored under, and the ARN and both
-            // endpoints are derived from it — so the read that follows reports the same one.
+            // The id is the key the collection is stored under and the ARN is derived from
+            // it — so the read that follows reports the same one.
             let read = call_in(
                 &router,
                 region,
@@ -316,13 +316,15 @@ async fn every_created_resource_carries_its_own_drawn_id() {
                 name,
                 "case {case}: the minted id must name the collection that was created, got {stored}"
             );
-            for member in ["arn", "collectionEndpoint", "dashboardEndpoint"] {
-                let derived = text(&stored, member);
-                assert!(
-                    derived.contains(&id),
-                    "case {case}: {member} is derived from the minted id {id:?}, got {derived:?}"
-                );
-            }
+            // The ARN is derived from the minted id. The ENDPOINTS are not: each names the
+            // address this emulator serves that collection at (its own listener,
+            // `crate::state::collection_plane`), which is what a client dials — asserted by
+            // the `announced_collection_endpoints` suite.
+            let arn = text(&stored, "arn");
+            assert!(
+                arn.contains(&id),
+                "case {case}: arn is derived from the minted id {id:?}, got {arn:?}"
+            );
         }
 
         // A collection GROUP's id carries the same shape and comes out of the same mint, so

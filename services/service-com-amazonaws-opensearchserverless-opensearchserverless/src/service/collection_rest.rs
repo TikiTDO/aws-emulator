@@ -18,25 +18,31 @@
 //! ([`claims_parts`], read by `Service::can_handle`) and the serving ([`serve`], reached
 //! from `Service::override_operation` for a request carrying a SigV4 credential — so the
 //! router verifies that credential before anything is served — and from
-//! `Service::override_routing_error` for one carrying none).
+//! `Service::override_routing_error` for one carrying none). It is also what the
+//! collection's OWN published address answers with ([`serve_published`], the one decision
+//! behind the listener [`crate::state::collection_plane`] opens): every addressing goes
+//! through [`serve_collection`], so none of them can answer a different thing.
 //!
 //! # What a request addresses
 //!
-//! A client on the machine this emulator runs on resolves a collection's endpoint host
-//! nowhere at all, so it reaches the emulator and carries what it was told; two
-//! addressings resolve:
+//! What a collection PUBLISHES is a listener of its own
+//! ([`crate::state::collection_plane`]), where the address names the collection and the
+//! whole path is the client's — the addressing a stock OpenSearch client needs, since it is
+//! configured with a host and a port and dials the REST API at the root of them. A request
+//! that reaches the emulator's own FRONT DOOR instead carries what it was told, and two
+//! addressings resolve there:
 //!
-//! * HOST-STYLE, the addressing `collectionEndpoint` publishes: the request's host IS a
-//!   host some collection of this store publishes — its collection endpoint, the FIPS
-//!   endpoint beside it, or either Dashboards host (see
+//! * HOST-STYLE: the request's host IS a host some collection of this store publishes — its
+//!   collection endpoint, the FIPS endpoint beside it, or either Dashboards host (see
 //!   [`crate::state::CollectionRecord::publishes_host`]) — and the whole path is the
 //!   request path;
 //! * PREFIXED PATH-STYLE: the data plane is named by the reserved namespace segment
-//!   (`service_common::data_plane_addressing::EMULATOR_PATH_NAMESPACE`) and
-//!   [`DATA_PLANE_SEGMENT`], then the collection's id, its name or its endpoint host, then
+//!   (`service_common::data_plane_addressing::EMULATOR_PATH_NAMESPACE`) and one of
+//!   [`DATA_PLANE_SEGMENTS`], then the collection's id, its name or its endpoint host, then
 //!   the request path — `/_aws/aoss/{collection-or-host}/{path}`. That segment begins with
 //!   `_`, which no modelled path segment of any service does, so the prefix collides with
-//!   no control-plane route.
+//!   no control-plane route. It is also what a collection reports while no listener of its
+//!   own is open (`crate::state::announced_endpoints`).
 //!
 //! Either way the claim is narrowed to a collection this service HOLDS, read from the one
 //! shared store, and a request carrying an `x-amz-target` header is never claimed: that
@@ -75,10 +81,16 @@ mod documents;
 mod indexes;
 mod search;
 
-/// The segment that names THIS plane under
+/// The segments that name THIS plane under
 /// [`EMULATOR_PATH_NAMESPACE`](service_common::data_plane_addressing::EMULATOR_PATH_NAMESPACE),
-/// which is this service's own name in an address: `/_aws/aoss/{collection}/{path}`.
-const DATA_PLANE_SEGMENT: &str = state::ARN_NAMESPACE;
+/// which are the two host labels a collection's published endpoints carry — this service's
+/// own name and its FIPS label: `/_aws/aoss/{collection}/{path}` and
+/// `/_aws/aoss-fips/{collection}/{path}`.
+///
+/// Both resolve to the same collection, because the FIPS endpoint of a collection is the
+/// same collection reached at its other published address
+/// (`crate::state::announced_endpoints`).
+const DATA_PLANE_SEGMENTS: &[&str] = &[state::ARN_NAMESPACE, state::FIPS_ARN_NAMESPACE];
 
 /// The most request-body bytes this plane reads.
 ///
@@ -244,7 +256,7 @@ fn resolve<Eng: Send + Sync + 'static>(engine: &Eng, addressed: &Addressed) -> O
         {
             return None;
         }
-        if !addresses_a_collection_host(addressed.host.as_deref()?) {
+        if !may_address_a_collection(addressed.host.as_deref()?) {
             return None;
         }
     }
@@ -259,16 +271,36 @@ fn resolve<Eng: Send + Sync + 'static>(engine: &Eng, addressed: &Addressed) -> O
             request_path: path.to_string(),
         });
     }
-    // HOST-STYLE: the host IS a host some collection of this store publishes.
-    let host = host_only(addressed.host.as_deref()?);
-    let collection = store
-        .collections
-        .values()
-        .find(|collection| collection.publishes_host(host))?;
+    // HOST-STYLE: the host IS a host some collection of this store publishes. Compared
+    // BOTH as the client addressed it and without its port, because a published address
+    // may carry a port of its own (a collection's own listener,
+    // `crate::state::collection_plane`) or stand for the default one (AWS's host).
+    let addressed_host = addressed.host.as_deref()?;
+    let collection = store.collections.values().find(|collection| {
+        collection.publishes_host(addressed_host)
+            || collection.publishes_host(host_only(addressed_host))
+    })?;
     Some(Resolved {
         collection_id: collection.id.clone(),
         request_path: addressed.path.clone(),
     })
+}
+
+/// Whether `host` CAN be a host a collection publishes, read without the store so a
+/// request that cannot be one is dropped before the shared lock is taken.
+///
+/// Two shapes pass, which are the two a published address takes:
+///
+/// * the endpoint template AWS's own hosts follow (`state::collection_endpoint` /
+///   `state::fips_collection_endpoint`: `<id>.<region>.aoss[-fips].<dns suffix>`), which
+///   this service's own API endpoint — carrying no label before the service name — does
+///   not;
+/// * a host that names no service at all (an address or a loopback name), which is what a
+///   collection's own listener and this emulator's own endpoint are addressed by. Which
+///   collection such a host names is still the store's to say.
+fn may_address_a_collection(host: &str) -> bool {
+    addresses_a_collection_host(host)
+        || !::service_common::data_plane_addressing::names_a_service(host)
 }
 
 /// Whether `host` is SHAPED like a host a collection publishes, read without the store so
@@ -315,21 +347,16 @@ fn prefixed_addressing(path: &str) -> Option<(&str, &str)> {
         return None;
     }
     let (plane, rest) = first_segment(rest)?;
-    if plane != DATA_PLANE_SEGMENT {
+    if !DATA_PLANE_SEGMENTS.contains(&plane) {
         return None;
     }
     let (named, request_path) = first_segment(rest)?;
     (!named.is_empty()).then_some((named, request_path))
 }
 
-/// Answer a request this plane claimed, out of the records the control plane holds.
-///
-/// The whole answer is computed inside ONE short critical section. What a request can ask
-/// for is bounded BEFORE any scan begins — the body by [`MAX_REQUEST_BODY_BYTES`], a bulk
-/// body's actions by [`documents::MAX_BULK_ACTIONS`], and a search's work (the product of
-/// the documents scanned and the cost of the query) by [`search::MAX_SEARCH_WORK`] — and
-/// nothing inside it awaits, sleeps or copies a document per clause, so the store is held
-/// for a bounded number of scalar comparisons rather than for work a caller chose.
+/// Answer a request this plane claimed at the FRONT DOOR, out of the records the control
+/// plane holds — the host-style and prefixed path-style addressings
+/// [`resolve`] reads.
 pub fn serve<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest) -> RtResponse {
     let received = Instant::now();
     let addressed = Addressed::of_request(req);
@@ -338,10 +365,71 @@ pub fn serve<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest) -> RtRes
         // host it published answers nothing.
         return unavailable();
     };
-    // The router hands this seam a request whose body it has already buffered (it reads the
-    // body itself to resolve a routing key), so an absent one is an empty body rather than
-    // a stream this plane declined to read.
-    let body = req.body().bytes().unwrap_or_default();
+    let Some(state) = state::service_state(engine) else {
+        return unavailable();
+    };
+    serve_collection(
+        &state,
+        &resolved.collection_id,
+        // The method of a runtime-API request arrives as a string.
+        req.method(),
+        &resolved.request_path,
+        &addressed.query,
+        // The router hands this seam a request whose body it has already buffered (it
+        // reads the body itself to resolve a routing key), so an absent one is an empty
+        // body rather than a stream this plane declined to read.
+        req.body().bytes().unwrap_or_default(),
+        received,
+    )
+}
+
+/// Answer a request that arrived on the LISTENER one collection is published on
+/// ([`crate::state::collection_plane`]), where the address names the collection and the
+/// whole path is the request path.
+///
+/// The same function serves it as serves the front door's path-style addressing
+/// ([`serve_collection`]), so the two addressings of one collection cannot diverge in what
+/// they answer.
+pub fn serve_published(
+    state: &::engine::ServiceState<
+        state::ComAmazonawsOpensearchserverlessOpensearchserverlessState,
+    >,
+    collection_id: &str,
+    req: &::http::Request<Vec<u8>>,
+) -> ::http::Response<Vec<u8>> {
+    let received = Instant::now();
+    as_http(serve_collection(
+        state,
+        collection_id,
+        req.method().as_str(),
+        req.uri().path(),
+        req.uri().query().unwrap_or_default(),
+        req.body(),
+        received,
+    ))
+}
+
+/// Answer one request out of the collection `collection_id` names — the one reading of this
+/// surface, reached from the front door ([`serve`]) and from the collection's own published
+/// listener ([`serve_published`]) alike.
+///
+/// The whole answer is computed inside ONE short critical section. What a request can ask
+/// for is bounded BEFORE any scan begins — the body by [`MAX_REQUEST_BODY_BYTES`], a bulk
+/// body's actions by [`documents::MAX_BULK_ACTIONS`], and a search's work (the product of
+/// the documents scanned and the cost of the query) by [`search::MAX_SEARCH_WORK`] — and
+/// nothing inside it awaits, sleeps or copies a document per clause, so the store is held
+/// for a bounded number of scalar comparisons rather than for work a caller chose.
+fn serve_collection(
+    state: &::engine::ServiceState<
+        state::ComAmazonawsOpensearchserverlessOpensearchserverlessState,
+    >,
+    collection_id: &str,
+    method: &str,
+    path: &str,
+    query: &str,
+    body: &[u8],
+    received: Instant,
+) -> RtResponse {
     if body.len() > MAX_REQUEST_BODY_BYTES {
         return error(
             413,
@@ -353,23 +441,20 @@ pub fn serve<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest) -> RtRes
             ),
         );
     }
-    let method = req.method().to_ascii_uppercase();
+    let method = method.to_ascii_uppercase();
     let request = Request {
         method: &method,
-        path: &resolved.request_path,
-        query: &addressed.query,
+        path,
+        query,
         body,
         received,
-    };
-    let Some(state) = state::service_state(engine) else {
-        return unavailable();
     };
     let mut store = state.lock();
     // The read materialises the transitions the clock has already made due, which this
     // request neither starts nor changes: a collection whose create has settled is ACTIVE
     // here, and one whose accepted deletion has been purged is gone.
     store.settle_due_transitions();
-    let Some(collection) = store.collections.get_mut(&resolved.collection_id) else {
+    let Some(collection) = store.collections.get_mut(collection_id) else {
         return unavailable();
     };
     // A collection serves its data plane once it is "ready to use"
@@ -379,6 +464,28 @@ pub fn serve<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest) -> RtRes
         return unavailable();
     }
     serve_resolved(collection, &request)
+}
+
+/// One answer of this surface as a plain HTTP response, which is what a core HTTP listener
+/// writes — the same status, content type and bytes the front door sends.
+fn as_http(response: RtResponse) -> ::http::Response<Vec<u8>> {
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .map(ToString::to_string);
+    let body = response.body().bytes().unwrap_or_default().to_vec();
+    let mut builder = ::http::Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        builder = builder.header("content-type", content_type);
+    }
+    builder.body(body).unwrap_or_else(|_| {
+        // Every part came off a response this module built, so the builder cannot fail;
+        // answer a bare 500 rather than panicking if it ever does.
+        let mut fallback = ::http::Response::new(Vec::new());
+        *fallback.status_mut() = ::http::StatusCode::INTERNAL_SERVER_ERROR;
+        fallback
+    })
 }
 
 /// Answer `request` out of the `collection` it addresses.
@@ -779,6 +886,11 @@ mod tests {
                 case: "a collection id and a search path",
                 path: "/_aws/aoss/abc123/my-index/_search",
                 names: Some(("abc123", "/my-index/_search")),
+            },
+            Row {
+                case: "the FIPS plane segment and an index path",
+                path: "/_aws/aoss-fips/abc123/my-index",
+                names: Some(("abc123", "/my-index")),
             },
             Row {
                 case: "another plane under the same namespace",

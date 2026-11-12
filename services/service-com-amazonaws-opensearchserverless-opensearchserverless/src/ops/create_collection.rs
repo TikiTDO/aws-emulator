@@ -238,6 +238,60 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        let stored = Self::store_collection(&state, input, &region, ctx)?;
+
+        // Publish the ADDRESS this emulator answers the collection's OpenSearch REST
+        // surface at, which is what `collectionEndpoint` has to name for a client to reach
+        // it (`crate::state::collection_plane`). `CreateCollectionDetail` models no endpoint
+        // member, so nothing this call answers depends on it — the first read that can
+        // report one is a later call, by which time this has completed.
+        //
+        // Only for the call that CREATED the collection: a replayed `clientToken` answers
+        // the collection the first call created, which is already published at an address a
+        // client may be dialling, and opening a second one would move it.
+        if stored.created {
+            crate::state::collection_plane::publish(&*self.engine, &state, &stored.id).await;
+        }
+        Ok(CreateCollectionOutput {
+            create_collection_detail: Some(stored.detail),
+        })
+    }
+}
+
+/// What the store made of a create.
+struct StoredCollection {
+    /// The `CollectionId` the create answers for.
+    id: String,
+    /// The `CreateCollectionDetail` to answer with, read off the stored record.
+    detail: CreateCollectionDetail,
+    /// Whether THIS call created the collection — false for an idempotent `clientToken`
+    /// replay, which answers the collection the first call created and leaves everything
+    /// that call set up, its published address included, exactly as it is.
+    created: bool,
+}
+
+impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CreateCollection<Eng> {
+    /// This operation's own name, as the idempotency index keys a `clientToken` by: the
+    /// name the generated `impl Operation` declares, named through the trait so the two
+    /// cannot drift apart.
+    const OPERATION_NAME: &'static str =
+        <Self as smithy_server_runtime::Operation>::NAME;
+
+    /// Store the collection this request creates and answer what the store made of it
+    /// ([`StoredCollection`]), or the modelled refusal that leaves nothing created.
+    ///
+    /// Every decision that reads or writes the store is here, so the store's lock is taken
+    /// and released inside ONE synchronous call: what the caller does with the collection
+    /// afterwards — opening the address it is published at, which binds a socket — holds no
+    /// lock while it awaits.
+    fn store_collection(
+        state: &::engine::ServiceState<
+            crate::state::ComAmazonawsOpensearchserverlessOpensearchserverlessState,
+        >,
+        input: CreateCollectionInput,
+        region: &str,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
+    ) -> Result<StoredCollection, CreateCollectionError> {
         let mut store = state.lock();
         store.settle_due_transitions();
 
@@ -248,13 +302,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // rather than answered with the first one.
         if let Some(token) = input.client_token.as_deref() {
             let replayed = store
-                .replayed_collection(Self::NAME, token)
+                .replayed_collection(Self::OPERATION_NAME, token)
                 .filter(|record| record.name == input.name)
-                .map(crate::state::CollectionRecord::create_detail);
-            if let Some(detail) = replayed {
-                return Ok(CreateCollectionOutput {
-                    create_collection_detail: Some(detail),
+                .map(|record| StoredCollection {
+                    id: record.id.clone(),
+                    detail: record.create_detail(),
+                    // The collection the first call created stands, and so does the address
+                    // it was published at: this call creates and opens nothing.
+                    created: false,
                 });
+            if let Some(replayed) = replayed {
+                return Ok(replayed);
             }
         }
 
@@ -345,6 +403,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let id = store.mint_collection_id();
         let created_date = crate::state::now_epoch_millis();
+        // The addresses this collection publishes until the one this emulator SERVES it at
+        // is opened (`crate::state::collection_plane`, called by the handler once this
+        // store's lock is released): the forms AWS itself publishes, which stand for a
+        // client that resolves them and for an emulator that can open no address of its
+        // own — see `crate::state::announced_endpoints`.
+        let endpoints = crate::state::AnnouncedEndpoints::of_collection(
+            &id,
+            region,
+            ctx.parts(),
+            ctx.endpoint().as_str(),
+        );
         // The key the collection reports. The REQUEST's own choice wins over the covering
         // policy's — a request that names a customer managed key, or that selects the
         // AWS-owned key, has said what this collection is encrypted with — and only a
@@ -368,7 +437,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .r#type
                 .unwrap_or_else(|| crate::state::DEFAULT_COLLECTION_TYPE.to_string()),
             description: input.description,
-            arn: crate::state::collection_arn(&region, &id),
+            arn: crate::state::collection_arn(region, &id),
             kms_key_arn,
             standby_replicas: input
                 .standby_replicas
@@ -378,10 +447,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .unwrap_or_else(|| crate::state::DELETION_PROTECTION_DISABLED.to_string()),
             vector_options: input.vector_options,
             collection_group_name: input.collection_group_name,
-            collection_endpoint: crate::state::collection_endpoint(&id, &region),
-            dashboard_endpoint: crate::state::dashboard_endpoint(&id, &region),
-            fips_collection_endpoint: crate::state::fips_collection_endpoint(&id, &region),
-            fips_dashboard_endpoint: crate::state::fips_dashboard_endpoint(&id, &region),
+            collection_endpoint: endpoints.collection,
+            dashboard_endpoint: endpoints.dashboards,
+            fips_collection_endpoint: endpoints.fips_collection,
+            fips_dashboard_endpoint: endpoints.fips_dashboards,
             created_date,
             last_modified_date: created_date,
             tags: input.tags.unwrap_or_default(),
@@ -398,20 +467,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         );
         store.insert_collection(record);
         if let Some(token) = input.client_token.as_deref() {
-            store.remember_token(Self::NAME, token, &id);
+            store.remember_token(Self::OPERATION_NAME, token, &id);
         }
 
         // Answered from the STORED record, so the create cannot report anything a later
         // `BatchGetCollection` would not.
-        let stored = store.collections.get(&id).ok_or_else(|| {
-            CreateCollectionError::from(CreateCollectionErrorModeled::InternalServerException(
-                InternalServerException {
-                    message: Some(crate::state::STORE_UNREACHABLE.to_string()),
-                },
-            ))
-        })?;
-        Ok(CreateCollectionOutput {
-            create_collection_detail: Some(stored.create_detail()),
+        let detail = store
+            .collections
+            .get(&id)
+            .map(crate::state::CollectionRecord::create_detail)
+            .ok_or_else(|| {
+                CreateCollectionError::from(
+                    CreateCollectionErrorModeled::InternalServerException(
+                        InternalServerException {
+                            message: Some(crate::state::STORE_UNREACHABLE.to_string()),
+                        },
+                    ),
+                )
+            })?;
+        Ok(StoredCollection {
+            id,
+            detail,
+            created: true,
         })
     }
 }

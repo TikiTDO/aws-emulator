@@ -36,6 +36,16 @@ use crate::ops::types::{
     VpcEndpointErrorDetail, VpcEndpointSummary,
 };
 
+/// Which address a collection's published endpoints name, so every one of them is an
+/// address this emulator answers the OpenSearch REST surface on.
+pub mod announced_endpoints;
+/// The listener one collection's data plane is published on, which is the address a stock
+/// OpenSearch client is configured with.
+pub mod collection_plane;
+
+pub use announced_endpoints::AnnouncedEndpoints;
+pub use collection_plane::CollectionPlane;
+
 /// This service's ARN namespace, from the model's `aws.api#service` trait
 /// (`smithy_query(query="service_info")` -> `awsService.arnNamespace`). Also its SigV4
 /// signing name and the host label its collection endpoints carry.
@@ -512,9 +522,14 @@ pub fn collection_group_arn(region: &str, collection_group_id: &str) -> String {
     )
 }
 
-/// The collection-specific endpoint index, search and data-upload requests go to:
-/// `https://<id>.<region>.aoss.amazonaws.com`. Derived from the collection id alone, so
-/// every reader of a record reports the same endpoint.
+/// The collection-specific endpoint index, search and data-upload requests go to as AWS
+/// publishes it: `https://<id>.<region>.aoss.amazonaws.com`. Derived from the collection id
+/// alone, so every reader of a record reports the same endpoint.
+///
+/// What this emulator ANNOUNCES for a collection is
+/// [`AnnouncedEndpoints::of_collection`], which answers this form only for a caller that
+/// resolves AWS's own hosts on an emulator served on no port at all — every other caller is
+/// announced an address this emulator answers on.
 pub fn collection_endpoint(collection_id: &str, region: &str) -> String {
     format!("https://{collection_id}.{region}.{ARN_NAMESPACE}.{DNS_SUFFIX}")
 }
@@ -549,6 +564,20 @@ pub fn fips_dashboard_endpoint(collection_id: &str, region: &str) -> String {
 /// stays part of the host, since that is what the client addressed.
 pub fn endpoint_host(endpoint: &str) -> String {
     ::service_common::data_plane_addressing::addressed_host(endpoint, None).unwrap_or_default()
+}
+
+/// Whether `endpoint` addresses a WHOLE host — a URL that is an authority and nothing more
+/// (`https://<host>[:<port>]`, with or without a trailing `/`), so what it names is reached
+/// by its address alone.
+///
+/// A published endpoint carrying a path beyond that names its resource IN the path, on an
+/// authority it shares with whatever else answers there; the two are told apart here rather
+/// than by each reader.
+pub fn addresses_a_whole_host(endpoint: &str) -> bool {
+    let after_scheme = endpoint
+        .split_once("://")
+        .map_or(endpoint, |(_scheme, rest)| rest);
+    matches!(after_scheme.split_once('/'), None | Some((_, "")))
 }
 
 /// A fresh document id, for a write that named none — the id OpenSearch mints for a
@@ -835,23 +864,23 @@ pub struct CollectionRecord {
 }
 
 impl CollectionRecord {
-    /// Whether this collection PUBLISHES `host`: the collection endpoint "used to submit
-    /// index, search, and data upload requests" (`CollectionDetail$collectionEndpoint`),
-    /// the FIPS endpoint beside it, or either Dashboards endpoint — every host a reader of
-    /// this record hands a client as an address of this collection.
+    /// Whether this collection publishes `host` as an address whose WHOLE authority is
+    /// this collection: its collection endpoint "used to submit index, search, and data
+    /// upload requests" (`CollectionDetail$collectionEndpoint`) or the FIPS endpoint beside
+    /// it, where the address names the collection and the path is the client's — which is
+    /// also the host of each Dashboards endpoint, since a Dashboards endpoint is its
+    /// collection endpoint plus a path.
     ///
-    /// Every published host is resolved, because each of them is an address the service
-    /// told a caller to send requests to: one that resolved to nothing would be an address
-    /// this service announced and then did not serve.
+    /// Read by the front door's host-style addressing
+    /// ([`crate::service::collection_rest`]), so only an address of that shape is compared:
+    /// a published endpoint that names the collection in its PATH
+    /// ([`announced_endpoints`]) is resolved by that path, because its authority is the
+    /// emulator's own front door, which every service of this process shares.
     pub fn publishes_host(&self, host: &str) -> bool {
-        [
-            &self.collection_endpoint,
-            &self.fips_collection_endpoint,
-            &self.dashboard_endpoint,
-            &self.fips_dashboard_endpoint,
-        ]
-        .into_iter()
-        .any(|published| endpoint_host(published) == host)
+        [&self.collection_endpoint, &self.fips_collection_endpoint]
+            .into_iter()
+            .filter(|published| addresses_a_whole_host(published))
+            .any(|published| endpoint_host(published) == host)
     }
 
     /// Report `transient` from now, and owe `settled` from [`SETTLE_AFTER`] onwards.
@@ -3327,6 +3356,14 @@ pub struct ComAmazonawsOpensearchserverlessOpensearchserverlessState {
     /// `VpcEndpointName` -> `VpcEndpointId`, for the duplicate-name conflict check, held
     /// beside the records exactly as `collection_name_index` is.
     pub vpc_endpoint_name_index: BTreeMap<String, String>,
+    /// The data-plane listener each collection is PUBLISHED on, by `CollectionId` — the
+    /// address its `collectionEndpoint` names ([`collection_plane`]).
+    ///
+    /// Held beside the collections rather than on the record, because a live socket is
+    /// neither `Clone` nor `Debug` and a record is both. Dropping an entry closes that
+    /// collection's port, so [`Self::remove_collection`] is what stops a purged
+    /// collection's address answering.
+    pub collection_planes: BTreeMap<String, CollectionPlane>,
 }
 
 impl ComAmazonawsOpensearchserverlessOpensearchserverlessState {
@@ -3637,6 +3674,9 @@ impl ComAmazonawsOpensearchserverlessOpensearchserverlessState {
         let record = self.collections.remove(id)?;
         self.collection_name_index.remove(&record.name);
         self.forget_tokens_for(id);
+        // Closes the port the collection was published on: an address this service
+        // announced answers only while the collection behind it exists.
+        self.collection_planes.remove(id);
         Some(record)
     }
 

@@ -23,6 +23,8 @@ mod account_settings;
 mod account_settings_audit;
 #[path = "all/account_settings_write_outcome.rs"]
 mod account_settings_write_outcome;
+#[path = "all/announced_collection_endpoints.rs"]
+mod announced_collection_endpoints;
 #[path = "all/audit_capture.rs"]
 mod audit_capture;
 #[path = "all/batch_selector_rule.rs"]

@@ -70,11 +70,14 @@
 //! (`CollectionDetail$collectionEndpoint`), and the protocol spoken there is the OpenSearch
 //! REST API, which this model does not describe — so a REST request to that host reached
 //! this service's `awsJson1_0` front door and was refused for carrying no `x-amz-target`.
-//! [`can_handle`](Service::can_handle) also claims a request addressed to a collection this
-//! service HOLDS, and [`collection_rest`] is what resolves and serves it: as an OPERATION
-//! for a request presenting a SigV4 credential, so the emulator verifies the signature, and
-//! from [`override_routing_error`](Service::override_routing_error) for one presenting
-//! none.
+//! What a collection publishes is now a listener of its own
+//! ([`crate::state::collection_plane`]), which answers that REST API at the root of the
+//! address it reports; the seams below keep the emulator's own FRONT DOOR serving a request
+//! addressed to a collection it HOLDS as well, so an address a caller was handed earlier,
+//! or one carried in a path, still resolves. [`can_handle`](Service::can_handle) claims such
+//! a request and [`collection_rest`] is what resolves and serves it: as an OPERATION for a
+//! request presenting a SigV4 credential, so the emulator verifies the signature, and from
+//! [`override_routing_error`](Service::override_routing_error) for one presenting none.
 
 use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse};
 use aws_smithy_schema_server::constraints::{envelope, Violation, ViolationKind};
