@@ -24,6 +24,8 @@
 
 use std::sync::Arc;
 
+use quick_xml::events::Event;
+use quick_xml::Reader;
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -58,6 +60,16 @@ const EVENTS_PRINCIPAL: &str = "events.amazonaws.com";
 /// The status and sentence an HTTP api answers for an integration that produced no response.
 const INTEGRATION_FAULT: u16 = 500;
 const INTEGRATION_FAULT_MESSAGE: &str = "Internal Server Error";
+
+/// The status and sentence it answers for a request that cannot satisfy what its route's
+/// integration maps onto a parameter the action requires.
+const BAD_REQUEST: u16 = 400;
+const BAD_REQUEST_MESSAGE: &str = "Bad Request";
+
+/// The media types a first-class subtype route answers a performed action's document under:
+/// the one a QUERY interface states an answer in, and the one an AWS JSON protocol does.
+const XML_MEDIA_TYPE: &str = "text/xml";
+const JSON_MEDIA_TYPE: &str = "application/json";
 
 /// The status an HTTP api answers for a first-class service action the service serving it
 /// REFUSED: that service's own answer, passed through — EventBridge's `AccessDeniedException`
@@ -301,6 +313,19 @@ impl Emulator {
         headers: &[(&str, &str)],
         body: &str,
     ) -> (u16, Value) {
+        let (status, _media_type, parsed) = self.answered(host, path, headers, body).await;
+        (status, parsed)
+    }
+
+    /// The same invoke, with the MEDIA TYPE the route answered beside its status and body —
+    /// the half of the answer that says which wire form the document is stated in.
+    async fn answered(
+        &self,
+        host: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> (u16, String, Value) {
         let mut builder = http::Request::builder()
             .method("POST")
             .uri(format!("https://{host}{path}"))
@@ -314,6 +339,12 @@ impl Emulator {
             .expect("the test request is well formed");
         let response = self.router.dispatch(request).await;
         let status = response.status().as_u16();
+        let media_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
         let answered = response.into_body();
         let parsed: Value = if answered.is_empty() {
             Value::Null
@@ -321,7 +352,7 @@ impl Emulator {
             serde_json::from_slice(&answered)
                 .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&answered).to_string()))
         };
-        (status, parsed)
+        (status, media_type, parsed)
     }
 
     /// The role an integration's `CredentialsArn` names, trusted by API Gateway and carrying
@@ -458,8 +489,39 @@ impl Emulator {
         (matching_url, near_miss_url)
     }
 
+    /// A FIFO queue, which is the one kind whose send is answered a `SequenceNumber`
+    /// ("This parameter applies only to FIFO (first-in-first-out) queues",
+    /// `SendMessageResult$SequenceNumber`); answers its url.
+    async fn fifo_queue(&self, case: &str, name: &str) -> String {
+        let created = self
+            .sqs(
+                case,
+                "CreateQueue",
+                &json!({ "QueueName": name, "Attributes": { "FifoQueue": "true" } }),
+            )
+            .await;
+        created["QueueUrl"]
+            .as_str()
+            .unwrap_or_else(|| panic!("case {case:?}: no QueueUrl in {created}"))
+            .to_string()
+    }
+
     /// Every message waiting on the queue at `url`, as its parsed body, taken off it.
     async fn drained(&self, case: &str, url: &str) -> Vec<Value> {
+        self.received(case, url)
+            .await
+            .iter()
+            .map(|message| {
+                let text = message["Body"].as_str().unwrap_or_default();
+                serde_json::from_str(text).unwrap_or(Value::String(text.to_string()))
+            })
+            .collect()
+    }
+
+    /// Every message waiting on the queue at `url`, WHOLE — the record a consumer reads, so
+    /// the id the queue holds for a message can be compared with the id its sender was
+    /// answered — taken off it.
+    async fn received(&self, case: &str, url: &str) -> Vec<Value> {
         let received = self
             .sqs(
                 case,
@@ -471,12 +533,6 @@ impl Emulator {
             .as_array()
             .cloned()
             .unwrap_or_default()
-            .iter()
-            .map(|message| {
-                let text = message["Body"].as_str().unwrap_or_default();
-                serde_json::from_str(text).unwrap_or(Value::String(text.to_string()))
-            })
-            .collect()
     }
 }
 
@@ -525,6 +581,41 @@ fn subtype_integration(
 /// needs to perform the action the subtype names.
 fn grant(action: &str) -> Value {
     json!([{ "Effect": "Allow", "Action": action, "Resource": "*" }])
+}
+
+/// The text of every `element` of the document the route answered, in document order.
+///
+/// Parsed with `quick-xml` (already a dependency of this workspace) rather than by slicing
+/// the body, so the answer of a service whose api is a QUERY api is read exactly the way a
+/// client's own XML reader reads it — which is what answering that service's own document is
+/// for. A body that is not well-formed XML fails the case rather than reading as nothing.
+fn envelope_elements(answered: &Value, element: &str) -> Vec<String> {
+    let body = answered.as_str().unwrap_or_default().to_string();
+    let mut reader = Reader::from_str(&body);
+    let mut inside = false;
+    let mut found: Vec<String> = Vec::new();
+    loop {
+        match reader.read_event().unwrap_or_else(|error| {
+            panic!("the route's answer must be well-formed XML: {error} in {body:?}")
+        }) {
+            Event::Start(start) => inside = start.name().as_ref() == element.as_bytes(),
+            Event::Text(text) if inside => {
+                let decoded = text
+                    .xml10_content()
+                    .unwrap_or_else(|error| panic!("the answer must decode: {error}"));
+                found.push(decoded.into_owned());
+            }
+            Event::End(_) => inside = false,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    found
+}
+
+/// The one `MessageId` the answer of a send carries, or `None` for an answer carrying none.
+fn answered_message_id(answered: &Value) -> Option<String> {
+    envelope_elements(answered, "MessageId").into_iter().next()
 }
 
 /// RULE: every parameter of the action comes from the integration's `RequestParameters` — a
@@ -634,13 +725,19 @@ async fn a_subtype_route_publishes_the_event_its_request_parameters_map() {
             )
             .await
             .1;
-        let (status, answered) = emulator.invoke(&host, row.path, row.headers, row.body).await;
+        let (status, media_type, answered) = emulator
+            .answered(&host, row.path, row.headers, row.body)
+            .await;
         assert_eq!(
             status, 200,
             "case {case:?}: expected the action's own answer, got {status} {answered}"
         );
         // The answer is EventBridge's own: one ingested entry, with the id that service
-        // minted for it.
+        // minted for it, as the JSON document that service's own api states one in.
+        assert_eq!(
+            media_type, JSON_MEDIA_TYPE,
+            "case {case:?}: expected {JSON_MEDIA_TYPE:?}, got {media_type:?} for {answered}"
+        );
         assert_eq!(
             answered["FailedEntryCount"],
             json!(0),
@@ -843,9 +940,10 @@ async fn the_action_a_subtype_route_performs_is_the_one_its_subtype_names() {
         let delivered = emulator.drained(case, &url).await;
         match expected {
             Some(body) => {
-                // The answer is Amazon SQS's own, carrying the id that service minted.
+                // The answer is Amazon SQS's own, in the document that api answers a send
+                // with, carrying the id that service minted.
                 assert!(
-                    answered["MessageId"].is_string(),
+                    answered_message_id(&answered).is_some(),
                     "case {case:?}: expected the queue's own message id in {answered}"
                 );
                 assert_eq!(
@@ -865,6 +963,254 @@ async fn the_action_a_subtype_route_performs_is_the_one_its_subtype_names() {
                 assert!(
                     delivered.is_empty(),
                     "case {case:?}: expected nothing on the queue, got {delivered:?}"
+                );
+            }
+        }
+    }
+}
+
+/// RULE: the caller of a first-class subtype route is answered the action's own answer in the
+/// document the interface the action was performed over states one in — for a send to a
+/// queue, the `{Action}Response` envelope of the queue api's query interface, carrying the
+/// result members that service answered and the `ResponseMetadata` that names the request —
+/// so the id a client reads off that answer is the id its consumer reads off the queue.
+#[tokio::test]
+async fn a_subtype_route_answers_the_document_the_serving_service_answered() {
+    /// Which queue a row sends to, which is what decides whether the action answers a
+    /// `SequenceNumber` at all.
+    #[derive(Debug, Clone, Copy)]
+    enum Queue {
+        Standard,
+        Fifo,
+    }
+    // Rows differ along the mapping the message body comes from, the TEXT it carries, and
+    // the kind of queue it is sent to — which is what varies the members the service answers.
+    struct Row {
+        case: &'static str,
+        queue: Queue,
+        /// The mapping, which is a function of the queue's url: it only exists once the
+        /// queue does.
+        parameters: fn(&str) -> Value,
+        body: &'static str,
+        /// The text the queue must then hold for the message.
+        queued: &'static str,
+    }
+    let rows: &[Row] = &[
+        Row {
+            case: "a member of the body onto a standard queue",
+            queue: Queue::Standard,
+            parameters: |url| json!({ "QueueUrl": url, "MessageBody": "$request.body.note" }),
+            body: r#"{"note":"placed"}"#,
+            queued: "placed",
+        },
+        Row {
+            case: "a body carrying XML metacharacters",
+            queue: Queue::Standard,
+            parameters: |url| json!({ "QueueUrl": url, "MessageBody": "$request.body.note" }),
+            body: r#"{"note":"a<b&c\"d'e>f"}"#,
+            queued: "a<b&c\"d'e>f",
+        },
+        Row {
+            case: "the whole request body onto a standard queue",
+            queue: Queue::Standard,
+            parameters: |url| json!({ "QueueUrl": url, "MessageBody": "$request.body" }),
+            body: r#"{"note":"whole"}"#,
+            queued: r#"{"note":"whole"}"#,
+        },
+        Row {
+            case: "a member of the body onto a FIFO queue",
+            queue: Queue::Fifo,
+            parameters: |url| {
+                json!({
+                    "QueueUrl": url,
+                    "MessageBody": "$request.body.note",
+                    "MessageGroupId": "orders",
+                    "MessageDeduplicationId": "$request.body.note",
+                })
+            },
+            body: r#"{"note":"sequenced"}"#,
+            queued: "sequenced",
+        },
+    ];
+    for row in rows {
+        let case = row.case;
+        let emulator = Emulator::new();
+        let role = emulator.role(case, Some(grant(SEND_MESSAGE_ACTION))).await;
+        let url = match row.queue {
+            Queue::Standard => emulator.queue(case, "sent-to").await.0,
+            Queue::Fifo => emulator.fifo_queue(case, "sent-to.fifo").await,
+        };
+        let host = emulator
+            .api(
+                case,
+                subtype_integration("SQS-SendMessage", Some(&role), (row.parameters)(&url)),
+                "POST /send",
+            )
+            .await
+            .1;
+        let (status, media_type, answered) =
+            emulator.answered(&host, "/send", &[], row.body).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: expected the action's own answer, got {status} {answered}"
+        );
+        // The answer is the document the queue api answers a send with, under the media type
+        // that interface states one in: the result members that service answered, under the
+        // element the action names, beside the request it names — not a re-encoding of them
+        // into another shape or media type.
+        assert_eq!(
+            media_type, XML_MEDIA_TYPE,
+            "case {case:?}: expected {XML_MEDIA_TYPE:?}, got {media_type:?} for {answered}"
+        );
+        let digests = envelope_elements(&answered, "MD5OfMessageBody");
+        assert_eq!(
+            digests.len(),
+            1,
+            "case {case:?}: expected one MD5OfMessageBody in {answered}, got {digests:?}"
+        );
+        let request_ids = envelope_elements(&answered, "RequestId");
+        assert!(
+            request_ids.len() == 1
+                && service_common::query_error_envelope::is_request_id(&request_ids[0]),
+            "case {case:?}: expected the answer to name its request, got {request_ids:?}"
+        );
+        let sequence_numbers = envelope_elements(&answered, "SequenceNumber");
+        let sequenced = matches!(row.queue, Queue::Fifo);
+        assert_eq!(
+            !sequence_numbers.is_empty(),
+            sequenced,
+            "case {case:?}: expected a SequenceNumber={sequenced}, got {sequence_numbers:?} in \
+             {answered}"
+        );
+        // And the id it carries is the id the queue holds for the message the mapping sent.
+        let received = emulator.received(case, &url).await;
+        assert_eq!(
+            received.len(),
+            1,
+            "case {case:?}: expected the mapped message on the queue, got {received:?}"
+        );
+        assert_eq!(
+            received[0]["Body"].as_str().unwrap_or_default(),
+            row.queued,
+            "case {case:?}: expected the mapped text on the queue, got {received:?}"
+        );
+        assert_eq!(
+            answered_message_id(&answered).as_deref(),
+            received[0]["MessageId"].as_str(),
+            "case {case:?}: expected the id the answer carries to be the id the consumer \
+             reads, got {answered} against {received:?}"
+        );
+    }
+}
+
+/// RULE: a request that carries no value for the mapping expression the integration maps onto
+/// a parameter the action REQUIRES is refused as a bad request — the mapping is the api's own
+/// configuration and the request is what failed to satisfy it — and no action is performed
+/// for it; a request that carries nothing for an OPTIONAL parameter's expression is performed
+/// without that parameter.
+#[tokio::test]
+async fn a_request_that_cannot_satisfy_a_required_mapping_is_refused() {
+    // Rows differ along WHICH required parameter the request fails to supply and HOW it
+    // fails: a member no body holds, a body that is no document at all, an absent header, a
+    // variable the stage does not state, and the queue the send is addressed to — plus the
+    // optional parameter that is no refusal at all.
+    struct Row {
+        case: &'static str,
+        parameters: fn(&str) -> Value,
+        body: &'static str,
+        /// The text the queue must hold afterwards, or `None` for a request no send was made
+        /// for.
+        queued: Option<&'static str>,
+    }
+    let rows: &[Row] = &[
+        Row {
+            case: "a body member the body does not hold",
+            parameters: |url| json!({ "QueueUrl": url, "MessageBody": "$request.body.msg" }),
+            body: r#"{"other":"x"}"#,
+            queued: None,
+        },
+        Row {
+            case: "a body that is no document at all",
+            parameters: |url| json!({ "QueueUrl": url, "MessageBody": "$request.body.msg" }),
+            body: "not a document",
+            queued: None,
+        },
+        Row {
+            case: "a header the request does not carry",
+            parameters: |url| json!({ "QueueUrl": url, "MessageBody": "$request.header.x-note" }),
+            body: r#"{"msg":"placed"}"#,
+            queued: None,
+        },
+        Row {
+            case: "a variable the stage does not state",
+            parameters: |url| json!({ "QueueUrl": url, "MessageBody": "$stageVariables.absent" }),
+            body: r#"{"msg":"placed"}"#,
+            queued: None,
+        },
+        Row {
+            case: "the queue the send is addressed to",
+            parameters: |_url| json!({ "QueueUrl": "$request.body.queue", "MessageBody": "placed" }),
+            body: r#"{"msg":"placed"}"#,
+            queued: None,
+        },
+        Row {
+            case: "an optional parameter the request does not carry",
+            parameters: |url| {
+                json!({
+                    "QueueUrl": url,
+                    "MessageBody": "$request.body.msg",
+                    "DelaySeconds": "$request.body.delay",
+                })
+            },
+            body: r#"{"msg":"placed"}"#,
+            queued: Some("placed"),
+        },
+    ];
+    for row in rows {
+        let case = row.case;
+        let emulator = Emulator::new();
+        let role = emulator.role(case, Some(grant(SEND_MESSAGE_ACTION))).await;
+        let (url, _arn) = emulator.queue(case, "sent-to").await;
+        let host = emulator
+            .api(
+                case,
+                subtype_integration("SQS-SendMessage", Some(&role), (row.parameters)(&url)),
+                "POST /send",
+            )
+            .await
+            .1;
+        let (status, answered) = emulator.invoke(&host, "/send", &[], row.body).await;
+        let expected_status = if row.queued.is_some() {
+            200
+        } else {
+            BAD_REQUEST
+        };
+        assert_eq!(
+            status, expected_status,
+            "case {case:?}: expected {expected_status} from the route, got {status} {answered}"
+        );
+        let delivered = emulator.drained(case, &url).await;
+        match row.queued {
+            None => {
+                assert_eq!(
+                    answered["message"].as_str().unwrap_or_default(),
+                    BAD_REQUEST_MESSAGE,
+                    "case {case:?}: expected the gateway's own sentence, got {answered}"
+                );
+                assert!(
+                    delivered.is_empty(),
+                    "case {case:?}: expected nothing on the queue, got {delivered:?}"
+                );
+            }
+            Some(queued) => {
+                assert!(
+                    answered_message_id(&answered).is_some(),
+                    "case {case:?}: expected the queue's own message id in {answered}"
+                );
+                assert_eq!(
+                    delivered,
+                    vec![Value::String(queued.to_string())],
+                    "case {case:?}: expected the mapped message on the queue, got {delivered:?}"
                 );
             }
         }

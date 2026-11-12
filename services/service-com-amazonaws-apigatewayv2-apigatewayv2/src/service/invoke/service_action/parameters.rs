@@ -29,8 +29,11 @@
 //! A value that names something the request does not carry — an absent header, a member no
 //! body holds, a variable the stage does not state — resolves to NOTHING, and the parameter
 //! is then not supplied to the action at all rather than supplied empty: a mapping is a
-//! reference to a value, and a reference to an absent value is not the empty string. What a
-//! MISSING parameter means is the action's own rule, decided by [`super::Action`].
+//! reference to a value, and a reference to an absent value is not the empty string. Such a
+//! parameter is REPORTED as one this request did not satisfy ([`Mapped::unresolved_required`])
+//! as well as left unsupplied, because a mapping the integration wrote for a parameter the
+//! action requires is a value the request was supposed to carry. What a MISSING parameter
+//! means is the action's own rule, decided by [`super::Action`].
 //!
 //! Nothing here is parsed by hand: a JSON body is read by `serde_json`, and the context
 //! variables are the ones the gateway already states for this invocation
@@ -39,7 +42,7 @@
 //! made AT MOST ONCE per invoke ([`Sources`]), so a mapping of many entries costs one pass
 //! over the request and not one per entry.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
@@ -86,11 +89,17 @@ const CONTEXT_ALIASES: &[(&str, &[&str])] = &[
 
 /// The parameters one invoke hands the action, by the action's own parameter name.
 ///
-/// Only the entries that RESOLVED are held: a mapping naming a value the request does not
-/// carry supplies no parameter (see the module docs).
+/// Only the entries that RESOLVED are held as values: a mapping naming a value the request
+/// does not carry supplies no parameter (see the module docs). Which of them failed to
+/// resolve is kept beside them, because a mapping the request did not satisfy is a different
+/// thing from a mapping the integration never wrote.
 #[derive(Debug, Clone, Default)]
 pub struct Mapped {
     resolved: BTreeMap<String, String>,
+    /// The parameters the integration maps a mapping EXPRESSION for that this request
+    /// carries no value for. A parameter mapped a static value is never among them, and
+    /// neither is one the integration maps nothing at all for.
+    unresolved: BTreeSet<String>,
 }
 
 impl Mapped {
@@ -113,6 +122,20 @@ impl Mapped {
             .map(String::as_str)
             .find(|name| !carried.contains(name))
     }
+
+    /// The first parameter of `required` whose mapping expression this request carries no
+    /// value for, or `None` when the request satisfied every one of them.
+    ///
+    /// A parameter the action requires is what the mapping exists to supply, so a request
+    /// carrying nothing for the expression that selects it is a request the action cannot be
+    /// performed for — and the fault is the REQUEST's, which is why it is told apart here
+    /// from a parameter the integration never mapped at all.
+    pub fn unresolved_required(&self, required: &[&str]) -> Option<&str> {
+        self.unresolved
+            .iter()
+            .find(|name| required.contains(&name.as_str()))
+            .map(String::as_str)
+    }
 }
 
 /// Resolve every entry of `request_parameters` against this invocation.
@@ -134,16 +157,26 @@ pub fn resolve(
         context: None,
     };
     let mut resolved = BTreeMap::new();
+    let mut unresolved = BTreeSet::new();
     for (parameter, value) in request_parameters {
-        let mapped = match value.strip_prefix(EXPRESSION_SIGIL) {
-            None => Some(value.clone()),
-            Some(expression) => sources.value_of(expression),
-        };
-        if let Some(mapped) = mapped {
-            resolved.insert(parameter.clone(), mapped);
+        match value.strip_prefix(EXPRESSION_SIGIL) {
+            None => {
+                resolved.insert(parameter.clone(), value.clone());
+            }
+            Some(expression) => match sources.value_of(expression) {
+                Some(mapped) => {
+                    resolved.insert(parameter.clone(), mapped);
+                }
+                None => {
+                    unresolved.insert(parameter.clone());
+                }
+            },
         }
     }
-    Mapped { resolved }
+    Mapped {
+        resolved,
+        unresolved,
+    }
 }
 
 /// What the mappings of one invoke read, each computed AT MOST ONCE however many entries name
@@ -455,6 +488,75 @@ mod tests {
             carried, None,
             "case \"every parameter carried\": expected nothing reported, got {carried:?}"
         );
+    }
+
+    /// RULE: a parameter the action REQUIRES whose mapping expression this request carries no
+    /// value for is reported as one the request did not satisfy — while a static value, a
+    /// resolved expression and a parameter the integration maps nothing for are not.
+    #[test]
+    fn a_required_parameter_the_request_does_not_satisfy_is_reported() {
+        /// One case: the entries the integration maps, and the required parameter the
+        /// request must then be reported as not satisfying.
+        struct Row {
+            case: &'static str,
+            entries: &'static [(&'static str, &'static str)],
+            expected: Option<&'static str>,
+        }
+        // Rows differ along what the entry maps and whether the request carries it: an
+        // expression it does carry, one it does not, a static value, a body that is not JSON
+        // at all, and a parameter the integration maps nothing for.
+        let rows: &[Row] = &[
+            Row {
+                case: "an expression the request carries",
+                entries: &[("MessageBody", "$request.body.note")],
+                expected: None,
+            },
+            Row {
+                case: "an expression naming a member no body holds",
+                entries: &[("MessageBody", "$request.body.absent")],
+                expected: Some("MessageBody"),
+            },
+            Row {
+                case: "an expression naming an absent header",
+                entries: &[("MessageBody", "$request.header.x-absent")],
+                expected: Some("MessageBody"),
+            },
+            Row {
+                case: "a static value",
+                entries: &[("MessageBody", "placed")],
+                expected: None,
+            },
+            Row {
+                case: "a required parameter the integration maps nothing for",
+                entries: &[("DelaySeconds", "$request.body.absent")],
+                expected: None,
+            },
+            Row {
+                case: "the other required parameter, unresolved",
+                entries: &[
+                    ("MessageBody", "placed"),
+                    ("QueueUrl", "$request.body.queue"),
+                ],
+                expected: Some("QueueUrl"),
+            },
+        ];
+        let required = &["QueueUrl", "MessageBody"];
+        for row in rows {
+            let case = row.case;
+            let (request, invocation) = invoke();
+            let parameters: BTreeMap<String, String> = row
+                .entries
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+                .collect();
+            let resolved = resolve(&parameters, &request, &invocation);
+            let actual = resolved.unresolved_required(required);
+            assert_eq!(
+                actual, row.expected,
+                "case {case:?}: expected {:?}, got {actual:?}",
+                row.expected
+            );
+        }
     }
 
     /// RULE: a body that is not text names no value, because a mapped parameter is text.

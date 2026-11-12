@@ -8767,6 +8767,7 @@ dependencies = [
  "hex",
  "http",
  "httparse",
+ "quick-xml",
  "regex",
  "serde_json",
  "service-com-amazonaws-apigateway-backplanecontrolservice",

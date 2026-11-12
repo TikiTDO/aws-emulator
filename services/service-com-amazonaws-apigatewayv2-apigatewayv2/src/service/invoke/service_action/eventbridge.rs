@@ -18,7 +18,7 @@ use smithy_server_runtime::OperationContext;
 
 use super::credentials::SigningIdentity;
 use super::parameters::Mapped;
-use super::Unperformed;
+use super::{Performed, Unperformed};
 
 /// The `IntegrationSubtype` that names this action.
 pub const PUT_EVENTS_SUBTYPE: &str = "EventBridge-PutEvents";
@@ -35,6 +35,11 @@ pub const PUT_EVENTS_PARAMETERS: &[&str] = &[
     "Time",
     "TraceHeader",
 ];
+
+/// The parameters the publication must carry a value for: NONE, because
+/// `PutEventsRequestEntry` marks no member required — an entry stating only some of them is
+/// an entry EventBridge itself decides about.
+pub const PUT_EVENTS_REQUIRED_PARAMETERS: &[&str] = &[];
 
 /// The `arnNamespace` EventBridge publishes its endpoint and signs under, which is the
 /// endpoint label the in-process client is addressed at.
@@ -60,12 +65,15 @@ fn resources(mapped: Option<&str>) -> Vec<String> {
 }
 
 /// Publish the mapped event, and answer the document EventBridge returned.
+///
+/// The action is performed over EventBridge's own api, which states an answer as a JSON
+/// document (`awsJson1_1`), so that is the form the caller is answered it in.
 pub async fn put_events(
     ctx: &OperationContext<'_>,
     region: &str,
     identity: Option<&SigningIdentity>,
     mapped: &Mapped,
-) -> Result<Value, Unperformed> {
+) -> Result<Performed, Unperformed> {
     let mut entry = ::aws_sdk_eventbridge::types::PutEventsRequestEntry::builder();
     if let Some(source) = mapped.get("Source") {
         entry = entry.source(source);
@@ -141,7 +149,7 @@ pub async fn put_events(
         "FailedEntryCount".to_string(),
         json!(published.failed_entry_count()),
     );
-    Ok(Value::Object(answer))
+    Ok(Performed::json(&Value::Object(answer)))
 }
 
 #[cfg(test)]

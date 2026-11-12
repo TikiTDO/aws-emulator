@@ -23,7 +23,10 @@
 //!    `RequestParameters` as the mapping it is. A parameter the integration maps and this
 //!    emulator cannot carry into the action is NOT dropped: the request is answered as an
 //!    integration that produced no response, because a call missing what the integration
-//!    mapped onto it is not the call the api was configured to make.
+//!    mapped onto it is not the call the api was configured to make. A parameter the action
+//!    REQUIRES whose mapping expression THIS REQUEST carries no value for is the request's
+//!    own fault rather than the gateway's, so it is refused as a bad request and no action is
+//!    performed for it.
 //! 3. **as whom** — [`credentials::integration_identity`], a session of the integration's
 //!    role. The service serving the action then authorizes it against the policies in force
 //!    on that role, exactly as it authorizes any other signed request, so a role that does
@@ -31,13 +34,20 @@
 //!    own refusal rather than reporting a publication nobody made.
 //!
 //! What the CALLER is answered: the action's own answer, as the document that service
-//! returned — a `200` carrying it, since the action is what the route exists to perform and
-//! its answer is the only thing the gateway has to report. An action the service serving it
+//! returned AND IN THE FORM THE INTERFACE THE ACTION WAS PERFORMED OVER STATES IT IN
+//! ([`Performed`]) — a `200` carrying it, since the action is what the route exists to perform
+//! and its answer is the only thing the gateway has to report. Which form that is belongs to
+//! each action's own module, from what is recorded for its subtype, because it is a fact
+//! about the api API Gateway performs the action over and not about this gateway: for
+//! [`eventbridge`] it is the JSON document that service's protocol answers with, and for
+//! [`sqs`] the `{Action}Response` envelope the queue api's query interface answers with. An
+//! action the service serving it
 //! ANSWERED a refusal for is that refusal, RELAYED: that service's own status, the error
 //! shape it named and the text it stated, which is what tells a client a missing permission
 //! from a malformed parameter. An action that reached no service at all, or whose parameters
 //! do not hold together, is the "integration produced no response" class [`super::dispatch`]
-//! owns; and one that had not answered within the integration's own `TimeoutInMillis` is its
+//! owns; one the REQUEST carried no required parameter for is that module's bad-request
+//! class; and one that had not answered within the integration's own `TimeoutInMillis` is its
 //! timeout class — the reason is logged, never told to the caller, which is what API Gateway
 //! does.
 //!
@@ -61,9 +71,12 @@ use crate::state::Integration;
 /// own configuration. It names where the credential came from and carries no secret.
 const INTEGRATION_ROLE_PROVIDER: &str = "ApiGatewayIntegrationCredentials";
 
-/// The media type the action's answer is carried to the caller as, and the status a
+/// The media types the action's answer is carried to the caller as — one per wire form an
+/// api this emulator performs an action over states an answer in: the document an AWS JSON
+/// protocol answers with, and the envelope a QUERY interface answers with — and the status a
 /// performed action answers with.
 const JSON_CONTENT_TYPE: &str = "application/json";
+const XML_CONTENT_TYPE: &str = "text/xml";
 const PERFORMED_STATUS: u16 = 200;
 
 /// The members the gateway relays a refused action's answer in: the error SHAPE the service
@@ -132,6 +145,12 @@ pub enum Unperformed {
     /// The action was not performed at all: a subtype this emulator cannot perform, a
     /// mapping the action cannot be called with, or a call that reached no such service.
     NotPerformed(String),
+    /// The REQUEST carried no value for the mapping expression the integration maps onto a
+    /// parameter the action REQUIRES, so there was nothing to call the action with. The
+    /// mapping is the api's own configuration and the request is what failed to satisfy it,
+    /// which is why this is a different class from an integration this gateway cannot
+    /// perform at all.
+    Unmappable(String),
 }
 
 impl Unperformed {
@@ -143,7 +162,7 @@ impl Unperformed {
                 after.as_millis()
             ),
             Unperformed::Answered(answered) => answered.reason(),
-            Unperformed::NotPerformed(detail) => detail.clone(),
+            Unperformed::NotPerformed(detail) | Unperformed::Unmappable(detail) => detail.clone(),
         }
     }
 }
@@ -204,6 +223,59 @@ impl ServiceAnswer {
     }
 }
 
+/// The answer a performed action produced, as the api it was performed over states one on
+/// the wire.
+///
+/// A first-class integration is the caller reaching that service THROUGH the api, so what the
+/// caller receives is the document the action answered in the form the interface it was
+/// performed over states one in — the document an AWS JSON protocol answers with, or the
+/// `{Action}Response` envelope a QUERY interface answers with — and not a re-encoding of it
+/// into a shape or media type of this gateway's own: a client of such a route parses the
+/// answer it would have been given calling that action itself, which is where it reads the id
+/// of what it just did. Which of the two an action is relayed in is that action's own module's
+/// to state, from what is recorded for its subtype.
+#[derive(Debug, Clone)]
+pub struct Performed {
+    /// The document, exactly as that api states one.
+    body: Vec<u8>,
+    /// The media type it carries it under.
+    content_type: &'static str,
+}
+
+impl Performed {
+    /// The answer of an action performed over an api that states one as a JSON document.
+    fn json(document: &Value) -> Self {
+        Self {
+            body: document.to_string().into_bytes(),
+            content_type: JSON_CONTENT_TYPE,
+        }
+    }
+
+    /// The answer of an action performed over a QUERY interface, which states one as the
+    /// XML `{Action}Response` envelope that interface wraps an action's result in.
+    fn query_envelope(envelope: String) -> Self {
+        Self {
+            body: envelope.into_bytes(),
+            content_type: XML_CONTENT_TYPE,
+        }
+    }
+
+    /// That answer, as the response the caller receives.
+    fn response(self) -> RtResponse {
+        let length = self.body.len();
+        let mut response = RtResponse::new(
+            StatusCode::try_from(PERFORMED_STATUS).unwrap_or(
+                StatusCode::try_from(UNPLACEABLE_STATUS).expect("500 is a valid status code"),
+            ),
+            SdkBody::from(self.body),
+        );
+        let headers = response.headers_mut();
+        let _ = headers.try_insert("content-type", self.content_type);
+        let _ = headers.try_insert("content-length", length.to_string());
+        response
+    }
+}
+
 /// Perform the service action `subtype` names, and answer the caller with what it returned.
 pub async fn perform<Eng: Send + Sync + 'static>(
     engine: &Eng,
@@ -233,6 +305,12 @@ pub async fn perform<Eng: Send + Sync + 'static>(
              not carry into {subtype}"
         )));
     }
+    if let Some(unresolved) = mapped.unresolved_required(action.required_parameters()) {
+        return Err(Unperformed::Unmappable(format!(
+            "this request carries no value for the {unresolved} the integration maps onto \
+             {subtype}, which that action requires"
+        )));
+    }
     // The role's session is resolved BEFORE the call and with no store of this service's
     // locked, because minting one takes the token service's and IAM's locks.
     let identity = credentials::integration_identity(
@@ -246,7 +324,7 @@ pub async fn perform<Eng: Send + Sync + 'static>(
         Ok(answered) => answered,
         Err(_elapsed) => return Err(Unperformed::TimedOut(timeout)),
     };
-    answered.map(|document| answer(&document))
+    answered.map(Performed::response)
 }
 
 /// The service actions this emulator performs for a first-class subtype integration.
@@ -280,14 +358,24 @@ impl Action {
         }
     }
 
-    /// Call the action, and answer the document the service returned.
+    /// Every parameter of this action a call must carry a value for, which is the set its own
+    /// request shape marks REQUIRED.
+    fn required_parameters(self) -> &'static [&'static str] {
+        match self {
+            Self::EventBridgePutEvents => eventbridge::PUT_EVENTS_REQUIRED_PARAMETERS,
+            Self::SqsSendMessage => sqs::SEND_MESSAGE_REQUIRED_PARAMETERS,
+        }
+    }
+
+    /// Call the action, and answer the document the service returned, in the form the
+    /// interface it was performed over states one in.
     async fn invoke(
         self,
         ctx: &OperationContext<'_>,
         region: &str,
         identity: Option<&SigningIdentity>,
         mapped: &Mapped,
-    ) -> Result<Value, Unperformed> {
+    ) -> Result<Performed, Unperformed> {
         match self {
             Self::EventBridgePutEvents => {
                 eventbridge::put_events(ctx, region, identity, mapped).await
@@ -295,22 +383,6 @@ impl Action {
             Self::SqsSendMessage => sqs::send_message(ctx, region, identity, mapped).await,
         }
     }
-}
-
-/// The caller's answer for a performed action: the document the service returned.
-fn answer(document: &Value) -> RtResponse {
-    let body = document.to_string().into_bytes();
-    let length = body.len();
-    let mut response = RtResponse::new(
-        StatusCode::try_from(PERFORMED_STATUS).unwrap_or(
-            StatusCode::try_from(UNPLACEABLE_STATUS).expect("500 is a valid status code"),
-        ),
-        SdkBody::from(body),
-    );
-    let headers = response.headers_mut();
-    let _ = headers.try_insert("content-type", JSON_CONTENT_TYPE);
-    let _ = headers.try_insert("content-length", length.to_string());
-    response
 }
 
 /// Why one call produced no answer of its own, told apart the way every other in-process hop

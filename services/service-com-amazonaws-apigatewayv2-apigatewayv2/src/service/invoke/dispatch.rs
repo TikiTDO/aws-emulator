@@ -53,6 +53,11 @@
 //!   is told to it as the service stated it ([`super::service_action`]);
 //! * `429` `{"message":"Too Many Requests"}` for a request the serving stage's
 //!   `RouteSettings` throttle ([`crate::state::route_throttle`]);
+//! * `400` `{"message":"Bad Request"}` for a request that does not carry what a first-class
+//!   service-action integration's mapping selects for a parameter its action REQUIRES: the
+//!   mapping is the api's own configuration and the request is what failed to satisfy it, so
+//!   the refusal is the caller's rather than the "produced no response" class, and no action
+//!   is performed for it;
 //! * the `307` above for an `HTTP_PROXY` upstream, which is the caller's to reach.
 //!
 //! The stage's own variables are interpolated into the integration's `IntegrationUri`
@@ -87,6 +92,11 @@ const UNAVAILABLE_MESSAGE: &str = "Service Unavailable";
 /// the sentence it carries — the same reason-phrase convention (RFC 6585 §4).
 const TOO_MANY_REQUESTS_STATUS: u16 = 429;
 const TOO_MANY_REQUESTS_MESSAGE: &str = "Too Many Requests";
+
+/// The status a request that cannot satisfy its route's own parameter mapping is refused
+/// with, and the sentence it carries — the same reason-phrase convention (RFC 7231 §6.5.1).
+const BAD_REQUEST_STATUS: u16 = 400;
+const BAD_REQUEST_MESSAGE: &str = "Bad Request";
 
 /// Everything step 7 needs, read out of the store while it was locked: the request as the
 /// backend will see it, the invocation's own facts, the integration to perform, and the
@@ -382,11 +392,13 @@ async fn lambda_proxy(
 /// ([`super::service_action`]).
 ///
 /// The classes an unperformed action falls into are the ones every other integration has,
-/// plus the one only a called SERVICE can report: an action that was called and did not
-/// answer within the integration's own deadline is the timeout; one that service ANSWERED a
-/// refusal for is that answer, relayed, because the call was served and its answer is what
-/// the gateway has to report; and everything else — a subtype this emulator cannot perform,
-/// a mapping the action cannot be called with, a call that reached no service — is the
+/// plus the two only a CALLED service and a MAPPED request can report: an action that was
+/// called and did not answer within the integration's own deadline is the timeout; one that
+/// service ANSWERED a refusal for is that answer, relayed, because the call was served and
+/// its answer is what the gateway has to report; one the REQUEST carried no required
+/// parameter for is a bad request, because the mapping is the api's own and the request is
+/// what failed to satisfy it; and everything else — a subtype this emulator cannot perform, a
+/// mapping the action cannot be called with, a call that reached no service — is the
 /// "produced no response" class. The reason is logged, never told to the caller.
 async fn service_action<Eng: Send + Sync + 'static>(
     engine: &Eng,
@@ -431,6 +443,17 @@ async fn service_action<Eng: Send + Sync + 'static>(
                  answer is what the caller is told"
             );
             answered.relayed()
+        }
+        Unperformed::Unmappable(_) => {
+            ::tracing::info!(
+                api_id = %dispatch.request.api_id,
+                route_key = %dispatch.route_key,
+                integration_subtype = %subtype,
+                reason = %reason,
+                "refusing an invoke: this request carries no value for a parameter this \
+                 route's service-action integration maps onto the action it requires it for"
+            );
+            json_response(BAD_REQUEST_STATUS, BAD_REQUEST_MESSAGE, None)
         }
         Unperformed::NotPerformed(_) => {
             ::tracing::warn!(
