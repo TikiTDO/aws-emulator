@@ -24,10 +24,9 @@
 //!    supplied. It is read per CALL and not once per batch, so a role switched while a
 //!    batch is in flight is the one that authorizes the calls that batch has not made yet
 //!    — its delivery and the deletion of what it delivered.
-//! 3. The REST of the configuration is read from that same record, and a batch is moved
-//!    under ONE of them: records polled under a configuration `UpdatePipe` has since
-//!    replaced are not delivered under it, but stay on the source to be moved under the
-//!    configuration the pipe now carries.
+//! 3. The REST of the configuration is read from that same record: records polled under a
+//!    configuration `UpdatePipe` has since replaced are not delivered under it, but under
+//!    the configuration the pipe carries when the batch is decided.
 
 use std::time::{Duration, Instant};
 
@@ -61,7 +60,15 @@ const SHORT_VISIBILITY: &str = "1";
 /// Give the queue at `url` a visibility timeout of `seconds`: "the length of time, in
 /// seconds, that a message received from a queue will be invisible to other receiving
 /// components" (`SetQueueAttributes$Attributes`).
-async fn set_visibility(router: &MultiServiceRouter, case: &str, url: &str, seconds: &str) {
+///
+/// `pub(crate)` because `tests/all/pipe_filter_reinstall.rs` configures the span of its
+/// source's checkout the same way, through this one path.
+pub(crate) async fn set_visibility(
+    router: &MultiServiceRouter,
+    case: &str,
+    url: &str,
+    seconds: &str,
+) {
     let (status, body) = sqs(
         router,
         "SetQueueAttributes",
@@ -779,11 +786,11 @@ struct Reconfigured {
     delivered: fn(&str) -> String,
 }
 
-/// RULE: a batch is moved under ONE configuration, and it is the pipe's own — the record
-/// is read when each call is made, so records polled under a configuration `UpdatePipe`
-/// has since replaced are not delivered under it: nothing reaches the target the pipe has
-/// left, nothing is delivered through a template it no longer carries, and the records
-/// stay on the source until the configuration it does carry moves them.
+/// RULE: the configuration a batch is moved under is the pipe's own, read when the batch is
+/// decided — so records polled under a configuration `UpdatePipe` has since replaced are not
+/// delivered under it: nothing reaches the target the pipe has left, nothing is delivered
+/// through a template it no longer carries, and the records leave the source once the
+/// configuration it does carry has moved them.
 ///
 /// The rows differ along which member of that configuration moved: the `Target` the
 /// delivery is made to, and the `InputTemplate` it is made with.
@@ -875,8 +882,8 @@ async fn a_batch_in_flight_is_not_delivered_under_a_configuration_the_pipe_has_l
         );
 
         // The record is delivered once the configuration the pipe now carries has moved
-        // it: the batch it was polled into is not served by the configuration it was
-        // polled under, so the record waits out its invisibility and is polled again.
+        // it: the batch it was polled into is decided by the configuration the pipe carries
+        // then, and not by the one it was polled under.
         let (landed_url, landed_arn) = if row.retargets {
             (&second_url, &second_arn)
         } else {

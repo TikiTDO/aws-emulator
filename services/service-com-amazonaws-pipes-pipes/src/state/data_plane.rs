@@ -121,9 +121,12 @@
 //! moment of each call ([`LiveRecord`]), never captured for the length of a batch, so a
 //! role switched while a batch is in flight authorizes every call the pipe has not made
 //! yet: nothing is delivered or deleted as an identity the record no longer carries. The
-//! rest of the configuration is read the same way, as what the record says NOW: a batch
-//! polled under a configuration the pipe has since left is not moved under it, and stays
-//! on the source for the configuration it now carries to move.
+//! rest of the configuration is read the same way, as what the record says NOW: the filter
+//! patterns a record is admitted by, the enrichment and target a batch is handed to and the
+//! templates they are handed through are the ones the record carries when the batch is
+//! DECIDED, not the ones it carried when the poll that collected it began — so a filter an
+//! `UpdatePipe` replaced on a running pipe governs the records already polled, and the
+//! patterns it replaced govern none.
 //!
 //! What each pass came to is published as the pipe's OWN CloudWatch metrics
 //! ([`super::metrics`]), for every minute the pipe is running: that series is the only
@@ -441,8 +444,9 @@ enum Pass {
     /// yet: nothing is consumed and nothing is taken up.
     Wait,
     /// The pipe is RUNNING but its configuration is not one this data plane serves, and
-    /// why. Nothing is polled and the poller ends, so no record is consumed by a stage
-    /// that would deliver it wrongly.
+    /// why. Nothing is polled, so no record is consumed by a stage that would deliver it
+    /// wrongly, and the poller ends — unless the record has since been given a
+    /// configuration this data plane does serve, which it then keeps polling under.
     Unserved(String),
     /// The pipe is no longer one this poller runs: it rests `STOPPED`, is stopping or
     /// being deleted, or the record is gone. The claim is already released.
@@ -509,14 +513,34 @@ async fn poll_pipe(
                 ::tokio::time::sleep(POLL_INTERVAL).await;
             }
             Pass::Unserved(detail) => {
+                // The claim is given up only if the pipe's record STILL asks for a
+                // configuration no stage here serves, re-read inside the critical section
+                // the claim is released through: a call that reconfigured the pipe while
+                // this pass was being decided starts no poller of its own — this one still
+                // held the claim when it looked — so letting the claim go on the strength
+                // of the older reading would leave a RUNNING pipe with no poller at all.
+                let unservable = {
+                    let mut store = state.lock();
+                    store.settle_due_transitions();
+                    let unservable = store
+                        .pipes
+                        .get(&pipe_name)
+                        .is_none_or(|pipe| resolve_run(pipe).is_err());
+                    if unservable {
+                        claim.release(&mut store);
+                    }
+                    unservable
+                };
+                if !unservable {
+                    ::tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
                 ::tracing::warn!(
                     pipe = %pipe_name,
                     detail = %detail,
                     "this emulator's pipes data plane does not serve this pipe's \
                      configuration, so its source is left untouched"
                 );
-                let mut store = state.lock();
-                claim.release(&mut store);
                 return;
             }
             Pass::Run(run) => {
@@ -572,8 +596,9 @@ async fn poll_pipe(
                         failures = 0;
                         ::tracing::debug!(
                             pipe = %pipe_name,
-                            "a pipe was reconfigured while a batch was in flight; the \
-                             records stay on the source for the new configuration to move"
+                            "a pipe's record asked for no configuration this data plane \
+                             serves while a batch was in flight; the records stay on the \
+                             source for a later pass to move"
                         );
                         ::tokio::time::sleep(POLL_INTERVAL).await;
                     }
@@ -773,11 +798,11 @@ enum Batch {
     Moved { events: usize },
     /// The source held nothing.
     Idle,
-    /// The pipe was RECONFIGURED while this batch was being polled, so the configuration
-    /// it was polled under is not the one the pipe carries any more: nothing was handed
-    /// to a stage and nothing was counted. The records stay on the source and reappear
-    /// when their visibility timeout lapses, for a later pass to move under the record as
-    /// it then reads.
+    /// The pipe's record asks for NO configuration this data plane can act under — the
+    /// store no longer holds the pipe, or what it now holds is a configuration no stage
+    /// here serves — so nothing was handed to a stage and nothing was counted. The records
+    /// stay on the source and reappear when their visibility timeout lapses, for a later
+    /// pass to move under the record as it then reads.
     Superseded,
     /// A stage failed; the batch is not finished with its source, so a later pass reads
     /// the same records again (a queue's reappear when their visibility timeout lapses,
@@ -810,6 +835,13 @@ enum Batch {
 /// hand the rest to the enrichment, deliver what came back to the target, and finish the
 /// batch with its source.
 ///
+/// `run` is the configuration the POLL is taken under — which source is read, how many
+/// records at most and for how long. What the records are then DECIDED by is the
+/// configuration the pipe's record asks for once that poll is in ([`LiveRecord::resolved_now`]):
+/// the filter stage matches the patterns the record holds then, and the enrichment, the
+/// templates and the target are the ones it names then, so a call that replaced any of them
+/// while the batch was being collected governs the records it was collecting.
+///
 /// Every one of those calls is made AS THE PIPE'S EXECUTION ROLE, so each is preceded by
 /// the one question [`LiveRecord::refusal`] answers: may the role the pipe carries AT THAT
 /// MOMENT make this call on this resource? A call it may not make is the stage FAILING
@@ -838,13 +870,18 @@ async fn move_one_batch(
     // When the source handed these records over, for a source they are checked OUT of:
     // every failure below leaves them there, so this is when they come back.
     let checked_out = polled.checked_out();
-    // One batch is moved under ONE configuration, and it is the pipe's own: records polled
-    // under a configuration the pipe has since left are not handed to the stages that
-    // configuration named, so nothing is delivered or deleted on behalf of a record that
-    // no longer reads that way.
-    if !record.still_configured_as(run) {
+    // The configuration the stages below act under is the one the pipe's record asks for
+    // NOW, re-read once the poll is in: a call that reconfigured the pipe while this batch
+    // was being collected decides every stage the batch has not reached yet, so a filter
+    // pattern, an enrichment, a template or a target that has just been replaced governs the
+    // records already polled — the records are decided by what the pipe carries rather than
+    // held back until their checkout of the source lapses. The one configuration a batch
+    // cannot be decided under is none at all: a pipe the store no longer holds, or whose
+    // record asks for something this data plane does not serve, leaves them on the source.
+    let Some(decided) = record.resolved_now() else {
         return Batch::Superseded;
-    }
+    };
+    let decided = &decided;
     let taken = polled.len();
     // The identifier its source names each polled record by: what a target's report of the
     // records it did not process names them by, and what the finish below leaves on the
@@ -852,7 +889,7 @@ async fn move_one_batch(
     let identifiers = polled.identifiers();
 
     // The WHOLE polled batch, as one JSON array of record envelopes.
-    let batch = match polled.envelopes(run) {
+    let batch = match polled.envelopes(decided) {
         Ok(batch) => batch,
         Err(detail) => {
             return Batch::Failed {
@@ -867,29 +904,29 @@ async fn move_one_batch(
     // The filter decides which of the polled records enter the pipe, BEFORE the
     // enrichment: one the pipe's patterns do not admit reaches neither stage. It is still
     // consumed, so the source moves on from it rather than offering it again.
-    let batch = admitted(&run.filters, batch);
+    let batch = admitted(&decided.filters, batch);
     if batch.is_empty() {
         let advance = finish_batch(
             callback,
             clients,
             cursors,
             record,
-            run,
+            decided,
             &polled,
             &Finished::WholeBatch,
         )
         .await;
-        return moved_or_standing_still(advance, run, taken, checked_out);
+        return moved_or_standing_still(advance, decided, taken, checked_out);
     }
 
     // What the TARGET stage delivers: the enrichment's answer when the pipe has one,
     // the polled batch itself when it has none. An enrichment is handed the records
     // rendered through ITS input template, when the pipe carries one, because that
     // template is what it receives instead of the record.
-    let events = match &run.enrichment {
+    let events = match &decided.enrichment {
         None => batch,
         Some(enrichment) => {
-            let handed = match transformed(run.enrichment_template.as_deref(), batch) {
+            let handed = match transformed(decided.enrichment_template.as_deref(), batch) {
                 Ok(handed) => handed,
                 Err(detail) => {
                     return Batch::Failed {
@@ -928,7 +965,8 @@ async fn move_one_batch(
     // batch, so the role is asked about it once for the batch — and only when there is an
     // event to deliver, because a batch the enrichment emptied makes no target call at all.
     if !events.is_empty() {
-        if let Some(detail) = record.refusal(run.target.delivery_action(), &run.target_arn) {
+        if let Some(detail) = record.refusal(decided.target.delivery_action(), &decided.target_arn)
+        {
             return Batch::Failed {
                 stage: Stage::Target,
                 events: taken,
@@ -943,7 +981,7 @@ async fn move_one_batch(
     // itself either way. Both of those read the event through its PATHS, so both see the
     // message body in the format its producer sent it in — while the event a target with
     // no template is handed is the envelope itself, body as sent.
-    let payloads = match target_payloads(run, &events) {
+    let payloads = match target_payloads(decided, &events) {
         Ok(payloads) => payloads,
         Err(detail) => {
             return Batch::Failed {
@@ -959,8 +997,8 @@ async fn move_one_batch(
     // API carries one payload per call, one call holding every event for a target whose API
     // takes the batch ([`deliver_batch`]). What it ANSWERS is which records of the batch it
     // did not process, for a target whose call answers the caller at all.
-    let report = match deliver_batch(callback, clients, &run.target, &payloads, &identifiers).await
-    {
+    let report =
+        match deliver_batch(callback, clients, &decided.target, &payloads, &identifiers).await {
         Ok(report) => report,
         Err(detail) => {
             return Batch::Failed {
@@ -980,7 +1018,7 @@ async fn move_one_batch(
             events: taken,
             detail: format!(
                 "the target {} reported no record of the batch as processed: {detail}",
-                run.target_arn
+                decided.target_arn
             ),
         };
     }
@@ -997,8 +1035,9 @@ async fn move_one_batch(
         // batch's length and the report's.
         Finished::Records(processed.iter().map(String::as_str).collect())
     };
-    let advance = finish_batch(callback, clients, cursors, record, run, &polled, &finished).await;
-    moved_or_standing_still(advance, run, taken, checked_out)
+    let advance =
+        finish_batch(callback, clients, cursors, record, decided, &polled, &finished).await;
+    moved_or_standing_still(advance, decided, taken, checked_out)
 }
 
 /// The pass's outcome for a batch whose events were all delivered, from what finishing it
@@ -1260,9 +1299,9 @@ fn checkpointed_through<'a>(
 ///
 /// Two decisions are taken from it, and both are about what the record says NOW: may the
 /// execution role it carries make the call a stage is about to make
-/// ([`Self::refusal`], decided by [`super::execution_role::call_refusal`]), and is the
-/// configuration a batch in flight was polled under still the pipe's
-/// ([`Self::still_configured_as`]). This holds only where those are read FROM — the pipes
+/// ([`Self::refusal`], decided by [`super::execution_role::call_refusal`]), and what does the
+/// record ask the stages of a batch already polled to do
+/// ([`Self::resolved_now`]). This holds only where those are read FROM — the pipes
 /// store this poller runs in and the IAM store of the same engine — and takes each guard
 /// for the length of one decision, so no call leaves this process while either is held.
 struct LiveRecord<'a> {
@@ -1301,14 +1340,15 @@ impl LiveRecord<'_> {
             .is_some_and(PipeRecord::rests_in_running)
     }
 
-    /// Whether the pipe's record still asks for exactly what `run` was resolved from —
-    /// `false` once a call has reconfigured it, and for a pipe the store no longer holds.
-    fn still_configured_as(&self, run: &RunningPipe) -> bool {
+    /// What the pipe's record asks for NOW, or `None` for a pipe the store no longer holds
+    /// and one whose record asks for a configuration this data plane does not serve.
+    ///
+    /// This is what the stages of a batch already polled act under: the configuration is
+    /// read when the batch is decided, so a call that reconfigured the pipe while the batch
+    /// was being collected decides every stage that batch has not reached yet.
+    fn resolved_now(&self) -> Option<RunningPipe> {
         let store = self.pipes.lock();
-        store
-            .pipes
-            .get(self.pipe)
-            .is_some_and(|pipe| resolve_run(pipe).is_ok_and(|current| &current == run))
+        resolve_run(store.pipes.get(self.pipe)?).ok()
     }
 
     /// Why the role may not perform `action` on `resource`, or `None` when nothing of the
@@ -2615,10 +2655,9 @@ fn json_string_body(text: &str) -> String {
 /// record when that call is made ([`LiveRecord::refusal`]), not resolved with the rest of
 /// the configuration.
 ///
-/// `PartialEq` because a batch is moved under ONE configuration: what the record resolves
-/// to now is compared with what the batch was polled under
-/// ([`LiveRecord::still_configured_as`]).
-#[derive(PartialEq, Eq)]
+/// One of these is resolved for the POLL of a pass ([`next_pass`]) and one for the DECISION
+/// of the batch that poll came back with ([`LiveRecord::resolved_now`]), so what the stages
+/// act under is never older than the batch they are handed.
 struct RunningPipe {
     /// The source the records are polled from, by the kind of resource the `Source`
     /// names.
