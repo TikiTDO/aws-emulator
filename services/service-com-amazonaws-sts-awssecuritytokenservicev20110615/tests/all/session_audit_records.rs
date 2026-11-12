@@ -54,7 +54,7 @@ const SOURCE_IDENTITY: &str = "alice@example.com";
 
 /// Every record in the shared log, oldest first, as the CloudTrail event document a lookup
 /// reports.
-fn records(engine: &Arc<engine::InMemoryEngine>) -> Vec<Value> {
+pub(crate) fn records(engine: &Arc<engine::InMemoryEngine>) -> Vec<Value> {
     let log = engine.state::<ManagementEventLog>();
     let held = log.lock();
     held.iter()
@@ -63,7 +63,7 @@ fn records(engine: &Arc<engine::InMemoryEngine>) -> Vec<Value> {
 }
 
 /// The records of the calls to `event_name`, oldest first.
-fn records_of(engine: &Arc<engine::InMemoryEngine>, event_name: &str) -> Vec<Value> {
+pub(crate) fn records_of(engine: &Arc<engine::InMemoryEngine>, event_name: &str) -> Vec<Value> {
     records(engine)
         .into_iter()
         .filter(|event| event.get("eventName") == Some(&Value::String(event_name.to_string())))
@@ -78,7 +78,7 @@ fn record_of(case: &str, engine: &Arc<engine::InMemoryEngine>, event_name: &str)
 }
 
 /// A string member of a record, or `None` when the record does not carry it.
-fn at(event: &Value, pointer: &str) -> Option<String> {
+pub(crate) fn at(event: &Value, pointer: &str) -> Option<String> {
     event
         .pointer(pointer)
         .and_then(Value::as_str)
@@ -87,7 +87,7 @@ fn at(event: &Value, pointer: &str) -> Option<String> {
 
 /// `AssumeRole` of `role_arn`, answering the status, the access key id of the session it
 /// minted and the body it answered with.
-async fn assume(
+pub(crate) async fn assume(
     router: &MultiServiceRouter,
     caller_key: &str,
     role_arn: &str,
