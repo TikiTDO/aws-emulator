@@ -214,9 +214,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// How many `Service` values one page carries.
 ///
 /// The model declares no page size for `GetTraceGraph`, so this is the
-/// emulator's: a `NextToken` is emitted only when the graph exceeded it, and
-/// resuming from that token returns the remainder.
-pub const TRACE_GRAPH_PAGE_SIZE: usize = 5;
+/// emulator's, and it is the one the service map read publishes
+/// ([`crate::ops::get_service_graph::SERVICE_GRAPH_PAGE_SIZE`]): both reads
+/// answer the SAME derivation, and a graph is only useful complete — an `Edge`
+/// names its downstream node by a `ReferenceId` that may land on any page — so
+/// a page carries a whole graph rather than a handful of its nodes. A
+/// `NextToken` is emitted only when the graph exceeded it, and resuming from
+/// that token returns the remainder.
+pub const TRACE_GRAPH_PAGE_SIZE: usize = crate::ops::get_service_graph::SERVICE_GRAPH_PAGE_SIZE;
 
 /// What a requested trace id that is not stored is refused with.
 pub const TRACE_ID_NOT_FOUND: &str = "Trace id not found";

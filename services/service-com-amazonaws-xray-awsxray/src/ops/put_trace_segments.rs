@@ -13,6 +13,12 @@
 //! than `crate::state::MAX_SEGMENT_DOCUMENTS_PER_CALL`, and a segment past a
 //! trace's segment cap, are refused.
 //!
+//! WHERE an accepted span GOES is the account's trace segment destination: with
+//! it settled on CloudWatch Logs — the Transaction Search configuration — each
+//! accepted document is ALSO delivered to the log group that destination vends
+//! for spans, through the one delivery in [`crate::state::span_delivery`], so a
+//! client that enabled Transaction Search queries its spans as logs.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -169,7 +175,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // `ctx` carries request metadata: the Region the credential scope names,
+        // which is the Region the spans log group is vended in when the account's
+        // destination sends the accepted spans to CloudWatch Logs.
+        let region = crate::state::request_region(ctx.parts());
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(PutTraceSegmentsErrorModeled::ThrottledException(ThrottledException {
                 message: Some(
@@ -211,14 +220,41 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
-        {
+        // The ingestion holds this service's guard, so it is done in ONE
+        // synchronous block and the guard is gone before the accepted spans are
+        // handed to the store of the service that OWNS the log group they are
+        // delivered to: a lock guard must not be held across a write into
+        // another service's store.
+        let accepted = {
             let mut store = state.lock();
+            // Where the account's spans go is settled first: the move to the
+            // configured destination was due at a fixed instant whether or not
+            // anybody called, and a span is delivered to CloudWatch Logs only
+            // once that switch is in effect.
+            store.settle_trace_segment_destination(::std::time::Instant::now());
+            let delivers = store.delivers_spans_to_cloud_watch_logs();
+            let mut accepted: Vec<crate::state::span_delivery::Span> = Vec::new();
             for (trace_id, segment) in parsed {
-                if let Err(rejection) = store.ingest_segment(&trace_id, segment) {
-                    unprocessed.push(rejection);
+                // Captured BEFORE the ingest takes the record: a span is
+                // delivered only once this store has ACCEPTED it, so a document
+                // the trace had no room for is reported as unprocessed and
+                // delivered nowhere.
+                let span = delivers.then(|| crate::state::span_delivery::Span {
+                    document: segment.document.clone(),
+                    start_time: segment.start_time,
+                });
+                match store.ingest_segment(&trace_id, segment) {
+                    Ok(()) => accepted.extend(span),
+                    Err(rejection) => unprocessed.push(rejection),
                 }
             }
-        }
+            accepted
+        };
+
+        // Transaction Search: with the destination settled on CloudWatch Logs,
+        // each accepted span is also written into the log group that service
+        // vends for them, which is where a client queries spans as logs.
+        crate::state::span_delivery::deliver(&*self.engine, &region, &accepted);
 
         Ok(PutTraceSegmentsOutput {
             unprocessed_trace_segments: Some(

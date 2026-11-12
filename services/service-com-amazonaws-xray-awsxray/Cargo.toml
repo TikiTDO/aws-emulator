@@ -24,6 +24,10 @@ tracing = { workspace = true }
 # `stable_hex_id`: the one deterministic mixing function a service derives a
 # wire-visible id with, rather than a copy per crate.
 service-common = { path = "../common" }
+# The store an accepted span is DELIVERED to while the account's trace segment
+# destination is CloudWatch Logs — the one CloudWatch Logs' own readers answer
+# from, so a delivered span and `FilterLogEvents` cannot disagree.
+service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

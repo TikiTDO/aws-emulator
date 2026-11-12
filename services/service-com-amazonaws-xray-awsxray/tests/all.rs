@@ -98,6 +98,9 @@ mod sampling_targets_for_a_divided_reservoir;
 #[path = "all/service_graph.rs"]
 mod service_graph;
 
+#[path = "all/service_map_reachability.rs"]
+mod service_map_reachability;
+
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 
@@ -127,6 +130,9 @@ mod trace_retrieval_lifecycle;
 
 #[path = "all/trace_segment_destination.rs"]
 mod trace_segment_destination;
+
+#[path = "all/transaction_search_span_delivery.rs"]
+mod transaction_search_span_delivery;
 
 #[path = "all/unconvertible_time_member.rs"]
 mod unconvertible_time_member;

@@ -94,6 +94,7 @@ pub mod query_window;
 pub mod retrievals;
 pub mod sampling_rules;
 pub mod sampling_statistics;
+pub mod span_delivery;
 
 // Each part above owns one concern of this service's state and is re-exported
 // here, so every handler keeps reaching the store through `crate::state::…` and
@@ -3468,6 +3469,19 @@ impl ComAmazonawsXrayAwsxrayState {
         {
             self.trace_segment_destination.active_at = None;
         }
+    }
+
+    /// Whether an accepted span is DELIVERED to CloudWatch Logs: the account's
+    /// destination is [`CLOUD_WATCH_LOGS_DESTINATION`] and the switch to it is
+    /// in effect.
+    ///
+    /// A switch still `PENDING` has not taken effect — the service is still
+    /// sending where it was — so nothing is delivered until the clock makes it
+    /// `ACTIVE` ([`Self::settle_trace_segment_destination`]), which is why the
+    /// caller settles the record before asking.
+    pub fn delivers_spans_to_cloud_watch_logs(&self) -> bool {
+        self.trace_segment_destination.destination == CLOUD_WATCH_LOGS_DESTINATION
+            && self.trace_segment_destination.status() == DESTINATION_STATUS_ACTIVE
     }
 
     /// Point the service at `destination`, and record `spans_log_group_kms_key_id`

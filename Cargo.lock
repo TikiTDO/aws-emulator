@@ -20116,6 +20116,7 @@ dependencies = [
  "hex",
  "http",
  "serde_json",
+ "service-com-amazonaws-cloudwatchlogs-logs-20140328",
  "service-common",
  "sha2 0.10.9",
  "tokio",

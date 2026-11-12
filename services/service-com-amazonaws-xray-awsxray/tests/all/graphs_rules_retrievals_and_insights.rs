@@ -650,7 +650,7 @@ async fn the_service_graph_pages_and_resumes_exactly_once() {
         let base = now() - 1_800.0;
         let trace = trace_id(110);
         let mut documents =
-            vec![root_document("f0f0f0f0f0f0f0f0", &trace, "svc-00", base, Some(base + 1.0))
+            vec![root_document("f0f0f0f0f0f0f0f0", &trace, "svc-000", base, Some(base + 1.0))
                 .to_string()];
         for index in 1..count {
             documents.push(
@@ -658,7 +658,7 @@ async fn the_service_graph_pages_and_resumes_exactly_once() {
                     &format!("f{index}f{index}f{index}f{index}f{index}f{index}f{index}f{index}"),
                     "f0f0f0f0f0f0f0f0",
                     &trace,
-                    &format!("svc-{index:02}"),
+                    &format!("svc-{index:03}"),
                     base + 0.1,
                     base + 0.2,
                     None,
@@ -703,10 +703,13 @@ async fn the_service_graph_pages_and_resumes_exactly_once() {
                 break;
             }
         }
-        let expected: Vec<String> = std::iter::once("svc-00".to_string())
+        // Zero-padded to the width of the largest index a row seeds, so the
+        // name order the graph answers in IS the index order asserted here
+        // however many services a page carries.
+        let expected: Vec<String> = std::iter::once("svc-000".to_string())
             // The root service's `client` node carries the root's own name, so
             // it pages beside it.
-            .chain((0..count).map(|index| format!("svc-{index:02}")))
+            .chain((0..count).map(|index| format!("svc-{index:03}")))
             .collect();
         assert_eq!(
             seen, expected,
@@ -1640,6 +1643,13 @@ async fn a_service_graph_of_a_group_resolves_the_group_and_applies_its_filter() 
 
     // A group with no filter expression selects everything in the window, by
     // either selector.
+    //
+    // "Everything" is every service the window holds PLUS the `client` node each
+    // ROOT service is reached through, which the model documents as a node of
+    // the map in its own right — so the count is derived from the fixture rather
+    // than from how much of the map one page happens to carry.
+    let roots = node_cases().iter().filter(|case| case.root).count();
+    let whole_map = node_cases().len() + roots;
     for (label, body) in [
         ("by GroupName", json!({"GroupName": "Default"})),
         ("by GroupARN", json!({"GroupARN": unfiltered_arn})),
@@ -1651,7 +1661,7 @@ async fn a_service_graph_of_a_group_resolves_the_group_and_applies_its_filter() 
         );
         assert_eq!(
             array(&answer.body, "Services").len(),
-            node_cases().len(),
+            whole_map,
             "case {label:?}: the graph must carry every service in the window, got {answer:?}"
         );
     }

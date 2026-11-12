@@ -275,9 +275,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// How many `Service` values one page carries.
 ///
 /// The model declares no page size for `GetServiceGraph`, so this is the
-/// emulator's: a `NextToken` is emitted only when the graph exceeded it, and
+/// emulator's — and it is sized for the WHOLE map of a window rather than a
+/// handful of its nodes. The service map has no selector but the window, every
+/// `Edge` names its downstream node by a `ReferenceId` that may land on any
+/// page, and a client reads the map to discover what it is talking to, so the
+/// map is only useful complete: a client walks pages until the token runs out,
+/// and whatever page size this read publishes is therefore the number of nodes
+/// such a walk reaches per request it makes. A page of a few nodes puts the
+/// nodes of an account with many services past any walk a client makes, which
+/// reports a map that is silently missing services rather than a map. So a
+/// `NextToken` is emitted only for a map larger than a page this size, and
 /// resuming from that token returns the remainder.
-pub const SERVICE_GRAPH_PAGE_SIZE: usize = 5;
+pub const SERVICE_GRAPH_PAGE_SIZE: usize = 100;
 
 /// Refuse the request with the error this operation models for an invalid one.
 fn refuse(message: String) -> GetServiceGraphError {
