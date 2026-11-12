@@ -260,7 +260,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::EventConfigurationTarget::Trail(identifier) => {
                 // A malformed identifier is refused as the form it was written
                 // in, the way every other trail operation refuses it.
-                let addressed = store.resolve_addressed(&identifier, &region).map_err(
+                let addressed = store.resolve(&identifier, &region).map_err(
                     |rejection| match rejection {
                         crate::state::IdentifierRejection::InvalidArn(message) => {
                             GetEventConfigurationErrorModeled::CloudTrailARNInvalidException(
@@ -278,15 +278,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         }
                     },
                 )?;
-                let Some(record) = addressed.record else {
+                let Some(record) = addressed else {
                     // The model says 404 for a not-found trail; CloudTrail answers
-                    // 400 (`crate::state::TRAIL_NOT_FOUND_STATUS`), and the refusal
-                    // names the trail by the ARN the identifier resolved to
-                    // (`crate::state::AddressedTrail::not_found_message`).
+                    // 400 (`crate::state::TRAIL_NOT_FOUND_STATUS`), and this
+                    // operation's recorded refusal names the identifier the request
+                    // sent, as it sent it — not an ARN expanded from it
+                    // (`crate::state::unknown_trail_message`).
                     return Err(crate::scaffolded::Scaffolded::modeled_with_status(
                         GetEventConfigurationErrorModeled::TrailNotFoundException(
                             TrailNotFoundException {
-                                message: Some(addressed.not_found_message()),
+                                message: Some(crate::state::unknown_trail_message(&identifier)),
                             },
                         ),
                         crate::state::TRAIL_NOT_FOUND_STATUS,

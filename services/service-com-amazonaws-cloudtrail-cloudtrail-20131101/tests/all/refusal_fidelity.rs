@@ -12,8 +12,9 @@
 //!
 //! * a trail refusal's subject is the trail the operation RESOLVED the request to:
 //!   the fully-qualified trail ARN for every operation that resolves one Region's
-//!   trail, and the identifier as the caller wrote it for the operations whose own
-//!   recorded refusal echoes it (`GetTrail`, `GetInsightSelectors`);
+//!   trail to drive or configure it, and the identifier as the caller wrote it for the
+//!   operations that take it as a name to look up (`GetTrail`, `GetInsightSelectors`,
+//!   `GetEventConfiguration`, `PutEventConfiguration`);
 //! * `CreateTrail`'s duplicate-name refusal names the trail the request asked for and
 //!   the ACCOUNT that already holds one of that name;
 //! * an invalid trail name is refused for the ONE rule it broke, with the rules
@@ -122,9 +123,9 @@ fn advanced_with_values(count: usize) -> Value {
     json!([{ "Name": "generated", "FieldSelectors": field_selectors }])
 }
 
-/// Every operation that resolves a trail identifier to ONE Region's trail, as a
-/// request naming `identifier`: these name the resolved trail ARN in a not-found
-/// refusal.
+/// Every operation that resolves a trail identifier to ONE Region's trail in order to
+/// drive or configure it, as a request naming `identifier`: these name the resolved
+/// trail ARN in a not-found refusal.
 fn arn_naming_requests(identifier: &str) -> Vec<(&'static str, Value)> {
     vec![
         ("UpdateTrail", json!({ "Name": identifier })),
@@ -141,6 +142,17 @@ fn arn_naming_requests(identifier: &str) -> Vec<(&'static str, Value)> {
             "PutInsightSelectors",
             json!({ "TrailName": identifier, "InsightSelectors": insights_statement() }),
         ),
+    ]
+}
+
+/// Every operation that takes the trail identifier as a name to LOOK UP, as a request
+/// naming `identifier`: these name that identifier as the request wrote it. Which
+/// subject each operation states is pinned per operation by its own recorded refusal;
+/// `tests/all/trail_not_found_identifier_echo.rs` holds the rule over both groups.
+fn name_echoing_requests(identifier: &str) -> Vec<(&'static str, Value)> {
+    vec![
+        ("GetTrail", json!({ "Name": identifier })),
+        ("GetInsightSelectors", json!({ "TrailName": identifier })),
         ("GetEventConfiguration", json!({ "TrailName": identifier })),
         (
             "PutEventConfiguration",
@@ -151,10 +163,10 @@ fn arn_naming_requests(identifier: &str) -> Vec<(&'static str, Value)> {
 
 /// A well-formed identifier that names no trail is `TrailNotFoundException` (HTTP 400)
 /// whose subject is the trail the operation resolved: its fully-qualified ARN for
-/// every operation that resolves one Region's trail, whichever form the caller wrote,
-/// and the identifier as given for the two operations whose own recorded refusal
-/// echoes it. The rows differ in the identifier's FORM (bare name, trail ARN), its
-/// length (each published bound) and the Region it pins.
+/// every operation that resolves one Region's trail to drive or configure it, whichever
+/// form the caller wrote, and the identifier as given for the operations that take it
+/// as a name to look up. The rows differ in the identifier's FORM (bare name, trail
+/// ARN), its length (each published bound) and the Region it pins.
 #[tokio::test]
 async fn a_trail_not_found_refusal_names_the_trail_the_operation_resolved() {
     let emulator = Emulator::new();
@@ -205,13 +217,10 @@ async fn a_trail_not_found_refusal_names_the_trail_the_operation_resolved() {
             );
         }
 
-        // The two operations whose recorded refusal echoes the caller's identifier
-        // rather than resolving an ARN for it.
+        // The operations whose recorded refusal names the caller's identifier as
+        // written rather than resolving an ARN for it.
         let echoed = format!("Unknown trail: {identifier} for the user: {account}");
-        for (operation, request) in [
-            ("GetTrail", json!({ "Name": identifier })),
-            ("GetInsightSelectors", json!({ "TrailName": identifier })),
-        ] {
+        for (operation, request) in name_echoing_requests(&identifier) {
             let case = format!("{operation} with {case}");
             let reply = emulator.call(operation, &request).await;
             reply.expect_error(&case, NOT_FOUND_STATUS, "TrailNotFoundException");

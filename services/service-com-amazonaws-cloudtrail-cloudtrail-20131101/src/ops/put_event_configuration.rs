@@ -505,14 +505,15 @@ fn configure_trail(
             )
             .into())
         }
-        crate::state::TrailForMutation::Absent { name } => {
+        crate::state::TrailForMutation::Absent { .. } => {
             // The model says 404 for a not-found trail; CloudTrail answers 400
-            // (`crate::state::TRAIL_NOT_FOUND_STATUS`), and the refusal names the
-            // trail by the ARN the identifier resolved to
-            // (`crate::state::trail_not_found_arn_message`).
+            // (`crate::state::TRAIL_NOT_FOUND_STATUS`), and this operation's recorded
+            // refusal names the identifier the request sent, as it sent it — not an
+            // ARN expanded from it (`crate::state::unknown_trail_message`), which is
+            // the subject `GetEventConfiguration` states too.
             return Err(crate::scaffolded::Scaffolded::modeled_with_status(
                 PutEventConfigurationErrorModeled::TrailNotFoundException(TrailNotFoundException {
-                    message: Some(crate::state::trail_not_found_arn_message(region, &name)),
+                    message: Some(crate::state::unknown_trail_message(identifier)),
                 }),
                 crate::state::TRAIL_NOT_FOUND_STATUS,
             ))

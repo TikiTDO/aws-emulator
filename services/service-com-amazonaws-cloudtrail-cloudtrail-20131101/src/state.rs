@@ -531,9 +531,18 @@ pub fn sns_topic_arn(region: &str, topic: &str) -> String {
 /// The refusal text for a well-formed identifier that names no trail, shared by
 /// every operation that answers `TrailNotFoundException`.
 ///
-/// It names the identifier EXACTLY as the caller wrote it — a bare name or a trail
-/// ARN — and the account the lookup ran in, because a trail name is scoped to one
-/// account and Region, so "no trail of this name here" is the whole refusal.
+/// It names the trail by the `subject` the calling operation states — see
+/// [`trail_not_found_arn_message`] for which operations state which — and the account
+/// the lookup ran in, because a trail name is scoped to one account and Region, so "no
+/// trail of this name here" is the whole refusal.
+///
+/// Called with the request's OWN identifier member, as received, by the operations that
+/// take the member as a trail name to look up rather than resolving it to one Region's
+/// trail: `GetTrail`, `GetInsightSelectors`, `GetEventConfiguration` and
+/// `PutEventConfiguration`, each pinned by its own recorded refusal, plus the tag
+/// writes. Those never pass a value SYNTHESIZED from the identifier — an ARN the
+/// service expanded a bare name into — because the recorded refusal of each carries
+/// the bare name the request sent.
 pub fn unknown_trail_message(identifier: &str) -> String {
     format!(
         "Unknown trail: {identifier} for the user: {}",
@@ -695,15 +704,15 @@ fn parse_trail_arn(value: &str) -> Result<TrailIdentifier, IdentifierRejection> 
 pub const TRAIL_NOT_FOUND_STATUS: u16 = 400;
 
 /// The refusal text that names the trail by the ARN the identifier RESOLVED to —
-/// the subject every trail operation's `TrailNotFoundException` carries unless its
-/// own recorded refusal echoes the caller's identifier instead.
+/// the subject the operations that address ONE Region's trail to drive or configure it
+/// carry, whichever form the caller wrote.
 ///
-/// A caller who passed a bare name is told which Region's trail was looked for,
-/// which is what the recorded refusals of `GetTrailStatus`, `DeleteTrail`,
-/// `StartLogging`, `StopLogging`, `UpdateTrail` and `PutEventSelectors` carry. The
-/// three exceptions, each pinned by its own recording, echo the identifier as the
-/// request sent it ([`unknown_trail_message`]): `GetTrail`, `GetInsightSelectors`
-/// and the tag writes.
+/// A caller who passed a bare name is told which Region's trail was looked for, which
+/// is what the recorded refusals of `GetTrailStatus`, `DeleteTrail`, `StartLogging`,
+/// `StopLogging`, `UpdateTrail`, `GetEventSelectors` and `PutEventSelectors` carry: a
+/// bare name in the request, the fully-qualified trail ARN in the refusal. The
+/// operations whose own recording carries the identifier as RECEIVED instead take it
+/// from the request member ([`unknown_trail_message`]) and never come here.
 pub fn trail_not_found_arn_message(region: &str, name: &str) -> String {
     unknown_trail_message(&trail_arn(region, name))
 }
