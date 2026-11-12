@@ -37,6 +37,8 @@ mod custom_action_fail_closed;
 mod custom_action_listing;
 #[path = "all/custom_action_listing_pagination.rs"]
 mod custom_action_listing_pagination;
+#[path = "all/custom_action_reconciliation.rs"]
+mod custom_action_reconciliation;
 #[path = "all/custom_action_update.rs"]
 mod custom_action_update;
 #[path = "all/error_message_member.rs"]
