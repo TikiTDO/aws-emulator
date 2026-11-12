@@ -473,8 +473,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 client_token: input.client_token.clone(),
                 // "This returns a null response if the Dedicated Host doesn't have an
                 // associated reservation" (`Host$HostReservationId`):
-                // `PurchaseHostReservation` is the operation that would give it one, and it
-                // is still a stub.
+                // `PurchaseHostReservation` is what gives a host one, and no reservation
+                // covers a host this call has only just allocated.
                 host_reservation_id: None,
                 // Nothing is running on a freshly allocated host.
                 instances: Some(Vec::new()),

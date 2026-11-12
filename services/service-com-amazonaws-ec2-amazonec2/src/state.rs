@@ -1861,6 +1861,7 @@ use crate::ops::types::{
     VolumeModification,
     EbsBlockDevice,
     EbsInfo, EbsOptimizedInfo, EfaInfo, EnableFastLaunchOutput, GroupIdentifier, Host,
+    HostReservation,
     INSTANCE_TYPE_VALUES, Image,
     ImageCriterion, ImportSnapshotTask, Instance, InstanceApplicationStatus, InstanceStorageInfo,
     InstanceTypeInfo,
@@ -2433,6 +2434,12 @@ mod ipam_deletion;
 mod ipam_pool_cidrs;
 mod vpc_endpoints_and_transit_gateway_attachments;
 mod prefix_lists_and_dedicated_hosts;
+/// The Dedicated Host RESERVATION store: the states a reservation takes, its id form, the
+/// stored record `PurchaseHostReservation` writes and `DescribeHostReservations` reports, and
+/// the store's own ceiling — in a file of its own rather than as more lines here. Everything
+/// it declares is re-exported below, so a handler reaches it as
+/// `crate::state::HostReservationRecord` like any primitive of this module.
+mod host_reservations;
 mod network_interfaces_and_transit_gateways;
 mod elastic_ips_and_transit_gateway_route_tables;
 mod elastic_ip_associations;
@@ -2508,6 +2515,7 @@ pub use elastic_ip_associations::*;
 pub use network_interfaces_and_transit_gateways::*;
 pub use network_interfaces_and_transit_gateways::INVALID_ROUTE_TABLE_ID_NOT_FOUND;
 pub use prefix_lists_and_dedicated_hosts::*;
+pub use host_reservations::*;
 pub use vpc_endpoints_and_transit_gateway_attachments::*;
 pub use ipam::*;
 pub use ipam_deletion::*;

@@ -806,6 +806,10 @@ mod create_dhcp_options;
 mod create_security_group;
 #[path = "all/dedicated_hosts.rs"]
 mod dedicated_hosts;
+// The Dedicated Host RESERVATION plane: what `PurchaseHostReservation` buys and stores, what
+// `DescribeHostReservations` reports, selects and pages, and what each of them refuses.
+#[path = "all/host_reservations.rs"]
+mod host_reservations;
 #[path = "all/default_network.rs"]
 mod default_network;
 // The account's default credit option for CPU usage of a burstable instance family, per

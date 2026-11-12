@@ -77,11 +77,12 @@
 use super::types::*;
 
 use crate::ops::describe_host_reservation_offerings::{
-    HOST_OFFERING_CURRENCY_CODE, format_price_milli, host_offering_by_id,
+    HOST_OFFERING_CURRENCY_CODE, format_price_milli, offering_instance_family_mismatch,
+    require_host_offering,
 };
 use crate::scaffolded::Scaffolded;
 use crate::state::{
-    MAX_RESOURCE_IDS, deduplicate_ids, echoed_resource_id, host_id_is_well_formed,
+    MAX_RESOURCE_IDS, deduplicate_ids, host_id_is_well_formed,
     host_instance_family, host_is_released, invalid_parameter_value, missing_parameter,
     require_service_state, unresolvable_host_ids_message,
 };
@@ -234,14 +235,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "The offering ID of the reservation" (`$OfferingId`): an id no entry of the
         // published catalog carries names no offering, so there is nothing to price — refused
-        // the way `crate::ops::purchase_host_reservation` refuses the same member.
-        let Some(offering) = host_offering_by_id(&input.offering_id) else {
-            return Err(invalid_parameter_value(format!(
-                "Invalid value '{offering_id}' for offeringId. An offering id is one of \
-                 those DescribeHostReservationOfferings reports",
-                offering_id = echoed_resource_id(&input.offering_id),
-            )));
-        };
+        // through the one resolver `crate::ops::purchase_host_reservation` resolves the same
+        // member with.
+        let offering = require_host_offering(&input.offering_id)?;
 
         // "Preview a reservation purchase with configurations that MATCH THOSE OF YOUR
         // DEDICATED HOST": a reservation covers "the instance family on the Dedicated Host
@@ -255,13 +251,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .and_then(host_instance_family)
                 .unwrap_or_default();
             if family != offering.instance_family {
-                return Err(invalid_parameter_value(format!(
-                    "Invalid value '{offering_id}' for offeringId. It is an offering for \
-                     instance family '{offered}', and Dedicated Host '{host_id}' is of \
-                     instance family '{family}'",
-                    offering_id = echoed_resource_id(&input.offering_id),
-                    offered = offering.instance_family,
-                )));
+                return Err(offering_instance_family_mismatch(
+                    &input.offering_id,
+                    offering,
+                    host_id,
+                    family,
+                ));
             }
         }
 
@@ -270,9 +265,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // price is the offering's price for one host times the hosts the reservation would
         // cover, held in thousandths of the currency the way the catalog holds them, so the
         // totals below cannot drift from the entry they sum.
-        let hosts = i64::try_from(host_ids.len()).unwrap_or(i64::MAX);
-        let hourly_price_milli = offering.hourly_price_milli.saturating_mul(hosts);
-        let upfront_price_milli = offering.upfront_price_milli.saturating_mul(hosts);
+        let (hourly_price_milli, upfront_price_milli) =
+            offering.total_prices_milli(host_ids.len());
         let purchase = Purchase {
             currency_code: Some(HOST_OFFERING_CURRENCY_CODE.to_string()),
             duration: Some(offering.duration_seconds),

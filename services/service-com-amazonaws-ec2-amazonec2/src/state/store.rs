@@ -2390,6 +2390,15 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// names EVERY host of the one allocation, because one call allocates `Quantity` of
     /// them.
     pub dedicated_host_client_tokens: HashMap<String, Vec<String>>,
+    /// Every Dedicated Host reservation the account has purchased, by `HostReservationId`,
+    /// as [`HostReservationRecord`]s — the modelled [`HostReservation`] shape plus the two
+    /// instants the clock decides its state from (see
+    /// [`crate::state::host_reservations`]). Ordered by id, which is the order
+    /// `DescribeHostReservations` reports and pages over.
+    pub host_reservations: BTreeMap<String, HostReservationRecord>,
+    /// A `PurchaseHostReservation` `ClientToken` and the reservation that request bought, so
+    /// a repeat of the same request reports that reservation instead of buying a second one.
+    pub host_reservation_client_tokens: HashMap<String, String>,
     /// Every connection to one of the account's own VPC endpoint services, by
     /// `VpcEndpointId`, as the modelled [`VpcEndpointConnection`] shape itself — see the
     /// module docs. Ordered by endpoint id, which is the order
@@ -3444,6 +3453,9 @@ impl Default for ComAmazonawsEc2Amazonec2State {
             transit_gateway_prefix_list_references: BTreeMap::new(),
             dedicated_hosts: BTreeMap::new(),
             dedicated_host_client_tokens: HashMap::new(),
+            // A fresh account has purchased no Dedicated Host reservation.
+            host_reservations: BTreeMap::new(),
+            host_reservation_client_tokens: HashMap::new(),
             vpc_endpoint_connections: BTreeMap::new(),
             ipams: BTreeMap::new(),
             ipam_create_complete_at: BTreeMap::new(),

@@ -1,15 +1,32 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op PurchaseHostReservation
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `PurchaseHostReservation`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: buys ONE Dedicated Host reservation for the hosts the request names, from the
+//! offering `DescribeHostReservationOfferings` publishes under the id it names, and stores it
+//! for `DescribeHostReservations` to report. This is the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`PurchaseHostReservation::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! "This action results in the specified reservation being purchased and charged to your
+//! account", so the purchase is a WRITE: the reservation covers the whole `HostIdSet` (one
+//! host however many times the request names it), each of those hosts is left carrying its
+//! `HostReservationId`, and the charge is not settled the instant the call answers — the
+//! reservation is `payment-pending` until one [`crate::state::TRANSITION_DELAY`] has passed
+//! and `active` after it (see [`crate::state::host_reservations`]).
+//!
+//! What the request chooses, and what each choice is refused for:
+//!
+//! * `HostIdSet` names the hosts the reservation is associated with. "You must have ACTIVE
+//!   Dedicated Hosts in your account before you purchase a reservation", so an id this
+//!   account holds no host under — and one whose host it has given back — has nothing to
+//!   reserve.
+//! * `OfferingId` names the published offering, whose instance family must be the hosts' own:
+//!   "ensure that the instance family and Region of the offering matches that of the Dedicated
+//!   Hosts with which it is to be associated".
+//! * `LimitPrice` caps the purchase: "the specified limit is checked against the total upfront
+//!   cost of the reservation (calculated as the offering's upfront cost multiplied by the host
+//!   count). If the total upfront cost is greater than the specified price limit, the request
+//!   fails."
+//! * `ClientToken` makes the purchase idempotent: a repeat of one request reports the
+//!   reservation it already bought instead of buying a second one.
 //!
 //! ## Shape of an operation
 //!
@@ -158,6 +175,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `ctx` carries request metadata only; the hosts and the offering are each named by
         // the request and resolved against the store the engine on `self` holds.
         let _ = ctx;
+        use crate::ops::describe_host_reservation_offerings::{
+            HOST_OFFERING_CURRENCY_CODE, format_price_milli, offering_instance_family_mismatch,
+            parse_price_milli, require_host_offering,
+        };
         use crate::state;
 
         // Both `@required` members are modelled `clientOptional`, so a request that left one
@@ -188,11 +209,39 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // (`TagSpecifications`) — "you must specify the resource type to tag, otherwise the
         // request will fail" (`TagSpecification`), and the only type this action tags is the
         // reservation it buys.
-        let _tags: Vec<Tag> = state::tags_from_specifications(
+        let tags: Vec<Tag> = state::tags_from_specifications(
             input.tag_specifications.as_deref(),
-            RESOURCE_TYPE_DEDICATED_HOST_RESERVATION,
+            state::HOST_RESERVATION_TAGGABLE_RESOURCE,
             Self::NAME,
         )?;
+        // The token is kept for the life of the process, so its size is bounded the way every
+        // other `ClientToken` of this crate is.
+        if input
+            .client_token
+            .as_ref()
+            .is_some_and(|token| token.chars().count() > state::MAX_CLIENT_TOKEN_CHARS)
+        {
+            return Err(state::invalid_parameter_value(format!(
+                "clientToken accepts at most {maximum} characters",
+                maximum = state::MAX_CLIENT_TOKEN_CHARS,
+            )));
+        }
+        // "The specified limit is checked against the total upfront cost of the reservation"
+        // (`LimitPrice`) — a value that is no amount at all names no limit to check against,
+        // so it is refused for its FORM before anything is looked up, and the sentence names
+        // the form the member documents ("to indicate a limit price of USD 100, specify
+        // 100.00").
+        let limit_price_milli = match input.limit_price.as_deref() {
+            None => None,
+            Some(limit_price) => Some(parse_price_milli(limit_price).ok_or_else(|| {
+                state::invalid_parameter_value(format!(
+                    "Invalid value '{limit_price}' for limitPrice. A limit price is an amount \
+                     of {HOST_OFFERING_CURRENCY_CODE} with at most three decimal places, for \
+                     example 100.00",
+                    limit_price = state::echoed_resource_id(limit_price),
+                ))
+            })?),
+        };
 
         let handle = state::require_service_state(&*self.engine)?;
         let mut store = handle.lock();
@@ -214,42 +263,228 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         {
             return Err(host_id_malformed(host_id));
         }
-        if input
-            .host_id_set
-            .iter()
-            .any(|host_id| !store.dedicated_hosts.contains_key(host_id))
-        {
+        if input.host_id_set.iter().any(|host_id| {
+            store
+                .dedicated_hosts
+                .get(host_id)
+                .is_none_or(state::host_is_released)
+        }) {
             return Err(host_ids_not_valid(&input.host_id_set));
         }
+        // One host is reserved ONCE however many times the request names it: the reservation
+        // covers a SET of hosts, and its `Count` is how many hosts that is.
+        let host_ids = state::deduplicate_ids(&input.host_id_set);
 
-        // "The ID of the offering" (`OfferingId`): a value that is not an offering id at all
-        // names nothing in the catalog `DescribeHostReservationOfferings` publishes, so it is
-        // refused for its form before anything is purchased.
-        if !state::prefixed_id_is_well_formed(HOST_OFFERING_ID_PREFIX, &input.offering_id) {
+        // "The ID of the offering" (`OfferingId`): an id no entry of the catalog
+        // `DescribeHostReservationOfferings` publishes carries names nothing that can be
+        // bought, resolved through the one resolver the purchase PREVIEW resolves it with, so
+        // the two cannot disagree about which ids name an offering.
+        let offering = require_host_offering(&input.offering_id)?;
+
+        // "Ensure that the instance family and Region of the offering matches that of the
+        // Dedicated Hosts with which it is to be associated": a reservation covers "the
+        // instance family on the Dedicated Host that the reservation can be associated with"
+        // (`Purchase$InstanceFamily`), so an offering of another family cannot be applied to
+        // these hosts.
+        for host_id in &host_ids {
+            let family = store
+                .dedicated_hosts
+                .get(host_id)
+                .and_then(state::host_instance_family)
+                .unwrap_or_default();
+            if family != offering.instance_family {
+                return Err(offering_instance_family_mismatch(
+                    &input.offering_id,
+                    offering,
+                    host_id,
+                    family,
+                ));
+            }
+        }
+
+        // "The specified limit is checked against the total upfront cost of the reservation
+        // (calculated as the offering's upfront cost multiplied by the host count). If the
+        // total upfront cost is greater than the specified price limit, the request fails"
+        // (`LimitPrice`) — so the limit is checked against the charge this purchase would
+        // make, and nothing is bought when it is above it.
+        let (_, upfront_price_milli) = offering.total_prices_milli(host_ids.len());
+        if limit_price_milli.is_some_and(|limit| upfront_price_milli > limit) {
             return Err(state::invalid_parameter_value(format!(
-                "Invalid value '{offering_id}' for offeringId. An offering id is one of \
-                 those DescribeHostReservationOfferings reports",
-                offering_id = input.offering_id,
+                "Invalid value '{limit_price}' for limitPrice. The total upfront cost of this \
+                 reservation is {total} {HOST_OFFERING_CURRENCY_CODE}, above that limit",
+                limit_price =
+                    state::echoed_resource_id(input.limit_price.as_deref().unwrap_or_default()),
+                total = format_price_milli(upfront_price_milli),
             )));
         }
 
-        // Buying the reservation itself is still unwritten, so the operation answers the
-        // scaffold's 501 rather than a success it cannot back with state. Every refusal the
-        // request earns is minted above, before this point, so a client learns that its
-        // input is wrong from the code the real service answers rather than from this.
-        Err(crate::scaffolded::Scaffolded::not_implemented(Self::NAME))
+        // Idempotency: "unique, case-sensitive identifier that you provide to ensure the
+        // idempotency of the request" (`ClientToken`) — one token names the reservation it
+        // bought, so a replay reports that reservation and charges the account nothing more.
+        // Asked after every refusal above, so a replay of a request that was never valid is
+        // still refused, and before the ceilings, because it stores nothing.
+        if let Some(reservation_id) = input
+            .client_token
+            .as_deref()
+            .and_then(|token| store.host_reservation_client_tokens.get(token))
+            .cloned()
+        {
+            let Some(record) = store.host_reservations.get(&reservation_id) else {
+                return Err(crate::scaffolded::Scaffolded::internal_error(format!(
+                    "the reservation '{reservation_id}' this clientToken bought could not be \
+                     read back"
+                )));
+            };
+            return purchased(input.client_token.as_deref(), record);
+        }
+
+        // Nothing in this emulator reclaims a stored reservation, so both ceilings — the
+        // number of records and the caller-chosen bytes they hold — are asked BEFORE the
+        // write, a count being no bound on the bytes a record carries.
+        if !store.has_host_reservation_capacity() {
+            return Err(state::host_reservation_limit_exceeded(format!(
+                "This emulator holds {held} of at most {maximum} Dedicated Host reservations, \
+                 so it cannot purchase another",
+                held = store.host_reservations.len(),
+                maximum = state::MAX_STORED_HOST_RESERVATIONS,
+            )));
+        }
+        let payload_bytes = state::STORED_RECORD_OVERHEAD_BYTES
+            .saturating_add(state::host_reservation_payload_bytes(&tags));
+        if store.would_exceed_stored_bytes(payload_bytes) {
+            return Err(state::host_reservation_limit_exceeded(format!(
+                "This emulator holds {held} of at most {maximum} bytes of caller-supplied \
+                 data, so it cannot store {payload_bytes} more",
+                held = store.stored_bytes(),
+                maximum = state::MAX_STORED_BYTES,
+            )));
+        }
+
+        // "The date and time that the reservation started" (`HostReservation$Start`) is the
+        // instant this call is served at, and its `End` that instant plus the offering's term.
+        let started_at = ::std::time::SystemTime::now();
+        let term = ::std::time::Duration::from_secs(
+            u64::try_from(offering.duration_seconds).unwrap_or_default(),
+        );
+        let ends_at = started_at.checked_add(term).unwrap_or(started_at);
+        let reservation_id = store.next_id(state::HOST_RESERVATION_ID_PREFIX);
+        let record = state::HostReservationRecord {
+            view: HostReservation {
+                // "The number of Dedicated Hosts the reservation is associated with"
+                // (`HostReservation$Count`).
+                count: Some(i32::try_from(host_ids.len()).unwrap_or(i32::MAX)),
+                currency_code: Some(HOST_OFFERING_CURRENCY_CODE.to_string()),
+                duration: Some(offering.duration_seconds),
+                end: Some(state::system_time_to_date_time(ends_at)),
+                host_id_set: Some(host_ids.clone()),
+                host_reservation_id: Some(reservation_id.clone()),
+                // The offering's own prices, which `Count` above says how many hosts are
+                // charged at them: the TOTALS over those hosts are what this call answers
+                // (`TotalHourlyPrice`, `TotalUpfrontPrice`), so one reservation quotes the
+                // same prices as the offering a describe published it under.
+                hourly_price: Some(format_price_milli(offering.hourly_price_milli)),
+                instance_family: Some(offering.instance_family.clone()),
+                offering_id: Some(offering.offering_id.clone()),
+                payment_option: Some(offering.payment_option.to_string()),
+                start: Some(state::system_time_to_date_time(started_at)),
+                // `State` is not stored: the two instants beside this view decide which word a
+                // reader sees ([`state::HostReservationRecord::state_at`]).
+                state: None,
+                upfront_price: Some(format_price_milli(offering.upfront_price_milli)),
+                tags: Some(tags),
+            },
+            // The charge "is billed immediately" but settles after the call: the reservation is
+            // `payment-pending` until this instant and `active` from it on.
+            active_at: state::due_instant(state::TRANSITION_DELAY),
+            ends_at,
+        };
+        // The insert enforces the store's count ceiling for itself, so it can refuse — which
+        // the gate above has already made room for, so a refusal here means this handler and
+        // the store disagree rather than that the request was wrong.
+        let Some(reservation_id) = store.insert_host_reservation(record) else {
+            return Err(crate::scaffolded::Scaffolded::internal_error(format!(
+                "the store refused a Dedicated Host reservation the capacity gate had already \
+                 made room for ({held} of at most {maximum} held)",
+                held = store.host_reservations.len(),
+                maximum = state::MAX_STORED_HOST_RESERVATIONS,
+            )));
+        };
+
+        // "The reservation ID of the Dedicated Host" (`Host$HostReservationId`): every host
+        // this reservation covers now has one, which is what `DescribeHosts` reports and its
+        // `host-reservation-id` filter selects on.
+        for host_id in &host_ids {
+            if let Some(host) = store.dedicated_hosts.get_mut(host_id) {
+                host.host_reservation_id = Some(reservation_id.clone());
+            }
+        }
+        if let Some(token) = input.client_token.clone() {
+            store
+                .host_reservation_client_tokens
+                .insert(token, reservation_id.clone());
+        }
+
+        // Answered from the record READ BACK out of the store, so the caller is told about a
+        // reservation a later describe will find rather than about one this handler merely
+        // built — and through the same projection a replayed token is answered with.
+        let Some(stored) = store.host_reservations.get(&reservation_id) else {
+            return Err(crate::scaffolded::Scaffolded::internal_error(format!(
+                "the newly purchased reservation '{reservation_id}' could not be read back"
+            )));
+        };
+        debug_assert_eq!(
+            stored.view.host_id_set.as_deref().unwrap_or_default().len(),
+            host_ids.len(),
+            "the stored reservation covers the hosts this purchase was priced for"
+        );
+        purchased(input.client_token.as_deref(), stored)
     }
 }
 
-/// The `ResourceType` a `TagSpecification` of this action may name: the host reservation it
-/// buys, as the `ResourceType` enum spells it
-/// (`smithy_query(query="shape",shape="ResourceType")`).
-const RESOURCE_TYPE_DEDICATED_HOST_RESERVATION: &str = "dedicated-host-reservation";
+/// The answer this operation gives for the stored reservation `record`: the purchase it names,
+/// and the offering's prices over every host that reservation covers.
+///
+/// ONE projection, so a request that bought the reservation and a replay of it under the same
+/// `ClientToken` are answered identically, and both read the reservation out of the STORE
+/// rather than from anything a handler held. The prices come from the offering the reservation
+/// was bought from, which is the one the catalog still publishes under that id.
+fn purchased(
+    client_token: Option<&str>,
+    record: &crate::state::HostReservationRecord,
+) -> Result<PurchaseHostReservationOutput, PurchaseHostReservationError> {
+    use crate::ops::describe_host_reservation_offerings::{
+        HOST_OFFERING_CURRENCY_CODE, format_price_milli, require_host_offering,
+    };
 
-/// The id prefix every Dedicated Host reservation OFFERING carries, as
-/// `crate::ops::describe_host_reservation_offerings` mints the ids of the catalog it
-/// publishes (`hro-…`).
-const HOST_OFFERING_ID_PREFIX: &str = "hro";
+    let view = &record.view;
+    let offering = require_host_offering(view.offering_id.as_deref().unwrap_or_default())?;
+    let host_ids = view.host_id_set.clone().unwrap_or_default();
+    let (hourly_price_milli, upfront_price_milli) = offering.total_prices_milli(host_ids.len());
+    Ok(PurchaseHostReservationOutput {
+        // "Unique, case-sensitive identifier that you provide to ensure the idempotency of the
+        // request" (`$ClientToken`): echoed back, and absent when the request carried none.
+        client_token: client_token.map(str::to_string),
+        currency_code: Some(HOST_OFFERING_CURRENCY_CODE.to_string()),
+        purchase: Some(vec![Purchase {
+            currency_code: Some(HOST_OFFERING_CURRENCY_CODE.to_string()),
+            duration: Some(offering.duration_seconds),
+            host_id_set: Some(host_ids),
+            // "The ID of the reservation" (`Purchase$HostReservationId`): this purchase bought
+            // one, where the PREVIEW of it reports none.
+            host_reservation_id: view.host_reservation_id.clone(),
+            hourly_price: Some(format_price_milli(offering.hourly_price_milli)),
+            instance_family: Some(offering.instance_family.clone()),
+            payment_option: Some(offering.payment_option.to_string()),
+            upfront_price: Some(format_price_milli(offering.upfront_price_milli)),
+        }]),
+        // "The total hourly price of the reservation calculated per hour"
+        // (`$TotalHourlyPrice`) and "the total amount charged to your account when you purchase
+        // the reservation" (`$TotalUpfrontPrice`): the offering's prices over every host the
+        // reservation covers.
+        total_hourly_price: Some(format_price_milli(hourly_price_milli)),
+        total_upfront_price: Some(format_price_milli(upfront_price_milli)),
+    })
+}
 
 /// `InvalidHostID.Malformed` (HTTP 400): the request named something that is not a Dedicated
 /// Host id at all, so there is nothing to look up.

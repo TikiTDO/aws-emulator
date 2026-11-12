@@ -519,6 +519,100 @@ impl HostOfferingRecord {
             upfront_price: Some(format_price_milli(self.upfront_price_milli)),
         }
     }
+
+    /// This offering's hourly and upfront prices over `hosts` Dedicated Hosts, in thousandths
+    /// of the currency: what one reservation covering that many hosts costs.
+    ///
+    /// ONE multiplication for the purchase and its preview, so the price a preview quotes and
+    /// the price a purchase charges for the same offering and the same hosts cannot drift
+    /// apart. Held in thousandths the way the catalog holds them, so the totals cannot drift
+    /// from the entry they sum either.
+    pub fn total_prices_milli(&self, hosts: usize) -> (i64, i64) {
+        let hosts = i64::try_from(hosts).unwrap_or(i64::MAX);
+        (
+            self.hourly_price_milli.saturating_mul(hosts),
+            self.upfront_price_milli.saturating_mul(hosts),
+        )
+    }
+}
+
+/// The published offering `offering_id` names, or the refusal EC2 answers an id that names
+/// none with: HTTP 400 `InvalidParameterValue`.
+///
+/// The ONE place an operation that ACTS on an offering resolves it, so the purchase and its
+/// preview cannot disagree about which ids name an offering or about how they refuse one that
+/// does not: an id outside the catalog, whatever its form, names nothing there is a price for.
+/// The describe above does NOT go through this — "the results describe all of the Dedicated
+/// Host reservation offerings", so for a SELECTION an id the catalog does not hold is a filter
+/// that matches nothing rather than a refusal.
+pub fn require_host_offering<E>(
+    offering_id: &str,
+) -> Result<&'static HostOfferingRecord, crate::scaffolded::Scaffolded<E>> {
+    host_offering_by_id(offering_id).ok_or_else(|| {
+        crate::state::invalid_parameter_value(format!(
+            "Invalid value '{offering_id}' for offeringId. An offering id is one of \
+             those DescribeHostReservationOfferings reports",
+            offering_id = crate::state::echoed_resource_id(offering_id),
+        ))
+    })
+}
+
+/// Refuse applying `offering` to a Dedicated Host of another instance family: HTTP 400
+/// `InvalidParameterValue`, naming both families.
+///
+/// "Ensure that the instance family and Region of the offering matches that of the Dedicated
+/// Hosts with which it is to be associated" (`DescribeHostReservationOfferings`), because a
+/// reservation covers "the instance family on the Dedicated Host that the reservation can be
+/// associated with" (`Purchase$InstanceFamily`) — so an offering of another family cannot be
+/// applied to that host, and the refusal names what the caller has to change. ONE sentence for
+/// the purchase and its preview, so the two refuse the same mismatch the same way.
+pub fn offering_instance_family_mismatch<E>(
+    offering_id: &str,
+    offering: &HostOfferingRecord,
+    host_id: &str,
+    host_family: &str,
+) -> crate::scaffolded::Scaffolded<E> {
+    crate::state::invalid_parameter_value(format!(
+        "Invalid value '{offering_id}' for offeringId. It is an offering for \
+         instance family '{offered}', and Dedicated Host '{host_id}' is of \
+         instance family '{host_family}'",
+        offering_id = crate::state::echoed_resource_id(offering_id),
+        offered = offering.instance_family,
+    ))
+}
+
+/// A price written as the decimal string a price member carries (`"100.00"`, `"1.499"`), in
+/// thousandths of its currency — the inverse of [`format_price_milli`], and `None` for a value
+/// that is no such price.
+///
+/// At most three decimal places, because that is the precision the catalog's prices are quoted
+/// in: a value naming a finer fraction asks for a price this emulator cannot hold, so it is
+/// refused rather than silently rounded. A point with no places after it is no amount either
+/// ("to indicate a limit price of USD 100, specify 100.00"), and a sign is no part of a price,
+/// so only digits either side of at most one point are accepted.
+pub fn parse_price_milli(price: &str) -> Option<i64> {
+    let (whole, fraction) = match price.split_once('.') {
+        None => (price, ""),
+        Some((_, "")) => return None,
+        Some((whole, fraction)) => (whole, fraction),
+    };
+    if whole.is_empty() || fraction.len() > 3 {
+        return None;
+    }
+    if !whole
+        .bytes()
+        .chain(fraction.bytes())
+        .all(|digit| digit.is_ascii_digit())
+    {
+        return None;
+    }
+    let whole: i64 = whole.parse().ok()?;
+    let mut milli: i64 = fraction.parse().unwrap_or(0);
+    // `"5"` is five tenths, not five thousandths: the places the value left out are zeros.
+    for _ in fraction.len()..3 {
+        milli = milli.saturating_mul(10);
+    }
+    whole.checked_mul(1_000)?.checked_add(milli)
 }
 
 /// A price held in thousandths of its currency, as the `String` price members quote it:

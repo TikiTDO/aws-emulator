@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeHostReservations
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeHostReservations`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: reports the Dedicated Host reservations [`crate::state`] holds — the ones
+//! `PurchaseHostReservation` bought — narrowed by `HostReservationIdSet` and the documented
+//! filters and paged by `MaxResults`/`NextToken`. This is the ONLY file to touch for this
+//! operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeHostReservations::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! This is a REPORT: the stored reservations are read and NOTHING is written, so two calls
+//! with the same request answer the same thing. A reservation's `State` is a fact of its age
+//! rather than something stored ([`crate::state::HostReservationRecord::state_at`]), so the
+//! word this reports follows the clock — `payment-pending` while the purchase's charge is
+//! settling, `active` after it, `retired` once the term has run out — without this handler
+//! touching the store.
 //!
 //! ## Shape of an operation
 //!
@@ -146,18 +148,313 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeHostReservations` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeHostReservationsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeHostReservations"))
+        use crate::scaffolded::Scaffolded;
+        use crate::state::{
+            CompiledFilter, MAX_FILTER_MATCH_STEPS, MAX_FILTER_VALUE_BYTES,
+            MAX_FILTER_VALUES, MAX_FILTERS, MAX_RESOURCE_IDS, MatchBudget, decode_page_token,
+            encode_page_token, invalid_pagination_token_for, matches_every_filter,
+            require_service_state,
+        };
+
+        // `ctx` carries request metadata only; this operation reads none of it — a reservation
+        // is held by the ACCOUNT, like the Dedicated Hosts it covers. The store is reached
+        // through the engine held on `self`.
+        let _ = ctx;
+
+        // "The host reservation IDs" (`HostReservationIdSet`): the list is resolved id by id
+        // below, so how many ids one request may name is capped first — the ceiling the rest
+        // of this crate puts on a caller-chosen id list — before any work proportional to it.
+        let requested_ids = input.host_reservation_id_set.clone().unwrap_or_default();
+        if requested_ids.len() > MAX_RESOURCE_IDS {
+            return Err(Scaffolded::invalid_parameter_value(format!(
+                "HostReservationIdSet carries {} ids, above the maximum of {MAX_RESOURCE_IDS}",
+                requested_ids.len()
+            )));
+        }
+
+        // "This value can be between 5 and 500. If maxResults is given a larger value than
+        // 500, you receive an error" (`DescribeHostReservationsRequest$MaxResults`) — the
+        // member targets a plain `Integer` with no `@range`, so the handler is the only place
+        // that bound is enforced.
+        if let Some(max_results) = input.max_results {
+            if !(MIN_RESERVATIONS_PER_PAGE..=MAX_RESERVATIONS_PER_PAGE).contains(&max_results) {
+                return Err(crate::state::max_results_outside_published_range(
+                    MIN_RESERVATIONS_PER_PAGE,
+                    MAX_RESERVATIONS_PER_PAGE,
+                ));
+            }
+        }
+
+        // Matching cost is filters x values x held values x stored reservations and the model
+        // bounds none of them, so the request-controlled factors are capped here, before any
+        // work proportional to them is done — and their PRODUCT is charged to one
+        // [`MatchBudget`] below, which is the bound the per-factor caps cannot give.
+        let supplied_filters = input.filter.as_ref().map_or(0, Vec::len);
+        if supplied_filters > MAX_FILTERS {
+            return Err(Scaffolded::invalid_parameter_value(format!(
+                "The request carries {supplied_filters} filters, above the maximum \
+                 of {MAX_FILTERS}"
+            )));
+        }
+
+        // A filter name this operation does not document is refused whether or not any
+        // reservation would have matched it, so an unsupported filter can never read as "no
+        // results".
+        let filters: &[Filter] = input.filter.as_deref().unwrap_or_default();
+        let mut selectors: Vec<CompiledFilter> = Vec::with_capacity(filters.len());
+        for filter in filters {
+            let name = filter.name.as_deref().unwrap_or_default();
+            if !is_documented_filter_name(name) {
+                return Err(Scaffolded::invalid_parameter_value(format!(
+                    "The filter '{name}' is invalid"
+                )));
+            }
+            let values = filter.values.as_deref().unwrap_or_default();
+            if values.len() > MAX_FILTER_VALUES {
+                return Err(Scaffolded::invalid_parameter_value(format!(
+                    "The filter '{name}' carries {} values, above the maximum of \
+                     {MAX_FILTER_VALUES}",
+                    values.len()
+                )));
+            }
+            // A capped NUMBER of comparisons is not capped WORK: the matcher's cost is the
+            // product of the pattern's length and the value's, so each value's size is
+            // bounded too, before any matching runs under the lock.
+            if let Some(oversize) = values
+                .iter()
+                .find(|value| value.len() > MAX_FILTER_VALUE_BYTES)
+            {
+                return Err(Scaffolded::invalid_parameter_value(format!(
+                    "A value of the filter '{name}' carries {} bytes, above the maximum of \
+                     {MAX_FILTER_VALUE_BYTES}",
+                    oversize.len()
+                )));
+            }
+            selectors.push(CompiledFilter::new(name.to_string(), values.to_vec()));
+        }
+
+        // "The token to use to retrieve the next page of results" (`$NextToken`) — a token this
+        // operation did not issue is refused rather than read as an id, and it is refused
+        // before the store is read, so a bogus token can never be answered with a page.
+        let start_at = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => Some(
+                decode_page_token(token).ok_or_else(|| invalid_pagination_token_for(token))?,
+            ),
+        };
+
+        let state = require_service_state(&*self.engine)?;
+        let store = state.lock();
+
+        // "Describes reservations that are associated with Dedicated Hosts in your account":
+        // an id that names no reservation of the account is refused rather than reported as an
+        // absent row.
+        require_describable_reservations(&store, &requested_ids)?;
+
+        // The two clocks a reservation's `State` is read off, taken ONCE so every reservation
+        // of one answer is reported as of the same instant.
+        let now = ::std::time::Instant::now();
+        let wall = ::std::time::SystemTime::now();
+
+        // Every comparison is charged to ONE budget, so the PRODUCT of stored reservations,
+        // filters, values, held values and value length is bounded however the caller combines
+        // them — which is also what bounds how long this holds the state lock.
+        let mut budget = MatchBudget::new(MAX_FILTER_MATCH_STEPS);
+        let mut selected: Vec<HostReservation> = Vec::new();
+        // The ids the request named, as a set, so narrowing one reservation costs a lookup
+        // rather than a scan of every id the request carries.
+        let wanted: ::std::collections::BTreeSet<&str> =
+            requested_ids.iter().map(String::as_str).collect();
+        for (reservation_id, record) in &store.host_reservations {
+            if budget.exhausted() {
+                break;
+            }
+            // The id narrowing is read off the key, so a reservation the request did not name
+            // costs no comparison at all.
+            if !wanted.is_empty() && !wanted.contains(reservation_id.as_str()) {
+                continue;
+            }
+            // The AND/OR evaluation and the per-candidate budget charge are the shared ones;
+            // only the lookup of what THIS reservation holds for a filter name is local.
+            if matches_every_filter(&selectors, &mut budget, &|name| {
+                filter_values(record, name, now, wall)
+            }) {
+                selected.push(record.view_at(now, wall));
+            }
+        }
+        // A spent budget means the answer is INCOMPLETE, which is not something to report as a
+        // result: the request asked for more filtering than one call will do, and is told so
+        // rather than given a silently truncated page.
+        if budget.exhausted() {
+            return Err(Scaffolded::request_limit_exceeded(format!(
+                "The request's filters would take more than {MAX_FILTER_MATCH_STEPS} \
+                 comparisons to evaluate; narrow them or page with MaxResults"
+            )));
+        }
+
+        // Page in `HostReservationId` order, which the cursor below names a position in. The
+        // store is an ordered map, so its iteration order already satisfies this sort; doing it
+        // here establishes the invariant the cursor depends on at the point of use.
+        selected.sort_by(|left, right| left.host_reservation_id.cmp(&right.host_reservation_id));
+
+        let from = match start_at.as_deref() {
+            None => 0,
+            Some(cursor) => selected.partition_point(|reservation| {
+                reservation.host_reservation_id.as_deref().unwrap_or_default() < cursor
+            }),
+        };
+        let page = selected.get(from..).unwrap_or_default();
+
+        // A request that names no page size gets the largest page this operation serves, so the
+        // `NextToken` path behaves the same whether or not a page size was asked for.
+        let limit = input
+            .max_results
+            .and_then(|max_results| usize::try_from(max_results).ok())
+            .unwrap_or(DEFAULT_RESERVATIONS_PER_PAGE)
+            .clamp(1, DEFAULT_RESERVATIONS_PER_PAGE);
+
+        // A token only when a reservation follows this page: "the token to use to retrieve the
+        // next page of results. This value is null when there are no more results to return"
+        // (`DescribeHostReservationsResult$NextToken`).
+        let next_token = page
+            .get(limit)
+            .and_then(|reservation| reservation.host_reservation_id.as_deref())
+            .map(encode_page_token);
+
+        Ok(DescribeHostReservationsOutput {
+            host_reservation_set: Some(page.iter().take(limit).cloned().collect()),
+            next_token,
+        })
+    }
+}
+
+/// Refuse every Dedicated Host reservation id this request named that the account has
+/// purchased no reservation under: HTTP 400 `InvalidHostReservationId.Malformed`, naming all
+/// of them.
+///
+/// To EC2 a reservation id it never issued is NOT VALID rather than merely absent, whatever its
+/// shape — the recorded contract for this operation (corpus `simparity-behavioral-aws-v1`,
+/// unit `ec2.op-contract-describeHostReservations`) answers a well-formed id no reservation has
+/// with
+///
+/// ```text
+/// InvalidHostReservationId.Malformed
+/// "The specified host Reservation IDs ['hr-0123456789abcdef0'] are not valid."
+/// ```
+///
+/// so this describe refuses the request as a whole, naming every id it could not resolve,
+/// instead of reporting the reservations it did find — and it asks ONE question of an id rather
+/// than the malformed-then-unknown pair a resource whose describe tells the two apart asks.
+/// That is the same reading `crate::ops::describe_hosts` is recorded making of a Dedicated Host
+/// id, which is why the POLICY lives HERE, beside the operation whose contract it is, rather
+/// than in `crate::state`; the SENTENCE is built by the shared
+/// [`crate::state::unresolvable_ids_message`], the one template both refusals are worded from.
+fn require_describable_reservations(
+    store: &crate::state::ComAmazonawsEc2Amazonec2State,
+    reservation_ids: &[String],
+) -> Result<(), DescribeHostReservationsError> {
+    let unresolvable: Vec<String> = reservation_ids
+        .iter()
+        .filter(|reservation_id| !store.host_reservations.contains_key(*reservation_id))
+        // Only the first characters of a value the caller chose are named, the bound every
+        // refusal of this crate that echoes one keeps.
+        .map(|reservation_id| crate::state::echoed_resource_id(reservation_id))
+        .collect();
+    if unresolvable.is_empty() {
+        return Ok(());
+    }
+    Err(crate::scaffolded::Scaffolded::service_error(
+        INVALID_HOST_RESERVATION_ID_MALFORMED,
+        400,
+        crate::state::unresolvable_ids_message(
+            HOST_RESERVATION_IDS_IN_REFUSALS,
+            unresolvable.iter().map(String::as_str),
+        ),
+    ))
+}
+
+/// How the recorded refusal of this operation names the resource whose ids it could not
+/// resolve, inside [`crate::state::unresolvable_ids_message`]'s sentence.
+const HOST_RESERVATION_IDS_IN_REFUSALS: &str = "host Reservation IDs";
+
+/// `InvalidHostReservationId.Malformed` (HTTP 400): the request named a value this account
+/// holds no Dedicated Host reservation under, so there is nothing to describe. EC2's
+/// `Invalid<Resource>Id.Malformed` spelling, beside `crate::state::INVALID_HOST_ID_MALFORMED`
+/// for the hosts a reservation covers.
+const INVALID_HOST_RESERVATION_ID_MALFORMED: &str = "InvalidHostReservationId.Malformed";
+
+/// The smallest `MaxResults` this operation accepts: "this value can be between 5 and 500"
+/// (`DescribeHostReservationsRequest$MaxResults`).
+const MIN_RESERVATIONS_PER_PAGE: i32 = 5;
+
+/// The largest it accepts: "if maxResults is given a larger value than 500, you receive an
+/// error" (the same member). Operation-scoped, and deliberately not the crate-wide generic
+/// [`crate::state::MAX_PAGE_SIZE`], which is a different cap.
+const MAX_RESERVATIONS_PER_PAGE: i32 = 500;
+
+/// The page size a request that names none gets — this operation's own documented maximum, so
+/// one answer is never larger than a page a caller could have asked for.
+const DEFAULT_RESERVATIONS_PER_PAGE: usize = MAX_RESERVATIONS_PER_PAGE as usize;
+
+/// The filter names this operation documents that are its OWN, from
+/// `DescribeHostReservationsRequest$Filter`:
+///
+/// ```text
+/// smithy_query(query="doc",shape="DescribeHostReservationsRequest",member="Filter",model_path="services/service-com-amazonaws-ec2-amazonec2/smithy-model/com-amazonaws-ec2-amazonec2.json")
+/// ```
+///
+/// The `tag:<key>` / `tag-key` family that member documents beside them is NOT listed here:
+/// it is the family every describe over a tagged resource answers, resolved by the crate's one
+/// reader of it ([`crate::state::is_tag_filter_name`] and
+/// [`crate::state::tag_filter_values`]). Every entry here must be answered by
+/// [`filter_values`].
+const HOST_RESERVATION_FILTERS: [&str; 3] = ["instance-family", "payment-option", "state"];
+
+/// Whether `name` is a filter this operation answers.
+///
+/// "Filter names are case-sensitive" (`Filter$Name`), so every comparison is exact. The tag
+/// family is asked of the crate's shared reader first, so a `tag:` prefix with no key is as
+/// undocumented here as any other misspelling.
+fn is_documented_filter_name(name: &str) -> bool {
+    crate::state::is_tag_filter_name(name) || HOST_RESERVATION_FILTERS.contains(&name)
+}
+
+/// The values the EC2 filter `name` compares against this reservation.
+///
+/// The tag family is read off the reservation's own `Tags` by the crate's one reader of it,
+/// which this asks FIRST and falls through when the answer is `None` — the arrangement
+/// [`crate::state::tag_filter_values`] documents. A filter naming an attribute this
+/// reservation does not carry compares against NO values, so it selects nothing. `state` is
+/// read off the clock the same way the reported member is
+/// ([`crate::state::HostReservationRecord::state_at`]), so a reservation is selected by the
+/// state this very answer reports for it rather than by one a writer left behind. `name` is a
+/// name [`is_documented_filter_name`] accepted, and the answer is what
+/// [`crate::state::matches_every_filter`] compares the request's values against.
+fn filter_values<'a>(
+    record: &'a crate::state::HostReservationRecord,
+    name: &str,
+    now: ::std::time::Instant,
+    wall: ::std::time::SystemTime,
+) -> Vec<::std::borrow::Cow<'a, str>> {
+    use ::std::borrow::Cow;
+
+    if let Some(values) = crate::state::tag_filter_values(
+        name,
+        record.view.tags.as_deref().unwrap_or_default(),
+    ) {
+        return values;
+    }
+
+    let text = |value: Option<&'a str>| -> Vec<Cow<'a, str>> {
+        value.map(Cow::Borrowed).into_iter().collect()
+    };
+    match name {
+        "instance-family" => text(record.view.instance_family.as_deref()),
+        "payment-option" => text(record.view.payment_option.as_deref()),
+        "state" => vec![Cow::Borrowed(record.state_at(now, wall))],
+        // Unreachable: `is_documented_filter_name` has already refused every other name. An
+        // undefined name compares against nothing, so it could never widen a result even if
+        // that check were bypassed.
+        _ => Vec::new(),
     }
 }

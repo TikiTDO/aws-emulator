@@ -1333,13 +1333,27 @@ pub fn unresolvable_host_id<E>(host_id: &str) -> Scaffolded<E> {
 pub fn unresolvable_host_ids_message<'a>(
     host_ids: impl IntoIterator<Item = &'a str>,
 ) -> String {
-    let quoted: Vec<String> = host_ids
-        .into_iter()
-        .map(|host_id| format!("'{host_id}'"))
-        .collect();
+    unresolvable_ids_message(DEDICATED_HOST_IDS_IN_REFUSALS, host_ids)
+}
+
+/// How a refusal of this service names the Dedicated Host ids it could not resolve, inside
+/// [`unresolvable_ids_message`]'s sentence: the resource as the recorded refusals of the host
+/// operations spell it.
+const DEDICATED_HOST_IDS_IN_REFUSALS: &str = "Dedicated host IDs";
+
+/// The sentence EC2 refuses a SET of ids of `kind` it cannot resolve with: the fixed
+/// `The specified <kind> [..] are not valid.`, the ids quoted inside it as a bracketed list.
+///
+/// The ONE template behind every refusal of this service that names a whole set of ids rather
+/// than one — the Dedicated Host operations ([`unresolvable_host_ids_message`]) and the
+/// Dedicated Host reservation describe — because the recorded refusals of both carry that one
+/// sentence with only the resource's name differing. `kind` is spelled the way the recorded
+/// refusal of THAT resource spells it, so a caller reads the resource's own name back.
+pub fn unresolvable_ids_message<'a>(kind: &str, ids: impl IntoIterator<Item = &'a str>) -> String {
+    let quoted: Vec<String> = ids.into_iter().map(|id| format!("'{id}'")).collect();
     format!(
-        "The specified Dedicated host IDs [{}] are not valid.",
-        quoted.join(", ")
+        "The specified {kind} [{ids}] are not valid.",
+        ids = quoted.join(", ")
     )
 }
 
