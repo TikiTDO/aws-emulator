@@ -15,9 +15,9 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use crate::ops::types::{
-    CreatePolicyEngineInput, CreatePolicyEngineOutput, CreatePolicyInput, CreatePolicyOutput,
-    DeletePolicyOutput, GetPolicyEngineOutput, GetPolicyOutput, PolicyDefinition,
-    ResourceNotFoundException,
+    ConflictException, CreatePolicyEngineInput, CreatePolicyEngineOutput, CreatePolicyInput,
+    CreatePolicyOutput, DeletePolicyOutput, GetPolicyEngineOutput, GetPolicyOutput,
+    PolicyDefinition, ResourceNotFoundException, UpdatePolicyEngineOutput, UpdatedDescription,
 };
 
 use super::{sorted_map, timestamp};
@@ -34,6 +34,7 @@ const ARN_TYPE_POLICY: &str = "policy";
 /// shape=PolicyEngineStatus,PolicyStatus`).
 pub const POLICY_STATUS_CREATING: &str = "CREATING";
 pub const POLICY_STATUS_ACTIVE: &str = "ACTIVE";
+pub const POLICY_STATUS_UPDATING: &str = "UPDATING";
 pub const POLICY_STATUS_DELETING: &str = "DELETING";
 
 /// How long a freshly created policy engine or policy stays `CREATING` before
@@ -70,6 +71,21 @@ pub fn policy_engine_not_found(policy_engine_id: &str) -> ResourceNotFoundExcept
     ResourceNotFoundException {
         message: Some(format!(
             "Policy engine with ID {policy_engine_id} not found"
+        )),
+    }
+}
+
+/// The modelled conflict for a change asked of a policy engine whose own
+/// asynchronous work is still under way: the engine is not `ACTIVE`, so the
+/// request collides with the operation already running on it.
+///
+/// The text around the id is fixed and tells the caller what to wait for; the id
+/// is the one the request's path carried.
+pub fn policy_engine_concurrent_modification(policy_engine_id: &str) -> ConflictException {
+    ConflictException {
+        message: Some(format!(
+            "Concurrent modification on policy engine with ID {policy_engine_id} detected, \
+             please try again once the policy engine status is ACTIVE"
         )),
     }
 }
@@ -163,6 +179,28 @@ impl PolicyEngineRecord {
         }
     }
 
+    /// Apply an accepted modification at `now`: the engine reports `UPDATING`
+    /// until the clock owes it `ACTIVE` one settle span later, as the create's
+    /// own transition is owed.
+    ///
+    /// `description` is the request's `UpdatedDescription` wrapper, applied with
+    /// the PATCH semantics the model states for it: "When present in an update
+    /// request, the description is replaced with optionalValue. When absent, the
+    /// description is left unchanged. To unset the description, include the
+    /// wrapper with optionalValue not specified"
+    /// (`smithy_query doc shape=UpdatedDescription`). Every other member of the
+    /// engine — its name, its id, its ARN, its key — is not modifiable by this
+    /// operation and is left as the create stored it.
+    pub fn accept_update(&mut self, description: Option<&UpdatedDescription>, now: SystemTime) {
+        if let Some(wrapper) = description {
+            self.description = wrapper.optional_value.clone();
+        }
+        self.transient_status = POLICY_STATUS_UPDATING.to_string();
+        self.settled_status = POLICY_STATUS_ACTIVE.to_string();
+        self.settles_at = now + POLICY_SETTLE_DELAY;
+        self.updated_at = now;
+    }
+
     /// This engine as `CreatePolicyEngine`'s response envelope.
     pub fn create_output(&self, now: SystemTime) -> CreatePolicyEngineOutput {
         CreatePolicyEngineOutput {
@@ -187,6 +225,26 @@ impl PolicyEngineRecord {
     pub fn get_output(&self, now: SystemTime) -> GetPolicyEngineOutput {
         let created = self.create_output(now);
         GetPolicyEngineOutput {
+            policy_engine_id: created.policy_engine_id,
+            name: created.name,
+            created_at: created.created_at,
+            updated_at: created.updated_at,
+            policy_engine_arn: created.policy_engine_arn,
+            status: created.status,
+            encryption_key_arn: created.encryption_key_arn,
+            description: created.description,
+            status_reasons: created.status_reasons,
+        }
+    }
+
+    /// This engine as `UpdatePolicyEngine`'s response envelope —
+    /// `UpdatePolicyEngineResponse` declares the same members as
+    /// `CreatePolicyEngineResponse`, so it too is rendered from the one stored
+    /// record: what the update reports about the engine is the engine, with the
+    /// status and the timestamps the accepted change left on it.
+    pub fn update_output(&self, now: SystemTime) -> UpdatePolicyEngineOutput {
+        let created = self.create_output(now);
+        UpdatePolicyEngineOutput {
             policy_engine_id: created.policy_engine_id,
             name: created.name,
             created_at: created.created_at,
