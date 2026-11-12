@@ -77,6 +77,8 @@ mod event_api_create_outcomes;
 mod event_api_data_plane;
 #[path = "all/event_api_delete.rs"]
 mod event_api_delete;
+#[path = "all/event_api_gauge_sampling.rs"]
+mod event_api_gauge_sampling;
 #[path = "all/event_api_update.rs"]
 mod event_api_update;
 #[path = "all/free_text_members.rs"]
@@ -93,6 +95,8 @@ mod functions;
 mod graphql_api_create_rules;
 #[path = "all/graphql_api_lifecycle.rs"]
 mod graphql_api_lifecycle;
+#[path = "all/graphql_api_realtime_endpoint.rs"]
+mod graphql_api_realtime_endpoint;
 #[path = "all/graphql_api_update.rs"]
 mod graphql_api_update;
 #[path = "all/graphql_types.rs"]

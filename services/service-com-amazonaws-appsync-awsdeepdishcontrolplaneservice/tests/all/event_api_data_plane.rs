@@ -69,7 +69,7 @@ const SUBPROTOCOL: &str = "aws-appsync-event-ws";
 
 /// A router with AppSync and CloudWatch mounted over ONE engine, so the series the data
 /// plane publishes are read back through the service that owns metrics.
-fn emulator() -> MultiServiceRouter {
+pub(crate) fn emulator() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
@@ -81,7 +81,7 @@ fn emulator() -> MultiServiceRouter {
 }
 
 /// One AppSync control-plane call.
-async fn appsync(
+pub(crate) async fn appsync(
     router: &MultiServiceRouter,
     method: &str,
     path: &str,
@@ -108,7 +108,7 @@ async fn appsync(
 
 /// One CloudWatch call, over the wire that service speaks (`awsJson1_0`, `POST /` with
 /// `X-Amz-Target`).
-async fn cloudwatch(router: &MultiServiceRouter, operation: &str, body: &Value) -> (u16, Value) {
+pub(crate) async fn cloudwatch(router: &MultiServiceRouter, operation: &str, body: &Value) -> (u16, Value) {
     let request = http::Request::builder()
         .method("POST")
         .uri("/")
@@ -142,11 +142,11 @@ async fn answered(router: &MultiServiceRouter, request: http::Request<Bytes>) ->
 }
 
 /// One created Event API: its id, the two addresses it publishes, and a live API key.
-struct EventApi {
-    api_id: String,
-    http: String,
-    realtime: String,
-    api_key: String,
+pub(crate) struct EventApi {
+    pub(crate) api_id: String,
+    pub(crate) http: String,
+    pub(crate) realtime: String,
+    pub(crate) api_key: String,
 }
 
 /// An `eventConfig` whose every mode is `API_KEY`, as the recorded case creates one.
@@ -160,7 +160,7 @@ fn api_key_event_config() -> Value {
 }
 
 /// Create one Event API with an API key, and read the two endpoints it publishes.
-async fn create_event_api(router: &MultiServiceRouter, name: &str) -> EventApi {
+pub(crate) async fn create_event_api(router: &MultiServiceRouter, name: &str) -> EventApi {
     create_configured_event_api(router, name, api_key_event_config()).await
 }
 
@@ -208,7 +208,7 @@ async fn create_configured_event_api(
 }
 
 /// Create one channel namespace, with the handler code it carries (or none).
-async fn create_namespace(
+pub(crate) async fn create_namespace(
     router: &MultiServiceRouter,
     api_id: &str,
     name: &str,
@@ -238,11 +238,11 @@ async fn create_namespace_body(router: &MultiServiceRouter, api_id: &str, body: 
 }
 
 /// The socket a client gets from a completed handshake.
-type ClientSocket = tokio_tungstenite::WebSocketStream<TcpStream>;
+pub(crate) type ClientSocket = tokio_tungstenite::WebSocketStream<TcpStream>;
 
 /// The port of an announced endpoint, having checked the address is [`LOOPBACK_HOST`] — so
 /// a dial names that literal and reaches nothing else.
-fn loopback_port(case: &str, authority: &str) -> u16 {
+pub(crate) fn loopback_port(case: &str, authority: &str) -> u16 {
     let (host, port) = authority
         .rsplit_once(':')
         .unwrap_or_else(|| panic!("case {case:?}: expected a host:port, got {authority:?}"));
@@ -274,15 +274,21 @@ fn offered_subprotocols(authority: &str, api_key: Option<&str>) -> String {
 /// The same, carrying whatever authorization OBJECT the case presents — the seam for a
 /// client presenting material of a provider other than `API_KEY`.
 fn auth_subprotocols(object: &Value) -> String {
+    format!("{SUBPROTOCOL}, header-{}", encoded_auth_object(object))
+}
+
+/// One authorization object as a real-time client encodes it: base64url, which is the form
+/// it travels in whether a client carries it in a subprotocol token or, as a GraphQL API's
+/// client does, in the handshake's `header` query parameter.
+pub(crate) fn encoded_auth_object(object: &Value) -> String {
     use base64::Engine as _;
-    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(object.to_string());
-    format!("{SUBPROTOCOL}, header-{encoded}")
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(object.to_string())
 }
 
 /// A `Sec-WebSocket-Key`: "a base64-encoded value that, when decoded, is 16 bytes in
 /// length" (RFC 6455 §4.1). A fixed one, because what the answer derives from it is the
 /// protocol's business and not this suite's.
-const CLIENT_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+pub(crate) const CLIENT_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 
 /// Open an opening handshake against an announced real-time endpoint: the established
 /// socket, or the status the refusal carried.
@@ -360,7 +366,7 @@ async fn handshake_with_fields(
 
 /// Open a connection, ack it, and answer the socket — what every case that needs a
 /// subscriber starts from.
-async fn connected(case: &str, api: &EventApi) -> ClientSocket {
+pub(crate) async fn connected(case: &str, api: &EventApi) -> ClientSocket {
     let mut socket = handshake(
         case,
         api,
@@ -379,7 +385,7 @@ async fn connected(case: &str, api: &EventApi) -> ClientSocket {
 }
 
 /// Send one message and read the frame the endpoint answers with.
-async fn exchange(case: &str, socket: &mut ClientSocket, message: &Value) -> Option<Value> {
+pub(crate) async fn exchange(case: &str, socket: &mut ClientSocket, message: &Value) -> Option<Value> {
     socket
         .send(Message::Text(message.to_string().into()))
         .await

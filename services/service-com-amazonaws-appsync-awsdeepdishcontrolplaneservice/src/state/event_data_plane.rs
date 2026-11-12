@@ -45,6 +45,15 @@ struct ApiSockets {
     /// The realtime connections open on this API, keyed by the connection id this plane
     /// minted for each.
     connections: BTreeMap<String, ConnectionRecord>,
+    /// Whether a gauge sampler is running for this API
+    /// ([`EventDataPlane::claim_gauge_sampler`]).
+    gauge_sampling: bool,
+    /// Which claim the running sampler holds, so a sampler that has stood down cannot
+    /// release a claim a later one took.
+    gauge_generation: u64,
+    /// The running sampler's task, held so the task a connection started stays stoppable:
+    /// an API whose records go takes its sampler with it.
+    gauge_sampler: Option<::tokio::task::JoinHandle<()>>,
 }
 
 /// One open realtime connection: the channel its frames are written over, and the
@@ -66,9 +75,14 @@ struct ConnectionRecord {
 /// subscriber that stops reading holds at most this many frames, whatever is published.
 pub const CONNECTION_FRAME_DEPTH: usize = 64;
 
-/// How many realtime connections one Event API accepts at once. A connection past it is
-/// refused rather than queued, so a client opening sockets in a loop cannot grow this
-/// store without limit.
+/// How many realtime connections one API's real-time endpoint accepts at once. A
+/// connection past it is refused rather than queued, so a client opening sockets in a loop
+/// cannot grow this store without limit.
+///
+/// It bounds BOTH real-time endpoints this service serves — an Event API's
+/// ([`super::super::service::event_api::realtime`]) and a GraphQL API's
+/// ([`super::graphql_data_plane`]) — because the bound is on what one socket of this
+/// emulator admits, not on which kind of API published it.
 pub const CONNECTIONS_PER_API: usize = 256;
 
 /// How many subscriptions one realtime connection holds. A subscribe past it is refused,
@@ -127,6 +141,17 @@ pub fn authority_of(listener: &ResourceListener) -> String {
     ::service_common::data_plane_addressing::listener_authority(listener)
 }
 
+/// Stop the gauge sampler of an API whose records have just gone.
+///
+/// A sampler reads the API's connection records, so one whose API is no longer held has
+/// nothing left to observe: it is stopped with the records rather than left to discover
+/// that on its next wake-up.
+fn abort_sampler(sockets: ApiSockets) {
+    if let Some(sampler) = sockets.gauge_sampler {
+        sampler.abort();
+    }
+}
+
 /// Why a subscribe was not recorded, which is what the realtime endpoint answers
 /// `subscribe_error` with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,14 +178,19 @@ impl EventDataPlane {
         realtime: Arc<ResourceListener>,
     ) -> (String, String) {
         let authorities = (authority_of(&publish), authority_of(&realtime));
-        self.apis.insert(
+        if let Some(replaced) = self.apis.insert(
             api_id.to_string(),
             ApiSockets {
                 publish,
                 realtime,
                 connections: BTreeMap::new(),
+                gauge_sampling: false,
+                gauge_generation: 0,
+                gauge_sampler: None,
             },
-        );
+        ) {
+            abort_sampler(replaced);
+        }
         authorities
     }
 
@@ -176,7 +206,71 @@ impl EventDataPlane {
     /// deleted does to its data plane. Dropping the handles severs every connection, and
     /// the task serving each one then ends.
     pub fn forget_api(&mut self, api_id: &str) {
-        self.apis.remove(api_id);
+        if let Some(forgotten) = self.apis.remove(api_id) {
+            abort_sampler(forgotten);
+        }
+    }
+
+    /// Claim the single GAUGE SAMPLER of `api_id`: the claim's GENERATION when the caller
+    /// may start one, `None` when one already runs or this API holds no sockets.
+    ///
+    /// The two gauges this plane reports ([`Self::active_connections`],
+    /// [`Self::active_subscriptions`]) measure quantities that HAVE a value at every
+    /// instant, so they are OBSERVED on a cadence rather than only when they change: one
+    /// sampler per API, claimed by the first connection opened on it and stood down once
+    /// the API holds none ([`Self::gauge_sampling_wanted_or_release`]).
+    pub fn claim_gauge_sampler(&mut self, api_id: &str) -> Option<u64> {
+        let sockets = self.apis.get_mut(api_id)?;
+        if sockets.gauge_sampling {
+            return None;
+        }
+        sockets.gauge_sampling = true;
+        sockets.gauge_generation = sockets.gauge_generation.wrapping_add(1);
+        Some(sockets.gauge_generation)
+    }
+
+    /// Keep the running sampler's task handle, aborting the one it replaces — and only
+    /// while `generation` is still the current claim AND that claim is still held, so a
+    /// starter whose own task has already stood down installs nothing and aborts nothing.
+    pub fn set_gauge_sampler(
+        &mut self,
+        api_id: &str,
+        generation: u64,
+        handle: ::tokio::task::JoinHandle<()>,
+    ) {
+        let Some(sockets) = self.apis.get_mut(api_id) else {
+            handle.abort();
+            return;
+        };
+        if !sockets.gauge_sampling || sockets.gauge_generation != generation {
+            handle.abort();
+            return;
+        }
+        if let Some(previous) = sockets.gauge_sampler.replace(handle) {
+            previous.abort();
+        }
+    }
+
+    /// Whether `api_id` still has gauges to sample — and, when it has not, RELEASE the
+    /// claim `generation` holds.
+    ///
+    /// An API has gauges to sample while it holds a CONNECTION: the quantities are of the
+    /// connections open on the API and the subscriptions they hold, so an API nothing is
+    /// connected to has nothing to observe and publishes no reading at all rather than a
+    /// run of zeros. Observing "nothing to sample" and standing down happen in ONE critical
+    /// section, which is what makes the hand-over race-free: a handshake holds this same
+    /// lock to record its connection BEFORE it tries to claim the sampler, so either this
+    /// call sees that connection and the running sampler keeps it, or the handshake's claim
+    /// finds the flag cleared and starts a sampler of its own.
+    pub fn gauge_sampling_wanted_or_release(&mut self, api_id: &str, generation: u64) -> bool {
+        let Some(sockets) = self.apis.get_mut(api_id) else {
+            return false;
+        };
+        let wanted = !sockets.connections.is_empty();
+        if !wanted && sockets.gauge_generation == generation {
+            sockets.gauge_sampling = false;
+        }
+        wanted
     }
 
     /// Mint the next connection id: a UUID, which is the shape AppSync's own realtime
@@ -353,7 +447,10 @@ const UUID_LOW_HALF_DOMAIN: u64 = 0xA5A5_A5A5_A5A5_A5A5;
 /// an id is opaque to its holder; the LAYOUT is the tree's one rendering of those bytes as
 /// a UUID (`service_common::uuid_from_random_bytes`), so the version and variant bits and
 /// the group boundaries are not spelled out again here.
-fn uuid_from(domain: u64, seed: u64) -> String {
+///
+/// Reached by the GraphQL API's real-time plane too ([`super::graphql_data_plane`]), with a
+/// domain of its own, so every connection id this service mints is minted one way.
+pub(super) fn uuid_from(domain: u64, seed: u64) -> String {
     // The DOMAIN is mixed first and the seed added to the mixed value, so the two kinds of
     // id are drawn from parts of the sequence far apart from each other: mixing
     // `domain ^ seed` instead would let one kind's seed land on the other kind's domain.

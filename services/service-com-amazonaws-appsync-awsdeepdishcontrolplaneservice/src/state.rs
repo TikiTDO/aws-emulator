@@ -16,6 +16,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// lock.
 pub mod event_data_plane;
 
+/// The GraphQL API REAL-TIME plane's records: the socket each `GraphqlApi`'s `REALTIME`
+/// endpoint is served on, the connections open on it and the subscriptions those
+/// connections hold. A field of the store below for the same reason the Event API's plane
+/// is one.
+pub mod graphql_data_plane;
+
 /// The GraphQL types created under a GraphQL API, and how one type definition is
 /// parsed, kept and reported.
 mod schema_types;
@@ -1923,6 +1929,10 @@ pub struct ComAmazonawsAppsyncAwsdeepdishcontrolplaneserviceState {
     /// them ([`event_data_plane`]). Held beside the API records so a reader cannot see an
     /// API whose data plane this store does not hold.
     pub event_data_plane: event_data_plane::EventDataPlane,
+    /// The socket each GraphQL API's real-time endpoint is served on, and what is open on
+    /// it ([`graphql_data_plane`]). Held beside the API records so a reader cannot see an
+    /// API whose real-time plane this store does not hold.
+    pub graphql_data_plane: graphql_data_plane::GraphqlDataPlane,
     /// Advanced once per minted id, so no id is ever a function of the request.
     id_seed: u64,
     /// Advanced once per created resource, giving each record its creation order.
@@ -3081,14 +3091,27 @@ pub const GRAPHQL_ENDPOINT: &str = "GRAPHQL";
 pub const HTTP_ENDPOINT: &str = "HTTP";
 
 /// The DNS records AppSync publishes for a GRAPHQL API it created: one hostname per
-/// endpoint, both on the API's own endpoint host label.
+/// endpoint, both on the API's own endpoint host label — except the REALTIME one, which
+/// is the address the API's real-time socket is SERVED on.
 ///
 /// `http_endpoint` is the key the HTTPS endpoint is published under — a GraphQL API
 /// publishes it as [`GRAPHQL_ENDPOINT`] and derives its `uris` from these records — so a
-/// create and an update cannot drift on the hostname shape. An Event API publishes the
-/// addresses its two endpoints are SERVED on instead ([`event_api_dns`]), because those
-/// endpoints are data planes a client dials.
-pub fn api_dns(host_label: &str, region: &str, http_endpoint: &str) -> BTreeMap<String, String> {
+/// create and an update cannot drift on the hostname shape.
+///
+/// `realtime_authority` is the `host:port` the API's real-time endpoint is reached at
+/// ([`crate::service::graphql_api`]). AWS publishes the API's
+/// `<label>.appsync-realtime-api.<region>.amazonaws.com` hostname there; this emulator
+/// publishes the address that endpoint is REACHED at, because the whole purpose of the
+/// value is that a client dials it — a subscriber completes a WebSocket handshake against
+/// `wss://<value>/graphql` — and no client on this machine resolves an AWS hostname
+/// (`service_common::data_plane_addressing`). An Event API publishes the addresses of both
+/// its endpoints the same way ([`event_api_dns`]).
+pub fn api_dns(
+    host_label: &str,
+    region: &str,
+    http_endpoint: &str,
+    realtime_authority: &str,
+) -> BTreeMap<String, String> {
     BTreeMap::from([
         (
             http_endpoint.to_string(),
@@ -3096,7 +3119,7 @@ pub fn api_dns(host_label: &str, region: &str, http_endpoint: &str) -> BTreeMap<
         ),
         (
             REALTIME_ENDPOINT.to_string(),
-            format!("{host_label}.appsync-realtime-api.{region}.amazonaws.com"),
+            realtime_authority.to_string(),
         ),
     ])
 }

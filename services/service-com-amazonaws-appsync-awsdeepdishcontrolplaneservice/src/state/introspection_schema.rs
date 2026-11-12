@@ -177,6 +177,36 @@ fn node_text(node: &apollo_parser::SyntaxNode) -> String {
 }
 
 impl GraphqlApiRecord {
+    /// The SUBSCRIPTION fields this API's schema declares, in the order the schema
+    /// declares them — the fields a real-time client may start a subscription on.
+    ///
+    /// Which type holds them is the schema's own binding: the type its `schema` definition
+    /// binds as the subscription root, and the type named [`DEFAULT_SUBSCRIPTION_TYPE`] for
+    /// a schema that binds none, which is GraphQL's own default. An API whose schema holds
+    /// no such type declares no subscription field at all, which is what a client
+    /// subscribing against it finds.
+    ///
+    /// Read from the stored document and the stored types, so the fields reported are the
+    /// ones the schema that was CREATED declares and cannot drift from it.
+    pub fn subscription_fields(&self) -> Vec<String> {
+        let bound = self
+            .schema_document
+            .as_deref()
+            .and_then(|document| schema_declarations(document).subscription);
+        let named = bound.as_deref().unwrap_or(DEFAULT_SUBSCRIPTION_TYPE);
+        self.types
+            .get(named)
+            .map(|record| {
+                record
+                    .parsed
+                    .fields
+                    .iter()
+                    .map(|field| field.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// This API's introspection schema in `format`, or the text a
     /// `GraphQLSchemaException` carries for an API that holds no schema to introspect.
     ///

@@ -56,6 +56,7 @@ use ::emulator_server::{ListenerConn, TlsUpgrader};
 use crate::ops::types::{AuthMode, EventConfig};
 use crate::state::ComAmazonawsAppsyncAwsdeepdishcontrolplaneserviceState as ServiceStore;
 
+pub mod gauges;
 pub mod handlers;
 pub mod metrics;
 pub mod publish;
@@ -228,6 +229,19 @@ impl PresentedAuth {
         let Some(encoded) = encoded else {
             return Self::default();
         };
+        Self::from_base64url_object(encoded)
+    }
+
+    /// The material a base64url-encoded authorization OBJECT carries — the form a real-time
+    /// client that cannot set a request's fields encodes it in, whether it travels in a
+    /// subprotocol token ([`Self::from_subprotocols`]) or, as a GraphQL API's real-time
+    /// client writes it, in the handshake's `header` query parameter
+    /// ([`crate::service::graphql_api::realtime`]).
+    ///
+    /// Both base64url spellings are accepted — padded and unpadded — because the encoding
+    /// is the client's choice and both decode to the same object. A value that is not
+    /// base64url, or does not decode to an object, carries no material at all.
+    pub fn from_base64url_object(encoded: &str) -> Self {
         let Some(decoded) = decoded_base64url(encoded) else {
             return Self::default();
         };

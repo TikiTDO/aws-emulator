@@ -304,6 +304,10 @@ async fn carry_frames<S>(
         %connection_id,
         "a real-time connection is open"
     );
+    // The API now holds a connection, so its two gauges have a quantity to report: this
+    // is the write that owes the cadence they are observed on, for as long as the API is
+    // connected to ([`super::gauges`]). Claimed once however many connections are opened.
+    super::gauges::drive_gauge_sampling(&context);
     let (mut outgoing, mut incoming) = socket.split();
     // A connection is CONNECTED once the client's `connection_init` has been acked, which
     // is what `ConnectSuccess` counts and what a `DisconnectSuccess` is then owed for.

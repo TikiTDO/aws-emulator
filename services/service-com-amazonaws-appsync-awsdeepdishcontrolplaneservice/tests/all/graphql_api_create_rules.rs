@@ -654,10 +654,10 @@ async fn dns_records_and_uris_name_the_same_hosts() {
         .await;
         let api_id = created["apiId"].as_str().unwrap_or_default().to_string();
 
-        // The DNS records: the two endpoint keys AppSync publishes, each the API's
-        // endpoint host label under that endpoint's AppSync domain — a bare
-        // hostname, no scheme and no path. Source: `GraphqlApi$dns`, "The DNS
-        // records for the API", keyed as `uris` is.
+        // The DNS records: the two endpoint keys AppSync publishes. The GraphQL one is
+        // the API's endpoint host label under AppSync's own domain — a bare hostname, no
+        // scheme and no path. Source: `GraphqlApi$dns`, "The DNS records for the API",
+        // keyed as `uris` is.
         let dns = created["dns"].clone();
         let graphql_host = dns["GRAPHQL"].as_str().unwrap_or_default().to_string();
         let label = graphql_host.split('.').next().unwrap_or_default().to_string();
@@ -668,19 +668,27 @@ async fn dns_records_and_uris_name_the_same_hosts() {
                     .all(|c| c.is_ascii_lowercase() || ('2'..='7').contains(&c)),
             "case {case}: the endpoint host label must be an opaque base-32 token, got {label:?}"
         );
-        for (endpoint, domain) in [
-            ("GRAPHQL", "appsync-api"),
-            ("REALTIME", "appsync-realtime-api"),
-        ] {
-            assert_eq!(
-                dns[endpoint].as_str(),
-                Some(format!("{label}.{domain}.{REGION}.amazonaws.com").as_str()),
-                "case {case}: dns.{endpoint} must be the API's {domain} hostname, got {dns:?}"
-            );
-        }
+        assert_eq!(
+            dns["GRAPHQL"].as_str(),
+            Some(format!("{label}.appsync-api.{REGION}.amazonaws.com").as_str()),
+            "case {case}: dns.GRAPHQL must be the API's appsync-api hostname, got {dns:?}"
+        );
+        // The REALTIME record is the address the API's real-time endpoint is SERVED on:
+        // a `host:port` of this emulator, because the whole purpose of the value is that
+        // a subscriber dials it.
+        let realtime = dns["REALTIME"].as_str().unwrap_or_default().to_string();
+        let (realtime_host, realtime_port) = realtime
+            .rsplit_once(':')
+            .map(|(host, port)| (host.to_string(), port.to_string()))
+            .unwrap_or_default();
+        assert!(
+            !realtime_host.is_empty() && realtime_port.parse::<u16>().is_ok_and(|port| port > 0),
+            "case {case}: dns.REALTIME must be the host:port the endpoint is served on, \
+             got {realtime:?}"
+        );
 
-        // And the URIs are those hostnames: HTTPS for the GraphQL endpoint, a
-        // WebSocket URL for the realtime one, both at the API's /graphql path.
+        // And the URIs are those records: HTTPS for the GraphQL endpoint, a WebSocket URL
+        // for the realtime one, both at the API's /graphql path.
         let uris = created["uris"].clone();
         for (endpoint, scheme) in [("GRAPHQL", "https"), ("REALTIME", "wss")] {
             let host = dns[endpoint].as_str().unwrap_or_default();

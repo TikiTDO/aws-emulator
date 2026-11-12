@@ -222,14 +222,80 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let region = crate::state::request_region(ctx);
-        let mut guard = state.lock();
 
-        // The store is bounded, so a repeated create cannot grow it without limit:
-        // AppSync's quota is 25 GraphQL APIs per account per Region, and
-        // `ApiLimitExceededException` ("The GraphQL API exceeded a limit") is the
-        // modelled refusal for a create past it. This emulator serves one Region's
-        // worth of state, so the cap applies to the whole store.
+        // Minting the API's identifiers is all the store is held for here, in a block of
+        // its own, so the guard is out of scope before the socket below is opened: opening
+        // one is the core's work and is awaited, and no state guard may be held across an
+        // await.
+        let (api_id, host_label) = {
+            let mut guard = state.lock();
+
+            // The store is bounded, so a repeated create cannot grow it without limit:
+            // AppSync's quota is 25 GraphQL APIs per account per Region, and
+            // `ApiLimitExceededException` ("The GraphQL API exceeded a limit") is the
+            // modelled refusal for a create past it. This emulator serves one Region's
+            // worth of state, so the cap applies to the whole store.
+            if guard.graphql_apis.len() >= APIS_PER_REGION {
+                return Err(CreateGraphqlApiErrorModeled::ApiLimitExceededException(
+                    ApiLimitExceededException {
+                        message: Some(format!(
+                            "an account may hold at most {APIS_PER_REGION} GraphQL APIs in a Region"
+                        )),
+                    },
+                )
+                .into());
+            }
+
+            // Mint an id that is not already taken. The id is drawn from the state's own
+            // counter, so it is new on every call even for an identical request.
+            let mut api_id = guard.mint_id();
+            while guard.graphql_apis.contains_key(&api_id) {
+                api_id = guard.mint_id();
+            }
+            // The endpoints are published on a host label of their own, minted the same
+            // way and independently of the `apiId`: an AppSync endpoint hostname cannot
+            // be derived from the API's id.
+            let mut host_label = guard.mint_id();
+            while host_label == api_id {
+                host_label = guard.mint_id();
+            }
+            (api_id, host_label)
+        };
+
+        // The API's REAL-TIME endpoint is a DATA plane — a subscriber completes a WebSocket
+        // handshake against it and then exchanges frames — and the core owns the socket it
+        // is served on ([`crate::service::graphql_api`]): it is opened for the id just
+        // minted, and the address it landed on is what this API publishes as its `REALTIME`
+        // endpoint, so the value a caller hands a WebSocket client is an address that
+        // client can reach. A socket that could not be opened leaves the API UNCREATED
+        // rather than publishing an endpoint nothing serves.
+        let realtime_authority =
+            match crate::service::graphql_api::open_for_api(&*self.engine, &api_id).await {
+                Ok(authority) => authority,
+                Err(reason) => {
+                    state.lock().graphql_data_plane.forget_api(&api_id);
+                    return Err(CreateGraphqlApiErrorModeled::InternalFailureException(
+                        InternalFailureException {
+                            message: Some(format!(
+                                "this emulator could not open the socket a GraphQL API's \
+                                 real-time endpoint is served on, so no API was created: \
+                                 {reason}"
+                            )),
+                        },
+                    )
+                    .into());
+                }
+            };
+
+        let mut guard = state.lock();
+        // The quota is weighed AGAIN under this lock, because the one above was released
+        // while the socket was opened: two creates in flight at once must not both pass a
+        // check made before either inserted, or the account would come to hold more APIs
+        // than the limit the modelled refusal names. The socket this request opened is
+        // forgotten with the refusal, so nothing stays listening for an API that was not
+        // created.
         if guard.graphql_apis.len() >= APIS_PER_REGION {
+            guard.graphql_data_plane.forget_api(&api_id);
             return Err(CreateGraphqlApiErrorModeled::ApiLimitExceededException(
                 ApiLimitExceededException {
                     message: Some(format!(
@@ -238,20 +304,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 },
             )
             .into());
-        }
-
-        // Mint an id that is not already taken. The id is drawn from the state's own
-        // counter, so it is new on every call even for an identical request.
-        let mut api_id = guard.mint_id();
-        while guard.graphql_apis.contains_key(&api_id) {
-            api_id = guard.mint_id();
-        }
-        // The endpoints are published on a host label of their own, minted the same
-        // way and independently of the `apiId`: an AppSync endpoint hostname cannot
-        // be derived from the API's id.
-        let mut host_label = guard.mint_id();
-        while host_label == api_id {
-            host_label = guard.mint_id();
         }
         let seq = guard.next_seq();
 
@@ -262,10 +314,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 &region,
                 &crate::state::api_resource(&api_id),
             ),
-            // The endpoint hostnames are built the same way for either kind of API
+            // The endpoint records are built the same way for either kind of API
             // (`crate::state::api_dns`); a GraphQL API publishes its HTTPS endpoint
-            // under the `GRAPHQL` key, which `uris` is derived from.
-            dns: crate::state::api_dns(&host_label, &region, crate::state::GRAPHQL_ENDPOINT),
+            // under the `GRAPHQL` key, which `uris` is derived from, and its real-time
+            // endpoint at the address that endpoint is served on.
+            dns: crate::state::api_dns(
+                &host_label,
+                &region,
+                crate::state::GRAPHQL_ENDPOINT,
+                &realtime_authority,
+            ),
             api_id: api_id.clone(),
             name: input.name,
             authentication_type: input.authentication_type,

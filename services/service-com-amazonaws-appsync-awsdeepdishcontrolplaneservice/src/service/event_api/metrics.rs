@@ -31,8 +31,10 @@
 //! The counts are never kept here. Each observation is a datapoint of what ONE call did,
 //! so the total a client reads is the `Sum` CloudWatch computes over a period, and the two
 //! GAUGES ([`ACTIVE_CONNECTIONS_METRIC`], [`ACTIVE_SUBSCRIPTIONS_METRIC`]) are published
-//! with the count the store holds AT that moment, every time it changes — which is what
-//! lets a reader see subscriptions fall back to zero while a connection stays open.
+//! with the count the store holds AT that moment, every time it changes AND on the cadence
+//! the plane observes them at while a connection is open ([`super::gauges`]) — which is
+//! what lets a reader see subscriptions fall back to zero, and STAY there, while a
+//! connection stays open.
 
 use ::service_com_amazonaws_cloudwatch_graniteserviceversion20100801::state as cloudwatch;
 
@@ -195,6 +197,16 @@ impl EventApiMetrics {
         }
     }
 
+    /// Publish ONE SAMPLE of the two gauges, taken while the API holds a connection.
+    ///
+    /// What [`super::gauges`] calls on its cadence: the same two series the lifecycle
+    /// publishes, with the counts the store holds at the moment of the sample, so every
+    /// period of a held-open connection carries a reading of what the plane holds then
+    /// rather than only the reading taken at the last change.
+    pub fn sampled(&self, counts: ConnectionCounts) {
+        self.publish_connection_counts(counts);
+    }
+
     /// Publish the two gauges: the connections open on the API and the subscriptions they
     /// hold, as the store holds them at this moment.
     ///
@@ -228,36 +240,57 @@ impl EventApiMetrics {
         let Some(store) = self.store.as_ref() else {
             return;
         };
-        let key = cloudwatch::MetricKey {
-            namespace: METRIC_NAMESPACE.to_string(),
-            metric_name: metric.to_string(),
-            dimensions,
-        };
-        let datum = cloudwatch::StoredDatum {
-            timestamp_secs: cloudwatch::now_secs(),
-            sample_count: 1.0,
-            sum: value,
-            minimum: value,
-            maximum: value,
-            unit: Some(COUNT_UNIT.to_string()),
-            storage_resolution: STANDARD_STORAGE_RESOLUTION_SECONDS,
-        };
-        let watched = cloudwatch::WrittenSeries {
-            key: key.clone(),
-            units: vec![datum.unit().to_string()],
-        };
-        let at_secs = datum.timestamp_secs;
-        let mut store = store.lock();
-        if store.append_datapoints(key, vec![datum]).is_err() {
+        if !append_observation(store, metric, dimensions, value) {
             ::tracing::warn!(
                 api_id = %self.api_id,
                 %metric,
                 "the CloudWatch store is at capacity; an AppSync metric could not be published"
             );
-            return;
         }
-        store.make_alarms_due(&[watched], at_secs);
     }
+}
+
+/// Append ONE observation of an `AWS/AppSync` series to `store`, and make every alarm
+/// watching that series due for evaluation — `false` when the store is at capacity and the
+/// datapoint could not be stored.
+///
+/// The ONE way a datapoint of this service's own metrics reaches the store, shared by every
+/// plane that publishes one (a GraphQL API's real-time plane publishes its own series
+/// through it, [`super::super::graphql_api::metrics`]), so the namespace a series lands in,
+/// the unit and resolution it is stored at and the alarm wake-up it owes cannot differ
+/// between them. An alarm is evaluated FROM these datapoints, so storing a series it
+/// watches is what makes its evaluation due.
+pub fn append_observation(
+    store: &::engine::ServiceState<CloudWatchState>,
+    metric: &str,
+    dimensions: cloudwatch::DimensionSet,
+    value: f64,
+) -> bool {
+    let key = cloudwatch::MetricKey {
+        namespace: METRIC_NAMESPACE.to_string(),
+        metric_name: metric.to_string(),
+        dimensions,
+    };
+    let datum = cloudwatch::StoredDatum {
+        timestamp_secs: cloudwatch::now_secs(),
+        sample_count: 1.0,
+        sum: value,
+        minimum: value,
+        maximum: value,
+        unit: Some(COUNT_UNIT.to_string()),
+        storage_resolution: STANDARD_STORAGE_RESOLUTION_SECONDS,
+    };
+    let watched = cloudwatch::WrittenSeries {
+        key: key.clone(),
+        units: vec![datum.unit().to_string()],
+    };
+    let at_secs = datum.timestamp_secs;
+    let mut store = store.lock();
+    if store.append_datapoints(key, vec![datum]).is_err() {
+        return false;
+    }
+    store.make_alarms_due(&[watched], at_secs);
+    true
 }
 
 /// What the two gauges read after one change: the connections open on the API and the

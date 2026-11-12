@@ -58,6 +58,12 @@ pub mod authorization;
 /// answers.
 pub mod event_api;
 
+/// A GraphQL API's REAL-TIME plane: the socket each `GraphqlApi`'s `REALTIME` endpoint is
+/// served on — the address `GraphqlApi$uris` publishes for a subscriber to dial — which is
+/// a SOCKET rather than a route of this service for the same reason an Event API's
+/// endpoints are.
+pub mod graphql_api;
+
 /// AppSync's own modelled error for a request that is not well formed:
 /// `BadRequestException`, `httpError` 400, with members `message`/`reason`/`detail`
 /// (`smithy_query(query="shape", shape="BadRequestException")`). Every operation of
