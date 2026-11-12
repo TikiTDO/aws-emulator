@@ -438,17 +438,17 @@ async fn an_unmodelled_sort_order_is_refused_in_codebuilds_own_words() {
     );
 }
 
-/// RULE: a request that addresses the webhook of a project carrying none is refused with
-/// 400 `ResourceNotFoundException` worded `Webhook does not exist for this project` —
-/// wholly fixed text that names neither the project nor its ARN, so the sentence is the
-/// same on every operation that resolves a project's webhook and for every way a project
-/// came to have none.
+/// RULE: a request that has to resolve an EXISTING webhook of a project carrying none is
+/// refused with 400 `ResourceNotFoundException` worded `Webhook does not exist for this
+/// project` — wholly fixed text that names neither the project nor its ARN, so the
+/// sentence is the same for every way a project came to have no webhook. Removing one is
+/// not such a request: a webhook that is not there is already removed, so that call is
+/// served instead of refused.
 ///
 /// The table spans every source type a project can carry a webhook on — the providers
 /// that send repository events (`state::WEBHOOK_SOURCE_TYPES`) plus the runner webhook's
 /// own source type (`state::RUNNER_WEBHOOK_SOURCE_TYPE`) — each in both forms of absence
-/// (never connected, and connected then disconnected) and on both operations that
-/// address an existing webhook.
+/// (never connected, and connected then disconnected).
 #[tokio::test]
 async fn an_absent_webhook_is_refused_in_codebuilds_own_words() {
     let router = emulator();
@@ -507,34 +507,28 @@ async fn an_absent_webhook_is_refused_in_codebuilds_own_words() {
                 );
             }
 
-            // (operation, the request that addresses the project's webhook)
-            let requests: [(&str, Value); 2] = [
-                ("DeleteWebhook", json!({"projectName": project})),
-                (
-                    "UpdateWebhook",
-                    json!({"projectName": project, "rotateSecret": true}),
-                ),
-            ];
-            for (operation, body) in requests {
-                let case = format!("{operation} on a {source_type} project, {form}");
-                let stated = refusal(
-                    &router,
-                    &case,
-                    operation,
-                    body,
-                    "ResourceNotFoundException",
-                )
-                .await;
-                assert_eq!(
-                    stated, state::WEBHOOK_NOT_FOUND_MESSAGE,
-                    "case {case:?}: expected CodeBuild's absent-webhook sentence, got {stated:?}"
-                );
-                assert!(
-                    !stated.contains("arn:") && !stated.contains(&project),
-                    "case {case:?}: the sentence must name neither the project nor its ARN, \
-                     got {stated:?}"
-                );
-            }
+            // The operation that CHANGES an existing webhook is the one with nothing to
+            // act on; the one that REMOVES it is served (see
+            // `tests/all/webhook_delete_is_idempotent.rs`), so only the update is
+            // asserted on here.
+            let case = format!("UpdateWebhook on a {source_type} project, {form}");
+            let stated = refusal(
+                &router,
+                &case,
+                "UpdateWebhook",
+                json!({"projectName": project, "rotateSecret": true}),
+                "ResourceNotFoundException",
+            )
+            .await;
+            assert_eq!(
+                stated, state::WEBHOOK_NOT_FOUND_MESSAGE,
+                "case {case:?}: expected CodeBuild's absent-webhook sentence, got {stated:?}"
+            );
+            assert!(
+                !stated.contains("arn:") && !stated.contains(&project),
+                "case {case:?}: the sentence must name neither the project nor its ARN, \
+                 got {stated:?}"
+            );
         }
     }
 }

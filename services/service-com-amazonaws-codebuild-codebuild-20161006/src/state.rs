@@ -616,15 +616,16 @@ pub fn named_project_absent_message(project_name: &str) -> String {
     format!("{PROJECT_NOT_FOUND_MESSAGE}: {project_name}.")
 }
 
-/// What CodeBuild states as the reason a webhook-addressing request names a project that
-/// carries no webhook, carried by the modelled `ResourceNotFoundException`.
+/// What CodeBuild states as the reason a request that CHANGES an existing webhook names a
+/// project that carries none, carried by the modelled `ResourceNotFoundException`.
 ///
 /// Fixed text, under [`SANDBOX_NOT_FOUND_MESSAGE`]'s rule: the absent thing is the
 /// WEBHOOK rather than the project, and the sentence names neither the project nor its
 /// ARN — `this project` is part of the sentence CodeBuild emits, not a substitution for
-/// the name the request sent. Every operation that resolves a project's webhook reports
-/// the same text, so a client can key on it. Recorded behaviour — the model states no
-/// message for the error.
+/// the name the request sent. Every operation that has to resolve an existing webhook in
+/// order to act on it reports the same text, so a client can key on it; a DELETE of one
+/// does not, because a webhook that is not there is already in the state that call asks
+/// for. Recorded behaviour — the model states no message for the error.
 pub const WEBHOOK_NOT_FOUND_MESSAGE: &str = "Webhook does not exist for this project";
 
 /// What CodeBuild states as the reason a request addresses a report group this account

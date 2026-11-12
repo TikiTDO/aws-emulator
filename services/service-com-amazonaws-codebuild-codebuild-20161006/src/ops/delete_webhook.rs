@@ -17,6 +17,12 @@
 //! GitHub and instead returns payloadUrl and secret values" — has no provider-side hook
 //! of CodeBuild's making, so dropping the record needs no token.
 //!
+//! The one resource this call addresses by name is the PROJECT, so that is the only
+//! absence it is refused for. A project this account holds that carries no webhook has
+//! nothing to disconnect, so the empty output is the honest answer and the call is
+//! idempotent — the same boundary `crate::ops::delete_resource_policy` draws between the
+//! resource a policy hangs off and the policy itself.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -172,15 +178,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 project_not_found(),
             ));
         };
+        // The project is held but carries no webhook: there is nothing to remove, from
+        // this store or from the provider, so no token is needed either and the store is
+        // already in the state this call asks for. Nothing changed, so the project's
+        // settings — `lastModified` included — are left exactly as they are and no audit
+        // record is written.
         let Some(webhook) = stored.project.webhook.as_ref() else {
             drop(guard);
-            return Err(refuse(
-                Self::NAME,
-                ctx,
-                crate::state::AuditOutcome::NotFound,
-                &project_arn,
-                webhook_not_found(),
-            ));
+            return Ok(DeleteWebhookOutput {});
         };
 
         // A manually created webhook is the caller's own registration with the provider,
@@ -262,16 +267,6 @@ fn refuse(
 fn project_not_found() -> DeleteWebhookError {
     DeleteWebhookErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
         message: Some(crate::state::PROJECT_NOT_FOUND_MESSAGE.to_string()),
-    })
-    .into()
-}
-
-/// The project is held but carries no webhook, so the resource this call names does not
-/// exist: AWS models that as `ResourceNotFoundException`, with the one fixed sentence
-/// [`crate::state::WEBHOOK_NOT_FOUND_MESSAGE`] holds.
-fn webhook_not_found() -> DeleteWebhookError {
-    DeleteWebhookErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
-        message: Some(crate::state::WEBHOOK_NOT_FOUND_MESSAGE.to_string()),
     })
     .into()
 }

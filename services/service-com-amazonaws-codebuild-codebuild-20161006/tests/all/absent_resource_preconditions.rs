@@ -278,8 +278,11 @@ type WebhookRequest = fn(&str) -> Value;
 
 /// RULE 2: every operation that addresses a project's webhook resolves the project
 /// first, so an absent project is refused with CodeBuild's fixed absent-project
-/// sentence — which names neither the project nor its ARN — while the absent-webhook
-/// sentence is reserved for a project that IS held and carries none.
+/// sentence — which names neither the project nor its ARN — while a held project that
+/// carries no webhook is answered by what that operation does with one that is not
+/// there: created for `CreateWebhook`, removed-already for `DeleteWebhook` (nothing to
+/// remove, so the empty answer), and refused with the absent-webhook sentence only by
+/// the update, which has no existing record to change.
 ///
 /// The table spans all three webhook operations, each against both forms of an absent
 /// project (never created, and created then deleted) and against a held project with no
@@ -350,26 +353,42 @@ async fn a_webhook_operation_reports_an_absent_project_before_an_absent_webhook(
 
         let case = format!("{operation} on a held project carrying no webhook");
         let (status, body) = call(&router, operation, request(&project)).await;
-        if operation == "CreateWebhook" {
-            assert_eq!(
-                status, 200,
-                "case {case:?}: a held project takes a webhook, got {status} with {body}"
-            );
-            assert!(
-                body["webhook"]["payloadUrl"].is_string(),
-                "case {case:?}: the created webhook is reported, got {body}"
-            );
-        } else {
-            assert_eq!(
-                status, 400,
-                "case {case:?}: expected 400, got {status} with {body}"
-            );
-            assert_eq!(
-                body["message"],
-                json!(state::WEBHOOK_NOT_FOUND_MESSAGE),
-                "case {case:?}: a held project reports the WEBHOOK as the absent \
-                 resource, got {body}"
-            );
+        match operation {
+            "CreateWebhook" => {
+                assert_eq!(
+                    status, 200,
+                    "case {case:?}: a held project takes a webhook, got {status} with {body}"
+                );
+                assert!(
+                    body["webhook"]["payloadUrl"].is_string(),
+                    "case {case:?}: the created webhook is reported, got {body}"
+                );
+            }
+            // A delete has nothing to remove, which is the state it would leave behind
+            // anyway: the empty answer, and the project left where it was.
+            "DeleteWebhook" => {
+                assert_eq!(
+                    status, 200,
+                    "case {case:?}: removing a webhook that is not there is a no-op, got \
+                     {status} with {body}"
+                );
+                assert!(
+                    body["webhook"].is_null(),
+                    "case {case:?}: the empty output models no members, got {body}"
+                );
+            }
+            _ => {
+                assert_eq!(
+                    status, 400,
+                    "case {case:?}: expected 400, got {status} with {body}"
+                );
+                assert_eq!(
+                    body["message"],
+                    json!(state::WEBHOOK_NOT_FOUND_MESSAGE),
+                    "case {case:?}: a held project reports the WEBHOOK as the absent \
+                     resource, got {body}"
+                );
+            }
         }
     }
 }

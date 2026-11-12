@@ -1189,10 +1189,11 @@ async fn a_delete_removes_the_webhook_and_leaves_the_project() {
     }
 }
 
-/// A delete refuses what it cannot remove — no project, or a project with no webhook —
-/// and changes nothing.
+/// A delete is refused for the one resource it addresses by name — the project — and is
+/// served for a project it resolves, whether or not that project carries a webhook: the
+/// detailed cover for that no-op is in `tests/all/webhook_delete_is_idempotent.rs`.
 #[tokio::test]
-async fn a_delete_refuses_what_it_cannot_remove() {
+async fn a_delete_refuses_only_an_absent_project() {
     let router = emulator();
 
     let (status, body) = call(
@@ -1218,24 +1219,18 @@ async fn a_delete_refuses_what_it_cannot_remove() {
     )
     .await;
     assert_eq!(
-        status, 400,
-        "DeleteWebhook on a project with no webhook: expected 400, got {status} with {body}"
-    );
-    assert!(
-        error_type(&body).contains("ResourceNotFoundException"),
-        "DeleteWebhook on a project with no webhook: expected ResourceNotFoundException, \
-         got {body}"
+        status, 200,
+        "DeleteWebhook on a project with no webhook: expected 200, got {status} with {body}"
     );
 
-    // And a second delete of a webhook that was already removed is the same refusal.
+    // And a second delete of a webhook that was already removed is served too.
     create_project_with_webhook(&router, "dw-twice", "GITHUB", full_configuration()).await;
     for attempt in 1..=2 {
         let (status, body) =
             call(&router, "DeleteWebhook", json!({"projectName": "dw-twice"})).await;
-        let expected = if attempt == 1 { 200 } else { 400 };
         assert_eq!(
-            status, expected,
-            "DeleteWebhook attempt {attempt}: expected {expected}, got {status} with {body}"
+            status, 200,
+            "DeleteWebhook attempt {attempt}: expected 200, got {status} with {body}"
         );
     }
 }

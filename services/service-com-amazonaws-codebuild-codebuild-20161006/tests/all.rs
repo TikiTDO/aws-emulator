@@ -111,6 +111,8 @@ mod update_project;
 mod update_report_group;
 #[path = "all/webhook_access_token.rs"]
 mod webhook_access_token;
+#[path = "all/webhook_delete_is_idempotent.rs"]
+mod webhook_delete_is_idempotent;
 #[path = "all/webhook_lifecycle.rs"]
 mod webhook_lifecycle;
 #[path = "all/webhook_project_resolution.rs"]
