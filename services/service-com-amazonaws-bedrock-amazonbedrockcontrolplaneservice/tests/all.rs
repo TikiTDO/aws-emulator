@@ -47,6 +47,8 @@ mod automated_reasoning_policy_updates;
 mod automated_reasoning_policy_versions;
 #[path = "all/batch_delete_evaluation_jobs.rs"]
 mod batch_delete_evaluation_jobs;
+#[path = "all/batch_submission_acceptance.rs"]
+mod batch_submission_acceptance;
 #[path = "all/control_plane_authorization.rs"]
 mod control_plane_authorization;
 #[path = "all/custom_model_authorization.rs"]
@@ -79,6 +81,8 @@ mod evaluation_job_execution;
 mod evaluation_job_listing;
 #[path = "all/evaluation_jobs.rs"]
 mod evaluation_jobs;
+#[path = "all/explicit_deny_names_the_addressed_guardrail.rs"]
+mod explicit_deny_names_the_addressed_guardrail;
 #[path = "all/foundation_model_agreement_offers.rs"]
 mod foundation_model_agreement_offers;
 #[path = "all/foundation_model_capability_projection.rs"]

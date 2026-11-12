@@ -39,7 +39,7 @@ use crate::support::{error_code, label, Reply};
 /// in the US East (N. Virginia) Region (us-east-1) by default"), which is also the Region
 /// this service serves a request carrying no credential scope in, so one Region label
 /// serves every call here.
-const REGION: &str = "us-east-1";
+pub(crate) const REGION: &str = "us-east-1";
 
 /// A SigV4 credential scope naming Amazon S3, which is what routes a request to the object
 /// store. No authenticator is registered, so the signature is never checked; the scope is
