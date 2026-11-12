@@ -252,14 +252,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .pool_mut(&input.user_pool_id)
             .ok_or_else(|| user_pool_not_found(&input.user_pool_id))?;
 
-        // Turning MFA on is turning on a CHALLENGE, and a challenge is issued over
+        // Requiring MFA is requiring a CHALLENGE, and a challenge is issued over
         // one of the factors this request configures: SMS message, email message or
-        // a time-based one-time password. A request that sets `MfaConfiguration`
-        // away from `OFF` while enabling none of them asks the pool to require a
-        // factor it could never present, so it is refused before anything is
-        // stored — asked after the lookup, so a request naming no pool is reported
-        // as such whatever else it carries.
-        if mfa_configuration != crate::state::MFA_OFF
+        // a time-based one-time password. `ON` is the mode in which "all users must
+        // set up MFA before they can sign in" (`MfaConfiguration` in this service's
+        // model), so a request that asks for it while enabling none of the factors
+        // asks the pool to demand a factor it could never present and is refused
+        // before anything is stored. `OPTIONAL` demands nothing of a user —
+        // "your application must make a client-side determination of whether a user
+        // wants to register an MFA device" — so it needs no factor to be offered,
+        // and this call is the documented way to turn one of them back off: every
+        // other legal combination of the mode and the per-factor blocks is stored as
+        // sent. Asked after the lookup, so a request naming no pool is reported as
+        // such whatever else it carries.
+        if mfa_configuration == crate::state::MFA_REQUIRED
             && !enables_an_mfa_factor(
                 input.sms_mfa_configuration.as_ref(),
                 input.email_mfa_configuration.as_ref(),
@@ -346,7 +352,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 }
 
 /// The message this operation's `InvalidParameterException` carries for a request
-/// that turns MFA on with no factor enabled ([`enables_an_mfa_factor`]). Fixed
+/// that REQUIRES MFA with no factor enabled ([`enables_an_mfa_factor`]). Fixed
 /// text, naming the three factors a pool can challenge with.
 const MFA_METHOD_REQUIRED_MESSAGE: &str =
     "Invalid MFA Configuration given. SMS MFA, Email MFA, or Software Token MFA must be enabled.";

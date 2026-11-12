@@ -608,7 +608,10 @@ struct MfaCase {
 /// passkeys, which are not one of the three the refusal names), and whether a
 /// configured factor is switched on — `SoftwareTokenMfaConfigType.Enabled` is
 /// "the activation state of TOTP MFA" (this service's model), so a disabled TOTP
-/// configuration enables nothing.
+/// configuration enables nothing. Only `ON`, the mode under which "all users must
+/// set up MFA before they can sign in" (`MfaConfiguration` in this service's
+/// model), takes a factor: `OPTIONAL` leaves the determination to the application,
+/// so it is served with no factor offered at all.
 fn mfa_cases() -> Vec<MfaCase> {
     vec![
         MfaCase {
@@ -637,7 +640,7 @@ fn mfa_cases() -> Vec<MfaCase> {
         MfaCase {
             case: "MFA optional with no factor at all",
             members: json!({ "MfaConfiguration": "OPTIONAL" }),
-            served: false,
+            served: true,
         },
         MfaCase {
             case: "MFA required with TOTP configured but disabled",
@@ -657,7 +660,15 @@ fn mfa_cases() -> Vec<MfaCase> {
                     "FactorConfiguration": "MULTI_FACTOR_WITH_USER_VERIFICATION"
                 }
             }),
-            served: false,
+            served: true,
+        },
+        MfaCase {
+            case: "MFA optional with TOTP configured but disabled, the de-activating write",
+            members: json!({
+                "MfaConfiguration": "OPTIONAL",
+                "SoftwareTokenMfaConfiguration": { "Enabled": false }
+            }),
+            served: true,
         },
         MfaCase {
             case: "MFA required with TOTP enabled",

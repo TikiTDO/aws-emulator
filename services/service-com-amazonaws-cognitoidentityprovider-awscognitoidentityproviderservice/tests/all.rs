@@ -283,6 +283,8 @@ mod user_pool_auth_metrics;
 mod user_pool_domain;
 #[path = "all/user_pool_mfa_config.rs"]
 mod user_pool_mfa_config;
+#[path = "all/user_pool_mfa_posture_rewrite.rs"]
+mod user_pool_mfa_posture_rewrite;
 #[path = "all/user_pool_replica_deletion.rs"]
 mod user_pool_replica_deletion;
 #[path = "all/user_pool_replicas.rs"]
