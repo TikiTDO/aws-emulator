@@ -25,6 +25,8 @@ mod authorization;
 mod block_geometry;
 #[path = "all/block_geometry_table_cells.rs"]
 mod block_geometry_table_cells;
+#[path = "all/block_outlines.rs"]
+mod block_outlines;
 #[path = "all/creation_time_windows.rs"]
 mod creation_time_windows;
 #[path = "all/document_extraction.rs"]

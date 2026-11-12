@@ -69,7 +69,13 @@
 //!   rule, a border or a logo is part of the page it is drawn on — rather than claiming
 //!   the whole page;
 //! * a `WORD` reports as its `Geometry$RotationAngle` the quarter turn its characters were
-//!   read at, which [`ocr`] establishes by reading the page at each of its turns.
+//!   read at, which [`ocr`] establishes by reading the page at each of its turns;
+//! * `BoundingBox` is "an axis-aligned COARSE representation of the location of the
+//!   recognized item" and `Polygon` is, "within the bounding box, a FINE-GRAINED polygon
+//!   around the recognized item", so a block reports both over the same marks: the box
+//!   around them, and their own outline — the extreme marks themselves, clockwise
+//!   from the corner the characters were read from — which follows the item's shape
+//!   instead of restating the box's corners.
 
 pub mod ocr;
 pub mod s3_source;
@@ -1364,7 +1370,7 @@ pub struct MeasuredPage {
     pub rotation: f32,
     /// The extent of the page's CONTENT: every mark found on it, read as text or not.
     /// `None` for a page carrying no ink at all.
-    pub content: Option<ocr::Rect>,
+    pub content: Option<ocr::Marks>,
 }
 
 /// A document's text, one entry per page, the confidence it was read with, and where on
@@ -1724,9 +1730,9 @@ struct WordLayout {
     column: usize,
     text: String,
     id: String,
-    /// Where the word sits on the page: the extent of its own ink when it was recognised
-    /// off pixels, and otherwise its place on the character grid.
-    bbox: BoundingBox,
+    /// Where the word sits on the page: its own ink, measured, when it was recognised off
+    /// pixels, and otherwise its place on the character grid.
+    region: Region,
     /// The `Confidence` a block derived from this word reports: the mean score ITS OWN
     /// characters were recognised with, or the document's one confidence when they were
     /// not recognised but read.
@@ -1744,9 +1750,12 @@ struct LineLayout {
     /// where the line itself carries no measurement, since a per-line spread there would
     /// be a measurement nothing made.
     confidence: f32,
-    /// Where the line sits on the page: the extent of the ink it was read from when it
-    /// was recognised off pixels, and otherwise its place on the character grid.
-    bbox: BoundingBox,
+    /// Where the line sits on the page: the ink it was read from when it was recognised
+    /// off pixels, and otherwise its place on the character grid.
+    region: Region,
+    /// The angle, in degrees, this page's characters were read at, which is the frame
+    /// every polygon on the page is outlined in.
+    rotation: f32,
     /// Word counts per tab-separated cell, when the line is a table row.
     cells: Vec<usize>,
     /// Index in [`Self::words`] of each cell's FIRST word, index-aligned with
@@ -1818,6 +1827,143 @@ fn box_of(rect: &ocr::Rect) -> BoundingBox {
     }
 }
 
+/// The four corners of `bbox`, clockwise from its top-left one.
+fn corners(bbox: &BoundingBox) -> Vec<Point> {
+    vec![
+        Point {
+            x: bbox.left,
+            y: bbox.top,
+        },
+        Point {
+            x: bbox.left + bbox.width,
+            y: bbox.top,
+        },
+        Point {
+            x: bbox.left + bbox.width,
+            y: bbox.top + bbox.height,
+        },
+        Point {
+            x: bbox.left,
+            y: bbox.top + bbox.height,
+        },
+    ]
+}
+
+/// How many quarter turns a page whose characters are turned by `rotation` degrees was
+/// read at, as an index into a list of corners running clockwise from the top-left.
+fn read_from_corner(rotation: f32) -> usize {
+    (((rotation / 90.0).round() as i32).rem_euclid(4)) as usize
+}
+
+/// The outline of the marks at `points`: the four extreme ones — the topmost, the
+/// rightmost, the bottommost and the leftmost — in the order the item they bound was
+/// read.
+///
+/// `Geometry$Polygon` is, "within the bounding box, a fine-grained polygon around the
+/// recognized item", against a `BoundingBox` that is "an axis-aligned COARSE
+/// representation" of the same place: so the polygon is taken from the marks themselves.
+/// Each of these four points is one of them, which puts the polygon inside the box around
+/// the same marks and on each of its edges, and lets it follow the item's own skew — the
+/// marks of a line whose glyphs do not all reach its top, or of a page photographed out of
+/// square, outline a slanted quadrilateral, while a solid rectangle of ink outlines its own
+/// rectangle.
+///
+/// The list runs clockwise from the corner the item's characters were READ from, which for
+/// a page read as it was submitted is its top-left one and for a page read at a quarter
+/// turn is the corner that turn started at.
+fn outline(points: &[Point], rotation: f32) -> Vec<Point> {
+    if points.is_empty() {
+        return Vec::new();
+    }
+    let (mut top, mut right, mut bottom, mut left) = (0usize, 0usize, 0usize, 0usize);
+    for (index, point) in points.iter().enumerate() {
+        let (x, y) = (point.x, point.y);
+        if y < points[top].y || (y == points[top].y && x < points[top].x) {
+            top = index;
+        }
+        if x > points[right].x || (x == points[right].x && y < points[right].y) {
+            right = index;
+        }
+        if y > points[bottom].y || (y == points[bottom].y && x > points[bottom].x) {
+            bottom = index;
+        }
+        if x < points[left].x || (x == points[left].x && y > points[left].y) {
+            left = index;
+        }
+    }
+    // Clockwise from the extreme mark nearest the page's top-left corner, turned to start
+    // at the corner the characters were read from.
+    let clockwise = [top, right, bottom, left];
+    let first = read_from_corner(rotation);
+    (0..clockwise.len())
+        .map(|step| points[clockwise[(step + first) % clockwise.len()]].clone())
+        .collect()
+}
+
+/// WHERE a block was measured: the extent of the marks it spans, and their outline.
+///
+/// The one place a block's `Geometry` comes from, so the coarse box and the fine-grained
+/// polygon a block reports are always measurements of the SAME marks.
+#[derive(Debug, Clone)]
+struct Region {
+    bbox: BoundingBox,
+    /// The polygon the block reports, as [`outline`] orders it.
+    polygon: Vec<Point>,
+}
+
+impl Region {
+    /// The region [`ocr`] measured for one item off the submitted pixels.
+    fn measured(marks: &ocr::Marks, rotation: f32) -> Self {
+        let points: Vec<Point> = marks
+            .outline
+            .iter()
+            .map(|vertex| Point {
+                x: vertex.x,
+                y: vertex.y,
+            })
+            .collect();
+        Self {
+            bbox: box_of(&marks.rect),
+            polygon: outline(&points, rotation),
+        }
+    }
+
+    /// The region a box is the whole of what was measured of: a block laid out on the
+    /// character grid, or one bounded by the blocks around it, has no finer outline than
+    /// that box's own corners.
+    fn of_box(bbox: BoundingBox, rotation: f32) -> Self {
+        let polygon = outline(&corners(&bbox), rotation);
+        Self { bbox, polygon }
+    }
+
+    /// The region spanning every one of `regions`: the box around them all, outlined by
+    /// the marks they were themselves measured over.
+    fn spanning<'a>(
+        regions: impl IntoIterator<Item = &'a Self>,
+        rotation: f32,
+    ) -> Option<Self> {
+        let mut boxes: Vec<BoundingBox> = Vec::new();
+        let mut points: Vec<Point> = Vec::new();
+        for region in regions {
+            boxes.push(region.bbox.clone());
+            points.extend(region.polygon.iter().cloned());
+        }
+        Some(Self {
+            bbox: union_of(&boxes)?,
+            polygon: outline(&points, rotation),
+        })
+    }
+
+    /// This region as the `Geometry` a block reports it.
+    fn geometry(&self) -> Geometry {
+        Geometry {
+            bounding_box: Some(self.bbox.clone()),
+            polygon: Some(self.polygon.clone()),
+            rotation_angle: None,
+        }
+    }
+}
+
 /// The box enclosing every one of `boxes`, or `None` when there are none.
 fn union_of(boxes: &[BoundingBox]) -> Option<BoundingBox> {
     if boxes.is_empty() {
@@ -1836,32 +1982,6 @@ fn union(boxes: &[BoundingBox]) -> BoundingBox {
         height: bottom - top,
         left,
         top,
-    }
-}
-
-fn geometry(bbox: BoundingBox) -> Geometry {
-    let polygon = vec![
-        Point {
-            x: bbox.left,
-            y: bbox.top,
-        },
-        Point {
-            x: bbox.left + bbox.width,
-            y: bbox.top,
-        },
-        Point {
-            x: bbox.left + bbox.width,
-            y: bbox.top + bbox.height,
-        },
-        Point {
-            x: bbox.left,
-            y: bbox.top + bbox.height,
-        },
-    ];
-    Geometry {
-        bounding_box: Some(bbox),
-        polygon: Some(polygon),
-        rotation_angle: None,
     }
 }
 
@@ -1918,6 +2038,7 @@ fn layout_page(
     content: &DocumentContent,
 ) -> Vec<LineLayout> {
     let measured = content.measured_page(page_index);
+    let rotation = content.page_rotation(page_index);
     page_text
         .lines()
         .map(str::trim_end)
@@ -1945,9 +2066,9 @@ fn layout_page(
                         column,
                         text,
                         id: block_id(key, "WORD", &[page_index, index, wi]),
-                        bbox: measured_word.map_or_else(
-                            || bounding_box(index, column, chars),
-                            |word| box_of(&word.rect),
+                        region: measured_word.map_or_else(
+                            || Region::of_box(bounding_box(index, column, chars), rotation),
+                            |word| Region::measured(&word.marks, rotation),
                         ),
                         confidence: measured_word
                             .map_or(content.confidence, |word| word.confidence),
@@ -1985,8 +2106,14 @@ fn layout_page(
                 // A line spans exactly the words it was read from, whichever way those
                 // words got their boxes; a line with no words at all (which a non-blank
                 // line never is) falls back to its place on the character grid.
-                bbox: union_of(&words.iter().map(|w| w.bbox.clone()).collect::<Vec<_>>())
-                    .unwrap_or_else(|| bounding_box(index, 0, line.trim_end().chars().count())),
+                region: Region::spanning(words.iter().map(|word| &word.region), rotation)
+                    .unwrap_or_else(|| {
+                        Region::of_box(
+                            bounding_box(index, 0, line.trim_end().chars().count()),
+                            rotation,
+                        )
+                    }),
+                rotation,
                 confidence: measured_line.map_or(content.confidence, |line| line.confidence),
                 text: line.to_string(),
                 words,
@@ -2020,7 +2147,7 @@ pub fn blocks(key: &str, content: &DocumentContent, features: FeatureSet) -> Vec
             let mut line_block = new_block("LINE", line.id.clone(), page_number);
             line_block.text = Some(line.text.trim().to_string());
             line_block.confidence = Some(line.confidence);
-            line_block.geometry = Some(geometry(line.bbox.clone()));
+            line_block.geometry = Some(line.region.geometry());
             if !line.words.is_empty() {
                 line_block.relationships = Some(vec![relationship(
                     "CHILD",
@@ -2033,7 +2160,7 @@ pub fn blocks(key: &str, content: &DocumentContent, features: FeatureSet) -> Vec
                 word_block.text = Some(word.text.clone());
                 word_block.confidence = Some(word.confidence);
                 word_block.text_type = Some("PRINTED".to_string());
-                let mut word_geometry = geometry(word.bbox.clone());
+                let mut word_geometry = word.region.geometry();
                 // `Geometry$RotationAngle` is "a numerical value corresponding to the
                 // rotation of the WORD block. Possible values are 0, 90, 180, and 270",
                 // so it is reported for WORD blocks only. The angle is the one the page's
@@ -2071,16 +2198,19 @@ pub fn blocks(key: &str, content: &DocumentContent, features: FeatureSet) -> Vec
         // page whose text carries no measurement reports the box enclosing its blocks.
         // A page nothing was found on has nothing to bound, so it reports the whole page:
         // that IS what was examined.
-        let mut page_boxes: Vec<BoundingBox> = lines.iter().map(|line| line.bbox.clone()).collect();
-        if let Some(detected) = content
+        let content_region = content
             .measured_page(page_index)
             .and_then(|page| page.content.as_ref())
-        {
-            page_boxes.push(box_of(detected));
-        }
-        page_block.geometry = Some(geometry(
-            union_of(&page_boxes).unwrap_or_else(|| box_of(&ocr::Rect::whole_page())),
-        ));
+            .map(|marks| Region::measured(marks, rotation));
+        let page_region = Region::spanning(
+            lines
+                .iter()
+                .map(|line| &line.region)
+                .chain(content_region.iter()),
+            rotation,
+        )
+        .unwrap_or_else(|| Region::of_box(box_of(&ocr::Rect::whole_page()), rotation));
+        page_block.geometry = Some(page_region.geometry());
         if !children.is_empty() {
             page_block.relationships = Some(vec![relationship("CHILD", children)]);
         }
@@ -2112,7 +2242,7 @@ fn form_blocks(
         let mut key_block = new_block("KEY_VALUE_SET", key_id.clone(), page_number);
         key_block.entity_types = Some(vec!["KEY".to_string()]);
         key_block.confidence = Some(words_confidence(line, &key_words));
-        key_block.geometry = Some(geometry(union(&word_boxes(&key_words))));
+        key_block.geometry = Some(words_region(line, &key_words).geometry());
         key_block.relationships = Some(vec![
             relationship("VALUE", vec![value_id.clone()]),
             relationship("CHILD", key_words.iter().map(|w| w.id.clone()).collect()),
@@ -2121,7 +2251,7 @@ fn form_blocks(
         let mut value_block = new_block("KEY_VALUE_SET", value_id.clone(), page_number);
         value_block.entity_types = Some(vec!["VALUE".to_string()]);
         value_block.confidence = Some(words_confidence(line, &value_words));
-        value_block.geometry = Some(geometry(union(&word_boxes(&value_words))));
+        value_block.geometry = Some(words_region(line, &value_words).geometry());
         value_block.relationships = Some(vec![relationship(
             "CHILD",
             value_words.iter().map(|w| w.id.clone()).collect(),
@@ -2136,8 +2266,14 @@ fn form_blocks(
 }
 
 /// Where each of `words` sits on the page, as it was measured or laid out.
-fn word_boxes(words: &[&WordLayout]) -> Vec<BoundingBox> {
-    words.iter().map(|w| w.bbox.clone()).collect()
+fn word_regions<'a>(words: &'a [&'a WordLayout]) -> impl Iterator<Item = &'a Region> {
+    words.iter().map(|word| &word.region)
+}
+
+/// The region covering every one of `words`, or the line's own when it has none: the box
+/// around them and the outline of the marks they were measured over.
+fn words_region(line: &LineLayout, words: &[&WordLayout]) -> Region {
+    Region::spanning(word_regions(words), line.rotation).unwrap_or_else(|| line.region.clone())
 }
 
 /// The `Confidence` a block spanning `words` reports.
@@ -2227,20 +2363,20 @@ fn cell_words(line: &LineLayout, column: usize) -> Vec<&WordLayout> {
 /// for from each empty cell: a row of `n` cells costs `O(n)` plus its own words, so a line
 /// that is nothing but separators is laid out in time proportional to the blocks it
 /// becomes.
-fn cell_boxes(line: &LineLayout) -> Vec<BoundingBox> {
-    let own: Vec<Option<BoundingBox>> = (0..line.cells.len())
-        .map(|column| union_of(&word_boxes(&cell_words(line, column))))
+fn cell_regions(line: &LineLayout) -> Vec<Region> {
+    let own: Vec<Option<Region>> = (0..line.cells.len())
+        .map(|column| Region::spanning(word_regions(&cell_words(line, column)), line.rotation))
         .collect();
 
-    let row_left = line.bbox.left;
-    let row_right = line.bbox.left + line.bbox.width;
+    let row_left = line.region.bbox.left;
+    let row_right = line.region.bbox.left + line.region.bbox.width;
 
     let mut left_edges: Vec<f32> = Vec::with_capacity(own.len());
     let mut nearest_before: Option<f32> = None;
     for cell in &own {
         left_edges.push(nearest_before.unwrap_or(row_left));
         if let Some(cell) = cell {
-            nearest_before = Some(cell.left + cell.width);
+            nearest_before = Some(cell.bbox.left + cell.bbox.width);
         }
     }
 
@@ -2249,20 +2385,23 @@ fn cell_boxes(line: &LineLayout) -> Vec<BoundingBox> {
     for (column, cell) in own.iter().enumerate().rev() {
         right_edges[column] = nearest_after.unwrap_or(row_right);
         if let Some(cell) = cell {
-            nearest_after = Some(cell.left);
+            nearest_after = Some(cell.bbox.left);
         }
     }
 
-    own.iter()
+    own.into_iter()
         .enumerate()
         .map(|(column, cell)| match cell {
-            Some(bbox) => bbox.clone(),
-            None => BoundingBox {
-                width: (right_edges[column] - left_edges[column]).max(0.0),
-                height: line.bbox.height,
-                left: left_edges[column],
-                top: line.bbox.top,
-            },
+            Some(region) => region,
+            None => Region::of_box(
+                BoundingBox {
+                    width: (right_edges[column] - left_edges[column]).max(0.0),
+                    height: line.region.bbox.height,
+                    left: left_edges[column],
+                    top: line.region.bbox.top,
+                },
+                line.rotation,
+            ),
         })
         .collect()
 }
@@ -2291,8 +2430,8 @@ fn table_blocks(
         let mut cell_blocks = Vec::new();
         let mut cell_ids = Vec::new();
         for (row, line) in run.iter().enumerate() {
-            // Every cell's box for this row at once, so no cell rescans the row.
-            let boxes = cell_boxes(line);
+            // Every cell's region for this row at once, so no cell rescans the row.
+            let regions = cell_regions(line);
             for column in 0..line.cells.len() {
                 let cell_words = cell_words(line, column);
                 let cell_id = block_id(key, "CELL", &[page_index, table_index, row, column]);
@@ -2302,7 +2441,7 @@ fn table_blocks(
                 cell.row_span = Some(1);
                 cell.column_span = Some(1);
                 cell.confidence = Some(words_confidence(line, &cell_words));
-                cell.geometry = boxes.get(column).cloned().map(geometry);
+                cell.geometry = regions.get(column).map(Region::geometry);
                 if !cell_words.is_empty() {
                     cell.relationships = Some(vec![relationship(
                         "CHILD",
@@ -2313,12 +2452,16 @@ fn table_blocks(
                 cell_blocks.push(cell);
             }
         }
-        let row_boxes: Vec<BoundingBox> = run.iter().map(|line| line.bbox.clone()).collect();
         let mut table = new_block("TABLE", table_id.clone(), page_number);
         // The table's own characters: every word of every row it was read from.
         let table_words: Vec<&WordLayout> = run.iter().flat_map(|line| line.words.iter()).collect();
         table.confidence = Some(words_confidence(first_row, &table_words));
-        table.geometry = Some(geometry(union(&row_boxes)));
+        table.geometry = Region::spanning(
+            run.iter().map(|line| &line.region),
+            first_row.rotation,
+        )
+        .as_ref()
+        .map(Region::geometry);
         table.relationships = Some(vec![relationship("CHILD", cell_ids)]);
 
         ids.push(table_id);
@@ -2343,7 +2486,7 @@ pub struct Field {
     /// The value the label carries, as written in the document.
     pub value: String,
     /// Where the value sits on the page, for the answer's `Geometry`.
-    pub value_box: BoundingBox,
+    value_region: Region,
     /// The confidence the value's own characters were read with, for the answer's
     /// `Confidence`.
     pub value_confidence: f32,
@@ -2366,7 +2509,7 @@ pub fn fields(key: &str, content: &DocumentContent) -> Vec<Field> {
                 continue;
             };
             let label = char_span(&line.text, 0, colon).trim().to_string();
-            let value_box = union(&word_boxes(&value_words));
+            let value_region = words_region(&line, &value_words);
             let value_confidence = words_confidence(&line, &value_words);
             out.push(Field {
                 page_number,
@@ -2375,7 +2518,7 @@ pub fn fields(key: &str, content: &DocumentContent) -> Vec<Field> {
                 value: char_span(&line.text, colon + 1, line.text.chars().count())
                     .trim()
                     .to_string(),
-                value_box,
+                value_region,
                 value_confidence,
             });
         }
@@ -2470,7 +2613,7 @@ pub fn query_blocks(key: &str, content: &DocumentContent, queries: &[PreparedQue
                 // Confidence in the answer is the confidence of the text it was read
                 // from, scaled by how much of the query that field's label accounts for.
                 result.confidence = Some((score * field.value_confidence).clamp(0.0, 100.0));
-                result.geometry = Some(geometry(field.value_box.clone()));
+                result.geometry = Some(field.value_region.geometry());
                 out.push(block);
                 out.push(result);
             }
@@ -2670,12 +2813,12 @@ pub fn detect_currency(text: &str) -> Option<&'static str> {
         .map(|(_, code)| *code)
 }
 
-/// An `ExpenseDetection` for text that was really read at `bbox`, with the confidence
+/// An `ExpenseDetection` for text that was really read in `region`, with the confidence
 /// it was read with.
-fn detection(text: &str, bbox: BoundingBox, confidence: f32) -> ExpenseDetection {
+fn detection(text: &str, region: &Region, confidence: f32) -> ExpenseDetection {
     ExpenseDetection {
         text: Some(text.to_string()),
-        geometry: Some(geometry(bbox)),
+        geometry: Some(region.geometry()),
         confidence: Some(confidence),
     }
 }
@@ -2720,16 +2863,6 @@ fn char_span(text: &str, from: usize, to: usize) -> String {
         .collect()
 }
 
-/// The box covering every one of `words`, or the line's own box when it has none.
-fn words_box(line: &LineLayout, words: &[&WordLayout]) -> BoundingBox {
-    let boxes = word_boxes(words);
-    if boxes.is_empty() {
-        line.bbox.clone()
-    } else {
-        union(&boxes)
-    }
-}
-
 /// The summary fields of one page: every labelled line outside a table, in page order.
 ///
 /// A labelled line is exactly what the `FORMS` path reads as a KEY/VALUE pair, so
@@ -2748,10 +2881,10 @@ fn summary_fields(lines: &[LineLayout], page_number: i32) -> Vec<ExpenseField> {
             summary_field_type(&label),
             Some(detection(
                 &label,
-                words_box(line, &label_words),
+                &words_region(line, &label_words),
                 words_confidence(line, &label_words),
             )),
-            detection(&value, words_box(line, &value_words), value_confidence),
+            detection(&value, &words_region(line, &value_words), value_confidence),
             page_number,
             value_confidence,
         ));
@@ -2783,7 +2916,7 @@ fn line_item(line: &LineLayout, header: Option<&LineLayout>, page_number: i32) -
         None,
         detection(
             &row_text,
-            words_box(line, &row_words),
+            &words_region(line, &row_words),
             words_confidence(line, &row_words),
         ),
         page_number,
@@ -2803,7 +2936,7 @@ fn line_item(line: &LineLayout, header: Option<&LineLayout>, page_number: i32) -
         let label = match (header, header_text) {
             (Some(header), Some(header_text)) => Some(detection(
                 header_text,
-                words_box(header, &cell_words(header, column)),
+                &words_region(header, &cell_words(header, column)),
                 words_confidence(header, &cell_words(header, column)),
             )),
             _ => None,
@@ -2814,7 +2947,7 @@ fn line_item(line: &LineLayout, header: Option<&LineLayout>, page_number: i32) -
             label,
             detection(
                 text,
-                words_box(line, &cell_words(line, column)),
+                &words_region(line, &cell_words(line, column)),
                 cell_confidence,
             ),
             page_number,

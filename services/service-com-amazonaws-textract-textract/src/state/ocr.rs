@@ -44,8 +44,11 @@
 //!    the fraction of the SUBMITTED page it covers ([`MeasuredLine`], [`MeasuredWord`],
 //!    mapped back out of the turn it was read at by [`Orientation`]), so the `Geometry`
 //!    the blocks carry is the position and the size the recogniser measured rather than a
-//!    typographic grid. The page's own content is measured too ([`Recognised::content`]):
-//!    the extent of every mark found on it, read as text or not.
+//!    typographic grid. Each measurement is both the box around the ink and its
+//!    [`Outline`] — the four extreme marks themselves — so a block can report the
+//!    fine-grained polygon around its item as well as the coarse box. The page's own
+//!    content is measured too ([`Recognised::content`]): every mark found on it, read as
+//!    text or not.
 //!
 //! No maintained Rust crate performs offline OCR: the ones that exist either bind to a
 //! C library or load neural-network weights from a file this emulator may not fetch, so
@@ -222,10 +225,10 @@ pub struct Recognised {
     /// it was submitted, and the quarter turn its characters are turned by when the page
     /// had to be turned to read them.
     pub rotation: f32,
-    /// The extent of the page's own CONTENT: the box enclosing every mark found on it,
-    /// whether or not the mark was read as a character, so a rule, a border or a logo is
-    /// part of the content of the page it is on. `None` on a page carrying no ink at all.
-    pub content: Option<Rect>,
+    /// The extent of the page's own CONTENT: every mark found on it, whether or not the
+    /// mark was read as a character, so a rule, a border or a logo is part of the content
+    /// of the page it is on. `None` on a page carrying no ink at all.
+    pub content: Option<Marks>,
 }
 
 /// Where something sits on a page, in the page-relative fractions `BoundingBox` and
@@ -251,11 +254,39 @@ impl Rect {
     }
 }
 
+/// One point of a page, in the same page-relative fractions as [`Rect`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Vertex {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// The OUTLINE of a set of marks: the four extreme marks of the set — the topmost, the
+/// rightmost, the bottommost and the leftmost mark — as points on the submitted page.
+///
+/// Each of them is a mark that was really found, so the outline is inscribed in the box
+/// around the same marks and touches each of its edges, and it follows the set's own skew
+/// instead of restating the box's corners: a line of text whose last glyph sits lower
+/// than its first outlines a slanted quadrilateral, while a solid rectangle of ink
+/// outlines its own rectangle.
+pub type Outline = [Vertex; 4];
+
+/// Where a set of marks was found on the page: the box enclosing them and their outline.
+///
+/// `BoundingBox` is "an axis-aligned COARSE representation of the location of the
+/// recognized item" and `Polygon` is, "within the bounding box, a FINE-GRAINED polygon
+/// around the recognized item", so a block needs both, measured over the same marks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Marks {
+    pub rect: Rect,
+    pub outline: Outline,
+}
+
 /// One word of a recognised line: where its ink sits, and the mean score its own
 /// characters were recognised with.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MeasuredWord {
-    pub rect: Rect,
+    pub marks: Marks,
     pub confidence: f32,
 }
 
@@ -367,7 +398,7 @@ pub fn read_raster(bytes: &[u8], format: ImageFormat) -> Result<Recognised, Unre
         text: best.text,
         lines: best.lines,
         rotation: best.rotation,
-        content: ink.content(),
+        content: ink.content(Orientation::upright(&ink)),
     })
 }
 
@@ -431,7 +462,7 @@ fn recognise_page(ink: &Ink, orientation: Orientation) -> Result<PageRead, Unrea
         text.push('\n');
         score_total += rendered.score_total;
         score_count += rendered.score_count;
-        measured.push(rendered.measured(orientation));
+        measured.push(rendered.measured(ink, orientation));
     }
 
     Ok(PageRead {
@@ -513,6 +544,26 @@ impl Orientation {
             height: ((bottom + 1 - top) as f32 / page_height).clamp(0.0, 1.0),
         }
     }
+
+    /// Where the point `(u, v)` of the TURNED page — each a fraction of that page's own
+    /// width and height — sits on the page as it was submitted.
+    ///
+    /// Turning the page back maps its corners onto the submitted page's: a quarter turn
+    /// takes the turned page's top edge to one of the submitted page's sides, so a point
+    /// measured while reading a turned page still names the pixel of the submitted page it
+    /// was measured at.
+    fn vertex(self, u: f32, v: f32) -> Vertex {
+        let (x, y) = match self.turns {
+            1 => (v, 1.0 - u),
+            2 => (1.0 - u, 1.0 - v),
+            3 => (1.0 - v, u),
+            _ => (u, v),
+        };
+        Vertex {
+            x: x.clamp(0.0, 1.0),
+            y: y.clamp(0.0, 1.0),
+        }
+    }
 }
 
 /// The refusal for a document in an accepted container whose bytes the decoder cannot
@@ -574,6 +625,45 @@ struct Ink {
     width: usize,
     height: usize,
     mask: Vec<bool>,
+}
+
+/// The four EXTREME marks of a set of pixels — the topmost, the rightmost, the bottommost
+/// and the leftmost — accumulated as the pixels are scanned.
+///
+/// One scan yields both what a block reports: the box around the marks is their bounds,
+/// and the fine-grained outline of the block is the extremes themselves. Ties go to the
+/// mark furthest along the page's own reading order, so one set of marks has one outline.
+#[derive(Debug, Default)]
+struct Extremes {
+    top: Option<(usize, usize)>,
+    right: Option<(usize, usize)>,
+    bottom: Option<(usize, usize)>,
+    left: Option<(usize, usize)>,
+}
+
+impl Extremes {
+    /// Take the mark at `(x, y)` into the four extremes.
+    fn mark(&mut self, x: usize, y: usize) {
+        if self.top.is_none_or(|(tx, ty)| y < ty || (y == ty && x < tx)) {
+            self.top = Some((x, y));
+        }
+        if self.right.is_none_or(|(rx, ry)| x > rx || (x == rx && y < ry)) {
+            self.right = Some((x, y));
+        }
+        if self.bottom.is_none_or(|(bx, by)| y > by || (y == by && x > bx)) {
+            self.bottom = Some((x, y));
+        }
+        if self.left.is_none_or(|(lx, ly)| x < lx || (x == lx && y > ly)) {
+            self.left = Some((x, y));
+        }
+    }
+
+    /// The pixel bounds `x0..=x1` by `y0..=y1` of every mark taken in, or `None` when none
+    /// was: the leftmost and rightmost mark give the columns, the topmost and bottommost
+    /// the rows.
+    fn bounds(&self) -> Option<(usize, usize, usize, usize)> {
+        Some((self.left?.0, self.right?.0, self.top?.1, self.bottom?.1))
+    }
 }
 
 impl Ink {
@@ -638,28 +728,86 @@ impl Ink {
         }
     }
 
-    /// The extent of the page's CONTENT: the box enclosing every mark on it, as a fraction
-    /// of the page, or `None` for a page carrying no ink.
+    /// The extent of the page's CONTENT: the box enclosing every mark on it and the
+    /// outline of those marks, as fractions of the page, or `None` for a page carrying no
+    /// ink.
     ///
     /// Every mark, not only the marks that were read as characters: a rule, a border or a
     /// logo is part of the content of the page it is drawn on, and the `PAGE` block's
     /// `Geometry` bounds what is on the page rather than what could be named.
-    fn content(&self) -> Option<Rect> {
-        let mut x0 = self.width;
-        let mut x1 = 0usize;
-        let mut y0 = self.height;
-        let mut y1 = 0usize;
+    ///
+    /// ONE pass over the page: the box and the outline are the bounds and the extremes of
+    /// the same marks, so both come out of the same scan ([`Extremes`]).
+    fn content(&self, orientation: Orientation) -> Option<Marks> {
+        let mut extremes = Extremes::default();
         for y in 0..self.height {
             for x in 0..self.width {
                 if self.at(x, y) {
-                    x0 = x0.min(x);
-                    x1 = x1.max(x);
-                    y0 = y0.min(y);
-                    y1 = y1.max(y);
+                    extremes.mark(x, y);
                 }
             }
         }
-        (x0 <= x1 && y0 <= y1).then(|| Orientation::upright(self).rect(x0, x1, y0, y1))
+        let (x0, x1, y0, y1) = extremes.bounds()?;
+        Some(Marks {
+            rect: orientation.rect(x0, x1, y0, y1),
+            outline: self.outline_of(&extremes, (x0, x1, y0, y1), orientation),
+        })
+    }
+
+    /// Where the ink inside `x0..=x1` by `y0..=y1` sits on the submitted page: the box
+    /// enclosing it, and the outline of the marks themselves.
+    ///
+    /// The outline's four points are the four EXTREME marks of that ink — the topmost, the
+    /// rightmost, the bottommost and the leftmost mark found, each at the corner of its own
+    /// pixel that faces away from the others. Every one of them is a mark that is really
+    /// there, so the outline lies inside the box and touches each of its edges, and it
+    /// follows the ink's own shape: the marks of a line whose glyphs do not all start at
+    /// its top outline a slanted quadrilateral rather than the box's four corners.
+    ///
+    /// A rectangle with no ink in it at all cannot be outlined, so its own corners are
+    /// reported: that is the whole of what was measured for it.
+    fn marks(&self, x0: usize, x1: usize, y0: usize, y1: usize, orientation: Orientation) -> Marks {
+        let right = x1.min(self.width.saturating_sub(1));
+        let bottom = y1.min(self.height.saturating_sub(1));
+        let mut extremes = Extremes::default();
+        for y in y0..=bottom {
+            for x in x0..=right {
+                if self.at(x, y) {
+                    extremes.mark(x, y);
+                }
+            }
+        }
+        Marks {
+            rect: orientation.rect(x0, right, y0, bottom),
+            outline: self.outline_of(&extremes, (x0, right, y0, bottom), orientation),
+        }
+    }
+
+    /// The extreme marks of `extremes` as points on the submitted page, falling back to
+    /// the corners of `x0..=x1` by `y0..=y1` for a rectangle no mark was found in.
+    fn outline_of(
+        &self,
+        extremes: &Extremes,
+        (x0, x1, y0, y1): (usize, usize, usize, usize),
+        orientation: Orientation,
+    ) -> Outline {
+        let page_width = self.width.max(1) as f32;
+        let page_height = self.height.max(1) as f32;
+        // A pixel covers the cell `x..x+1` by `y..y+1` of the page, which is the same cell
+        // `Orientation::rect` measures the box over, so a corner of the outline and the
+        // edge of the box it touches are the same number.
+        let corner = |(x, y): (usize, usize), rightwards: bool, downwards: bool| {
+            orientation.vertex(
+                (x + usize::from(rightwards)) as f32 / page_width,
+                (y + usize::from(downwards)) as f32 / page_height,
+            )
+        };
+        [
+            corner(extremes.top.unwrap_or((x0, y0)), false, false),
+            corner(extremes.right.unwrap_or((x1, y0)), true, false),
+            corner(extremes.bottom.unwrap_or((x1, y1)), true, true),
+            corner(extremes.left.unwrap_or((x0, y1)), false, true),
+        ]
     }
 
     fn row_inked(&self, y: usize) -> bool {
@@ -1070,24 +1218,24 @@ impl WordRun {
         self.score_count += 1;
     }
 
-    /// This word's ink as a fraction of the page it was submitted as, whichever turn of
-    /// that page it was read at.
-    fn rect(&self, orientation: Orientation) -> Rect {
-        orientation.rect(self.x0, self.x1, self.y0, self.y1)
+    /// This word's ink as it sits on the page it was submitted as, whichever turn of that
+    /// page it was read at: the box enclosing the ink, and the outline of the marks.
+    fn marks(&self, ink: &Ink, orientation: Orientation) -> Marks {
+        ink.marks(self.x0, self.x1, self.y0, self.y1, orientation)
     }
 }
 
 impl RenderedLine {
     /// This line's measurements, as fractions of the page as it was SUBMITTED: the extent
-    /// of each word's own ink, and the score each was recognised with.
-    fn measured(&self, orientation: Orientation) -> MeasuredLine {
+    /// and the outline of each word's own ink, and the score each was recognised with.
+    fn measured(&self, ink: &Ink, orientation: Orientation) -> MeasuredLine {
         MeasuredLine {
             confidence: percentage(self.score_total, self.score_count),
             words: self
                 .words
                 .iter()
                 .map(|run| MeasuredWord {
-                    rect: run.rect(orientation),
+                    marks: run.marks(ink, orientation),
                     confidence: percentage(run.score_total, run.score_count),
                 })
                 .collect(),

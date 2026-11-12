@@ -8,9 +8,9 @@
 //!
 //! * a `LINE`/`WORD` block's `BoundingBox` is where that text sits in the document and as
 //!   big as it is there (for a raster: the extent of the ink it was recognised from, which
-//!   this suite knows because it DREW the page), its `Polygon` traces that box, and a
-//!   `PAGE` block's box ENCLOSES the blocks of its page rather than claiming the whole
-//!   page;
+//!   this suite knows because it DREW the page), its `Polygon` is inscribed in that box and
+//!   touches each of its edges, and a `PAGE` block's box ENCLOSES the blocks of its page
+//!   rather than claiming the whole page;
 //! * so the geometry varies with the document: between the lines of one page, between the
 //!   words of one line, and not at all between two renderings of the same page at two
 //!   sizes (the boxes are page-relative fractions);
@@ -38,20 +38,24 @@ use crate::document_extraction::{
 use crate::raster_documents::{raster_document, render, Paper, CELL, PITCH};
 
 /// A `BoundingBox` as it came back over the wire.
+///
+/// `pub(crate)` here and on the two readers below: `crate::block_outlines` asserts the
+/// polygon half of the same `Geometry` and reads it through these rather than growing a
+/// second copy of them.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Rect {
-    left: f64,
-    top: f64,
-    width: f64,
-    height: f64,
+pub(crate) struct Rect {
+    pub(crate) left: f64,
+    pub(crate) top: f64,
+    pub(crate) width: f64,
+    pub(crate) height: f64,
 }
 
 impl Rect {
-    fn right(&self) -> f64 {
+    pub(crate) fn right(&self) -> f64 {
         self.left + self.width
     }
 
-    fn bottom(&self) -> f64 {
+    pub(crate) fn bottom(&self) -> f64 {
         self.top + self.height
     }
 
@@ -68,7 +72,7 @@ fn number(value: &Value, member: &str) -> f64 {
     value.get(member).and_then(Value::as_f64).unwrap_or(f64::NAN)
 }
 
-fn bbox_of(case: &str, block: &Value) -> Rect {
+pub(crate) fn bbox_of(case: &str, block: &Value) -> Rect {
     let bbox = block
         .get("Geometry")
         .and_then(|geometry| geometry.get("BoundingBox"))
@@ -86,7 +90,7 @@ fn bbox_of(case: &str, block: &Value) -> Rect {
     }
 }
 
-fn polygon_of(case: &str, block: &Value) -> Vec<(f64, f64)> {
+pub(crate) fn polygon_of(case: &str, block: &Value) -> Vec<(f64, f64)> {
     block
         .get("Geometry")
         .and_then(|geometry| geometry.get("Polygon"))
@@ -542,34 +546,13 @@ async fn a_recognised_pages_geometry_is_measured_where_the_ink_was_drawn() {
             );
         }
 
-        // Every Polygon traces its own box, with four corners of the box it was measured
-        // as — so no block reports the page's corners for a region inside the page.
+        // Every Polygon is the fine-grained outline of the marks its own box coarsely
+        // bounds: four points inside that box, together touching each of its edges — so no
+        // block reports the page's corners for a region inside the page. That assertion,
+        // and the exact outline a drawn page must report, live in `crate::block_outlines`.
         for block in &blocks {
-            let rect = bbox_of(case.name, block);
+            crate::block_outlines::assert_inscribed(case.name, block);
             let polygon = polygon_of(case.name, block);
-            let corners = [
-                (rect.left, rect.top),
-                (rect.right(), rect.top),
-                (rect.right(), rect.bottom()),
-                (rect.left, rect.bottom()),
-            ];
-            assert_eq!(
-                polygon.len(),
-                corners.len(),
-                "case {:?}: block {} Polygon must trace its own BoundingBox {rect:?}, got \
-                 {polygon:?}",
-                case.name,
-                block_id(block)
-            );
-            for (point, corner) in polygon.iter().zip(corners.iter()) {
-                assert!(
-                    (point.0 - corner.0).abs() < 1e-6 && (point.1 - corner.1).abs() < 1e-6,
-                    "case {:?}: block {} Polygon must trace its own BoundingBox {rect:?}, got \
-                     {polygon:?}",
-                    case.name,
-                    block_id(block)
-                );
-            }
             assert!(
                 polygon
                     .iter()
