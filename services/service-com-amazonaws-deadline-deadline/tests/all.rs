@@ -15,6 +15,8 @@
 mod batch_get_job;
 #[path = "all/budget.rs"]
 mod budget;
+#[path = "all/create_queue_fleet_association.rs"]
+mod create_queue_fleet_association;
 #[path = "all/delete_fleet.rs"]
 mod delete_fleet;
 #[path = "all/delete_storage_profile.rs"]
