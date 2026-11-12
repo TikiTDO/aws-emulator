@@ -5,7 +5,10 @@
 //! Creates or updates a scaling policy on an existing Auto Scaling group and answers its
 //! `PolicyARN`. A policy's `PolicyType` decides which members are part of it, so a put
 //! keeps only those and `DescribePolicies` reports exactly them
-//! ([`crate::state::scaling_policies`]). A target-tracking policy IS its CloudWatch
+//! ([`crate::state::scaling_policies`]). A switch the request leaves unset is RESOLVED
+//! here to the default the model documents for it, so the stored policy is the policy in
+//! force and a read of it does not leave the caller to re-read its own request. A
+//! target-tracking policy IS its CloudWatch
 //! alarms: putting one materialises them in the account's own CloudWatch store and the
 //! response reports the alarms that store holds for it.
 //!
@@ -319,8 +322,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .scaling_adjustment
                 .filter(|_| members.scaling_adjustment),
             cooldown: input.cooldown.filter(|_| members.cooldown),
-            step_adjustments: input.step_adjustments.filter(|_| members.step),
-            metric_aggregation_type: input.metric_aggregation_type.filter(|_| members.step),
+            step_adjustments: input
+                .step_adjustments
+                .filter(|_| members.step)
+                .unwrap_or_default(),
+            // A switch the request left unset is RESOLVED here, so the policy this put
+            // stores is the policy in force and every later read reports it rather than
+            // leaving the caller to re-read its own request
+            // (`crate::state::scaling_policies`).
+            metric_aggregation_type: policies::resolved_metric_aggregation_type(
+                input.metric_aggregation_type,
+                members,
+            ),
             estimated_instance_warmup: input
                 .estimated_instance_warmup
                 .filter(|_| members.instance_warmup),
@@ -328,10 +341,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             enabled: input.enabled.unwrap_or(true),
             target_tracking_configuration: input
                 .target_tracking_configuration
-                .filter(|_| members.target_tracking),
+                .filter(|_| members.target_tracking)
+                .map(policies::resolved_target_tracking),
             predictive_scaling_configuration: input
                 .predictive_scaling_configuration
-                .filter(|_| members.predictive),
+                .filter(|_| members.predictive)
+                .map(policies::resolved_predictive_scaling),
             // Filled in by the alarm sync below, which is what creates them in
             // CloudWatch: a policy's alarms are state, not a value a response invents.
             alarms: Vec::new(),
@@ -433,6 +448,19 @@ fn check_policy_input(
             .is_none_or(|steps| steps.is_empty())
     {
         return Err(refuse(policies::STEP_ADJUSTMENT_REQUIRED_MESSAGE));
+    }
+    // The published quota on a policy's steps ([`policies::MAX_STEP_ADJUSTMENTS`]): a
+    // bound on the steps the POLICY keeps, so it is checked for the one type that owns
+    // them. A put of another type carries no steps into the policy at all — they are
+    // dropped, as "Not used with any other policy type" says — so there is nothing of
+    // that policy for the quota to bound.
+    if members.step
+        && input
+            .step_adjustments
+            .as_ref()
+            .is_some_and(|steps| steps.len() > policies::MAX_STEP_ADJUSTMENTS)
+    {
+        return Err(refuse(policies::too_many_step_adjustments_message()));
     }
     if members.target_tracking {
         let Some(configuration) = input.target_tracking_configuration.as_ref() else {

@@ -75,6 +75,74 @@ pub const POLICY_TYPES: &[&str] = &[
 /// Minimum, Maximum, and Average", in the order that documentation lists them.
 pub const METRIC_AGGREGATION_TYPES: &[&str] = &["Minimum", "Maximum", "Average"];
 
+// ---------------------------------------------------------------------------
+// The switches the service resolves for a policy the put left unset
+// ---------------------------------------------------------------------------
+
+/// The `MetricAggregationType` a step policy is graded by when the put names none, from
+/// the model's own documentation for `PutScalingPolicyType$MetricAggregationType`: "If
+/// the aggregation type is null, the value is treated as Average."
+pub const DEFAULT_METRIC_AGGREGATION_TYPE: &str = "Average";
+
+/// Whether a target-tracking policy is barred from scaling in when the put names no
+/// `DisableScaleIn`, from `TargetTrackingConfiguration$DisableScaleIn`: "The default is
+/// false."
+pub const DEFAULT_DISABLE_SCALE_IN: bool = false;
+
+/// The `Mode` a predictive-scaling policy runs in when the put names none, from
+/// `PredictiveScalingConfiguration$Mode`: "Defaults to ForecastOnly if not specified."
+pub const DEFAULT_PREDICTIVE_SCALING_MODE: &str = "ForecastOnly";
+
+/// What a predictive-scaling policy may do to the group's maximum capacity when the put
+/// names no `MaxCapacityBreachBehavior`, from
+/// `PredictiveScalingConfiguration$MaxCapacityBreachBehavior`: "Defaults to
+/// HonorMaxCapacity if not specified."
+pub const DEFAULT_MAX_CAPACITY_BREACH_BEHAVIOR: &str = "HonorMaxCapacity";
+
+/// The `MetricAggregationType` a policy of this type is STORED with: the one the put
+/// named, or [`DEFAULT_METRIC_AGGREGATION_TYPE`] for a policy whose type owns the member
+/// and whose put named none — and none at all for a type that does not own it.
+#[must_use]
+pub fn resolved_metric_aggregation_type(
+    requested: Option<String>,
+    members: PolicyMembers,
+) -> Option<String> {
+    if !members.step {
+        return None;
+    }
+    Some(requested.unwrap_or_else(|| DEFAULT_METRIC_AGGREGATION_TYPE.to_string()))
+}
+
+/// The target-tracking configuration as the service RESOLVED it: the switch the put left
+/// unset carries the default in force, so the stored policy is the policy in force and
+/// every read of it reports that.
+#[must_use]
+pub fn resolved_target_tracking(
+    mut configuration: TargetTrackingConfiguration,
+) -> TargetTrackingConfiguration {
+    configuration
+        .disable_scale_in
+        .get_or_insert(DEFAULT_DISABLE_SCALE_IN);
+    configuration
+}
+
+/// The predictive-scaling configuration as the service RESOLVED it, by the same rule: the
+/// two switches that select what the policy DOES — whether it only forecasts, and whether
+/// it may raise the group's maximum capacity — carry the defaults in force when the put
+/// named neither.
+#[must_use]
+pub fn resolved_predictive_scaling(
+    mut configuration: PredictiveScalingConfiguration,
+) -> PredictiveScalingConfiguration {
+    configuration
+        .mode
+        .get_or_insert_with(|| DEFAULT_PREDICTIVE_SCALING_MODE.to_string());
+    configuration
+        .max_capacity_breach_behavior
+        .get_or_insert_with(|| DEFAULT_MAX_CAPACITY_BREACH_BEHAVIOR.to_string());
+    configuration
+}
+
 /// The predefined metric types a target-tracking policy may track, from the model's
 /// `com.amazonaws.autoscaling#MetricType` enum
 /// (`smithy_query(query="shape",shape="MetricType")`).
@@ -188,7 +256,10 @@ pub struct StoredScalingPolicy {
     pub min_adjustment_magnitude: Option<i32>,
     pub scaling_adjustment: Option<i32>,
     pub cooldown: Option<i32>,
-    pub step_adjustments: Option<Vec<StepAdjustment>>,
+    /// The steps a step policy scales by, EMPTY for a policy of any other type — which
+    /// is what such a policy reports: a collection the shape declares is reported as the
+    /// empty collection it holds rather than left out (see [`StoredScalingPolicy::view`]).
+    pub step_adjustments: Vec<StepAdjustment>,
     pub metric_aggregation_type: Option<String>,
     pub estimated_instance_warmup: Option<i32>,
     /// `Enabled`: "Indicates whether the scaling policy is enabled or disabled. The
@@ -209,6 +280,15 @@ impl StoredScalingPolicy {
     ///
     /// Only the members the policy's own type owns are reported, which are the only ones
     /// a put stored (see the module docs).
+    ///
+    /// Two things are reported for EVERY policy whatever its type. A collection the shape
+    /// declares (`StepAdjustments`, `Alarms`) is reported as the collection the policy
+    /// HOLDS, empty when it holds none: a policy that scales by no step has an empty step
+    /// list, not an absent one, and a client iterating it must not have to tell the two
+    /// apart. And a switch the put left unset was resolved to the default in force when
+    /// the policy was stored ([`resolved_target_tracking`],
+    /// [`resolved_predictive_scaling`], [`resolved_metric_aggregation_type`]), so what a
+    /// read reports is the policy in force rather than the request that created it.
     #[must_use]
     pub fn view(&self, key: &PolicyKey) -> ScalingPolicy {
         ScalingPolicy {
@@ -221,7 +301,7 @@ impl StoredScalingPolicy {
             min_adjustment_magnitude: self.min_adjustment_magnitude,
             scaling_adjustment: self.scaling_adjustment,
             cooldown: self.cooldown,
-            step_adjustments: self.step_adjustments.clone(),
+            step_adjustments: Some(self.step_adjustments.clone()),
             metric_aggregation_type: self.metric_aggregation_type.clone(),
             estimated_instance_warmup: self.estimated_instance_warmup,
             alarms: Some(self.alarms.clone()),
@@ -276,6 +356,17 @@ pub const VALID_ADJUSTMENT_TYPES_MESSAGE: &str =
 /// text: it names neither the group nor the policy.
 pub const STEP_ADJUSTMENT_REQUIRED_MESSAGE: &str =
     "You should specify at least one StepAdjustment with a StepScaling policy.";
+
+/// The most step adjustments one scaling policy may carry: the published Amazon EC2 Auto
+/// Scaling quota "Step adjustments per scaling policy", whose value is 20.
+pub const MAX_STEP_ADJUSTMENTS: usize = 20;
+
+/// The sentence a put carrying more steps than that is refused with, stating the quota it
+/// broke and quoting nothing from the request.
+#[must_use]
+pub fn too_many_step_adjustments_message() -> String {
+    format!("Your policies can have at most {MAX_STEP_ADJUSTMENTS} StepAdjustments.")
+}
 
 /// The sentence a put naming a `PolicyType` the service does not serve is refused with,
 /// in the same form as [`VALID_ADJUSTMENT_TYPES_MESSAGE`] — the service reports an
@@ -598,7 +689,10 @@ fn resource_label_dimensions(resource_label: &str) -> Vec<(String, String)> {
 /// that cannot remove an instance owes no alarm that would ask it to.
 #[must_use]
 pub fn wanted_alarm_kinds(configuration: &TargetTrackingConfiguration) -> Vec<AlarmKind> {
-    if configuration.disable_scale_in.unwrap_or(false) {
+    if configuration
+        .disable_scale_in
+        .unwrap_or(DEFAULT_DISABLE_SCALE_IN)
+    {
         vec![AlarmKind::High]
     } else {
         vec![AlarmKind::High, AlarmKind::Low]

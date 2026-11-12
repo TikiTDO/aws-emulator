@@ -51,6 +51,8 @@ mod lifecycle_hooks;
 mod load_balancer_target_registration;
 #[path = "all/metric_collection_catalog.rs"]
 mod metric_collection_catalog;
+#[path = "all/policy_read_projection.rs"]
+mod policy_read_projection;
 #[path = "all/reference_data_catalogs.rs"]
 mod reference_data_catalogs;
 #[path = "all/rollback_instance_refresh.rs"]

@@ -12,7 +12,10 @@
 //!    "Not used with any other policy type", `MetricAggregationType` as the step policy's
 //!    own and `EstimatedInstanceWarmup` as "Valid only if the policy type is
 //!    TargetTrackingScaling or StepScaling" — and every value it carries is reported as
-//!    it was sent, whatever its magnitude or precision.
+//!    it was sent, whatever its magnitude or precision. A COLLECTION the shape declares
+//!    is reported whatever the type, empty when the policy holds none, and a switch the
+//!    put left unset is reported as the service resolved it; both are pinned in
+//!    `policy_read_projection.rs`.
 //! 2. Putting the same policy name again UPDATES that policy: the ARN and the creation
 //!    identity survive, the members are replaced.
 //! 3. A request that cannot describe a policy is refused with HTTP 400 `ValidationError`
@@ -219,7 +222,7 @@ fn accepted_cases() -> Vec<AcceptedCase> {
                 ("ScalingAdjustment", "1".to_string()),
                 ("Enabled", "true".to_string()),
             ],
-            withheld: vec!["Cooldown", "StepAdjustments", "TargetTrackingConfiguration"],
+            withheld: vec!["Cooldown", "TargetTrackingConfiguration"],
         },
         AcceptedCase {
             case: "a simple scaling policy that scales in, with the smallest cooldown",
@@ -232,7 +235,7 @@ fn accepted_cases() -> Vec<AcceptedCase> {
                 ("ScalingAdjustment", "-2".to_string()),
                 ("Cooldown", "0".to_string()),
             ],
-            withheld: vec!["StepAdjustments", "MetricAggregationType"],
+            withheld: vec!["MetricAggregationType"],
         },
         AcceptedCase {
             case: "a simple scaling policy with a day-long cooldown and an exact capacity",
@@ -274,7 +277,7 @@ fn accepted_cases() -> Vec<AcceptedCase> {
                 ("PolicyType", "StepScaling".to_string()),
                 ("MetricAggregationType", "Maximum".to_string()),
                 ("EstimatedInstanceWarmup", "90".to_string()),
-                ("MetricIntervalLowerBound", "0".to_string()),
+                ("MetricIntervalLowerBound", "0.0".to_string()),
             ],
             // A step policy honours no cooldown of its own, so none is reported even
             // though the request carried one.
@@ -310,7 +313,9 @@ fn accepted_cases() -> Vec<AcceptedCase> {
             reported: vec![
                 ("PolicyType", "TargetTrackingScaling".to_string()),
                 ("PredefinedMetricType", "ASGAverageCPUUtilization".to_string()),
-                ("TargetValue", "50".to_string()),
+                ("TargetValue", "50.0".to_string()),
+                // The switch the put left unset, reported as the service resolved it.
+                ("DisableScaleIn", "false".to_string()),
             ],
             withheld: vec!["AdjustmentType", "ScalingAdjustment", "Cooldown"],
         },
@@ -329,7 +334,7 @@ fn accepted_cases() -> Vec<AcceptedCase> {
                 ("TargetValue", "1234567.89".to_string()),
                 ("DisableScaleIn", "true".to_string()),
             ],
-            withheld: vec!["StepAdjustments"],
+            withheld: vec!["MetricAggregationType", "ScalingAdjustment"],
         },
         AcceptedCase {
             case: "a target tracking policy on a customized metric, disabled",
@@ -379,7 +384,9 @@ fn accepted_cases() -> Vec<AcceptedCase> {
                 ("PolicyType", "PredictiveScaling".to_string()),
                 ("Mode", "ForecastOnly".to_string()),
                 ("SchedulingBufferTime", "300".to_string()),
-                ("TargetValue", "40".to_string()),
+                ("TargetValue", "40.0".to_string()),
+                // The switch this put left unset, reported as the service resolved it.
+                ("MaxCapacityBreachBehavior", "HonorMaxCapacity".to_string()),
             ],
             withheld: vec!["AdjustmentType", "Cooldown", "TargetTrackingConfiguration"],
         },
@@ -905,6 +912,115 @@ async fn a_put_that_cannot_describe_a_policy_is_refused_and_stores_nothing() {
     assert_eq!(
         status, 200,
         "the valid put must still succeed, got {status} with {body:?}"
+    );
+}
+
+/// RULE 3, the quota half: a step policy carries at most the published number of step
+/// adjustments ("Step adjustments per scaling policy: 20", the Amazon EC2 Auto Scaling
+/// quota) — the bound itself is accepted and one past it is refused with the sentence the
+/// service states for that quota.
+#[tokio::test]
+async fn a_put_carries_at_most_the_published_number_of_step_adjustments() {
+    let router = router();
+    create_group(&router, "asg-step-quota").await;
+
+    const TOO_MANY_STEPS_MESSAGE: &str = "Your policies can have at most 20 StepAdjustments.";
+
+    /// A step-scaling put carrying `count` adjacent steps, each one unit of the metric
+    /// wide, so every step is well formed whatever the count.
+    fn steps(count: usize) -> Params {
+        let mut params = vec![
+            p("PolicyType", "StepScaling"),
+            p("AdjustmentType", "ChangeInCapacity"),
+        ];
+        for index in 0..count {
+            let member = format!("StepAdjustments.member.{}", index + 1);
+            params.push(p(
+                &format!("{member}.MetricIntervalLowerBound"),
+                index.to_string(),
+            ));
+            params.push(p(
+                &format!("{member}.MetricIntervalUpperBound"),
+                (index + 1).to_string(),
+            ));
+            params.push(p(&format!("{member}.ScalingAdjustment"), "1"));
+        }
+        params
+    }
+
+    // The rows span the bound: one step, one below it, the bound itself, one past it and
+    // far past it.
+    for (case, count, accepted) in [
+        ("one step", 1, true),
+        ("one step below the quota", 19, true),
+        ("the quota itself", 20, true),
+        ("one step past the quota", 21, false),
+        ("twice the quota", 40, false),
+    ] {
+        let policy = format!("steps-{count}");
+        let (status, body) = put_policy(&router, "asg-step-quota", &policy, &steps(count)).await;
+        if accepted {
+            assert_eq!(
+                status, 200,
+                "case {case:?}: {count} steps must be accepted, got {status} with {body:?}"
+            );
+            let (_, read) = describe_policies(
+                &router,
+                &[p("PolicyNames.member.1", policy.clone())],
+            )
+            .await;
+            let reported = tag_values(&read, "ScalingAdjustment").len();
+            assert_eq!(
+                reported, count,
+                "case {case:?}: expected the {count} steps reported back, got {reported} in \
+                 {read:?}"
+            );
+        } else {
+            assert_eq!(
+                status, 400,
+                "case {case:?}: {count} steps must be refused, got {status} with {body:?}"
+            );
+            let (code, message) = refusal(&body);
+            assert_eq!(
+                code, "ValidationError",
+                "case {case:?}: expected the ValidationError code, got {code:?}"
+            );
+            assert_eq!(
+                message, TOO_MANY_STEPS_MESSAGE,
+                "case {case:?}: expected the message {TOO_MANY_STEPS_MESSAGE:?}, got \
+                 {message:?}"
+            );
+        }
+    }
+
+    // The quota bounds the steps the POLICY keeps, and a policy of another type keeps
+    // none: such a put drops them, as "Not used with any other policy type" says, so it
+    // is accepted and the policy it stores reports no step at all.
+    let mut target_tracking = vec![
+        p("PolicyType", "TargetTrackingScaling"),
+        p(
+            "TargetTrackingConfiguration.PredefinedMetricSpecification.PredefinedMetricType",
+            "ASGAverageCPUUtilization",
+        ),
+        p("TargetTrackingConfiguration.TargetValue", "50"),
+    ];
+    target_tracking.extend(steps(21).into_iter().skip(2));
+    let (status, body) =
+        put_policy(&router, "asg-step-quota", "tracking-with-steps", &target_tracking).await;
+    assert_eq!(
+        status, 200,
+        "a target-tracking put carrying steps the policy does not keep must be accepted, \
+         got {status} with {body:?}"
+    );
+    let (_, read) = describe_policies(
+        &router,
+        &[p("PolicyNames.member.1", "tracking-with-steps")],
+    )
+    .await;
+    let reported = tag_values(&read, "ScalingAdjustment");
+    assert!(
+        reported.is_empty(),
+        "a target-tracking policy keeps no step adjustment, got {reported:?} in {read:?}"
     );
 }
 

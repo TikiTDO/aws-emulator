@@ -50,6 +50,11 @@
 //! Everything else about those paths — status, `<Type>`, `<Code>`, `<Message>` — stays
 //! with the framework.
 //!
+//! That wrapper is also where the operations whose response carries a floating-point
+//! member are served behind the renderer that writes one as AWS does ([`decimal_floats`]):
+//! the rule is the XML protocol's, so it is applied once for every such operation rather
+//! than per handler.
+//!
 //! That same wrapper is where the AUTHORIZATION gate runs ([`authorization`]): whether the
 //! caller may perform the action at all is a fact of the CREDENTIAL the request presented
 //! and the IAM policies in force on the principal it speaks for, not of the input any one
@@ -57,6 +62,7 @@
 //! than per handler.
 
 pub mod authorization;
+pub mod decimal_floats;
 pub mod query_error_envelope;
 
 use query_error_envelope::{AutoScalingDefinition, RequestIdEnvelopeOperation};
