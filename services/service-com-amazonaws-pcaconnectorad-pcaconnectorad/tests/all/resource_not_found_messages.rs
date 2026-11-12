@@ -10,9 +10,9 @@
 //! it is the handler's lookup and not the boundary validator.
 //!
 //! The rows span the three resources this service holds (connector, template, directory
-//! registration), a read and a create, and identifiers that are absent in three
-//! different ways: never created in this Region, named in another Region, and named in
-//! another partition.
+//! registration), a read and a create, the prerequisite a create resolves before it
+//! mints anything, and identifiers that are absent in three different ways: never
+//! created in this Region, named in another Region, and named in another partition.
 
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
@@ -67,6 +67,21 @@ fn create_template_body(connector_arn: &str) -> Value {
     })
 }
 
+/// The body a `CreateConnector` carries: the directory whose registration is the
+/// create's prerequisite, a pattern-valid CA ARN and the smallest
+/// `VpcInformation` the shape accepts
+/// (`smithy_query(query="operation",operation="CreateConnector")`).
+fn create_connector_body(directory_id: &str) -> Value {
+    json!({
+        "DirectoryId": directory_id,
+        "CertificateAuthorityArn": format!(
+            "arn:aws:acm-pca:{REGION}:{ACCOUNT}:certificate-authority/\
+             22222222-3333-4444-5555-666666666666"
+        ),
+        "VpcInformation": { "SecurityGroupIds": ["sg-0123456789abcdef0"] },
+    })
+}
+
 fn missing_cases() -> Vec<MissingCase> {
     let unknown_connector = connector_arn("cccccccc-dddd-eeee-ffff-000000000000");
     let other_region_connector =
@@ -79,6 +94,7 @@ fn missing_cases() -> Vec<MissingCase> {
         template_arn("cccccccc-dddd-eeee-ffff-000000000000", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
     let unknown_registration =
         format!("arn:aws:pca-connector-ad:{REGION}:{ACCOUNT}:directory-registration/d-5555555555");
+    let unregistered_directory = "d-7777777777".to_string();
     vec![
         MissingCase {
             case: "GetConnector, a connector never created".to_string(),
@@ -131,12 +147,33 @@ fn missing_cases() -> Vec<MissingCase> {
             resource_type: "DirectoryRegistration",
             identifier: unknown_registration,
         },
+        MissingCase {
+            case: "CreateConnector, a directory carrying no registration".to_string(),
+            method: "POST",
+            target: "/connectors".to_string(),
+            body: Some(create_connector_body(&unregistered_directory)),
+            resource_type: "DirectoryRegistration",
+            identifier: unregistered_directory,
+        },
     ]
 }
 
 /// A connector and a directory registration, so each refusal below is a store that
-/// holds resources answering about the one it does not hold.
+/// holds resources answering about the one it does not hold. The registration comes
+/// first: a connector's `DirectoryId` is resolved against it.
 async fn populate(router: &MultiServiceRouter) {
+    let (status, code, parsed) = call(
+        router,
+        "POST",
+        "/directoryRegistrations",
+        Some(&json!({ "DirectoryId": "d-0123456789" })),
+    )
+    .await;
+    assert_eq!(
+        status, 202,
+        "CreateDirectoryRegistration must answer the modelled 202, \
+         got {status} / {code:?} / {parsed}"
+    );
     let (status, code, parsed) = call(
         router,
         "POST",
@@ -154,18 +191,6 @@ async fn populate(router: &MultiServiceRouter) {
     assert_eq!(
         status, 202,
         "CreateConnector must answer the modelled 202, got {status} / {code:?} / {parsed}"
-    );
-    let (status, code, parsed) = call(
-        router,
-        "POST",
-        "/directoryRegistrations",
-        Some(&json!({ "DirectoryId": "d-0123456789" })),
-    )
-    .await;
-    assert_eq!(
-        status, 202,
-        "CreateDirectoryRegistration must answer the modelled 202, \
-         got {status} / {code:?} / {parsed}"
     );
 }
 

@@ -40,6 +40,32 @@ pub fn router() -> MultiServiceRouter {
     router_with_engine().0
 }
 
+/// Register `directory_id` with this service and answer the registration's ARN —
+/// the prerequisite `CreateConnector` resolves its `DirectoryId` against, so a
+/// suite that wants a connector asks for this first.
+///
+/// Idempotent: the `ClientToken` is derived from the directory id, so registering
+/// the same directory twice answers the first registration's ARN instead of the
+/// conflict a second registration of one directory is.
+pub async fn register_directory(router: &MultiServiceRouter, directory_id: &str) -> String {
+    let body = serde_json::json!({
+        "DirectoryId": directory_id,
+        "ClientToken": format!("register-{directory_id}"),
+    });
+    let (status, code, parsed) = call(router, "POST", "/directoryRegistrations", Some(&body)).await;
+    assert_eq!(
+        status, 202,
+        "setup {directory_id}: CreateDirectoryRegistration must answer the modelled 202, \
+         got {status} / {code:?} / {parsed}"
+    );
+    parsed["DirectoryRegistrationArn"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!("setup {directory_id}: the create answered no DirectoryRegistrationArn: {parsed}")
+        })
+        .to_string()
+}
+
 /// Percent-encode one value the way an AWS SDK encodes a non-greedy `@httpLabel`
 /// or a query-string value: every byte outside the unreserved set is escaped, so
 /// an ARN's `:` and `/` arrive as `%3A` / `%2F` and stay inside one segment, and a

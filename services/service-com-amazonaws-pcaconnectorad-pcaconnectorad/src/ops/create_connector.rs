@@ -2,7 +2,10 @@
 
 //! @op CreateConnector
 //!
-//! Persists a new connector and returns only its ARN. The connector store is
+//! Persists a new connector and returns only its ARN. The `DirectoryId` must
+//! already carry a directory registration in this service's store — without one
+//! the create is refused with the modelled `ResourceNotFoundException` and
+//! nothing is persisted. The connector store is
 //! bounded at [`crate::state::MAX_CONNECTORS`] and the idempotency store at
 //! [`crate::state::MAX_IDEMPOTENCY_RECORDS`]; past the connector cap the create
 //! is refused with the modelled `ServiceQuotaExceededException` rather than
@@ -180,6 +183,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx);
         let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
+        // Every move the clock already owes is materialised before this create
+        // decides anything, so a registration whose deletion has come due is gone
+        // and no longer satisfies the prerequisite below.
+        store.settle(now);
+
+        // A connector joins a private CA to an Active Directory, and this service
+        // reaches that directory only through the registration that authorizes it:
+        // the prerequisite is resolved FIRST, so a request naming a directory this
+        // service holds no registration for is a 404 whatever else it carries, and
+        // nothing is minted or persisted for it.
+        if store
+            .registration_by_directory_id(&input.directory_id)
+            .is_none()
+        {
+            return Err(CreateConnectorErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: crate::state::not_found_message(
+                        crate::state::RESOURCE_TYPE_DIRECTORY_REGISTRATION,
+                        &input.directory_id,
+                    ),
+                    resource_id: input.directory_id.clone(),
+                    resource_type: crate::state::RESOURCE_TYPE_DIRECTORY_REGISTRATION.to_string(),
+                },
+            )
+            .into());
+        }
 
         // @idempotencyToken: a retry carrying the ClientToken of an earlier call
         // names the connector that call minted, instead of minting a second one.

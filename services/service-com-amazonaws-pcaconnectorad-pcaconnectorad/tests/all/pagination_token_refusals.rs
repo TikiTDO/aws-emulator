@@ -123,7 +123,9 @@ const LIST_OPERATIONS: &[ListOperation] = &[
     },
 ];
 
-/// A connector, so the refusals below are not an empty store answering.
+/// A connector, so the refusals below are not an empty store answering. Its
+/// directory is registered first: the create resolves its `DirectoryId` against
+/// the directory-registration store.
 async fn create_connector(router: &MultiServiceRouter, directory_id: &str) {
     let body = json!({
         "DirectoryId": directory_id,
@@ -177,8 +179,8 @@ const DIRECTORY_IDS: &[&str] = &["d-0123456789", "d-abcdefabcd", "d-00000000ff"]
 async fn a_pagination_token_this_service_did_not_issue_is_refused_naming_its_wrapping_schema() {
     let router = router();
     for directory_id in DIRECTORY_IDS {
-        create_connector(&router, directory_id).await;
         create_directory_registration(&router, directory_id).await;
+        create_connector(&router, directory_id).await;
     }
 
     for operation in LIST_OPERATIONS {
@@ -219,8 +221,8 @@ async fn a_pagination_token_this_service_did_not_issue_is_refused_naming_its_wra
 async fn a_token_the_read_issued_still_continues_the_listing_it_came_from() {
     let router = router();
     for directory_id in DIRECTORY_IDS {
-        create_connector(&router, directory_id).await;
         create_directory_registration(&router, directory_id).await;
+        create_connector(&router, directory_id).await;
     }
 
     // What the refusals above turn on is the payload a presented token carries, so

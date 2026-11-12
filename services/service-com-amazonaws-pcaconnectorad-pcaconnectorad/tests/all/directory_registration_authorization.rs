@@ -189,7 +189,7 @@ async fn listed_summary(router: &MultiServiceRouter, arn: &str) -> Option<Value>
 /// Move the instant the clock owes the registration `arn` its REMOVAL to `due_at`,
 /// through the service's own state. Strictly a clock move: only the due instant is
 /// rewritten.
-fn set_deleted_due(engine: &engine::InMemoryEngine, arn: &str, due_at: SystemTime) {
+pub(crate) fn set_deleted_due(engine: &engine::InMemoryEngine, arn: &str, due_at: SystemTime) {
     let shared = pcad::state::service_state(engine).expect("the service's own state");
     let mut store = shared.lock();
     let record = store

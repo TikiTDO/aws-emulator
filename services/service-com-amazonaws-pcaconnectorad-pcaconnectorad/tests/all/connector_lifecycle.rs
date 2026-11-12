@@ -14,7 +14,9 @@ use std::collections::BTreeSet;
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
-use super::harness::{call as dispatch, encode_label, router, ACCOUNT, REGION};
+use super::harness::{
+    call as dispatch, encode_label, register_directory, router, ACCOUNT, REGION,
+};
 
 // The store bounds the handlers refuse past, imported from the crate so these
 // tests cannot drift from the caps the handlers enforce.
@@ -155,6 +157,16 @@ impl ConnectorCase {
 }
 
 async fn create_connector(router: &MultiServiceRouter, body: &Value) -> String {
+    // A connector's directory must already be registered with this service: the
+    // create resolves its `DirectoryId` against the directory-registration store,
+    // so the prerequisite is established before every case below.
+    register_directory(
+        router,
+        body["DirectoryId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a connector body must carry a DirectoryId: {body}")),
+    )
+    .await;
     let (status, parsed) = call(router, "POST", "/connectors", Some(body)).await;
     assert_eq!(
         status, 202,
@@ -911,6 +923,11 @@ async fn a_repeated_client_token_returns_the_first_resource_rather_than_a_second
 #[tokio::test]
 async fn the_connector_store_is_bounded_and_refuses_past_its_quota() {
     let router = router();
+    // The bound is on connectors, and several connectors may share one directory,
+    // so the prerequisite registrations are established once up front.
+    for case in CONNECTOR_CASES {
+        register_directory(&router, case.directory_id).await;
+    }
 
     for index in 0..MAX_CONNECTORS {
         let case = &CONNECTOR_CASES[index % CONNECTOR_CASES.len()];

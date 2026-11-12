@@ -15,6 +15,8 @@
 mod arn_pattern_refusal_clauses;
 #[path = "all/connector_lifecycle.rs"]
 mod connector_lifecycle;
+#[path = "all/connector_prerequisites.rs"]
+mod connector_prerequisites;
 #[path = "all/directory_registration_authorization.rs"]
 mod directory_registration_authorization;
 #[path = "all/directory_registration_lifecycle.rs"]
