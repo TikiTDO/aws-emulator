@@ -83,8 +83,6 @@
 #[allow(unused_imports)]
 use super::types::*;
 
-use crate::state::{StandardsSubscriptionKey, StandardsSubscriptionRecord};
-
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -236,12 +234,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The ARN the enabling call answered with is the subscription's address, so
         // the lookup compares against the stored ARN rather than re-deriving one: a
         // subscription ARN of another account or Region names no subscription here.
-        let found: Option<(&StandardsSubscriptionKey, &StandardsSubscriptionRecord)> =
-            store.standards.iter().find(|(subscription_key, record)| {
-                subscription_key.account_id == account_id
-                    && subscription_key.region == region
-                    && record.standards_subscription_arn == input.standards_subscription_arn
-            });
+        // `crate::state` owns that comparison, so every subscription-ARN-addressed
+        // operation resolves the resource the same way.
+        let found = crate::state::standards_subscription_by_arn(
+            &store,
+            &key,
+            &input.standards_subscription_arn,
+        )
+        .and_then(|subscription_key| {
+            store
+                .standards
+                .get(&subscription_key)
+                .map(|record| (subscription_key, record))
+        });
         let Some((subscription_key, record)) = found else {
             return Err(
                 DescribeStandardsControlsErrorModeled::ResourceNotFoundException(

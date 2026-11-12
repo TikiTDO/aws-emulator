@@ -257,7 +257,8 @@ pub struct StandardsSubscriptionRecord {
     /// The `StandardsInput` key-value pairs the subscription was created with.
     pub standards_input: HashMap<String, String>,
     /// A `StandardsStatus` value: `PENDING` until the enabling call's transition
-    /// falls due, then `READY`.
+    /// falls due, then `READY`; `DELETING` once a disabling call has started the
+    /// removal it owes.
     pub standards_status: String,
     /// A `StandardsProvider` value (`AWS` or `Azure`) — the cloud whose resources the
     /// standard evaluates.
@@ -266,6 +267,11 @@ pub struct StandardsSubscriptionRecord {
     /// transition the enabling call owes becomes due. A reporting operation
     /// materialises it once the clock passes this instant.
     pub ready_due_nanos: i128,
+    /// Whole nanoseconds since the epoch at which the removal a disabling call owes
+    /// this subscription becomes due, or `None` while no disable has been asked for.
+    /// A reporting operation drops the subscription once the clock passes this
+    /// instant, which is what makes a disabled standard stop being enabled.
+    pub removal_due_nanos: Option<i128>,
     /// The instant the standard was enabled, which is when every control of the
     /// subscription got the status it starts in — so a control nobody has touched
     /// reports this as its `ControlStatusUpdatedAt`, stable for as long as the
@@ -697,6 +703,12 @@ pub const STANDARDS_STATUS_PENDING: &str = "PENDING";
 /// `StandardsStatus$READY`: "The standard is enabled."
 pub const STANDARDS_STATUS_READY: &str = "READY";
 
+/// `StandardsStatus$DELETING`: "The standard is in the process of being disabled"
+/// (`smithy_query(query="shape", shape="StandardsSubscription")`, member
+/// `StandardsStatus`) — the status a disabling call puts a subscription in until the
+/// removal it owes falls due.
+pub const STANDARDS_STATUS_DELETING: &str = "DELETING";
+
 /// `StandardsControlsUpdatable$NOT_READY_FOR_UPDATES`: "Controls in the standard
 /// cannot be retrieved or configured" — what a subscription still being enabled
 /// reports.
@@ -711,6 +723,12 @@ pub const STANDARDS_CONTROLS_READY: &str = "READY_FOR_UPDATES";
 /// inside the emulator's 250-750 ms band: short enough not to stall a caller, long
 /// enough that a caller reading straight back still observes `PENDING`.
 pub const STANDARDS_READY_AFTER_NANOS: i128 = 500_000_000;
+
+/// How long after the disabling call a standards subscription's `DELETING` ->
+/// removed transition falls due. AWS publishes no duration for it, so this is a
+/// chosen span: long enough that a caller reading straight back still observes the
+/// `DELETING` the call owes, short enough not to stall one.
+pub const STANDARDS_REMOVED_AFTER_NANOS: i128 = 3_000_000_000;
 
 /// The ARN of a standard itself. AWS's standard ARNs carry no account (and, for the
 /// one partition-wide ruleset, no Region either), so they are not built through
@@ -756,6 +774,8 @@ pub fn new_standards_subscription(
             standards_status: STANDARDS_STATUS_PENDING.to_string(),
             provider: definition.provider.to_string(),
             ready_due_nanos: now_nanos() + STANDARDS_READY_AFTER_NANOS,
+            // Nothing has asked for this subscription to go away.
+            removal_due_nanos: None,
             enabled_at: now_date_time(),
             // Enabling a standard enables its controls, so no control carries a
             // changed status until a caller changes one.
@@ -766,21 +786,61 @@ pub fn new_standards_subscription(
 
 /// Materialise, for one hub, every standards-subscription transition the clock has
 /// already made due: a `PENDING` subscription whose due instant has passed is
-/// `READY`, whether or not anybody called. A reporting operation calls this before it
-/// reads, so the status it reports is the status the clock owes.
+/// `READY`, and a `DELETING` one whose removal fell due is gone — whether or not
+/// anybody called. A reporting operation calls this before it reads, so the status it
+/// reports, and the set of subscriptions it reports at all, is what the clock owes.
 pub fn settle_standards(
     store: &mut ComAmazonawsSecurityhubSecurityhubapiserviceState,
     key: &HubKey,
 ) {
     let now = now_nanos();
-    for (subscription_key, record) in &mut store.standards {
+    store.standards.retain(|subscription_key, record| {
         if subscription_key.account_id != key.0 || subscription_key.region != key.1 {
-            continue;
+            return true;
+        }
+        if let Some(due) = record.removal_due_nanos {
+            // A disabling call owes the subscription's removal; once that instant has
+            // passed the account no longer subscribes to the standard, so the record
+            // — and the per-control status it carried — goes with it.
+            return now < due;
         }
         if record.standards_status == STANDARDS_STATUS_PENDING && now >= record.ready_due_nanos {
             record.standards_status = STANDARDS_STATUS_READY.to_string();
         }
+        true
+    });
+}
+
+/// Start the removal a disabling call owes one subscription: it reports `DELETING`
+/// until [`STANDARDS_REMOVED_AFTER_NANOS`] has passed, when [`settle_standards`]
+/// drops it. Idempotent — a second disable of the same subscription neither restarts
+/// the span nor changes what the first one owes.
+pub fn begin_standards_subscription_removal(record: &mut StandardsSubscriptionRecord) {
+    if record.removal_due_nanos.is_some() {
+        return;
     }
+    record.standards_status = STANDARDS_STATUS_DELETING.to_string();
+    record.removal_due_nanos = Some(now_nanos() + STANDARDS_REMOVED_AFTER_NANOS);
+}
+
+/// The key of the subscription of hub `key` whose `StandardsSubscriptionArn` is
+/// `standards_subscription_arn`, or `None` when that hub has no such subscription.
+/// The single definition of how a subscription-ARN-addressed operation resolves the
+/// resource it was given.
+pub fn standards_subscription_by_arn(
+    store: &ComAmazonawsSecurityhubSecurityhubapiserviceState,
+    key: &HubKey,
+    standards_subscription_arn: &str,
+) -> Option<StandardsSubscriptionKey> {
+    store
+        .standards
+        .iter()
+        .find(|(subscription_key, record)| {
+            subscription_key.account_id == key.0
+                && subscription_key.region == key.1
+                && record.standards_subscription_arn == standards_subscription_arn
+        })
+        .map(|(subscription_key, _)| subscription_key.clone())
 }
 
 /// The published standard a `StandardsArn` names for a request in `region`, or `None`

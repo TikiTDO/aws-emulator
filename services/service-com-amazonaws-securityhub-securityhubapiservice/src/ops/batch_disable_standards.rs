@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op BatchDisableStandards
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `BatchDisableStandards`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`BatchDisableStandards::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Cancels the caller's subscription to each standard named by a
+//! `StandardsSubscriptionArn`: the subscription `GetEnabledStandards` reports enters
+//! the `DELETING` status this call owes, and the removal the clock then makes due
+//! takes the subscription — with the per-control state it carried — away, so a later
+//! read no longer reports the standard as enabled. A disable asks for a subscription
+//! to be gone, so an ARN that names none of this hub's subscriptions is skipped, not
+//! refused: the call reports what it disabled, and disabling a standard that is
+//! already on its way out, or already gone, is a no-op.
 //!
 //! ## Shape of an operation
 //!
@@ -77,6 +77,8 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+
+use std::collections::BTreeSet;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -150,18 +152,72 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `BatchDisableStandards` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(BatchDisableStandardsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("BatchDisableStandards"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            BatchDisableStandardsError::Modeled(
+                BatchDisableStandardsErrorModeled::InternalException(InternalException {
+                    message: Some(crate::state::STATE_UNAVAILABLE_MESSAGE.to_string()),
+                    code: Some("InternalException".to_string()),
+                }),
+            )
+        })?;
+
+        let key = crate::state::hub_key(ctx);
+
+        let mut store = state.lock();
+        if !store.hubs.contains_key(&key) {
+            return Err(BatchDisableStandardsErrorModeled::InvalidAccessException(
+                InvalidAccessException {
+                    message: Some(crate::state::not_subscribed_message(&key.0, &key.1)),
+                    code: Some("InvalidAccessException".to_string()),
+                },
+            )
+            .into());
+        }
+
+        // A subscription this hub no longer has is one this call cannot disable, so
+        // the transitions the clock already owes are materialised before the request's
+        // ARNs are resolved against the store: a subscription whose own removal fell
+        // due is already gone, whether or not anybody called.
+        crate::state::settle_standards(&mut store, &key);
+
+        // Disabling a standard asks for a subscription to be gone, and an ARN that
+        // names no subscription of this hub asks for a state that already holds, so it
+        // is skipped rather than refused: the call reports the subscriptions it
+        // actually disabled, which makes a repeated — or already completed — disable a
+        // no-op. One subscription per ARN, so a batch naming the same subscription
+        // twice disables, and reports, it once.
+        let mut resolved: Vec<crate::state::StandardsSubscriptionKey> = Vec::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for standards_subscription_arn in &input.standards_subscription_arns {
+            if !seen.insert(standards_subscription_arn.clone()) {
+                continue;
+            }
+            if let Some(subscription_key) = crate::state::standards_subscription_by_arn(
+                &store,
+                &key,
+                standards_subscription_arn,
+            ) {
+                resolved.push(subscription_key);
+            }
+        }
+
+        let mut subscriptions = Vec::with_capacity(resolved.len());
+        for subscription_key in resolved {
+            let Some(record) = store.standards.get_mut(&subscription_key) else {
+                continue;
+            };
+            // Disabling starts the removal this call owes: the subscription reports
+            // `DELETING` until that removal falls due, and a repeat neither restarts
+            // the span nor reports a different status.
+            crate::state::begin_standards_subscription_removal(record);
+            subscriptions.push(crate::state::standards_subscription_view(
+                &subscription_key,
+                record,
+            ));
+        }
+
+        Ok(BatchDisableStandardsOutput {
+            standards_subscriptions: Some(subscriptions),
+        })
     }
 }

@@ -33,6 +33,9 @@ mod standards_controls;
 // And this one, for the same reason.
 #[path = "all/security_control_definitions.rs"]
 mod security_control_definitions;
+// And this one, for the same reason.
+#[path = "all/batch_disable_standards.rs"]
+mod batch_disable_standards;
 #[path = "all/action_targets.rs"]
 mod action_targets;
 #[path = "all/automation_rules.rs"]

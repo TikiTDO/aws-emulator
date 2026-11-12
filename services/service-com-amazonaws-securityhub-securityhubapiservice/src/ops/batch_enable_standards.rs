@@ -256,11 +256,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // A standard this hub already subscribes to is the same resource, not a
             // second one: its subscription is reported as it stands, so a repeated
             // call neither restarts the `PENDING` -> `READY` transition nor replaces
-            // the input the subscription was enabled with.
-            let record = store
-                .standards
-                .entry(subscription_key.clone())
-                .or_insert(subscription);
+            // the input the subscription was enabled with. A subscription whose
+            // disable has not finished is the exception: the account asked for that
+            // one to go away, so enabling the standard again subscribes afresh rather
+            // than reporting a resource that is on its way out.
+            let record = match store.standards.entry(subscription_key.clone()) {
+                ::std::collections::hash_map::Entry::Occupied(occupied) => {
+                    let existing = occupied.into_mut();
+                    if existing.standards_status == crate::state::STANDARDS_STATUS_DELETING {
+                        *existing = subscription;
+                    }
+                    existing
+                }
+                ::std::collections::hash_map::Entry::Vacant(vacant) => vacant.insert(subscription),
+            };
             subscriptions.push(crate::state::standards_subscription_view(
                 &subscription_key,
                 record,
