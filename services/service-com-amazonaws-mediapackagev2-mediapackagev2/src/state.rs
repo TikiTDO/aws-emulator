@@ -32,7 +32,10 @@
 //! manifest configuration's window, URI path type, child-manifest URL encoding and (on
 //! the HLS families) child manifest name are materialised ONCE, at create time, from the
 //! submitted value or the service's default, and stored — so the create response, a later
-//! read and the list projection all report the same concrete value.
+//! read and the list projection all report the same concrete value. That reaches INSIDE a
+//! configured block too: the members the model documents the service as supplying within
+//! an endpoint's `Segment.Encryption` and its SCTE blocks are materialised with the rest
+//! of the segment ([`materialized_segment`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -42,13 +45,13 @@ use sha2::{Digest, Sha256};
 use crate::ops::types::{
     CdnAuthConfiguration, ConflictException, CreateDashManifestConfiguration,
     CreateHlsManifestConfiguration, CreateLowLatencyHlsManifestConfiguration,
-    CreateMssManifestConfiguration, Destination, EncryptionMethod,
+    CreateMssManifestConfiguration, Destination, Encryption, EncryptionMethod,
     ForceEndpointErrorConfiguration,
     GetDashManifestConfiguration, GetHlsManifestConfiguration,
     GetLowLatencyHlsManifestConfiguration, GetMssManifestConfiguration, HarvestedManifests,
     HarvesterScheduleConfiguration, IngestEndpoint, InputSwitchConfiguration,
-    MultiviewConfiguration, OutputHeaderConfiguration, ResourceNotFoundException, Segment,
-    ServiceQuotaExceededException, ValidationException,
+    MultiviewConfiguration, OutputHeaderConfiguration, ResourceNotFoundException, Scte, ScteDash,
+    ScteHls, Segment, ServiceQuotaExceededException, ValidationException,
 };
 
 /// The CDN-authorization, segment-encryption and key-provider-URL rules of an origin
@@ -189,6 +192,18 @@ pub const DEFAULT_INCLUDE_IFRAME_ONLY_STREAMS: bool = false;
 /// configuration that does not ask for it — recorded behaviour: the service reports the
 /// encoding off.
 pub const DEFAULT_URL_ENCODE_CHILD_MANIFEST: bool = false;
+
+/// Whether SCTE-35 messages are embedded in segment files when a configured SCTE block
+/// names no choice. The model states the default inside the member's own value list:
+/// "None – SCTE-35 messages are not included in segments (default)", from the modelled
+/// `ScteInSegments` enum (`NONE` | `ALL` | `MATCHES_FILTER`).
+pub const DEFAULT_SCTE_IN_SEGMENTS: &str = "NONE";
+
+/// Which SCTE-35 events appear in a manifest whose configured SCTE block names no choice.
+/// The model states the same default on both manifest-side blocks — `ScteHls` and
+/// `ScteDash` — "If you don't specify a value, the default is `ALL`", from the modelled
+/// `ScteInManifests` enum (`ALL` | `MATCHES_FILTER`).
+pub const DEFAULT_SCTE_IN_MANIFESTS: &str = "ALL";
 
 /// The child manifest name MediaPackage applies to an HLS or low-latency HLS manifest
 /// configuration submitted without one.
@@ -1766,6 +1781,30 @@ pub fn output_timestamp_mode_violation(
     ))
 }
 
+/// What an origin endpoint's segment configuration is materialised against: the values
+/// OUTSIDE the submitted `Segment` that decide which service-applied members the stored
+/// configuration carries.
+///
+/// Passed to [`materialized_segment`] by both of the endpoint's writers, so a create and
+/// an update read the same facts about the endpoint when they apply the service's own
+/// values.
+#[derive(Debug, Clone, Copy)]
+pub struct SegmentContext<'a> {
+    /// The parent channel's materialised `OutputLockingMode`, which decides whether the
+    /// endpoint carries an output-timestamp mode at all
+    /// ([`channel_carries_output_timestamp_mode`]).
+    pub channel_output_locking_mode: Option<&'a str>,
+    /// The endpoint's `ContainerType`, which decides which `EncryptionMethod` member names
+    /// the method the segments are encrypted with — and therefore whether that method
+    /// takes a constant initialization vector at all
+    /// ([`encryption_carries_constant_initialization_vector`]).
+    pub container_type: &'a str,
+    /// The endpoint's ARN: the identity the constant initialization vector the service
+    /// creates is derived from ([`created_constant_initialization_vector`]), so one
+    /// endpoint reports one vector for its whole lifetime and no two endpoints share one.
+    pub endpoint_arn: &'a str,
+}
+
 /// The segment configuration an origin endpoint is stored with.
 ///
 /// `Segment` is required on every origin-endpoint response and optional on the request,
@@ -1775,8 +1814,15 @@ pub fn output_timestamp_mode_violation(
 /// toggles on and the extra I-frame-only stream off — the state the recorded service
 /// reports for an endpoint created without a segment configuration — and
 /// [`DEFAULT_OUTPUT_TIMESTAMP_MODE`] on an endpoint whose channel may carry an
-/// output-timestamp mode. `Scte` and `Encryption` are reported only when they were
-/// configured, so they pass through untouched.
+/// output-timestamp mode.
+///
+/// `Scte` and `Encryption` are reported only when they were CONFIGURED, so an endpoint
+/// created without one carries none — but a block that IS configured is materialised like
+/// any other part of the segment, because the model documents the service as supplying
+/// members inside it: the vector, the CMAF DRM-metadata toggle and the key provider's own
+/// documented values of [`materialized_encryption`], and the segment-side SCTE choice of
+/// [`materialized_scte`]. The manifest-side SCTE blocks are the same rule one level out
+/// ([`materialized_scte_hls`], [`materialized_scte_dash`]).
 ///
 /// The output-timestamp mode is materialised the way a channel's own output locking mode
 /// is: the member has a documented service-applied default AND the model restricts which
@@ -1785,14 +1831,11 @@ pub fn output_timestamp_mode_violation(
 /// on an endpoint whose channel may not. Every endpoint that can report a mode therefore
 /// holds a concrete one from its create onwards, which is what makes a member documented
 /// "immutable after endpoint creation" immutable from the first write on.
-pub fn materialized_segment(
-    submitted: Option<Segment>,
-    channel_output_locking_mode: Option<&str>,
-) -> Segment {
+pub fn materialized_segment(submitted: Option<Segment>, at: SegmentContext<'_>) -> Segment {
     let mut segment = submitted.unwrap_or_default();
     let submitted_output_timestamp_mode = segment.output_timestamp_mode.take();
     segment.output_timestamp_mode = channel_carries_output_timestamp_mode(
-        channel_output_locking_mode,
+        at.channel_output_locking_mode,
     )
     .then(|| {
         submitted_output_timestamp_mode
@@ -1823,7 +1866,53 @@ pub fn materialized_segment(
             .ts_include_dvb_subtitles
             .unwrap_or(DEFAULT_TS_INCLUDE_DVB_SUBTITLES),
     );
+    segment.scte = materialized_scte(segment.scte.take());
+    segment.encryption = segment
+        .encryption
+        .take()
+        .map(|encryption| materialized_encryption(encryption, at));
     segment
+}
+
+/// The segment-side SCTE block an origin endpoint is stored with: the submitted one with
+/// the choice the service applies to it ([`DEFAULT_SCTE_IN_SEGMENTS`]) when the request
+/// named none, and `None` for an endpoint that configured no SCTE block at all.
+///
+/// `ScteFilter` and `CustomAdTypes` pass through: the model documents no value the service
+/// supplies for either — an unspecified `CustomAdTypes` is documented as "empty (only
+/// default ad types are used)", which is the absent list rather than a value to report.
+pub fn materialized_scte(submitted: Option<Scte>) -> Option<Scte> {
+    let mut scte = submitted?;
+    scte.scte_in_segments = Some(
+        scte.scte_in_segments
+            .unwrap_or_else(|| DEFAULT_SCTE_IN_SEGMENTS.to_string()),
+    );
+    Some(scte)
+}
+
+/// The HLS manifest's SCTE block as it is stored: the submitted one with the service's own
+/// manifest-side choice ([`DEFAULT_SCTE_IN_MANIFESTS`]) applied when the request named
+/// none, and `None` for a manifest configuration that configured no block at all. The ad
+/// marker passes through — the model documents no value the service supplies for it.
+pub fn materialized_scte_hls(submitted: Option<ScteHls>) -> Option<ScteHls> {
+    let mut scte = submitted?;
+    scte.scte_in_manifests = Some(
+        scte.scte_in_manifests
+            .unwrap_or_else(|| DEFAULT_SCTE_IN_MANIFESTS.to_string()),
+    );
+    Some(scte)
+}
+
+/// The DASH manifest's SCTE block as it is stored. The model states the manifest-side
+/// default on this block in the same words it states it on the HLS one, so both read it
+/// off [`DEFAULT_SCTE_IN_MANIFESTS`].
+pub fn materialized_scte_dash(submitted: Option<ScteDash>) -> Option<ScteDash> {
+    let mut scte = submitted?;
+    scte.scte_in_manifests = Some(
+        scte.scte_in_manifests
+            .unwrap_or_else(|| DEFAULT_SCTE_IN_MANIFESTS.to_string()),
+    );
+    Some(scte)
 }
 
 /// The startover window an origin endpoint is stored with: the one the request named, or
@@ -2629,8 +2718,8 @@ impl ManifestLocation<'_> {
 /// The stored form of a submitted HLS manifest: everything the caller asked for, plus
 /// the URL the service computes for it and the manifest settings the service applies to
 /// what the caller left out ([`DEFAULT_MANIFEST_WINDOW_SECONDS`],
-/// [`DEFAULT_URI_PATH_TYPE`], [`DEFAULT_CHILD_MANIFEST_NAME`], and child-manifest URL
-/// encoding off).
+/// [`DEFAULT_URI_PATH_TYPE`], [`DEFAULT_CHILD_MANIFEST_NAME`], child-manifest URL
+/// encoding off, and the manifest-side SCTE choice inside a configured `ScteHls`).
 pub fn stored_hls_manifest(
     submitted: CreateHlsManifestConfiguration,
     at: ManifestLocation<'_>,
@@ -2649,7 +2738,7 @@ pub fn stored_hls_manifest(
                 .unwrap_or(DEFAULT_MANIFEST_WINDOW_SECONDS),
         ),
         program_date_time_interval_seconds: submitted.program_date_time_interval_seconds,
-        scte_hls: submitted.scte_hls,
+        scte_hls: materialized_scte_hls(submitted.scte_hls),
         filter_configuration: submitted.filter_configuration,
         start_tag: submitted.start_tag,
         url_encode_child_manifest: Some(
@@ -2686,7 +2775,7 @@ pub fn stored_low_latency_hls_manifest(
                 .unwrap_or(DEFAULT_MANIFEST_WINDOW_SECONDS),
         ),
         program_date_time_interval_seconds: submitted.program_date_time_interval_seconds,
-        scte_hls: submitted.scte_hls,
+        scte_hls: materialized_scte_hls(submitted.scte_hls),
         filter_configuration: submitted.filter_configuration,
         start_tag: submitted.start_tag,
         url_encode_child_manifest: Some(
@@ -2723,7 +2812,7 @@ pub fn stored_dash_manifest(
         suggested_presentation_delay_seconds: submitted.suggested_presentation_delay_seconds,
         segment_template_format: submitted.segment_template_format,
         period_triggers: submitted.period_triggers,
-        scte_dash: submitted.scte_dash,
+        scte_dash: materialized_scte_dash(submitted.scte_dash),
         drm_signaling: submitted.drm_signaling,
         utc_timing: submitted.utc_timing,
         profiles: submitted.profiles,

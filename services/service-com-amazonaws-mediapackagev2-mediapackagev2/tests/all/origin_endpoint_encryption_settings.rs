@@ -11,8 +11,9 @@
 //! against the endpoint's `ContainerType` before anything is stored — a block the service
 //! could not act on is a 400 `ValidationException` carrying the
 //! `ValidationExceptionType` the model names for which of those it is, with no endpoint
-//! created, and a block it can act on is stored verbatim and reported by
-//! `GetOriginEndpoint`.
+//! created, and a block it can act on is stored with every submitted member unchanged —
+//! beside the members the service supplies inside it, which
+//! `segment_service_applied_blocks` pins — and reported by `GetOriginEndpoint`.
 //!
 //! Every discriminator below is a value of the model's own `ValidationExceptionType` enum,
 //! and every enum value a row submits comes from the model's `ContainerType`,
@@ -60,6 +61,7 @@ struct Block {
     method: (&'static str, &'static str),
     constant_initialization_vector: Option<&'static str>,
     key_rotation_interval_seconds: Option<i32>,
+    cmaf_exclude_segment_drm_metadata: Option<bool>,
     drm_systems: &'static [&'static str],
     presets: (&'static str, &'static str),
     speke_version: Option<&'static str>,
@@ -75,6 +77,7 @@ impl Default for Block {
             method: ("CmafEncryptionMethod", "CENC"),
             constant_initialization_vector: None,
             key_rotation_interval_seconds: None,
+            cmaf_exclude_segment_drm_metadata: None,
             drm_systems: &["PLAYREADY"],
             presets: ("PRESET_AUDIO_1", "PRESET_VIDEO_1"),
             speke_version: None,
@@ -115,6 +118,9 @@ impl Block {
         if let Some(interval) = self.key_rotation_interval_seconds {
             encryption["KeyRotationIntervalSeconds"] = json!(interval);
         }
+        if let Some(exclude) = self.cmaf_exclude_segment_drm_metadata {
+            encryption["CmafExcludeSegmentDrmMetadata"] = json!(exclude);
+        }
         json!({"Encryption": encryption})
     }
 }
@@ -138,7 +144,8 @@ struct Case {
 
 /// The rows. They differ along everything the rule generalises over: the container type
 /// (TS | CMAF | ISM), which `EncryptionMethod` member the request sets and which value it
-/// names, whether a constant initialization vector and key rotation are configured, which
+/// names, whether a constant initialization vector, key rotation and the CMAF
+/// DRM-metadata toggle are configured, which
 /// DRM systems the key provider lists, which presets the encryption contract names, which
 /// content-key period timing is signalled under which SPEKE version, and the form of the
 /// key-server URL.
@@ -318,6 +325,34 @@ fn cases() -> Vec<Case> {
             ),
         },
         // Key rotation and the encryption contract against the container.
+        Case {
+            label: "the CMAF DRM-metadata toggle on a TS endpoint, which packages no CMAF",
+            container: "TS",
+            block: Block {
+                method: ("TsEncryptionMethod", "AES_128"),
+                drm_systems: &["CLEAR_KEY_AES_128"],
+                cmaf_exclude_segment_drm_metadata: Some(true),
+                ..Block::default()
+            },
+            expected: Expected::Refused(
+                "CMAF_EXCLUDE_SEGMENT_DRM_METADATA_INCOMPATIBLE_CONTAINER_TYPE",
+                "segment.encryption.cmafExcludeSegmentDrmMetadata",
+            ),
+        },
+        Case {
+            label: "the CMAF DRM-metadata toggle turned OFF on an ISM endpoint",
+            container: "ISM",
+            block: Block {
+                method: ("IsmEncryptionMethod", "CENC"),
+                presets: ("SHARED", "SHARED"),
+                cmaf_exclude_segment_drm_metadata: Some(false),
+                ..Block::default()
+            },
+            expected: Expected::Refused(
+                "CMAF_EXCLUDE_SEGMENT_DRM_METADATA_INCOMPATIBLE_CONTAINER_TYPE",
+                "segment.encryption.cmafExcludeSegmentDrmMetadata",
+            ),
+        },
         Case {
             label: "key rotation on an ISM endpoint",
             container: "ISM",
@@ -586,6 +621,29 @@ fn endpoint_body(container: &str, segment: Value) -> Value {
     body
 }
 
+/// Assert that `reported` carries every member `submitted` named, with the value it was
+/// given — the stored block may carry MORE (the members the service supplies inside it,
+/// pinned by `segment_service_applied_blocks`), but never a different value for one the
+/// request named. Recurses into nested objects, so a value the service supplies beside a
+/// submitted sub-block does not read as a changed sub-block.
+fn assert_submitted_members_survive(case: &str, path: &str, submitted: &Value, reported: &Value) {
+    let Some(members) = submitted.as_object() else {
+        assert_eq!(
+            reported, submitted,
+            "case {case:?}: {path} expected {submitted}, got {reported}"
+        );
+        return;
+    };
+    for (member, expected) in members {
+        assert_submitted_members_survive(
+            case,
+            &format!("{path}.{member}"),
+            expected,
+            &reported[member],
+        );
+    }
+}
+
 /// Assert that `body` is this service's `ValidationException` carrying `expected_type` and
 /// naming `member`.
 fn assert_refused(case: &str, status: u16, body: &Value, expected_type: &str, member: &str) {
@@ -630,7 +688,8 @@ async fn emulator_with_parents() -> Emulator {
 
 /// RULE, on the create — the whole encryption block is read before anything is stored: a
 /// combination the service could not act on is refused with the model's own discriminator
-/// and mints nothing, and one it can act on is stored and reported back verbatim.
+/// and mints nothing, and one it can act on is stored and reported back with every
+/// submitted member unchanged.
 #[tokio::test]
 async fn an_endpoints_encryption_settings_are_read_against_each_other_and_the_container() {
     let emulator = emulator_with_parents().await;
@@ -667,10 +726,11 @@ async fn an_endpoints_encryption_settings_are_read_against_each_other_and_the_co
                     status, 200,
                     "case {label:?}: GetOriginEndpoint expected 200, got {status} {read}"
                 );
-                assert_eq!(
-                    read["Segment"]["Encryption"], segment["Encryption"],
-                    "case {label:?}: the stored encryption block must be the submitted \
-                     one, got {read}"
+                assert_submitted_members_survive(
+                    label,
+                    "segment.encryption",
+                    &segment["Encryption"],
+                    &read["Segment"]["Encryption"],
                 );
                 assert_eq!(
                     read["Segment"]["Encryption"], body["Segment"]["Encryption"],
@@ -689,13 +749,12 @@ async fn an_endpoints_encryption_settings_are_read_against_each_other_and_the_co
 async fn an_update_reads_the_encryption_settings_before_replacing_them() {
     let emulator = emulator_with_parents().await;
     let endpoint = "enc-update-ep";
-    let stored = Block::default().segment();
     let (status, created) = emulator
         .create_endpoint(
             GROUP,
             CHANNEL,
             endpoint,
-            endpoint_body("CMAF", stored.clone()),
+            endpoint_body("CMAF", Block::default().segment()),
         )
         .await;
     assert_eq!(
@@ -731,7 +790,7 @@ async fn an_update_reads_the_encryption_settings_before_replacing_them() {
             "case {label:?}: the endpoint must still be readable, got {status} {read}"
         );
         assert_eq!(
-            read["Segment"]["Encryption"], stored["Encryption"],
+            read["Segment"]["Encryption"], created["Segment"]["Encryption"],
             "case {label:?}: a refused update must leave the stored block as it was, got \
              {read}"
         );

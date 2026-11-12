@@ -120,7 +120,9 @@ pub fn speke_role_arn_rejection(segment: Option<&Segment>) -> Option<ValidationE
 /// ([`VALIDATION_ENCRYPTION_METHOD_CONTAINER_TYPE_MISMATCH`]), the constant
 /// initialization vector against that method ([`VALIDATION_CENC_IV_INCOMPATIBLE`]), the
 /// DRM systems against it ([`VALIDATION_DRM_SYSTEMS_ENCRYPTION_METHOD_INCOMPATIBLE`]), key
-/// rotation against the container ([`VALIDATION_ISM_CONTAINER_WITH_KEY_ROTATION`]), the
+/// rotation and the CMAF DRM-metadata toggle against the container
+/// ([`VALIDATION_ISM_CONTAINER_WITH_KEY_ROTATION`],
+/// [`VALIDATION_CMAF_EXCLUDE_SEGMENT_DRM_METADATA_INCOMPATIBLE_CONTAINER_TYPE`]), the
 /// encryption contract's presets against each other and against the container
 /// ([`VALIDATION_ENCRYPTION_CONTRACT_UNENCRYPTED`],
 /// [`VALIDATION_ENCRYPTION_CONTRACT_SHARED`],
@@ -137,6 +139,9 @@ pub const VALIDATION_DRM_SYSTEMS_ENCRYPTION_METHOD_INCOMPATIBLE: &str =
     "DRM_SYSTEMS_ENCRYPTION_METHOD_INCOMPATIBLE";
 /// See [`VALIDATION_ENCRYPTION_METHOD_CONTAINER_TYPE_MISMATCH`].
 pub const VALIDATION_ISM_CONTAINER_WITH_KEY_ROTATION: &str = "ISM_CONTAINER_WITH_KEY_ROTATION";
+/// See [`VALIDATION_ENCRYPTION_METHOD_CONTAINER_TYPE_MISMATCH`].
+pub const VALIDATION_CMAF_EXCLUDE_SEGMENT_DRM_METADATA_INCOMPATIBLE_CONTAINER_TYPE: &str =
+    "CMAF_EXCLUDE_SEGMENT_DRM_METADATA_INCOMPATIBLE_CONTAINER_TYPE";
 /// See [`VALIDATION_ENCRYPTION_METHOD_CONTAINER_TYPE_MISMATCH`].
 pub const VALIDATION_ENCRYPTION_CONTRACT_UNENCRYPTED: &str = "ENCRYPTION_CONTRACT_UNENCRYPTED";
 /// See [`VALIDATION_ENCRYPTION_METHOD_CONTAINER_TYPE_MISMATCH`].
@@ -167,11 +172,16 @@ pub(super) const ENCRYPTION_MEMBER: &str = "segment.encryption";
 pub(super) fn encryption_method_member(container: &str) -> Option<&'static str> {
     match container {
         "TS" => Some("tsEncryptionMethod"),
-        "CMAF" => Some("cmafEncryptionMethod"),
+        CONTAINER_TYPE_CMAF => Some("cmafEncryptionMethod"),
         CONTAINER_TYPE_ISM => Some("ismEncryptionMethod"),
         _ => None,
     }
 }
+
+/// The `ContainerType` whose endpoints package CMAF segments, from the model's
+/// `ContainerType` enum — the container the CMAF-only members of an encryption block
+/// belong to (see [`container_carries_cmaf_exclude_segment_drm_metadata`]).
+pub(super) const CONTAINER_TYPE_CMAF: &str = "CMAF";
 
 /// Every `EncryptionMethod` member the request set, as `(member, value)` pairs in the
 /// order the model declares them.
@@ -241,6 +251,148 @@ pub(super) const SPEKE_VERSION_WITH_KEY_PERIOD_TIMING: &str = "V2_1";
 /// ("If you don't specify a value, the default is `V2_0`").
 pub(super) const DEFAULT_SPEKE_VERSION: &str = "V2_0";
 
+/// The content-key period timing MediaPackage signals when a CONFIGURED
+/// `ContentKeyPeriodConfiguration` names none ("If you don't specify a value, the default
+/// is `INDEX_ONLY`"), from the model's `ContentKeyPeriodTiming` enum.
+pub(super) const DEFAULT_CONTENT_KEY_PERIOD_TIMING: &str = "INDEX_ONLY";
+
+/// The encryption method the segments of an endpoint of this container type are encrypted
+/// with, or `None` when the block names none in the member the container configures its
+/// method through ([`encryption_method_member`]).
+///
+/// The ONE reading of which method an endpoint encrypts with: both the refusals that are
+/// about the method ([`segment_encryption_rejection`]) and the materialisation of the
+/// member the method decides the presence of
+/// ([`encryption_carries_constant_initialization_vector`]) resolve through it, so a stored
+/// block and a refused one can never disagree about what the endpoint encrypts with.
+pub(super) fn encryption_method_of<'a>(
+    encryption: &'a Encryption,
+    container: &str,
+) -> Option<&'a str> {
+    let expected_member = encryption_method_member(container)?;
+    submitted_encryption_methods(&encryption.encryption_method)
+        .into_iter()
+        .find_map(|(member, value)| (member == expected_member).then_some(value))
+}
+
+/// Whether MediaPackage supplies a constant initialization vector to an endpoint of this
+/// container type whose encryption settings name none.
+///
+/// `Encryption$ConstantInitializationVector` is documented as a value the service creates
+/// for a request that omits it ("If you don't specify a value, then MediaPackage creates
+/// the constant initialization vector (IV)"), and Common Encryption derives each sample's
+/// vector from the content key instead, so an endpoint encrypting with that method has no
+/// constant one at all — which is the combination a SUBMITTED vector is refused in
+/// ([`VALIDATION_CENC_IV_INCOMPATIBLE`]). Both read the method off
+/// [`encryption_method_of`], so the service can never create the value its own validation
+/// refuses.
+pub fn encryption_carries_constant_initialization_vector(
+    encryption: &Encryption,
+    container: &str,
+) -> bool {
+    encryption_method_of(encryption, container) != Some(ENCRYPTION_METHOD_CENC)
+}
+
+/// Whether segment metadata of a CMAF container keeps its DRM metadata boxes when the
+/// encryption settings do not ask for their removal — the model states the member's
+/// default outright ("Valid values: `true` | `false`", "Default: `false`").
+pub const DEFAULT_CMAF_EXCLUDE_SEGMENT_DRM_METADATA: bool = false;
+
+/// Whether an endpoint of this container type carries the CMAF DRM-metadata toggle at all.
+///
+/// `Encryption$CmafExcludeSegmentDrmMetadata` excludes boxes from "segment metadata in CMAF
+/// containers" and "only affects CMAF container formats", and the model declares
+/// `CMAF_EXCLUDE_SEGMENT_DRM_METADATA_INCOMPATIBLE_CONTAINER_TYPE` for the member on any
+/// other container — so, like every other member with a documented default that only some
+/// parents carry, its default is applied exactly where the endpoint can carry one and the
+/// member stays absent everywhere else.
+pub fn container_carries_cmaf_exclude_segment_drm_metadata(container: &str) -> bool {
+    container == CONTAINER_TYPE_CMAF
+}
+
+/// What the digest of a created initialization vector is of, so the value can collide with
+/// no other digest this module derives.
+const INITIALIZATION_VECTOR_DOMAIN: &str = "mediapackagev2:segment-encryption-iv";
+
+/// How many bytes of that digest the vector carries: `ConstantInitializationVector` is "a
+/// 128-bit, 16-byte hex value represented by a 32-character string" (`@length 32..32`,
+/// `@pattern ^[0-9a-fA-F]+$`).
+const INITIALIZATION_VECTOR_BYTES: usize = 16;
+
+/// The constant initialization vector MediaPackage creates for an endpoint whose
+/// encryption settings name none.
+///
+/// Derived from the endpoint's ARN, which is the identity of the endpoint across its whole
+/// lifetime: the value is therefore unique to the endpoint, the same on the create
+/// response and on every later read of it, and the same one an update that names no vector
+/// re-materialises — so an update that re-submits what was already stored still changes
+/// nothing. Rendered as the hex of the first [`INITIALIZATION_VECTOR_BYTES`] digest bytes,
+/// in the upper case AWS's own examples of the member use (the modelled pattern admits
+/// either case).
+///
+/// It is a reported configuration value and nothing else: this service packages no
+/// content and encrypts nothing, so the value is never used to encrypt or decrypt
+/// anything.
+pub fn created_constant_initialization_vector(endpoint_arn: &str) -> String {
+    let digest = field_digest(&[
+        INITIALIZATION_VECTOR_DOMAIN.to_string(),
+        endpoint_arn.to_string(),
+    ]);
+    hex::encode_upper(&digest[..INITIALIZATION_VECTOR_BYTES])
+}
+
+/// The encryption block an origin endpoint's segment is stored with: the submitted one,
+/// plus the members the model documents the SERVICE as supplying inside it.
+///
+/// Those are the constant initialization vector, created for an endpoint whose request
+/// named none and whose encryption method takes one at all
+/// ([`created_constant_initialization_vector`],
+/// [`encryption_carries_constant_initialization_vector`]); the CMAF DRM-metadata
+/// toggle, whose documented default ([`DEFAULT_CMAF_EXCLUDE_SEGMENT_DRM_METADATA`]) is
+/// applied on an endpoint whose container carries the member
+/// ([`container_carries_cmaf_exclude_segment_drm_metadata`], which is also what a SUBMITTED
+/// toggle is refused by in [`segment_encryption_rejection`], so no caller's value is
+/// dropped here instead of refused); and, one level down, the key
+/// provider's SPEKE version ([`DEFAULT_SPEKE_VERSION`]) and the content-key period timing
+/// of a configured period configuration ([`DEFAULT_CONTENT_KEY_PERIOD_TIMING`]) — the same
+/// members the refusals above read a submitted block through, so a stored block reports the
+/// version and the timing those rules act on. The key-rotation interval is NOT one of them:
+/// its doc says an omitted interval leaves content keys unrotated, so there is no value to
+/// report. Reached through [`super::materialized_segment`], so the create and the update of
+/// an endpoint store one block.
+pub fn materialized_encryption(submitted: Encryption, at: SegmentContext<'_>) -> Encryption {
+    let mut encryption = submitted;
+    if encryption_carries_constant_initialization_vector(&encryption, at.container_type) {
+        encryption.constant_initialization_vector = Some(
+            encryption
+                .constant_initialization_vector
+                .unwrap_or_else(|| created_constant_initialization_vector(at.endpoint_arn)),
+        );
+    }
+    encryption.cmaf_exclude_segment_drm_metadata =
+        container_carries_cmaf_exclude_segment_drm_metadata(at.container_type).then(|| {
+            encryption
+                .cmaf_exclude_segment_drm_metadata
+                .unwrap_or(DEFAULT_CMAF_EXCLUDE_SEGMENT_DRM_METADATA)
+        });
+    let provider = &mut encryption.speke_key_provider;
+    provider.speke_version = Some(
+        provider
+            .speke_version
+            .take()
+            .unwrap_or_else(|| DEFAULT_SPEKE_VERSION.to_string()),
+    );
+    if let Some(period) = provider.content_key_period_configuration.as_mut() {
+        period.content_key_period_timing = Some(
+            period
+                .content_key_period_timing
+                .take()
+                .unwrap_or_else(|| DEFAULT_CONTENT_KEY_PERIOD_TIMING.to_string()),
+        );
+    }
+    encryption
+}
+
 /// Refuse a segment whose encryption settings are a configuration the service could not
 /// act on, or `None` when the block is one it can.
 ///
@@ -284,11 +436,7 @@ pub fn segment_encryption_rejection(
             }
         }
     }
-    let method = expected_member.and_then(|expected_member| {
-        submitted
-            .iter()
-            .find_map(|(member, value)| (*member == expected_member).then_some(*value))
-    });
+    let method = encryption_method_of(encryption, container);
 
     if let Some(method) = method {
         // Common Encryption derives each sample's initialization vector from the content
@@ -324,6 +472,26 @@ pub fn segment_encryption_rejection(
                 VALIDATION_DRM_SYSTEMS_ENCRYPTION_METHOD_INCOMPATIBLE,
             ));
         }
+    }
+
+    // The CMAF-only member of the block, against the container: the toggle excludes boxes
+    // from "segment metadata in CMAF containers", so an endpoint that packages no CMAF
+    // segments has none to exclude them from — the member the materialisation applies the
+    // documented default to on exactly the containers that carry it, read off the same
+    // predicate ([`container_carries_cmaf_exclude_segment_drm_metadata`]), so a submitted
+    // value can never be dropped instead of refused.
+    if encryption.cmaf_exclude_segment_drm_metadata.is_some()
+        && !container_carries_cmaf_exclude_segment_drm_metadata(container)
+    {
+        return Some(validation_failed(
+            &format!("{ENCRYPTION_MEMBER}.cmafExcludeSegmentDrmMetadata"),
+            &format!(
+                "A {container} container endpoint packages no CMAF segments to exclude DRM \
+                 metadata boxes from. Remove the setting, or create an origin endpoint \
+                 whose container type is {CONTAINER_TYPE_CMAF}"
+            ),
+            VALIDATION_CMAF_EXCLUDE_SEGMENT_DRM_METADATA_INCOMPATIBLE_CONTAINER_TYPE,
+        ));
     }
 
     // Key rotation, and then the encryption contract, against the container.

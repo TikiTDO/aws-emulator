@@ -166,3 +166,5 @@ mod ingest_endpoint_hosts;
 mod harvest_destination;
 #[path = "all/delete_origin_endpoint_cascade.rs"]
 mod delete_origin_endpoint_cascade;
+#[path = "all/segment_service_applied_blocks.rs"]
+mod segment_service_applied_blocks;

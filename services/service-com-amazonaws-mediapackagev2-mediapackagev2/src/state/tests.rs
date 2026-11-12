@@ -375,7 +375,14 @@ fn materialization_fills_only_what_the_caller_left_out() {
     // On a channel whose output locking mode carries no output-timestamp mode, so the
     // member stays absent; the carrying case is the table in
     // `tests/all/segment_output_timestamp_mode.rs`.
-    let materialized = materialized_segment(Some(submitted), Some(DEFAULT_OUTPUT_LOCKING_MODE));
+    let materialized = materialized_segment(
+        Some(submitted),
+        SegmentContext {
+            channel_output_locking_mode: Some(DEFAULT_OUTPUT_LOCKING_MODE),
+            container_type: "TS",
+            endpoint_arn: &origin_endpoint_arn("us-west-2", "group", "channel", "endpoint"),
+        },
+    );
     assert_eq!(
         materialized.segment_duration_seconds,
         Some(12),
@@ -392,7 +399,9 @@ fn materialization_fills_only_what_the_caller_left_out() {
         "an omitted segment name must come out as the service's default"
     );
     assert!(
-        materialized.scte.is_none() && materialized.output_timestamp_mode.is_none(),
+        materialized.scte.is_none()
+            && materialized.encryption.is_none()
+            && materialized.output_timestamp_mode.is_none(),
         "materialization must not invent members the service reports only when configured"
     );
 }
@@ -634,7 +643,14 @@ fn sample_endpoint() -> OriginEndpoint {
         group_name: "group".to_string(),
         arn: origin_endpoint_arn("us-west-2", "group", "channel", "endpoint"),
         container_type: "TS".to_string(),
-        segment: materialized_segment(None, None),
+        segment: materialized_segment(
+            None,
+            SegmentContext {
+                channel_output_locking_mode: None,
+                container_type: "TS",
+                endpoint_arn: &origin_endpoint_arn("us-west-2", "group", "channel", "endpoint"),
+            },
+        ),
         description: None,
         startover_window_seconds: materialized_startover_window_seconds(
             None,

@@ -638,7 +638,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // reporting the service's own settings rather than nothing.
         let mut segment = crate::state::materialized_segment(
             input.segment,
-            channel_output_locking_mode.as_deref(),
+            crate::state::SegmentContext {
+                channel_output_locking_mode: channel_output_locking_mode.as_deref(),
+                container_type: &input.container_type,
+                endpoint_arn: &endpoint.arn,
+            },
         );
         // Except the output-timestamp mode: that member is immutable after creation, so
         // the mode the create materialised stands whatever the replacement segment

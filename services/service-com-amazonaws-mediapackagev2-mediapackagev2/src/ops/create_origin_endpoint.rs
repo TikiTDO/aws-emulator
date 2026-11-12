@@ -569,6 +569,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             input.startover_window_seconds,
             &input_type,
         );
+        // `Segment` is required in the response: the service applies its own segmentation
+        // settings to whatever the request left out and reports the result, so the
+        // materialized configuration is what is stored — including the output-timestamp
+        // mode of an endpoint whose channel carries that member, which is what leaves no
+        // later update to be the write that sets it, and the members the model documents
+        // the service as supplying inside a configured encryption or SCTE block.
+        let segment = crate::state::materialized_segment(
+            input.segment,
+            crate::state::SegmentContext {
+                channel_output_locking_mode: channel_output_locking_mode.as_deref(),
+                container_type: &input.container_type,
+                endpoint_arn: &arn,
+            },
+        );
 
         let mut endpoint = crate::state::OriginEndpoint {
             name: name.clone(),
@@ -576,15 +590,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             group_name: group_name.clone(),
             arn,
             container_type: input.container_type,
-            // `Segment` is required in the response: the service applies its own
-            // segmentation settings to whatever the request left out and reports the
-            // result, so the materialized configuration is what is stored — including
-            // the output-timestamp mode of an endpoint whose channel carries that
-            // member, which is what leaves no later update to be the write that sets it.
-            segment: crate::state::materialized_segment(
-                input.segment,
-                channel_output_locking_mode.as_deref(),
-            ),
+            segment,
             description: input.description,
             startover_window_seconds,
             hls_manifests,
