@@ -236,12 +236,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .unwrap_or(crate::state::DEFAULT_PATH),
             &input.role_name,
         );
-        crate::state::authorization::authorize_named(
+        crate::state::authorization::authorize_policy_attachment(
             &store,
             ctx,
             crate::state::authorization::DETACH_ROLE_POLICY,
             &resource,
             &format!("role {}", input.role_name),
+            // The managed policy this call NAMES, which IAM publishes as `iam:PolicyARN`,
+            // so a grant scoped to one policy permits the detach that names it alone.
+            &input.policy_arn,
         )?;
 
         // "Service-linked roles are protected Amazon Web Services resources. Only the

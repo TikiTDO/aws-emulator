@@ -71,9 +71,12 @@
 //!   under both spellings IAM publishes them as (`aws:ResourceTag/<key>` and the
 //!   service-specific `iam:ResourceTag/<key>`), so an ABAC statement comparing a resource
 //!   tag with a principal tag is decided from the two entities' stored tags;
-//! * the REQUEST, for a call that writes tags: the tags it writes
-//!   (`aws:RequestTag/<key>`) and the set of keys it writes (`aws:TagKeys`), which the
-//!   `Tag*`, `Untag*` and `Create*` call sites hand the gate ([`WrittenTags`]);
+//! * the REQUEST's own parameters, for each parameter IAM publishes as a condition key:
+//!   for a call that writes tags, the tags it writes (`aws:RequestTag/<key>`) and the set
+//!   of keys it writes (`aws:TagKeys`), which the `Tag*`, `Untag*` and `Create*` call
+//!   sites hand the gate ([`WrittenTags`]); and for a call that attaches or detaches a
+//!   MANAGED POLICY, the ARN of the policy it names (`iam:PolicyARN`), which those call
+//!   sites hand the gate ([`authorize_policy_attachment`]);
 //! * the CONNECTION the request arrived on — the address it was made from
 //!   (`aws:SourceIp`), which is what a network clause is decided against
 //!   ([`source_address`]);
@@ -237,6 +240,19 @@ const REQUEST_TAG_PREFIX: &str = "aws:RequestTag/";
 /// tag keys that are passed in the request". Multi-valued, so a clause over it is decided
 /// under one of IAM's set qualifiers.
 const TAG_KEYS_KEY: &str = "aws:TagKeys";
+
+/// The IAM-specific condition key carrying the ARN of the managed policy a request NAMES:
+/// "`iam:PolicyARN` — the ARN of an IAM policy", compared under IAM's ARN operators.
+///
+/// It is the value of that request's own `PolicyArn` parameter, which is what lets a grant
+/// be scoped to the managed policies a delegate may attach or detach rather than to the
+/// identity it may attach them to. Filled — and declared — only by the call sites that
+/// carry such a parameter and that IAM publishes the key for
+/// ([`authorize_policy_attachment`]): for every other call it stays undeclared, because
+/// absence from the context there would have to mean this gate knows the request carries
+/// no policy ARN, which is a claim about the key's availability per action that is not
+/// this gate's to make.
+const POLICY_ARN_KEY: &str = "iam:PolicyARN";
 
 /// The condition key carrying the ADDRESS the request was made from: "`aws:SourceIp` —
 /// the requester's IP address", which is what an IP clause compares against.
@@ -414,7 +430,8 @@ enum Caller<'a> {
 /// fail-closed reading the shared evaluation gives every key this emulator cannot answer
 /// for. The keys no such request carries at all are declared beside them
 /// ([`PUBLISHED_ABSENT_KEYS`], and for a long-term key the ones that describe a session's
-/// credential, [`LONG_TERM_CREDENTIAL_ABSENT_KEYS`]).
+/// credential, [`LONG_TERM_CREDENTIAL_ABSENT_KEYS`]). A call that names a MANAGED POLICY
+/// carries that ARN too, under the key IAM publishes it as ([`POLICY_ARN_KEY`]).
 ///
 /// A ROLE SESSION is described by what IAM publishes for one: `aws:userid` is "the unique
 /// identifier of the current user", which for an assumed-role session is the role's own id
@@ -432,6 +449,7 @@ fn request_context(
     caller: Caller<'_>,
     resource: &str,
     written: WrittenTags<'_>,
+    policy_arn: Option<&str>,
     source_ip: String,
 ) -> (Vec<(String, String)>, Vec<&'static str>) {
     let mut context = Vec::new();
@@ -468,6 +486,14 @@ fn request_context(
         published.extend_from_slice(PUBLISHED_RESOURCE_TAG_KEYS);
     }
     context.extend(written.context());
+    // The managed policy the request NAMES, for a call that carries one: a single value,
+    // read off the request's own parameter rather than off anything stored, so an
+    // `ArnEquals`/`ArnLike` clause scoping a grant to one policy is decided from the
+    // policy the call actually asked about.
+    if let Some(policy_arn) = policy_arn {
+        context.push((POLICY_ARN_KEY.to_string(), policy_arn.to_string()));
+        published.push(POLICY_ARN_KEY);
+    }
     // Where the call came from, read from the connection the same way every request's
     // source address is read here ([`source_address`]).
     context.push((SOURCE_IP_KEY.to_string(), source_ip));
@@ -536,6 +562,52 @@ pub fn authorize_written(
     named_as: &str,
     written: WrittenTags<'_>,
 ) -> Result<(), AccessDenied> {
+    authorize_request(store, ctx, action, resource, named_as, written, None)
+}
+
+/// [`authorize_named`] for a call that NAMES A MANAGED POLICY — the managed-policy
+/// attachment calls — which hands the gate that policy's ARN so a clause over
+/// [`POLICY_ARN_KEY`] can be decided.
+///
+/// The ARN the request's `PolicyArn` parameter carries is part of the request IAM decides:
+/// `iam:PolicyARN` is read from it, so a grant scoped to one managed policy permits
+/// exactly the attach or detach that names it and withholds every other — which is how a
+/// delegated administrator is given the one policy it may attach to an identity rather
+/// than every policy the account holds. The decision is still made against the ARN of the
+/// IDENTITY the attachment is taken on (`resource`), because that is the resource a
+/// statement's `Resource` element matches, and it precedes the write, so a refusal leaves
+/// the identity's attachments untouched.
+pub fn authorize_policy_attachment(
+    store: &IamState,
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    action: &str,
+    resource: &str,
+    named_as: &str,
+    policy_arn: &str,
+) -> Result<(), AccessDenied> {
+    authorize_request(
+        store,
+        ctx,
+        action,
+        resource,
+        named_as,
+        WrittenTags::None,
+        Some(policy_arn),
+    )
+}
+
+/// The ONE decision every spelling above reaches, handed everything the REQUEST itself
+/// contributes to the condition context: the tags it writes and the managed policy it
+/// names (see [`request_context`]).
+fn authorize_request(
+    store: &IamState,
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    action: &str,
+    resource: &str,
+    named_as: &str,
+    written: WrittenTags<'_>,
+    policy_arn: Option<&str>,
+) -> Result<(), AccessDenied> {
     let access_key_id = ::engine::extract_akid(&ctx.parts().headers);
     // A credential this account holds no IAM user for carries no identity-based
     // policies, so there is nothing to judge it on (see the module docs).
@@ -548,8 +620,14 @@ pub fn authorize_written(
         policies,
         scope,
     } = signer;
-    let (context, published) =
-        request_context(store, caller, resource, written, source_address(ctx.parts()));
+    let (context, published) = request_context(
+        store,
+        caller,
+        resource,
+        written,
+        policy_arn,
+        source_address(ctx.parts()),
+    );
 
     let principals = [principal.clone()];
     // What the policies in force are decided against BESIDES the action and the resource:
@@ -861,6 +939,9 @@ pub fn delegation_permission_check(
             caller,
             resource,
             WrittenTags::None,
+            // An ask is an `(action, resource)` pair read out of a policy document, not a
+            // call: it carries no request parameter, so no managed policy ARN either.
+            None,
             source_address(ctx.parts()),
         );
         let request = iam::Request::new(action, resource, &principals)

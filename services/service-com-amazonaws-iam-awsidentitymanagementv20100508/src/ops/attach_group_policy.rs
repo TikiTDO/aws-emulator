@@ -221,12 +221,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             || crate::state::group_arn(crate::state::DEFAULT_PATH, &input.group_name),
             |group| group.arn.clone(),
         );
-        crate::state::authorization::authorize_named(
+        crate::state::authorization::authorize_policy_attachment(
             &store,
             ctx,
             crate::state::authorization::ATTACH_GROUP_POLICY,
             &resource,
             &format!("group {}", input.group_name),
+            // The managed policy this call NAMES, which IAM publishes as `iam:PolicyARN`,
+            // so a grant scoped to one policy permits the attach that names it alone.
+            &input.policy_arn,
         )?;
 
         let Some(group_name) = store.groups.get(&group_key).map(|group| group.group_name.clone())

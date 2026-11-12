@@ -221,16 +221,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // since there is no other path to attribute it to. A refusal names that user as
         // the request named it (`user Bob`) rather than by ARN, and leaves the user's
         // attachments untouched, because the decision is made before the write.
+        //
+        // The managed policy this call NAMES is part of that request: IAM publishes it as
+        // `iam:PolicyARN` (`crate::state::authorization::authorize_policy_attachment`), so
+        // a grant scoped to one policy permits the detach that names it and withholds
+        // every other.
         let resource = held.map_or_else(
             || crate::state::user_arn(crate::state::DEFAULT_PATH, &input.user_name),
             |user| user.arn.clone(),
         );
-        crate::state::authorization::authorize_named(
+        crate::state::authorization::authorize_policy_attachment(
             &store,
             ctx,
             crate::state::authorization::DETACH_USER_POLICY,
             &resource,
             &format!("user {}", input.user_name),
+            &input.policy_arn,
         )?;
 
         if held.is_none() {
