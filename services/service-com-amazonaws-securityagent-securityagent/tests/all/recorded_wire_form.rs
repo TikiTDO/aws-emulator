@@ -415,8 +415,9 @@ async fn an_agent_space_reports_its_id_its_owner_and_its_arn() {
 /// RULE: `CreateAgentSpace` echoes the association RESOLVED — for every
 /// `targetDomainIds` entry the store holds a record for, the response carries that
 /// stored target-domain record in `targetDomains`, in the order the request listed the
-/// ids, and an id no record answers contributes no entry. An agent space that names no
-/// target domain at all carries no `targetDomains` member.
+/// ids, and an id no record answers contributes no entry. An agent space associated with
+/// no target domain — the member omitted, or a list of no ids, which is the same state —
+/// carries neither `targetDomainIds` nor `targetDomains`.
 #[tokio::test]
 async fn create_agent_space_echoes_the_associated_target_domains_resolved() {
     let router = emulator();
@@ -501,12 +502,17 @@ async fn create_agent_space_echoes_the_associated_target_domains_resolved() {
         }
         let created = create_agent_space(&router, "us-east-1", &request, case).await;
 
-        let Some(ids) = ids else {
-            assert!(
-                present(&created, "targetDomains").is_none(),
-                "case {case:?}: an agent space that names no target domain carries no \
-                 targetDomains member: {created}"
-            );
+        // An association of no ids leaves the agent space associated with nothing, which
+        // is the state an omitted member describes, so both association members are
+        // reported by their ABSENCE rather than as empty arrays.
+        let Some(ids) = ids.filter(|ids| !ids.is_empty()) else {
+            for name in ["targetDomainIds", "targetDomains"] {
+                assert!(
+                    present(&created, name).is_none(),
+                    "case {case:?}: an agent space associated with no target domain \
+                     carries no {name} member: {created}"
+                );
+            }
             continue;
         };
 

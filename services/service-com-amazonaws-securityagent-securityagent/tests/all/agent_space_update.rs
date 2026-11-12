@@ -37,9 +37,39 @@ const PATCHABLE_MEMBERS: &[&str] = &[
     "codeReviewSettings",
 ];
 
+/// The sentence this service words a refusal of an agent space it cannot resolve with.
+///
+/// Source: the recorded 404 for an `agentSpaceId` that resolves to no agent space — wholly
+/// FIXED text, carrying no value from the request. Written out here independently of the
+/// constant the handlers report it from; `crate::agent_space_update_echo` owns the rule
+/// across the operations that state it.
+const AGENT_SPACE_NOT_FOUND: &str = "The specified agent instance does not exist.";
+
 /// One member of a payload, with an absent member and an explicit `null` read alike.
 fn value(payload: &Value, name: &str) -> Option<Value> {
     payload.get(name).filter(|value| !value.is_null()).cloned()
+}
+
+/// What the ECHO of one member must carry, given the value the stored record now holds.
+///
+/// `targetDomainIds` is the one member whose echo is not the stored value verbatim: a
+/// list of no ids is the same state as no list at all — the agent space is associated
+/// with nothing — and the create and update echoes report that state by the member's
+/// ABSENCE rather than as an empty array. A READ of the store reports the record's
+/// collections as arrays either way (`crate::agent_space_batch_read` owns that rule).
+fn echoed(name: &str, stored: Option<Value>) -> Option<Value> {
+    stored.filter(|stored| {
+        name != "targetDomainIds" || stored.as_array().is_some_and(|ids| !ids.is_empty())
+    })
+}
+
+/// What a READ of the store must report for one member, given the echo of it.
+fn read_as(name: &str, echoed: Option<Value>) -> Option<Value> {
+    if name == "targetDomainIds" {
+        Some(echoed.unwrap_or_else(|| json!([])))
+    } else {
+        echoed
+    }
 }
 
 /// The agent space every patch row starts from: every member `UpdateAgentSpace` can
@@ -239,7 +269,7 @@ async fn update_writes_the_supplied_members_and_leaves_the_rest() {
         // What each member must now be: the patch's value where the request carried
         // one, the created record's otherwise.
         for name in PATCHABLE_MEMBERS {
-            let expected = value(&patch, name).or_else(|| value(&stored, name));
+            let expected = echoed(name, value(&patch, name).or_else(|| value(&stored, name)));
             assert_eq!(
                 value(&patched, name),
                 expected,
@@ -259,12 +289,12 @@ async fn update_writes_the_supplied_members_and_leaves_the_rest() {
         // this operation does not take (`kmsKeyId`) are not disturbed by it.
         let read_back = read(&router, &id, case).await;
         for name in PATCHABLE_MEMBERS {
+            let expected = read_as(name, value(&patched, name));
             assert_eq!(
                 value(&read_back, name),
-                value(&patched, name),
+                expected,
                 "case {case:?}: expected the stored {name} to be what the update \
-                 answered {:?}, got {:?}",
-                value(&patched, name),
+                 answered {expected:?}, got {:?}",
                 value(&read_back, name)
             );
         }
@@ -277,13 +307,23 @@ async fn update_writes_the_supplied_members_and_leaves_the_rest() {
         );
 
         // An update is not a re-creation: the identity the create minted is the identity
-        // the record keeps.
+        // the record keeps — and the update ANSWERS that identity, so a caller that reads
+        // the ARN or the owning account off the response it just got does not have to
+        // read the record back for them.
         for name in ["id", "arn", "ownerId"] {
             assert_eq!(
                 member(&read_back, name),
                 member(&created, name),
                 "case {case:?}: expected the stored {name} to be unchanged by the update, \
                  got {read_back}"
+            );
+            assert_eq!(
+                member(&patched, name),
+                member(&created, name),
+                "case {case:?}: expected the update to answer the {name} the create \
+                 minted {:?}, got {:?}",
+                member(&created, name),
+                member(&patched, name)
             );
         }
     }
@@ -375,8 +415,9 @@ async fn update_advances_updated_at_only_when_it_writes() {
 }
 
 /// RULE: an `agentSpaceId` the store holds no record for names no agent space, so
-/// `UpdateAgentSpace` answers the service's `ResourceNotFoundException` (HTTP 404)
-/// naming the id, and writes nothing.
+/// `UpdateAgentSpace` answers the service's `ResourceNotFoundException` (HTTP 404) with
+/// the service's own sentence for an agent space it cannot resolve — fixed text naming
+/// the resource class and carrying nothing the request sent — and writes nothing.
 #[tokio::test]
 async fn update_refuses_an_agent_space_that_does_not_exist() {
     let router = emulator();
@@ -413,10 +454,14 @@ async fn update_refuses_an_agent_space_that_does_not_exist() {
             answer.error_code, answer.body
         );
         let message = member(&answer.body, "message").unwrap_or_default();
-        assert!(
-            message.contains(&unknown),
-            "case {case:?}: expected the refusal to name the id {unknown:?}, got \
+        assert_eq!(
+            message, AGENT_SPACE_NOT_FOUND,
+            "case {case:?}: expected the refusal to state {AGENT_SPACE_NOT_FOUND:?}, got \
              {message:?}"
+        );
+        assert!(
+            !message.contains(&unknown),
+            "case {case:?}: the refusal echoed the requested id {unknown:?}: {message:?}"
         );
         // A refused update is not a create: the unknown id still resolves to nothing.
         let payload = ok(

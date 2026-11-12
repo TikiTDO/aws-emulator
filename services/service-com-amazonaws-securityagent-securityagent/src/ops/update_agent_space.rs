@@ -78,6 +78,13 @@
 //! * `updatedAt` (Timestamp) — The date and time the agent space was last updated, in UTC
 //!   format.
 //!
+//! ## Recorded, not modelled
+//!
+//! The recorded 200 carries the same three identity members the create echo and the batch
+//! read carry beside the modelled ones — `id` (the agent space's identifier again),
+//! `ownerId` (the owning account) and `arn` — so a caller that reads the ARN or the owner
+//! account off the update it just made does not have to read the record back.
+//!
 //! ## Wire form
 //!
 //! `createdAt` and `updatedAt` are `@timestampFormat("date-time")` members, so they go out
@@ -220,10 +227,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .ok_or_else(|| {
                     UpdateAgentSpaceErrorModeled::ResourceNotFoundException(
                         ResourceNotFoundException {
-                            message: format!(
-                                "No agent space found with id {}",
-                                input.agent_space_id
-                            ),
+                            // The service's own sentence for an agent space it cannot
+                            // resolve (`crate::state::AGENT_SPACE_NOT_FOUND`), the one
+                            // every other operation of this service answers an
+                            // unresolvable `agentSpaceId` with: fixed text naming the
+                            // resource CLASS, carrying nothing the request sent.
+                            message: crate::state::AGENT_SPACE_NOT_FOUND.to_string(),
                         },
                     )
                 })?;
@@ -276,6 +285,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             code_review_settings: projected.code_review_settings,
             created_at: projected.created_at,
             updated_at: projected.updated_at,
+            id: projected.id,
+            owner_id: projected.owner_id,
+            arn: projected.arn,
         })
     }
 }

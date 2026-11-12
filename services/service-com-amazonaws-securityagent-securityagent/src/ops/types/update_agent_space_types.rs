@@ -33,9 +33,12 @@ pub struct UpdateAgentSpaceInput {
 /// (and every SDK's generated deserializer) requires an RFC 3339 string. The whole
 /// reason, and the vendored gap behind it, live in `super::wire_shape`.
 ///
-/// The members are exactly the ones the model declares for this output, so the
-/// `recorded:` list is empty: unlike `CreateAgentSpaceOutput`, nothing beyond the model
-/// is evidenced on this operation's wire.
+/// Beside those two, the recorded 200 of this operation carries the same three identity
+/// members the create echo and the batch read carry — `id` (the agent space's own
+/// identifier again, under the name the service's records use for it), `ownerId` (the
+/// owning account) and `arn` — which the model does not declare at all, so they go in
+/// the `recorded:` list: a derived struct cannot carry a field that matches no Smithy
+/// member.
 #[derive(Debug, Clone, Default)]
 pub struct UpdateAgentSpaceOutput {
     pub agent_space_id: String,
@@ -46,6 +49,13 @@ pub struct UpdateAgentSpaceOutput {
     pub code_review_settings: Option<CodeReviewSettings>,
     pub created_at: Option<::aws_smithy_types::DateTime>,
     pub updated_at: Option<::aws_smithy_types::DateTime>,
+    /// Recorded, not modelled: the agent space's id again, under the name the service's
+    /// own record uses for it.
+    pub id: String,
+    /// Recorded, not modelled: the account that owns the agent space.
+    pub owner_id: String,
+    /// Recorded, not modelled: the agent space's ARN.
+    pub arn: String,
 }
 
 sa_schema_and_codec!(
@@ -71,5 +81,9 @@ sa_schema_and_codec!(
         (M_CREATED_AT, created_at, "createdAt", 6, opt, date_time),
         (M_UPDATED_AT, updated_at, "updatedAt", 7, opt, date_time),
     ],
-    recorded: [],
+    recorded: [
+        (M_ID, id, "id", 8, req, string),
+        (M_OWNER_ID, owner_id, "ownerId", 9, req, string),
+        (M_ARN, arn, "arn", 10, req, string),
+    ],
 );

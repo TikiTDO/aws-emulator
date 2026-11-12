@@ -19,6 +19,8 @@ mod agent_space_deletion;
 mod agent_space_lifecycle;
 #[path = "all/agent_space_update.rs"]
 mod agent_space_update;
+#[path = "all/agent_space_update_echo.rs"]
+mod agent_space_update_echo;
 #[path = "all/application_lifecycle.rs"]
 mod application_lifecycle;
 #[path = "all/artifact_deletion.rs"]

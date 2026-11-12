@@ -532,12 +532,22 @@ impl AgentSpaceRecord {
     /// record uses, the account every resource of this emulator belongs to, and the
     /// ARN minted at create time.
     pub fn modelled(&self, target_domains: &BTreeMap<String, TargetDomainRecord>) -> AgentSpace {
+        // A list of no ids is the same state as no list at all: the agent space is
+        // associated with nothing. An echo of the record reports that state by the
+        // ABSENCE of both association members rather than by an empty array, so a
+        // caller that distinguishes "not returned" from "returned empty" is never told
+        // that an unset association is an authoritative empty one. (The READ path is the
+        // documented exception: see [`Self::read_view`].)
+        let associated = self
+            .target_domain_ids
+            .as_deref()
+            .filter(|ids| !ids.is_empty());
         AgentSpace {
             agent_space_id: self.agent_space_id.clone(),
             name: self.name.clone(),
             description: self.description.clone(),
             aws_resources: self.aws_resources.clone(),
-            target_domain_ids: self.target_domain_ids.clone(),
+            target_domain_ids: associated.map(<[String]>::to_vec),
             code_review_settings: self.code_review_settings.clone(),
             kms_key_id: self.kms_key_id.clone(),
             created_at: Some(timestamp(self.created_at)),
@@ -545,7 +555,7 @@ impl AgentSpaceRecord {
             id: self.agent_space_id.clone(),
             owner_id: ::engine::emulator_account_id().to_string(),
             arn: self.arn.clone(),
-            target_domains: self.target_domain_ids.as_ref().map(|ids| {
+            target_domains: associated.map(|ids| {
                 // Each DISTINCT id contributes at most one record, in the order it was
                 // first named, so a list that repeats an id does not multiply the
                 // answer. With the stored list capped at create time
@@ -569,8 +579,9 @@ impl AgentSpaceRecord {
     /// `targetDomainIds` and the resolved `targetDomains` beside it are arrays on every
     /// agent space a read answers and a caller iterating either one loops zero times
     /// instead of dereferencing a missing member. The create and update echo paths are
-    /// NOT this: there an optional member the request did not carry stays absent, which
-    /// is why the normalisation lives here and not in [`Self::modelled`].
+    /// NOT this: there an association the record does not hold — no list, or a list of no
+    /// ids — stays ABSENT, which is why the normalisation lives here and not in
+    /// [`Self::modelled`].
     pub fn read_view(&self, target_domains: &BTreeMap<String, TargetDomainRecord>) -> AgentSpace {
         let mut view = self.modelled(target_domains);
         view.target_domain_ids = Some(view.target_domain_ids.unwrap_or_default());

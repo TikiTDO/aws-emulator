@@ -265,12 +265,20 @@ async fn create_then_batch_get_reads_back_the_stored_agent_space() {
         );
 
         for name in PASS_THROUGH_MEMBERS {
+            // `targetDomainIds` is the one member whose echo is not the request's value
+            // verbatim: a list of no ids is the same state as no list at all — the agent
+            // space is associated with nothing — and the echo reports that state by the
+            // member's ABSENCE rather than as an empty array, so a caller cannot read an
+            // unset association as an authoritative empty one.
+            let supplied = value(&request, name).filter(|supplied| {
+                *name != "targetDomainIds"
+                    || supplied.as_array().is_some_and(|ids| !ids.is_empty())
+            });
             assert_eq!(
                 value(&created, name),
-                value(&request, name),
+                supplied,
                 "case {case:?}: expected CreateAgentSpace to answer the supplied {name} \
-                 {:?}, got {:?}",
-                value(&request, name),
+                 {supplied:?}, got {:?}",
                 value(&created, name)
             );
         }
@@ -311,8 +319,9 @@ async fn create_then_batch_get_reads_back_the_stored_agent_space() {
             // `targetDomainIds` is the one member the READ reports differently from the
             // create: a read of the store reports the record's collections, so the
             // member is an array on every agent space it answers — empty for a record
-            // that names no target domain, where the create echoes the absent member as
-            // absent. `crate::agent_space_batch_read` owns that rule; here the stored
+            // that names no target domain, where the create echoes an association of no
+            // ids by leaving the member out. `crate::agent_space_batch_read` owns that
+            // rule; here the stored
             // value is compared against what the request supplied, read through the
             // same normalisation.
             let supplied = if *name == "targetDomainIds" {
