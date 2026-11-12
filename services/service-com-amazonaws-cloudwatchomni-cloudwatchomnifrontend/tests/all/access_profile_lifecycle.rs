@@ -350,7 +350,7 @@ async fn the_profile_id_pattern_is_checked_as_written() {
     }
 
     for (value, expected) in [
-        ("arn:aws:cloudwatch:us-west-2:000000000000:space/s/access-profile/p", true),
+        ("arn:aws:cloudwatch:us-west-2:000000000000:access-profile/p", true),
         ("arn:x", true),
         ("arn:", false),
         ("aws:arn:thing", false),
@@ -405,11 +405,10 @@ async fn create_access_profile_persists_a_record_get_access_profile_returns_it()
             created.arn
         );
         assert!(
-            created.arn.ends_with(&format!(
-                ":space/{space_id}/access-profile/{}",
-                created.profile_id
-            )),
-            "case {case:?}: arn {:?} does not name space {space_id} and this profile",
+            created
+                .arn
+                .ends_with(&format!(":access-profile/{}", created.profile_id)),
+            "case {case:?}: arn {:?} does not name this profile alone",
             created.arn
         );
         assert!(

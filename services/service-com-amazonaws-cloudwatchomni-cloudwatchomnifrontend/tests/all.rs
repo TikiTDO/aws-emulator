@@ -25,6 +25,8 @@ mod domain_space_lifecycle;
 mod omni_dashboard_lifecycle;
 #[path = "all/probe.rs"]
 mod probe;
+#[path = "all/response_shaping.rs"]
+mod response_shaping;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/view_definition_diagnosis.rs"]

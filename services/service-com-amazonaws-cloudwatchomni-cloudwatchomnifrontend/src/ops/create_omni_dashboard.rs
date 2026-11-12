@@ -263,7 +263,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             body: input.body,
             created_by,
             description: input.description,
-            tags: input.tags,
+            tags: crate::state::reported_tags(input.tags),
             created_at,
             updated_at: created_at,
         };

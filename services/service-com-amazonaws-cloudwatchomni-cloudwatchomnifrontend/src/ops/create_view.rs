@@ -218,11 +218,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let seq = store.next_seq();
+        let view_id = crate::state::mint_view_id();
         let created_at = crate::state::now();
         let stored = crate::state::StoredView {
             seq,
             name: input.name.clone(),
-            arn: crate::state::view_arn(&region, &input.name),
+            arn: crate::state::view_arn(&region, &input.name, &view_id),
+            view_id,
             // Only USER views can be created; MANAGED views are provisioned by AWS.
             r#type: crate::state::VIEW_TYPE_USER.to_string(),
             definition: input.definition,

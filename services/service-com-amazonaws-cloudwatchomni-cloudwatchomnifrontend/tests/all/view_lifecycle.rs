@@ -329,13 +329,12 @@ async fn a_definition_that_is_one_sql_query_is_persisted_and_read_back() {
             "case {case:?}: the reported type must be a modelled ViewType, got {:?}",
             created.r#type
         );
-        assert_eq!(
-            created.arn,
-            format!(
-                "arn:aws:cloudwatch:{REGION}:{}:{VIEW_ARN_RESOURCE_TYPE}/{name}",
+        assert!(
+            created.arn.starts_with(&format!(
+                "arn:aws:cloudwatch:{REGION}:{}:{VIEW_ARN_RESOURCE_TYPE}/{name}/",
                 engine::emulator_account_id()
-            ),
-            "case {case:?}: the ARN must name this region, account and view, got {:?}",
+            )),
+            "case {case:?}: the ARN must name this region, account, view and view id, got {:?}",
             created.arn
         );
         assert_eq!(

@@ -536,7 +536,8 @@ async fn create_omni_dashboard_persists_a_definition_get_omni_dashboard_returns_
         );
 
         // The request's own members come back as sent — the body BYTE for byte, since a
-        // definition is stored rather than reformatted.
+        // definition is stored rather than reformatted — and `tags` is reported as the
+        // dashboard's tag map, empty when the request named none.
         assert_eq!(
             (
                 created.name.as_str(),
@@ -548,7 +549,7 @@ async fn create_omni_dashboard_persists_a_definition_get_omni_dashboard_returns_
                 row.name.as_str(),
                 row.body.as_str(),
                 row.description.as_deref(),
-                row.tags.clone(),
+                Some(row.tags.clone().unwrap_or_default()),
             ),
             "case {case:?}: the created dashboard is {created:?}"
         );

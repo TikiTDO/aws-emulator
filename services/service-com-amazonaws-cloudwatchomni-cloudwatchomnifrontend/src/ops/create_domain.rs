@@ -213,13 +213,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             domain_arn: crate::state::domain_arn(&region, &domain_id),
             name: Some(input.name.clone()),
             identity_providers: input.identity_providers.clone(),
-            domain_endpoint_url: crate::state::domain_endpoint_url(&region, &domain_id),
-            custom_endpoint_urls: Some(crate::state::custom_endpoint_urls(&region, &input.name)),
+            domain_endpoint_url: crate::state::domain_endpoint_url(&domain_id),
+            custom_endpoint_urls: Some(crate::state::custom_endpoint_urls(&input.name)),
             identity_center_application_arn: crate::state::identity_center_application_arn(
                 &input.identity_providers,
                 input.identity_provider_configuration.as_ref(),
             ),
-            identity_provider_configuration: input.identity_provider_configuration,
+            identity_provider_configuration: crate::state::reported_identity_provider_configuration(
+                input.identity_provider_configuration,
+            ),
             region,
             created_at,
             updated_at: created_at,

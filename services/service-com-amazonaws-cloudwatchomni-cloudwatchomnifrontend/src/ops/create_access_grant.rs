@@ -333,12 +333,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let grant_id = crate::state::mint_grant_id();
         let created_at = crate::state::now();
         let access_grant = AccessGrant {
-            grant_arn: crate::state::access_grant_arn(&region, &input.space_id, &grant_id),
+            grant_arn: crate::state::access_grant_arn(&region, &grant_id),
             account_id: ::engine::emulator_account_id().to_string(),
             domain_id: input.domain_id,
             space_id: input.space_id,
             name: Some(input.name),
-            principal: input.principal,
+            // The principal is reported as the grant holds it, with its attribute
+            // conditions present as an empty list when it carries none.
+            principal: crate::state::reported_principal(input.principal),
             permission: input.permission,
             // Every grant created through this API is customer managed; the service
             // provisions SERVICE_MANAGED ones itself.

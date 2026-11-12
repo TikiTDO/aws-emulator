@@ -573,17 +573,22 @@ async fn create_domain_persists_a_record_get_domain_returns_it_verbatim() {
             "case {case:?}: unexpected status {:?}",
             domain.status
         );
+        assert_eq!(
+            domain.domain_endpoint_url,
+            format!("https://{}.cloudwatch-omni.global.app.aws", domain.domain_id),
+            "case {case:?}: domainEndpointUrl {:?} is not the domain's global endpoint",
+            domain.domain_endpoint_url
+        );
         assert!(
-            domain.domain_endpoint_url.starts_with("https://")
-                && domain.domain_endpoint_url.contains(&domain.domain_id)
-                && domain.domain_endpoint_url.contains(REGION),
-            "case {case:?}: domainEndpointUrl {:?} is not derived from the domain and its region",
+            !domain.domain_endpoint_url.contains(REGION),
+            "case {case:?}: domainEndpointUrl {:?} is global and must carry no region",
             domain.domain_endpoint_url
         );
         let custom = domain.custom_endpoint_urls.clone().unwrap_or_default();
-        assert!(
-            custom.iter().any(|url| url.contains(&name)),
-            "case {case:?}: customEndpointUrls {custom:?} carries no URL derived from the name"
+        assert_eq!(
+            custom,
+            vec![format!("https://{name}.cloudwatch-omni.global.app.aws")],
+            "case {case:?}: customEndpointUrls {custom:?} are not the name's global endpoint"
         );
         // `identityCenterApplicationArn` is "Absent for IAM-only domains".
         assert_eq!(

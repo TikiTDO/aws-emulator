@@ -520,7 +520,7 @@ async fn the_grant_id_pattern_is_checked_as_written() {
         );
     }
 
-    for (value, expected) in [("arn:aws:cloudwatch:us-west-2:000000000000:space/s/access-grant/g", true), ("arn:", false)] {
+    for (value, expected) in [("arn:aws:cloudwatch:us-west-2:000000000000:access-grant/g", true), ("arn:", false)] {
         assert_eq!(
             is_arn(value),
             expected,
@@ -566,7 +566,7 @@ async fn create_access_grant_persists_a_record_get_access_grant_returns_it() {
         );
         minted.push(created.grant_id.clone());
 
-        // The ARN is derived from the parent space and this grant, in the signed region.
+        // The ARN is derived from this grant alone, in the signed region.
         assert!(
             is_arn(&created.grant_arn),
             "case {case:?}: grantArn {:?} does not satisfy ^arn:.+$",
@@ -575,8 +575,8 @@ async fn create_access_grant_persists_a_record_get_access_grant_returns_it() {
         assert!(
             created
                 .grant_arn
-                .ends_with(&format!(":space/{space_id}/access-grant/{}", created.grant_id)),
-            "case {case:?}: grantArn {:?} does not name space {space_id} and this grant",
+                .ends_with(&format!(":access-grant/{}", created.grant_id)),
+            "case {case:?}: grantArn {:?} does not name this grant alone",
             created.grant_arn
         );
         assert!(
@@ -604,9 +604,20 @@ async fn create_access_grant_persists_a_record_get_access_grant_returns_it() {
             ),
             "case {case:?}: the created grant is {created:?}"
         );
+        // The principal comes back as sent, with its attribute conditions reported as
+        // an empty list when the request named none: `principalAttributes` is a member
+        // of every principal, so it is reported empty rather than dropped.
         assert_eq!(
             format!("{:?}", created.principal),
-            format!("{:?}", row.principal),
+            format!(
+                "{:?}",
+                AccessGrantPrincipal {
+                    principal_attributes: Some(
+                        row.principal.principal_attributes.clone().unwrap_or_default()
+                    ),
+                    ..row.principal.clone()
+                }
+            ),
             "case {case:?}: expected the principal as sent, got {:?}",
             created.principal
         );

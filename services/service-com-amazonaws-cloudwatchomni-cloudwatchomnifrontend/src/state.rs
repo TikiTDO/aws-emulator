@@ -17,10 +17,10 @@
 use std::collections::HashMap;
 
 use crate::ops::types::{
-    AccessGrant, AccessProfile, Alert, AlertStateInfo, Domain, EncryptionConfiguration,
-    IdentityProviderConfiguration, NotificationRule, OmniDashboard, OmniDashboardSummary, Rule,
-    Space, SpaceSummary, ALERT_STATE_VALUES, COMPARATOR_VALUES, NOTIFICATION_TARGET_TYPE_VALUES,
-    QUERY_LANGUAGE_VALUES, THRESHOLD_MODE_VALUES,
+    AccessGrant, AccessGrantPrincipal, AccessProfile, Alert, AlertStateInfo, Domain,
+    EncryptionConfiguration, IdentityProviderConfiguration, NotificationRule, OmniDashboard,
+    OmniDashboardSummary, Rule, Space, SpaceSummary, ALERT_STATE_VALUES, COMPARATOR_VALUES,
+    NOTIFICATION_TARGET_TYPE_VALUES, QUERY_LANGUAGE_VALUES, THRESHOLD_MODE_VALUES,
 };
 
 /// The region a resource is recorded in when the request carries no SigV4
@@ -329,6 +329,10 @@ pub struct StoredView {
     pub seq: u64,
     /// The view's name, which is its identity within the account and region.
     pub name: String,
+    /// The id the backend minted for this view. No modelled member reports it on its
+    /// own; it is the resource id the view's ARN carries after the name
+    /// ([`view_arn`]), so a caller that parses the ARN recovers it.
+    pub view_id: String,
     /// The view's ARN ([`view_arn`]).
     pub arn: String,
     /// The view's ownership category, a `ViewType` value.
@@ -654,9 +658,19 @@ pub fn service_state<Eng: Send + Sync + 'static>(
         .map(::engine::InMemoryEngine::state::<ComAmazonawsCloudwatchomniCloudwatchomnifrontendState>)
 }
 
-/// Now, as the modelled `Timestamp` type.
+/// Now, as the modelled `Timestamp` type, at the resolution this service reports a
+/// timestamp in: WHOLE epoch seconds.
+///
+/// Every `Timestamp` member this service answers with carries a whole-second epoch
+/// value, so an instant is truncated to the second when it is TAKEN rather than when it
+/// is serialized: the stored record then holds exactly the instant every response
+/// reports, and a client that parses the member as an integer epoch — or compares,
+/// hashes or round-trips the serialized value — reads the same value back.
 pub fn now() -> ::aws_smithy_types::DateTime {
-    ::aws_smithy_types::DateTime::from(::std::time::SystemTime::now())
+    let seconds = ::std::time::SystemTime::now()
+        .duration_since(::std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    ::aws_smithy_types::DateTime::from_secs(i64::try_from(seconds).unwrap_or(0))
 }
 
 /// The region the request was signed for, which is the region the resource it
@@ -745,6 +759,15 @@ pub fn mint_grant_id() -> String {
     fresh_uuid()
 }
 
+/// A fresh view id — the id [`view_arn`] carries after the view's name.
+///
+/// The model declares no member for it and therefore no format of its own, so it is
+/// minted the way every other id this backend mints without a documented prefix is: a
+/// canonical v4 UUID.
+pub fn mint_view_id() -> String {
+    fresh_uuid()
+}
+
 /// A fresh `alertId`.
 ///
 /// `AlertId`'s model doc: "a 32-character lowercase hex uuid, minted by the backend on
@@ -764,29 +787,34 @@ pub fn space_arn(region: &str, space_id: &str) -> String {
     ::engine::emulator_arn(ARN_NAMESPACE, region, &format!("space/{space_id}"))
 }
 
+/// The resource type an `AccessProfile`'s ARN carries.
+pub const ACCESS_PROFILE_ARN_RESOURCE_TYPE: &str = "access-profile";
+
+/// The resource type an `AccessGrant`'s ARN carries.
+pub const ACCESS_GRANT_ARN_RESOURCE_TYPE: &str = "access-grant";
+
 /// The ARN of an access profile, in this service's ARN namespace.
 ///
-/// An access profile lives IN a space (`AccessProfile.spaceId`: "The ID of the space
-/// the profile belongs to"), so its ARN is the parent space's resource path with the
-/// profile appended — the ARN of a child resource names its parent.
-pub fn access_profile_arn(region: &str, space_id: &str, profile_id: &str) -> String {
+/// The profile's own id is the whole resource path: a profile is addressed by the id the
+/// backend minted for it, and its parent space — which `AccessProfile.spaceId` already
+/// reports — is not part of the ARN.
+pub fn access_profile_arn(region: &str, profile_id: &str) -> String {
     ::engine::emulator_arn(
         ARN_NAMESPACE,
         region,
-        &format!("space/{space_id}/access-profile/{profile_id}"),
+        &format!("{ACCESS_PROFILE_ARN_RESOURCE_TYPE}/{profile_id}"),
     )
 }
 
 /// The ARN of an access grant, in this service's ARN namespace.
 ///
-/// A grant is scoped to one space (`AccessGrant.spaceId`: "The space this grant applies
-/// to"), so, like an access profile's, its ARN is the parent space's resource path with
-/// the grant appended — the ARN of a child resource names its parent.
-pub fn access_grant_arn(region: &str, space_id: &str, grant_id: &str) -> String {
+/// Like an access profile's, the grant's own id is the whole resource path; the space
+/// the grant applies to is reported by `AccessGrant.spaceId` rather than by the ARN.
+pub fn access_grant_arn(region: &str, grant_id: &str) -> String {
     ::engine::emulator_arn(
         ARN_NAMESPACE,
         region,
-        &format!("space/{space_id}/access-grant/{grant_id}"),
+        &format!("{ACCESS_GRANT_ARN_RESOURCE_TYPE}/{grant_id}"),
     )
 }
 
@@ -821,12 +849,14 @@ pub fn alert_arn(region: &str, alert_id: &str) -> String {
 /// The ARN of a view, in this service's ARN namespace.
 ///
 /// A view is addressed by its name, which `CreateView` documents as unique within the
-/// account and region, so the name is the resource id its ARN carries.
-pub fn view_arn(region: &str, name: &str) -> String {
+/// account and region, and the backend also mints an id for it: both appear in the
+/// resource path, the name first, so the ARN of a view created under a name that was
+/// released and taken again is a different ARN.
+pub fn view_arn(region: &str, name: &str, view_id: &str) -> String {
     ::engine::emulator_arn(
         ARN_NAMESPACE,
         region,
-        &format!("{VIEW_ARN_RESOURCE_TYPE}/{name}"),
+        &format!("{VIEW_ARN_RESOURCE_TYPE}/{name}/{view_id}"),
     )
 }
 
@@ -852,17 +882,23 @@ pub fn caller_principal(ctx: &::smithy_server_runtime::OperationContext<'_>) -> 
     ::engine::emulator_arn("iam", "", &format!("user/{access_key_id}"))
 }
 
-/// A domain's HTTPS endpoint URL, built from its id, its region and this service's
-/// documented endpoint prefix.
-pub fn domain_endpoint_url(region: &str, domain_id: &str) -> String {
-    format!("https://{domain_id}.{ENDPOINT_PREFIX}.{region}.amazonaws.com")
+/// The host a domain's user-facing endpoint URL lives under.
+///
+/// A domain's endpoint is the address a console or deep-link client navigates to, and it
+/// is GLOBAL rather than regional: the host is this service's endpoint prefix under one
+/// application host for every region, so the URL carries no region at all.
+pub const DOMAIN_ENDPOINT_HOST: &str = "global.app.aws";
+
+/// A domain's HTTPS endpoint URL, built from its id and the global application host.
+pub fn domain_endpoint_url(domain_id: &str) -> String {
+    format!("https://{domain_id}.{ENDPOINT_PREFIX}.{DOMAIN_ENDPOINT_HOST}")
 }
 
 /// The additional endpoint URLs the model describes as "derived from the domain
 /// name": the same endpoint addressed by name rather than by id.
-pub fn custom_endpoint_urls(region: &str, name: &str) -> Vec<String> {
+pub fn custom_endpoint_urls(name: &str) -> Vec<String> {
     vec![format!(
-        "https://{name}.{ENDPOINT_PREFIX}.{region}.amazonaws.com"
+        "https://{name}.{ENDPOINT_PREFIX}.{DOMAIN_ENDPOINT_HOST}"
     )]
 }
 
@@ -913,6 +949,45 @@ pub fn aws_owned_encryption() -> EncryptionConfiguration {
         encryption_strategy: ENCRYPTION_STRATEGY_AWS_OWNED.to_string(),
         kms_key_arn: None,
     }
+}
+
+/// The tag map a resource reports.
+///
+/// A resource's own aggregate members — its tags, its principal's attribute conditions,
+/// its identity-provider configuration — are part of the resource whether or not the
+/// request filled them, so a response carries the EMPTY aggregate rather than dropping
+/// the member: a client iterating it finds a container with no entries instead of
+/// nothing. Omission is reserved for a member the resource has no value for at all (a
+/// description nobody gave, an ARN the model documents as absent).
+pub fn reported_tags(
+    tags: Option<HashMap<String, String>>,
+) -> Option<HashMap<String, String>> {
+    Some(tags.unwrap_or_default())
+}
+
+/// The principal a grant reports: the principal as given, with its attribute
+/// conditions reported as an empty list when it carries none.
+///
+/// The same rule as [`reported_tags`]: `principalAttributes` is a member of every
+/// principal, so it is reported empty rather than dropped.
+pub fn reported_principal(principal: AccessGrantPrincipal) -> AccessGrantPrincipal {
+    AccessGrantPrincipal {
+        principal_attributes: Some(principal.principal_attributes.unwrap_or_default()),
+        ..principal
+    }
+}
+
+/// The identity-provider configuration a domain reports.
+///
+/// The same rule as [`reported_tags`]: a domain's identity-provider configuration is a
+/// member of every domain, so a domain configured with no provider-specific block
+/// reports the empty structure rather than dropping the member. Its own
+/// `identityCenterConfiguration` stays absent, because a domain with no Identity Center
+/// instance has no such configuration.
+pub fn reported_identity_provider_configuration(
+    configuration: Option<IdentityProviderConfiguration>,
+) -> Option<IdentityProviderConfiguration> {
+    Some(configuration.unwrap_or_default())
 }
 
 /// Project a stored space into the `SpaceSummary` the list operations return.
@@ -1284,8 +1359,7 @@ mod tests {
         let profile = AccessProfile {
             profile_id: "profile".to_string(),
             space_id: "space".to_string(),
-            arn: "arn:aws:cloudwatch:us-east-1:000000000000:space/space/access-profile/profile"
-                .to_string(),
+            arn: "arn:aws:cloudwatch:us-east-1:000000000000:access-profile/profile".to_string(),
             name: "a profile".to_string(),
             description: None,
             created_at: at,

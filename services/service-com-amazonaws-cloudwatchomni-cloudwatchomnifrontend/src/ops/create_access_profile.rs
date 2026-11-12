@@ -218,7 +218,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let stored = crate::state::StoredAccessProfile {
             seq,
             profile: AccessProfile {
-                arn: crate::state::access_profile_arn(&region, &input.space_id, &profile_id),
+                arn: crate::state::access_profile_arn(&region, &profile_id),
                 space_id: input.space_id,
                 name: input.name,
                 description: input.description,
