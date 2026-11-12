@@ -25,6 +25,8 @@ mod domain_tags;
 mod handler_input_constraint_order;
 #[path = "all/harness.rs"]
 mod harness;
+#[path = "all/instance_type_limits_version_refusal.rs"]
+mod instance_type_limits_version_refusal;
 #[path = "all/missing_resource_not_found_status.rs"]
 mod missing_resource_not_found_status;
 #[path = "all/outbound_cross_cluster_search_connections.rs"]
