@@ -560,6 +560,11 @@ mod cloudhsm_signing_name_routing;
 // Declared here, in the SORTED block rather than appended at the end: the tail is where
 // every suite landing in the same window appends, so it is the contended region, while
 // this span of the list is stable.
+// Declared here, in the SORTED block rather than appended at the end: the tail is where
+// every suite landing in the same window appends, so it is the contended region, while
+// this span of the list is stable.
+#[path = "all/cloudtrail_api_call_events_by_region.rs"]
+mod cloudtrail_api_call_events_by_region;
 #[path = "all/cloudtrail_channel_target_routing.rs"]
 mod cloudtrail_channel_target_routing;
 // In the SORTED block, not appended at the end, for the reason stated above: the end of

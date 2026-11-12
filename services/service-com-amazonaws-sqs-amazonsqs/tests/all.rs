@@ -45,6 +45,8 @@ mod generated_queue_policy_document;
 mod list_dead_letter_source_queues;
 #[path = "all/list_message_move_tasks.rs"]
 mod list_message_move_tasks;
+#[path = "all/management_event_recording.rs"]
+mod management_event_recording;
 #[path = "all/message_attribute_rules.rs"]
 mod message_attribute_rules;
 #[path = "all/message_lifecycle.rs"]

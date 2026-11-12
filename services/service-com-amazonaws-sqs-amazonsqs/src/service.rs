@@ -45,9 +45,14 @@
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
 
+/// This front door's AUDIT leg: what this service contributes to the record of each
+/// queue-level call it serves, and the routing table those calls are served through.
+pub mod management_events;
+
+use management_events::AuditedDefinition;
 use smithy_server_runtime::{
-    http, BoxFuture, ErasedOperation, OperationContext, Refusal, Refused, Service, Violation,
-    ViolationKind,
+    http, BoxFuture, ErasedOperation, ErasedServiceDefinition, OperationContext, Refusal, Refused,
+    Service, Violation, ViolationKind,
 };
 use std::sync::Arc;
 
@@ -57,7 +62,13 @@ use std::sync::Arc;
 /// Generic over the engine type `Eng` so this file names no concrete engine; the
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
-    entry: crate::ServiceDefinition<Eng>,
+    /// The generated entry, routing through this service's AUDITED operations: every
+    /// queue-level call it serves is a management event of this service, recorded in the
+    /// account's event history where CloudTrail's `LookupEvents` reads it and published
+    /// onto the account's default event bus while a trail of the Region is logging calls
+    /// of its kind (see [`management_events`]). Identity, the protocol and every framework
+    /// error renderer stay the generated entry's.
+    entry: AuditedDefinition<crate::ServiceDefinition<Eng>>,
     /// The transport's answer to a request body above [`max_request_body_bytes`], held
     /// here because [`Service::override_operation`] hands back a reference borrowed from
     /// `&self`.
@@ -73,8 +84,16 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// generated [`ServiceDefinition`], which constructs each operation from it; the
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
+        // Every modelled operation of this service, constructed from the same shared
+        // engine: the queue-level ones served behind the audit recorder, so no control-plane
+        // call reaches a handler by a path that records nothing, and the message data plane
+        // filed beside them unrecorded (see [`management_events::audited_table`]).
+        let audited = management_events::audited_table(&engine);
         Self {
-            entry: crate::ServiceDefinition::new(Arc::clone(&engine)),
+            entry: AuditedDefinition::new(
+                crate::ServiceDefinition::new(Arc::clone(&engine)),
+                audited,
+            ),
             oversized: RequestEntityTooLarge,
             query_compatible: QueryCompatibleErrors { engine },
         }
