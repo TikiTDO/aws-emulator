@@ -139,6 +139,18 @@ const ATTRIBUTE_QUEUE_INFO: &str = "QueueInfo";
 /// input: Amazon Braket words this refusal per operation.
 const INVALID_ARN_MEMBER: &str = "quantumTaskArn";
 
+/// How this operation refuses a well-formed quantum-task ARN no record is held for.
+///
+/// The recorded behaviour of the quantum-task not-found class is one FIXED sentence:
+/// it interpolates NOTHING from the request — not the ARN, not the task id, not the
+/// account or the region — and carries no trailing period, so the class reads
+/// identically whichever task was asked for and nothing of unbounded caller-supplied
+/// length reaches the error body. `CancelQuantumTask`, the other door that resolves a
+/// quantum task by ARN, answers the same class in the same sentence (worded in that
+/// operation's own not-found path, because this service words each refusal class per
+/// operation).
+const QUANTUM_TASK_NOT_FOUND: &str = "Quantum task not found";
+
 /// The `position` a task that has left the queue reports: the one sentinel this
 /// service reports for a resource that is no longer waiting in its queue, shared with
 /// the hybrid-job queue info in `crate::state`.
@@ -262,10 +274,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(task) = guard.quantum_tasks.get(&input.quantum_task_arn).cloned() else {
             return Err(GetQuantumTaskErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
-                    message: Some(format!(
-                        "Quantum task {} not found",
-                        input.quantum_task_arn
-                    )),
+                    message: Some(QUANTUM_TASK_NOT_FOUND.to_string()),
                 },
             )
             .into());

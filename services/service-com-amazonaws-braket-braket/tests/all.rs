@@ -25,6 +25,8 @@ mod execution_role_resolution;
 mod hybrid_job_loop;
 #[path = "all/quantum_task_loop.rs"]
 mod quantum_task_loop;
+#[path = "all/quantum_task_not_found_wording.rs"]
+mod quantum_task_not_found_wording;
 #[path = "all/request_body_rejection.rs"]
 mod request_body_rejection;
 #[path = "all/resource_tags.rs"]

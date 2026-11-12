@@ -110,6 +110,18 @@ impl From<CancelQuantumTaskErrorModeled> for CancelQuantumTaskError {
 /// other.
 const INVALID_ARN_MEMBER: &str = "quantumTaskArn";
 
+/// How this operation refuses a well-formed quantum-task ARN no record is held for.
+///
+/// The recorded behaviour of the quantum-task not-found class is one FIXED sentence:
+/// it interpolates NOTHING from the request — not the ARN, not the task id, not the
+/// account or the region — and carries no trailing period, so the class reads
+/// identically whichever task was asked for and nothing of unbounded caller-supplied
+/// length reaches the error body. `GetQuantumTask`, the other door that resolves a
+/// quantum task by ARN, answers the same class in the same sentence (worded in that
+/// operation's own not-found path, because this service words each refusal class per
+/// operation).
+const QUANTUM_TASK_NOT_FOUND: &str = "Quantum task not found";
+
 /// The `CancelQuantumTask` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -184,10 +196,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(task) = guard.quantum_tasks.get_mut(&input.quantum_task_arn) else {
             return Err(CancelQuantumTaskErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
-                    message: Some(format!(
-                        "Quantum task {} not found",
-                        input.quantum_task_arn
-                    )),
+                    message: Some(QUANTUM_TASK_NOT_FOUND.to_string()),
                 },
             )
             .into());

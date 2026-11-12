@@ -66,7 +66,7 @@ const MALFORMED_QUANTUM_TASK_ARNS: &[(&str, &str)] = &[
 
 /// Well-formed quantum-task ARNs this emulator holds no record for: the shape of the
 /// value varies (partition, region, account, id), the answer does not. `(case, value)`.
-const ABSENT_QUANTUM_TASK_ARNS: &[(&str, &str)] = &[
+pub(crate) const ABSENT_QUANTUM_TASK_ARNS: &[(&str, &str)] = &[
     (
         "the form this emulator mints",
         "arn:aws:braket:eu-west-1:000000000000:quantum-task/00000000-0000-4000-8000-000000000000",
