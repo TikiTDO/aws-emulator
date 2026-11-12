@@ -15,12 +15,13 @@
 // exactly that. The lines above are the file header, which no landing edits.
 #[path = "all/prefix_lists.rs"]
 mod prefix_lists;
-// `CreateCapacityReservationBySplitting`: the reading it gives a source reservation id it
-// cannot resolve, and how much capacity a source has to give. Declared beside `prefix_lists`
-// for the reason the note above gives: the sorted neighbourhood and the tail of this file are
-// where every new ec2 suite inserts its lines.
-#[path = "all/capacity_reservation_split_refusals.rs"]
-mod capacity_reservation_split_refusals;
+// The per-instance-type hardware facts the catalog publishes — the EBS, instance store,
+// network, accelerator, processor and host-feature members that are facts of one type rather
+// than functions of its name's size multiplier. Declared beside `prefix_lists` for the reason
+// the note above gives: the sorted neighbourhood and the tail of this file are where every new
+// ec2 suite inserts its lines.
+#[path = "all/published_instance_type_hardware_facts.rs"]
+mod published_instance_type_hardware_facts;
 // The RECORDED response elements a reported shape carries that this checkout's model
 // declares no member for — a VPC's `dhcpOptionsSource` and a Verified Access instance's
 // transit-gateway attachment set — beside the state those same reads depend on: a created
@@ -54,8 +55,6 @@ mod register_image;
 // The FILTERS a describe serves for the members of the records it reports — the reported
 // record's own id, and the tag pair for a record that carries tags — whether or not that
 // operation's own documentation enumerates them. Declared beside `prefix_lists` for the reason
-// the note above gives: the sorted neighbourhood and the tail of this file are where every new
-// ec2 suite inserts its lines.
 #[path = "all/describe_filters_on_reported_members.rs"]
 mod describe_filters_on_reported_members;
 // An application status check's `Protocol`, spelled in another ASCII case: the create is served
@@ -1938,3 +1937,7 @@ mod create_local_gateway_virtual_interface_group;
 // the tail of this file, which is where every new ec2 suite lands.
 #[path = "all/create_coip_pool.rs"]
 mod create_coip_pool;
+// `CreateCapacityReservationBySplitting`: the reading it gives a source reservation id it
+// cannot resolve, and how much capacity a source has to give. Declared beside `prefix_lists`
+#[path = "all/capacity_reservation_split_refusals.rs"]
+mod capacity_reservation_split_refusals;

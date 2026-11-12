@@ -1,0 +1,700 @@
+// SPDX-License-Identifier: CC0-1.0
+
+//! The per-instance-type hardware facts AWS publishes, as a table.
+//!
+//! An instance type's size ladder — its vCPUs, its cores and threads, its memory — follows
+//! from its NAME, and the module above derives it that way. Its HARDWARE does not: how many
+//! local devices it carries and how big they are, the EBS bandwidth and IOPS AWS dedicates
+//! to it, how many volumes it can hold attached and whether that limit is its own, its
+//! network performance and interface limits, its processor and that processor's sustained
+//! frequency, its accelerators, and which host features it is offered with (Dedicated Hosts,
+//! CloudWatch action based recovery, hibernation, reboot migration, in-transit encryption)
+//! are FACTS of the type that AWS publishes per type. No function of the name yields them:
+//! two types of one size differ in all of them, and two sizes of one family do not scale by
+//! the size multiplier.
+//!
+//! So they are held here, one row per instance type, and
+//! [`super::instance_type_info`] reports what the row carries. A column a row leaves unset
+//! is one the derivation above answers for every type of the catalog, and a type with no row
+//! is described by that derivation alone — the table grows as AWS's published figures for
+//! more of the catalog are recorded here, and nothing about the way a row is read depends on
+//! which types have one.
+
+use super::*;
+use crate::ops::types::{FpgaDeviceInfo, FpgaDeviceMemoryInfo, FpgaInfo};
+
+/// The EBS-optimized performance AWS publishes for one instance type: the two bandwidth and
+/// the two IOPS figures of its row in "Amazon EBS optimized instance types".
+///
+/// A size with dedicated bandwidth publishes its sustained figure as both its baseline and
+/// its maximum; a size below the family's dedicated row publishes a baseline it bursts above
+/// up to that maximum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublishedEbsPerformance {
+    /// The bandwidth, in Mbps, the type sustains.
+    pub baseline_bandwidth_mbps: i32,
+    /// The I/O operations per second it sustains.
+    pub baseline_iops: i32,
+    /// The bandwidth, in Mbps, it can reach.
+    pub maximum_bandwidth_mbps: i32,
+    /// The I/O operations per second it can reach.
+    pub maximum_iops: i32,
+}
+
+impl PublishedEbsPerformance {
+    /// This row as the modelled `EbsOptimizedInfo`.
+    ///
+    /// The throughput members are the bandwidth ones in the other unit — a megabyte being
+    /// [`EBS_MEGABITS_PER_MEGABYTE`] megabits — which is exactly how the published table's
+    /// Mbps and MB/s columns relate.
+    pub fn to_ebs_optimized_info(self) -> EbsOptimizedInfo {
+        let megabytes = |mbps: i32| f64::from(mbps) / EBS_MEGABITS_PER_MEGABYTE;
+        EbsOptimizedInfo {
+            baseline_bandwidth_in_mbps: Some(self.baseline_bandwidth_mbps),
+            baseline_throughput_in_m_bps: Some(megabytes(self.baseline_bandwidth_mbps)),
+            baseline_iops: Some(self.baseline_iops),
+            maximum_bandwidth_in_mbps: Some(self.maximum_bandwidth_mbps),
+            maximum_throughput_in_m_bps: Some(megabytes(self.maximum_bandwidth_mbps)),
+            maximum_iops: Some(self.maximum_iops),
+        }
+    }
+}
+
+/// The FPGA accelerators of one instance type — "the FPGA accelerator settings for the
+/// instance type" (`InstanceTypeInfo$FpgaInfo`).
+///
+/// The devices of one instance are identical, so the whole inventory is one device
+/// description and a count, and the total memory is that device's memory times the count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublishedFpgaDevices {
+    /// How many accelerators the instance carries.
+    pub count: i32,
+    /// The accelerator's name, as `FpgaDeviceInfo$Name` publishes it.
+    pub name: &'static str,
+    /// Who makes it (`FpgaDeviceInfo$Manufacturer`).
+    pub manufacturer: &'static str,
+    /// The memory of ONE accelerator, in MiB.
+    pub memory_mib_each: i32,
+}
+
+impl PublishedFpgaDevices {
+    /// This inventory as the modelled `FpgaInfo`.
+    pub fn to_fpga_info(self) -> FpgaInfo {
+        FpgaInfo {
+            fpgas: Some(vec![FpgaDeviceInfo {
+                name: Some(self.name.to_string()),
+                manufacturer: Some(self.manufacturer.to_string()),
+                count: Some(self.count),
+                memory_info: Some(FpgaDeviceMemoryInfo {
+                    size_in_mi_b: Some(self.memory_mib_each),
+                }),
+            }]),
+            total_fpga_memory_in_mi_b: Some(self.memory_mib_each.saturating_mul(self.count)),
+        }
+    }
+}
+
+/// The published facts of ONE instance type.
+///
+/// Every column is optional: `None` means AWS's figure for this type is the one the
+/// derivation above computes for every type, so the row says nothing about it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PublishedInstanceTypeFacts {
+    /// The instance type these facts are about — a value of the modelled `InstanceType`
+    /// enum.
+    pub instance_type: &'static str,
+    /// Its memory, in MiB, where the family's ratio of memory to vCPUs is its own.
+    pub memory_mib: Option<i64>,
+    /// Its EBS-optimized performance.
+    pub ebs_performance: Option<PublishedEbsPerformance>,
+    /// How many Amazon EBS volumes it can hold attached.
+    pub maximum_ebs_attachments: Option<i32>,
+    /// Whether that limit is shared with its interfaces and instance store devices or is the
+    /// EBS volumes' own — one value of the modelled `AttachmentLimitType`.
+    pub attachment_limit_type: Option<&'static str>,
+    /// Its local instance store, as (devices, GB each); `Some((0, 0))` is not a row AWS
+    /// publishes, so a type without a store leaves this unset and keeps the derived answer.
+    pub instance_store_devices: Option<(i32, i64)>,
+    /// "The network performance", as the published table writes it.
+    pub network_performance: Option<&'static str>,
+    /// The most network interfaces it can have attached.
+    pub maximum_network_interfaces: Option<i32>,
+    /// The most private IPv4 addresses each of those interfaces can have.
+    pub ipv4_addresses_per_interface: Option<i32>,
+    /// The Elastic Fabric Adapters it is offered, zero where it is offered none.
+    pub efa_interfaces: Option<i32>,
+    /// Who makes its processor (`ProcessorInfo$Manufacturer`).
+    pub processor_manufacturer: Option<&'static str>,
+    /// That processor's sustained all-core frequency, in GHz.
+    pub sustained_clock_speed_ghz: Option<f64>,
+    /// Is the type offered on a Dedicated Host?
+    pub dedicated_hosts_supported: Option<bool>,
+    /// Is Amazon CloudWatch action based recovery supported?
+    pub auto_recovery_supported: Option<bool>,
+    /// Is On-Demand hibernation supported?
+    pub hibernation_supported: Option<bool>,
+    /// Does the type encrypt in-transit traffic between instances automatically?
+    pub encryption_in_transit_supported: Option<bool>,
+    /// Is reboot migration during a user-initiated reboot supported?
+    pub reboot_migration_supported: Option<bool>,
+    /// Is a local Precision Time Protocol hardware clock supported?
+    pub phc_supported: Option<bool>,
+    /// Its FPGA accelerators.
+    pub fpga_devices: Option<PublishedFpgaDevices>,
+}
+
+impl PublishedInstanceTypeFacts {
+    /// A row that carries no fact yet: every column is the derivation's.
+    const fn of(instance_type: &'static str) -> Self {
+        Self {
+            instance_type,
+            memory_mib: None,
+            ebs_performance: None,
+            maximum_ebs_attachments: None,
+            attachment_limit_type: None,
+            instance_store_devices: None,
+            network_performance: None,
+            maximum_network_interfaces: None,
+            ipv4_addresses_per_interface: None,
+            efa_interfaces: None,
+            processor_manufacturer: None,
+            sustained_clock_speed_ghz: None,
+            dedicated_hosts_supported: None,
+            auto_recovery_supported: None,
+            hibernation_supported: None,
+            encryption_in_transit_supported: None,
+            reboot_migration_supported: None,
+            phc_supported: None,
+            fpga_devices: None,
+        }
+    }
+
+    /// The memory of the type, in GiB as the published specification writes it.
+    const fn memory_gib(mut self, gib: i64) -> Self {
+        self.memory_mib = Some(gib * 1024);
+        self
+    }
+
+    /// The four EBS figures of the type's row: sustained bandwidth and IOPS, then the
+    /// bandwidth and IOPS it can reach.
+    const fn ebs(
+        mut self,
+        baseline_bandwidth_mbps: i32,
+        baseline_iops: i32,
+        maximum_bandwidth_mbps: i32,
+        maximum_iops: i32,
+    ) -> Self {
+        self.ebs_performance = Some(PublishedEbsPerformance {
+            baseline_bandwidth_mbps,
+            baseline_iops,
+            maximum_bandwidth_mbps,
+            maximum_iops,
+        });
+        self
+    }
+
+    /// An EBS volume limit of the type's own, rather than one shared with its interfaces and
+    /// instance store devices.
+    const fn dedicated_ebs_attachments(mut self, limit: i32) -> Self {
+        self.maximum_ebs_attachments = Some(limit);
+        self.attachment_limit_type = Some(DEDICATED_ATTACHMENT_LIMIT);
+        self
+    }
+
+    /// An EBS volume limit above the attachments a shared pool leaves, the type's EBS
+    /// devices being attached beside that pool rather than out of it — the limit stays the
+    /// `shared` kind the type reports.
+    const fn ebs_attachments_outside_pool(mut self, limit: i32) -> Self {
+        self.maximum_ebs_attachments = Some(limit);
+        self
+    }
+
+    /// The type's local instance store: `devices` devices of `gb_each` GB.
+    const fn instance_store(mut self, devices: i32, gb_each: i64) -> Self {
+        self.instance_store_devices = Some((devices, gb_each));
+        self
+    }
+
+    /// The type's network performance, as the published table writes it.
+    const fn network(mut self, performance: &'static str) -> Self {
+        self.network_performance = Some(performance);
+        self
+    }
+
+    /// The most network interfaces the type can have attached, where AWS's figure for it is
+    /// its own rather than the one its step of the size ladder publishes.
+    const fn interfaces(mut self, interfaces: i32) -> Self {
+        self.maximum_network_interfaces = Some(interfaces);
+        self
+    }
+
+    /// The most private IPv4 addresses each of those interfaces can have, on the same terms.
+    const fn ipv4_per_interface(mut self, addresses: i32) -> Self {
+        self.ipv4_addresses_per_interface = Some(addresses);
+        self
+    }
+
+    /// The Elastic Fabric Adapters the type is offered, zero where it is offered none.
+    const fn efa(mut self, interfaces: i32) -> Self {
+        self.efa_interfaces = Some(interfaces);
+        self
+    }
+
+    /// The type's processor and that processor's sustained frequency.
+    const fn processor(mut self, manufacturer: &'static str, sustained_ghz: f64) -> Self {
+        self.processor_manufacturer = Some(manufacturer);
+        self.sustained_clock_speed_ghz = Some(sustained_ghz);
+        self
+    }
+
+    /// Whether the type is offered on a Dedicated Host.
+    const fn dedicated_hosts(mut self, supported: bool) -> Self {
+        self.dedicated_hosts_supported = Some(supported);
+        self
+    }
+
+    /// Whether CloudWatch action based recovery is supported.
+    const fn auto_recovery(mut self, supported: bool) -> Self {
+        self.auto_recovery_supported = Some(supported);
+        self
+    }
+
+    /// Whether On-Demand hibernation is supported.
+    const fn hibernation(mut self, supported: bool) -> Self {
+        self.hibernation_supported = Some(supported);
+        self
+    }
+
+    /// Whether the type encrypts in-transit traffic between instances.
+    const fn encryption_in_transit(mut self, supported: bool) -> Self {
+        self.encryption_in_transit_supported = Some(supported);
+        self
+    }
+
+    /// Whether reboot migration is supported, and whether a local PTP hardware clock is.
+    const fn host_features(mut self, reboot_migration: bool, phc: bool) -> Self {
+        self.reboot_migration_supported = Some(reboot_migration);
+        self.phc_supported = Some(phc);
+        self
+    }
+
+    /// The type's FPGA accelerators.
+    const fn fpgas(
+        mut self,
+        count: i32,
+        name: &'static str,
+        manufacturer: &'static str,
+        memory_mib_each: i32,
+    ) -> Self {
+        self.fpga_devices = Some(PublishedFpgaDevices {
+            count,
+            name,
+            manufacturer,
+            memory_mib_each,
+        });
+        self
+    }
+}
+
+/// The `AttachmentLimitType` of a type whose EBS volumes have a limit of their own.
+const DEDICATED_ATTACHMENT_LIMIT: &str = "dedicated";
+
+/// The published hardware facts of the instance types recorded so far, one row per type.
+///
+/// Read through [`published_instance_type_facts`]. The rows are grouped by family, and each
+/// family's comment says where its figures come from: the family's own specification page
+/// (vCPUs, memory, instance store devices, network performance, accelerators), the
+/// "Amazon EBS optimized instance types" table (the four EBS figures), "Instance volume
+/// limits" (the EBS attachment limit and whether it is dedicated), and the "IP addresses per
+/// network interface per instance type" table (the interface limits).
+static PUBLISHED_INSTANCE_TYPE_FACTS: &[PublishedInstanceTypeFacts] = &[
+    // D3en — dense HDD storage, 2nd generation Intel Xeon Scalable (Cascade Lake) at a
+    // sustained 3.1 GHz, 14 TB magnetic devices (13,980 GB as the catalog counts them), and
+    // the enhanced network the family's `n` names, up to 75 Gigabit on its largest size. The
+    // family's EBS bandwidth is dedicated from `4xlarge` up, and the two sizes below that one
+    // burst to its figure. The devices take most of the shared attachment pool, which is why
+    // the EBS volume limit falls with the size: the derivation above already counts the pool,
+    // so these rows leave it unset. Every size of the family carries FOUR network interfaces,
+    // rather than the count its step of the size ladder publishes.
+    // Dedicated Hosts are not offered on the family, and neither reboot migration nor a PTP
+    // hardware clock is.
+    PublishedInstanceTypeFacts::of("d3en.xlarge")
+        .ebs(850, 5_000, 2_800, 15_000)
+        .instance_store(2, 13_980)
+        .network("Up to 25 Gigabit")
+        .interfaces(4)
+        .processor("Intel", 3.1)
+        .dedicated_hosts(false)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("d3en.2xlarge")
+        .ebs(1_700, 10_000, 2_800, 15_000)
+        .instance_store(4, 13_980)
+        .network("Up to 25 Gigabit")
+        .interfaces(4)
+        .processor("Intel", 3.1)
+        .dedicated_hosts(false)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("d3en.4xlarge")
+        .ebs(2_800, 15_000, 2_800, 15_000)
+        .instance_store(8, 13_980)
+        .network("25 Gigabit")
+        .interfaces(4)
+        .processor("Intel", 3.1)
+        .dedicated_hosts(false)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("d3en.6xlarge")
+        .ebs(4_000, 25_000, 4_000, 25_000)
+        .instance_store(12, 13_980)
+        .network("40 Gigabit")
+        .interfaces(4)
+        .processor("Intel", 3.1)
+        .dedicated_hosts(false)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("d3en.8xlarge")
+        .ebs(5_000, 30_000, 5_000, 30_000)
+        .instance_store(16, 13_980)
+        .network("50 Gigabit")
+        .interfaces(4)
+        .processor("Intel", 3.1)
+        .dedicated_hosts(false)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("d3en.12xlarge")
+        .ebs(7_000, 40_000, 7_000, 40_000)
+        .instance_store(24, 13_980)
+        .network("75 Gigabit")
+        .interfaces(4)
+        .processor("Intel", 3.1)
+        .dedicated_hosts(false)
+        .host_features(false, false),
+    // F2 — FPGA accelerated, 3rd generation AMD EPYC (Milan) at a sustained 3.6 GHz, with
+    // one Xilinx Virtex UltraScale+ (VU47P) accelerator of 80 GiB and one 1,900 GB local NVMe
+    // device per two sizes of the ladder, and an EBS volume limit of its own rather than one
+    // out of the shared pool.
+    PublishedInstanceTypeFacts::of("f2.6xlarge")
+        .memory_gib(256)
+        .ebs(7_500, 30_000, 15_000, 60_000)
+        .dedicated_ebs_attachments(32)
+        .instance_store(1, 1_900)
+        .network("Up to 12.5 Gigabit")
+        .interfaces(8)
+        .ipv4_per_interface(30)
+        .efa(0)
+        .processor("AMD", 3.6)
+        .encryption_in_transit(true)
+        .host_features(false, false)
+        .fpgas(1, "Virtex UltraScale+ (VU47P)", "Xilinx", 81_920),
+    PublishedInstanceTypeFacts::of("f2.12xlarge")
+        .memory_gib(512)
+        .ebs(15_000, 60_000, 15_000, 60_000)
+        .dedicated_ebs_attachments(32)
+        .instance_store(2, 1_900)
+        .network("25 Gigabit")
+        .interfaces(8)
+        .ipv4_per_interface(30)
+        .efa(0)
+        .processor("AMD", 3.6)
+        .encryption_in_transit(true)
+        .host_features(false, false)
+        .fpgas(2, "Virtex UltraScale+ (VU47P)", "Xilinx", 81_920),
+    PublishedInstanceTypeFacts::of("f2.48xlarge")
+        .memory_gib(2_048)
+        .ebs(60_000, 240_000, 60_000, 240_000)
+        .dedicated_ebs_attachments(32)
+        .instance_store(8, 1_900)
+        .network("100 Gigabit")
+        .interfaces(15)
+        .ipv4_per_interface(50)
+        .efa(1)
+        .processor("AMD", 3.6)
+        .encryption_in_transit(true)
+        .host_features(false, false)
+        .fpgas(8, "Virtex UltraScale+ (VU47P)", "Xilinx", 81_920),
+    // M6idn — general purpose with local NVMe and the enhanced network the family's `n`
+    // names, 3rd generation Intel Xeon Scalable (Ice Lake) at a sustained 3.5 GHz. The
+    // family carries up to 200 Gigabit of network and 100 Gbps of EBS bandwidth on its
+    // largest size, each size taking its share of both, and the Elastic Fabric Adapter is
+    // offered only on that largest size and the bare metal one.
+    PublishedInstanceTypeFacts::of("m6idn.large")
+        .ebs(1_562, 6_250, 25_000, 100_000)
+        .instance_store(1, 118)
+        .network("Up to 25 Gigabit")
+        .interfaces(3)
+        .ipv4_per_interface(10)
+        .efa(0)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("m6idn.xlarge")
+        .ebs(3_125, 12_500, 25_000, 100_000)
+        .instance_store(1, 237)
+        .network("Up to 30 Gigabit")
+        .interfaces(4)
+        .ipv4_per_interface(15)
+        .efa(0)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("m6idn.2xlarge")
+        .ebs(6_250, 25_000, 25_000, 100_000)
+        .instance_store(1, 474)
+        .network("Up to 40 Gigabit")
+        .interfaces(4)
+        .ipv4_per_interface(15)
+        .efa(0)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("m6idn.4xlarge")
+        .ebs(12_500, 50_000, 25_000, 100_000)
+        .instance_store(1, 950)
+        .network("Up to 50 Gigabit")
+        .interfaces(8)
+        .ipv4_per_interface(30)
+        .efa(0)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("m6idn.8xlarge")
+        .ebs(25_000, 100_000, 25_000, 100_000)
+        .instance_store(1, 1_900)
+        .network("50 Gigabit")
+        .interfaces(8)
+        .ipv4_per_interface(30)
+        .efa(0)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("m6idn.12xlarge")
+        .ebs(37_500, 150_000, 37_500, 150_000)
+        .instance_store(2, 1_425)
+        .network("75 Gigabit")
+        .interfaces(8)
+        .ipv4_per_interface(30)
+        .efa(0)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("m6idn.16xlarge")
+        .ebs(50_000, 200_000, 50_000, 200_000)
+        .instance_store(2, 1_900)
+        .network("100 Gigabit")
+        .interfaces(15)
+        .ipv4_per_interface(50)
+        .efa(0)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("m6idn.24xlarge")
+        .ebs(75_000, 300_000, 75_000, 300_000)
+        .instance_store(4, 1_425)
+        .network("150 Gigabit")
+        .interfaces(15)
+        .ipv4_per_interface(50)
+        .efa(0)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("m6idn.32xlarge")
+        .ebs(100_000, 400_000, 100_000, 400_000)
+        .instance_store(4, 1_900)
+        .network("200 Gigabit")
+        .interfaces(15)
+        .ipv4_per_interface(50)
+        .efa(1)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("m6idn.metal")
+        .ebs(100_000, 400_000, 100_000, 400_000)
+        .instance_store(4, 1_900)
+        .network("200 Gigabit")
+        .interfaces(15)
+        .ipv4_per_interface(50)
+        .efa(1)
+        .host_features(false, false),
+    // R5b — memory optimized with the family's EBS-optimized hardware, 2nd generation Intel
+    // Xeon Scalable (Cascade Lake) at a sustained 3.1 GHz: up to 60 Gbps of EBS bandwidth and
+    // 260,000 IOPS, the highest of the R5 ladder, and 31 EBS volumes whatever the size — more
+    // than the shared pool leaves, those volumes being attached to the family's own EBS
+    // hardware, while the limit itself is still reported as the `shared` kind. The family is
+    // not among the hibernation prerequisites, and its bare metal size supports CloudWatch
+    // action based recovery like every other size.
+    PublishedInstanceTypeFacts::of("r5b.large")
+        .ebs(1_250, 5_417, 10_000, 43_333)
+        .ebs_attachments_outside_pool(31)
+        .network("Up to 10 Gigabit")
+        .interfaces(3)
+        .ipv4_per_interface(10)
+        .processor("Intel", 3.1)
+        .auto_recovery(true)
+        .hibernation(false)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("r5b.xlarge")
+        .ebs(2_500, 10_833, 10_000, 43_333)
+        .ebs_attachments_outside_pool(31)
+        .network("Up to 10 Gigabit")
+        .interfaces(4)
+        .ipv4_per_interface(15)
+        .processor("Intel", 3.1)
+        .auto_recovery(true)
+        .hibernation(false)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("r5b.2xlarge")
+        .ebs(5_000, 21_667, 10_000, 43_333)
+        .ebs_attachments_outside_pool(31)
+        .network("Up to 10 Gigabit")
+        .interfaces(4)
+        .ipv4_per_interface(15)
+        .processor("Intel", 3.1)
+        .auto_recovery(true)
+        .hibernation(false)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("r5b.4xlarge")
+        .ebs(10_000, 43_333, 10_000, 43_333)
+        .ebs_attachments_outside_pool(31)
+        .network("Up to 10 Gigabit")
+        .interfaces(8)
+        .ipv4_per_interface(30)
+        .processor("Intel", 3.1)
+        .auto_recovery(true)
+        .hibernation(false)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("r5b.8xlarge")
+        .ebs(20_000, 86_667, 20_000, 86_667)
+        .ebs_attachments_outside_pool(31)
+        .network("10 Gigabit")
+        .interfaces(8)
+        .ipv4_per_interface(30)
+        .processor("Intel", 3.1)
+        .auto_recovery(true)
+        .hibernation(false)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("r5b.12xlarge")
+        .ebs(30_000, 130_000, 30_000, 130_000)
+        .ebs_attachments_outside_pool(31)
+        .network("12 Gigabit")
+        .interfaces(8)
+        .ipv4_per_interface(30)
+        .processor("Intel", 3.1)
+        .auto_recovery(true)
+        .hibernation(false)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("r5b.16xlarge")
+        .ebs(40_000, 173_333, 40_000, 173_333)
+        .ebs_attachments_outside_pool(31)
+        .network("20 Gigabit")
+        .interfaces(15)
+        .ipv4_per_interface(50)
+        .processor("Intel", 3.1)
+        .auto_recovery(true)
+        .hibernation(false)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("r5b.24xlarge")
+        .ebs(60_000, 260_000, 60_000, 260_000)
+        .ebs_attachments_outside_pool(31)
+        .network("25 Gigabit")
+        .interfaces(15)
+        .ipv4_per_interface(50)
+        .processor("Intel", 3.1)
+        .auto_recovery(true)
+        .hibernation(false)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("r5b.metal")
+        .ebs(60_000, 260_000, 60_000, 260_000)
+        .ebs_attachments_outside_pool(31)
+        .network("25 Gigabit")
+        .interfaces(15)
+        .ipv4_per_interface(50)
+        .processor("Intel", 3.1)
+        .auto_recovery(true)
+        .hibernation(false)
+        .host_features(false, false),
+    // T3 — burstable performance, Intel Xeon Scalable at a sustained 2.5 GHz. The family's
+    // EBS figures do not follow the size ladder: they double up to `large` and then stop, so
+    // `large`, `xlarge` and `2xlarge` share one row, and `large` takes 12 private addresses
+    // per interface rather than the 10 the ladder's step publishes. Dedicated Hosts ARE
+    // offered on the family.
+    PublishedInstanceTypeFacts::of("t3.nano")
+        .ebs(43, 250, 2_085, 11_800)
+        .network("Up to 5 Gigabit")
+        .interfaces(2)
+        .ipv4_per_interface(2)
+        .processor("Intel", 2.5)
+        .dedicated_hosts(true)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("t3.micro")
+        .ebs(87, 500, 2_085, 11_800)
+        .network("Up to 5 Gigabit")
+        .interfaces(2)
+        .ipv4_per_interface(2)
+        .processor("Intel", 2.5)
+        .dedicated_hosts(true)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("t3.small")
+        .ebs(174, 1_000, 2_085, 11_800)
+        .network("Up to 5 Gigabit")
+        .interfaces(3)
+        .ipv4_per_interface(4)
+        .processor("Intel", 2.5)
+        .dedicated_hosts(true)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("t3.medium")
+        .ebs(347, 2_000, 2_085, 11_800)
+        .network("Up to 5 Gigabit")
+        .interfaces(3)
+        .ipv4_per_interface(6)
+        .processor("Intel", 2.5)
+        .dedicated_hosts(true)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("t3.large")
+        .ebs(695, 4_000, 2_780, 15_700)
+        .network("Up to 5 Gigabit")
+        .interfaces(3)
+        .ipv4_per_interface(12)
+        .processor("Intel", 2.5)
+        .dedicated_hosts(true)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("t3.xlarge")
+        .ebs(695, 4_000, 2_780, 15_700)
+        .network("Up to 5 Gigabit")
+        .interfaces(4)
+        .ipv4_per_interface(15)
+        .processor("Intel", 2.5)
+        .dedicated_hosts(true)
+        .host_features(false, false),
+    PublishedInstanceTypeFacts::of("t3.2xlarge")
+        .ebs(695, 4_000, 2_780, 15_700)
+        .network("Up to 5 Gigabit")
+        .interfaces(4)
+        .ipv4_per_interface(15)
+        .processor("Intel", 2.5)
+        .dedicated_hosts(true)
+        .host_features(false, false),
+];
+
+/// The published facts of `instance_type`, or `None` where the catalog holds no row for it
+/// and every member is the derivation's.
+pub fn published_instance_type_facts(
+    instance_type: &str,
+) -> Option<&'static PublishedInstanceTypeFacts> {
+    PUBLISHED_INSTANCE_TYPE_FACTS
+        .iter()
+        .find(|facts| facts.instance_type == instance_type)
+}
+
+/// Every instance type the table above holds a row for.
+///
+/// A row is reached by its instance type ([`published_instance_type_facts`]), so a key that
+/// names no type of the catalog would be a row nothing ever reads; this is what lets a test
+/// hold every key to being one.
+pub fn published_instance_types() -> impl Iterator<Item = &'static str> {
+    PUBLISHED_INSTANCE_TYPE_FACTS
+        .iter()
+        .map(|facts| facts.instance_type)
+}
+
+/// The local instance store `facts` publishes, with the device MODEL — magnetic or solid
+/// state, NVMe or not, and therefore its encryption — taken from the `derived` store of the
+/// same type where its name yields one, and from the name itself where it does not: the
+/// published row says how many devices there are and how big they are, which is the half of
+/// the fact no name yields.
+pub(super) fn published_instance_storage(
+    facts: Option<&'static PublishedInstanceTypeFacts>,
+    name: &InstanceTypeName<'_>,
+    derived: Option<InstanceStorageFacts>,
+) -> Option<InstanceStorageFacts> {
+    let (devices, gb_each) = facts.and_then(|facts| facts.instance_store_devices)?;
+    let (disk_type, nvme) = match derived {
+        Some(derived) => (derived.disk_type, derived.nvme),
+        None => instance_storage_device_model(name),
+    };
+    Some(InstanceStorageFacts {
+        total_size_gb: gb_each.saturating_mul(i64::from(devices)),
+        disk_count: devices,
+        disk_size_gb: gb_each,
+        disk_type,
+        nvme,
+    })
+}

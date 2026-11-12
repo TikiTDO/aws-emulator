@@ -1162,11 +1162,12 @@ pub const FIRST_ENCRYPTING_INSTANCE_GENERATION: u32 = 6;
 /// the modelled `NetworkInfo$EncryptionInTransitSupported`, "indicates whether the
 /// instance type automatically encrypts in-transit traffic between instances".
 ///
-/// A fact of the instance TYPE, not of a stored instance or of a request, so it is derived
-/// from the parts [`InstanceTypeName`] parses out of the name, like every other fact about
-/// an instance type this module answers: a type that runs on the Nitro System
-/// ([`InstanceTypeName::nitro`]) from [`FIRST_ENCRYPTING_INSTANCE_GENERATION`] on — the
-/// generation from which it is the 4th version of that System — or one of the earlier
+/// A fact of the instance TYPE, not of a stored instance or of a request: the figure the
+/// published catalog holds for the type ([`published_instance_type_facts`]) where it holds
+/// one, and otherwise derived from the parts [`InstanceTypeName`] parses out of the name,
+/// like every other fact about an instance type this module answers — a type that runs on the
+/// Nitro System ([`InstanceTypeName::nitro`]) from [`FIRST_ENCRYPTING_INSTANCE_GENERATION`]
+/// on, the generation from which it is the 4th version of that System, or one of the earlier
 /// families [`ENCRYPTING_INSTANCE_FAMILIES`] names, or the high-memory family
 /// [`HIGH_MEMORY_ROOT`] names.
 ///
@@ -1179,6 +1180,11 @@ pub const FIRST_ENCRYPTING_INSTANCE_GENERATION: u32 = 6;
 /// A value that is not an instance type at all (no `<family>.<size>`) names nothing that
 /// encrypts.
 pub fn instance_type_encrypts_in_transit(instance_type: &str) -> bool {
+    if let Some(published) = published_instance_type_facts(instance_type)
+        .and_then(|facts| facts.encryption_in_transit_supported)
+    {
+        return published;
+    }
     InstanceTypeName::parse(instance_type)
         .is_some_and(|name| name.encrypts_in_transit())
 }

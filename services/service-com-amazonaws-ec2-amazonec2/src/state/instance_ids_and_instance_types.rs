@@ -1,13 +1,20 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! Instance-id and tag-key validation, and the instance-type catalog every type's facts are
-//! derived from its name through.
+//! Instance-id and tag-key validation, and the instance-type catalog: the facts a type's
+//! NAME yields are derived here, and the hardware facts AWS publishes PER TYPE are held in
+//! the table [`instance_type_catalog`] holds beside them.
 //!
 //! Split out of the [`crate::state`] module root so each file holds one concern, and
 //! re-exported from it, so a handler reaches these as `crate::state::<item>` like every
 //! other primitive there.
 
 use super::*;
+
+/// The per-instance-type hardware facts AWS publishes — the ones no function of the type's
+/// name yields. Re-exported below, so a reader reaches them as
+/// `crate::state::published_instance_type_facts` like every other primitive here.
+mod instance_type_catalog;
+pub use instance_type_catalog::*;
 
 impl ComAmazonawsEc2Amazonec2State {
     /// The tags of the resource `resource_id` names, whatever kind of resource that is, or
@@ -1957,6 +1964,20 @@ impl InstanceStorageFacts {
     }
 }
 
+/// The device model of one type's instance store: `ssd` or `hdd`, and whether the devices are
+/// presented as NVMe ones.
+///
+/// The ONE site of that pair, so the store the catalog publishes for a type and the store
+/// derived from its name describe the same devices.
+pub(super) fn instance_storage_device_model(name: &InstanceTypeName<'_>) -> (&'static str, bool) {
+    let disk_type = if HDD_STORAGE_FAMILIES.contains(&name.family) {
+        "hdd"
+    } else {
+        "ssd"
+    };
+    (disk_type, nvme_instance_storage(name))
+}
+
 /// The local instance storage of one size of one family, or `None` when the type has
 /// none.
 pub(super) fn instance_storage_facts(
@@ -1974,16 +1995,13 @@ pub(super) fn instance_storage_facts(
     // bigger one — and the total is the sum of the devices the instance actually has.
     let disk_count = total_gb.div_ceil(MAX_INSTANCE_STORE_DISK_GB).max(1);
     let disk_size_gb = total_gb / disk_count;
+    let (disk_type, nvme) = instance_storage_device_model(name);
     Some(InstanceStorageFacts {
         total_size_gb: i64::try_from(disk_size_gb * disk_count).unwrap_or(i64::MAX),
         disk_count: i32::try_from(disk_count).unwrap_or(i32::MAX),
         disk_size_gb: i64::try_from(disk_size_gb).unwrap_or(i64::MAX),
-        disk_type: if HDD_STORAGE_FAMILIES.contains(&name.family) {
-            "hdd"
-        } else {
-            "ssd"
-        },
-        nvme: nvme_instance_storage(name),
+        disk_type,
+        nvme,
     })
 }
 
@@ -2103,16 +2121,31 @@ pub fn instance_type_record(instance_type: &str) -> Option<InstanceTypeRecord> {
     let name = InstanceTypeName::parse(instance_type)?;
     let sixteenths = instance_size_sixteenths_of(&name);
     let architecture = architecture_for(instance_type);
-    let (default_vcpus, memory_mib) = match mac_host(name.family) {
+    // What AWS publishes about THIS type, where the catalog holds its row: a figure a row
+    // carries is a fact of the type, so it is reported instead of the figure the name and the
+    // per-family ratios below derive.
+    let facts = published_instance_type_facts(instance_type);
+    let (default_vcpus, derived_memory_mib) = match mac_host(name.family) {
         Some((vcpus, memory_gib)) => (vcpus, memory_gib * 1024),
         None => (
             default_vcpus(&name, sixteenths),
             memory_mib_of(&name, sixteenths),
         ),
     };
+    let memory_mib = facts
+        .and_then(|facts| facts.memory_mib)
+        .unwrap_or(derived_memory_mib);
     let default_threads_per_core = default_threads_per_core(&name, &architecture, default_vcpus);
-    let instance_storage = instance_storage_facts(&name, sixteenths);
-    let (maximum_network_interfaces, ipv4_addresses_per_interface) = network_limits(sixteenths);
+    let derived_storage = instance_storage_facts(&name, sixteenths);
+    let instance_storage =
+        published_instance_storage(facts, &name, derived_storage).or(derived_storage);
+    let (derived_interfaces, derived_ipv4) = network_limits(sixteenths);
+    let maximum_network_interfaces = facts
+        .and_then(|facts| facts.maximum_network_interfaces)
+        .unwrap_or(derived_interfaces);
+    let ipv4_addresses_per_interface = facts
+        .and_then(|facts| facts.ipv4_addresses_per_interface)
+        .unwrap_or(derived_ipv4);
     Some(InstanceTypeRecord {
         instance_type: instance_type.to_string(),
         default_vcpus,
@@ -2125,7 +2158,9 @@ pub fn instance_type_record(instance_type: &str) -> Option<InstanceTypeRecord> {
         nitro: name.nitro(),
         architecture,
         instance_storage,
-        hibernation_supported: hibernation_supported(&name, memory_mib),
+        hibernation_supported: facts
+            .and_then(|facts| facts.hibernation_supported)
+            .unwrap_or_else(|| hibernation_supported(&name, memory_mib)),
         maximum_network_interfaces,
         ipv4_addresses_per_interface,
     })
@@ -2611,16 +2646,21 @@ pub(super) fn maximum_ebs_attachments(nitro: bool, instance_store_disks: i32) ->
 /// [`instance_type_offerings`] derives which location offers which type. Two calls
 /// therefore report one instance type identically.
 ///
-/// The members this leaves absent are the per-type figures AWS publishes as HARDWARE
-/// data that neither the model nor the name yields — the GPU, FPGA, inference, media and
-/// Neuron device inventories, and the configurable bandwidth weightings. An absent member
-/// is reported absent rather than invented, and a filter naming one therefore selects
-/// nothing.
+/// What a type's name does NOT yield is its HARDWARE — the EBS and network figures AWS
+/// dedicates to it, its local devices, its accelerators, its processor's frequency and the
+/// host features it is offered with. Those are facts AWS publishes per instance type, held
+/// row by row in [`published_instance_type_facts`], and this reports what the type's row
+/// carries wherever it carries it. A member neither the row nor the derivation answers (the
+/// GPU, inference, media and Neuron device inventories, and the configurable bandwidth
+/// weightings) is reported absent rather than invented, and a filter naming one therefore
+/// selects nothing.
 pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
     let name = InstanceTypeName::parse(instance_type)?;
     let record = instance_type_record(instance_type)?;
     let sixteenths = instance_size_sixteenths_of(&name);
     let nitro = record.nitro;
+    // The published facts of this type, where the catalog holds its row.
+    let facts = published_instance_type_facts(instance_type);
 
     // Amazon EBS encryption, and IPv6, reach every current generation instance type and
     // the previous generation ones from the generation that introduced them on; the
@@ -2630,11 +2670,16 @@ pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
             .generation
             .is_some_and(|generation| generation >= FIRST_EBS_ENCRYPTION_GENERATION);
     let ipv6_supported = modern;
-    let efa_interfaces = efa_interfaces(&name, sixteenths);
+    let efa_interfaces = facts
+        .and_then(|facts| facts.efa_interfaces)
+        .unwrap_or_else(|| efa_interfaces(&name, sixteenths));
     let (tcp_established, udp, udp_stream) = CONNECTION_TRACKING_TIMEOUTS;
     // The network cards the instance has, and the bandwidth its size's share of the host
-    // carries: every member the model publishes about the instance's network is derived from
-    // those two facts, so the type's own figures and its per-card ones cannot disagree.
+    // carries: the per-card figures are derived from those two facts, so the cards of one
+    // instance cannot disagree with each other. A type whose row publishes a network
+    // performance reports THAT figure as its own, while its per-card bandwidth stays this
+    // share until AWS's published per-card figures are recorded in the row too, so the two
+    // may differ for a type the table covers.
     let cards = network_card_count(instance_type);
     let (baseline_centi, peak_centi) = network_bandwidth_centi_gbps(&name, sixteenths);
     let instance_store_disks = record
@@ -2646,6 +2691,9 @@ pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
     let supported_or_not = |supported: bool| {
         if supported { "supported" } else { "unsupported" }.to_string()
     };
+    let manufacturer = facts
+        .and_then(|facts| facts.processor_manufacturer)
+        .unwrap_or_else(|| processor_manufacturer(&name, &record.architecture));
 
     Some(InstanceTypeInfo {
         instance_type: Some(record.instance_type.clone()),
@@ -2664,12 +2712,11 @@ pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
                 instance_type,
                 &record.architecture,
             )),
-            sustained_clock_speed_in_ghz: sustained_clock_speed_ghz(
-                processor_manufacturer(&name, &record.architecture),
-                &name,
-            ),
+            sustained_clock_speed_in_ghz: facts
+                .and_then(|facts| facts.sustained_clock_speed_ghz)
+                .or_else(|| sustained_clock_speed_ghz(manufacturer, &name)),
             supported_features: Some(processor_features(&name)),
-            manufacturer: Some(processor_manufacturer(&name, &record.architecture).to_string()),
+            manufacturer: Some(manufacturer.to_string()),
         }),
         v_cpu_info: Some(VCpuInfo {
             default_v_cpus: Some(record.default_vcpus),
@@ -2694,9 +2741,13 @@ pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
             // "Describes the optimized EBS performance for the instance type"
             // (`EbsInfo$EbsOptimizedInfo`): reported for every type that HAS an
             // EBS-optimized mode, and absent for one whose `EbsOptimizedSupport` is
-            // `unsupported`, which has no such performance to describe.
+            // `unsupported`, which has no such performance to describe. The four figures
+            // are the type's own where the catalog publishes them.
             ebs_optimized_info: (ebs_optimized_support(&name) != EBS_OPTIMIZED_UNSUPPORTED)
-                .then(|| ebs_optimized_info(sixteenths, nitro)),
+                .then(|| match facts.and_then(|facts| facts.ebs_performance) {
+                    Some(published) => published.to_ebs_optimized_info(),
+                    None => ebs_optimized_info(sixteenths, nitro),
+                }),
             nvme_support: Some(
                 ebs_nvme_support(
                     nitro,
@@ -2706,18 +2757,36 @@ pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
                 )
                 .to_string(),
             ),
-            maximum_ebs_attachments: Some(maximum_ebs_attachments(nitro, instance_store_disks)),
+            maximum_ebs_attachments: Some(
+                facts
+                    .and_then(|facts| facts.maximum_ebs_attachments)
+                    .unwrap_or_else(|| maximum_ebs_attachments(nitro, instance_store_disks)),
+            ),
             // A Nitro instance's attachments are shared between its EBS volumes, its
             // network interfaces and its instance store devices; a Xen instance's EBS
-            // volumes have a limit of their own.
-            attachment_limit_type: Some(if nitro { "shared" } else { "dedicated" }.to_string()),
+            // volumes have a limit of their own, and so does a type whose EBS devices are
+            // attached to hardware of their own, which the catalog publishes.
+            attachment_limit_type: Some(
+                facts
+                    .and_then(|facts| facts.attachment_limit_type)
+                    .unwrap_or(if nitro { "shared" } else { "dedicated" })
+                    .to_string(),
+            ),
             maximum_ebs_cards: None,
             ebs_cards: None,
         }),
         network_info: Some(NetworkInfo {
-            // "The network performance": the instance's share of its host's bandwidth, or
-            // the ceiling a size below that share bursts to.
-            network_performance: Some(network_performance(baseline_centi, peak_centi)),
+            // "The network performance": the figure AWS publishes for the type, or — for a
+            // type the catalog holds no row for — the instance's share of its host's
+            // bandwidth, or the ceiling a size below that share bursts to.
+            network_performance: Some(
+                facts
+                    .and_then(|facts| facts.network_performance)
+                    .map_or_else(
+                        || network_performance(baseline_centi, peak_centi),
+                        str::to_string,
+                    ),
+            ),
             maximum_network_interfaces: Some(record.maximum_network_interfaces),
             // Every instance has at least one physical network card, its interfaces being
             // attached to one, and the first card is the default; the types AWS publishes
@@ -2742,11 +2811,14 @@ pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
             }),
             // "Indicates whether the instance type automatically encrypts in-transit
             // traffic between instances" (`NetworkInfo$EncryptionInTransitSupported`):
-            // the one site of that fact is `InstanceTypeName::encrypts_in_transit`, so
-            // this report and `GetVpcResourcesBlockingEncryptionEnforcement` — which asks
-            // which instances of a VPC cannot encrypt — cannot answer differently for one
-            // instance type.
-            encryption_in_transit_supported: Some(name.encrypts_in_transit()),
+            // the published row where the catalog holds one, else
+            // `InstanceTypeName::encrypts_in_transit`. Both are read through
+            // `instance_type_encrypts_in_transit`, so this report and
+            // `GetVpcResourcesBlockingEncryptionEnforcement` — which asks which instances
+            // of a VPC cannot encrypt — cannot answer differently for one instance type.
+            encryption_in_transit_supported: Some(instance_type_encrypts_in_transit(
+                instance_type,
+            )),
             // "Indicates whether the instance type supports ENA Express"
             // (`$EnaSrdSupported`), the adapter feature the sixth generation introduced.
             ena_srd_supported: Some(has_nitro_feature(&name, FIRST_ENA_SRD_GENERATION)),
@@ -2773,7 +2845,9 @@ pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
                 .then_some(record.ipv4_addresses_per_interface),
         }),
         gpu_info: None,
-        fpga_info: None,
+        fpga_info: facts
+            .and_then(|facts| facts.fpga_devices)
+            .map(PublishedFpgaDevices::to_fpga_info),
         placement_group_info: Some(PlacementGroupInfo {
             supported_strategies: Some(placement_group_strategies(&name)),
         }),
@@ -2781,13 +2855,20 @@ pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
         hibernation_supported: Some(record.hibernation_supported),
         burstable_performance_supported: Some(record.burstable),
         // "Dedicated Hosts are supported for ... current generation instance types",
-        // and an EC2 Mac runs on nothing else; the burstable families are not offered
-        // on a host.
-        dedicated_hosts_supported: Some(record.current_generation && !record.burstable),
+        // and an EC2 Mac runs on nothing else; the burstable families are offered on a host
+        // only where the catalog publishes that they are.
+        dedicated_hosts_supported: Some(
+            facts
+                .and_then(|facts| facts.dedicated_hosts_supported)
+                .unwrap_or(record.current_generation && !record.burstable),
+        ),
         // "Simplified automatic recovery" covers neither a bare metal instance nor one
-        // with an instance store, whose local data a recovery cannot carry over.
+        // with an instance store, whose local data a recovery cannot carry over — except on a
+        // type the catalog publishes recovery for.
         auto_recovery_supported: Some(
-            !record.bare_metal && record.instance_storage.is_none(),
+            facts
+                .and_then(|facts| facts.auto_recovery_supported)
+                .unwrap_or(!record.bare_metal && record.instance_storage.is_none()),
         ),
         supported_boot_modes: Some(supported_boot_modes(&record.architecture, nitro)),
         nitro_enclaves_support: Some(
@@ -2812,14 +2893,24 @@ pub fn instance_type_info(instance_type: &str) -> Option<InstanceTypeInfo> {
         media_accelerator_info: None,
         neuron_info: None,
         // "Indicates whether a local Precision Time Protocol (PTP) hardware clock (PHC) is
-        // supported" (`$PhcSupport`): a clock of the Nitro hardware generation named by
+        // supported" (`$PhcSupport`): the clock the type's own hardware carries where the
+        // catalog publishes it, else a clock of the Nitro hardware generation named by
         // [`FIRST_NITRO_CLOCK_GENERATION`].
-        phc_support: Some(supported_or_not(nitro_clock)),
+        phc_support: Some(supported_or_not(
+            facts
+                .and_then(|facts| facts.phc_supported)
+                .unwrap_or(nitro_clock),
+        )),
         // "Indicates whether reboot migration during a user-initiated reboot is supported"
         // (`$RebootMigrationSupport`): the migration moves a running instance to another
         // host, which is the hypervisor's to do, so every Nitro type but a bare metal one
-        // supports it.
-        reboot_migration_support: Some(supported_or_not(nitro && !record.bare_metal)),
+        // supports it — except where the catalog publishes that the type's own hardware does
+        // not.
+        reboot_migration_support: Some(supported_or_not(
+            facts
+                .and_then(|facts| facts.reboot_migration_supported)
+                .unwrap_or(nitro && !record.bare_metal),
+        )),
         // Every type of the catalog is offered in every Region this emulator serves,
         // which is what [`instance_type_offerings`] reports too.
         supported_in_region: Some(true),
