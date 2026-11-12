@@ -44,12 +44,20 @@ pem = "3"
 # callback into this same emulator — no network client feature is enabled, so the
 # transport is the emulator's own.
 aws-sdk-acmpca = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# Amazon EC2 client the `VpcEndpointId` a create names is resolved through
+# (`DescribeVpcEndpoints`), called over the in-process callback into this same emulator — no
+# network client feature is enabled, so the transport is the emulator's own.
+aws-sdk-ec2 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 
 [dev-dependencies]
 # The SCEP data-plane suite mounts Amazon Web Services Private CA beside this service on
 # one engine — what the assembled emulator does — because a connector's `GetCACert`
 # answers the certificate that service holds for the CA the connector names.
 service-com-amazonaws-acmpca-acmprivateca = { workspace = true }
+# The reference-resolution suite mounts Amazon EC2 beside this service on the same engine,
+# because the VPC endpoint a connector is restricted to is a resource EC2 owns: the suite
+# creates its endpoints through EC2's own front door.
+service-com-amazonaws-ec2-amazonec2 = { workspace = true }
 # Reads the subject and serial number out of the DER certificate the SCEP plane answers,
 # so the suite compares it with the one the private CA holds.
 x509-cert = "0.2"

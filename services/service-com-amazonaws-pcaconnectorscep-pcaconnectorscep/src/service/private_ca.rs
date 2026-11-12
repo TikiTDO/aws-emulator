@@ -5,10 +5,11 @@
 //! A connector is a link between a SCEP endpoint and a private certificate authority that
 //! Private CA — not this service — owns. So every question about that CA is answered by that
 //! service's own API, over the emulator's in-process callback: whether the CA a request
-//! names exists at all ([`names_no_certificate_authority`], which `CreateConnector` resolves
-//! its `CertificateAuthorityArn` through before admitting a connector), and the certificate
-//! it holds (`GetCertificateAuthorityCertificate`, which the SCEP data plane answers
-//! `GetCACert` from).
+//! names exists at all and whether it is one a connector could be linked to
+//! ([`resolve`], which `CreateConnector` resolves its `CertificateAuthorityArn` through
+//! before admitting a connector), and the certificate it holds
+//! (`GetCertificateAuthorityCertificate`, which the SCEP data plane answers `GetCACert`
+//! from).
 //!
 //! NOTHING here opens a socket or leaves the host: the transport is
 //! `ctx.callback().http_client()`, the emulator's in-process channel into its own services,
@@ -16,6 +17,7 @@
 //! credentials are the emulator's own and are used to sign these calls; they are never
 //! returned or logged.
 
+use ::aws_sdk_acmpca::types::CertificateAuthorityStatus;
 use ::smithy_server_runtime::OperationContext;
 
 /// The endpoint prefix the in-process channel resolves Amazon Web Services Private CA by,
@@ -23,36 +25,96 @@ use ::smithy_server_runtime::OperationContext;
 /// (`^arn:aws(-[a-z]+)*:acm-pca:…`).
 const ENDPOINT_PREFIX: &str = "acm-pca";
 
-/// Whether Amazon Web Services Private CA reports that it holds NO certificate authority
-/// under `certificate_authority_arn`.
+/// What Amazon Web Services Private CA answered about the certificate authority one request
+/// named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolved {
+    /// That service answered its own not-found error, which is the one answer that
+    /// establishes the CA is absent.
+    Absent,
+    /// That service holds the CA, in a status it cannot issue certificates from and does not
+    /// reach `ACTIVE` from on its own ([`ISSUING_IS_OVER_STATUSES`]).
+    Unusable,
+    /// That service holds a CA a connector could be linked to — and equally, the answer when
+    /// the question could not be put at all, because absence and unusability are established
+    /// by the owning service's own read and never inferred from a dependency that did not
+    /// answer.
+    Usable,
+}
+
+impl Resolved {
+    /// Whether Private CA reports it holds no certificate authority under the ARN asked
+    /// about, which is the one outcome that refuses a `CreateConnector` call outright.
+    pub fn is_absent(self) -> bool {
+        self == Self::Absent
+    }
+
+    /// The `ConnectorStatusReason` a connector linking this CA fails creation with, or `None`
+    /// when the CA is one it could be linked to.
+    pub fn failure_reason(self) -> Option<&'static str> {
+        match self {
+            // A connector naming an absent CA is refused before any record exists, so there
+            // is no connector left for a status reason to be reported on.
+            Self::Absent | Self::Usable => None,
+            Self::Unusable => Some(crate::state::REASON_PRIVATECA_INVALID_STATE),
+        }
+    }
+}
+
+/// The statuses a private CA will not issue a certificate in again without being replaced or
+/// deliberately put back in service, which is what makes one a CA a connector cannot link.
 ///
-/// `true` only when that service answered its own not-found error, which is the one answer
-/// that establishes the CA is absent. Every other outcome — the CA described, any other
-/// error, or no answer at all because the channel could not reach that service — leaves the
-/// question unanswered, so this reports `false`: absence is established by the owning
-/// service's own read, never inferred from a dependency that did not answer.
-pub async fn names_no_certificate_authority(
+/// `DescribeCertificateAuthority` documents what each status means: `DISABLED` — "your
+/// private CA has been disabled", `EXPIRED` — "your private CA certificate has expired",
+/// `FAILED` — "a failed CA can never return to the pending state. You must create a new CA",
+/// and `DELETED` — "your private CA is within the restoration period, after which it is
+/// permanently deleted". `CREATING` and `PENDING_CERTIFICATE` are deliberately absent: both
+/// are steps on the way to `ACTIVE` in that same list, so a connector created beside a CA
+/// that is still being set up is not one that failed.
+const ISSUING_IS_OVER_STATUSES: [CertificateAuthorityStatus; 4] = [
+    CertificateAuthorityStatus::Disabled,
+    CertificateAuthorityStatus::Expired,
+    CertificateAuthorityStatus::Failed,
+    CertificateAuthorityStatus::Deleted,
+];
+
+/// Resolve `certificate_authority_arn` against Amazon Web Services Private CA: ONE read of
+/// that service, answering both whether it holds the CA and whether the status it reports is
+/// one a connector could be linked to.
+pub async fn resolve(
     ctx: &OperationContext<'_>,
     region: &str,
     certificate_authority_arn: &str,
-) -> bool {
+) -> Resolved {
     let answer = client(ctx, region)
         .describe_certificate_authority()
         .certificate_authority_arn(certificate_authority_arn)
         .send()
         .await;
-    let Err(error) = answer else {
-        return false;
+    let error = match answer {
+        // The status is the owning service's own report of the CA, so a CA described without
+        // one says nothing about whether it could be used.
+        Ok(output) => {
+            let status = output
+                .certificate_authority()
+                .and_then(|authority| authority.status());
+            return match status {
+                Some(status) if ISSUING_IS_OVER_STATUSES.contains(status) => Resolved::Unusable,
+                _ => Resolved::Usable,
+            };
+        }
+        Err(error) => error,
     };
     match error.as_service_error() {
-        Some(service_error) => service_error.is_resource_not_found_exception(),
+        Some(service_error) if service_error.is_resource_not_found_exception() => Resolved::Absent,
+        Some(_) => Resolved::Usable,
         None => {
             ::tracing::warn!(
                 certificate_authority = %certificate_authority_arn,
                 error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
                 "the private CA service did not answer whether the certificate authority exists"
             );
-            false
+            Resolved::Usable
         }
     }
 }

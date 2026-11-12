@@ -81,6 +81,15 @@ pub const REASON_PRIVATECA_RESOURCE_NOT_FOUND: &str = "PRIVATECA_RESOURCE_NOT_FO
 /// `ConnectorStatusReason` of a connector that was not allowed to use the private CA it
 /// names (smithy_query: shape ConnectorStatusReason).
 pub const REASON_PRIVATECA_ACCESS_DENIED: &str = "PRIVATECA_ACCESS_DENIED";
+/// `ConnectorStatusReason` of a connector whose private CA exists but was in a status it
+/// could not be used from (smithy_query: shape ConnectorStatusReason).
+pub const REASON_PRIVATECA_INVALID_STATE: &str = "PRIVATECA_INVALID_STATE";
+/// `ConnectorStatusReason` of a connector whose `VpcEndpointId` named no VPC endpoint
+/// (smithy_query: shape ConnectorStatusReason).
+pub const REASON_VPC_ENDPOINT_RESOURCE_NOT_FOUND: &str = "VPC_ENDPOINT_RESOURCE_NOT_FOUND";
+/// `ConnectorStatusReason` of a connector whose VPC endpoint exists but publishes no DNS
+/// entry for a client to resolve it by (smithy_query: shape ConnectorStatusReason).
+pub const REASON_VPC_ENDPOINT_DNS_ENTRIES_NOT_FOUND: &str = "VPC_ENDPOINT_DNS_ENTRIES_NOT_FOUND";
 
 /// How long a connector stays in a non-terminal status before the clock settles it:
 /// `CREATING` before it owes the status its creation lands in (`ACTIVE`, or `FAILED` for a
@@ -700,8 +709,10 @@ pub fn arn_account(arn: &str) -> Option<&str> {
 /// * a CA in another account exists, but nothing grants this connector the use of it, so
 ///   that is the reason about permission rather than about existence.
 ///
-/// `VpcEndpointId` gets no equivalent check: it carries neither a Region nor an account
-/// segment, so nothing in the request says whether the endpoint it names is reachable.
+/// `VpcEndpointId` gets no equivalent check HERE: it carries neither a Region nor an account
+/// segment, so nothing in the request itself says whether the endpoint it names is reachable
+/// — that question is Amazon EC2's to answer, and it is asked there
+/// ([`crate::service::vpc_endpoint`]).
 pub fn private_ca_failure_reason(
     region: &str,
     certificate_authority_arn: &str,

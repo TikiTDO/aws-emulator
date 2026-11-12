@@ -31,6 +31,8 @@ mod connector_oidc_parameters;
 mod connector_private_ca_reachability;
 #[path = "all/connector_projection_agreement.rs"]
 mod connector_projection_agreement;
+#[path = "all/connector_reference_resolution.rs"]
+mod connector_reference_resolution;
 #[path = "all/connector_scep_endpoint.rs"]
 mod connector_scep_endpoint;
 #[path = "all/connector_vpc_endpoint.rs"]

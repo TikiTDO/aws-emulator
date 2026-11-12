@@ -64,12 +64,14 @@
 //! What is served on it — the private CA's own certificate for `GetCACert`, and an error
 //! for every SCEP operation this emulator does not implement — is documented in [`scep`].
 //! Every call this service makes into Amazon Web Services Private CA, on that plane and on
-//! the control plane alike, goes through [`private_ca`]; how it words a request its own model
-//! refused is in [`refusal`].
+//! the control plane alike, goes through [`private_ca`], and every question about a VPC
+//! endpoint a connector names goes to Amazon EC2 through [`vpc_endpoint`]; how it words a
+//! request its own model refused is in [`refusal`].
 
 pub mod private_ca;
 pub mod refusal;
 pub mod scep;
+pub mod vpc_endpoint;
 
 use smithy_server_runtime::{
     http, ErasedOperation, Refusal, Refused, Service,
