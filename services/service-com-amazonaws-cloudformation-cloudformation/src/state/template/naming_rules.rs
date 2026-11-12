@@ -585,6 +585,14 @@ pub(super) fn declared_name_property(resource_type: &str) -> Option<&'static str
         // the type publishes `ClusterIdentifier`; the type's last segment is `Cluster`, so
         // neither `ClusterName` nor `Name` finds it.
         REDSHIFT_CLUSTER => Some("ClusterIdentifier"),
+        // Amazon ElastiCache's `CreateCacheCluster` takes a `CacheClusterId`, and the type
+        // publishes it as `ClusterName` — "Ref returns the name of the cache cluster" — so
+        // neither `CacheClusterName` nor `Name` finds it. That name is what the cluster is
+        // CREATED under and the identifier every ElastiCache call on one takes, so it is the
+        // physical id.
+        crate::state::provisioner::elasticache_caches::ELASTICACHE_CACHE_CLUSTER => {
+            Some("ClusterName")
+        }
         // Amazon Cognito's `CreateGroup` takes `GroupName`, so the type publishes
         // `GroupName` — the type's last segment is `UserPoolGroup`, so neither
         // `UserPoolGroupName` nor `Name` finds it.

@@ -475,6 +475,22 @@ impl CacheClusterRecord {
         self.status != STATUS_CREATING && self.status != STATUS_DELETING
     }
 
+    /// Record that every node of this cluster is owed a reboot before it runs
+    /// the values its cache parameter group holds: what
+    /// `CacheParameterGroupStatus$ParameterApplyStatus` reports as
+    /// `pending-reboot` and `CacheNodeIdsToReboot` names, until
+    /// `RebootCacheCluster` restarts them.
+    ///
+    /// The one write of that deferral, so a parameter CHANGED on the group a
+    /// cluster runs
+    /// ([`ComAmazonawsElasticacheAmazonelasticachev9State::defer_parameter_change_to_reboot`])
+    /// and a cluster MOVED onto another group leave the same state behind.
+    pub fn defer_parameters_to_reboot(&mut self) {
+        for node in &mut self.nodes {
+            node.parameter_group_status = PARAMETER_APPLY_STATUS_PENDING_REBOOT.to_string();
+        }
+    }
+
     /// What `CacheParameterGroupStatus$ParameterApplyStatus` reports for this
     /// cluster's association with its parameter group: the group's values are
     /// applied to the cluster only once every node runs them, so a cluster with

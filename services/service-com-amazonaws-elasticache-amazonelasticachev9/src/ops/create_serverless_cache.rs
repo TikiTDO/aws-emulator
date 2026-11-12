@@ -493,7 +493,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(
                 CreateServerlessCacheErrorModeled::ServerlessCacheAlreadyExistsFault(
                     ServerlessCacheAlreadyExistsFault {
-                        message: Some(format!("Serverless cache {name} already exists.")),
+                        message: Some(
+                            crate::state::SERVERLESS_CACHE_ALREADY_EXISTS_MESSAGE.to_string(),
+                        ),
                     },
                 )
                 .into(),

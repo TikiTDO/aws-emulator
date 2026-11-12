@@ -237,10 +237,10 @@ mod unknown_instance_message;
 mod validation_message_wording;
 #[path = "all/withdrawn_assignment_copy_in_place.rs"]
 mod withdrawn_assignment_copy_in_place;
-// `listed_instance_state_every_entry` is declared above, in its sorted position; a second
-// declaration of the same module here is what the name-collision error named.
 #[path = "all/listed_instance_state_across_read_edge_cases.rs"]
 mod listed_instance_state_across_read_edge_cases;
+// `listed_instance_state_every_entry` is declared above, in its sorted position; a second
+// declaration of the same module here is what the name-collision error named.
 // `listed_instance_state_every_entry` is declared once, in the sorted list
 // above: two branches each added a declaration of it, and the merge of both
 // left the file loaded as a module twice.

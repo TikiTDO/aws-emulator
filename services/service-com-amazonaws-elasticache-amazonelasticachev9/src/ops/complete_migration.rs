@@ -239,13 +239,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .into());
                 };
                 // A cutover exists only inside a migration that is MIGRATING: the
-                // group has to carry an open one whose data sync is in flight, and
-                // it has to be provisioned and idle, because the work that
-                // establishes the sync is work the service carries out after the
-                // `StartMigration` that began it. Any other state is the one
-                // modelled parameter refusal, which says exactly that and says to
-                // retry once the service has got there.
-                let migrating = group.status == crate::state::STATUS_AVAILABLE
+                // group has to carry an open one whose data sync is in flight. The
+                // group's own status is NOT a second gate on it — the transient
+                // status it answers while the service works that same migration
+                // through (the one `StartMigration` began) is part of the migration,
+                // so a caller that cuts over straight after starting the sync is
+                // served rather than refused. Any other state is the one modelled
+                // parameter refusal, which says exactly that and says to retry once
+                // the service has got there.
+                let migrating = (group.status == crate::state::STATUS_AVAILABLE
+                    || group.status == crate::state::STATUS_MODIFYING)
                     && group
                         .migration
                         .as_ref()

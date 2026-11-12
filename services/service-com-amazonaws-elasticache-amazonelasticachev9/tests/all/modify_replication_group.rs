@@ -326,6 +326,13 @@ struct DeferredCase {
     /// What the group still reports while the change is only pending — `None`
     /// for an element it must not report at all yet.
     still: &'static [(&'static str, Option<&'static str>)],
+    /// Whether [`Self::pending`] is STILL reported after an immediate apply:
+    /// true only for a change `ApplyImmediately` does not finish, which is the
+    /// auth-token ROTATE — "ROTATE" adds the new password beside the old one
+    /// and "SET - allowed only after ROTATE" is what ends that window, so the
+    /// rotation is outstanding until the caller finalizes it however this call
+    /// was applied.
+    pending_survives_apply: bool,
 }
 
 #[tokio::test]
@@ -346,6 +353,7 @@ async fn a_change_the_pending_shape_carries_is_deferred_or_applied_by_apply_imme
             pending: &[("PendingModifiedValues/ClusterMode", "compatible")],
             applied: &[("ReplicationGroup/ClusterMode", "compatible")],
             still: &[("ReplicationGroup/ClusterMode", Some("disabled"))],
+            pending_survives_apply: false,
         },
         DeferredCase {
             case: "the automatic failover",
@@ -358,6 +366,7 @@ async fn a_change_the_pending_shape_carries_is_deferred_or_applied_by_apply_imme
             )],
             applied: &[("ReplicationGroup/AutomaticFailover", "enabled")],
             still: &[("ReplicationGroup/AutomaticFailover", Some("disabled"))],
+            pending_survives_apply: false,
         },
         DeferredCase {
             // "ROTATE - default, if no update strategy is provided", reported as
@@ -369,6 +378,7 @@ async fn a_change_the_pending_shape_carries_is_deferred_or_applied_by_apply_imme
             pending: &[("PendingModifiedValues/AuthTokenStatus", "ROTATING")],
             applied: &[("ReplicationGroup/AuthTokenEnabled", "true")],
             still: &[("ReplicationGroup/AuthTokenEnabled", Some("false"))],
+            pending_survives_apply: true,
         },
         DeferredCase {
             case: "the in-transit encryption mode",
@@ -381,6 +391,7 @@ async fn a_change_the_pending_shape_carries_is_deferred_or_applied_by_apply_imme
             )],
             applied: &[("ReplicationGroup/TransitEncryptionMode", "preferred")],
             still: &[("ReplicationGroup/TransitEncryptionMode", None)],
+            pending_survives_apply: false,
         },
         DeferredCase {
             case: "the user group",
@@ -393,6 +404,7 @@ async fn a_change_the_pending_shape_carries_is_deferred_or_applied_by_apply_imme
             )],
             applied: &[("ReplicationGroup/UserGroupIds/member", "deferred-rbac")],
             still: &[("ReplicationGroup/UserGroupIds/member", None)],
+            pending_survives_apply: false,
         },
     ];
 
@@ -425,6 +437,12 @@ async fn a_change_the_pending_shape_carries_is_deferred_or_applied_by_apply_imme
                 for (source, reply) in [("the answer", &answered), ("a later describe", &described)]
                 {
                     assert_reports(&name, source, reply, case.applied);
+                    if case.pending_survives_apply {
+                        // The one change `ApplyImmediately` does not finish; see
+                        // `DeferredCase::pending_survives_apply`.
+                        assert_reports(&name, source, reply, case.pending);
+                        continue;
+                    }
                     for (path, _) in case.pending {
                         assert_eq!(
                             reply.text(path),

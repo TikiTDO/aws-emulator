@@ -182,11 +182,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(
                 RebalanceSlotsInGlobalReplicationGroupErrorModeled::InvalidGlobalReplicationGroupStateFault(
                     InvalidGlobalReplicationGroupStateFault {
-                        message: Some(format!(
-                            "Global Replication Group {key} is in {} state, not {}.",
-                            group.status,
-                            crate::state::GLOBAL_ACTIONABLE_STATUSES.join(" or ")
-                        )),
+                        message: Some(
+                            crate::state::global_replication_group_state_refusal(
+                                &key,
+                                &group.status,
+                            ),
+                        ),
                     },
                 )
                 .into(),

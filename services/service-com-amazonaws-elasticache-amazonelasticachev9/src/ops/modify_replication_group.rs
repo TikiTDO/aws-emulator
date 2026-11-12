@@ -1002,6 +1002,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             group.durability = durability;
         }
 
+        // The auth-token update is the one change `ApplyImmediately` does not
+        // decide: `AuthTokenUpdateStatus` (`SETTING | ROTATING`) is what the
+        // group reports while a token change is in flight, and a ROTATE is in
+        // flight until the caller FINALIZES it — "ROTATE" adds the new password
+        // beside the old one and both are valid from then on, and "SET -
+        // allowed only after ROTATE" is the call that ends that window by
+        // leaving the new password the only one. So a ROTATE reports `ROTATING`
+        // however it was applied, a SET applied at once closes the window and
+        // clears the status, a deferred SET reports `SETTING` until it is
+        // applied, and a DELETE has no value in that enum — it takes the
+        // password away rather than changing it — so it clears the status too.
+        match (auth_token_strategy.as_deref(), deferred) {
+            (Some(crate::state::AUTH_TOKEN_ROTATE), _) => {
+                group.pending_modified_values.auth_token_status =
+                    Some(crate::state::AUTH_TOKEN_STATUS_ROTATING.to_string());
+            }
+            (Some(crate::state::AUTH_TOKEN_SET), true) => {
+                group.pending_modified_values.auth_token_status =
+                    Some(crate::state::AUTH_TOKEN_STATUS_SETTING.to_string());
+            }
+            (Some(_), _) => group.pending_modified_values.auth_token_status = None,
+            (None, _) => {}
+        }
+
         if deferred {
             // The group keeps running its current values and reports the
             // requested ones under `PendingModifiedValues`.
@@ -1011,20 +1035,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             if let Some(enabled) = input.automatic_failover_enabled {
                 pending.automatic_failover_status = Some(setting(enabled).to_string());
-            }
-            // `AuthTokenUpdateStatus` is `SETTING | ROTATING`: a DELETE has no
-            // value in that enum, so it has nowhere to be reported as pending
-            // and is applied at once, below.
-            match auth_token_strategy.as_deref() {
-                Some(crate::state::AUTH_TOKEN_ROTATE) => {
-                    pending.auth_token_status =
-                        Some(crate::state::AUTH_TOKEN_STATUS_ROTATING.to_string());
-                }
-                Some(crate::state::AUTH_TOKEN_SET) => {
-                    pending.auth_token_status =
-                        Some(crate::state::AUTH_TOKEN_STATUS_SETTING.to_string());
-                }
-                _ => {}
             }
             if remove_all_user_groups {
                 pending.user_group_ids_to_remove = group.user_group_ids.clone();
@@ -1058,9 +1068,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             if input.automatic_failover_enabled.is_some() {
                 pending.automatic_failover_status = None;
-            }
-            if auth_token_strategy.is_some() {
-                pending.auth_token_status = None;
             }
             if remove_all_user_groups
                 || !user_groups_to_add.is_empty()

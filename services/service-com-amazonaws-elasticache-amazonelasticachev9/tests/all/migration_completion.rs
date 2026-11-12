@@ -27,7 +27,7 @@
 
 use service_com_amazonaws_elasticache_amazonelasticachev9::state;
 
-use crate::harness::{params, Emulator, Reply, PAST_TRANSITION};
+use crate::harness::{params, poll_until, Emulator, Reply, PAST_TRANSITION, REGION};
 
 /// One row of the target table: the case, the form pairs the request carries, and the
 /// status plus wire code it must be refused with.
@@ -185,26 +185,13 @@ async fn a_migrating_group_is_completed_once_its_data_sync_is_in_flight() {
         "StartMigration must answer 200, got {} {}",
         started.status, started.body
     );
-    // The data sync is work the service carries out after the call that began it, so a
-    // completion asked for inside that span is refused — and told to retry.
-    let too_early = complete(&emulator, &[("ReplicationGroupId", "migrated-group")]).await;
-    assert_eq!(
-        too_early.status, 400,
-        "a completion inside the start's span must be refused, got {} {}",
-        too_early.status, too_early.body
-    );
-    assert_eq!(
-        too_early.error_message(),
-        state::MIGRATION_NOT_MIGRATING_MESSAGE,
-        "expected the migrating-state sentence, got {:?}",
-        too_early.error_message()
-    );
-
-    std::thread::sleep(PAST_TRANSITION);
+    // The cutover is of the migration the start began, and the transient status the start
+    // left is the service's own work on that same migration — so a completion asked for
+    // inside that span is SERVED rather than refused.
     let completed = complete(&emulator, &[("ReplicationGroupId", "migrated-group")]).await;
     assert_eq!(
         completed.status, 200,
-        "the completion must answer 200, got {} {}",
+        "a completion inside the start's span must be served, got {} {}",
         completed.status, completed.body
     );
     assert_eq!(
@@ -223,9 +210,18 @@ async fn a_migrating_group_is_completed_once_its_data_sync_is_in_flight() {
     );
 
     // The migration is CLOSED: a second completion is the not-migrating refusal again,
-    // even once the group has settled.
-    std::thread::sleep(PAST_TRANSITION);
-    let described = describe_group(&emulator, "migrated-group").await;
+    // even once the group has settled. The suite waits for THAT condition — the group
+    // reporting `available` — rather than for a fixed time.
+    let described = poll_until(
+        &emulator,
+        REGION,
+        "the migrated group",
+        "the group settling at available after the cutover",
+        "DescribeReplicationGroups",
+        &params(&[("ReplicationGroupId", "migrated-group")]),
+        |reply| reply.text("Status") == Some(state::STATUS_AVAILABLE),
+    )
+    .await;
     assert_eq!(
         described.text("Status"),
         Some(state::STATUS_AVAILABLE),

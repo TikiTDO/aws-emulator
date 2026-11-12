@@ -886,10 +886,6 @@ mod payment_cryptography_signing_name_routing;
 // either collides with all of them.
 #[path = "all/pinpoint_sms_voice_signing_name_routing.rs"]
 mod pinpoint_sms_voice_signing_name_routing;
-// Declared HERE, beside the neighbouring entry of this same quiet span, for the reason it
-// records: the appended tail at the end of this file and the HEAD of the sorted list are
-#[path = "all/polly_synthesis_task_side_effects.rs"]
-mod polly_synthesis_task_side_effects;
 // this file or beside the other `cloudformation_provisions_*` suites in the `c` span: both
 // of those are where every concurrently landing suite puts its line, so a declaration there
 // conflicts with all of them.
@@ -1499,6 +1495,16 @@ mod sfn_execution_status_change_on_an_authenticating_router;
 // CloudTrail reports at once — no single service crate's test target can ask it.
 #[path = "all/codepipeline_approval_reviewer_attribution.rs"]
 mod codepipeline_approval_reviewer_attribution;
+// Declared in the appended tail, which is where every new suite inserts its lines: the cache
+// cluster an `AWS::ElastiCache::CacheCluster` declares, created for real in ElastiCache and
+// read back through that service's own describe — CloudFormation and ElastiCache at once, so
+// no single service crate's test target can ask it.
+#[path = "all/cloudformation_provisions_elasticache_cache_clusters.rs"]
+mod cloudformation_provisions_elasticache_cache_clusters;
+// Declared HERE, beside the neighbouring entry of this same quiet span, for the reason it
+// records: the appended tail at the end of this file and the HEAD of the sorted list are
+#[path = "all/polly_synthesis_task_side_effects.rs"]
+mod polly_synthesis_task_side_effects;
 // RUNNING function's own DynamoDB item call is authorized against spans IAM (the role and its
 // document), STS (the session the call is signed with), Lambda (the handler and the SDK it is
 // given) and DynamoDB (the decision) at once, so no single service crate's test target can
@@ -1515,7 +1521,6 @@ mod backup_job_state_change_invokes_its_lambda_target;
 // Declared in the appended tail, which is where every new suite inserts its lines: the WHOLE
 // life of an event-driven object pipeline — the conversion a bucket notification drives and
 // the teardown that follows — spans Amazon S3, AWS Lambda, IAM and CloudFormation at once, so
-// no single service crate's test target can ask it.
 #[path = "all/s3_notification_pipeline_lifecycle.rs"]
 mod s3_notification_pipeline_lifecycle;
 // S3 -> SNS -> Lambda chain, from an object write through the bucket's topic configuration onto

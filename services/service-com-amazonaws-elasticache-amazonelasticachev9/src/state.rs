@@ -3987,9 +3987,15 @@ pub const CLUSTER_MODE_ENABLED: &str = "enabled";
 /// The role a member of a Global datastore has, from
 /// `GlobalReplicationGroupMember$Role`: "Indicates the role of the replication
 /// group, primary or secondary."
-pub const GLOBAL_ROLE_PRIMARY: &str = "primary";
+///
+/// The member's prose names the two roles in lower case; the wire value is UPPER
+/// case, which is what a client comparing the role it read against the role it
+/// expects sees. The same value is what
+/// `GlobalReplicationGroupInfo$GlobalReplicationGroupMemberRole` reports for a
+/// replication group's own membership, so both are the one pair of constants.
+pub const GLOBAL_ROLE_PRIMARY: &str = "PRIMARY";
 /// See [`GLOBAL_ROLE_PRIMARY`].
-pub const GLOBAL_ROLE_SECONDARY: &str = "secondary";
+pub const GLOBAL_ROLE_SECONDARY: &str = "SECONDARY";
 
 /// Materialise a status change the clock owes a resource, if it is due.
 ///
@@ -4190,6 +4196,25 @@ pub fn even_slot_ranges(count: usize) -> Vec<String> {
 /// datastore still `creating`, `modifying` or on its way out is refused with
 /// `InvalidGlobalReplicationGroupStateFault`.
 pub const GLOBAL_ACTIONABLE_STATUSES: [&str; 2] = [STATUS_AVAILABLE, STATUS_PRIMARY_ONLY];
+
+/// How this service refuses a change to a Global datastore whose status cannot
+/// take one: the datastore, the status it is in, and the statuses the change
+/// needs ([`GLOBAL_ACTIONABLE_STATUSES`]).
+///
+/// One statement, so every operation that changes a Global datastore — the
+/// associate a secondary create performs, the disassociate, the failover, the
+/// two node-group changes, the rebalance, the modify and the delete — cannot
+/// word its `InvalidGlobalReplicationGroupStateFault` differently from the
+/// others.
+pub fn global_replication_group_state_refusal(
+    global_replication_group_id: &str,
+    status: &str,
+) -> String {
+    format!(
+        "Global Replication Group {global_replication_group_id} is in {status} state, not {}.",
+        GLOBAL_ACTIONABLE_STATUSES.join(" or ")
+    )
+}
 
 /// Why this service refuses a deferred change.
 ///

@@ -267,11 +267,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // whose data is not partitioned across shards has one keyspace and one
         // shard, so there is no shard configuration of it to change.
         if !group.cluster_enabled {
-            return Err(invalid_value(format!(
-                "Invalid value {} for ReplicationGroupId: shards can only be configured on a \
-                 cluster mode enabled replication group.",
-                input.replication_group_id
-            )));
+            return Err(invalid_value(
+                crate::state::SHARDS_NEED_CLUSTER_MODE_MESSAGE,
+            ));
         }
         // The same gate every change to a group applies: one still `creating`,
         // already `modifying` (a reshard of its own included) or on its way out

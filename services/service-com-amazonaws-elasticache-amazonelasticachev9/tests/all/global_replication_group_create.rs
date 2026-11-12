@@ -161,7 +161,7 @@ fn assert_reports_case(case: &Case, where_from: &str, reply: &Reply) {
         ),
         (
             vec![case.primary],
-            vec!["primary"],
+            vec!["PRIMARY"],
             vec![REGION],
             vec![case.automatic_failover],
         ),
@@ -359,7 +359,7 @@ async fn a_created_global_datastore_is_read_back_from_persisted_state() {
                 primary.text("GlobalReplicationGroupId"),
                 primary.text("GlobalReplicationGroupMemberRole"),
             ),
-            (200, Some(case.stored_id), Some("primary")),
+            (200, Some(case.stored_id), Some("PRIMARY")),
             "case {:?}: the primary must report its Global datastore membership, got {}",
             case.suffix, primary.body
         );

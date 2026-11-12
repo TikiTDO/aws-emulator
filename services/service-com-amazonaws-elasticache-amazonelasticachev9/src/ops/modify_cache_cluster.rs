@@ -744,7 +744,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             cluster.auto_minor_version_upgrade = Some(upgrade);
         }
         if let Some((name, _)) = requested_parameter_group {
+            // "The name of the cache parameter group to apply to this cluster":
+            // the ASSOCIATION moves at once, but the values the group holds are
+            // read by the engine when a node starts, so a cluster moved onto
+            // another group keeps running the values its nodes were started
+            // with until they are rebooted. That is what
+            // `CacheParameterGroupStatus$ParameterApplyStatus` reports as
+            // `pending-reboot`, with every node still owed one named in
+            // `CacheNodeIdsToReboot`, and `RebootCacheCluster` is what applies
+            // them and puts the association back `in-sync` — the same deferral
+            // a parameter CHANGED on the group the cluster already runs gets
+            // (`ComAmazonawsElasticacheAmazonelasticachev9State::defer_parameter_change_to_reboot`).
+            // Re-applying the group a cluster already runs changes no value, so
+            // nothing is owed a reboot for it.
+            let moved = !cluster.cache_parameter_group_name.eq_ignore_ascii_case(&name);
             cluster.cache_parameter_group_name = name;
+            if moved {
+                cluster.defer_parameters_to_reboot();
+            }
             // "A change to the parameters a cluster runs": applied at once, so
             // the event it raises is this call's.
             immediate_events.push(crate::state::EVENT_CACHE_CLUSTER_PARAMETERS_CHANGED);

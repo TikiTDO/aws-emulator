@@ -819,32 +819,45 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "The name of the Global datastore": a datastore the group would join
         // has to be one this account holds, so the id is resolved against the
-        // store — `CreateGlobalReplicationGroup` is what puts one there.
-        // Creating the SECONDARY of a datastore that DOES exist is a path nobody
-        // has written yet: it answers the scaffold's 501, the same way a create
-        // seeded from a snapshot does below, rather than a group that joined
-        // nothing behind a 200.
-        if let Some(global) = input.global_replication_group_id.as_deref() {
-            if !store
-                .global_replication_groups
-                .contains_key(&global.to_ascii_lowercase())
-            {
-                return Err(
-                    CreateReplicationGroupErrorModeled::GlobalReplicationGroupNotFoundFault(
-                        GlobalReplicationGroupNotFoundFault {
-                            message: Some(
-                                crate::state::GLOBAL_REPLICATION_GROUP_NOT_FOUND_MESSAGE
-                                    .to_string(),
-                            ),
-                        },
-                    )
-                    .into(),
-                );
+        // store — `CreateGlobalReplicationGroup` is what puts one there — and it
+        // has to be one that can take a change, which is the modelled state
+        // fault every Global datastore change applies. The membership itself is
+        // written once the group exists, below.
+        let joined_global = match input.global_replication_group_id.as_deref() {
+            Some(global) => {
+                let key = global.to_ascii_lowercase();
+                let Some(datastore) = store.settled_global_replication_group_mut(&key, now) else {
+                    return Err(
+                        CreateReplicationGroupErrorModeled::GlobalReplicationGroupNotFoundFault(
+                            GlobalReplicationGroupNotFoundFault {
+                                message: Some(
+                                    crate::state::GLOBAL_REPLICATION_GROUP_NOT_FOUND_MESSAGE
+                                        .to_string(),
+                                ),
+                            },
+                        )
+                        .into(),
+                    );
+                };
+                if !crate::state::GLOBAL_ACTIONABLE_STATUSES.contains(&datastore.status.as_str()) {
+                    return Err(
+                        CreateReplicationGroupErrorModeled::InvalidGlobalReplicationGroupStateFault(
+                            InvalidGlobalReplicationGroupStateFault {
+                                message: Some(
+                                    crate::state::global_replication_group_state_refusal(
+                                        global,
+                                        &datastore.status,
+                                    ),
+                                ),
+                            },
+                        )
+                        .into(),
+                    );
+                }
+                Some(key)
             }
-            return Err(crate::scaffolded::Scaffolded::not_implemented(
-                "CreateReplicationGroup as the secondary of a Global datastore",
-            ));
-        }
+            None => None,
+        };
 
         // The parameter group the group's clusters join has to be one this
         // account holds, so the name is resolved against the stored groups — the
@@ -1308,6 +1321,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // owes it `available` once the transition span has passed. The response
         // is read back out of the store, so it reports what was persisted.
         store.insert_replication_group(new);
+        // A group created with a Global datastore named joins it as a
+        // SECONDARY: the datastore accepts writes through its primary and
+        // replicates to this group, so both records report the membership from
+        // here on.
+        if let Some(global_key) = joined_global {
+            store.join_global_replication_group(&global_key, &replication_group_id, now);
+        }
         let Some(replication_group) = store.modeled_replication_group(&replication_group_id) else {
             return Err(crate::scaffolded::Scaffolded::validation(
                 crate::state::STORE_UNAVAILABLE,

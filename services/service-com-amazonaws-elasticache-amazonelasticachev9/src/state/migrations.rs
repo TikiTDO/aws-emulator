@@ -34,6 +34,30 @@ pub const MIGRATION_NOT_MIGRATING_MESSAGE: &str =
     "The replication group must be in migrating state to complete the migration. Please retry \
      later.";
 
+/// How ElastiCache refuses a `StartMigration` on a replication group whose
+/// status cannot take one: the sentence states the statuses the operation
+/// accepts — a group that is provisioned and idle, or one already migrating
+/// data — and names neither the group nor the status it is in.
+///
+/// The state gate of the operation that STARTS a migration, worded for that
+/// operation rather than through the general modification refusal, because the
+/// statuses it accepts are its own.
+pub const MIGRATION_START_STATE_MESSAGE: &str =
+    "Replication group must be in available or migrating status to start migration.";
+
+/// How ElastiCache refuses a `TestMigration` on a replication group whose
+/// status cannot take one: the sentence states the status the operation accepts
+/// — a group that is provisioned and idle, the state a migration into it would
+/// be started from — and names neither the group nor the status it is in.
+pub const MIGRATION_TEST_STATE_MESSAGE: &str =
+    "Replication group must be in available status to test migration.";
+
+/// How ElastiCache refuses a migration source list that names more than one endpoint:
+/// `TestMigration$CustomerNodeEndpointList`'s own rule, stated as the model states it
+/// ("List of endpoints from which data should be migrated. List should have only one
+/// element") — the sentence alone, with nothing of the request in it.
+pub const MIGRATION_ONE_SOURCE_MESSAGE: &str = "List should have only one element.";
+
 /// `MigrationSummary$CutoverMode` when ElastiCache cuts over by itself, which is
 /// what `StartMigration$AutoCutover` asks for: "whether ElastiCache
 /// automatically attempts to complete the migration after data sync is

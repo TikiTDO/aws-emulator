@@ -22,6 +22,14 @@
 
 use super::*;
 
+/// How ElastiCache refuses a shard-configuration change on a replication group
+/// whose keyspace is not partitioned: the operation configures the shards of a
+/// cluster mode ENABLED group, and a group that is not one has a single keyspace
+/// in a single shard, so the whole sentence is fixed text naming neither the
+/// group nor the count that was asked for.
+pub const SHARDS_NEED_CLUSTER_MODE_MESSAGE: &str =
+    "Operation is only applicable for cluster mode enabled replication groups.";
+
 /// How many replicas a shard a reshard ADDS gets when the group it joins has no shard to
 /// take a count from: none, the primary alone.
 ///

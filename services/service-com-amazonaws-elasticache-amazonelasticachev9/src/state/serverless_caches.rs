@@ -24,6 +24,12 @@ pub const SERVERLESS_STATUS_AVAILABLE: &str = STATUS_AVAILABLE;
 /// owes it ([`ServerlessCacheRecord::pending_deletion`]).
 pub const SERVERLESS_STATUS_DELETING: &str = STATUS_DELETING;
 
+/// How ElastiCache refuses a `CreateServerlessCache` whose name is one the
+/// account already holds: `ServerlessCacheAlreadyExistsFault` states only that a
+/// cache of that name is already there, naming neither the name the request used
+/// nor the cache it collided with — the whole sentence is fixed text.
+pub const SERVERLESS_CACHE_ALREADY_EXISTS_MESSAGE: &str = "Serverless Cache already exists";
+
 /// How long a serverless cache stays `CREATING` (or `MODIFYING`) before the
 /// clock owes it `AVAILABLE`, and how long one stays `DELETING` before the clock
 /// owes its removal — the same span a cache cluster's transitions take; see

@@ -747,6 +747,12 @@ pub(super) enum Provisioner {
     MskServerlessCluster,
     MqBroker,
     RdsDbInstance,
+    /// `AWS::ElastiCache::CacheCluster`: a cache cluster of Amazon ElastiCache, which
+    /// `CreateCacheCluster` creates under the `ClusterName` the declaration states — the name
+    /// this type's `Ref` returns — and `DeleteCacheCluster` deletes by it. That create
+    /// answers the cluster `creating`, in which it serves nothing and carries no endpoint, so
+    /// the resource's creation is held open until ElastiCache reports it `available`.
+    ElastiCacheCacheCluster,
     RdsDbSubnetGroup,
     RdsDbParameterGroup,
     RdsDbClusterParameterGroup,
@@ -982,6 +988,7 @@ pub(super) fn provisioner_for(resource_type: &str) -> Option<Provisioner> {
         MSK_SERVERLESS_CLUSTER => Some(Provisioner::MskServerlessCluster),
         MQ_BROKER => Some(Provisioner::MqBroker),
         RDS_DB_INSTANCE => Some(Provisioner::RdsDbInstance),
+        ELASTICACHE_CACHE_CLUSTER => Some(Provisioner::ElastiCacheCacheCluster),
         RDS_DB_SUBNET_GROUP => Some(Provisioner::RdsDbSubnetGroup),
         RDS_DB_PARAMETER_GROUP => Some(Provisioner::RdsDbParameterGroup),
         RDS_DB_CLUSTER_PARAMETER_GROUP => Some(Provisioner::RdsDbClusterParameterGroup),
@@ -1248,6 +1255,16 @@ impl Provisioner {
             Self::MqBroker => create_mq_broker(ctx, region, resource, propagated).await,
             Self::RdsDbInstance => {
                 create_db_instance(ctx, region, resource, propagated).await
+            }
+            // `AWS::ElastiCache::CacheCluster` publishes `Tags` as the `{Key, Value}` list
+            // `CreateCacheCluster`'s own `Tags` member takes, so a cluster a stack creates
+            // carries the tags CloudFormation gives it beside the declared ones.
+            Self::ElastiCacheCacheCluster => {
+                // Boxed, like every other arm of this catalogue should be as it grows: the
+                // enclosing future holds one pointer instead of this arm's whole state, so
+                // adding a type does not enlarge the future a nested stack's provisioning
+                // walk keeps on the stack.
+                Box::pin(create_cache_cluster(ctx, region, resource, propagated)).await
             }
             Self::RedshiftCluster => {
                 create_redshift_cluster(ctx, region, resource, propagated).await
@@ -1660,6 +1677,11 @@ impl Provisioner {
                 // the one check its own crate's tag validation makes — so an environment
                 // carries the stack's own tags without the three.
                 | Self::MwaaEnvironment
+                // Amazon ElastiCache refuses a tag key in the reserved namespace on every
+                // call that takes tags — `CreateCacheCluster`'s `Tags` member and
+                // `AddTagsToResource` alike, in the one check its own crate's tag validation
+                // makes — so a cache cluster carries the stack's own tags without the three.
+                | Self::ElastiCacheCacheCluster
         );
         propagated
             .iter()
@@ -1802,6 +1824,13 @@ impl Provisioner {
             // just answered for handles no connection yet and the resource's creation is
             // finished once Amazon RDS reports it `available`.
             Self::RdsDbProxy => db_proxy_readiness(ctx, region, physical_resource_id).await,
+            // "When the cluster is in the `creating` state, only cluster-level information
+            // is displayed" (`DescribeCacheClusters`) and the cluster serves nothing in it,
+            // so the resource's creation is finished once Amazon ElastiCache reports it
+            // `available`.
+            Self::ElastiCacheCacheCluster => {
+                Box::pin(cache_cluster_readiness(ctx, region, physical_resource_id)).await
+            }
             // "When you create a new cluster, the Amazon EKS API server endpoint is private
             // to your VPC" only once the control plane is up: a created cluster is reported
             // `CREATING` and "you must wait for the cluster status to become ACTIVE before
@@ -1890,6 +1919,13 @@ impl Provisioner {
             Self::MwaaEnvironment => {
                 mwaa_environment_ready_attributes(ctx, region, physical_resource_id).await
             }
+            // A cache cluster has no endpoint while it is `creating`: the address a client
+            // connects to is one Amazon ElastiCache fills in as it provisions the cluster,
+            // so the type's endpoint attributes are read off the cluster once it reports it
+            // `available`.
+            Self::ElastiCacheCacheCluster => {
+                Box::pin(cache_cluster_ready_attributes(ctx, region, physical_resource_id)).await
+            }
             _ => Ok(BTreeMap::new()),
         }
     }
@@ -1943,6 +1979,14 @@ impl Provisioner {
             // and the deletion is finished once Amazon MWAA no longer holds it.
             Self::MwaaEnvironment => {
                 mwaa_environment_removal(ctx, region, physical_resource_id).await
+            }
+            // "The `DeleteCacheCluster` operation deletes a previously provisioned cluster"
+            // and leaves it `deleting` while it does, so the cluster is still there when the
+            // delete answers and the deletion is finished once Amazon ElastiCache no longer
+            // holds it — which is what keeps a stack from deleting the subnet group the
+            // cluster still sits in.
+            Self::ElastiCacheCacheCluster => {
+                Box::pin(cache_cluster_removal(ctx, region, physical_resource_id)).await
             }
             _ => Ok(Removal::Gone),
         }
@@ -2473,6 +2517,17 @@ impl Provisioner {
             // same call.
             Self::RdsDbInstance => {
                 delete_db_instance(ctx, region, resource, final_snapshot).await
+            }
+            // The final snapshot a `Snapshot` deletion policy asks for is a member of the
+            // delete itself, so the arm takes it beside the cluster's identifier.
+            Self::ElastiCacheCacheCluster => {
+                Box::pin(delete_cache_cluster(
+                    ctx,
+                    region,
+                    physical_resource_id,
+                    final_snapshot,
+                ))
+                .await
             }
             Self::RedshiftCluster => {
                 delete_redshift_cluster(ctx, region, physical_resource_id, final_snapshot)
@@ -3187,6 +3242,16 @@ impl Provisioner {
             Self::ConfigConfigRule => {
                 describe_config_rule(ctx, region, physical_resource_id).await
             }
+            // Amazon ElastiCache's own read of the cluster, by the identifier it was created
+            // under. The cluster is reported with its SCALAR configuration — the engine, the
+            // node type and count, the windows and the group names, each the member of the
+            // same name the type declares — plus its configuration endpoint; a property that
+            // is a LIST on the wire (the security groups, the log delivery configurations)
+            // is left out, which is the position every arm whose property is not a scalar is
+            // in and what [`super::drift`] documents.
+            Self::ElastiCacheCacheCluster => {
+                Box::pin(read_cache_cluster(ctx, region, physical_resource_id)).await
+            }
         }
     }
 }
@@ -3220,6 +3285,8 @@ mod route53_policies;
 pub(super) mod compute_fleet;
 mod network_and_delivery;
 mod ssm_associations;
+pub(super) mod elasticache_caches;
+use elasticache_caches::*;
 use ssm_associations::*;
 use compute_fleet::*;
 pub(crate) use network_and_delivery::*;

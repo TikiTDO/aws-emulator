@@ -73,9 +73,7 @@ impl ComAmazonawsElasticacheAmazonelasticachev9State {
             if !cluster.cache_parameter_group_name.eq_ignore_ascii_case(group) {
                 continue;
             }
-            for node in &mut cluster.nodes {
-                node.parameter_group_status = PARAMETER_APPLY_STATUS_PENDING_REBOOT.to_string();
-            }
+            cluster.defer_parameters_to_reboot();
         }
     }
 
@@ -957,6 +955,54 @@ impl ComAmazonawsElasticacheAmazonelasticachev9State {
                 slot.into_mut()
             }
         }
+    }
+
+    /// Make the replication group `replication_group_id` a SECONDARY member of
+    /// the Global datastore held under `global_key`, which is what
+    /// `CreateReplicationGroup$GlobalReplicationGroupId` asks for.
+    ///
+    /// One write of the membership, over BOTH records that report it: the
+    /// datastore gains the member (`GlobalReplicationGroup$Members`) and the
+    /// replication group starts reporting the datastore and its role in it
+    /// (`ReplicationGroup$GlobalReplicationGroupInfo`), so the two cannot
+    /// disagree — the same pair
+    /// `DisassociateGlobalReplicationGroup` clears. The member's Region and its
+    /// `AutomaticFailover` are the group's own, read off the stored group rather
+    /// than passed in, and the datastore answers `modifying` until the clock
+    /// settles it, which is `available` now that it has a secondary.
+    pub fn join_global_replication_group(
+        &mut self,
+        global_key: &str,
+        replication_group_id: &str,
+        now: SystemTime,
+    ) {
+        let Some(datastore_id) = self
+            .global_replication_groups
+            .get(global_key)
+            .map(|datastore| datastore.global_replication_group_id.clone())
+        else {
+            return;
+        };
+        let Some(group) = self.replication_groups.get_mut(replication_group_id) else {
+            return;
+        };
+        let member = GlobalMemberRecord {
+            replication_group_id: group.replication_group_id.clone(),
+            region: group.region.clone(),
+            role: GLOBAL_ROLE_SECONDARY.to_string(),
+            automatic_failover: group.automatic_failover.clone(),
+            status: STATUS_ASSOCIATED.to_string(),
+        };
+        group.global_replication_group_id = Some(datastore_id);
+        group.global_member_role = Some(GLOBAL_ROLE_SECONDARY.to_string());
+        let Some(datastore) = self.global_replication_groups.get_mut(global_key) else {
+            return;
+        };
+        datastore
+            .members
+            .retain(|held| held.replication_group_id != member.replication_group_id);
+        datastore.members.push(member);
+        datastore.begin_transition(STATUS_MODIFYING, now);
     }
 
     /// The resource a batch update-action call named, resolved against this

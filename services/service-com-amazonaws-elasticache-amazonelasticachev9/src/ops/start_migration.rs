@@ -255,15 +255,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     );
                 };
                 // The group has to be provisioned and idle before data can be
-                // synced into it: one still `creating`, already `modifying` or on
-                // its way out is refused with the modelled state fault, the same
-                // gate every other change to a group applies.
+                // synced into it, or already be migrating data: one still
+                // `creating`, busy with another change or on its way out is
+                // refused with the modelled state fault, worded for the
+                // statuses THIS operation accepts.
                 if group.status != crate::state::STATUS_AVAILABLE {
                     return Err(
                         StartMigrationErrorModeled::InvalidReplicationGroupStateFault(
                             InvalidReplicationGroupStateFault {
                                 message: Some(
-                                    crate::state::replication_group_modify_state_refusal(),
+                                    crate::state::MIGRATION_START_STATE_MESSAGE.to_string(),
                                 ),
                             },
                         )

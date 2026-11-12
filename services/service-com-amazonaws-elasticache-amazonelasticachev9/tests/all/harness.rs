@@ -31,6 +31,48 @@ pub const API_VERSION: &str = "2015-02-02";
 /// resource its next status; the handlers never sleep, so only the test waits.
 pub const PAST_TRANSITION: Duration = Duration::from_millis(750);
 
+/// How long a suite waits for a status change the CLOCK owes before it gives up,
+/// and how often it looks again while it waits.
+///
+/// Generous on purpose: a suite waits for the CONDITION it needs — through
+/// [`poll_until`] — rather than for a fixed time, so what it asserts does not
+/// depend on how fast or how loaded the host is.
+pub const SETTLE_DEADLINE: Duration = Duration::from_secs(30);
+/// See [`SETTLE_DEADLINE`].
+pub const LOOK_AGAIN_AFTER: Duration = Duration::from_millis(25);
+
+/// Send `action` in `region` until the answer satisfies `holds`, and answer with
+/// that reply.
+///
+/// The one place a suite of this crate waits for a status change the clock owes:
+/// it looks again until the condition holds or [`SETTLE_DEADLINE`] passes, and a
+/// deadline that passes fails with the last answer quoted. `description` says
+/// what was being waited for.
+pub async fn poll_until(
+    emulator: &Emulator,
+    region: &str,
+    case: &str,
+    description: &str,
+    action: &str,
+    request: &[(String, String)],
+    holds: impl Fn(&Reply) -> bool,
+) -> Reply {
+    let deadline = ::std::time::Instant::now() + SETTLE_DEADLINE;
+    loop {
+        let reply = emulator.call_in(region, action, request).await;
+        if holds(&reply) {
+            return reply;
+        }
+        assert!(
+            ::std::time::Instant::now() < deadline,
+            "case {case:?}: {description} never came about; the last {action} answered {} {}",
+            reply.status,
+            reply.body
+        );
+        ::tokio::time::sleep(LOOK_AGAIN_AFTER).await;
+    }
+}
+
 /// One refusal row: the case name, the form pairs that make the request, and
 /// the HTTP status plus `awsQuery` error code it must be answered with.
 pub type RefusalCase = (

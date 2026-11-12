@@ -287,3 +287,15 @@ mod reference_catalog_inventory;
 // that owns topics and their deliveries.
 #[path = "all/cluster_event_notifications.rs"]
 mod cluster_event_notifications;
+
+// Appended for the same reason: the `TestMigration` suite, the Global-datastore SECONDARY
+// suite, the suite about the two changes ElastiCache reports as outstanding after it has
+// accepted them, and the suite about the two refusals whose whole sentence is fixed text.
+#[path = "all/test_migration.rs"]
+mod test_migration;
+#[path = "all/global_replication_group_secondary.rs"]
+mod global_replication_group_secondary;
+#[path = "all/deferred_change_reporting.rs"]
+mod deferred_change_reporting;
+#[path = "all/fixed_refusal_sentences.rs"]
+mod fixed_refusal_sentences;

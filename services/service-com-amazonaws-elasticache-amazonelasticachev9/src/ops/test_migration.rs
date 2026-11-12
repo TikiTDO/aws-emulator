@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op TestMigration
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `TestMigration`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: tests the migration a `StartMigration` would open into the replication
+//! group the request names — the group has to be one this account holds, provisioned and
+//! idle, carrying no migration of its own, and the endpoints the request names have to be
+//! endpoints a migration could read from. This is the ONLY file to touch for this
+//! operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`TestMigration::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The operation reports the group it tested and nothing else: the model gives its output
+//! no verdict member, so a successful call says the configuration it was given CAN carry a
+//! migration, which is what every refusal below says the converse of.
 //!
 //! ## Shape of an operation
 //!
@@ -153,18 +153,119 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `TestMigration` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(TestMigrationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("TestMigration"))
+        // "Async API to test connection between source and target replication group":
+        // the test is work ElastiCache carries out after the call, and what this call
+        // decides is whether there is a migration to test at all — the group it would
+        // run into and the endpoints it would read from. `ctx` carries nothing this
+        // operation needs: the group is named by its own identity.
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(crate::scaffolded::Scaffolded::validation(
+                crate::state::STORE_UNAVAILABLE,
+            ));
+        };
+        let now = ::std::time::SystemTime::now();
+
+        // The identifier before the group is resolved: a value past the bound this
+        // service states names no group it could have stored, so the refusal reports
+        // the bound rather than the group being absent — through the one template
+        // every identifier refusal of this service goes through, worded as
+        // `StartMigration` words the same member.
+        if let Some(message) = crate::state::identifier_refusal(
+            "Cluster ID",
+            "ReplicationGroupIdentifier",
+            &input.replication_group_id,
+            crate::state::CLUSTER_ID_MAX_LEN,
+        ) {
+            return Err(invalid_value(message));
+        }
+        // The endpoints a migration would read FROM, held to the one rule every
+        // migration operation of this service holds the list to
+        // (`crate::state::source_endpoints`).
+        let endpoints = match crate::state::source_endpoints(&input.customer_node_endpoint_list) {
+            Ok(endpoints) => endpoints,
+            Err(message) => return Err(invalid_value(message)),
+        };
+        // "List should have only one element": the connection this operation tests is
+        // the one a migration would open, and a test names one source.
+        if endpoints.len() > 1 {
+            return Err(invalid_value(crate::state::MIGRATION_ONE_SOURCE_MESSAGE));
+        }
+
+        // A group id is stored folded to lower case, so the group this request
+        // resolves is the one held under the lowercased id.
+        let key = input.replication_group_id.to_ascii_lowercase();
+        let mut store = state.lock();
+        // The status change the clock owes the group is materialised first, so what
+        // this call gates on is the group THIS instant owes.
+        let Some(group) = store.settled_replication_group_mut(&key, now) else {
+            return Err(TestMigrationErrorModeled::ReplicationGroupNotFoundFault(
+                ReplicationGroupNotFoundFault {
+                    message: Some(crate::state::replication_group_not_found_message(
+                        &input.replication_group_id,
+                    )),
+                },
+            )
+            .into());
+        };
+        // A migration is started into a group that is provisioned and idle, so that is
+        // the group a test of one is run against: one still `creating`, busy with a
+        // change of its own or on its way out is refused with the modelled state fault.
+        if group.status != crate::state::STATUS_AVAILABLE {
+            return Err(
+                TestMigrationErrorModeled::InvalidReplicationGroupStateFault(
+                    InvalidReplicationGroupStateFault {
+                        message: Some(crate::state::MIGRATION_TEST_STATE_MESSAGE.to_string()),
+                    },
+                )
+                .into(),
+            );
+        }
+        // A group that already carries an open migration has nothing left to test:
+        // the migration this call would test is the one already running into it.
+        if group.migration.is_some() {
+            return Err(
+                TestMigrationErrorModeled::ReplicationGroupAlreadyUnderMigrationFault(
+                    ReplicationGroupAlreadyUnderMigrationFault {
+                        message: Some(format!(
+                            "Replication group {} is already under migration.",
+                            input.replication_group_id
+                        )),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // Nothing below refuses anything, and nothing about the group changes: the
+        // test runs between the source and the group, so the group keeps the status
+        // and the configuration it had — a `StartMigration` right after this call is
+        // the next step, not a refusal. The test itself is recorded in the event log,
+        // which is where a client reads what this service did.
+        store.record_event(
+            crate::state::SOURCE_TYPE_REPLICATION_GROUP,
+            &key,
+            "Migration test to the replication group started",
+            now,
+        );
+        let Some(replication_group) = store.modeled_replication_group(&key) else {
+            // Unreachable: resolved under this same lock above.
+            return Err(crate::scaffolded::Scaffolded::validation(
+                crate::state::STORE_UNAVAILABLE,
+            ));
+        };
+        Ok(TestMigrationOutput {
+            replication_group: Some(replication_group),
+        })
     }
+}
+
+/// The modelled refusal for a parameter value this operation cannot accept:
+/// `InvalidParameterValueException` ("The value for a parameter is invalid"),
+/// HTTP 400.
+fn invalid_value(message: impl Into<String>) -> TestMigrationError {
+    TestMigrationErrorModeled::InvalidParameterValueException(InvalidParameterValueException {
+        message: Some(message.into()),
+    })
+    .into()
 }
