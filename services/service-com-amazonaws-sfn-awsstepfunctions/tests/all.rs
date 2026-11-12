@@ -149,6 +149,8 @@ mod map_run_updates;
 mod map_runs;
 #[path = "all/nested_type_discriminator.rs"]
 mod nested_type_discriminator;
+#[path = "all/optimized_lambda_task_attribution.rs"]
+mod optimized_lambda_task_attribution;
 #[path = "all/parallel_branch_stop.rs"]
 mod parallel_branch_stop;
 #[path = "all/parallel_run_a_job.rs"]
