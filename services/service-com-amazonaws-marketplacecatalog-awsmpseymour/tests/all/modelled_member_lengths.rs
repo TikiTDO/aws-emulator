@@ -61,11 +61,12 @@ const ENTITY_IDENTIFIER_PATTERN: &str =
 /// `@pattern`, quoted verbatim in a refusal.
 const ENTITY_ID_PATTERN: &str = "^[a-zA-Z0-9][.a-zA-Z0-9/-]+[a-zA-Z0-9]$";
 
-/// The syntax the service publishes for an `AssessmentIdentifier`: the modelled
-/// `@pattern`, which states both forms the member's doc documents.
+/// The syntax the service publishes for an `AssessmentIdentifier`: the two forms the
+/// member's doc documents, as two separately anchored alternatives joined by `|` with no
+/// account field in the ARN branch — the service's own string, not the modelled `@pattern`.
 const ASSESSMENT_IDENTIFIER_PATTERN: &str = concat!(
-    r"^(assessment-[a-zA-Z0-9]+|arn:[a-zA-Z0-9-]+:[a-zA-Z0-9-]+:[a-zA-Z0-9-]*:",
-    r"[0-9]*:[a-zA-Z0-9-]+/Assessment/assessment-[a-zA-Z0-9]+)$"
+    r"(^assessment-[a-zA-Z0-9]+$)|(^arn:[a-zA-Z0-9-]+:[a-zA-Z0-9-]+:[a-zA-Z0-9-]*::",
+    r"[a-zA-Z0-9-]+/Assessment/assessment-[a-zA-Z0-9]+$)"
 );
 
 /// One emulator: a router carrying only this service, over one shared engine.
@@ -257,7 +258,7 @@ async fn a_hand_judged_member_is_bounded_by_its_modelled_length() {
             "POST",
             "/StartChangeSet".to_string(),
             Some(start_change_set_body(
-                json!({"Type": "AmiProduct", "Identifier": identifier.clone()}),
+                json!({"Type": "AmiProduct@1.0", "Identifier": identifier.clone()}),
             )),
             if refused { 422 } else { 404 },
             if refused {

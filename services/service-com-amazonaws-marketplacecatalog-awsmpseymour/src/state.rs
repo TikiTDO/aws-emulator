@@ -1658,20 +1658,25 @@ pub fn paginate<T>(all: Vec<T>, offset: usize, page_size: usize, prefix: &str) -
 /// Every paginated operation of this service models `MaxResults` with a
 /// `@range(min: 1, max: <limit>)` and documents the page it serves when the
 /// request names none, so a requested size inside that range is the size served,
-/// one outside it is refused under the member it is about, and a request naming
-/// none serves that documented default — which is the maximum only where the
-/// operation publishes the same number for both. This is the one place that
-/// decision is made, so each paginated operation judges a page size the same way:
-/// `operation` is the operation being called, `items` the noun it pages (what one
-/// page holds), `default` the page its own member documents for an absent
-/// `MaxResults` and `limit` the maximum its own range declares.
+/// one outside it is refused with the sentence this service states an
+/// out-of-bounds page size in — naming the size asked for and the range the
+/// member declares — and a request naming none serves that documented default,
+/// which is the maximum only where the operation publishes the same number for
+/// both. This is the one place that decision is made, so each paginated
+/// operation judges a page size the same way: `default` is the page its own
+/// member documents for an absent `MaxResults` and `limit` the maximum its own
+/// range declares.
+///
+/// The range is judged HERE rather than by the boundary walk (`MaxResults`
+/// carries `skip_validation` on every paginated input of this service): a
+/// boundary refusal takes the protocol's status, where this service answers the
+/// modelled `ValidationException` and its 422 for a member outside its
+/// constraint.
 ///
 /// `requested` is `None` for the operations whose `MaxResults` is optional and
 /// carries no `@default`, so the handler owns the default; the ones that model a
 /// `@default` are handed the value the boundary already applied.
 pub fn page_size(
-    operation: &str,
-    items: &str,
     default: i32,
     limit: i32,
     requested: Option<i32>,
@@ -1679,14 +1684,19 @@ pub fn page_size(
     let serving = match requested {
         None => default,
         Some(requested) if (1..=limit).contains(&requested) => requested,
-        Some(requested) => {
-            return Err(validation(
-                "MaxResults",
-                format!("{operation} serves between 1 and {limit} {items} a page, not {requested}"),
-            ))
-        }
+        Some(requested) => return Err(page_size_out_of_bounds(requested, limit)),
     };
     Ok(usize::try_from(serving).expect("a page size inside the modelled range fits in usize"))
+}
+
+/// The modelled `ValidationException` payload for a `MaxResults` outside the
+/// range its member declares — built from the request, naming the size asked for
+/// and the bounds that member publishes.
+pub fn page_size_out_of_bounds(requested: i32, limit: i32) -> ValidationException {
+    validation_message(format!(
+        "Provided max results value '{requested}' is out of bounds. It should be \
+         between 1 and {limit}."
+    ))
 }
 
 /// The offset a `NextToken` asks the list paging with `prefix` to resume at, or
@@ -3426,23 +3436,30 @@ pub fn assessment_id_of<'a>(identifier: &'a str, catalog: &str) -> Option<&'a st
 }
 
 /// The syntax the service publishes for `AssessmentIdentifier`, which it reports
-/// in the fault for one outside it: the shape's own modelled `@pattern`
-/// (`smithy_query(query="shape", shape="AssessmentIdentifier")`), which already
-/// states both forms the member's doc documents ("You can provide either the
-/// assessment ID … or the full assessment ARN").
+/// in the fault for one outside it: the two forms the member's doc documents
+/// ("You can provide either the assessment ID … or the full assessment ARN"),
+/// written as two SEPARATELY anchored alternatives joined by `|`, the ARN one
+/// carrying no account field.
 ///
-/// [`assessment_id_of`] is STRICTER than this string on the ARN alternative: the
-/// pattern constrains only the SHAPE of an ARN, so one naming another service's
-/// namespace or another catalog satisfies it while naming no assessment of this
-/// catalog, and such an identifier is refused too.
+/// It is the service's own string, not the shape's modelled `@pattern`
+/// (`smithy_query(query="shape", shape="AssessmentIdentifier")`, which spells
+/// the same two forms as one anchored group with an `[0-9]*` account segment):
+/// what a refusal quotes is the syntax the SERVICE publishes for the member, so
+/// it is written out here rather than interpolated from the model — a caller
+/// that pre-validates an identifier against the advertised regex gets the one
+/// the service advertises.
 ///
-/// The modelled pattern states no length either, so the shape's
-/// `@length(min: 1, max: 2048)` ([`ASSESSMENT_IDENTIFIER_MAX`]) is enforced by
-/// [`assessment_id_of`] beside it — the string stays the one the model declares
-/// and the service quotes.
+/// [`assessment_id_of`] is wider than this string on the ARN alternative — the
+/// account field of an ARN names where an assessment lives, not which one it is,
+/// so an ARN carrying one resolves — and stricter on everything the shape of an
+/// ARN cannot say: one naming another service's namespace or another catalog
+/// names no assessment of this catalog and is refused too.
+///
+/// The string states no length, so the shape's `@length(min: 1, max: 2048)`
+/// ([`ASSESSMENT_IDENTIFIER_MAX`]) is enforced by [`assessment_id_of`] beside it.
 pub const ASSESSMENT_IDENTIFIER_PATTERN: &str = concat!(
-    r"^(assessment-[a-zA-Z0-9]+|arn:[a-zA-Z0-9-]+:[a-zA-Z0-9-]+:[a-zA-Z0-9-]*:",
-    r"[0-9]*:[a-zA-Z0-9-]+/Assessment/assessment-[a-zA-Z0-9]+)$"
+    r"(^assessment-[a-zA-Z0-9]+$)|(^arn:[a-zA-Z0-9-]+:[a-zA-Z0-9-]+:[a-zA-Z0-9-]*::",
+    r"[a-zA-Z0-9-]+/Assessment/assessment-[a-zA-Z0-9]+$)"
 );
 
 /// How long an `AssessmentIdentifier` may be: that shape's modelled
@@ -3545,6 +3562,86 @@ pub fn arn_resource(arn: &str) -> &str {
 pub fn arn_resource_id(arn: &str) -> &str {
     let resource = arn_resource(arn);
     resource.rsplit('/').next().unwrap_or(resource)
+}
+
+/// The syntax the service publishes for a resource ARN, which it reports in the
+/// fault for one outside it: the modelled `ResourceARN` `@pattern`
+/// (`smithy_query(query="shape", shape="ResourceARN")`), which is the syntax the
+/// service's own recorded refusals quote for the member.
+pub const RESOURCE_ARN_PATTERN: &str =
+    r"^arn:[\w+=/,.@-]+:aws-marketplace:[\w+=/,.@-]*:[0-9]+:[\w+=,.@-]+(/[\w+=,.@-]+)*$";
+
+/// How long a resource ARN may be: the modelled `ResourceARN`
+/// `@length(min: 1, max: 255)`, which [`RESOURCE_ARN_PATTERN`] does not state.
+const RESOURCE_ARN_MAX: usize = 255;
+
+/// Whether `value` is a resource ARN at all — [`RESOURCE_ARN_PATTERN`] spelled
+/// out as a predicate, with the member's modelled `@length` beside it.
+///
+/// The six fields the pattern names: the literal `arn`, a partition, this
+/// service's `arnNamespace`, a region (which may be empty), an account of
+/// digits, and a resource of `/`-separated non-empty segments. WHICH resource an
+/// ARN inside this syntax names is [`parse_resource_arn`]'s decision; this one
+/// says only that the value is an ARN of this service's namespace, which is what
+/// a caller is told to satisfy.
+pub fn is_resource_arn(value: &str) -> bool {
+    if !(1..=RESOURCE_ARN_MAX).contains(&value.chars().count()) {
+        return false;
+    }
+    let field = |c: char| {
+        c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '=' | '/' | ',' | '.' | '@' | '-')
+    };
+    let segment = |c: char| {
+        c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '=' | ',' | '.' | '@' | '-')
+    };
+    let mut fields = value.splitn(6, ':');
+    let (
+        Some("arn"),
+        Some(partition),
+        Some(ARN_NAMESPACE),
+        Some(region),
+        Some(account),
+        Some(resource),
+    ) = (
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+    )
+    else {
+        return false;
+    };
+    if partition.is_empty() || !partition.chars().all(field) {
+        return false;
+    }
+    if !region.chars().all(field) {
+        return false;
+    }
+    if account.is_empty() || !account.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    resource
+        .split('/')
+        .all(|part| !part.is_empty() && part.chars().all(segment))
+}
+
+/// The modelled `ValidationException` payload for a resource ARN outside
+/// [`RESOURCE_ARN_PATTERN`] — built from the request, naming the value it
+/// rejected and the syntax a resource ARN has to satisfy.
+///
+/// Every operation addressed by a resource ARN refuses a malformed one this way,
+/// before it decides whether the ARN names a resource of this catalog: the
+/// member is judged by the handler rather than at the boundary
+/// (`skip_validation` on each of those inputs), so the refusal carries the
+/// modelled `ValidationException` and its 422 rather than the protocol's status.
+pub fn invalid_resource_arn(arn: &str) -> ValidationException {
+    validation_message(quoting(
+        "Requested resource arn '",
+        arn,
+        &format!("' is invalid. It should match with {RESOURCE_ARN_PATTERN}."),
+    ))
 }
 
 /// The resource of THIS service `arn` names, or `None` when `arn` names none.
@@ -4053,8 +4150,17 @@ pub fn is_change_type(value: &str) -> bool {
 /// well satisfy `ChangeType`'s `@pattern` and still name no change, so there is
 /// no syntax to tell the caller to satisfy — the set in [`CHANGE_TYPES`] is what
 /// it failed.
+///
+/// The member is judged here rather than at the boundary (`skip_validation` on
+/// `Change`), so the value reaching this sentence is bounded by nothing the
+/// walk checked: it is quoted through [`quoting`], which keeps the fault inside
+/// the length `ExceptionMessageContent` declares however long a value was sent.
 pub fn invalid_change_type(change_type: &str) -> ValidationException {
-    validation_message(format!("Requested change type '{change_type}' is invalid."))
+    validation_message(quoting(
+        "Requested change type '",
+        change_type,
+        "' is invalid.",
+    ))
 }
 
 /// The entity type a `Change$Entity$Type` names: everything before the optional
@@ -4079,9 +4185,28 @@ pub fn entity_type_of(reference: &str) -> &str {
 /// served back in a shape that forbids it.
 pub const ENTITY_MEMBER_MAX: usize = 255;
 
-/// Whether `reference` is an `Entity$Type`: one of [`ENTITY_TYPES`], on its own
-/// or at a version (`<EntityType>@<version>`), within the modelled
-/// [`ENTITY_MEMBER_MAX`] characters the member is bounded by.
+/// The syntax the service publishes for `Change$Entity$Type`: an entity type at
+/// a SCHEMA VERSION, the two parts separated by
+/// [`ENTITY_TYPE_VERSION_SEPARATOR`].
+///
+/// `Entity$Type` targets `EntityType`, whose modelled `@pattern` (`^[a-zA-Z]+$`,
+/// `smithy_query(query="shape", shape="Entity")`) admits no separator at all, so
+/// the model's pattern cannot be what a caller is told to satisfy here — this is
+/// the syntax the service's own recorded refusals quote for the member, and it
+/// is what the member carries off the boundary (`skip_validation` on `Entity`).
+pub const ENTITY_TYPE_REFERENCE_PATTERN: &str = "^(.*)@(.*)$";
+
+/// What separates the two parts of an `Entity$Type`, and of every other
+/// versioned id this service reads.
+const ENTITY_TYPE_VERSION_SEPARATOR: char = '@';
+
+/// Whether `reference` is an `Entity$Type`: one of [`ENTITY_TYPES`] at a version
+/// (`<EntityType>@<version>`), within the modelled [`ENTITY_MEMBER_MAX`]
+/// characters the member is bounded by.
+///
+/// A change addresses an entity type at a schema version, so a bare type name is
+/// not one of these references — [`check_entity_type_reference`] is what refuses
+/// it, and for the published FORM rather than for the set of types.
 ///
 /// The length is judged on the whole reference, which is the value the member
 /// carries: a type this catalog has at a version long enough to take the
@@ -4091,12 +4216,40 @@ pub fn is_entity_type_reference(reference: &str) -> bool {
     if !(1..=ENTITY_MEMBER_MAX).contains(&reference.chars().count()) {
         return false;
     }
-    match reference.split_once('@') {
-        Some((entity_type, version)) => {
-            is_entity_type(entity_type) && is_version_suffix(version)
-        }
-        None => is_entity_type(reference),
+    match reference.split_once(ENTITY_TYPE_VERSION_SEPARATOR) {
+        Some((entity_type, version)) => is_entity_type(entity_type) && is_version_suffix(version),
+        None => false,
     }
+}
+
+/// The modelled `ValidationException` payload for a `Change$Entity$Type` that is
+/// not of the published `<EntityType>@<version>` form — built from the request,
+/// naming the value it rejected and the syntax it had to satisfy.
+pub fn unqualified_entity_type(reference: &str) -> ValidationException {
+    validation_message(quoting(
+        "Requested entity type '",
+        reference,
+        &format!("' is invalid. It should match with {ENTITY_TYPE_REFERENCE_PATTERN}."),
+    ))
+}
+
+/// The `Change$Entity$Type` check `StartChangeSet` runs on every change: the
+/// value is first held to the FORM the service publishes for the member
+/// ([`ENTITY_TYPE_REFERENCE_PATTERN`]), and only a value of that form is then
+/// held to the set of types this catalog HAS.
+///
+/// The two are different faults, as they are for `Catalog` ([`check_catalog`]):
+/// the first says the member is not written the way the service publishes it —
+/// so the sentence quotes that syntax — and the second that the type it named is
+/// not one of this catalog's, which no syntax could tell a caller.
+pub fn check_entity_type_reference(reference: &str) -> Result<(), ValidationException> {
+    if !reference.contains(ENTITY_TYPE_VERSION_SEPARATOR) {
+        return Err(unqualified_entity_type(reference));
+    }
+    if !is_entity_type_reference(reference) {
+        return Err(invalid_entity_type(reference));
+    }
+    Ok(())
 }
 
 /// Whether `version` is the `@<version>` part of one of this service's versioned
@@ -4470,10 +4623,32 @@ pub fn invalid_choice(noun: &str, value: &str, supported: &[&str]) -> Validation
 }
 
 /// The modelled `ValidationException` payload for a `Sort$SortBy` outside the
-/// attributes the list being called sorts on (`supported`).
-pub fn invalid_sort_by(sort_by: &str, supported: &[&str]) -> ValidationException {
-    invalid_choice("sort by", sort_by, supported)
+/// attributes the list being called sorts on.
+///
+/// The sentence quotes the submitted attribute and then the set of attributes
+/// the MODEL publishes for the member it is about: `Sort$SortBy` targets a plain
+/// string with no enum constraint
+/// (`smithy_query(query="shape", shape="Sort")`), so there is no published set
+/// to name and the allowed-value slot renders the empty list — which is what the
+/// service answers for either list. The attributes a request is JUDGED against
+/// are the list's own ([`entity_sort_attributes`], [`CHANGE_SET_SORT_BY`]); they
+/// are not published in the refusal, so a caller is never pointed at a set the
+/// service does not declare.
+///
+/// The member is judged here rather than at the boundary (`skip_validation` on
+/// `Sort`), so the attribute is quoted through [`quoting`]: however long a value
+/// was sent, the fault stays inside the length its `Message` declares.
+pub fn invalid_sort_by(sort_by: &str) -> ValidationException {
+    validation_message(quoting(
+        "Requested sort by '",
+        sort_by,
+        &format!("' is invalid. It should be one of '{UNPUBLISHED_VALUE_SET}'."),
+    ))
 }
+
+/// How the allowed-value slot of a refusal renders a set the model does not
+/// publish: the empty list.
+const UNPUBLISHED_VALUE_SET: &str = "[]";
 
 /// The modelled `ResourceNotFoundException` payload for a change set id that
 /// names no change set.

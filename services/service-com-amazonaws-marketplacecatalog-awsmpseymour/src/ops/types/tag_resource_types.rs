@@ -11,7 +11,12 @@ use super::*;
 
 smithy_macros::smithy_model!("smithy-model/com-amazonaws-marketplacecatalog-awsmpseymour.json");
 
-#[smithy_macros::smithy(shape = "com.amazonaws.marketplacecatalog#TagResourceRequest")]
+// `skip_validation = ["ResourceArn"]`: the same member, the same pattern and the same
+// reason as `ListTagsForResourceInput`.
+#[smithy_macros::smithy(
+    shape = "com.amazonaws.marketplacecatalog#TagResourceRequest",
+    skip_validation = ["ResourceArn"]
+)]
 #[derive(Debug, Clone, Default)]
 pub struct TagResourceInput {
     pub resource_arn: String,

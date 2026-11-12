@@ -234,7 +234,7 @@ fn create_change(entity_type: &str, details: Value) -> Value {
         "Catalog": CATALOG,
         "ChangeSet": [{
             "ChangeType": "CreateProduct",
-            "Entity": {"Type": entity_type},
+            "Entity": {"Type": format!("{entity_type}@1.0")},
             "Details": details.to_string(),
         }],
     })
@@ -286,7 +286,7 @@ async fn a_started_change_set_is_reported_from_what_was_stored() {
                 "Intent": "APPLY",
                 "ChangeSet": [{
                     "ChangeType": "CreateProduct",
-                    "Entity": {"Type": "AmiProduct"},
+                    "Entity": {"Type": "AmiProduct@1.0"},
                     "Details": "{\"ProductTitle\":\"single\"}",
                 }],
             }),
@@ -298,7 +298,7 @@ async fn a_started_change_set_is_reported_from_what_was_stored() {
                 "Catalog": CATALOG,
                 "ChangeSet": [{
                     "ChangeType": "AddRevisions",
-                    "Entity": {"Type": "SaaSProduct"},
+                    "Entity": {"Type": "SaaSProduct@1.0"},
                     "DetailsDocument": {
                         "ProductTitle": "nested",
                         "Versions": [{"Name": "v1", "Enabled": true}],
@@ -317,18 +317,18 @@ async fn a_started_change_set_is_reported_from_what_was_stored() {
                 "ChangeSet": [
                     {
                         "ChangeType": "CreateProduct",
-                        "Entity": {"Type": "AmiProduct"},
+                        "Entity": {"Type": "AmiProduct@1.0"},
                         "Details": "{\"ProductTitle\":\"first\"}",
                         "EntityTags": [{"Key": "team", "Value": "catalog"}],
                     },
                     {
                         "ChangeType": "CreateProduct",
-                        "Entity": {"Type": "ContainerProduct"},
+                        "Entity": {"Type": "ContainerProduct@1.0"},
                         "Details": "{\"ProductTitle\":\"second\"}",
                     },
                     {
                         "ChangeType": "UpdateInformation",
-                        "Entity": {"Type": "DataProduct"},
+                        "Entity": {"Type": "DataProduct@1.0"},
                         "DetailsDocument": {"ProductTitle": "third"},
                     },
                 ],
@@ -342,12 +342,12 @@ async fn a_started_change_set_is_reported_from_what_was_stored() {
                 "ChangeSet": [
                     {
                         "ChangeType": "CreateProduct",
-                        "Entity": {"Type": "MachineLearningProduct"},
+                        "Entity": {"Type": "MachineLearningProduct@1.0"},
                         "Details": "{\"ProductTitle\":\"left\"}",
                     },
                     {
                         "ChangeType": "CreateProduct",
-                        "Entity": {"Type": "MachineLearningProduct"},
+                        "Entity": {"Type": "MachineLearningProduct@1.0"},
                         "Details": "{\"ProductTitle\":\"right\"}",
                     },
                 ],
@@ -528,8 +528,16 @@ async fn a_started_change_set_is_reported_from_what_was_stored() {
                 entity.status, entity.body
             );
             let submitted = &request["ChangeSet"][index];
+            // `Change$Entity$Type` carries the type at a schema version, where the ENTITY
+            // it acts on is of the type that reference names.
+            let entity_type = submitted["Entity"]["Type"]
+                .as_str()
+                .unwrap_or_default()
+                .split('@')
+                .next()
+                .unwrap_or_default();
             assert_eq!(
-                entity.body["EntityType"], submitted["Entity"]["Type"],
+                entity.body["EntityType"], json!(entity_type),
                 "case {case:?}: the entity's type must be the change's, got {:?}",
                 entity.body
             );
@@ -547,8 +555,7 @@ async fn a_started_change_set_is_reported_from_what_was_stored() {
             assert_eq!(
                 entity.text("/EntityArn"),
                 format!(
-                    "arn:aws:aws-marketplace:{REGION}:{ACCOUNT}:{CATALOG}/{}/{entity_id}",
-                    submitted["Entity"]["Type"].as_str().unwrap_or_default()
+                    "arn:aws:aws-marketplace:{REGION}:{ACCOUNT}:{CATALOG}/{entity_type}/{entity_id}"
                 ),
                 "case {case:?}: the entity ARN must name its type and id, got {:?}",
                 entity.body
@@ -583,7 +590,7 @@ async fn a_started_change_set_is_reported_from_what_was_stored() {
             // a canned list.
             let mine = list_entities(
                 &router,
-                json!({"Catalog": CATALOG, "EntityType": submitted["Entity"]["Type"]}),
+                json!({"Catalog": CATALOG, "EntityType": entity_type}),
             )
             .await;
             assert!(
@@ -619,7 +626,7 @@ async fn one_client_request_token_starts_one_change_set() {
         "Intent": "APPLY",
         "ChangeSet": [{
             "ChangeType": "CreateProduct",
-            "Entity": {"Type": "AmiProduct"},
+            "Entity": {"Type": "AmiProduct@1.0"},
             "Details": "{}",
         }],
     });
@@ -808,7 +815,7 @@ async fn a_change_against_an_existing_entity_updates_it() {
         "Catalog": CATALOG,
         "ChangeSet": [{
             "ChangeType": "UpdateInformation",
-            "Entity": {"Type": "AmiProduct", "Identifier": format!("{entity_id}@1")},
+            "Entity": {"Type": "AmiProduct@1.0", "Identifier": format!("{entity_id}@1")},
             "DetailsDocument": {"ProductTitle": "second", "Support": "email"},
         }],
     });
@@ -1614,7 +1621,7 @@ async fn a_running_change_set_locks_its_entities() {
         "Catalog": CATALOG,
         "ChangeSet": [{
             "ChangeType": "UpdateInformation",
-            "Entity": {"Type": "AmiProduct", "Identifier": entity_id.clone()},
+            "Entity": {"Type": "AmiProduct@1.0", "Identifier": entity_id.clone()},
             "DetailsDocument": {"ProductTitle": "holder"},
         }],
     });
@@ -1658,12 +1665,12 @@ async fn a_running_change_set_locks_its_entities() {
             "ChangeSet": [
                 {
                     "ChangeType": "AddRevisions",
-                    "Entity": {"Type": "AmiProduct", "Identifier": entity_id.clone()},
+                    "Entity": {"Type": "AmiProduct@1.0", "Identifier": entity_id.clone()},
                     "Details": "{\"Revision\":1}",
                 },
                 {
                     "ChangeType": "AddRevisions",
-                    "Entity": {"Type": "AmiProduct", "Identifier": entity_id.clone()},
+                    "Entity": {"Type": "AmiProduct@1.0", "Identifier": entity_id.clone()},
                     "Details": "{\"Revision\":2}",
                 },
             ],
@@ -1694,12 +1701,12 @@ async fn a_running_change_set_locks_its_entities() {
             "ChangeSet": [
                 {
                     "ChangeType": "AddRevisions",
-                    "Entity": {"Type": "AmiProduct", "Identifier": entity_id.clone()},
+                    "Entity": {"Type": "AmiProduct@1.0", "Identifier": entity_id.clone()},
                     "Details": "{\"Revision\":1}",
                 },
                 {
                     "ChangeType": "UpdateInformation",
-                    "Entity": {"Type": "AmiProduct", "Identifier": entity_id.clone()},
+                    "Entity": {"Type": "AmiProduct@1.0", "Identifier": entity_id.clone()},
                     "Details": "{\"ProductTitle\":\"mixed\"}",
                 },
             ],
@@ -1739,7 +1746,7 @@ async fn an_unknown_id_is_not_found() {
                     "Catalog": CATALOG,
                     "ChangeSet": [{
                         "ChangeType": "UpdateInformation",
-                        "Entity": {"Type": "AmiProduct", "Identifier": "ent-does-not-exist"},
+                        "Entity": {"Type": "AmiProduct@1.0", "Identifier": "ent-does-not-exist"},
                         "Details": "{}",
                     }],
                 }),
@@ -1780,7 +1787,7 @@ async fn a_request_outside_the_contract_is_refused() {
                         "Catalog": catalog,
                         "ChangeSet": [{
                             "ChangeType": "CreateProduct",
-                            "Entity": {"Type": "AmiProduct"},
+                            "Entity": {"Type": "AmiProduct@1.0"},
                             "Details": "{}",
                         }],
                     }),
@@ -1850,7 +1857,7 @@ async fn a_request_outside_the_contract_is_refused() {
                 "Catalog": CATALOG,
                 "ChangeSet": [{
                     "ChangeType": "CreateProduct",
-                    "Entity": {"Type": "AmiProduct"},
+                    "Entity": {"Type": "AmiProduct@1.0"},
                     "Details": "{}",
                     "DetailsDocument": {},
                 }],
@@ -1862,7 +1869,7 @@ async fn a_request_outside_the_contract_is_refused() {
                 "Catalog": CATALOG,
                 "ChangeSet": [{
                     "ChangeType": "CreateProduct",
-                    "Entity": {"Type": "AmiProduct"},
+                    "Entity": {"Type": "AmiProduct@1.0"},
                     "DetailsDocument": ["not", "an", "object"],
                 }],
             }),
@@ -1900,7 +1907,7 @@ async fn a_request_outside_the_contract_is_refused() {
             let nested = nested_details(depth);
             let mut change = json!({
                 "ChangeType": "CreateProduct",
-                "Entity": {"Type": "AmiProduct"},
+                "Entity": {"Type": "AmiProduct@1.0"},
             });
             change[member] = if member == "Details" {
                 json!(nested.to_string())
@@ -1957,7 +1964,7 @@ async fn a_request_outside_the_contract_is_refused() {
                 "Catalog": "AWS_Marketplace",
                 "ChangeSet": [{
                     "ChangeType": "CreateProduct",
-                    "Entity": {"Type": "AmiProduct"},
+                    "Entity": {"Type": "AmiProduct@1.0"},
                     "Details": "{}",
                 }],
             }),
@@ -1973,7 +1980,7 @@ async fn a_request_outside_the_contract_is_refused() {
                 "Intent": "SIDEWAYS",
                 "ChangeSet": [{
                     "ChangeType": "CreateProduct",
-                    "Entity": {"Type": "AmiProduct"},
+                    "Entity": {"Type": "AmiProduct@1.0"},
                     "Details": "{}",
                 }],
             }),

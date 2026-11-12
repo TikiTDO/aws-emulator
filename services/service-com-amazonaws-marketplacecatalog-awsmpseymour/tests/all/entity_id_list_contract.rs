@@ -193,7 +193,7 @@ async fn summary_of(router: &MultiServiceRouter, case: &str, id: &str) -> Value 
 /// One change: a change type, the entity type it acts under, and the identifier it names
 /// (none for a change that creates an entity of its own).
 fn change(change_type: &str, entity_type: &str, identifier: Option<&str>) -> Value {
-    let mut entity = json!({"Type": entity_type});
+    let mut entity = json!({"Type": format!("{entity_type}@1.0")});
     if let Some(identifier) = identifier {
         entity["Identifier"] = json!(identifier);
     }

@@ -147,7 +147,7 @@ fn assert_inside_the_message_bound(case: &str, message: &str, value: &str) {
 fn change(members: Value) -> Value {
     let mut change = json!({
         "ChangeType": "CreateProduct",
-        "Entity": {"Type": "AmiProduct"},
+        "Entity": {"Type": "AmiProduct@1.0"},
         "Details": json!({"ProductTitle": "modelled-answer-bounds"}).to_string(),
     });
     if let (Value::Object(target), Value::Object(extra)) = (&mut change, &members) {
@@ -218,7 +218,7 @@ fn faults_quoting(value: &str) -> Vec<(&'static str, &'static str, String, Optio
                 "Catalog": CATALOG,
                 "ChangeSet": [change(json!({
                     "ChangeType": "UpdateInformation",
-                    "Entity": {"Type": "AmiProduct", "Identifier": value},
+                    "Entity": {"Type": "AmiProduct@1.0", "Identifier": value},
                 }))],
             })),
         ),
@@ -236,6 +236,31 @@ fn faults_quoting(value: &str) -> Vec<(&'static str, &'static str, String, Optio
             "POST",
             "/DescribeAssessment".to_string(),
             Some(json!({"Catalog": CATALOG, "AssessmentIdentifier": value})),
+        ),
+        (
+            "StartChangeSet ChangeSet.ChangeType",
+            "POST",
+            "/StartChangeSet".to_string(),
+            Some(json!({
+                "Catalog": CATALOG,
+                "ChangeSet": [change(json!({"ChangeType": value}))],
+            })),
+        ),
+        (
+            "ListEntities Sort.SortBy",
+            "POST",
+            "/ListEntities".to_string(),
+            Some(json!({
+                "Catalog": CATALOG,
+                "EntityType": "AmiProduct",
+                "Sort": {"SortBy": value},
+            })),
+        ),
+        (
+            "ListTagsForResource ResourceArn",
+            "POST",
+            "/ListTagsForResource".to_string(),
+            Some(json!({"ResourceArn": value})),
         ),
     ]
 }

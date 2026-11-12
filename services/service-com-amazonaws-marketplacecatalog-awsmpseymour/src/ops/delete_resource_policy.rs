@@ -146,6 +146,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
+        // `ResourceArn` is judged here rather than at the boundary
+        // (`skip_validation` on this input), the way `ListTagsForResource`
+        // judges it: a value outside the syntax the member publishes is no
+        // resource ARN at all, so it is refused with the modelled
+        // `ValidationException` and its 422, quoting that syntax.
+        if !crate::state::is_resource_arn(&input.resource_arn) {
+            return Err(DeleteResourcePolicyErrorModeled::ValidationException(
+                crate::state::invalid_resource_arn(&input.resource_arn),
+            )
+            .into());
+        }
+
         // Authorization is evaluated on the ARN BEFORE anything is looked up: an
         // ARN that names no resource of this catalog in this account is one no
         // identity or resource policy of this catalog can grant an action on, so

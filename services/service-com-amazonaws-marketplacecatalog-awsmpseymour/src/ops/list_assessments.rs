@@ -238,11 +238,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // `MaxResults` is modelled `@range(min: 1, max: 100)` with `@default(20)`,
         // so the boundary has applied the default; the range itself is judged by
-        // the one page-size rule in `crate::state::page_size`, so no request can
-        // reach the paging arithmetic with a size the model does not allow.
+        // the one page-size rule in `crate::state::page_size` — here rather than
+        // at the boundary (`skip_validation` on `ListAssessmentsInput`), so a size
+        // outside the range carries the modelled `ValidationException` and its
+        // 422, and no request can reach the paging arithmetic with a size the
+        // model does not allow.
         let page_size = match crate::state::page_size(
-            "ListAssessments",
-            "assessments",
             crate::state::LIST_ASSESSMENTS_PAGE_DEFAULT,
             crate::state::LIST_ASSESSMENTS_PAGE_LIMIT,
             Some(input.max_results),

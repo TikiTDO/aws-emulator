@@ -37,11 +37,6 @@ const SIGNED_FOR_EU_WEST_1: &str = "AWS4-HMAC-SHA256 \
      Credential=AKIDEXAMPLE/20260101/eu-west-1/aws-marketplace/aws4_request, \
      SignedHeaders=host, Signature=abc";
 
-/// The attribute `Sort$SortBy` documents as the default for `ListEntities`
-/// ("`LastModifiedDate` (default)"), and the other it publishes for every type.
-const DEFAULT_ATTRIBUTE: &str = "LastModifiedDate";
-const COMMON_ATTRIBUTE: &str = "EntityId";
-
 /// Every entity type under test and the attributes the model declares it sorts on.
 ///
 /// The first nine are the types whose own `*SortBy` enum the model declares, each row that
@@ -222,20 +217,6 @@ async fn list_entities(router: &MultiServiceRouter, request: Value) -> Answer {
     call(router, "/ListEntities", request).await
 }
 
-/// The attributes a refusal published, read out of the set it quotes.
-fn published_attributes(message: &str) -> Vec<String> {
-    let quoted = message
-        .rsplit_once("one of '")
-        .map(|(_, tail)| tail)
-        .unwrap_or_default();
-    let quoted = quoted.split_once('\'').map(|(head, _)| head).unwrap_or("");
-    quoted
-        .split(", ")
-        .filter(|entry| !entry.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
 /// Every attribute any `*SortBy` enum of the model declares, which is the pool a case
 /// draws an attribute belonging to ANOTHER type from.
 fn every_modelled_attribute() -> Vec<&'static str> {
@@ -249,9 +230,9 @@ fn every_modelled_attribute() -> Vec<&'static str> {
 }
 
 /// Each entity type is ordered by exactly the attributes the model declares for it: every
-/// one of them is served, every other attribute name is refused, and the refusal publishes
-/// that same set, the two attributes every type carries first with the documented default
-/// at its head.
+/// one of them is served, and every other attribute name is refused with the one sentence
+/// the service states a sort attribute it does not order by in — which publishes no set,
+/// because `Sort$SortBy` declares none.
 #[tokio::test]
 async fn a_list_sorts_on_the_attributes_the_model_declares_for_its_type() {
     let router = emulator();
@@ -311,34 +292,11 @@ async fn a_list_sorts_on_the_attributes_the_model_declares_for_its_type() {
                 refused.body
             );
             let message = refused.text("/Message");
-            assert!(
-                message.contains(sort_by),
-                "case {case:?}: the refusal must name the attribute asked for, got \
-                 {message:?}"
-            );
-
-            let published = published_attributes(&message);
             assert_eq!(
-                published.first().map(String::as_str),
-                Some(DEFAULT_ATTRIBUTE),
-                "case {case:?}: the refusal must publish the default attribute first, got \
-                 {published:?}"
-            );
-            assert_eq!(
-                published.get(1).map(String::as_str),
-                Some(COMMON_ATTRIBUTE),
-                "case {case:?}: the refusal must publish the other common attribute next, \
-                 got {published:?}"
-            );
-            let mut published_set = published.clone();
-            published_set.sort();
-            let mut declared_set: Vec<String> =
-                declared.iter().map(|value| value.to_string()).collect();
-            declared_set.sort();
-            assert_eq!(
-                published_set, declared_set,
-                "case {case:?}: the refusal must publish exactly the attributes the model \
-                 declares for this type, got {published:?}"
+                message,
+                format!("[Requested sort by '{sort_by}' is invalid. It should be one of '[]'.]"),
+                "case {case:?}: the refusal must name the attribute asked for and render the \
+                 unpublished allowed-value set as an empty list, got {message:?}"
             );
         }
     }
@@ -384,7 +342,7 @@ async fn a_declared_attribute_orders_the_page_it_is_asked_for() {
                     "Catalog": CATALOG,
                     "ChangeSet": [{
                         "ChangeType": "CreateProduct",
-                        "Entity": {"Type": entity_type},
+                        "Entity": {"Type": format!("{entity_type}@1.0")},
                         "DetailsDocument": details,
                     }],
                 }),

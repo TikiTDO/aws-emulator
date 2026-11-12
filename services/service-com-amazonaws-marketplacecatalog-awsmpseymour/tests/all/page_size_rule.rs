@@ -39,6 +39,11 @@ const SIGNED_FOR_EU_WEST_1: &str = "AWS4-HMAC-SHA256 \
 /// The entity type the change sets below create, and the one `ListEntities` pages.
 const ENTITY_TYPE: &str = "AmiProduct";
 
+/// The schema version a change addresses [`ENTITY_TYPE`] at: `Change$Entity$Type` carries
+/// an entity type at a version (`<EntityType>@<version>`), which is the form the service
+/// publishes for that member.
+const ENTITY_TYPE_AT_VERSION: &str = "AmiProduct@1.0";
+
 /// How many change sets this suite starts — more than the smallest page it asks for, so
 /// a page boundary is crossed, and fewer than any declared maximum or documented
 /// default, so a request naming no `MaxResults` can be checked to serve them all.
@@ -170,7 +175,7 @@ async fn start_change_set(router: &MultiServiceRouter, title: &str) {
             "Intent": "APPLY",
             "ChangeSet": [{
                 "ChangeType": "AddDeliveryOptions",
-                "Entity": {"Type": ENTITY_TYPE},
+                "Entity": {"Type": ENTITY_TYPE_AT_VERSION},
                 "Details": details.to_string(),
             }],
         })),
@@ -192,8 +197,7 @@ struct Paginated {
     request: Value,
     /// The JSON pointer of the member one page's items arrive in.
     items: &'static str,
-    /// The maximum the operation's `MaxResults` `@range` declares, and the noun its
-    /// refusal counts — from the model itself
+    /// The maximum the operation's `MaxResults` `@range` declares — from the model itself
     /// (`smithy_query(query="operation", operation="ListChangeSets,ListEntities,\
     /// ListAssessments,DescribeAssessment")`: 1..=20, 1..=50, 1..=100, 1..=100).
     limit: i32,
@@ -203,7 +207,6 @@ struct Paginated {
     /// `smithy_query(query="doc", shape="<Request>", member="MaxResults")`: 20, 20, 20,
     /// 50).
     default: i32,
-    noun: &'static str,
 }
 
 /// Every paginated operation of this service, with the assessment the control-level
@@ -217,7 +220,6 @@ fn paginated(assessment_id: &str) -> Vec<Paginated> {
             items: "/ChangeSetSummaryList",
             limit: 20,
             default: 20,
-            noun: "change sets",
         },
         Paginated {
             operation: "ListEntities",
@@ -226,7 +228,6 @@ fn paginated(assessment_id: &str) -> Vec<Paginated> {
             items: "/EntitySummaryList",
             limit: 50,
             default: 20,
-            noun: "entities",
         },
         Paginated {
             operation: "ListAssessments",
@@ -235,7 +236,6 @@ fn paginated(assessment_id: &str) -> Vec<Paginated> {
             items: "/AssessmentSummaryList",
             limit: 100,
             default: 20,
-            noun: "assessments",
         },
         Paginated {
             operation: "DescribeAssessment",
@@ -244,7 +244,6 @@ fn paginated(assessment_id: &str) -> Vec<Paginated> {
             items: "/ControlAssessments",
             limit: 100,
             default: 50,
-            noun: "control results",
         },
     ]
 }
@@ -395,10 +394,10 @@ async fn every_paginated_operation_serves_the_page_size_it_was_asked_for() {
     }
 }
 
-/// A `MaxResults` outside the declared range is refused as a client
-/// `ValidationException` naming the member, by every paginated operation and whatever
-/// the resources it pages — never served, never coerced into a legal page size, and
-/// never a 5xx.
+/// A `MaxResults` outside the declared range is refused with the modelled
+/// `ValidationException` and its 422, by every paginated operation and whatever the
+/// resources it pages — never served, never coerced into a legal page size, never the
+/// protocol's bare 400, and never a 5xx.
 ///
 /// The rows are the four paginated operations crossed with the ways a page size leaves
 /// a range: zero, negative, one past the published maximum, and the largest a 32-bit
@@ -410,13 +409,11 @@ async fn a_page_size_outside_the_declared_range_is_refused_the_same_way_everywhe
     for row in paginated(&assessment_id) {
         for requested in [0, -1, row.limit + 1, i32::MAX] {
             let answer = page(&router, &row, Some(requested), "").await;
-            assert!(
-                (400..500).contains(&answer.status),
+            assert_eq!(
+                answer.status, 422,
                 "case {}/MaxResults={requested}: a page size outside the declared range must \
-                 be refused as a client error, got {} with {:?}",
-                row.operation,
-                answer.status,
-                answer.body
+                 be refused with the modelled ValidationException's status, got {} with {:?}",
+                row.operation, answer.status, answer.body
             );
             assert_eq!(
                 answer.error_code(),
@@ -425,10 +422,11 @@ async fn a_page_size_outside_the_declared_range_is_refused_the_same_way_everywhe
                 row.operation,
                 answer.body
             );
-            assert!(
-                answer.fault().to_ascii_lowercase().contains("maxresults"),
-                "case {}/MaxResults={requested}: the refusal must name the member it is \
-                 about, got {:?}",
+            assert_eq!(
+                answer.fault(),
+                out_of_bounds_message(requested, row.limit),
+                "case {}/MaxResults={requested}: the refusal must state the size asked for \
+                 and the bounds the member declares, got {:?}",
                 row.operation,
                 answer.fault()
             );
@@ -436,28 +434,37 @@ async fn a_page_size_outside_the_declared_range_is_refused_the_same_way_everywhe
     }
 }
 
+/// The refusal an out-of-range `MaxResults` is answered with, spelled out here rather
+/// than taken from the crate so a wrong implementation cannot make this pass: the size
+/// the request asked for and the bounds the member's own `@range` declares.
+fn out_of_bounds_message(requested: i32, limit: i32) -> String {
+    format!(
+        "[Provided max results value '{requested}' is out of bounds. It should be between \
+         1 and {limit}.]"
+    )
+}
+
 /// The page-size decision itself, read where the service makes it: the size served for
 /// a `MaxResults` inside the declared range, the documented default page for a request
-/// naming none, and the refusal built for one outside the range — stating the operation,
-/// the range it serves, the noun it pages and the size asked for.
+/// naming none, and the refusal built for one outside the range — stating the size asked
+/// for and the bounds the member declares.
 ///
-/// The rows are the four paginated operations, each with the range, the documented
-/// default and the noun it publishes, crossed with the sizes the rule generalises over:
-/// both published bounds, one in between, no member at all, and the three ways a size
-/// leaves the range.
+/// The rows are the four paginated operations, each with the range and the documented
+/// default it publishes, crossed with the sizes the rule generalises over: both
+/// published bounds, one in between, no member at all, and the three ways a size leaves
+/// the range.
 #[test]
 fn the_page_size_rule_judges_every_operation_by_its_own_declared_range() {
     for row in paginated("assessment-1") {
         let limit = row.limit;
         for requested in [Some(1), Some(limit / 2), Some(limit), None] {
-            let served = page_size(row.operation, row.noun, row.default, limit, requested)
-                .unwrap_or_else(|fault| {
-                    panic!(
-                        "case {}/MaxResults={requested:?}: a page size inside the declared \
-                         range must be served, got {fault:?}",
-                        row.operation
-                    )
-                });
+            let served = page_size(row.default, limit, requested).unwrap_or_else(|fault| {
+                panic!(
+                    "case {}/MaxResults={requested:?}: a page size inside the declared \
+                     range must be served, got {fault:?}",
+                    row.operation
+                )
+            });
             let expected = usize::try_from(requested.unwrap_or(row.default))
                 .expect("a positive page size fits in usize");
             assert_eq!(
@@ -469,19 +476,13 @@ fn the_page_size_rule_judges_every_operation_by_its_own_declared_range() {
         }
 
         for requested in [0, -1, limit + 1, i32::MAX] {
-            let fault = page_size(row.operation, row.noun, row.default, limit, Some(requested))
+            let fault = page_size(row.default, limit, Some(requested))
                 .expect_err("a page size outside the declared range is refused");
             assert_eq!(
                 fault.message.as_deref(),
-                Some(
-                    format!(
-                        "[MaxResults: {} serves between 1 and {limit} {} a page, not {requested}]",
-                        row.operation, row.noun
-                    )
-                    .as_str()
-                ),
-                "case {}/MaxResults={requested}: the refusal must name the member, the range \
-                 served and the size asked for, got {:?}",
+                Some(out_of_bounds_message(requested, limit).as_str()),
+                "case {}/MaxResults={requested}: the refusal must state the size asked for \
+                 and the bounds the member declares, got {:?}",
                 row.operation,
                 fault.message
             );

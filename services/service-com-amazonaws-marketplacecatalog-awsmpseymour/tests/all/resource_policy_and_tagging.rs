@@ -281,7 +281,7 @@ async fn created_resources(router: &MultiServiceRouter, entity_type: &str) -> (S
             "Catalog": CATALOG,
             "ChangeSet": [{
                 "ChangeType": "CreateProduct",
-                "Entity": {"Type": entity_type},
+                "Entity": {"Type": format!("{entity_type}@1.0")},
                 "Details": json!({"ProductTitle": entity_type}).to_string(),
             }],
         })),
@@ -901,10 +901,9 @@ async fn a_resource_arn_is_refused_by_syntax_then_authorization_then_existence()
 
         for arn in malformed {
             let refused = invoke(arn.to_string()).await;
-            // The boundary validator refuses a modelled `@pattern` before any handler
-            // runs, and the HTTP status of such a pre-dispatch refusal stays with the
-            // protocol (`vendor/smithy-server-runtime/src/pre_dispatch.rs`); the error
-            // CODE and the message are the service's own, chosen in `service.rs`.
+            // `ResourceArn` is judged by the HANDLER (`skip_validation` on each of these
+            // inputs), so a value outside the syntax the member publishes carries the
+            // modelled `ValidationException` — its code, its 422 and its `Message`.
             assert_eq!(
                 (
                     refused.error_code(),
@@ -918,16 +917,10 @@ async fn a_resource_arn_is_refused_by_syntax_then_authorization_then_existence()
                 refused.error_code(),
                 refused.body
             );
-            // A pre-dispatch refusal takes the PROTOCOL's status — 400 for the JSON
-            // family (`vendor/smithy-server-runtime/src/pre_dispatch.rs`'s `json`) — and
-            // no service seam can change it: `Service::override_refusal` chooses the code
-            // and the message, never the status, and the modelled `ValidationException`'s
-            // own 422 is what a HANDLER-returned one carries (see the policy suite, where
-            // a `Policy` that is not JSON is refused 422).
             assert_eq!(
-                refused.status, 400,
+                refused.status, 422,
                 "case {operation} {arn:?}: a malformed resource ARN must be refused with \
-                 the protocol's client-error status, got {}",
+                 the modelled ValidationException's own status, got {}",
                 refused.status
             );
             assert_eq!(

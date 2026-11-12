@@ -14,10 +14,11 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-marketplacecatalog-awsm
 // `skip_validation` names `Catalog` and `NextToken` (see `ListAssessmentsInput`) plus
 // `EntityType`: a letters-only value satisfies the modelled `@pattern` and may still name
 // no entity type at all, and only the handler holds the set of types this catalog has
-// (`crate::state::ENTITY_TYPES`), so it is what judges the member.
+// (`crate::state::ENTITY_TYPES`), so it is what judges the member. `MaxResults` joins them
+// for the reason given on `ListChangeSetsInput`.
 #[smithy_macros::smithy(
     shape = "com.amazonaws.marketplacecatalog#ListEntitiesRequest",
-    skip_validation = ["Catalog", "EntityType", "NextToken"]
+    skip_validation = ["Catalog", "EntityType", "MaxResults", "NextToken"]
 )]
 #[derive(Debug, Clone, Default)]
 pub struct ListEntitiesInput {

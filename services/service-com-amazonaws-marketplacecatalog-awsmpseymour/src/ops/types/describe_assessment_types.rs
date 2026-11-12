@@ -14,10 +14,11 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-marketplacecatalog-awsm
 // `skip_validation` names `Catalog` and `NextToken` (see `ListAssessmentsInput`) plus
 // `AssessmentIdentifier`, whose two accepted forms are narrower in shape and wider in
 // namespace than the modelled `@pattern`, and whose fault quotes the syntax this service
-// publishes — so the HANDLER judges it.
+// publishes — so the HANDLER judges it. `MaxResults` joins them for the reason given on
+// `ListChangeSetsInput`.
 #[smithy_macros::smithy(
     shape = "com.amazonaws.marketplacecatalog#DescribeAssessmentRequest",
-    skip_validation = ["Catalog", "AssessmentIdentifier", "NextToken"]
+    skip_validation = ["Catalog", "AssessmentIdentifier", "MaxResults", "NextToken"]
 )]
 #[derive(Debug, Clone, Default)]
 pub struct DescribeAssessmentInput {

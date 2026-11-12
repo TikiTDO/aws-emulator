@@ -163,7 +163,7 @@ async fn seed(router: &MultiServiceRouter) -> String {
             "ChangeSetName": "filter-validation",
             "ChangeSet": [{
                 "ChangeType": "CreateProduct",
-                "Entity": {"Type": ENTITY_TYPE},
+                "Entity": {"Type": format!("{ENTITY_TYPE}@1.0")},
                 "Details": json!({"ProductTitle": "filter-validation"}).to_string(),
             }],
         }),

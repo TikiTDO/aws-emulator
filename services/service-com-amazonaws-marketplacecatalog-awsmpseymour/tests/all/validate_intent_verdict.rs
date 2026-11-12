@@ -205,7 +205,7 @@ fn change(
     details: Value,
     change_name: Option<&str>,
 ) -> Value {
-    let mut entity = json!({"Type": entity_type});
+    let mut entity = json!({"Type": format!("{entity_type}@1.0")});
     if let Some(identifier) = identifier {
         entity["Identifier"] = json!(identifier);
     }

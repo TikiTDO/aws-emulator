@@ -545,7 +545,7 @@ async fn an_unknown_id_is_a_client_refusal_with_no_side_effect() {
             "Catalog": CATALOG,
             "ChangeSet": [{
                 "ChangeType": "CreateProduct",
-                "Entity": {"Type": "AmiProduct"},
+                "Entity": {"Type": "AmiProduct@1.0"},
                 "Details": "{\"ProductTitle\":\"before\"}",
             }],
         })),
@@ -590,7 +590,7 @@ async fn an_unknown_id_is_a_client_refusal_with_no_side_effect() {
                 "Catalog": CATALOG,
                 "ChangeSet": [{
                     "ChangeType": "UpdateInformation",
-                    "Entity": {"Type": "AmiProduct", "Identifier": "ent-does-not-exist"},
+                    "Entity": {"Type": "AmiProduct@1.0", "Identifier": "ent-does-not-exist"},
                     "Details": "{}",
                 }],
             })),

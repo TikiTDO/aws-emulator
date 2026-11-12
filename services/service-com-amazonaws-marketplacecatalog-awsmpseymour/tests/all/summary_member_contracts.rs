@@ -277,7 +277,7 @@ async fn run_rows(router: &MultiServiceRouter, rows: &[Row]) -> Vec<String> {
                 "Catalog": CATALOG,
                 "ChangeSet": [{
                     "ChangeType": create_change_type(entity_type),
-                    "Entity": {"Type": entity_type},
+                    "Entity": {"Type": format!("{entity_type}@1.0")},
                     "DetailsDocument": details,
                 }],
             })),

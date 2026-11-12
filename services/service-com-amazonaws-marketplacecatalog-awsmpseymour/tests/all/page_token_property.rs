@@ -298,7 +298,7 @@ async fn start_change_set(router: &MultiServiceRouter, title: &str) {
             "Intent": "APPLY",
             "ChangeSet": [{
                 "ChangeType": "AddDeliveryOptions",
-                "Entity": {"Type": ENTITY_TYPE},
+                "Entity": {"Type": format!("{ENTITY_TYPE}@1.0")},
                 "Details": details.to_string(),
             }],
         })),

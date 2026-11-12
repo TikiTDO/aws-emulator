@@ -125,16 +125,16 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // The boundary validator refuses a member that fails its modelled
         // `@pattern` before any handler runs, so this seam is the only place
         // that wording can be chosen — and the one place it is chosen for EVERY
-        // operation and every member, rather than per operation. The members
-        // whose documented syntax is not the modelled pattern of the shape they
-        // target (`Catalog`, `Entity$Type`, `Entity$Identifier`, `EntityId` on
-        // both read paths, `ChangeSetName`, `ClientRequestToken`,
-        // `AssessmentIdentifier`, `NextToken`) carry `skip_validation` and are
-        // checked by their handler
-        // instead, which answers the modelled `ValidationException` and its 422;
-        // what reaches here is a member whose modelled pattern IS the syntax the
-        // service publishes — `ResourceArn` above all, the member every tagging
-        // and resource-policy operation is addressed by.
+        // operation and every member, rather than per operation. Every member
+        // this service judges against a rule of its OWN — a syntax, a set or a
+        // range it states in words — is off the boundary instead
+        // (`skip_validation` in `src/ops/types/`) and is checked by its handler,
+        // which answers the modelled `ValidationException` and its 422: a
+        // pre-dispatch refusal cannot carry that status, since it takes the
+        // protocol's own. What reaches here is a member held to exactly the
+        // model's own constraint and for which this service states no sentence
+        // of its own — a tag key or value, a filter name, a policy document, the
+        // details of a change.
         //
         // The code stays `ValidationException`, which is both the framework's own
         // code for a constraint failure and the modelled client error a handler

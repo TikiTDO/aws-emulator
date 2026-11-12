@@ -185,7 +185,7 @@ async fn seed_one_assessment_per_framework(router: &MultiServiceRouter) {
                 "Intent": "APPLY",
                 "ChangeSet": [{
                     "ChangeType": "AddDeliveryOptions",
-                    "Entity": {"Type": entity_type},
+                    "Entity": {"Type": format!("{entity_type}@1.0")},
                     "Details": submitted_version(entity_type).to_string(),
                 }],
             }),

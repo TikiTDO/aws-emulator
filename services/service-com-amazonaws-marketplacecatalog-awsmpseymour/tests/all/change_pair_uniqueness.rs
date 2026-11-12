@@ -176,7 +176,14 @@ async fn start(router: &MultiServiceRouter, changes: Value) -> Answer {
 /// One change: a change type, the entity type reference it acts under, and the identifier
 /// it names (none for a change that creates an entity of its own).
 fn change(change_type: &str, entity_type: &str, identifier: Option<&str>) -> Value {
-    let mut entity = json!({"Type": entity_type});
+    // `Change$Entity$Type` carries an entity type at a schema version, which is the form
+    // the service publishes for the member; a row that names its own version keeps it.
+    let reference = if entity_type.contains('@') {
+        entity_type.to_string()
+    } else {
+        format!("{entity_type}@1.0")
+    };
+    let mut entity = json!({"Type": reference});
     if let Some(identifier) = identifier {
         entity["Identifier"] = json!(identifier);
     }

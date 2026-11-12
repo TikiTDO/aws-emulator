@@ -154,7 +154,7 @@ async fn one_sort_order_rule_serves_every_list() {
                 "Catalog": CATALOG,
                 "ChangeSet": [{
                     "ChangeType": "CreateProduct",
-                    "Entity": {"Type": "AmiProduct"},
+                    "Entity": {"Type": "AmiProduct@1.0"},
                     "Details": json!({"ProductTitle": title}).to_string(),
                 }],
             }),
@@ -303,7 +303,7 @@ async fn an_absent_sort_order_reads_as_the_documented_default() {
                 "Catalog": CATALOG,
                 "ChangeSet": [{
                     "ChangeType": "CreateProduct",
-                    "Entity": {"Type": "AmiProduct"},
+                    "Entity": {"Type": "AmiProduct@1.0"},
                     "Details": json!({"ProductTitle": title}).to_string(),
                 }],
             }),

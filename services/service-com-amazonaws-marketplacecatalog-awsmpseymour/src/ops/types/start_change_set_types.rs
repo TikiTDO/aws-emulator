@@ -35,9 +35,15 @@ pub struct StartChangeSetInput {
 // the modelled `@length(min: 1, max: 72)` — where the modelled `@pattern` (`^[a-zA-Z]$`)
 // admits a single letter and so leaves that length nothing to describe. The handler judges
 // it (`crate::state::is_change_name`) and answers the modelled `ValidationException`.
+//
+// `ChangeType` joins it because the member names the change the catalog is to MAKE: the
+// set of changes this catalog performs (`crate::state::CHANGE_TYPES`) is narrower than the
+// modelled `@pattern`, and the handler holds it — so every value the member cannot carry,
+// whatever is wrong with it, is the one refusal that set states, carrying the modelled
+// `ValidationException` and its 422 rather than the protocol's boundary status.
 #[smithy_macros::smithy(
     shape = "com.amazonaws.marketplacecatalog#Change",
-    skip_validation = ["ChangeName"]
+    skip_validation = ["ChangeName", "ChangeType"]
 )]
 #[derive(Debug, Clone, Default)]
 pub struct Change {

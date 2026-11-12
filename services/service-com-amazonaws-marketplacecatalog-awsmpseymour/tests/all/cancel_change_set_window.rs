@@ -166,7 +166,7 @@ fn create_change(entity_type: &str, details: Value) -> Value {
         "Catalog": CATALOG,
         "ChangeSet": [{
             "ChangeType": "CreateProduct",
-            "Entity": {"Type": entity_type},
+            "Entity": {"Type": format!("{entity_type}@1.0")},
             "Details": details.to_string(),
         }],
     })

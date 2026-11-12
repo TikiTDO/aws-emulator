@@ -286,7 +286,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let sort_attributes = crate::state::entity_sort_attributes(&input.entity_type);
         if !sort_attributes.contains(&sort_by.as_str()) {
             return Err(ListEntitiesErrorModeled::ValidationException(
-                crate::state::invalid_sort_by(&sort_by, &sort_attributes),
+                crate::state::invalid_sort_by(&sort_by),
             )
             .into());
         }
@@ -346,13 +346,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // `MaxResults` is modelled `@range(min: 1, max: 50)` and documented "if a
         // value isn't provided, the default value is 20", judged by the one
-        // page-size rule in `crate::state::page_size`, so no request can reach
-        // the paging arithmetic with a size the model does not allow, and one
-        // naming no `MaxResults` is served the documented default rather than the
-        // modelled maximum.
+        // page-size rule in `crate::state::page_size` — here rather than at the
+        // boundary (`skip_validation` on `ListEntitiesInput`), so a size outside
+        // the range carries the modelled `ValidationException` and its 422. No
+        // request can reach the paging arithmetic with a size the model does not
+        // allow, and one naming no `MaxResults` is served the documented default
+        // rather than the modelled maximum.
         let page_size = match crate::state::page_size(
-            "ListEntities",
-            "entities",
             crate::state::LIST_ENTITIES_PAGE_DEFAULT,
             crate::state::LIST_ENTITIES_PAGE_LIMIT,
             input.max_results,

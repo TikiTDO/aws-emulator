@@ -257,24 +257,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut named_changes: ::std::collections::HashMap<&str, usize> =
             ::std::collections::HashMap::with_capacity(input.change_set.len());
         for (index, change) in input.change_set.iter().enumerate() {
-            // `Entity$Type` names an entity type, on its own or at a schema
-            // version (`<EntityType>@<version>`) — the form the service accepts
-            // and every real caller sends. It is judged here rather than at the
-            // boundary (`skip_validation` on `Entity`), against the types this
-            // catalog HAS: a reference naming none of them names no entity type.
-            if !crate::state::is_entity_type_reference(&change.entity.r#type) {
-                return Err(StartChangeSetErrorModeled::ValidationException(
-                    crate::state::invalid_entity_type(&change.entity.r#type),
-                )
-                .into());
+            // `Entity$Type` names an entity type at a SCHEMA VERSION
+            // (`<EntityType>@<version>`) — the form the service publishes for the
+            // member and every real caller sends. It is judged here rather than
+            // at the boundary (`skip_validation` on `Entity`): first against that
+            // published form, which the modelled `EntityType` pattern cannot
+            // state because it admits no separator, and then against the types
+            // this catalog HAS, since a reference naming none of them names no
+            // entity type.
+            if let Err(fault) =
+                crate::state::check_entity_type_reference(&change.entity.r#type)
+            {
+                return Err(StartChangeSetErrorModeled::ValidationException(fault).into());
             }
             // `Change$ChangeType` names the change the catalog is to make
             // ("single string values that describe your intention for the
             // change"), so it is judged against the changes this catalog
             // PERFORMS, the way the entity type above is judged against the
-            // types it has: a value inside `ChangeType`'s pattern that names
-            // none of them asks for no change the catalog can make, and is
-            // refused rather than stored as a change nothing could apply.
+            // types it has: a value naming none of them asks for no change the
+            // catalog can make, and is refused — here rather than at the
+            // boundary (`skip_validation` on `Change`), so the refusal is the
+            // modelled `ValidationException` — rather than stored as a change
+            // nothing could apply.
             if !crate::state::is_change_type(&change.change_type) {
                 return Err(StartChangeSetErrorModeled::ValidationException(
                     crate::state::invalid_change_type(&change.change_type),

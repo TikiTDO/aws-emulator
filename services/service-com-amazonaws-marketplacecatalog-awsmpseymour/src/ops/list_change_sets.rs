@@ -227,7 +227,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .unwrap_or_else(|| crate::state::CHANGE_SET_SORT_BY[0].to_string());
         if !crate::state::CHANGE_SET_SORT_BY.contains(&sort_by.as_str()) {
             return Err(ListChangeSetsErrorModeled::ValidationException(
-                crate::state::invalid_sort_by(&sort_by, crate::state::CHANGE_SET_SORT_BY),
+                crate::state::invalid_sort_by(&sort_by),
             )
             .into());
         }
@@ -255,11 +255,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `MaxResults` is modelled `@range(min: 1, max: 20)` and documents the
         // page an absent member serves, and the page-size rule — serve a size
         // inside that range, refuse one outside it, serve the documented default
-        // when the member is absent — is `crate::state::page_size`, so no request
-        // can reach the paging arithmetic with a size the model does not allow.
+        // when the member is absent — is `crate::state::page_size`, judged here
+        // rather than at the boundary (`skip_validation` on
+        // `ListChangeSetsInput`), so no request can reach the paging arithmetic
+        // with a size the model does not allow.
         let page_size = match crate::state::page_size(
-            "ListChangeSets",
-            "change sets",
             crate::state::LIST_CHANGE_SETS_PAGE_DEFAULT,
             crate::state::LIST_CHANGE_SETS_PAGE_LIMIT,
             input.max_results,

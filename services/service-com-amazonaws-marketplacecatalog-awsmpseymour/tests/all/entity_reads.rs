@@ -167,7 +167,7 @@ async fn created_entity(router: &MultiServiceRouter, entity_type: &str, title: &
             "Catalog": CATALOG,
             "ChangeSet": [{
                 "ChangeType": "CreateProduct",
-                "Entity": {"Type": entity_type},
+                "Entity": {"Type": format!("{entity_type}@1.0")},
                 "Details": json!({"ProductTitle": title}).to_string(),
             }],
         })),
@@ -679,13 +679,15 @@ async fn an_unsupported_sort_attribute_is_refused() {
             answer.status,
             answer.body
         );
-        // The message is built from the request: the attribute it asked for and the set
-        // this list accepts.
+        // The message is built from the request — the attribute it asked for — and renders
+        // the allowed-value set the MODEL publishes for `Sort$SortBy`, which declares
+        // none, so that slot is the empty list.
         let message = answer.text("/Message");
-        assert!(
-            message.contains(sort_by) && ENTITY_SORT_BY.iter().all(|s| message.contains(s)),
-            "case {case:?}: the refusal must name the rejected attribute and the permitted \
-             set, got {message:?}"
+        assert_eq!(
+            message,
+            format!("[Requested sort by '{sort_by}' is invalid. It should be one of '[]'.]"),
+            "case {case:?}: the refusal must name the rejected attribute and render the \
+             unpublished set as an empty list, got {message:?}"
         );
     }
 

@@ -190,7 +190,7 @@ fn change_set(
     details: &Value,
     identifier: Option<&str>,
 ) -> Value {
-    let mut entity = json!({"Type": "AmiProduct"});
+    let mut entity = json!({"Type": "AmiProduct@1.0"});
     if let Some(identifier) = identifier {
         entity["Identifier"] = json!(identifier);
     }
@@ -645,12 +645,12 @@ async fn two_changes_against_one_entity_are_judged_on_their_combined_merge() {
             "ChangeSet": [
                 {
                     "ChangeType": "AddDeliveryOptions",
-                    "Entity": {"Type": "AmiProduct", "Identifier": entity_id},
+                    "Entity": {"Type": "AmiProduct@1.0", "Identifier": entity_id},
                     "DetailsDocument": option,
                 },
                 {
                     "ChangeType": "UpdateInformation",
-                    "Entity": {"Type": "AmiProduct", "Identifier": entity_id},
+                    "Entity": {"Type": "AmiProduct@1.0", "Identifier": entity_id},
                     "DetailsDocument": {"Filler": filler},
                 },
             ],

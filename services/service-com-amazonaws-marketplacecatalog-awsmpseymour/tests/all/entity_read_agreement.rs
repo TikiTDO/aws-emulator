@@ -178,7 +178,7 @@ async fn create_entity(router: &MultiServiceRouter, title: &str) -> String {
             "Catalog": CATALOG,
             "ChangeSet": [{
                 "ChangeType": "CreateProduct",
-                "Entity": {"Type": "AmiProduct"},
+                "Entity": {"Type": "AmiProduct@1.0"},
                 "Details": json!({"ProductTitle": title}).to_string(),
             }],
         })),

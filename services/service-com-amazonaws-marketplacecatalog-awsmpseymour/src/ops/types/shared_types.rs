@@ -109,7 +109,16 @@ pub struct Filter {
     pub value_list: Option<Vec<String>>,
 }
 
-#[smithy_macros::smithy(shape = "com.amazonaws.marketplacecatalog#Sort")]
+// `skip_validation = ["SortBy"]`: the member names the attribute the list being called
+// orders by, so what it may carry is that list's own set of attributes
+// (`crate::state::entity_sort_attributes`, `CHANGE_SET_SORT_BY`) — narrower than the
+// modelled `@pattern`, and held only by the handlers. Every value outside the set,
+// whatever its characters, is therefore the one refusal those handlers state, with the
+// modelled `ValidationException` and its 422 rather than the protocol's boundary status.
+#[smithy_macros::smithy(
+    shape = "com.amazonaws.marketplacecatalog#Sort",
+    skip_validation = ["SortBy"]
+)]
 #[derive(Debug, Clone, Default)]
 pub struct Sort {
     pub sort_by: Option<String>,

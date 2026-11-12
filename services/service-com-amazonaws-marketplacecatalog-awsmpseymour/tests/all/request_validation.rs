@@ -73,12 +73,13 @@ const CHANGE_SET_NAME_PATTERN: &str = r"^[\w\s+=.:@-]{1,100}$";
 /// with the modelled `@length(min: 1, max: 64)` folded into it.
 const CLIENT_REQUEST_TOKEN_PATTERN: &str = r"^[!-~]{1,64}$";
 
-/// The syntax the service publishes for an `AssessmentIdentifier`: the shape's own
-/// modelled `@pattern` (`smithy_query(query="shape", shape="AssessmentIdentifier")`),
-/// which already states both forms its member's doc documents.
+/// The syntax the service publishes for an `AssessmentIdentifier`: the two forms its
+/// member's doc documents ("the assessment ID … or the full assessment ARN"), written as
+/// two separately anchored alternatives joined by `|` with no account field in the ARN
+/// branch — the service's own string, not the shape's modelled `@pattern`.
 const ASSESSMENT_IDENTIFIER_PATTERN: &str = concat!(
-    r"^(assessment-[a-zA-Z0-9]+|arn:[a-zA-Z0-9-]+:[a-zA-Z0-9-]+:[a-zA-Z0-9-]*:",
-    r"[0-9]*:[a-zA-Z0-9-]+/Assessment/assessment-[a-zA-Z0-9]+)$"
+    r"(^assessment-[a-zA-Z0-9]+$)|(^arn:[a-zA-Z0-9-]+:[a-zA-Z0-9-]+:[a-zA-Z0-9-]*::",
+    r"[a-zA-Z0-9-]+/Assessment/assessment-[a-zA-Z0-9]+$)"
 );
 
 /// The `EntityId` `@pattern` (`smithy_query(query="shape", shape="EntityId")`).
@@ -210,7 +211,8 @@ fn start_change_set_body(changes: Value, extra: &[(&str, Value)]) -> Value {
     request
 }
 
-/// One change creating an entity of `entity_type` (which may be versioned).
+/// One change creating an entity of `entity_type`, which carries its schema version as
+/// `Change$Entity$Type` publishes it.
 fn create_change(entity_type: &str) -> Value {
     json!({
         "ChangeType": "CreateProduct",
@@ -286,7 +288,7 @@ async fn a_member_outside_its_published_syntax_is_refused_with_one_bracketed_fau
             "POST",
             "/StartChangeSet".to_string(),
             Some(start_change_set_body(
-                json!([create_change("AmiProduct")]),
+                json!([create_change("AmiProduct@1.0")]),
                 &[("Catalog", json!("AWS--Marketplace"))],
             )),
             format!(
@@ -631,7 +633,7 @@ async fn a_versioned_entity_type_reaches_the_rules_behind_it() {
             "OfferSet@1.0",
             "OfferSet",
         ),
-        ("no version at all", "SaaSProduct", "SaaSProduct"),
+        ("a three-part version", "SaaSProduct@1.2.3", "SaaSProduct"),
     ];
 
     for (case, reference, entity_type) in rows {
@@ -863,7 +865,7 @@ async fn a_mixed_batch_reports_each_entry_under_its_own_id() {
         "POST",
         "/StartChangeSet",
         Some(start_change_set_body(
-            json!([create_change("AmiProduct")]),
+            json!([create_change("AmiProduct@1.0")]),
             &[],
         )),
     )

@@ -199,7 +199,7 @@ async fn created_entity_arn(router: &MultiServiceRouter, entity_type: &str) -> S
             "Catalog": CATALOG,
             "ChangeSet": [{
                 "ChangeType": "CreateProduct",
-                "Entity": {"Type": entity_type},
+                "Entity": {"Type": format!("{entity_type}@1.0")},
                 "Details": json!({"ProductTitle": entity_type}).to_string(),
             }],
         })),

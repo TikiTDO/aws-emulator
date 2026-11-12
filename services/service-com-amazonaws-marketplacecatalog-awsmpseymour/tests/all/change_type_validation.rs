@@ -169,10 +169,18 @@ async fn describe_entity(router: &MultiServiceRouter, id: &str) -> Answer {
 }
 
 /// One change: a change type, the entity type it acts under, and the details it carries.
+///
+/// `Change$Entity$Type` carries an entity type at a schema version, which is the form the
+/// service publishes for the member; a row that names its own version keeps it.
 fn change(change_type: &str, entity_type: &str, title: &str) -> Value {
+    let reference = if entity_type.contains('@') {
+        entity_type.to_string()
+    } else {
+        format!("{entity_type}@1.0")
+    };
     json!({
         "ChangeType": change_type,
-        "Entity": {"Type": entity_type},
+        "Entity": {"Type": reference},
         "DetailsDocument": {"ProductTitle": title},
     })
 }

@@ -93,3 +93,5 @@ mod summary_member_contracts;
 mod tag_set_uniqueness;
 #[path = "all/validate_intent_verdict.rs"]
 mod validate_intent_verdict;
+#[path = "all/validation_refusal_class.rs"]
+mod validation_refusal_class;

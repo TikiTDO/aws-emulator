@@ -11,7 +11,17 @@ use super::*;
 
 smithy_macros::smithy_model!("smithy-model/com-amazonaws-marketplacecatalog-awsmpseymour.json");
 
-#[smithy_macros::smithy(shape = "com.amazonaws.marketplacecatalog#ListTagsForResourceRequest")]
+// `skip_validation = ["ResourceArn"]`: a resource ARN outside the modelled `ResourceARN`
+// `@pattern` is a member outside its constraint, which this service answers with the
+// modelled `ValidationException` and its 422 — a status no boundary refusal can carry,
+// since a pre-dispatch refusal takes the protocol's own. The handler judges the syntax
+// (`crate::state::is_resource_arn`), quoting that same pattern back, before it decides
+// whether the ARN names a resource of this catalog. Every operation this service addresses
+// by a resource ARN does the same.
+#[smithy_macros::smithy(
+    shape = "com.amazonaws.marketplacecatalog#ListTagsForResourceRequest",
+    skip_validation = ["ResourceArn"]
+)]
 #[derive(Debug, Clone, Default)]
 pub struct ListTagsForResourceInput {
     pub resource_arn: String,

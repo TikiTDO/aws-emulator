@@ -190,7 +190,7 @@ async fn created_entities(router: &MultiServiceRouter, specs: &[(&str, Value)]) 
                 "Catalog": CATALOG,
                 "ChangeSet": [{
                     "ChangeType": "CreateProduct",
-                    "Entity": {"Type": entity_type},
+                    "Entity": {"Type": format!("{entity_type}@1.0")},
                     "DetailsDocument": details,
                 }],
             })),

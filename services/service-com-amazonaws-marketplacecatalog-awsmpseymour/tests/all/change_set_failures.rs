@@ -231,7 +231,8 @@ async fn run_change_set(router: &MultiServiceRouter, case: &str, request: Value)
 /// A one-change `StartChangeSet` body creating an entity of `entity_type`, with the
 /// details carried by `member` (`Details` as a JSON string, or `DetailsDocument`).
 fn create_change(entity_type: &str, member: &str, details: Value) -> Value {
-    let mut change = json!({"ChangeType": "CreateProduct", "Entity": {"Type": entity_type}});
+    let mut change =
+        json!({"ChangeType": "CreateProduct", "Entity": {"Type": format!("{entity_type}@1.0")}});
     change[member] = if member == "Details" {
         json!(details.to_string())
     } else {
@@ -456,17 +457,17 @@ async fn a_change_set_whose_content_cannot_be_applied_fails_with_its_errors() {
                 "ChangeSet": [
                     {
                         "ChangeType": "CreateProduct",
-                        "Entity": {"Type": "AmiProduct"},
+                        "Entity": {"Type": "AmiProduct@1.0"},
                         "DetailsDocument": {"ProductTitle": "first"},
                     },
                     {
                         "ChangeType": "CreateProduct",
-                        "Entity": {"Type": "DataProduct"},
+                        "Entity": {"Type": "DataProduct@1.0"},
                         "DetailsDocument": {"ProductTitle": "second", "Visibility": "Sideways"},
                     },
                     {
                         "ChangeType": "CreateProduct",
-                        "Entity": {"Type": "SaaSProduct"},
+                        "Entity": {"Type": "SaaSProduct@1.0"},
                         "Details": "{\"ProductTitle\":\"third\"}",
                     },
                 ],
@@ -480,12 +481,12 @@ async fn a_change_set_whose_content_cannot_be_applied_fails_with_its_errors() {
                 "ChangeSet": [
                     {
                         "ChangeType": "CreateProduct",
-                        "Entity": {"Type": "AmiProduct"},
+                        "Entity": {"Type": "AmiProduct@1.0"},
                         "DetailsDocument": {"ProductTitle": true},
                     },
                     {
                         "ChangeType": "CreateProduct",
-                        "Entity": {"Type": "AmiProduct"},
+                        "Entity": {"Type": "AmiProduct@1.0"},
                         "DetailsDocument": {"Visibility": "Elsewhere"},
                     },
                 ],
@@ -499,7 +500,7 @@ async fn a_change_set_whose_content_cannot_be_applied_fails_with_its_errors() {
                 "Intent": "VALIDATE",
                 "ChangeSet": [{
                     "ChangeType": "AddRevisions",
-                    "Entity": {"Type": "AmiProduct"},
+                    "Entity": {"Type": "AmiProduct@1.0"},
                     "DetailsDocument": {"ProductTitle": ["titled"]},
                 }],
             }),
@@ -666,12 +667,12 @@ async fn a_change_set_that_contradicts_itself_fails_with_a_description() {
             "ChangeSet": [
                 {
                     "ChangeType": "UpdateInformation",
-                    "Entity": {"Type": entity_type, "Identifier": entity_id},
+                    "Entity": {"Type": format!("{entity_type}@1.0"), "Identifier": entity_id},
                     "DetailsDocument": first,
                 },
                 {
                     "ChangeType": "UpdateDeliveryOptions",
-                    "Entity": {"Type": entity_type, "Identifier": entity_id},
+                    "Entity": {"Type": format!("{entity_type}@1.0"), "Identifier": entity_id},
                     "DetailsDocument": second.clone(),
                 },
             ],
@@ -802,7 +803,7 @@ async fn a_change_whose_tags_pass_the_bound_fails_the_change_set() {
                 "Catalog": CATALOG,
                 "ChangeSet": [{
                     "ChangeType": "UpdateInformation",
-                    "Entity": {"Type": "AmiProduct", "Identifier": entity_id},
+                    "Entity": {"Type": "AmiProduct@1.0", "Identifier": entity_id},
                     "DetailsDocument": {"Support": "email"},
                     "EntityTags": tags,
                 }],

@@ -58,12 +58,13 @@ const ASSESSMENT_IDENTIFIER_MAX: usize = 2048;
 const EXCEPTION_MESSAGE_MAX: usize = 2048;
 
 /// The syntax the service publishes for an `AssessmentIdentifier`, reported verbatim in
-/// the refusal for one outside it: the shape's modelled `@pattern`, which states both
-/// forms the member's doc documents ("You can provide either the assessment ID … or the
-/// full assessment ARN").
+/// the refusal for one outside it: the two forms the member's doc documents ("You can
+/// provide either the assessment ID … or the full assessment ARN"), as two separately
+/// anchored alternatives joined by `|` with no account field in the ARN branch — the
+/// service's own string, not the shape's modelled `@pattern`.
 const ASSESSMENT_IDENTIFIER_PATTERN: &str = concat!(
-    r"^(assessment-[a-zA-Z0-9]+|arn:[a-zA-Z0-9-]+:[a-zA-Z0-9-]+:[a-zA-Z0-9-]*:",
-    r"[0-9]*:[a-zA-Z0-9-]+/Assessment/assessment-[a-zA-Z0-9]+)$"
+    r"(^assessment-[a-zA-Z0-9]+$)|(^arn:[a-zA-Z0-9-]+:[a-zA-Z0-9-]+:[a-zA-Z0-9-]*::",
+    r"[a-zA-Z0-9-]+/Assessment/assessment-[a-zA-Z0-9]+$)"
 );
 
 /// One emulator: a router carrying only this service, over one shared engine.

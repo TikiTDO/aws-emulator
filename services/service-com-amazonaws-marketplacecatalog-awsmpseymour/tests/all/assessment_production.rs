@@ -169,7 +169,7 @@ async fn try_start(
             "Intent": intent,
             "ChangeSet": [{
                 "ChangeType": "AddDeliveryOptions",
-                "Entity": {"Type": entity_type},
+                "Entity": {"Type": format!("{entity_type}@1.0")},
                 "Details": details.to_string(),
             }],
         })),

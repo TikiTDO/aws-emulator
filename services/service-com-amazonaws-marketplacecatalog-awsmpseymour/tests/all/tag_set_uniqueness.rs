@@ -187,7 +187,7 @@ fn start_body(
 ) -> Value {
     let mut change = json!({
         "ChangeType": "CreateProduct",
-        "Entity": {"Type": entity_type},
+        "Entity": {"Type": format!("{entity_type}@1.0")},
         "Details": json!({"ProductTitle": entity_type}).to_string(),
     });
     if let Some(tags) = entity_tags {

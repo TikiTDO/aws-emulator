@@ -12,10 +12,14 @@ use super::*;
 smithy_macros::smithy_model!("smithy-model/com-amazonaws-marketplacecatalog-awsmpseymour.json");
 
 // `skip_validation` names `Catalog` and `NextToken` for the reasons given on
-// `ListAssessmentsInput`.
+// `ListAssessmentsInput`, plus `MaxResults`: a page size outside the modelled `@range` is
+// a member outside its constraint, which this service answers with the modelled
+// `ValidationException` and its 422 — a status no boundary refusal can carry, since a
+// pre-dispatch refusal takes the protocol's own. The handler judges the range
+// (`crate::state::page_size`), the one place every paginated operation decides it.
 #[smithy_macros::smithy(
     shape = "com.amazonaws.marketplacecatalog#ListChangeSetsRequest",
-    skip_validation = ["Catalog", "NextToken"]
+    skip_validation = ["Catalog", "MaxResults", "NextToken"]
 )]
 #[derive(Debug, Clone, Default)]
 pub struct ListChangeSetsInput {
