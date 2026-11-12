@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op SendMessages
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `SendMessages`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`SendMessages::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Answers one direct-message send: every destination the request names is resolved
+//! against the application's stored endpoints and channels and the message
+//! configuration the request carries, and each one's `DeliveryStatus` is computed from
+//! that state — so the same send lands differently before and after a write that
+//! enables, disables or changes one of them. An unknown application is a
+//! `NotFoundException`; a request naming no destination at all is a
+//! `BadRequestException`.
 //!
 //! ## Shape of an operation
 //!
@@ -153,20 +151,478 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `SendMessages` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(SendMessagesErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("SendMessages"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(store_unavailable());
+        };
+
+        let SendMessagesInput {
+            application_id,
+            message_request,
+        } = input;
+        let MessageRequest {
+            addresses,
+            // `Context` and `TemplateConfiguration` tailor the message body, which this
+            // service does not render: nothing about the delivery outcome follows from
+            // either, so neither is read here.
+            context: _,
+            endpoints,
+            message_configuration,
+            template_configuration: _,
+            trace_id,
+        } = message_request;
+
+        let endpoints = endpoints.unwrap_or_default();
+        let addresses = addresses.unwrap_or_default();
+        if endpoints.is_empty() && addresses.is_empty() {
+            return Err(SendMessagesErrorModeled::BadRequestException(BadRequestException {
+                message: Some(
+                    "MessageRequest must specify at least one of Addresses or Endpoints"
+                        .to_string(),
+                ),
+                request_id: None,
+            })
+            .into());
+        }
+
+        // One request's destinations are answered in one deterministic order, so which
+        // of two destinations sharing an address is the duplicate does not depend on a
+        // hash map's iteration order.
+        let mut endpoint_ids: Vec<String> = endpoints.keys().cloned().collect();
+        endpoint_ids.sort();
+        let mut address_keys: Vec<String> = addresses.keys().cloned().collect();
+        address_keys.sort();
+
+        // Refused before anything is resolved, minted or recorded, so a send past the
+        // ceiling leaves the store exactly as it was.
+        let destination_count = endpoint_ids.len() + address_keys.len();
+        if destination_count > crate::state::MAX_DESTINATIONS_PER_SEND {
+            return Err(SendMessagesErrorModeled::BadRequestException(BadRequestException {
+                message: Some(format!(
+                    "one send addresses at most {} endpoints and addresses in this emulator; this request names {destination_count}",
+                    crate::state::MAX_DESTINATIONS_PER_SEND
+                )),
+                request_id: None,
+            })
+            .into());
+        }
+
+        let sent_at = crate::state::now_iso8601();
+        let mut store = state.lock();
+        let Some(app) = store.apps.get(&application_id) else {
+            return Err(SendMessagesErrorModeled::NotFoundException(NotFoundException {
+                // The service's text for this class is fixed: it names the class of
+                // resource and carries no value out of the request.
+                message: Some("Application not found".to_string()),
+                request_id: None,
+            })
+            .into());
+        };
+
+        // Resolve every destination against the STORED endpoints first: no id is
+        // minted and nothing is written until each outcome is known.
+        let mut destinations: Vec<Destination> =
+            Vec::with_capacity(endpoint_ids.len() + address_keys.len());
+        let mut delivered_addresses: ::std::collections::BTreeSet<String> =
+            ::std::collections::BTreeSet::new();
+
+        for endpoint_id in endpoint_ids {
+            let destination = match app.endpoints.get(&endpoint_id) {
+                // A destination named by an endpoint id this application does not hold
+                // cannot be delivered to, and no retry of the same send makes it
+                // deliverable.
+                None => Destination {
+                    endpoint_id: Some(endpoint_id.clone()),
+                    key: endpoint_id,
+                    address: None,
+                    channel_type: None,
+                    verdict: Verdict::new(
+                        DELIVERY_PERMANENT_FAILURE,
+                        STATUS_NOT_FOUND,
+                        "Endpoint not found".to_string(),
+                    ),
+                },
+                Some(endpoint) => {
+                    let target = Target::from_endpoint(endpoint, None);
+                    let verdict = target.verdict(app, &message_configuration, &delivered_addresses);
+                    Destination {
+                        endpoint_id: Some(endpoint_id.clone()),
+                        key: endpoint_id,
+                        address: target.address,
+                        channel_type: target.channel_type,
+                        verdict,
+                    }
+                }
+            };
+            destination.note_delivered(&mut delivered_addresses);
+            destinations.push(destination);
+        }
+
+        for address in address_keys {
+            // An address one of this application's endpoints carries brings that
+            // endpoint's opt-out and status with it, and supplies the channel when the
+            // request names none; an address the application holds no endpoint for is
+            // resolved from the request alone. An address two endpoints share is
+            // reachable through the ACTIVE one, which is the endpoint most recently
+            // written to it.
+            let stored = app
+                .endpoints
+                .values()
+                .filter(|endpoint| endpoint.address.as_deref() == Some(address.as_str()))
+                .max_by_key(|endpoint| is_active(endpoint.endpoint_status.as_deref()));
+            let requested_channel = addresses
+                .get(&address)
+                .and_then(|configuration| configuration.channel_type.clone());
+            let target = match stored {
+                Some(endpoint) => Target::from_endpoint(endpoint, requested_channel),
+                None => Target {
+                    address: Some(address.clone()).filter(|value| !value.trim().is_empty()),
+                    channel_type: requested_channel,
+                    opt_out: None,
+                    endpoint_status: None,
+                },
+            };
+            let verdict = target.verdict(app, &message_configuration, &delivered_addresses);
+            let destination = Destination {
+                endpoint_id: None,
+                key: address,
+                address: target.address,
+                channel_type: target.channel_type,
+                verdict,
+            };
+            destination.note_delivered(&mut delivered_addresses);
+            destinations.push(destination);
+        }
+
+        // Then mint the ids this send answers with and record it. A message id is
+        // minted only for a destination the message was accepted for, so an id in a
+        // response always names an accepted delivery.
+        let request_id = store.mint_id();
+        let mut endpoint_result: ::std::collections::HashMap<String, EndpointMessageResult> =
+            ::std::collections::HashMap::new();
+        let mut result: ::std::collections::HashMap<String, MessageResult> =
+            ::std::collections::HashMap::new();
+        let mut deliveries: Vec<crate::state::MessageDelivery> =
+            Vec::with_capacity(destinations.len());
+
+        for destination in destinations {
+            let message_id = (destination.verdict.delivery_status == DELIVERY_SUCCESSFUL)
+                .then(|| store.mint_id());
+            let Destination {
+                endpoint_id,
+                key,
+                address,
+                channel_type,
+                verdict,
+            } = destination;
+            if endpoint_id.is_some() {
+                endpoint_result.insert(
+                    key,
+                    EndpointMessageResult {
+                        address: address.clone(),
+                        delivery_status: verdict.delivery_status.to_string(),
+                        message_id: message_id.clone(),
+                        status_code: verdict.status_code,
+                        status_message: Some(verdict.status_message),
+                        updated_token: None,
+                    },
+                );
+            } else {
+                result.insert(
+                    key,
+                    MessageResult {
+                        delivery_status: verdict.delivery_status.to_string(),
+                        message_id: message_id.clone(),
+                        status_code: verdict.status_code,
+                        status_message: Some(verdict.status_message),
+                        updated_token: None,
+                    },
+                );
+            }
+            deliveries.push(crate::state::MessageDelivery {
+                endpoint_id,
+                address,
+                channel_type,
+                delivery_status: verdict.delivery_status.to_string(),
+                status_code: verdict.status_code,
+                message_id,
+            });
+        }
+
+        let Some(app) = store.apps.get_mut(&application_id) else {
+            return Err(store_unavailable());
+        };
+        app.record_send(crate::state::MessageSend {
+            request_id: request_id.clone(),
+            trace_id,
+            sent_at,
+            deliveries,
+        });
+
+        Ok(SendMessagesOutput {
+            message_response: MessageResponse {
+                application_id,
+                endpoint_result: (!endpoint_result.is_empty()).then_some(endpoint_result),
+                request_id: Some(request_id),
+                result: (!result.is_empty()).then_some(result),
+            },
+        })
     }
 }
+
+/// The `InternalServerErrorException` this operation answers with when the shared
+/// store cannot be reached — never a fresh engine, which would be a private store.
+fn store_unavailable() -> SendMessagesError {
+    SendMessagesErrorModeled::InternalServerErrorException(InternalServerErrorException {
+        message: Some("the pinpoint state store is unavailable".to_string()),
+        request_id: None,
+    })
+    .into()
+}
+
+/// The message was accepted for delivery to the destination.
+const DELIVERY_SUCCESSFUL: &str = "SUCCESSFUL";
+
+/// The destination cannot take the message, and a retry of the same send cannot
+/// change that.
+const DELIVERY_PERMANENT_FAILURE: &str = "PERMANENT_FAILURE";
+
+/// The destination's user has opted out of receiving messages.
+const DELIVERY_OPT_OUT: &str = "OPT_OUT";
+
+/// The destination's address already took delivery in this same send.
+const DELIVERY_DUPLICATE: &str = "DUPLICATE";
+
+/// `MessageResult$StatusCode` is "the downstream service status code for delivering
+/// the message": accepted, no such destination, refused by the destination's own
+/// state, or refused because nothing deliverable was supplied for its channel.
+const STATUS_OK: i32 = 200;
+const STATUS_REFUSED: i32 = 400;
+const STATUS_FORBIDDEN: i32 = 403;
+const STATUS_NOT_FOUND: i32 = 404;
+
+/// The `OptOut` value that means the endpoint's user wants no messages at all, per
+/// `EndpointResponse$OptOut`: "ALL, the user has opted out and doesn't want to receive
+/// any messages or push notifications".
+const OPT_OUT_ALL: &str = "ALL";
+
+/// The endpoint status a deliverable endpoint carries. Its counterpart `INACTIVE` is
+/// what an endpoint is moved to when another endpoint takes over its address, per
+/// `EndpointRequest$EndpointStatus`.
+const ENDPOINT_STATUS_ACTIVE: &str = "ACTIVE";
+
+/// Whether an endpoint carrying `status` is the one its address is reachable through.
+/// An endpoint stored with no status at all counts as active: that is the state a
+/// write lands an endpoint in.
+fn is_active(status: Option<&str>) -> bool {
+    status.is_none_or(|status| status.eq_ignore_ascii_case(ENDPOINT_STATUS_ACTIVE))
+}
+
+/// What the service answers for one destination, before any id is minted.
+struct Verdict {
+    delivery_status: &'static str,
+    status_code: i32,
+    status_message: String,
+}
+
+impl Verdict {
+    fn new(delivery_status: &'static str, status_code: i32, status_message: String) -> Self {
+        Self {
+            delivery_status,
+            status_code,
+            status_message,
+        }
+    }
+}
+
+/// One destination of this send, resolved against stored state.
+struct Destination {
+    /// The endpoint id, when the request addressed this destination by id — which is
+    /// also what decides whether the outcome is reported under `EndpointResult` or
+    /// under `Result`.
+    endpoint_id: Option<String>,
+    /// The key the outcome is reported under: the endpoint id, or the address.
+    key: String,
+    address: Option<String>,
+    channel_type: Option<String>,
+    verdict: Verdict,
+}
+
+impl Destination {
+    /// Record the address this destination took delivery of, so a later destination
+    /// carrying the same address is a duplicate of it rather than a second delivery.
+    fn note_delivered(&self, delivered: &mut ::std::collections::BTreeSet<String>) {
+        if self.verdict.delivery_status == DELIVERY_SUCCESSFUL {
+            if let Some(address) = self.address.clone() {
+                delivered.insert(address);
+            }
+        }
+    }
+}
+
+/// The stored facts one destination's outcome follows from.
+struct Target {
+    address: Option<String>,
+    channel_type: Option<String>,
+    opt_out: Option<String>,
+    endpoint_status: Option<String>,
+}
+
+impl Target {
+    /// The target one stored endpoint is. `requested_channel` is the channel the
+    /// request named for this destination and takes precedence over the endpoint's
+    /// own: a caller sending to an address states which channel it is an address for.
+    fn from_endpoint(endpoint: &crate::state::Endpoint, requested_channel: Option<String>) -> Self {
+        Self {
+            address: endpoint
+                .address
+                .clone()
+                .filter(|address| !address.trim().is_empty()),
+            channel_type: requested_channel.or_else(|| endpoint.channel_type.clone()),
+            opt_out: endpoint.opt_out.clone(),
+            endpoint_status: endpoint.endpoint_status.clone(),
+        }
+    }
+
+    /// The outcome for this target. Every refusal below is a fact about the stored
+    /// endpoint or about the message the request carries, so the same send lands
+    /// differently before and after a write that changes one of those facts.
+    fn verdict(
+        &self,
+        app: &crate::state::App,
+        configuration: &DirectMessageConfiguration,
+        delivered: &::std::collections::BTreeSet<String>,
+    ) -> Verdict {
+        let Some(address) = self.address.as_deref() else {
+            return Verdict::new(
+                DELIVERY_PERMANENT_FAILURE,
+                STATUS_REFUSED,
+                "Endpoint has no address to deliver the message to".to_string(),
+            );
+        };
+        if delivered.contains(address) {
+            return Verdict::new(
+                DELIVERY_DUPLICATE,
+                STATUS_REFUSED,
+                "The endpoint address is a duplicate of another endpoint address in this request"
+                    .to_string(),
+            );
+        }
+        if self
+            .opt_out
+            .as_deref()
+            .is_some_and(|opt_out| opt_out.eq_ignore_ascii_case(OPT_OUT_ALL))
+        {
+            return Verdict::new(
+                DELIVERY_OPT_OUT,
+                STATUS_FORBIDDEN,
+                "The user who's associated with the endpoint address has opted out of receiving messages"
+                    .to_string(),
+            );
+        }
+        if !is_active(self.endpoint_status.as_deref()) {
+            return Verdict::new(
+                DELIVERY_PERMANENT_FAILURE,
+                STATUS_REFUSED,
+                "The endpoint address is not active".to_string(),
+            );
+        }
+        let Some(channel) = self.channel_type.as_deref() else {
+            return Verdict::new(
+                DELIVERY_PERMANENT_FAILURE,
+                STATUS_REFUSED,
+                "No ChannelType for the address: the request names none and this application holds no endpoint for it"
+                    .to_string(),
+            );
+        };
+        // A channel the API configures as a channel of the application is delivered
+        // over only while that channel is enabled for it: a send over a channel the
+        // application never configured, or disabled again, reaches nothing.
+        if is_configurable_channel(channel) && app.deliverable_channel(channel).is_none() {
+            return Verdict::new(
+                DELIVERY_PERMANENT_FAILURE,
+                STATUS_NOT_FOUND,
+                format!("The {channel} channel is not enabled for this application"),
+            );
+        }
+        if !carries_message_for(channel, configuration) {
+            return Verdict::new(
+                DELIVERY_PERMANENT_FAILURE,
+                STATUS_REFUSED,
+                format!("MessageConfiguration carries no message for the {channel} channel"),
+            );
+        }
+        Verdict::new(
+            DELIVERY_SUCCESSFUL,
+            STATUS_OK,
+            "Message accepted for delivery".to_string(),
+        )
+    }
+}
+
+/// Whether `configuration` carries a message that can be delivered over `channel`:
+/// the channel's own message, or a default that stands in for it —
+/// `DirectMessageConfiguration$DefaultPushNotificationMessage` is "the default push
+/// notification message for all push notification channels" and `$DefaultMessage` is
+/// "the default message for all channels".
+fn carries_message_for(channel: &str, configuration: &DirectMessageConfiguration) -> bool {
+    // The channel each member of `DirectMessageConfiguration` carries the message
+    // for, over the values the model's `ChannelType` enum lists.
+    let channel_specific = match channel {
+        "GCM" => configuration.gcm_message.is_some(),
+        "APNS" | "APNS_SANDBOX" | "APNS_VOIP" | "APNS_VOIP_SANDBOX" => {
+            configuration.apns_message.is_some()
+        }
+        "ADM" => configuration.adm_message.is_some(),
+        "BAIDU" => configuration.baidu_message.is_some(),
+        "SMS" => configuration.sms_message.is_some(),
+        "VOICE" => configuration.voice_message.is_some(),
+        "EMAIL" => configuration.email_message.is_some(),
+        // `PUSH`, `CUSTOM` and `IN_APP` have no message member of their own, so only a
+        // default can stand in for them.
+        _ => false,
+    };
+    channel_specific
+        || (is_push_channel(channel) && configuration.default_push_notification_message.is_some())
+        || configuration.default_message.is_some()
+}
+
+/// Whether `channel` is one the API configures as a channel resource of the
+/// application: the channels the model gives their own Get/Update/Delete channel
+/// operations (`/v1/apps/{ApplicationId}/channels/...`). `PUSH`, `CUSTOM` and `IN_APP`
+/// have none, so there is nothing to enable or disable for them and a send over one
+/// is not gated on a channel.
+fn is_configurable_channel(channel: &str) -> bool {
+    matches!(
+        channel,
+        "ADM" | "APNS"
+            | "APNS_SANDBOX"
+            | "APNS_VOIP"
+            | "APNS_VOIP_SANDBOX"
+            | "BAIDU"
+            | "EMAIL"
+            | "GCM"
+            | "SMS"
+            | "VOICE"
+    )
+}
+
+/// Whether `channel` is one of the push notification channels, which is what decides
+/// whether `DefaultPushNotificationMessage` can stand in for a missing channel
+/// message. These are the push values of the model's `ChannelType` enum; `SMS`,
+/// `VOICE`, `EMAIL`, `CUSTOM` and `IN_APP` are the ones that are not.
+fn is_push_channel(channel: &str) -> bool {
+    matches!(
+        channel,
+        "PUSH"
+            | "GCM"
+            | "APNS"
+            | "APNS_SANDBOX"
+            | "APNS_VOIP"
+            | "APNS_VOIP_SANDBOX"
+            | "ADM"
+            | "BAIDU"
+    )
+}
+

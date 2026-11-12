@@ -197,6 +197,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             creation_date,
             tags,
             endpoints: ::std::collections::BTreeMap::new(),
+            channels: ::std::collections::BTreeMap::new(),
+            sends: ::std::vec::Vec::new(),
         };
         store.apps.insert(id.clone(), app);
 

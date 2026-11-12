@@ -16,7 +16,8 @@ use std::collections::{BTreeMap, HashMap};
 use sha2::{Digest, Sha256};
 
 use crate::ops::types::{
-    ApplicationResponse, EndpointDemographic, EndpointLocation, EndpointResponse, EndpointUser,
+    ApplicationResponse, BaiduChannelResponse, EndpointDemographic, EndpointLocation,
+    EndpointResponse, EndpointUser,
 };
 
 /// The ARN namespace Pinpoint signs and builds ARNs with (`sigv4Name` /
@@ -64,8 +65,31 @@ pub const MAX_ENDPOINT_ATTRIBUTES: usize = 250;
 /// The `Metrics` counterpart of [`MAX_ENDPOINT_ATTRIBUTES`].
 pub const MAX_ENDPOINT_METRICS: usize = 250;
 
+/// The most destinations one direct-message send may name.
+///
+/// A send answers one result per destination and, for an address, scans the
+/// application's endpoints for the one that carries it, so without a ceiling one
+/// request could ask for work bounded only by its own size. A send past it is refused
+/// through this service's client-error channel and nothing is recorded. The emulator's
+/// own ceiling, chosen well above what a client script needs.
+pub const MAX_DESTINATIONS_PER_SEND: usize = 100;
+
+/// The most accepted direct-message sends one application keeps a record of.
+///
+/// A send is recorded so a later read sees what the service actually did with it, and
+/// the oldest record is dropped once the log is full: however many messages a caller
+/// sends, the store's size stays bounded by the live applications. Again the
+/// emulator's own ceiling, not an AWS-published one.
+pub const MAX_SENDS_PER_APP: usize = 100;
+
 /// The number of hex characters in a minted id, and so in an `ApplicationId`.
 const MINTED_ID_LEN: usize = 32;
+
+/// The `ChannelType` value of the Baidu (Baidu Cloud Push) channel, which is also the
+/// `Platform` its response reports: `BaiduChannelResponse$Platform` is "the type of
+/// messaging or notification platform for the channel. For the Baidu channel, this
+/// value is BAIDU".
+pub const CHANNEL_TYPE_BAIDU: &str = "BAIDU";
 
 /// A stored Pinpoint application (a "project").
 #[derive(Debug, Clone, Default)]
@@ -77,6 +101,13 @@ pub struct App {
     pub creation_date: String,
     pub tags: HashMap<String, String>,
     pub endpoints: BTreeMap<String, Endpoint>,
+    /// The channels configured on this application, by the `ChannelType` value each
+    /// one is the channel for. A channel is a singleton per application, so one
+    /// application holds at most one entry per channel and the map needs no ceiling.
+    pub channels: BTreeMap<String, Channel>,
+    /// The sends this application accepted, oldest first and at most
+    /// [`MAX_SENDS_PER_APP`] of them.
+    pub sends: Vec<MessageSend>,
 }
 
 impl App {
@@ -92,6 +123,135 @@ impl App {
             creation_date: Some(self.creation_date.clone()),
         }
     }
+
+    /// Record one accepted send against this application, dropping the oldest record
+    /// when the log is already at [`MAX_SENDS_PER_APP`].
+    pub fn record_send(&mut self, send: MessageSend) {
+        if self.sends.len() >= MAX_SENDS_PER_APP {
+            let overflow = self.sends.len() + 1 - MAX_SENDS_PER_APP;
+            self.sends.drain(..overflow);
+        }
+        self.sends.push(send);
+    }
+
+    /// Create or update the settings of one channel, the way a channel's Update
+    /// operation does: the first write records the creation date, and every write
+    /// bumps the version and the last-modified date. Returns the stored channel, so
+    /// the operation answers with what is now in the store.
+    ///
+    /// Every channel's Update operation goes through here, so two channels cannot
+    /// record the same settings differently.
+    pub fn upsert_channel(
+        &mut self,
+        channel_type: &str,
+        enabled: bool,
+        credential: Option<String>,
+    ) -> &Channel {
+        let now = now_iso8601();
+        let application_id = self.id.clone();
+        let channel = self
+            .channels
+            .entry(channel_type.to_string())
+            .or_insert_with(|| Channel {
+                channel_type: channel_type.to_string(),
+                application_id,
+                creation_date: now.clone(),
+                ..Channel::default()
+            });
+        channel.enabled = enabled;
+        channel.has_credential = credential.is_some();
+        channel.credential = credential;
+        channel.last_modified_date = now;
+        channel.version = channel.version.saturating_add(1);
+        channel
+    }
+
+    /// The channel `channel_type` is configured and deliverable over: present,
+    /// enabled and not archived. A channel an application never configured, or one it
+    /// disabled, is not deliverable over.
+    pub fn deliverable_channel(&self, channel_type: &str) -> Option<&Channel> {
+        self.channels
+            .get(channel_type)
+            .filter(|channel| channel.enabled && !channel.is_archived)
+    }
+}
+
+/// A channel configured on one application: what the channel's Update operation
+/// stored, what its Get reports, and what a send over that channel is checked
+/// against.
+#[derive(Debug, Clone, Default)]
+pub struct Channel {
+    /// The `ChannelType` value this is the channel for, e.g. `BAIDU` — also the
+    /// `Platform` the channel's response reports.
+    pub channel_type: String,
+    pub application_id: String,
+    pub enabled: bool,
+    /// The credential the channel's response member carries, when the caller supplied
+    /// one (the API key, client id or equivalent the channel is modelled with).
+    pub credential: Option<String>,
+    pub has_credential: bool,
+    pub is_archived: bool,
+    /// ISO 8601, set once when the channel is first configured.
+    pub creation_date: String,
+    /// ISO 8601, refreshed on every write to the channel.
+    pub last_modified_date: String,
+    pub last_modified_by: Option<String>,
+    /// 1 after the first write, incremented by every later one.
+    pub version: i32,
+}
+
+impl Channel {
+    /// The modelled `BaiduChannelResponse` view of this stored channel. Every
+    /// operation that returns the Baidu channel builds it here, so UpdateBaiduChannel,
+    /// GetBaiduChannel and DeleteBaiduChannel cannot describe the same channel
+    /// differently.
+    pub fn to_baidu_response(&self) -> BaiduChannelResponse {
+        BaiduChannelResponse {
+            application_id: Some(self.application_id.clone()),
+            creation_date: Some(self.creation_date.clone()),
+            credential: self.credential.clone().unwrap_or_default(),
+            enabled: Some(self.enabled),
+            has_credential: Some(self.has_credential),
+            // `Id` is "(Deprecated) An identifier for the Baidu channel": a channel is
+            // a singleton of its application, so the application's own id names it.
+            id: Some(self.application_id.clone()),
+            is_archived: Some(self.is_archived),
+            last_modified_by: self.last_modified_by.clone(),
+            last_modified_date: Some(self.last_modified_date.clone()),
+            platform: self.channel_type.clone(),
+            version: Some(self.version),
+        }
+    }
+}
+
+/// One destination's outcome inside a recorded send: what this service answered for
+/// one endpoint id or one address, and the message id it minted for it.
+#[derive(Debug, Clone, Default)]
+pub struct MessageDelivery {
+    /// The endpoint the message was addressed to, when it was addressed by endpoint id.
+    pub endpoint_id: Option<String>,
+    /// The address the message was addressed to, as far as it is known.
+    pub address: Option<String>,
+    /// The channel the destination was resolved to, when one could be resolved.
+    pub channel_type: Option<String>,
+    /// A `DeliveryStatus` value.
+    pub delivery_status: String,
+    pub status_code: i32,
+    /// Minted only for a destination the message was accepted for.
+    pub message_id: Option<String>,
+}
+
+/// One accepted direct-message send against an application.
+#[derive(Debug, Clone, Default)]
+pub struct MessageSend {
+    /// The `RequestId` the send answered with.
+    pub request_id: String,
+    /// The caller's own `TraceId`, when it supplied one.
+    pub trace_id: Option<String>,
+    /// ISO 8601, the instant the send was accepted.
+    pub sent_at: String,
+    /// One entry per destination the request named, in the order they were answered.
+    pub deliveries: Vec<MessageDelivery>,
 }
 
 /// A stored endpoint of one application.

@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateBaiduChannel
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateBaiduChannel`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateBaiduChannel::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Enables the Baidu channel for an application, or updates its status and settings:
+//! the first write records the channel's creation date and every write bumps its
+//! version. An unknown `ApplicationId` is a `NotFoundException`.
 //!
 //! ## Shape of an operation
 //!
@@ -154,20 +148,65 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateBaiduChannel` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateBaiduChannelErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateBaiduChannel"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(UpdateBaiduChannelErrorModeled::InternalServerErrorException(
+                InternalServerErrorException {
+                    message: Some("the pinpoint state store is unavailable".to_string()),
+                    request_id: None,
+                },
+            )
+            .into());
+        };
+
+        let UpdateBaiduChannelInput {
+            application_id,
+            baidu_channel_request: request,
+        } = input;
+
+        // The model requires both credentials, so the boundary validator has already
+        // refused a request carrying neither; a blank one still configures nothing to
+        // communicate with, so it is refused here rather than stored.
+        if request.api_key.trim().is_empty() || request.secret_key.trim().is_empty() {
+            return Err(UpdateBaiduChannelErrorModeled::BadRequestException(
+                BadRequestException {
+                    message: Some(
+                        "ApiKey and SecretKey must be the credentials you received from the Baidu Cloud Push service"
+                            .to_string(),
+                    ),
+                    request_id: None,
+                },
+            )
+            .into());
+        }
+
+        let mut store = state.lock();
+        let Some(app) = store.apps.get_mut(&application_id) else {
+            return Err(UpdateBaiduChannelErrorModeled::NotFoundException(NotFoundException {
+                // The service's text for this class is fixed: it names the class of
+                // resource and carries no value out of the request.
+                message: Some("Application not found".to_string()),
+                request_id: None,
+            })
+            .into());
+        };
+
+        // `BaiduChannelRequest$Enabled` "specifies whether to enable the Baidu channel
+        // for the application": a request that does not say lands the channel enabled,
+        // which is what supplying its credentials asks for.
+        let enabled = request.enabled.unwrap_or(true);
+        // Only the API key is retained: it is the credential
+        // `BaiduChannelResponse$Credential` reports, and no response member carries the
+        // secret key, so nothing in this service has any use for it.
+        let channel = app.upsert_channel(
+            crate::state::CHANNEL_TYPE_BAIDU,
+            enabled,
+            Some(request.api_key),
+        );
+
+        Ok(UpdateBaiduChannelOutput {
+            baidu_channel_response: channel.to_baidu_response(),
+        })
     }
 }
