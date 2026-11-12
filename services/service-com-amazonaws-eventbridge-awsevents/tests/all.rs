@@ -79,6 +79,8 @@ mod event_bus_write_semantics;
 mod fifo_queue_target_delivery;
 #[path = "all/fixed_refusal_sentences.rs"]
 mod fixed_refusal_sentences;
+#[path = "all/function_target_grant_takes_effect_on_the_next_event.rs"]
+mod function_target_grant_takes_effect_on_the_next_event;
 #[path = "all/global_endpoint.rs"]
 mod global_endpoint;
 #[path = "all/global_endpoint_deletion.rs"]
