@@ -1486,3 +1486,9 @@ mod lambda_in_function_dynamodb_authorization;
 #[path = "all/backup_job_state_change_invokes_its_lambda_target.rs"]
 mod backup_job_state_change_invokes_its_lambda_target;
 // Declared in the appended tail, which is where every new suite inserts its lines: how a
+// Declared in the appended tail, which is where every new suite inserts its lines: the WHOLE
+// life of an event-driven object pipeline — the conversion a bucket notification drives and
+// the teardown that follows — spans Amazon S3, AWS Lambda, IAM and CloudFormation at once, so
+// no single service crate's test target can ask it.
+#[path = "all/s3_notification_pipeline_lifecycle.rs"]
+mod s3_notification_pipeline_lifecycle;
