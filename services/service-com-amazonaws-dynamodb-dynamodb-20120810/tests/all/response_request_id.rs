@@ -5,11 +5,14 @@
 //!
 //! RULE: a response carries the header this protocol reports the request id in
 //! (`x-amzn-RequestId` for `awsJson1_0`, matched case-insensitively), freshly minted per
-//! answer, on a success exactly as on a failure. It is a property of the RESPONSE rather
-//! than of any modelled shape — no output and no error shape of this model declares it —
-//! and it is what an SDK exposes as the call's `ResponseMetadata.RequestId` and
-//! `ServiceError::request_id()`. Two deliveries of ONE call (what an SDK retry sends) are
-//! two requests, so they are answered with two DIFFERENT ids: the id is what tells a
+//! answer, on a success exactly as on a failure, and the VALUE is spelled the way THIS
+//! service spells its request ids: one unbroken fixed-width run of uppercase letters and
+//! digits, which is what every sample response in the DynamoDB API reference shows — not
+//! the hyphenated 8-4-4-4-12 UUID most AWS services report. It is a property of the
+//! RESPONSE rather than of any modelled shape — no output and no error shape of this model
+//! declares it — and it is what an SDK exposes as the call's `ResponseMetadata.RequestId`
+//! and `ServiceError::request_id()`. Two deliveries of ONE call (what an SDK retry sends)
+//! are two requests, so they are answered with two DIFFERENT ids: the id is what tells a
 //! replay from a first attempt in a server-side record.
 //!
 //! What the rule does not change, and this suite pins too: the status, the error code and
@@ -33,22 +36,21 @@ use crate::emulator::{describe_when_active, emulator, ok, REGION};
 /// itself.
 const REQUEST_ID_HEADER: &str = "x-amzn-RequestId";
 
-/// Whether `id` has the 8-4-4-4-12 lowercase-hex form an AWS request id carries.
+/// The width of one of this service's request ids, and the alphabet it is written in —
+/// read off the `x-amzn-RequestId` of the sample responses in the DynamoDB API reference
+/// and written out here, so the assertion does not merely compare the implementation with
+/// itself.
+const REQUEST_ID_WIDTH: usize = 52;
+
+/// Whether `id` is spelled the way this service spells a request id: exactly
+/// [`REQUEST_ID_WIDTH`] characters, every one of them an uppercase letter or a digit. The
+/// hyphenated UUID other AWS services report fails on both counts, which is the difference
+/// this suite exists to pin.
 fn names_a_request_id(id: &str) -> bool {
-    let mut groups = id.split('-');
-    for width in [8usize, 4, 4, 4, 12] {
-        let Some(group) = groups.next() else {
-            return false;
-        };
-        if group.len() != width
-            || !group
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        {
-            return false;
-        }
-    }
-    groups.next().is_none()
+    id.chars().count() == REQUEST_ID_WIDTH
+        && id
+            .chars()
+            .all(|character| character.is_ascii_uppercase() || character.is_ascii_digit())
 }
 
 /// One delivery of one request: its status, the request id the response named, and its
@@ -137,6 +139,21 @@ async fn every_response_names_the_request_it_answered_and_every_attempt_is_its_o
                    "ExpressionAttributeValues": {":p": {"S": "a"}}}),
             400,
         ),
+        (
+            "a write that mutates an existing item",
+            "DynamoDB_20120810.UpdateItem",
+            json!({"TableName": "RequestIds", "Key": {"pk": {"S": "a"}},
+                   "UpdateExpression": "SET #n = :v",
+                   "ExpressionAttributeNames": {"#n": "note"},
+                   "ExpressionAttributeValues": {":v": {"S": "written"}}}),
+            200,
+        ),
+        (
+            "a success answering a request with no resource named in it",
+            "DynamoDB_20120810.ListTables",
+            json!({}),
+            200,
+        ),
     ];
 
     let mut minted: BTreeSet<String> = BTreeSet::new();
@@ -151,7 +168,8 @@ async fn every_response_names_the_request_it_answered_and_every_attempt_is_its_o
         });
         assert!(
             names_a_request_id(&id),
-            "case {case:?}: expected a request id, got {id:?}"
+            "case {case:?}: expected {REQUEST_ID_WIDTH} uppercase letters and digits, which is \
+             how this service spells a request id, got {id:?}"
         );
         assert!(
             !text.contains(&id),
@@ -206,6 +224,13 @@ async fn every_response_names_the_request_it_answered_and_every_attempt_is_its_o
          one, got {:?} for both",
         answers[0].0
     );
+    for (attempt, (id, _)) in answers.iter().enumerate() {
+        assert!(
+            names_a_request_id(id),
+            "case retry delivery {attempt}: expected {REQUEST_ID_WIDTH} uppercase letters and \
+             digits, which is how this service spells a request id, got {id:?}"
+        );
+    }
     assert_eq!(
         answers[0].1, answers[1].1,
         "case an SDK-retried call: the id is the only thing that differs between the two \

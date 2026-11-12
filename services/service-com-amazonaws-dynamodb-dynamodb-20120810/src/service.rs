@@ -54,17 +54,20 @@
 //!
 //! The rule is not restated here: [`service_common::query_error_envelope`] owns it for
 //! every emulated service, and this file only chooses the report this protocol takes (the
-//! header alone — `awsJson1_0` has no envelope element for the id) and wires it at the two
-//! layers every response of this service passes through:
+//! header alone — `awsJson1_0` has no envelope element for the id), in the FORM this
+//! SERVICE spells its ids in ([`request_id`], which is the one part of the rule that is
+//! DynamoDB's own rather than the shared module's), and wires it at the two layers every
+//! response of this service passes through:
 //!
 //! * [`OperationScopedClauseForm`], the dispatch [`Service::override_operation`] hands the
 //!   router in place of each modelled operation, covers everything an operation answers —
 //!   a success, a modelled error, and a constraint refusal raised while that operation was
 //!   being served;
-//! * [`RequestIdEnvelopeDefinition::header_only`], the definition wrapper
+//! * [`RequestIdEnvelopeDefinition::reporting`], the definition wrapper
 //!   [`Service::definition`] hands back, covers a response NO operation produced: a
 //!   routing failure, a transport failure detected up front, and a pre-dispatch
-//!   authentication refusal.
+//!   authentication refusal. It is handed the SAME report as the dispatch above, so which
+//!   layer answered cannot change how the request is named.
 //!
 //! Nothing else about a response changes: the status, the other headers and every byte of
 //! the body stay as the renderer wrote them.
@@ -85,14 +88,18 @@
 use service_common::authentication_refusal::{
     AuthenticationRefusalDefinition, StatedAuthenticationRefusal,
 };
-use service_common::query_error_envelope::{
-    with_request_id_header, RequestIdEnvelopeDefinition,
-};
+use request_id::with_request_id_header;
+use service_common::query_error_envelope::RequestIdEnvelopeDefinition;
 use smithy_server_runtime::{
     http, BoxFuture, ErasedOperation, ErasedServiceDefinition, OperationContext, Refusal, Refused,
     Service, Violation, ViolationKind,
 };
 use std::sync::Arc;
+
+/// The FORM of the id every response of this service names its request by, which is this
+/// service's own; `service_common::query_error_envelope` owns everything else about the
+/// rule (see "Naming the request a response answers").
+mod request_id;
 
 /// The error code this service answers an input-constraint violation with: the
 /// `ValidationException` (HTTP 400) every DynamoDB operation refuses a malformed
@@ -813,10 +820,13 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
-            entry: RequestIdEnvelopeDefinition::header_only(AuthenticationRefusalDefinition::new(
-                crate::ServiceDefinition::new(Arc::clone(&engine)),
-                AUTHENTICATION_REFUSAL,
-            )),
+            entry: RequestIdEnvelopeDefinition::reporting(
+                AuthenticationRefusalDefinition::new(
+                    crate::ServiceDefinition::new(Arc::clone(&engine)),
+                    AUTHENTICATION_REFUSAL,
+                ),
+                with_request_id_header,
+            ),
             clause_form_scope: OperationScopedClauseForm { engine },
         }
     }

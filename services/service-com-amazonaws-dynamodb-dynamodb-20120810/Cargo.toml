@@ -81,6 +81,10 @@ service-com-amazonaws-cloudwatch-graniteserviceversion20100801 = { workspace = t
 # data-plane authorization gate judges the caller's identity-based policies by
 # (`state::authorization`).
 service-common = { path = "../common" }
+# Draws the characters of the request id every response names its request by: DynamoDB
+# spells that id as a fixed-width uppercase alphanumeric token rather than as a UUID, so
+# each character is drawn uniformly from its own alphabet (`service::request_id`).
+rand = "0.9"
 # `state::authorization` resolves WHO a data-plane request speaks for from the same place
 # `sts:GetCallerIdentity` answers from, and reads the identity-based policies the IAM store
 # holds for that principal through STS's own view of it.

@@ -61,6 +61,13 @@
 //!   unchanged), [`RequestIdReportingOperation::error_member`] (one serving its operations
 //!   already wrapped) and [`RequestIdEnvelopeDefinition::error_member`].
 //!
+//! WHERE the id is stated is the protocol's; WHAT it is spelled like is the service's. The
+//! three writers above mint [`new_request_id`], the form almost every AWS service reports,
+//! and a service whose own ids are spelled another way mints them itself, states them with
+//! [`with_stated_request_id_header`], and hands THAT report ([`Report`]) to
+//! [`RequestIdEnvelopeDefinition::reporting`] — so the choice of form costs a service its
+//! minting function and nothing else.
+//!
 //! Only the request id is this module's business: the HTTP status, the `<Type>`, the
 //! `<Code>`, the `<Message>`, the body of a success and every other header stay with the
 //! framework renderer that owns them, so each has exactly one home. The only
@@ -118,12 +125,19 @@ const REQUEST_ID_HEADER: &str = "x-amzn-requestid";
 /// `ResponseMetadata/RequestId` (`vendor/smithy-server-runtime/src/pre_dispatch.rs`), so a
 /// client cannot tell the two apart. It needs no state, so a request refused before any
 /// store is reached still answers with one.
+///
+/// It is the form MOST AWS services report, not every one: the id is opaque to a client, so
+/// a service free to spell it its own way sometimes does (a fixed-width run of uppercase
+/// alphanumeric characters, say). A service whose ids have a form of its own mints them
+/// itself, states them through [`with_stated_request_id_header`], and hands that report to
+/// the two wrappers below ([`Report`]) rather than restating this plumbing.
 pub fn new_request_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Whether `id` has the 8-4-4-4-12 lowercase-hex form every AWS request id carries — what
-/// [`new_request_id`] mints, and the only shape this module will report as one.
+/// Whether `id` has the 8-4-4-4-12 lowercase-hex form MOST AWS services' request ids carry
+/// — what [`new_request_id`] mints, and the only shape this module will report as one. A
+/// service that mints its own form ([`new_request_id`]) states and asserts that form itself.
 ///
 /// Public so a service's own test can assert the FORM of the id its responses name the
 /// request by without restating that form; the module's writers below are its only other
@@ -440,7 +454,12 @@ fn modeled_operation<'s>(svc: &'s dyn Service, req: &RtRequest) -> Option<&'s dy
 ///
 /// A function rather than a type parameter, so one service's operation wrapper and
 /// definition wrapper can be handed the SAME report and cannot report differently.
-type Report = fn(RtResponse) -> RtResponse;
+///
+/// Public so a service whose report none of the three writers below states — one whose ids
+/// have a FORM of their own, minted through [`with_stated_request_id_header`] — can hand
+/// its own report to [`RequestIdEnvelopeDefinition::reporting`] and reuse all of this
+/// plumbing.
+pub type Report = fn(RtResponse) -> RtResponse;
 
 /// Serve the modelled operation the service's own routing table names for `req`, exactly
 /// as that table would, and `report` the request id on the response.
@@ -654,6 +673,17 @@ impl<D: ErasedServiceDefinition> RequestIdEnvelopeDefinition<D> {
             inner,
             report: with_request_id_error_member,
         }
+    }
+
+    /// Wrap a service's generated definition, reporting the id with `report` — the
+    /// constructor for a service whose report none of the three above states, because the
+    /// FORM of the id it names a request by is its own (see [`Report`]).
+    ///
+    /// The same `report` the service hands its operation wrapper, so the response an
+    /// operation produced and the response no operation produced name their request the
+    /// same way.
+    pub fn reporting(inner: D, report: Report) -> Self {
+        Self { inner, report }
     }
 
     /// Whether the generated routing table can serve this request — the condition under
