@@ -35,6 +35,9 @@ mod harness;
 #[path = "all/notebook_import_export.rs"]
 mod notebook_import_export;
 
+#[path = "all/prepared_statement_lifecycle.rs"]
+mod prepared_statement_lifecycle;
+
 #[path = "all/query_execution_identity.rs"]
 mod query_execution_identity;
 

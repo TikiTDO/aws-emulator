@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreatePreparedStatement
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreatePreparedStatement`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreatePreparedStatement::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: registers a prepared statement under its name in the workgroup it belongs
+//! to, refuses a workgroup this account does not hold and a name that workgroup already
+//! holds a statement under, and stores the create's instant as the statement's last
+//! modified time.
 //!
 //! ## Shape of an operation
 //!
@@ -139,20 +134,92 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreatePreparedStatement` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreatePreparedStatementErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreatePreparedStatement"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(CreatePreparedStatementErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("Athena state is not reachable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+        let mut store = state.lock();
+
+        // A prepared statement BELONGS to a workgroup, so a create naming one this
+        // account does not hold has nowhere to put it.
+        if !store.holds_work_group(&input.work_group) {
+            return Err(invalid_request(crate::state::WORK_GROUP_NOT_FOUND));
+        }
+
+        // The name identifies the statement within its workgroup, so a create under a
+        // name that workgroup already holds would overwrite a statement this call never
+        // made. Refused instead — an update is how an existing statement is rewritten.
+        if store
+            .prepared_statements
+            .statement(&input.work_group, &input.statement_name)
+            .is_some()
+        {
+            return Err(invalid_request(
+                crate::state::prepared_statement_already_exists(
+                    &input.statement_name,
+                    &input.work_group,
+                ),
+            ));
+        }
+
+        // Measured before the registry grows: the statements one workgroup holds and the
+        // bytes of them this account holds are both bounded, so a create past either bound
+        // is refused rather than stored.
+        let statement_bytes = crate::state::prepared_statement_bytes(
+            &input.statement_name,
+            &input.query_statement,
+            input.description.as_deref(),
+        );
+        if store.prepared_statements.len_in(&input.work_group)
+            >= crate::state::MAX_PREPARED_STATEMENTS_PER_WORK_GROUP
+        {
+            return Err(invalid_request(crate::state::too_many_prepared_statements(
+                &input.work_group,
+            )));
+        }
+        if store
+            .prepared_statements
+            .would_exceed_stored_bytes(statement_bytes)
+        {
+            return Err(invalid_request(
+                crate::state::prepared_statements_too_large(),
+            ));
+        }
+
+        store
+            .prepared_statements
+            .insert(crate::state::PreparedStatementRecord::created(
+                input.statement_name,
+                input.work_group,
+                input.query_statement,
+                // Stored as the caller gave it: a create that carried no description
+                // leaves the statement with none, which is what keeps an absent
+                // description absent on the way back out.
+                input.description,
+                ::std::time::SystemTime::now(),
+            ));
+
+        // `CreatePreparedStatementOutput` models no members: the created statement is read
+        // back through `GetPreparedStatement`.
+        Ok(CreatePreparedStatementOutput {})
     }
+}
+
+/// The operation's own client error (HTTP 400), carrying `message`.
+///
+/// Every refusal above is a bad request rather than an unwritten operation, and
+/// `InvalidRequestException` is the client error this operation models: "Indicates that
+/// something is wrong with the input to the request." Each one is caused by the request
+/// itself — a workgroup this account does not hold, a name already taken, a workgroup
+/// already holding as many statements as it can, a write past the bytes this account holds
+/// — which is the class
+/// [`crate::state::ERROR_CODE_INVALID_INPUT`] names.
+fn invalid_request(message: impl Into<String>) -> CreatePreparedStatementError {
+    CreatePreparedStatementError::invalid_request(crate::state::ERROR_CODE_INVALID_INPUT, message)
 }

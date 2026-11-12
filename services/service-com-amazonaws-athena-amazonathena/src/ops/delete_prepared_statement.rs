@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeletePreparedStatement
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeletePreparedStatement`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeletePreparedStatement::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: removes the prepared statement the named workgroup holds under the
+//! requested name, so a later read of it reports it as absent, and reports a workgroup or
+//! a statement this account does not hold as not found.
 //!
 //! ## Shape of an operation
 //!
@@ -137,20 +131,53 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeletePreparedStatement` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeletePreparedStatementErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeletePreparedStatement"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(DeletePreparedStatementErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("Athena state is not reachable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+        let mut store = state.lock();
+
+        // The same two misses the read of a statement reports, and for the same reason: a
+        // resource the request named that this account does not hold.
+        if !store.holds_work_group(&input.work_group) {
+            return Err(not_found(crate::state::WORK_GROUP_NOT_FOUND));
+        }
+
+        if store
+            .prepared_statements
+            .remove(&input.work_group, &input.statement_name)
+            .is_none()
+        {
+            return Err(not_found(crate::state::prepared_statement_not_found(
+                &input.statement_name,
+                &input.work_group,
+            )));
+        }
+
+        // `DeletePreparedStatementOutput` models no members: that the statement is gone is
+        // observed by reading it back.
+        Ok(DeletePreparedStatementOutput {})
     }
+}
+
+/// The operation's modelled miss (HTTP 400 `ResourceNotFoundException`), stating
+/// `message`.
+///
+/// Both refusals above are resources the request named that this account does not hold,
+/// which is the class that shape reports ("A resource, such as a workgroup, was not
+/// found").
+fn not_found(message: impl Into<String>) -> DeletePreparedStatementError {
+    DeletePreparedStatementErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+        message: Some(message.into()),
+        // Addressed by name and workgroup rather than by an ARN, so there is no Amazon
+        // resource name to report; the sentence above names both.
+        resource_name: None,
+    })
+    .into()
 }

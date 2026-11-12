@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op BatchGetPreparedStatement
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `BatchGetPreparedStatement`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`BatchGetPreparedStatement::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: answers with the prepared statements the named workgroup holds under the
+//! requested names, in the order the request listed them, and reports every name that
+//! workgroup holds none under as an unprocessed name with the reason.
 //!
 //! ## Shape of an operation
 //!
@@ -146,20 +140,68 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `BatchGetPreparedStatement` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(BatchGetPreparedStatementErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("BatchGetPreparedStatement"))
+        // Bounded and measured FIRST, before any lock is taken: the operation documents
+        // that it returns at most 256 statements, so a longer list is refused rather than
+        // walked, and no other Athena request waits behind the work of walking it.
+        if input.prepared_statement_names.len() > crate::state::MAX_PREPARED_STATEMENT_NAMES_PER_BATCH
+        {
+            return Err(BatchGetPreparedStatementError::invalid_request(
+                crate::state::ERROR_CODE_INVALID_INPUT,
+                crate::state::too_many_prepared_statement_names(
+                    input.prepared_statement_names.len(),
+                ),
+            ));
+        }
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(BatchGetPreparedStatementErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("Athena state is not reachable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+        // A read: nothing below writes the store.
+        let store = state.lock();
+
+        // Every name is resolved in ONE workgroup — "the workgroup to which the prepared
+        // statements belong" — so a workgroup this account does not hold is refused
+        // rather than answered with every name unprocessed.
+        if !store.holds_work_group(&input.work_group) {
+            return Err(BatchGetPreparedStatementError::invalid_request(
+                crate::state::ERROR_CODE_INVALID_INPUT,
+                crate::state::WORK_GROUP_NOT_FOUND,
+            ));
+        }
+
+        // The partition is COMPUTED from state, name by name and in the order the request
+        // listed them: a name the workgroup holds a statement under is reported from that
+        // statement, and one it does not is "listed in UnprocessedPreparedStatementNames"
+        // with the reason. A name the request listed twice names ONE statement, so it is
+        // answered once: the reply reports the statements asked for, and its size follows
+        // from what the account holds rather than from how often a name was repeated.
+        let mut answered: ::std::collections::HashSet<&str> = ::std::collections::HashSet::new();
+        let mut statements: Vec<PreparedStatement> = Vec::new();
+        let mut unprocessed: Vec<UnprocessedPreparedStatementName> = Vec::new();
+        for name in &input.prepared_statement_names {
+            if !answered.insert(name.as_str()) {
+                continue;
+            }
+            match store.prepared_statements.statement(&input.work_group, name) {
+                Some(record) => statements.push(record.to_prepared_statement()),
+                None => unprocessed.push(UnprocessedPreparedStatementName {
+                    statement_name: Some(name.clone()),
+                    error_code: Some(crate::state::ERROR_CODE_STATEMENT_NOT_FOUND.to_string()),
+                    error_message: Some(crate::state::prepared_statement_name_not_found()),
+                }),
+            }
+        }
+
+        Ok(BatchGetPreparedStatementOutput {
+            prepared_statements: Some(statements),
+            unprocessed_prepared_statement_names: Some(unprocessed),
+        })
     }
 }

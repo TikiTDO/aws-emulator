@@ -43,6 +43,13 @@
 //! Amazon S3 location) and `ExportNotebook` answers with that same content, so an export
 //! reports what an import persisted rather than anything rebuilt from the reading request.
 //!
+//! PREPARED STATEMENTS live in the [`PreparedStatementRegistry`] of
+//! [`ComAmazonawsAthenaAmazonathenaState::prepared_statements`], scoped to the workgroup
+//! each belongs to: `CreatePreparedStatement` writes a [`PreparedStatementRecord`] there
+//! and `GetPreparedStatement`, `BatchGetPreparedStatement` and an update or a delete all
+//! address that same record, so a read reports what a write persisted. A statement has no
+//! lifecycle the clock owes — a create hands back one a query can already name.
+//!
 //! CAPACITY RESERVATIONS live in the [`CapacityReservationRegistry`] of
 //! [`ComAmazonawsAthenaAmazonathenaState::capacity_reservations`], and they have a
 //! lifecycle the clock owes as well: a create stores when the requested data processing
@@ -67,6 +74,10 @@ pub use notebooks::*;
 /// The provisioned capacity this account reserved, and each reservation's lifecycle.
 mod capacity_reservations;
 pub use capacity_reservations::*;
+
+/// The prepared statements each workgroup holds, and the query string of each.
+mod prepared_statements;
+pub use prepared_statements::*;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, SystemTime};
@@ -1737,6 +1748,10 @@ pub struct ComAmazonawsAthenaAmazonathenaState {
     /// Every capacity reservation this account holds. `CreateCapacityReservation` writes
     /// it and `GetCapacityReservation` reads it; see [`CapacityReservationRegistry`].
     pub capacity_reservations: CapacityReservationRegistry,
+    /// Every prepared statement this account holds, by workgroup.
+    /// `CreatePreparedStatement` writes it and `GetPreparedStatement` reads it; see
+    /// [`PreparedStatementRegistry`].
+    pub prepared_statements: PreparedStatementRegistry,
     /// The secret this store's page tokens are authenticated under, so a `NextToken`
     /// this store did not mint names no page. Drawn from the system's randomness when
     /// the store is created and never reported.
@@ -1758,6 +1773,7 @@ impl Default for ComAmazonawsAthenaAmazonathenaState {
             query_databases: BTreeMap::new(),
             notebooks: NotebookRegistry::default(),
             capacity_reservations: CapacityReservationRegistry::default(),
+            prepared_statements: PreparedStatementRegistry::default(),
             page_token_key: PageTokenKey::new(),
         }
     }
