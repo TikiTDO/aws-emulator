@@ -154,8 +154,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // A notebook belongs to a workgroup, and the workgroup is the IAM resource this
+        // action is scoped by, so the import is authorized against that workgroup's ARN
+        // before any content is resolved or stored. See `crate::state::authorization`.
+        crate::state::authorization::authorize(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &crate::state::authorization::work_group_arn(ctx, &input.work_group),
+        )
+        .map_err(ImportNotebookError::AccessDenied)?;
         // Resolve the CONTENT first, before any lock is taken: the object store is the
         // other store this reads, and it is read with no guard of this service's own held
         // (the lock order `crate::state::notebook_file_at` documents).

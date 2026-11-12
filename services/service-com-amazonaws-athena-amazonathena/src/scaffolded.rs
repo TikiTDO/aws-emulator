@@ -50,6 +50,14 @@
 //! built by [`AthenaRefusal`] rather than by the derive, which admits exactly the model's
 //! member list. A handler that refuses a request reaches for that constructor rather than
 //! the modelled error struct, so no refusal can leave the code out.
+//!
+//! The other refusal that travels through this wrapper is the AUTHORIZATION one: the
+//! [`Scaffolded::AccessDenied`] variant renders `AccessDeniedException` (HTTP 400), which is
+//! what Athena answers a caller whose IAM policies do not cover the action on the resource it
+//! named ([`crate::state::authorization`] decides that question and words the sentence). The
+//! shape is not in this service's on-disk model — it is the IAM layer's error rather than one
+//! of Athena's own — so it cannot travel as [`Scaffolded::Modeled`] and carries the body
+//! [`AccessDenied`] renders.
 
 use aws_smithy_schema::serde::{SerdeError, SerializableStruct, ShapeSerializer};
 use aws_smithy_schema::{Schema, ShapeId, ShapeType};
@@ -302,6 +310,84 @@ impl SerializableStruct for AthenaRefusal {
     }
 }
 
+/// The `Message` member of the `AccessDeniedException` body: the sentence IAM refuses an
+/// unauthorized request with.
+///
+/// Athena's own modelled errors carry their wording under `Message`, so the authorization
+/// refusal carries it under that same name — a client reads one member whichever refusal it
+/// got.
+static ACCESS_DENIED_MESSAGE: Schema = Schema::new_member(
+    ShapeId::from_static(
+        "aws.recorded.athena#AccessDeniedException$Message",
+        "aws.recorded.athena",
+        "Message",
+    ),
+    ShapeType::String,
+    "Message",
+    0,
+)
+.with_xml_name("Message");
+
+/// Schema for the BODY of an authorization refusal.
+///
+/// In the `aws.recorded.athena` namespace, the one this file keeps for what the WIRE carries
+/// and the on-disk model does not declare (see [`ATHENA_REFUSAL_ERROR_CODE`]): the shape is
+/// AWS's common authorization error rather than a shape of this service's model, so it can
+/// neither claim to be modelled nor collide with one the model may declare later.
+pub static ACCESS_DENIED_SCHEMA: Schema = Schema::new_struct(
+    ShapeId::from_static(
+        "aws.recorded.athena#AccessDeniedException",
+        "aws.recorded.athena",
+        "AccessDeniedException",
+    ),
+    ShapeType::Structure,
+    &[&ACCESS_DENIED_MESSAGE],
+);
+
+/// The wire error code (`__type`) of an authorization refusal, which is the code a client
+/// branches on to tell "not permitted" from "bad request".
+pub const ACCESS_DENIED_EXCEPTION: &str = "AccessDeniedException";
+
+/// Its HTTP status. Athena answers every client-side failure at 400, the status its own
+/// modelled client errors carry, and an authorization refusal is one of them.
+pub const ACCESS_DENIED_STATUS: u16 = 400;
+
+/// One authorization refusal: the sentence Athena states it with.
+///
+/// It carries nothing else: who was refused, which resource the request named, whether that
+/// resource exists at all and which statement refused are what such a refusal does not
+/// disclose. The sentence itself is built by [`crate::state::authorization`], the one place
+/// this service decides the question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessDenied {
+    /// Athena's sentence: the action the caller asked for, between that service's fixed text.
+    pub message: String,
+}
+
+impl AccessDenied {
+    /// The refusal stating `message`.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for AccessDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{ACCESS_DENIED_EXCEPTION}: {}", self.message)
+    }
+}
+
+impl std::error::Error for AccessDenied {}
+
+impl SerializableStruct for AccessDenied {
+    fn serialize_members(&self, s: &mut dyn ShapeSerializer) -> Result<(), SerdeError> {
+        s.write_string(&ACCESS_DENIED_MESSAGE, self.message.as_str())?;
+        Ok(())
+    }
+}
+
 /// An operation's error channel: either the synthetic scaffold signal, or one of the
 /// operation's own modeled errors.
 #[derive(Debug)]
@@ -315,6 +401,12 @@ pub enum Scaffolded<E> {
     /// [`Modeled`](Self::Modeled) because one of those names is not a member the model
     /// declares.
     InvalidRequest(AthenaRefusal),
+    /// The caller's IAM policies do not cover the action on the resource the request named:
+    /// HTTP 400 `AccessDeniedException`, carrying Athena's own sentence for that refusal. It
+    /// cannot travel as [`Modeled`](Self::Modeled) because the shape is not in this service's
+    /// model. Built by [`crate::state::authorization`] and returned by the handler through
+    /// this variant, so there is one way to state it.
+    AccessDenied(AccessDenied),
     /// The request was refused as invalid. Renders as HTTP 400 with the error code
     /// `ValidationException`.
     ///
@@ -369,6 +461,7 @@ impl<E: std::fmt::Display> std::fmt::Display for Scaffolded<E> {
             Self::NotImplemented(e) => write!(f, "{e}"),
             Self::Modeled(e) => write!(f, "{e}"),
             Self::InvalidRequest(e) => write!(f, "{e}"),
+            Self::AccessDenied(e) => write!(f, "{e}"),
             Self::ValidationException(e) => write!(f, "{e}"),
         }
     }
@@ -382,6 +475,7 @@ impl<E: std::error::Error + 'static> std::error::Error for Scaffolded<E> {
             Self::NotImplemented(e) => e.source(),
             Self::Modeled(e) => e.source(),
             Self::InvalidRequest(e) => e.source(),
+            Self::AccessDenied(e) => e.source(),
             Self::ValidationException(e) => e.source(),
         }
     }
@@ -397,6 +491,7 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
             Self::NotImplemented(e) => e,
             Self::Modeled(e) => e.as_serializable(),
             Self::InvalidRequest(e) => e,
+            Self::AccessDenied(e) => e,
             Self::ValidationException(e) => e,
         }
     }
@@ -406,6 +501,7 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
             Self::NotImplemented(_) => &NOT_IMPLEMENTED_SCHEMA,
             Self::Modeled(e) => e.variant_schema(),
             Self::InvalidRequest(_) => &ATHENA_REFUSAL_SCHEMA,
+            Self::AccessDenied(_) => &ACCESS_DENIED_SCHEMA,
             Self::ValidationException(_) => &VALIDATION_EXCEPTION_SCHEMA,
         }
     }
@@ -421,6 +517,9 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
             // The shape the model binds for a request this service itself refuses, which
             // is the code a client branches on.
             Self::InvalidRequest(_) => INVALID_REQUEST_EXCEPTION,
+            // AWS's common authorization error, which is the code a caller the IAM layer
+            // refused branches on.
+            Self::AccessDenied(_) => ACCESS_DENIED_EXCEPTION,
             Self::ValidationException(_) => "ValidationException",
         }
     }
@@ -434,6 +533,7 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
             Self::NotImplemented(_) => 501,
             Self::Modeled(e) => e.http_status(),
             Self::InvalidRequest(_) => INVALID_REQUEST_STATUS,
+            Self::AccessDenied(_) => ACCESS_DENIED_STATUS,
             Self::ValidationException(_) => 400,
         }
     }
@@ -448,6 +548,8 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
             // This service speaks awsJson1_1, and the modelled shape carries no
             // `awsQueryError` trait, so there is no query code to honour.
             Self::InvalidRequest(_) => None,
+            // Same reason: the authorization shape is not in the model at all.
+            Self::AccessDenied(_) => None,
             // Same reason: the synthetic shape carries no `awsQueryError` trait.
             Self::ValidationException(_) => None,
         }

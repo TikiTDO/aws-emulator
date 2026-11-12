@@ -19,8 +19,18 @@ service-com-amazonaws-glue-awsglue = { workspace = true }
 # nothing holds.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
 # `page_tokens`: the authenticated continuation token every paginated read here hands
-# back, so a `NextToken` this process did not mint names no page.
+# back, so a `NextToken` this process did not mint names no page; `iam_authorization`: the
+# ONE evaluation of IAM policy documents against a request, which is what decides whether
+# the caller may act on the workgroup it named.
 service-common = { path = "../common" }
+# The identity-based policies in force on the calling principal, and the permissions
+# boundary that caps them, read through IAM's own accessors: a workgroup is an IAM resource,
+# so an Athena action on one is authorized against the documents that store holds.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# Which principal the request's access key id speaks for — the session STS minted it for,
+# the same record `sts:GetCallerIdentity` answers from — so the identity a refusal blames is
+# the one the caller reads back for the credentials it signed with.
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
 # The SQL engine a query execution RUNS on, in-process.
 #
 # MEMORY-SAFETY POSTURE: the rationale, the bounds and the alternatives considered are

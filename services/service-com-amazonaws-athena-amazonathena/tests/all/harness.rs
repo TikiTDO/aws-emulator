@@ -18,13 +18,22 @@ use smithy_server_runtime::MultiServiceRouter;
 /// build that header.
 const TARGET_PREFIX: &str = "AmazonAthena";
 
+/// The access key id every suite that does not care about the caller signs with: a key
+/// neither STS nor IAM holds a record for, which is the position the account's own
+/// published credential is in.
+pub const ACCOUNT_ACCESS_KEY_ID: &str = "AKIDEXAMPLE";
+
 /// The router picks a service by the SigV4 credential scope's service field, so every
 /// request carries one naming `athena` (this service's `sigv4Name`). Neither the key id
 /// nor the signature is a credential: [`router`] turns request authentication off, so
-/// nothing here is verified.
-const AUTHORIZATION: &str = "AWS4-HMAC-SHA256 \
-     Credential=AKIDEXAMPLE/20260101/us-east-1/athena/aws4_request, \
-     SignedHeaders=host;x-amz-target, Signature=not-verified";
+/// nothing here is verified — the key id only names the principal a request speaks for.
+fn authorization(access_key_id: &str) -> String {
+    format!(
+        "AWS4-HMAC-SHA256 \
+         Credential={access_key_id}/20260101/us-east-1/athena/aws4_request, \
+         SignedHeaders=host;x-amz-target, Signature=not-verified"
+    )
+}
 
 /// One service mounted on its own engine, reached the way the production router reaches
 /// it.
@@ -44,13 +53,25 @@ pub fn engine_and_router() -> (Arc<engine::InMemoryEngine>, MultiServiceRouter) 
     (engine, router)
 }
 
-/// Invoke one operation and return `(status, body)`.
+/// Invoke one operation signed with the account's own published credential, and return
+/// `(status, body)`.
 pub async fn call(router: &MultiServiceRouter, operation: &str, body: &Value) -> (u16, Value) {
+    call_as(router, ACCOUNT_ACCESS_KEY_ID, operation, body).await
+}
+
+/// Invoke one operation signed with `access_key_id` — what names the principal the request
+/// speaks for — and return `(status, body)`.
+pub async fn call_as(
+    router: &MultiServiceRouter,
+    access_key_id: &str,
+    operation: &str,
+    body: &Value,
+) -> (u16, Value) {
     let request = http::Request::builder()
         .method("POST")
         .uri("/")
         .header("host", "athena.us-east-1.amazonaws.com")
-        .header("authorization", AUTHORIZATION)
+        .header("authorization", authorization(access_key_id))
         .header("x-amz-target", format!("{TARGET_PREFIX}.{operation}"))
         .header("content-type", "application/x-amz-json-1.1")
         .body(bytes::Bytes::from(

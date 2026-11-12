@@ -138,8 +138,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // A workgroup is an IAM resource, and a create addresses the workgroup it would
+        // create, so this request is authorized against that name's ARN before anything is
+        // measured, read or written. See `crate::state::authorization`.
+        crate::state::authorization::authorize(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &crate::state::authorization::work_group_arn(ctx, &input.name),
+        )
+        .map_err(CreateWorkGroupError::AccessDenied)?;
         // Bound and check the caller-supplied collections FIRST, before any lock is
         // taken: a request that is going to be refused never walks the registry, and
         // no other Athena request waits behind the work of measuring it.

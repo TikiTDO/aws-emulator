@@ -62,6 +62,9 @@ mod state_roundtrip;
 #[path = "all/table_metadata.rs"]
 mod table_metadata;
 
+#[path = "all/work_group_authorization.rs"]
+mod work_group_authorization;
+
 #[path = "all/work_group_lifecycle.rs"]
 mod work_group_lifecycle;
 

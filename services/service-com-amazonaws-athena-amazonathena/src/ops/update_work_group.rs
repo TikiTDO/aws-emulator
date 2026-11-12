@@ -135,8 +135,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // A workgroup is an IAM resource, so this update is authorized against the ARN of
+        // the workgroup it names before the registry is read or written — a refused update
+        // changes nothing. See `crate::state::authorization`.
+        crate::state::authorization::authorize(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &crate::state::authorization::work_group_arn(ctx, &input.work_group),
+        )
+        .map_err(UpdateWorkGroupError::AccessDenied)?;
         // `State` needs no check of its own before the registry is touched: it is the
         // model's `WorkGroupState` enum, so a value outside that set is refused before
         // this handler runs.

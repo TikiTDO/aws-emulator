@@ -140,8 +140,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // Every name is resolved in the ONE workgroup the request names, and that workgroup
+        // is the IAM resource this action is scoped by, so the batch is authorized against
+        // its ARN before anything is measured or read. See `crate::state::authorization`.
+        crate::state::authorization::authorize(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &crate::state::authorization::work_group_arn(ctx, &input.work_group),
+        )
+        .map_err(BatchGetPreparedStatementError::AccessDenied)?;
         // Bounded and measured FIRST, before any lock is taken: the operation documents
         // that it returns at most 256 statements, so a longer list is refused rather than
         // walked, and no other Athena request waits behind the work of walking it.

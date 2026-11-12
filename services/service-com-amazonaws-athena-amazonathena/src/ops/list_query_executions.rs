@@ -143,13 +143,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         // "If a workgroup is not specified, a list of available query execution IDs for
         // the queries in the primary workgroup is returned."
         let work_group = input
             .work_group
             .unwrap_or_else(|| crate::state::DEFAULT_WORK_GROUP.to_string());
+        // "Requires that you have access to the specified workgroup": the workgroup is an
+        // IAM resource, so this listing is authorized against THAT workgroup's ARN before
+        // the history is read. See `crate::state::authorization`.
+        crate::state::authorization::authorize(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &crate::state::authorization::work_group_arn(ctx, &work_group),
+        )
+        .map_err(ListQueryExecutionsError::AccessDenied)?;
         // "The maximum number of query executions to return in this request", bounded by
         // the modelled maximum, which is also what a request naming none gets.
         let page_size = usize::try_from(input.max_results.unwrap_or(MAX_PAGE_IDS))

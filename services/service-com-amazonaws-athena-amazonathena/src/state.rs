@@ -75,6 +75,9 @@ pub use notebooks::*;
 mod capacity_reservations;
 pub use capacity_reservations::*;
 
+/// Whether IAM lets a request perform the action it asks for on the workgroup it names.
+pub mod authorization;
+
 /// The prepared statements each workgroup holds, and the query string of each.
 mod prepared_statements;
 pub use prepared_statements::*;

@@ -134,8 +134,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // A prepared statement belongs to a workgroup, and the workgroup is the IAM resource
+        // this action is scoped by, so the create is authorized against that workgroup's ARN
+        // before anything is read or written. See `crate::state::authorization`.
+        crate::state::authorization::authorize(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &crate::state::authorization::work_group_arn(ctx, &input.work_group),
+        )
+        .map_err(CreatePreparedStatementError::AccessDenied)?;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(CreatePreparedStatementErrorModeled::InternalServerException(
                 InternalServerException {

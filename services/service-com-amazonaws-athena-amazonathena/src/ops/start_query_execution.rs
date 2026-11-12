@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op StartQueryExecution
-//! IMPLEMENTED: runs the submitted SQL on this service's in-process SQL engine, persists
+//! IMPLEMENTED: authorizes the caller against the ARN of the workgroup the request names,
+//! then runs the submitted SQL on this service's in-process SQL engine, persists
 //! the execution and the result set it produced, and answers with the id it minted —
 //! the same id, and no second execution, for a repeated `ClientRequestToken`.
 //!
@@ -174,7 +175,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let query_string = input.query_string;
         // The workgroup a query belongs to. A query runs in a workgroup this account
@@ -184,6 +185,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let work_group = input
             .work_group
             .unwrap_or_else(|| crate::state::DEFAULT_WORK_GROUP.to_string());
+        // "Requires you to have access to the workgroup in which the query ran": the
+        // workgroup is an IAM resource, so this submission is authorized against THAT
+        // workgroup's ARN before anything is parsed, read or written — a caller whose
+        // policies cover one workgroup reaches no other, and a refused call mints no
+        // execution. See `crate::state::authorization`.
+        crate::state::authorization::authorize(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &crate::state::authorization::work_group_arn(ctx, &work_group),
+        )
+        .map_err(StartQueryExecutionError::AccessDenied)?;
         let context = {
             let mut context = input.query_execution_context.unwrap_or_default();
             // The context a read of this execution reports: the database as the request
