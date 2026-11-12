@@ -30,6 +30,19 @@
 //!   `^[a-zA-Z0-9_\.-]+$` (`smithy_query(query="shape", shape="ImplementationType")`).
 //! * `control_tower_identifier` is the `AWS-GR_…` identifier Amazon Web Services Control
 //!   Tower publishes for the control, where it publishes one.
+//! * `name` and `description` are the control's PUBLISHED text, worded by the surface
+//!   that publishes the control: Control Tower's own control name and description for a
+//!   control Control Tower publishes (a row carrying a `control_tower_identifier`), and
+//!   the implementing AWS Config managed rule's own title and description for a control
+//!   the catalog publishes under a `CONFIG.…` designator. They are catalog CONTENT, not a
+//!   summary of the row written here: `Description` is "[a] description of the control,
+//!   as it may appear in the console" (`smithy_query(query="shape",
+//!   shape="ControlSummary")`), and the catalog is account- and Region-independent, so
+//!   one ARN carries one `Name` and one `Description` for every caller and every run.
+//! * the instant the catalog publishes as a control's release time (`CreateTime`) is
+//!   recorded with its published identity, in [`PUBLISHED_CATALOG_RECORDS`], because like
+//!   the opaque identifier it is a fact the catalog assigns and nothing in the row or the
+//!   request derives — and two controls the catalog released together carry one instant.
 //! * `parameters` are the control parameters a caller supplies when it ENABLES the
 //!   control, and they are the parameters of the SURFACE that implements it, so they are
 //!   read through [`parameters`] rather than off the row alone: a control an AWS Config
@@ -53,10 +66,12 @@
 //! Services and is derivable from nothing in the request, yet it is part of the
 //! control's published identity: the catalog is account-independent, so one ARN names
 //! the control for every caller, in every partition and on every run. A control whose
-//! published identifier is recorded in [`PUBLISHED_CATALOG_IDENTIFIERS`] is therefore
-//! served under it; for a control it does not name — and for the ontology in
-//! [`super::published_ontology`] — this emulator mints an identifier deterministically
-//! from the row's `slug` (see `super::catalog_id`). The slug never appears on the wire.
+//! published record is recorded in [`PUBLISHED_CATALOG_RECORDS`] is therefore served
+//! under that identifier and with that release time; for a control it does not name —
+//! and for the ontology in [`super::published_ontology`] — this emulator mints an
+//! identifier deterministically from the row's `slug` (see `super::catalog_id`) and
+//! derives the timestamp the same deterministic way (see `super::seed_catalog`). The
+//! slug never appears on the wire.
 
 /// `ControlParameterRequirement`: a parameter the caller must supply.
 pub(super) const REQUIRED: &str = "REQUIRED";
@@ -320,9 +335,11 @@ pub(super) const PUBLISHED_CONTROLS: &[ControlSeed] = &[
     ControlSeed {
         slug: "multi-region-cloud-trail-enabled",
         name: "Checks that there is at least one multi-region AWS CloudTrail",
+        // The implementing AWS Config managed rule's own published description, which is
+        // what the catalog publishes for a control it publishes under a `CONFIG.…`
+        // designator.
         description: "Checks that there is at least one multi-region AWS CloudTrail. The \
-                      rule is NON_COMPLIANT if the trails do not match the input \
-                      parameters.",
+                      rule is non-compliant if the trails do not match input parameters",
         behavior: DETECTIVE,
         severity: HIGH,
         implementation_type: CONFIG_RULE,
@@ -369,13 +386,15 @@ pub(super) const PUBLISHED_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         slug: "s3-bucket-server-side-encryption-enabled",
-        name: "Checks that your Amazon S3 bucket either has Amazon S3 default encryption \
-               enabled or that its bucket policy explicitly denies put-object requests \
-               without server-side encryption",
-        description: "Checks that your Amazon S3 bucket either has Amazon S3 default \
-                      encryption enabled or that its bucket policy explicitly denies \
-                      put-object requests without server-side encryption. The rule is \
-                      NON_COMPLIANT if the bucket has neither.",
+        name: "Checks if S3 buckets have default encryption enabled or have bucket \
+               policies that explicitly deny put-object requests without server side \
+               encryption using AES-256 or AWS KMS",
+        // The implementing AWS Config managed rule's own published title and
+        // description, which the catalog publishes for this control.
+        description: "Checks if S3 buckets have default encryption enabled or have bucket \
+                      policies that explicitly deny put-object requests without server \
+                      side encryption using AES-256 or AWS KMS. The rule is \
+                      NON_COMPLIANT if an S3 bucket is not encrypted by default.",
         behavior: DETECTIVE,
         severity: MEDIUM,
         implementation_type: CONFIG_RULE,
@@ -402,8 +421,10 @@ pub(super) const PUBLISHED_CONTROLS: &[ControlSeed] = &[
     ControlSeed {
         slug: "s3-bucket-public-read-prohibited",
         name: "Disallow public read access to S3 buckets",
-        description: "Detects whether an Amazon S3 bucket policy or access control list \
-                      grants read access to everyone.",
+        // Control Tower's own published description of the control it publishes, which
+        // is what the catalog publishes for a Control Tower control.
+        description: "Secure access to data stored in Amazon S3 buckets by disallowing \
+                      public reads.",
         behavior: DETECTIVE,
         severity: CRITICAL,
         implementation_type: CONFIG_RULE,
@@ -429,8 +450,8 @@ pub(super) const PUBLISHED_CONTROLS: &[ControlSeed] = &[
     ControlSeed {
         slug: "audit-bucket-public-read-prohibited",
         name: "Disallow public read access to log archive",
-        description: "Detects whether the Amazon S3 bucket the organization archives its \
-                      audit logs in grants read access to everyone.",
+        description: "Control access to your log archive's Amazon S3 bucket by \
+                      disallowing public read access.",
         behavior: DETECTIVE,
         severity: CRITICAL,
         implementation_type: CONFIG_RULE,
@@ -453,8 +474,8 @@ pub(super) const PUBLISHED_CONTROLS: &[ControlSeed] = &[
     ControlSeed {
         slug: "s3-bucket-public-write-prohibited",
         name: "Disallow public write access to S3 buckets",
-        description: "Detects whether an Amazon S3 bucket policy or access control list \
-                      grants write access to everyone.",
+        description: "Secure access to data stored in Amazon S3 buckets by disallowing \
+                      public writes.",
         behavior: DETECTIVE,
         severity: CRITICAL,
         implementation_type: CONFIG_RULE,
@@ -478,8 +499,8 @@ pub(super) const PUBLISHED_CONTROLS: &[ControlSeed] = &[
     ControlSeed {
         slug: "audit-bucket-public-write-prohibited",
         name: "Disallow public write access to log archive",
-        description: "Detects whether the Amazon S3 bucket the organization archives its \
-                      audit logs in grants write access to everyone.",
+        description: "Control access to your log archive's Amazon S3 bucket by \
+                      disallowing public write access.",
         behavior: DETECTIVE,
         severity: CRITICAL,
         implementation_type: CONFIG_RULE,
@@ -501,11 +522,10 @@ pub(super) const PUBLISHED_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         slug: "s3-bucket-ssl-requests-only",
-        name: "Checks whether Amazon S3 buckets have policies that require requests to use \
-               Secure Socket Layer (SSL)",
-        description: "Checks whether Amazon S3 buckets have policies that require requests \
-                      to use Secure Socket Layer (SSL). The rule is NON_COMPLIANT if a \
-                      bucket policy does not deny requests made over unencrypted HTTP.",
+        name: "Checks if S3 buckets have policies that require requests to use SSL/TLS",
+        description: "Checks if S3 buckets have policies that require requests to use \
+                      SSL/TLS. The rule is NON_COMPLIANT if any S3 bucket has policies \
+                      allowing HTTP requests.",
         behavior: DETECTIVE,
         severity: MEDIUM,
         implementation_type: CONFIG_RULE,
@@ -653,12 +673,11 @@ pub(super) const PUBLISHED_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         slug: "vpc-flow-logs-enabled",
-        name: "Checks whether Amazon Virtual Private Cloud flow logs are found and enabled \
-               for Amazon VPC",
-        description: "Checks whether Amazon Virtual Private Cloud flow logs are found and \
-                      enabled for Amazon VPC. The rule is NON_COMPLIANT if a VPC \
-                      publishes no flow log of the traffic type the input parameter \
-                      names.",
+        name: "Checks if Amazon Virtual Private Cloud (Amazon VPC) flow logs are found \
+               and enabled for all Amazon VPCs",
+        description: "Checks if Amazon Virtual Private Cloud (Amazon VPC) flow logs are \
+                      found and enabled for all Amazon VPCs. The rule is NON_COMPLIANT \
+                      if flow logs are not enabled for at least one Amazon VPC.",
         behavior: DETECTIVE,
         severity: MEDIUM,
         implementation_type: CONFIG_RULE,
@@ -706,8 +725,8 @@ pub(super) const PUBLISHED_CONTROLS: &[ControlSeed] = &[
     ControlSeed {
         slug: "rds-snapshots-public-prohibited",
         name: "Disallow public access to RDS database snapshots",
-        description: "Detects whether an Amazon Relational Database Service database \
-                      snapshot is shared with every Amazon Web Services account.",
+        description: "Secure your Amazon RDS database snapshots by disallowing public \
+                      access.",
         behavior: DETECTIVE,
         severity: CRITICAL,
         implementation_type: CONFIG_RULE,
@@ -732,8 +751,9 @@ pub(super) const PUBLISHED_CONTROLS: &[ControlSeed] = &[
     ControlSeed {
         slug: "rds-storage-encrypted",
         name: "Disallow RDS database instances without storage encryption",
-        description: "Detects whether an Amazon Relational Database Service database \
-                      instance is running without storage encryption.",
+        description: "Secure your Amazon RDS database instances at rest by encrypting the \
+                      underlying storage for database instances and their automated \
+                      backups, Read Replicas, and snapshots.",
         behavior: DETECTIVE,
         severity: MEDIUM,
         implementation_type: CONFIG_RULE,
@@ -1082,59 +1102,110 @@ pub(super) const PUBLISHED_CONTROLS: &[ControlSeed] = &[
     },
 ];
 
-/// The opaque identifier the catalog publishes in a control's ARN, keyed by the `slug`
-/// of the [`PUBLISHED_CONTROLS`] row that describes the control: `(slug, identifier)`.
+/// What the Control Catalog itself assigns to one published control: the facts that are
+/// neither derivable from the request nor from the row describing the control.
+#[derive(Debug)]
+pub(super) struct PublishedCatalogRecord {
+    /// The `slug` of the [`PUBLISHED_CONTROLS`] row this record belongs to.
+    pub(super) slug: &'static str,
+    /// The opaque identifier the control's published ARN carries.
+    pub(super) identifier: &'static str,
+    /// The instant the catalog publishes as the control's release time, in seconds since
+    /// the Unix epoch: `CreateTime` "notes the time when the control was released (start
+    /// of its life) as a governance capability in Amazon Web Services"
+    /// (`smithy_query(query="shape", shape="ControlSummary")`).
+    pub(super) release_time: i64,
+}
+
+/// The published catalog record of every control this catalog records one for.
 ///
 /// Source: the Control Catalog's own published control list, which names every control
-/// by the ARN `arn:{PARTITION}:controlcatalog:::control/{identifier}`. The identifier is
-/// assigned by Amazon Web Services and derivable from nothing in the request, yet it is
-/// part of the control's published identity rather than a per-run value: the catalog is
-/// account-independent and read-only, so one identifier names the control for every
-/// caller and across runs, and a client holds it to read the control back with
-/// `GetControl` and to enable it elsewhere. A row this table does not name is served
-/// under an identifier minted from its slug (see `super::catalog_id`), which is all a
-/// control whose published identifier is not recorded here can be served under.
-pub(super) const PUBLISHED_CATALOG_IDENTIFIERS: &[(&str, &str)] = &[
-    (
-        "multi-region-cloud-trail-enabled",
-        "d5kdbugbadk3r481vtwnvoynv",
-    ),
-    (
-        "s3-bucket-server-side-encryption-enabled",
-        "d4wgeffz6izrb627c2yb8nq8d",
-    ),
-    (
-        "s3-bucket-public-read-prohibited",
-        "8sw3pbid15t9cbww8d2w2qwgf",
-    ),
-    (
-        "audit-bucket-public-read-prohibited",
-        "9jzlkwys54gzgsx3pmkqnx8l1",
-    ),
-    (
-        "s3-bucket-public-write-prohibited",
-        "9j9nwxj789d82sypnukhyyowy",
-    ),
-    (
-        "audit-bucket-public-write-prohibited",
-        "ci9ov6vzjoi6vzkajgademvvo",
-    ),
-    ("s3-bucket-ssl-requests-only", "e5efjudq0b347dgxn86o8fg2o"),
-    ("vpc-flow-logs-enabled", "22484xhzccf9twis5gmdt7uic"),
-    (
-        "rds-snapshots-public-prohibited",
-        "1h4eyqyyonp19dlrreqf1i3w0",
-    ),
-    ("rds-storage-encrypted", "e34kieahgkm0lggs5g0s412jt"),
+/// by the ARN `arn:{PARTITION}:controlcatalog:::control/{identifier}` and publishes the
+/// instant it was released. Neither value is derivable from the request, yet both are
+/// part of the control's published content rather than a per-run value: the catalog is
+/// account-independent and read-only, so one identifier names the control and one
+/// release instant dates it for every caller and across runs — a client holds the
+/// identifier to read the control back with `GetControl` and to enable it elsewhere, and
+/// reads the release instant to decide which controls are new since its last sync. Two
+/// controls the catalog released together therefore carry ONE release instant, not two
+/// near ones. A row this table does not name is served under an identifier minted from
+/// its slug (see `super::catalog_id`) and a release instant derived the same
+/// deterministic way (see `super::seed_catalog`), which is all a control whose published
+/// record is not recorded here can be served under.
+pub(super) const PUBLISHED_CATALOG_RECORDS: &[PublishedCatalogRecord] = &[
+    PublishedCatalogRecord {
+        slug: "multi-region-cloud-trail-enabled",
+        identifier: "d5kdbugbadk3r481vtwnvoynv",
+        release_time: 1_539_993_600,
+    },
+    PublishedCatalogRecord {
+        slug: "s3-bucket-server-side-encryption-enabled",
+        identifier: "d4wgeffz6izrb627c2yb8nq8d",
+        release_time: 1_515_110_400,
+    },
+    // The account-wide and the log-archive control over public S3 reads were released
+    // together, so the catalog dates both with one instant.
+    PublishedCatalogRecord {
+        slug: "s3-bucket-public-read-prohibited",
+        identifier: "8sw3pbid15t9cbww8d2w2qwgf",
+        release_time: 1_542_240_000,
+    },
+    PublishedCatalogRecord {
+        slug: "audit-bucket-public-read-prohibited",
+        identifier: "9jzlkwys54gzgsx3pmkqnx8l1",
+        release_time: 1_542_240_000,
+    },
+    PublishedCatalogRecord {
+        slug: "s3-bucket-public-write-prohibited",
+        identifier: "9j9nwxj789d82sypnukhyyowy",
+        release_time: 1_542_240_000,
+    },
+    PublishedCatalogRecord {
+        slug: "audit-bucket-public-write-prohibited",
+        identifier: "ci9ov6vzjoi6vzkajgademvvo",
+        release_time: 1_542_240_000,
+    },
+    PublishedCatalogRecord {
+        slug: "s3-bucket-ssl-requests-only",
+        identifier: "e5efjudq0b347dgxn86o8fg2o",
+        release_time: 1_479_772_800,
+    },
+    PublishedCatalogRecord {
+        slug: "vpc-flow-logs-enabled",
+        identifier: "22484xhzccf9twis5gmdt7uic",
+        release_time: 1_536_710_400,
+    },
+    // Both RDS controls were released together, so they too share one instant.
+    PublishedCatalogRecord {
+        slug: "rds-snapshots-public-prohibited",
+        identifier: "1h4eyqyyonp19dlrreqf1i3w0",
+        release_time: 1_564_444_800,
+    },
+    PublishedCatalogRecord {
+        slug: "rds-storage-encrypted",
+        identifier: "e34kieahgkm0lggs5g0s412jt",
+        release_time: 1_564_444_800,
+    },
 ];
 
-/// The opaque catalog identifier published for the control `slug` names, or `None` when
-/// this table does not record one for it.
-pub(super) fn published_catalog_identifier(slug: &str) -> Option<&'static str> {
-    PUBLISHED_CATALOG_IDENTIFIERS
+/// The published catalog record of the control `slug` names, or `None` when this catalog
+/// records none for it.
+fn published_catalog_record(slug: &str) -> Option<&'static PublishedCatalogRecord> {
+    PUBLISHED_CATALOG_RECORDS
         .iter()
-        .find(|(candidate, _)| *candidate == slug)
-        .map(|(_, identifier)| *identifier)
+        .find(|record| record.slug == slug)
+}
+
+/// The opaque catalog identifier published for the control `slug` names, or `None` when
+/// this catalog records no published record for it.
+pub(super) fn published_catalog_identifier(slug: &str) -> Option<&'static str> {
+    published_catalog_record(slug).map(|record| record.identifier)
+}
+
+/// The instant the catalog publishes as the release time of the control `slug` names, or
+/// `None` when this catalog records no published record for it.
+pub(super) fn published_release_time(slug: &str) -> Option<i64> {
+    published_catalog_record(slug).map(|record| record.release_time)
 }
 
 /// The input parameters an AWS Config managed rule takes: `(rule identifier, [(parameter

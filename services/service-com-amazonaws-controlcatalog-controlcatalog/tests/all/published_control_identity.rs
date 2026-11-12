@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
-use crate::control_catalog::{drain, Emulator};
+use crate::control_catalog::{catalog_arn, drain, Emulator};
 
 /// One published control, as the catalog publishes it.
 ///
@@ -75,9 +75,9 @@ const PUBLISHED_CONTROLS: &[PublishedControl] = &[
     PublishedControl {
         alias: "CONFIG.S3.DT.8",
         identifier: "d4wgeffz6izrb627c2yb8nq8d",
-        name: "Checks that your Amazon S3 bucket either has Amazon S3 default encryption \
-               enabled or that its bucket policy explicitly denies put-object requests \
-               without server-side encryption",
+        name: "Checks if S3 buckets have default encryption enabled or have bucket \
+               policies that explicitly deny put-object requests without server side \
+               encryption using AES-256 or AWS KMS",
         severity: "MEDIUM",
         parameter_requirement_summary: "NONE",
         governed_resources: &["AWS::S3::Bucket"],
@@ -86,8 +86,7 @@ const PUBLISHED_CONTROLS: &[PublishedControl] = &[
     PublishedControl {
         alias: "CONFIG.S3.DT.15",
         identifier: "e5efjudq0b347dgxn86o8fg2o",
-        name: "Checks whether Amazon S3 buckets have policies that require requests to \
-               use Secure Socket Layer (SSL)",
+        name: "Checks if S3 buckets have policies that require requests to use SSL/TLS",
         severity: "MEDIUM",
         parameter_requirement_summary: "NONE",
         governed_resources: &["AWS::S3::Bucket"],
@@ -96,8 +95,8 @@ const PUBLISHED_CONTROLS: &[PublishedControl] = &[
     PublishedControl {
         alias: "CONFIG.EC2.DT.48",
         identifier: "22484xhzccf9twis5gmdt7uic",
-        name: "Checks whether Amazon Virtual Private Cloud flow logs are found and \
-               enabled for Amazon VPC",
+        name: "Checks if Amazon Virtual Private Cloud (Amazon VPC) flow logs are found \
+               and enabled for all Amazon VPCs",
         severity: "MEDIUM",
         parameter_requirement_summary: "OPTIONAL",
         governed_resources: &["AWS::EC2::VPC"],
@@ -185,11 +184,6 @@ const PUBLISHED_PARAMETER_SUMMARIES: &[(&str, &str)] = &[
     // A control deployed as a service control policy, exempting principals.
     ("CT.IAM.PV.1", "OPTIONAL"),
 ];
-
-/// The catalog ARN a control whose published identifier is `identifier` is served under.
-fn catalog_arn(identifier: &str) -> String {
-    format!("arn:aws:controlcatalog:::control/{identifier}")
-}
 
 /// The `Aliases` of a served control summary.
 fn aliases(control: &Value) -> Vec<String> {

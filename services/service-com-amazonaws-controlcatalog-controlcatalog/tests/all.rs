@@ -43,6 +43,8 @@ mod ontology_listing;
 mod pagination_token_spelling;
 #[path = "all/published_control_identity.rs"]
 mod published_control_identity;
+#[path = "all/published_control_release_record.rs"]
+mod published_control_release_record;
 #[path = "all/published_controls.rs"]
 mod published_controls;
 #[path = "all/published_ontology.rs"]

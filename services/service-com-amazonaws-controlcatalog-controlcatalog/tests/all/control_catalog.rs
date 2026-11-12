@@ -179,6 +179,15 @@ pub(crate) async fn drain(
     items
 }
 
+/// The catalog ARN a control whose published opaque identifier is `identifier` is served
+/// under: the global `controlcatalog` form, which carries neither account nor Region.
+///
+/// `pub(crate)`: the ONE spelling of a control's catalog ARN this test target uses,
+/// shared with the sibling suites rather than rewritten beside them.
+pub(crate) fn catalog_arn(identifier: &str) -> String {
+    format!("arn:aws:controlcatalog:::control/{identifier}")
+}
+
 /// Sort items by their `Arn`, so two differently ordered sets compare equal.
 pub(crate) fn by_arn(mut items: Vec<Value>) -> Vec<Value> {
     items.sort_by_key(|item| {

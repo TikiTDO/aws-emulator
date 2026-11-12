@@ -1024,23 +1024,28 @@ fn seed_catalog() -> ComAmazonawsControlcatalogControlcatalogState {
     // --- controls ----------------------------------------------------------
     //
     // ONE pass over the published control table, which carries one row per published
-    // control: its identity, the surface that implements it, the control parameters a
-    // caller supplies when enabling it, and the common control and framework items it
-    // is published against. The ARN carries the catalog's own published identifier for
-    // the control, where the table records it, and otherwise one minted from the row's
-    // slug, exactly as the ontology's are (see `control_arn`).
+    // control: its identity, the published text that describes it, the surface that
+    // implements it, the control parameters a caller supplies when enabling it, and the
+    // common control and framework items it is published against. The ARN carries the
+    // catalog's own published identifier for the control, where the table records it,
+    // and otherwise one minted from the row's slug, exactly as the ontology's are (see
+    // `control_arn`).
     //
-    // Timestamps are positional and fixed (see CATALOG_EPOCH), so the catalog a client
-    // reads is identical in every process and on every run.
-    // Every recorded published identifier names a row of the table below: a stale entry
+    // `CreateTime` is the instant the catalog publishes as the control's release time,
+    // read from that same published record, so controls the catalog released together
+    // carry one instant. Only a control whose published record this catalog does not
+    // hold — one already served under a minted identifier — is dated positionally;
+    // either way the instant is fixed (see CATALOG_EPOCH), so the catalog a client reads
+    // is identical in every process and on every run.
+    // Every recorded published record names a row of the table below: a stale entry
     // would otherwise leave its control served under a minted identifier with no signal.
     debug_assert!(
-        published_controls::PUBLISHED_CATALOG_IDENTIFIERS
+        published_controls::PUBLISHED_CATALOG_RECORDS
             .iter()
-            .all(|(slug, _)| published_controls::PUBLISHED_CONTROLS
+            .all(|record| published_controls::PUBLISHED_CONTROLS
                 .iter()
-                .any(|seed| seed.slug == *slug)),
-        "a published catalog identifier must name a published control"
+                .any(|seed| seed.slug == record.slug)),
+        "a published catalog record must name a published control"
     );
     for (position, seed) in published_controls::PUBLISHED_CONTROLS.iter().enumerate() {
         let arn = control_arn(seed.slug);
@@ -1083,7 +1088,11 @@ fn seed_catalog() -> ComAmazonawsControlcatalogControlcatalogState {
                         requirement: Some((*requirement).to_string()),
                     })
                     .collect(),
-                create_time: CATALOG_EPOCH + (position as i64) * DAY,
+                // The instant the catalog publishes as this control's release time,
+                // where its published record holds one; a control served under a minted
+                // identifier is dated from its position in the table instead.
+                create_time: published_controls::published_release_time(seed.slug)
+                    .unwrap_or(CATALOG_EPOCH + (position as i64) * DAY),
                 governed_resources: seed
                     .governed_resources
                     .iter()
