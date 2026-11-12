@@ -63,6 +63,15 @@ const PEM_LABEL_SUBJECT_PUBLIC_KEY_INFO: &str = "PUBLIC KEY";
 /// `ssh-keygen -e -m PEM` writes for an RSA key.
 const PEM_LABEL_RSA_PUBLIC_KEY: &str = "RSA PUBLIC KEY";
 
+/// `encodingType`'s `SSH` (`smithy_query(query="shape", shape="encodingType")` gives
+/// `SSH`, `PEM`): "to retrieve the public key in ssh-rsa format, use SSH"
+/// (`GetSSHPublicKey$Encoding`).
+pub const ENCODING_SSH: &str = "SSH";
+
+/// `encodingType`'s `PEM`: "to retrieve the public key in PEM format, use PEM"
+/// (`GetSSHPublicKey$Encoding`).
+pub const ENCODING_PEM: &str = "PEM";
+
 /// One SSH public key an IAM user holds, keyed in
 /// [`IamState::ssh_public_keys`] by its `SSHPublicKeyId` — the handle every other
 /// operation on one takes (`GetSSHPublicKey`, `UpdateSSHPublicKey` and
@@ -113,6 +122,47 @@ impl SshPublicKeyRecord {
             ssh_public_key_body: self.ssh_public_key_body.clone(),
             status: self.status.clone(),
             upload_date: Some(self.upload_date),
+        }
+    }
+
+    /// This record as the whole modelled shape, with its body written in the encoding
+    /// `encoding` names, or `None` for an encoding outside the value set `encodingType`
+    /// declares.
+    ///
+    /// "Specifies the public key encoding format to use in the response. To retrieve the
+    /// public key in ssh-rsa format, use SSH. To retrieve the public key in PEM format, use
+    /// PEM" (`GetSSHPublicKey$Encoding`) — so the ENCODING is the caller's choice while the
+    /// KEY is the account's: every other member is reported exactly as
+    /// [`report`](Self::report) reports it, including the fingerprint, which is a digest of
+    /// the key material and therefore the same whichever encoding carries it.
+    pub fn report_in(
+        &self,
+        ssh_public_key_id: &str,
+        user_name: &str,
+        encoding: &str,
+    ) -> Option<SSHPublicKey> {
+        Some(SSHPublicKey {
+            ssh_public_key_body: self.body_in(encoding)?,
+            ..self.report(ssh_public_key_id, user_name)
+        })
+    }
+
+    /// The key's body written in the encoding `encoding` names, or `None` for an encoding
+    /// outside the value set `encodingType` declares.
+    ///
+    /// A body already written in the encoding asked for is reported verbatim, so the key
+    /// the upload carried comes back byte for byte in its own encoding. In the OTHER
+    /// encoding the body is written out from the KEY the account holds — the DER
+    /// `SubjectPublicKeyInfo` every accepted body was reduced to — by the crates that
+    /// implement these formats, so one key renders alike however it arrived.
+    pub fn body_in(&self, encoding: &str) -> Option<String> {
+        if body_encoding(&self.ssh_public_key_body) == Some(encoding) {
+            return Some(self.ssh_public_key_body.clone());
+        }
+        match encoding {
+            ENCODING_SSH => openssh_public_key_line(&self.subject_public_key_info),
+            ENCODING_PEM => subject_public_key_info_pem(&self.subject_public_key_info),
+            _ => None,
         }
     }
 
@@ -184,6 +234,22 @@ impl IamState {
         self.ssh_public_keys
             .insert(ssh_public_key_id.clone(), record);
         ssh_public_key_id
+    }
+
+    /// The key `ssh_public_key_id` names AMONG the keys the user keyed by `user_key` holds.
+    ///
+    /// An SSH public key is reachable only through the user it is associated with, so an id
+    /// the account never minted and an id that belongs to a DIFFERENT user are one answer:
+    /// that user holds no such key. The one lookup every operation that addresses a single
+    /// key by id goes through.
+    pub fn held_ssh_public_key(
+        &self,
+        user_key: &str,
+        ssh_public_key_id: &str,
+    ) -> Option<&SshPublicKeyRecord> {
+        self.ssh_public_keys
+            .get(ssh_public_key_id)
+            .filter(|record| record.user_key == user_key)
     }
 }
 
@@ -265,23 +331,82 @@ fn openssh_rsa_key(text: &str) -> Option<(Vec<u8>, Vec<u8>)> {
 fn pem_rsa_key(text: &str) -> Option<(Vec<u8>, Vec<u8>)> {
     let (label, document) = ::pkcs1::der::Document::from_pem(text).ok()?;
     let der = document.as_bytes();
-    let key = match label {
-        PEM_LABEL_RSA_PUBLIC_KEY => ::pkcs1::RsaPublicKey::from_der(der).ok()?,
-        PEM_LABEL_SUBJECT_PUBLIC_KEY_INFO => {
-            let info = ::pkcs8::spki::SubjectPublicKeyInfoRef::from_der(der).ok()?;
-            if info.algorithm.oid != ::pkcs1::ALGORITHM_OID {
-                return None;
-            }
-            ::pkcs1::RsaPublicKey::from_der(info.subject_public_key.as_bytes()?).ok()?
+    match label {
+        PEM_LABEL_RSA_PUBLIC_KEY => {
+            let key = ::pkcs1::RsaPublicKey::from_der(der).ok()?;
+            Some((
+                key.modulus.as_bytes().to_vec(),
+                key.public_exponent.as_bytes().to_vec(),
+            ))
         }
+        PEM_LABEL_SUBJECT_PUBLIC_KEY_INFO => spki_rsa_key(der),
         // Every other PEM structure (a certificate, a private key): recognised framing,
         // but no public key the upload can take.
-        _ => return None,
-    };
+        _ => None,
+    }
+}
+
+/// The same pair out of the DER `SubjectPublicKeyInfo` `der`, or `None` when that structure
+/// carries no RSA public key.
+///
+/// The one reading of the structure [`subject_public_key_info`] writes, so what a body is
+/// reduced to on the way in is read back the same way on the way out.
+fn spki_rsa_key(der: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let info = ::pkcs8::spki::SubjectPublicKeyInfoRef::from_der(der).ok()?;
+    if info.algorithm.oid != ::pkcs1::ALGORITHM_OID {
+        return None;
+    }
+    let key = ::pkcs1::RsaPublicKey::from_der(info.subject_public_key.as_bytes()?).ok()?;
     Some((
         key.modulus.as_bytes().to_vec(),
         key.public_exponent.as_bytes().to_vec(),
     ))
+}
+
+/// Which of the encodings `encodingType` names the body `ssh_public_key_body` is written
+/// in, or `None` when it is in neither.
+///
+/// Read by the crates that implement those formats, exactly as [`read_ssh_public_key`]
+/// reads the material itself: the question is what the text IS, not what it looks like.
+fn body_encoding(ssh_public_key_body: &str) -> Option<&'static str> {
+    let text = ssh_public_key_body.trim();
+    if ::ssh_key::PublicKey::from_openssh(text).is_ok() {
+        Some(ENCODING_SSH)
+    } else if ::pkcs1::der::Document::from_pem(text).is_ok() {
+        Some(ENCODING_PEM)
+    } else {
+        None
+    }
+}
+
+/// The OpenSSH `ssh-rsa` public key line for the key the DER `SubjectPublicKeyInfo`
+/// `subject_public_key_info` holds — the one-line form "ssh-rsa format" names — written by
+/// the crate that implements the format.
+///
+/// No comment is written: a comment names the key's origin on the machine that generated
+/// it, and the account holds a key rather than a line.
+fn openssh_public_key_line(subject_public_key_info: &[u8]) -> Option<String> {
+    let (modulus, public_exponent) = spki_rsa_key(subject_public_key_info)?;
+    let rsa = ::ssh_key::public::RsaPublicKey {
+        e: ::ssh_key::Mpint::from_positive_bytes(&public_exponent).ok()?,
+        n: ::ssh_key::Mpint::from_positive_bytes(&modulus).ok()?,
+    };
+    ::ssh_key::PublicKey::new(::ssh_key::public::KeyData::Rsa(rsa), String::new())
+        .to_openssh()
+        .ok()
+}
+
+/// The X.509 `SubjectPublicKeyInfo` PEM for the same structure — the PEM form of a public
+/// key (RFC 7468 section 13), what `ssh-keygen -e -m PKCS8` writes — framed by the crate
+/// that implements PEM, with the line ending that framing defines.
+fn subject_public_key_info_pem(subject_public_key_info: &[u8]) -> Option<String> {
+    ::pkcs1::der::Document::try_from(subject_public_key_info)
+        .ok()?
+        .to_pem(
+            PEM_LABEL_SUBJECT_PUBLIC_KEY_INFO,
+            ::pkcs1::der::pem::LineEnding::LF,
+        )
+        .ok()
 }
 
 /// The DER `SubjectPublicKeyInfo` of the RSA public key `(modulus, public_exponent)` — the

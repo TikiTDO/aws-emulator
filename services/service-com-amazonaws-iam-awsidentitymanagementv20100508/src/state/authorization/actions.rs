@@ -460,6 +460,9 @@ pub const UPLOAD_SSH_PUBLIC_KEY: &str = "iam:UploadSSHPublicKey";
 /// `iam:ListSSHPublicKeys`.
 pub const LIST_SSH_PUBLIC_KEYS: &str = "iam:ListSSHPublicKeys";
 
+/// `iam:GetSSHPublicKey`.
+pub const GET_SSH_PUBLIC_KEY: &str = "iam:GetSSHPublicKey";
+
 /// `iam:CreateServiceSpecificCredential`.
 pub const CREATE_SERVICE_SPECIFIC_CREDENTIAL: &str = "iam:CreateServiceSpecificCredential";
 

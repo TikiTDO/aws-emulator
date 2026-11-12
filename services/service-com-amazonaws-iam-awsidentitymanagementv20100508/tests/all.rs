@@ -349,6 +349,8 @@ mod service_specific_credential_status;
 mod service_specific_credentials;
 #[path = "all/signing_certificates.rs"]
 mod signing_certificates;
+#[path = "all/ssh_public_key_reads.rs"]
+mod ssh_public_key_reads;
 #[path = "all/ssh_public_keys.rs"]
 mod ssh_public_keys;
 #[path = "all/simulated_address_conditions.rs"]

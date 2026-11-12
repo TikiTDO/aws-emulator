@@ -44,7 +44,7 @@ use crate::user_lifecycle::{call, call_signed_by, element, elements, error_code,
 /// (`UploadSSHPublicKey$SSHPublicKeyBody`) and the "SSH public keys per IAM user: 5" quota
 /// of AWS's "IAM and STS quotas" page. The suite also pins that the service's own constants
 /// ARE these values, so a row written against them is a row about the published bound.
-const PUBLISHED_MINIMUM_BITS: usize = 2048;
+pub(crate) const PUBLISHED_MINIMUM_BITS: usize = 2048;
 const PUBLISHED_KEYS_PER_USER: usize = 5;
 
 /// RULE: the bounds the rows below are written against are the ones AWS publishes.
@@ -70,7 +70,7 @@ const EXPONENT: [u8; 3] = [0x01, 0x00, 0x01];
 /// The top bit is set so the integer really is that long and the last byte is odd, which is
 /// what an RSA modulus is; nothing here depends on the integer being a product of primes,
 /// because what the upload reads off the material is its STRUCTURE and its length.
-fn modulus(bits: usize, seed: u8) -> Vec<u8> {
+pub(crate) fn modulus(bits: usize, seed: u8) -> Vec<u8> {
     let mut bytes: Vec<u8> = (0..bits / 8)
         .map(|at| seed.wrapping_mul(31).wrapping_add(at as u8) | 0x11)
         .collect();
@@ -85,7 +85,7 @@ fn modulus(bits: usize, seed: u8) -> Vec<u8> {
 
 /// The one-line OpenSSH public key for `modulus`, as `ssh-keygen` writes one: the key type,
 /// the base64 key blob and the comment, written by the crate that implements the format.
-fn openssh_line(modulus: &[u8], comment: &str) -> String {
+pub(crate) fn openssh_line(modulus: &[u8], comment: &str) -> String {
     let rsa = ::ssh_key::public::RsaPublicKey {
         e: ::ssh_key::Mpint::from_positive_bytes(&EXPONENT).expect("a positive exponent"),
         n: ::ssh_key::Mpint::from_positive_bytes(modulus).expect("a positive modulus"),
@@ -112,7 +112,7 @@ fn pkcs1_body(modulus: &[u8]) -> Vec<u8> {
 
 /// The X.509 `SubjectPublicKeyInfo` PEM for `modulus` — what `ssh-keygen -e -m PKCS8`
 /// writes, the PEM form of a public key.
-fn spki_pem(modulus: &[u8]) -> String {
+pub(crate) fn spki_pem(modulus: &[u8]) -> String {
     use ::pkcs1::der::EncodePem as _;
 
     let body = pkcs1_body(modulus);
@@ -129,7 +129,7 @@ fn spki_pem(modulus: &[u8]) -> String {
 }
 
 /// The PKCS#1 `RSAPublicKey` PEM for `modulus` — what `ssh-keygen -e -m PEM` writes.
-fn pkcs1_pem(modulus: &[u8]) -> String {
+pub(crate) fn pkcs1_pem(modulus: &[u8]) -> String {
     use ::pkcs1::der::EncodePem as _;
 
     ::pkcs1::RsaPublicKey {
@@ -680,7 +680,7 @@ async fn both_operations_are_decided_against_the_callers_policies() {
 
 /// Assert `fingerprint` is the MD5 digest form `publicKeyFingerprintType` admits
 /// (`^[:\w]+$`): sixteen lowercase hex pairs, separated by colons.
-fn assert_fingerprint(case: &str, fingerprint: &str) {
+pub(crate) fn assert_fingerprint(case: &str, fingerprint: &str) {
     let pairs: Vec<&str> = fingerprint.split(':').collect();
     assert_eq!(
         pairs.len(),
@@ -697,7 +697,7 @@ fn assert_fingerprint(case: &str, fingerprint: &str) {
 }
 
 /// One `UploadSSHPublicKey` call.
-async fn upload(
+pub(crate) async fn upload(
     router: &MultiServiceRouter,
     user_name: &str,
     ssh_public_key_body: &str,
@@ -719,7 +719,7 @@ async fn list(router: &MultiServiceRouter, params: &[(&str, &str)]) -> (u16, Str
 }
 
 /// Create the user `user_name`, which every row needs to exist before it uploads.
-async fn create_user(router: &MultiServiceRouter, case: &str, user_name: &str) {
+pub(crate) async fn create_user(router: &MultiServiceRouter, case: &str, user_name: &str) {
     let (status, body) = call(router, "CreateUser", &[("UserName", user_name)]).await;
     assert_eq!(
         status, 200,

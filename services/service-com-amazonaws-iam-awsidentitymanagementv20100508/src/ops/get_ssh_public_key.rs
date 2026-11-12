@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetSSHPublicKey
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetSSHPublicKey`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetSSHPublicKey::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports ONE SSH public key the named IAM user holds, with its body written in the
+//! encoding the request asks for: "specifies the public key encoding format to use in the
+//! response. To retrieve the public key in ssh-rsa format, use SSH. To retrieve the public
+//! key in PEM format, use PEM" (`GetSSHPublicKey$Encoding`). Everything else about the key
+//! — its id, the user that holds it, its fingerprint, its status and its upload date — is
+//! reported as the account holds it, so the encoding is the caller's choice while the key
+//! is the account's, and a read changes nothing a later caller sees.
 //!
 //! ## Shape of an operation
 //!
@@ -152,18 +151,104 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetSSHPublicKey` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetSSHPublicKeyErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetSSHPublicKey"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            // The operation models `NoSuchEntityException` and
+            // `UnrecognizedPublicKeyEncodingException` alone, so a store that is not there
+            // is reported as the entity not being retrievable.
+            return Err(GetSSHPublicKeyErrorModeled::NoSuchEntityException(
+                NoSuchEntityException {
+                    message: Some("the IAM store is unavailable".to_string()),
+                },
+            )
+            .into());
+        };
+
+        // A read: it "retrieves the specified SSH public key, including metadata about the
+        // key" and writes nothing.
+        let store = state.lock();
+
+        // IAM entity names "are not distinguished by case", so the user is resolved on the
+        // case-folded name, as every other operation on a user's credentials resolves it.
+        let user_key = crate::state::name_key(&input.user_name);
+
+        // IAM authorizes its own API: the signing principal's identity-based policies are
+        // evaluated before anything about the key is reported, and before the store is
+        // consulted for it. The decision is made on the ARN of the user the key belongs to
+        // — the held user's own ARN, or, for a name the account holds no user under, the
+        // ARN that name would carry at the default path, since there is no other path to
+        // attribute it to. A refusal names that user as the request named it.
+        let resource = store.users.get(&user_key).map_or_else(
+            || crate::state::user_arn(crate::state::DEFAULT_PATH, &input.user_name),
+            |user| user.arn.clone(),
+        );
+        crate::state::authorization::authorize_named(
+            &store,
+            ctx,
+            crate::state::authorization::GET_SSH_PUBLIC_KEY,
+            &resource,
+            &format!("user {}", input.user_name),
+        )?;
+
+        // A key is held by an IAM user the account holds: a name the account does not hold
+        // names no user whose key could be reported, which "referenced a resource entity
+        // that does not exist" — worded in the one form this service words an absent user
+        // with, naming the user as the request spelled it.
+        let Some(user) = store.users.get(&user_key) else {
+            return Err(GetSSHPublicKeyErrorModeled::NoSuchEntityException(
+                NoSuchEntityException {
+                    message: Some(format!(
+                        "The user with name {} cannot be found.",
+                        input.user_name
+                    )),
+                },
+            )
+            .into());
+        };
+        // Reported in the case the user was created with, not the case the request happened
+        // to spell.
+        let user_name = user.user_name.clone();
+
+        // The key the id names among THAT user's keys: an id the account never minted and
+        // an id another user holds are one answer, since an SSH public key is reachable
+        // only through the user it is associated with.
+        let Some(record) = store.held_ssh_public_key(&user_key, &input.ssh_public_key_id)
+        else {
+            return Err(GetSSHPublicKeyErrorModeled::NoSuchEntityException(
+                NoSuchEntityException {
+                    message: Some(format!(
+                        "The SSH Public Key with id {} cannot be found.",
+                        input.ssh_public_key_id
+                    )),
+                },
+            )
+            .into());
+        };
+
+        // The stored key, with its body written in the encoding the request names. The
+        // value set of `encodingType` is enforced before this handler runs, so the only way
+        // the key cannot be written is material the account holds that no named encoding
+        // can carry — "the public key encoding format is unsupported or unrecognized".
+        let Some(ssh_public_key) =
+            record.report_in(&input.ssh_public_key_id, &user_name, &input.encoding)
+        else {
+            return Err(
+                GetSSHPublicKeyErrorModeled::UnrecognizedPublicKeyEncodingException(
+                    UnrecognizedPublicKeyEncodingException {
+                        message: Some(UNRECOGNIZED_ENCODING.to_string()),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        Ok(GetSSHPublicKeyOutput {
+            ssh_public_key: Some(ssh_public_key),
+        })
     }
 }
+
+/// What IAM answers an `Encoding` the key cannot be written in with — one fixed sentence
+/// for the refusal class, naming no part of the request, exactly as the upload words the
+/// same modelled refusal.
+const UNRECOGNIZED_ENCODING: &str =
+    "The public key encoding format is unsupported or unrecognized.";
