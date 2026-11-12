@@ -37,6 +37,9 @@ mod findings;
 mod investigations;
 /// The trusted-IP lists a detector holds.
 mod ip_sets;
+/// The IAM role a Malware Protection plan works under, as the account's IAM
+/// records answer for it.
+mod malware_protection_plan_role;
 /// Malware Protection plans.
 mod malware_protection_plans;
 /// Malware scans and the reports over them.
@@ -62,6 +65,7 @@ pub use features::*;
 pub use findings::*;
 pub use investigations::*;
 pub use ip_sets::*;
+pub use malware_protection_plan_role::*;
 pub use malware_protection_plans::*;
 pub use malware_scans::*;
 pub use organization::*;
@@ -540,6 +544,19 @@ impl ComAmazonawsGuarddutyGuarddutyapiserviceState {
             &hex[16..20],
             &hex[20..32]
         )
+    }
+
+    /// Mint a `MalwareProtectionPlanId`: the
+    /// [`MALWARE_PROTECTION_PLAN_ID_LEN`] hexadecimal characters that form takes
+    /// ([`is_malware_protection_plan_id`]), which is a shorter id than the
+    /// [`DETECTOR_ID_LEN`] one [`Self::mint_id`] hands out.
+    ///
+    /// Taken from the TAIL of a minted id, because that is where this state's own
+    /// sequence counter lives: two plan ids minted by the same state differ even if
+    /// the hash above them repeats.
+    pub fn mint_malware_protection_plan_id(&mut self) -> String {
+        let hex = self.mint_id();
+        hex[hex.len().saturating_sub(MALWARE_PROTECTION_PLAN_ID_LEN)..].to_string()
     }
 
     /// Set the archive state of the named findings of the detector `region`'s
@@ -2448,30 +2465,20 @@ pub const S3_OBJECT_BUCKET_MEMBER: &str = "s3Object.bucket";
 /// for malware" (`smithy_query(shape="S3ObjectForSendObjectMalwareScan")`).
 pub const S3_OBJECT_KEY_MEMBER: &str = "s3Object.key";
 
-/// The message an object scan is refused with when the Region's endpoint holds no
-/// Malware Protection plan for the bucket the request names.
+/// The message a send GuardDuty will not start a scan for is refused with.
 ///
-/// "The bucket must have a Malware Protection plan configured to use this API"
-/// (`smithy_query(query="doc",shape="SendObjectMalwareScanRequest",member="S3Object")`),
-/// so a bucket with no plan has nothing to scan the object with. Built from the
-/// REQUEST — the condition the caller broke — and naming neither the bucket nor the
-/// Region, like every other rejection this service answers.
-pub const OBJECT_MALWARE_SCAN_WITHOUT_PLAN_MESSAGE: &str =
-    "The request is rejected because the S3 bucket does not have a Malware Protection plan configured.";
-
-/// The message an object scan is refused with when the bucket's plan limits its
-/// scanning to object prefixes and the key the request names is under none of
-/// them.
-///
-/// "The S3 object will be scanned only if it belongs to any of the specified
-/// object prefixes"
-/// (`smithy_query(query="doc",shape="CreateS3BucketResource",member="ObjectPrefixes")`),
-/// so an object outside the plan's prefixes is not an object that plan scans.
-/// Built from the REQUEST — the condition the caller broke — and, like
-/// [`OBJECT_MALWARE_SCAN_WITHOUT_PLAN_MESSAGE`], naming neither the key nor the
-/// prefixes the plan holds.
-pub const OBJECT_MALWARE_SCAN_OUTSIDE_PREFIXES_MESSAGE: &str =
-    "The request is rejected because the S3 object key does not belong to any of the object prefixes configured in the Malware Protection plan.";
+/// ONE short fixed text for the whole class: the object the request named is not one
+/// a plan of this account and Region scans — the bucket has no Malware Protection
+/// plan ("the bucket must have a Malware Protection plan configured to use this
+/// API",
+/// `smithy_query(query="doc",shape="SendObjectMalwareScanRequest",member="S3Object")`),
+/// or the key falls under none of that plan's object prefixes ("the S3 object will
+/// be scanned only if it belongs to any of the specified object prefixes",
+/// `smithy_query(query="doc",shape="CreateS3BucketResource",member="ObjectPrefixes")`).
+/// GuardDuty does not report WHICH of them it was, and naming neither the bucket,
+/// the key nor the prefixes a plan holds is also what keeps a caller from learning
+/// through a refusal whether another account protects that bucket.
+pub const OBJECT_MALWARE_SCAN_REFUSAL_MESSAGE: &str = "Unable to start a scan";
 
 /// The `MalwareProtectionPlanStatus` a plan GuardDuty accepted reports: the plan
 /// is in force and nothing is wrong with it. The enum's other two members

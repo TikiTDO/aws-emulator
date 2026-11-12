@@ -688,6 +688,9 @@ mod sfn_management_events;
 // stable.
 #[path = "all/guardduty_runtime_coverage.rs"]
 mod guardduty_runtime_coverage;
+// Declared beside its sibling GuardDuty suite for the reason the lines above give.
+#[path = "all/guardduty_malware_protection_plan_role.rs"]
+mod guardduty_malware_protection_plan_role;
 // tail is where every concurrently landing router suite appends, so a line added there
 // conflicts with all of them, while these neighbouring lines are stable.
 #[path = "all/sagemaker_feature_store_control_plane_handoff.rs"]

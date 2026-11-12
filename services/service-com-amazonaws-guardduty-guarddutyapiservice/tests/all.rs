@@ -147,6 +147,8 @@ mod malware_protection_plan_delete;
 mod malware_protection_plan_listing;
 #[path = "all/malware_protection_plan_update.rs"]
 mod malware_protection_plan_update;
+#[path = "all/malware_protection_plan_validation.rs"]
+mod malware_protection_plan_validation;
 #[path = "all/malware_scan.rs"]
 mod malware_scan;
 #[path = "all/malware_scan_continuous_window.rs"]

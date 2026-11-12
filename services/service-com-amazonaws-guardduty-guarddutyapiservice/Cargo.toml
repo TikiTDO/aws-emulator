@@ -37,6 +37,11 @@ aws-sdk-eks = { version = "1", default-features = false }
 # token names its own listing; `hex` renders that digest into the token.
 sha2 = { workspace = true }
 hex = { workspace = true }
+# `service-common` carries the shared readings of a caller-supplied IAM role ARN —
+# which role of this account it names, and what this account's IAM records say that
+# role may do — which a Malware Protection plan's `Role` is held to before a plan is
+# recorded, rather than a copy of that reading here.
+service-common = { path = "../common" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

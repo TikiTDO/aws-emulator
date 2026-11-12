@@ -92,6 +92,10 @@ const MALFORMED_ID: &str = "not-an-id-this-service-mints";
 /// service mints) that no create here ever minted.
 const ABSENT_ID: &str = "0123456789abcdef0123456789abcdef";
 
+/// A well-formed Malware Protection plan id (the 20 hexadecimal characters that
+/// family's ids are spelled in) that no create here ever minted.
+const ABSENT_PLAN_ID: &str = "0123456789abcdef0123";
+
 /// A well-formed finding id no `CreateSampleFindings` minted.
 const FOREIGN_FINDING_ID: &str = "ffffffffffffffffffffffffffffffff";
 
@@ -582,7 +586,7 @@ async fn each_family_words_its_own_absent_resource_refusal() {
     // wording, under the modelled 404 its operations declare.
     for (id, why) in [
         (stored.plan.clone(), "an id whose delete was accepted"),
-        (ABSENT_ID.to_string(), "an id no create minted"),
+        (ABSENT_PLAN_ID.to_string(), "an id no create minted"),
         (stored.plan.to_uppercase(), "the stored id upper-cased"),
     ] {
         rows.push(Row {
