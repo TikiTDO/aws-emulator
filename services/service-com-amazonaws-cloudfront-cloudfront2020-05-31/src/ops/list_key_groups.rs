@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListKeyGroups
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListKeyGroups`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListKeyGroups::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Enumerates the key groups this account holds, one page at a time: the page is cut at
+//! `MaxItems` (bounded by this emulator's own ceiling), the order is the stored total order
+//! over ids, and `Marker` names the key group the previous page ended at, so walking the
+//! pages enumerates every group exactly once.
+//!
+//! A reporting operation — "Gets a list of key groups" — it reads the stored records and
+//! writes nothing.
 //!
 //! ## Shape of an operation
 //!
@@ -73,6 +72,8 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+
+use std::ops::Bound;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -142,18 +143,86 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListKeyGroups` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListKeyGroupsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListKeyGroups"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(crate::state::store_unavailable());
+        };
+        let _ = ctx;
+
+        // "You can optionally specify the maximum number of items to receive in the
+        // response": the member BOUNDS the page rather than demanding one, so only a
+        // negative size names no page at all. The size served is bounded above by this
+        // emulator's own page ceiling, the same one every listing of this service is
+        // bounded by, so one request cannot serve the whole store in a single response.
+        let max_items = input.max_items.unwrap_or(crate::state::MAX_ITEMS);
+        let Some(page_size) = crate::state::page_size(input.max_items) else {
+            return Err(
+                ListKeyGroupsErrorModeled::InvalidArgument(crate::state::invalid_max_items())
+                    .into(),
+            );
+        };
+
+        // "To get the next page of items, send a subsequent request that specifies the
+        // NextMarker value from the current response as the Marker value": the marker is a
+        // resume point this service handed out — a key group id — so a value outside that
+        // shape was never one, and an unusable argument is the one refusal this listing
+        // models.
+        if let Some(marker) = input.marker.as_deref() {
+            if !crate::state::is_key_group_id(marker) {
+                return Err(ListKeyGroupsErrorModeled::InvalidArgument(
+                    crate::state::invalid_key_group_marker(),
+                )
+                .into());
+            }
+        }
+
+        let store = state.lock();
+
+        let mut items: Vec<KeyGroupSummary> = Vec::new();
+        let mut more_remain = false;
+        // `Marker` names where the previous page ENDED, so this page starts after it —
+        // "the response includes key groups in the list that occur after the marker" — and
+        // walking the pages enumerates every group exactly once. The store is ordered by
+        // id, so the resume point is a range bound rather than a scan.
+        let start = match input.marker.as_deref() {
+            Some(marker) => Bound::Excluded(marker),
+            None => Bound::Unbounded,
+        };
+        for (_, stored) in store.key_groups.range::<str, _>((start, Bound::Unbounded)) {
+            if items.len() >= page_size {
+                more_remain = true;
+                break;
+            }
+            // Read from the stored record, so every member a summary reports is the one the
+            // last mutation of that group wrote.
+            items.push(KeyGroupSummary {
+                key_group: stored.to_key_group(),
+            });
+        }
+
+        Ok(ListKeyGroupsOutput {
+            key_group_list: Some(KeyGroupList {
+                // "If there are more items in the list than are in this response, this
+                // element is present. It contains the value that you should use in the
+                // Marker field of a subsequent request to continue listing key groups" —
+                // the id the page ended at, and nothing at all on a page that ends the
+                // collection. `KeyGroupList` models no `IsTruncated`, so the presence of
+                // this element is the whole of what says more remain.
+                next_marker: if more_remain {
+                    items.last().map(|summary| summary.key_group.id.clone())
+                } else {
+                    None
+                },
+                // "The maximum number of key groups requested": the size this request asked
+                // for, or the default this service supplies for one that asked for none.
+                max_items,
+                // "The number of key groups returned in the response": the length of
+                // `Items` on this page, rather than the size of the whole collection.
+                quantity: i32::try_from(items.len()).unwrap_or(i32::MAX),
+                // "A list of key groups." A page that lists nothing carries no `Items`
+                // element at all, rather than an empty one — the same form every other
+                // CloudFront listing here takes for an account using none of the resource.
+                items: if items.is_empty() { None } else { Some(items) },
+            }),
+        })
     }
 }

@@ -3840,6 +3840,24 @@ pub const KEY_GROUP_WITHOUT_A_PUBLIC_KEY_MESSAGE: &str =
     "An argument is invalid: to create a key group, you must specify at least one public \
      key for the key group";
 
+/// The modelled `InvalidArgument` (HTTP 400) for a `ListKeyGroups` `Marker` that is no
+/// resume point this service handed out.
+///
+/// ONE CONSTANT for the condition, for the same reason [`invalid_public_key_marker`] is one:
+/// what the refusal states is the CONSTRAINT on the parameter — a marker is a key group id
+/// ([`is_key_group_id`]) — which is a property of the parameter rather than of the value
+/// submitted, so nothing from the request belongs in the text.
+pub fn invalid_key_group_marker() -> crate::ops::types::InvalidArgument {
+    crate::ops::types::InvalidArgument {
+        message: Some(INVALID_KEY_GROUP_MARKER_MESSAGE.to_string()),
+    }
+}
+
+/// The message `ListKeyGroups` refuses an unusable `Marker` with: the constraint on the
+/// parameter, worded as [`INVALID_PUBLIC_KEY_MARKER_MESSAGE`] words the same constraint on
+/// the neighbouring listing's marker, naming this listing's own resource.
+pub const INVALID_KEY_GROUP_MARKER_MESSAGE: &str = "Marker must be a valid CF key group Id";
+
 /// Mint the request id ONE response names the request it answers with — the `RequestId`
 /// element of this service's `<ErrorResponse>` envelope (`crate::service::envelope`).
 ///
