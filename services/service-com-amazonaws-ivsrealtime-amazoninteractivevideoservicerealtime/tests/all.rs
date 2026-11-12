@@ -89,6 +89,8 @@ mod get_participant;
 mod get_stage_session;
 #[path = "all/get_storage_configuration.rs"]
 mod get_storage_configuration;
+#[path = "all/import_public_key_admission.rs"]
+mod import_public_key_admission;
 #[path = "all/ingest_configuration_publishing_state.rs"]
 mod ingest_configuration_publishing_state;
 #[path = "all/ingest_configurations.rs"]
