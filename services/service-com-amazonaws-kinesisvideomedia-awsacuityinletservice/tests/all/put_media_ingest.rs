@@ -315,7 +315,8 @@ impl Harness {
             .await
     }
 
-    /// Create `name` through the control plane and answer the `StreamARN` it minted.
+    /// Create `name` through the control plane, wait for it to be readable, and answer
+    /// the `StreamARN` it minted.
     async fn create_stream(&self, name: &str) -> String {
         let response = self
             .call(
@@ -330,11 +331,38 @@ impl Harness {
             status(&response),
             text(&response)
         );
-        json(&response)
+        let arn = json(&response)
             .get("StreamARN")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_else(|| panic!("case \"create {name}\": no StreamARN in the answer"))
-            .to_string()
+            .to_string();
+        self.await_active(name).await;
+        arn
+    }
+
+    /// Wait until the control plane reports `name` as `ACTIVE`, as a client does before
+    /// reading a stream it just created ("CreateStream is an asynchronous operation"):
+    /// the archive read plane serves a stream only while the registry holds it active.
+    ///
+    /// Waits for the CONDITION, not for a span: it looks again until the status holds,
+    /// under a deadline far longer than the transition needs.
+    async fn await_active(&self, name: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut last = String::new();
+        while std::time::Instant::now() < deadline {
+            let response = self
+                .call("/describeStream", &serde_json::json!({ "StreamName": name }))
+                .await;
+            last = json(&response)["StreamInfo"]["Status"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if last == "ACTIVE" {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("case \"create {name}\": expected Status ACTIVE before the deadline, got {last:?}");
     }
 
     /// The chunks this service's media log holds for the stream `arn` names, in order.
@@ -1401,6 +1429,7 @@ async fn a_producer_reaches_the_ingest_plane_at_the_announced_write_endpoint() {
             status(&created),
             text(&created)
         );
+        harness.await_active(&name).await;
 
         let announced = harness
             .call_at(

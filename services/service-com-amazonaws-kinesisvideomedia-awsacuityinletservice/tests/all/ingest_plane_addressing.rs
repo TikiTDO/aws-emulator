@@ -114,7 +114,7 @@ impl Harness {
     }
 
     /// Create `name` through the control plane, on the address the discovery call is made
-    /// at, and answer the `StreamARN` it minted.
+    /// at, wait for it to be readable, and answer the `StreamARN` it minted.
     async fn create_stream(&self, control: &str, name: &str) -> String {
         let response = self
             .call_at(
@@ -130,11 +130,42 @@ impl Harness {
             status(&response),
             text(&response)
         );
-        json(&response)
+        let arn = json(&response)
             .get("StreamARN")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_else(|| panic!("case {name:?}: no StreamARN in the answer"))
-            .to_string()
+            .to_string();
+        self.await_active(control, name).await;
+        arn
+    }
+
+    /// Wait until the control plane reports `name` as `ACTIVE`, as a client does before
+    /// reading a stream it just created ("CreateStream is an asynchronous operation"):
+    /// the archive read plane serves a stream only while the registry holds it active.
+    ///
+    /// Waits for the CONDITION, not for a span: it looks again until the status holds,
+    /// under a deadline far longer than the transition needs.
+    async fn await_active(&self, control: &str, name: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut last = String::new();
+        while std::time::Instant::now() < deadline {
+            let response = self
+                .call_at(
+                    control,
+                    "/describeStream",
+                    &serde_json::json!({ "StreamName": name }),
+                )
+                .await;
+            last = json(&response)["StreamInfo"]["Status"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if last == "ACTIVE" {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("case {name:?}: expected Status ACTIVE before the deadline, got {last:?}");
     }
 
     /// The authority `GetDataEndpoint` announces for `api_name`, with the scheme stripped

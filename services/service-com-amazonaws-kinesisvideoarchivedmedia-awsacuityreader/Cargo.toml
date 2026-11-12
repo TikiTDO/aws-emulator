@@ -51,6 +51,9 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+# `time`: the suites wait for a control-plane stream to become readable by looking
+# again in a poll loop, which needs a timer between looks.
+tokio = { workspace = true, features = ["time"] }
 
 [lints]
 workspace = true

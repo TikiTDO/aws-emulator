@@ -108,8 +108,8 @@ impl Harness {
         (status, code, parsed)
     }
 
-    /// Create `name` through the control plane with `retention` hours and
-    /// answer its `StreamARN`.
+    /// Create `name` through the control plane with `retention` hours, wait for
+    /// it to be readable, and answer its `StreamARN`.
     async fn create_stream(&self, name: &str, retention: i32) -> String {
         let (status, _, body) = self
             .call(
@@ -122,10 +122,39 @@ impl Harness {
             "case create {name:?} retention {retention}: expected HTTP 200, got {status} with \
              {body:?}"
         );
-        body.get("StreamARN")
+        let arn = body
+            .get("StreamARN")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_else(|| panic!("case create {name:?}: no StreamARN in {body:?}"))
-            .to_string()
+            .to_string();
+        self.await_active(name).await;
+        arn
+    }
+
+    /// Wait until the control plane reports `name` as `ACTIVE`, the one status an
+    /// archived-media read serves, as a client of the real service does before
+    /// reading a stream it just created ("CreateStream is an asynchronous
+    /// operation").
+    ///
+    /// Waits for the CONDITION, not for a span: it looks again until the status
+    /// holds, under a deadline far longer than the transition needs.
+    async fn await_active(&self, name: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut last = String::new();
+        while std::time::Instant::now() < deadline {
+            last = self
+                .describe_stream(name)
+                .await
+                .get("Status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if last == "ACTIVE" {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("case create {name:?}: expected Status ACTIVE before the deadline, got {last:?}");
     }
 
     /// The stream's `StreamInfo`, as the control plane reports it.

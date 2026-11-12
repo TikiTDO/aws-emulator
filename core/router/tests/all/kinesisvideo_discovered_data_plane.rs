@@ -211,6 +211,35 @@ fn whole_archive() -> Value {
     })
 }
 
+/// Wait until the control plane reports `stream` as `ACTIVE`, which is what a client does
+/// before reading a stream it just created ("CreateStream is an asynchronous operation"),
+/// and what the archived-media plane serves reads for.
+///
+/// Waits for the CONDITION, not for a span: it looks again until the status holds, under a
+/// deadline far longer than the transition needs.
+async fn await_active(router: &MultiServiceRouter, stream: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut last = String::new();
+    while std::time::Instant::now() < deadline {
+        let answer = call(
+            router,
+            CONTROL_AUTHORITY,
+            "/describeStream",
+            &json!({ "StreamName": stream }),
+        )
+        .await;
+        last = answer.body["StreamInfo"]["Status"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if last == "ACTIVE" {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("DescribeStream expected Status ACTIVE before the deadline, got {last:?}");
+}
+
 /// The discovered data plane is reachable, and the media reads of that plane are served when
 /// a call is addressed to the authority the control plane announced.
 #[tokio::test(flavor = "multi_thread")]
@@ -227,6 +256,7 @@ async fn the_announced_data_endpoint_serves_the_media_reads_of_its_plane() {
         created.status, 200,
         "CreateStream expected HTTP 200, got {created:?}"
     );
+    await_active(&router, STREAM).await;
 
     // One row per plane the published `APIName` set is partitioned into: the plane media is
     // written to, and the plane it is read back from.

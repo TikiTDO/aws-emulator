@@ -168,8 +168,9 @@ impl Harness {
         Reply { status, code, body }
     }
 
-    /// Create `name` through the control plane with `retention` hours and answer its
-    /// `StreamARN` — the ARN an IAM statement names that stream by.
+    /// Create `name` through the control plane with `retention` hours, wait for it to
+    /// be readable, and answer its `StreamARN` — the ARN an IAM statement names that
+    /// stream by.
     async fn create_stream(&self, name: &str, retention: i32) -> String {
         let reply = self
             .post_as(
@@ -183,10 +184,37 @@ impl Harness {
             "case \"create {name}\": expected HTTP 200, got {} with body {}",
             reply.status, reply.body
         );
-        reply.body["StreamARN"]
+        let arn = reply.body["StreamARN"]
             .as_str()
             .unwrap_or_else(|| panic!("case \"create {name}\": no StreamARN in {}", reply.body))
-            .to_string()
+            .to_string();
+        self.await_active(name).await;
+        arn
+    }
+
+    /// Wait until the control plane reports `name` as `ACTIVE`, the one status an
+    /// archived-media read serves, as a client of the real service does before reading
+    /// a stream it just created ("CreateStream is an asynchronous operation").
+    ///
+    /// Waits for the CONDITION, not for a span: it looks again until the status holds,
+    /// under a deadline far longer than the transition needs.
+    async fn await_active(&self, name: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut last = String::new();
+        while std::time::Instant::now() < deadline {
+            let reply = self
+                .post_as(AMBIENT_KEY_ID, "/describeStream", &json!({ "StreamName": name }))
+                .await;
+            last = reply.body["StreamInfo"]["Status"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if last == "ACTIVE" {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("case \"create {name}\": expected Status ACTIVE before the deadline, got {last:?}");
     }
 }
 

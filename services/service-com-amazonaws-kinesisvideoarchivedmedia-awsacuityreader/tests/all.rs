@@ -35,3 +35,5 @@ mod registered_stream_reads;
 mod route_claims;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/stream_readable_state.rs"]
+mod stream_readable_state;

@@ -44,8 +44,9 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 # One case dials the address `GetDataEndpoint` announces, in THIS process, as a producer
 # handed that address does: tokio's socket and byte-stream halves carry the HTTP exchange
-# on the transport the announced scheme names.
-tokio = { workspace = true, features = ["io-util", "net"] }
+# on the transport the announced scheme names. `time`: the suites wait for a stream to
+# become readable by looking again in a poll loop, which needs a timer between looks.
+tokio = { workspace = true, features = ["io-util", "net", "time"] }
 
 [lints]
 workspace = true

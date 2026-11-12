@@ -816,9 +816,14 @@ impl ComAmazonawsKinesisvideoarchivedmediaAwsacuityreaderState {
     /// it, so the identifier is resolved in that service's registry in the
     /// shared engine first, and its record is what the stream's ARN and current
     /// retention are read from — re-read here on every call, so a retention
-    /// change is visible to the next read. Only an identifier neither that
-    /// registry nor this service's own archive answers to is a missing
-    /// resource.
+    /// change is visible to the next read. A registered stream is READ only
+    /// while its record is in the one status that serves reads, `ACTIVE`: a
+    /// record the registry still holds in a non-terminal status — created and
+    /// not yet active, or marked for deletion — is as unreadable as one the
+    /// registry does not hold at all, and is reported with the same
+    /// [`STREAM_NOT_FOUND_MESSAGE`] ("not found or not active"). An identifier
+    /// neither that registry nor this service's own archive answers to is a
+    /// missing resource too.
     ///
     /// The control-plane store is locked while this service's own store is
     /// already locked (the caller holds that guard); the control plane never
@@ -843,6 +848,15 @@ impl ComAmazonawsKinesisvideoarchivedmediaAwsacuityreaderState {
         // nothing has been ingested into, and that emptiness is what the
         // per-operation no-fragments behaviour is computed from.
         if let Some(registered) = registered_stream(engine, stream_name, stream_arn) {
+            // A record the registry holds in a status that does not serve reads
+            // is not a readable stream: the archived-media plane refuses it as
+            // the missing resource it is, rather than reporting the archive of
+            // a stream that is not there yet or is on its way out.
+            if !registered.readable() {
+                return Err(StreamLookupError::NotFound(
+                    STREAM_NOT_FOUND_MESSAGE.to_string(),
+                ));
+            }
             let archive = self.streams.get(&registered.name);
             return Ok(ResolvedStream {
                 name: registered.name,
@@ -950,6 +964,22 @@ struct RegisteredStream {
     arn: String,
     /// The stream's retention AS OF THIS CALL.
     data_retention_in_hours: i64,
+    /// The stream's `Status` AS OF THIS CALL, which decides whether the record
+    /// is one an archived-media read may serve.
+    status: String,
+}
+
+impl RegisteredStream {
+    /// Whether this record is one the archived-media plane reads.
+    ///
+    /// `ACTIVE` is the only stream status that serves reads: the other values
+    /// `StreamInfo$Status` takes are the non-terminal ones a stream passes
+    /// through on its way in or out, and the archived-media plane words its
+    /// refusal for both halves at once — the stream is "not found or not
+    /// active".
+    fn readable(&self) -> bool {
+        self.status == control_plane::STATUS_ACTIVE
+    }
 }
 
 /// The stream the Kinesis Video Streams control plane registry holds under this
@@ -959,22 +989,29 @@ struct RegisteredStream {
 /// client created through `CreateStream` is the very record read here — no copy
 /// of it is kept on this side, and nothing here writes to it.
 ///
-/// The record's `Status` is not read: a stream is resolved whatever status the
-/// control plane holds it in, so whether a read of a stream that is still
-/// creating (or already deleting) should be refused belongs with the
-/// stream-state work on the control plane, not here.
+/// The registry's own clock is settled first, which is not a mutation this read
+/// invents: the move out of `CREATING` and the removal of a stream marked for
+/// deletion were each owed at a fixed instant whether or not anybody called, so
+/// a read that did not settle them would report a stream in a state the clock
+/// had already left — a deleted stream, in particular, would stay readable for
+/// as long as nothing else touched the control plane.
+///
+/// The record's `Status` travels with it, because a stream is readable here only
+/// while the control plane holds it `ACTIVE`.
 fn registered_stream<Eng: Send + Sync + 'static>(
     engine: &Eng,
     stream_name: Option<&str>,
     stream_arn: Option<&str>,
 ) -> Option<RegisteredStream> {
     let registry = control_plane::service_state(engine)?;
-    let registry = registry.lock();
+    let mut registry = registry.lock();
+    registry.settle_clock();
     let stream = registry.resolve(stream_name, stream_arn).ok()?;
     Some(RegisteredStream {
         name: stream.stream_name.clone(),
         arn: stream.stream_arn.clone(),
         data_retention_in_hours: i64::from(stream.data_retention_in_hours),
+        status: stream.status.clone(),
     })
 }
 
