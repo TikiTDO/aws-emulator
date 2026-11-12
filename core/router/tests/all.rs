@@ -1475,3 +1475,10 @@ mod sfn_execution_status_change_on_an_authenticating_router;
 // CloudTrail reports at once — no single service crate's test target can ask it.
 #[path = "all/codepipeline_approval_reviewer_attribution.rs"]
 mod codepipeline_approval_reviewer_attribution;
+// Declared in the appended tail, which is where every new suite inserts its lines: what a
+// RUNNING function's own DynamoDB item call is authorized against spans IAM (the role and its
+// document), STS (the session the call is signed with), Lambda (the handler and the SDK it is
+// given) and DynamoDB (the decision) at once, so no single service crate's test target can
+// ask it.
+#[path = "all/lambda_in_function_dynamodb_authorization.rs"]
+mod lambda_in_function_dynamodb_authorization;
