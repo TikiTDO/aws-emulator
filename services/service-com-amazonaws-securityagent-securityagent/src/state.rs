@@ -278,17 +278,28 @@ pub const MAX_SECURITY_REQUIREMENTS_PER_PACK: usize = 1_000;
 /// matches one vocabulary whether a condition failed the whole call or one entry of it.
 pub const BATCH_REQUIREMENT_ERROR_CONFLICT: &str = "ConflictException";
 
-/// The `code` one entry carries when the pack holds no security requirement of that
-/// name: the shape name of the request-level error for the same condition, as
-/// [`BATCH_REQUIREMENT_ERROR_CONFLICT`] is.
-pub const BATCH_REQUIREMENT_ERROR_NOT_FOUND: &str = "ResourceNotFoundException";
-
-/// The `code` one entry carries when the service never processed it, because an entry
-/// ahead of it in the same request failed.
+/// The `code` one entry of a batch security requirement response carries when the pack
+/// holds no security requirement of that name.
 ///
-/// RECORDED, not modelled: the same recorded run reports this code for the entry BESIDE
-/// the one that conflicted. It is not the name of any modelled error, because nothing
-/// about that entry failed — the batch simply stopped before reaching it.
+/// RECORDED, not modelled: `BatchSecurityRequirementError$code` is "The error code", an
+/// unconstrained string, and the recorded
+/// `securityagent.batch-delete-security-requirements-partial-not-found` run reports this
+/// token for the name the pack did not hold. It is deliberately NOT the name of the
+/// request-level `ResourceNotFoundException` shape: that name belongs to the call-level
+/// 404, while this is the token a client branches on to tell "this one name is absent"
+/// from a refusal of the whole call.
+pub const BATCH_REQUIREMENT_ERROR_NOT_FOUND: &str = "ResourceNotFound";
+
+/// The `code` one entry carries when the service never processed it, because ANOTHER
+/// entry of the same request failed.
+///
+/// RECORDED, not modelled: the recorded
+/// `securityagent.batch-create-security-requirements-duplicate-partial-failure` run
+/// reports this code for the entry BESIDE the one that conflicted, and the recorded
+/// `securityagent.batch-delete-security-requirements-partial-not-found` run reports it
+/// for the name beside the one the pack did not hold. It is not the name of any modelled
+/// error, because nothing about that entry failed — the request simply did not act on
+/// it.
 pub const BATCH_REQUIREMENT_ERROR_NOT_PROCESSED: &str = "NotProcessed";
 
 /// The sentence one batch entry carries when the pack already holds a security
@@ -302,18 +313,23 @@ pub fn security_requirement_exists_message(name: &str) -> String {
 }
 
 /// The sentence one batch entry carries when the pack holds no security requirement of
-/// that name — the per-entry counterpart of the pack's own not-found sentence ("No
-/// security requirement pack found for ID: …"), stated here once for the same reason as
-/// [`security_requirement_exists_message`].
+/// that name, stated here once for the same reason as
+/// [`security_requirement_exists_message`] so every batch security requirement operation
+/// that meets the condition answers the same sentence.
+///
+/// RECORDED, not modelled: `BatchSecurityRequirementError$message` is "The error
+/// message", an unconstrained string. The fixed text is the service's; the only variable
+/// part is the requirement name, taken verbatim from the request.
 pub fn security_requirement_not_found_message(name: &str) -> String {
-    format!("No security requirement found for name: {name}")
+    format!("Security requirement with name: {name} was not found")
 }
 
 /// The sentence one batch entry carries when the service never processed it. Wholly
 /// FIXED: it carries no value from the request, because nothing about this entry is what
-/// stopped the batch.
+/// failed. It names ANOTHER entry of the same request rather than an earlier one,
+/// because a request can fail on an entry that sits behind the ones it did not act on.
 pub const SECURITY_REQUIREMENT_NOT_PROCESSED: &str =
-    "Security requirement was not processed because an earlier entry in the request failed.";
+    "Security requirement was not processed because another entry in the request failed.";
 
 /// The sentence a refusal to write security requirements into a pack AWS manages
 /// states.
@@ -1703,6 +1719,22 @@ impl ComAmazonawsSecurityagentSecurityagentState {
             (requirement.pack_id.clone(), requirement.name.clone()),
             requirement,
         );
+    }
+
+    /// Drop the security requirement `name` names IN the pack `pack_id`, handing back
+    /// the record that was removed, or `None` when that pack held no requirement of that
+    /// name.
+    ///
+    /// The counterpart of [`Self::insert_security_requirement`], keyed by the same pair,
+    /// so a removal and a read can never disagree about which record a name names: after
+    /// this returns `Some`, every later read of that pack and name resolves nothing.
+    pub fn remove_security_requirement(
+        &mut self,
+        pack_id: &str,
+        name: &str,
+    ) -> Option<SecurityRequirement> {
+        self.security_requirements
+            .remove(&(pack_id.to_string(), name.to_string()))
     }
 
     /// Mint the `artifactId` of a newly uploaded artifact.

@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op BatchDeleteSecurityRequirements
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `BatchDeleteSecurityRequirements`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`BatchDeleteSecurityRequirements::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Batch deletes security requirements from a customer managed security requirement
+//! pack. This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -156,18 +149,128 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `BatchDeleteSecurityRequirements` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(BatchDeleteSecurityRequirementsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("BatchDeleteSecurityRequirements"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            BatchDeleteSecurityRequirementsErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: "the security requirement store is unavailable".to_string(),
+                },
+            )
+        })?;
+
+        // `packId` is `@required` but carries no `@length`, so an empty one reaches the
+        // handler. It names no pack and never could, so it is a bad request rather than
+        // a missing resource: refused with the modelled `ValidationException` (400), as
+        // every other operation addressed to a pack refuses it.
+        if input.pack_id.is_empty() {
+            return Err(
+                BatchDeleteSecurityRequirementsErrorModeled::ValidationException(
+                    ValidationException {
+                        message: "packId must not be empty".to_string(),
+                        field_list: Some(vec![ValidationExceptionField {
+                            path: "packId".to_string(),
+                            message: "must not be empty".to_string(),
+                        }]),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        let mut state = state.lock();
+
+        // A requirement is reached through the pack that holds it, so an unknown
+        // `packId` is the operation's modelled `ResourceNotFoundException` (404) for the
+        // whole call rather than one error per name: there is no pack to delete from.
+        let pack = state
+            .security_requirement_packs
+            .get(&input.pack_id)
+            .ok_or_else(|| {
+                BatchDeleteSecurityRequirementsErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: crate::state::pack_not_found_message(&input.pack_id),
+                    },
+                )
+            })?;
+
+        // "Batch deletes security requirements from a CUSTOMER MANAGED pack": the
+        // contents of a pack AWS ships are the service's, so removing anything from one
+        // conflicts with the current state of that pack — the operation's modelled
+        // `ConflictException` (409), for the whole call, since every name of the request
+        // names the same pack.
+        if pack.management_type == crate::state::MANAGEMENT_TYPE_AWS_MANAGED {
+            return Err(
+                BatchDeleteSecurityRequirementsErrorModeled::ConflictException(
+                    ConflictException {
+                        message: crate::state::aws_managed_pack_conflict_message(&input.pack_id),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // The names are resolved against the pack as ONE snapshot, before anything is
+        // dropped, and the batch is ATOMIC in them: unless the pack holds every name the
+        // request asks for, nothing is deleted — each name it does not hold is reported
+        // as not found, and every other requested name is reported as one the service
+        // never processed, so each requested name carries exactly one outcome and a
+        // request naming one requirement that is not there leaves the pack as it was.
+        // The outcome is per REQUIREMENT, not per request position: a name the request
+        // repeats names one record, so it is resolved once and reported once, in the
+        // order of its first occurrence.
+        let mut seen = ::std::collections::BTreeSet::new();
+        let mut requested: Vec<&String> = Vec::new();
+        for name in &input.security_requirement_names {
+            if seen.insert(name.as_str()) {
+                requested.push(name);
+            }
+        }
+
+        let held: Vec<bool> = requested
+            .iter()
+            .map(|name| {
+                state
+                    .security_requirement(&input.pack_id, name.as_str())
+                    .is_some()
+            })
+            .collect();
+        if held.contains(&false) {
+            let errors = requested
+                .into_iter()
+                .zip(held)
+                .map(|(name, held)| {
+                    if held {
+                        BatchSecurityRequirementError {
+                            security_requirement_name: name.clone(),
+                            code: crate::state::BATCH_REQUIREMENT_ERROR_NOT_PROCESSED.to_string(),
+                            message: crate::state::SECURITY_REQUIREMENT_NOT_PROCESSED.to_string(),
+                        }
+                    } else {
+                        BatchSecurityRequirementError {
+                            security_requirement_name: name.clone(),
+                            code: crate::state::BATCH_REQUIREMENT_ERROR_NOT_FOUND.to_string(),
+                            message: crate::state::security_requirement_not_found_message(name),
+                        }
+                    }
+                })
+                .collect();
+            return Ok(BatchDeleteSecurityRequirementsOutput {
+                deleted_security_requirement_names: Vec::new(),
+                errors,
+            });
+        }
+
+        // Every name resolved, so every record named is dropped: each later read of this
+        // pack and name — the batch read, the listing, a second delete — sees it gone.
+        let deleted_security_requirement_names: Vec<String> =
+            requested.into_iter().cloned().collect();
+        for name in &deleted_security_requirement_names {
+            state.remove_security_requirement(&input.pack_id, name);
+        }
+
+        Ok(BatchDeleteSecurityRequirementsOutput {
+            deleted_security_requirement_names,
+            errors: Vec::new(),
+        })
     }
 }

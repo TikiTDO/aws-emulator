@@ -49,6 +49,8 @@ mod security_requirement_packs;
 mod security_requirements_listing;
 #[path = "all/security_requirements_batch.rs"]
 mod security_requirements_batch;
+#[path = "all/security_requirements_batch_delete.rs"]
+mod security_requirements_batch_delete;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 // Not a suite of its own: the wire harness every suite shares, reached as
