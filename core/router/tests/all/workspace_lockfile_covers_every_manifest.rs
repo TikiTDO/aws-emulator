@@ -24,22 +24,27 @@
 //! declaration forms it does not read — a `[dependencies.<name>]` sub-table and a dotted
 //! key — are absent from the tree rather than silently skipped.
 //!
-//! Those readers are `pub(crate)`: `sql_engine_single_locked_copy` pairs the same two
-//! committed files for a different invariant, so the lock and the manifests are read here
-//! once rather than by a second reader of the same formats.
+//! Those readers are `pub(crate)`: `sql_engine_single_locked_copy` and
+//! `workspace_lockfile_records_each_member_dependency` pair the same two committed files
+//! for a different invariant, so the lock and the manifests are read here once rather than
+//! by a second reader of the same formats. This module owns the ONE reader of each format:
+//! `lock_entries` reads the lock's `[[package]]` records whole, and every other view of it —
+//! `locked_packages`, which is crate name to locked versions — is derived from that one.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 /// A dependency as a manifest declares it: `name = "<req>"`, or an inline table with any
-/// of `version`, `package` (the crate the lock knows, when the key is an alias) and
-/// `workspace = true` (the requirement lives in the root `[workspace.dependencies]`).
+/// of `version`, `package` (the crate the lock knows, when the key is an alias),
+/// `workspace = true` (the requirement lives in the root `[workspace.dependencies]`) and
+/// `optional = true` (a feature has to turn it on before it is resolved at all).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Declared {
     pub(crate) package: Option<String>,
     pub(crate) req: Option<String>,
     pub(crate) from_workspace: bool,
+    pub(crate) optional: bool,
 }
 
 /// The crate names the lock carries, each with the versions locked for it.
@@ -54,28 +59,84 @@ pub(crate) fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn unquote(value: &str) -> &str {
+pub(crate) fn unquote(value: &str) -> &str {
     value.trim().trim_matches('"')
 }
 
-/// Every `[[package]]` in the lock, as crate name -> the versions locked for it.
-pub(crate) fn locked_packages(lock: &str) -> Locked {
-    let mut locked: Locked = BTreeMap::new();
-    let mut name: Option<String> = None;
+/// One `[[package]]` of the lock: the crate it locks, where it comes from, the checksum of
+/// the archive to fetch (a registry crate only), and the crates it depends on.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct LockEntry {
+    pub(crate) name: String,
+    pub(crate) version: String,
+    pub(crate) source: Option<String>,
+    pub(crate) checksum: Option<String>,
+    pub(crate) dependencies: BTreeSet<String>,
+}
+
+impl LockEntry {
+    /// Whether this package is fetched from a registry, and so needs a checksum. A member of
+    /// this workspace and a path dependency have no source at all.
+    pub(crate) fn is_from_registry(&self) -> bool {
+        self.source
+            .as_deref()
+            .is_some_and(|source| source.starts_with("registry+"))
+    }
+}
+
+/// Every `[[package]]` the lock carries, whole and in file order.
+///
+/// An edge is written either as the crate's name alone or, where the lock holds more than one
+/// version of it, as the name and the version (`"sha2 0.10.9"`); the name is what a manifest
+/// declares, so that is what is kept.
+pub(crate) fn lock_entries(lock: &str) -> Vec<LockEntry> {
+    let mut entries: Vec<LockEntry> = Vec::new();
+    let mut current: Option<LockEntry> = None;
+    let mut inside_dependencies = false;
     for line in lock.lines() {
         let line = line.trim();
-        if line == "[[package]]" {
-            name = None;
-        } else if let Some(value) = line.strip_prefix("name = ") {
-            name = Some(unquote(value).to_string());
-        } else if let Some(value) = line.strip_prefix("version = ") {
-            if let Some(name) = name.take() {
-                locked
-                    .entry(name)
-                    .or_default()
-                    .push(unquote(value).to_string());
+        if line.starts_with('[') {
+            inside_dependencies = false;
+            entries.extend(current.take());
+            if line == "[[package]]" {
+                current = Some(LockEntry::default());
             }
+            continue;
         }
+        let Some(entry) = current.as_mut() else {
+            continue;
+        };
+        if inside_dependencies {
+            if line.starts_with(']') {
+                inside_dependencies = false;
+            } else if let Some(name) = unquote(line.trim_end_matches(',')).split_whitespace().next()
+            {
+                entry.dependencies.insert(name.to_string());
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("name = ") {
+            entry.name = unquote(value).to_string();
+        } else if let Some(value) = line.strip_prefix("version = ") {
+            entry.version = unquote(value).to_string();
+        } else if let Some(value) = line.strip_prefix("source = ") {
+            entry.source = Some(unquote(value).to_string());
+        } else if let Some(value) = line.strip_prefix("checksum = ") {
+            entry.checksum = Some(unquote(value).to_string());
+        } else if line.starts_with("dependencies = [") {
+            inside_dependencies = true;
+        }
+    }
+    entries.extend(current);
+    entries
+}
+
+/// Every `[[package]]` in the lock, as crate name -> the versions locked for it, read off the
+/// records `lock_entries` returns.
+pub(crate) fn locked_packages(lock: &str) -> Locked {
+    let mut locked: Locked = BTreeMap::new();
+    for entry in lock_entries(lock) {
+        locked.entry(entry.name).or_default().push(entry.version);
     }
     locked
 }
@@ -102,7 +163,7 @@ pub(crate) fn workspace_members(root_manifest: &str) -> Vec<String> {
 }
 
 /// The `name` of the `[package]` a manifest defines.
-fn package_name(manifest: &str) -> Option<String> {
+pub(crate) fn package_name(manifest: &str) -> Option<String> {
     let mut inside = false;
     for line in manifest.lines() {
         let line = line.trim();
@@ -133,6 +194,7 @@ fn parse_declared(value: &str) -> Declared {
             "package" => declared.package = Some(unquote(value).to_string()),
             "version" => declared.req = Some(unquote(value).to_string()),
             "workspace" => declared.from_workspace = unquote(value) == "true",
+            "optional" => declared.optional = unquote(value) == "true",
             _ => {}
         }
     }
@@ -223,7 +285,7 @@ pub(crate) fn dependencies_in(
 
 /// The root `[workspace.dependencies]` table a member's `workspace = true` resolves through,
 /// keyed by the name a member declares. It is one table, so no name appears twice.
-fn workspace_dependency_table(root_manifest: &str) -> BTreeMap<String, Declared> {
+pub(crate) fn workspace_dependency_table(root_manifest: &str) -> BTreeMap<String, Declared> {
     dependencies_in(root_manifest, is_workspace_dependency_table)
         .into_iter()
         .map(|(_table, name, declared)| (name, declared))
@@ -328,6 +390,32 @@ pub(crate) fn accepts(req: &str, version: &str) -> bool {
     actual >= lower && actual < upper
 }
 
+/// The declaration the lock is resolved from: the root `[workspace.dependencies]` entry a
+/// `workspace = true` declaration defers to, or the declaration itself.
+///
+/// `None` where it defers to a root table that does not declare it, which leaves nothing to
+/// pair with the lock.
+pub(crate) fn resolve_declared(
+    dependency: &str,
+    spec: &Declared,
+    workspace_deps: &BTreeMap<String, Declared>,
+) -> Option<Declared> {
+    if spec.from_workspace {
+        workspace_deps.get(dependency).cloned()
+    } else {
+        Some(spec.clone())
+    }
+}
+
+/// The name the LOCK knows a declaration by: the crate `package = "…"` renames it to, or the
+/// name the manifest declares it under when it renames nothing.
+pub(crate) fn locked_crate_name(dependency: &str, resolved: &Declared) -> String {
+    resolved
+        .package
+        .clone()
+        .unwrap_or_else(|| dependency.to_string())
+}
+
 /// How many dependencies `manifest` declares, and one report per dependency the lock does
 /// not carry at a version the manifest's requirement accepts.
 fn unlocked_dependencies(
@@ -339,22 +427,15 @@ fn unlocked_dependencies(
     let declared = dependencies_in(manifest, is_member_dependency_table);
     let mut reports = Vec::new();
     for (table, dependency, spec) in &declared {
-        let resolved = if spec.from_workspace {
-            match workspace_deps.get(dependency) {
-                Some(root_spec) => root_spec.clone(),
-                None => {
-                    reports.push(format!(
-                        "case {manifest_path:?} {table} -> {dependency:?}: declared \
-                         `workspace = true`, expected the root [workspace.dependencies] to \
-                         declare it, got nothing"
-                    ));
-                    continue;
-                }
-            }
-        } else {
-            spec.clone()
+        let Some(resolved) = resolve_declared(dependency, spec, workspace_deps) else {
+            reports.push(format!(
+                "case {manifest_path:?} {table} -> {dependency:?}: declared \
+                 `workspace = true`, expected the root [workspace.dependencies] to \
+                 declare it, got nothing"
+            ));
+            continue;
         };
-        let crate_name = resolved.package.clone().unwrap_or_else(|| dependency.clone());
+        let crate_name = locked_crate_name(dependency, &resolved);
         let Some(versions) = locked.get(&crate_name) else {
             reports.push(format!(
                 "case {manifest_path:?} {table} -> {dependency:?}: expected Cargo.lock to \
@@ -374,11 +455,15 @@ fn unlocked_dependencies(
     (declared.len(), reports)
 }
 
-/// The root manifest, the lock's packages, and every member's manifest text.
-fn workspace() -> (String, Locked, Vec<(String, String)>) {
+/// The committed lock's text.
+pub(crate) fn committed_lock() -> String {
+    fs::read_to_string(workspace_root().join("Cargo.lock")).expect("read Cargo.lock")
+}
+
+/// The root manifest's text, and every member's path (relative to the root) and text.
+pub(crate) fn root_and_member_manifests() -> (String, Vec<(String, String)>) {
     let root = workspace_root();
     let root_manifest = fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo.toml");
-    let locked = locked_packages(&fs::read_to_string(root.join("Cargo.lock")).expect("read lock"));
     let members = workspace_members(&root_manifest);
     assert!(
         members.len() > 1,
@@ -394,7 +479,13 @@ fn workspace() -> (String, Locked, Vec<(String, String)>) {
             (format!("{member}/Cargo.toml"), manifest)
         })
         .collect();
-    (root_manifest, locked, manifests)
+    (root_manifest, manifests)
+}
+
+/// The root manifest, the lock's packages, and every member's manifest text.
+fn workspace() -> (String, Locked, Vec<(String, String)>) {
+    let (root_manifest, manifests) = root_and_member_manifests();
+    (root_manifest, locked_packages(&committed_lock()), manifests)
 }
 
 #[test]

@@ -83,6 +83,12 @@ mod cloudformation_rollback_triggers_revert_the_operation;
 // service's span of the sorted list.
 #[path = "all/workspace_lockfile_covers_every_manifest.rs"]
 mod workspace_lockfile_covers_every_manifest;
+// Declared here, in this same head region, beside the suite above it shares its readers with:
+// this one holds the same committed `Cargo.lock` to recording each member's own dependency
+// edges and every registry package's checksum, so it too belongs to no service's span of the
+// sorted list.
+#[path = "all/workspace_lockfile_records_each_member_dependency.rs"]
+mod workspace_lockfile_records_each_member_dependency;
 // Declared here, in this same head region, for the reason the entries above record: what a
 // bucket's Lambda notification configuration DOES, which spans S3, Lambda, IAM and
 // CloudFormation at once.
