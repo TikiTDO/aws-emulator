@@ -4,9 +4,10 @@
 //! IMPLEMENTED: removes the tag keys the request names from the resource whose
 //! stored ARN is `resourceArn` — a collection or a collection group, whichever kind the
 //! ARN addresses — so `ListTagsForResource` no longer reports them and the resource's
-//! `lastModifiedDate` reports the write instant. A
-//! `resourceArn` that names no resource this account holds — including a collection whose
-//! deletion has been accepted — is refused with `ResourceNotFoundException`, and a
+//! `lastModifiedDate` reports the write instant. A `resourceArn` that is no ARN at all is
+//! refused with `ValidationException` before any lookup, one that names no resource this
+//! account holds — including a collection whose deletion has been accepted — with
+//! `ResourceNotFoundException`, and a
 //! `tagKeys` that names one key twice with `ValidationException`.
 //!
 //! ## Shape of an operation
@@ -175,17 +176,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store.settle_due_transitions();
 
         // A `resourceArn` addresses an ACTIVE resource this account holds, whichever KIND
-        // of resource it names: a collection whose deletion has been accepted is on its way
-        // out and its tags are no longer addressable, so it answers the same not-found
-        // refusal as a resource that was never there.
-        if !store.is_tag_addressable(&input.resource_arn) {
-            return Err(UntagResourceErrorModeled::ResourceNotFoundException(
-                ResourceNotFoundException {
-                    message: Some(crate::state::resource_not_found_message(
-                        &input.resource_arn,
-                    )),
-                },
-            )
+        // of resource it names. A value that is no ARN at all names nothing a lookup could
+        // resolve, so it is refused as malformed input rather than as a missing resource; a
+        // collection whose deletion has been accepted is on its way out and its tags are no
+        // longer addressable, so it answers the same not-found refusal as a resource that
+        // was never there.
+        if let Err(refusal) = store.resolve_tag_resource_arn(&input.resource_arn) {
+            return Err(match refusal {
+                crate::state::ResourceArnRefusal::Invalid(message) => {
+                    UntagResourceErrorModeled::ValidationException(ValidationException {
+                        message: Some(message),
+                    })
+                }
+                crate::state::ResourceArnRefusal::NotFound(message) => {
+                    UntagResourceErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException {
+                            message: Some(message),
+                        },
+                    )
+                }
+            }
             .into());
         }
         // Removing tags REWRITES the resource, so the write instant is what its

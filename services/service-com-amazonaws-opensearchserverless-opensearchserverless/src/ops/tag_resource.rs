@@ -5,8 +5,9 @@
 //! `resourceArn` — a collection or a collection group, whichever kind the ARN addresses —
 //! replacing the value of a key the resource already carries, so
 //! `ListTagsForResource` reports them and the resource's `lastModifiedDate` reports the
-//! write instant. A `resourceArn` that names no resource this
-//! account holds — including a collection whose deletion has been accepted — is refused with
+//! write instant. A `resourceArn` that is no ARN at all is refused with
+//! `ValidationException` before any lookup, one that names no resource this
+//! account holds — including a collection whose deletion has been accepted — with
 //! `ResourceNotFoundException`, a write that would take the resource past the
 //! documented 50-tag quota with `ServiceQuotaExceededException`, and a `tags` that names
 //! one key twice with `ValidationException`.
@@ -178,17 +179,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store.settle_due_transitions();
 
         // A `resourceArn` addresses an ACTIVE resource this account holds, whichever KIND
-        // of resource it names: a collection whose deletion has been accepted is on its way
-        // out and its tags are no longer addressable, so it answers the same not-found
-        // refusal as a resource that was never there.
-        if !store.is_tag_addressable(&input.resource_arn) {
-            return Err(TagResourceErrorModeled::ResourceNotFoundException(
-                ResourceNotFoundException {
-                    message: Some(crate::state::resource_not_found_message(
-                        &input.resource_arn,
-                    )),
-                },
-            )
+        // of resource it names. A value that is no ARN at all names nothing a lookup could
+        // resolve, so it is refused as malformed input rather than as a missing resource; a
+        // collection whose deletion has been accepted is on its way out and its tags are no
+        // longer addressable, so it answers the same not-found refusal as a resource that
+        // was never there.
+        if let Err(refusal) = store.resolve_tag_resource_arn(&input.resource_arn) {
+            return Err(match refusal {
+                crate::state::ResourceArnRefusal::Invalid(message) => {
+                    TagResourceErrorModeled::ValidationException(ValidationException {
+                        message: Some(message),
+                    })
+                }
+                crate::state::ResourceArnRefusal::NotFound(message) => {
+                    TagResourceErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException {
+                            message: Some(message),
+                        },
+                    )
+                }
+            }
             .into());
         }
 
@@ -227,7 +237,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // Storing tags REWRITES the resource, so the write instant is what its
-        // `lastModifiedDate` reports from here on: the stamping accessor applies it.
+        // `lastModifiedDate` reports from here on: the stamping accessor applies it. The ARN
+        // resolved above, so the accessor reaches the same record.
         let written_at = crate::state::now_epoch_millis();
         let Some(stored) = store.tags_by_arn_for_write(&input.resource_arn, written_at) else {
             return Err(TagResourceErrorModeled::ResourceNotFoundException(

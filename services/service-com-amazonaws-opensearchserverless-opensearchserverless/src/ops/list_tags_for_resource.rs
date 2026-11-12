@@ -3,8 +3,9 @@
 //! @op ListTagsForResource
 //! IMPLEMENTED: reports the tags stored on the resource whose stored ARN is
 //! `resourceArn` — a collection or a collection group, whichever kind the ARN addresses.
-//! A `resourceArn` that names no resource this account holds, or one whose deletion has
-//! already been accepted, is refused with `ResourceNotFoundException`: the member takes
+//! A `resourceArn` that is no ARN at all is refused with `ValidationException` before any
+//! lookup, and one that names no resource this account holds, or one whose deletion has
+//! already been accepted, with `ResourceNotFoundException`: the member takes
 //! the ARN of an active resource, as the tag writes' does.
 //!
 //! ## Shape of an operation
@@ -154,17 +155,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store.settle_due_transitions();
 
         // The `resourceArn` this read takes addresses an ACTIVE resource this account
-        // holds, exactly as the tag writes' does: a collection whose deletion has been
-        // accepted is on its way out and its tags are no longer addressable, so it answers
-        // the same not-found refusal as a resource that was never there — of whichever kind
-        // the ARN addresses. The tags are read through the SAME resolution, so the answer
-        // is never a stored record the precondition refused nor an empty set standing in
-        // for one that is not there.
-        let addressable = store
-            .is_tag_addressable(&input.resource_arn)
-            .then(|| store.tags_by_arn(&input.resource_arn).cloned())
-            .flatten();
-        let Some(tags) = addressable else {
+        // holds, exactly as the tag writes' does: a value that is no ARN at all names
+        // nothing a lookup could resolve and is refused as malformed input, and a
+        // collection whose deletion has been accepted is on its way out and its tags are no
+        // longer addressable, so it answers the same not-found refusal as a resource that
+        // was never there — of whichever kind the ARN addresses. The tags are read through
+        // the SAME resolution, so the answer is never a stored record the precondition
+        // refused nor an empty set standing in for one that is not there.
+        if let Err(refusal) = store.resolve_tag_resource_arn(&input.resource_arn) {
+            return Err(match refusal {
+                crate::state::ResourceArnRefusal::Invalid(message) => {
+                    ListTagsForResourceErrorModeled::ValidationException(ValidationException {
+                        message: Some(message),
+                    })
+                }
+                crate::state::ResourceArnRefusal::NotFound(message) => {
+                    ListTagsForResourceErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException {
+                            message: Some(message),
+                        },
+                    )
+                }
+            }
+            .into());
+        }
+        let Some(tags) = store.tags_by_arn(&input.resource_arn).cloned() else {
             return Err(ListTagsForResourceErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
                     message: Some(crate::state::resource_not_found_message(

@@ -2870,14 +2870,6 @@ impl ArnResourceKind {
     /// Every kind an ARN may address, in the order [`parse_resource_arn`] tries them.
     const ALL: [Self; 2] = [Self::CollectionGroup, Self::Collection];
 
-    /// The resource half's prefix for this kind, from the resource's own ARN template.
-    fn arn_prefix(self) -> &'static str {
-        match self {
-            Self::Collection => "collection/",
-            Self::CollectionGroup => "collection-group/",
-        }
-    }
-
     /// How a refusal NAMES this kind, before the id of the resource it was looking for.
     pub fn label(self) -> &'static str {
         match self {
@@ -2886,7 +2878,9 @@ impl ArnResourceKind {
         }
     }
 
-    /// The `resourceType` a quota refusal names for this kind: the segment the ARN carries.
+    /// The `resourceType` a quota refusal names for this kind, which is also the resource
+    /// TYPE this kind's ARN template carries (`collection/{id}`, `collection-group/{id}`),
+    /// so an ARN is read for this kind by that one token.
     pub fn resource_type(self) -> &'static str {
         match self {
             Self::Collection => TAGGED_RESOURCE_TYPE,
@@ -2895,13 +2889,31 @@ impl ArnResourceKind {
     }
 }
 
+/// Whether `value` is an ARN at all — the only question the SYNTAX of a `resourceArn` asks.
+///
+/// Read through the workspace's ONE ARN parse, so this service cannot disagree with another
+/// about what an ARN is: six colon-separated fields with the literal `arn` first and a
+/// partition, a vendor and a resource that each name something, the Region and the account
+/// empty for a partition-global or account-less resource. A value outside that form
+/// addresses no resource of any service, so nothing can be looked up under it; which
+/// SERVICE's resource an ARN names and whether that resource exists are separate questions,
+/// answered by [`parse_resource_arn`] and the store.
+pub fn is_arn(value: &str) -> bool {
+    ::service_common::arn::parse(value).is_some()
+}
+
 /// The resource a `resourceArn` addresses: its kind and the id the ARN carries, or `None`
-/// for an ARN whose resource half names neither of this service's addressable resources.
+/// for a value whose resource half names neither of this service's addressable resources.
+///
+/// An ARN addresses a resource here only when its VENDOR field names THIS service
+/// ([`ARN_NAMESPACE`]) and its resource field names one of the resource types this
+/// service's resources declare in their ARN templates, with a non-empty id — both read
+/// through the shared ARN parse, so an ARN of another service, whose resource half may read
+/// like one of these, names nothing here.
 pub fn parse_resource_arn(arn: &str) -> Option<(ArnResourceKind, &str)> {
-    let (_, resource) = arn.rsplit_once(':')?;
+    ::service_common::arn::parse_of(arn, ARN_NAMESPACE)?;
     ArnResourceKind::ALL.into_iter().find_map(|kind| {
-        resource
-            .strip_prefix(kind.arn_prefix())
+        ::service_common::arn::resource_id_of_type(arn, kind.resource_type())
             .filter(|id| !id.is_empty())
             .map(|id| (kind, id))
     })
@@ -2915,6 +2927,28 @@ pub fn resource_not_found_message(arn: &str) -> String {
         Some((kind, id)) => format!("{} ID {id} is not found", kind.label()),
         None => format!("Resource {arn} is not found"),
     }
+}
+
+/// How this service words a `resourceArn` that is no ARN at all ([`is_arn`]): the value the
+/// request carried, verbatim, called invalid.
+pub fn invalid_resource_arn_message(value: &str) -> String {
+    format!("Resource ARN: {value} is invalid")
+}
+
+/// Why the TAGGING plane cannot address the `resourceArn` a request carried.
+///
+/// The two conditions are not interchangeable: a value that is no ARN is malformed input —
+/// the caller bug `ValidationException` describes, which no retry and no wait can turn into
+/// a resource — while an ARN that names no live resource is the state condition
+/// `ResourceNotFoundException` describes, which a client may poll or read as already
+/// deleted. Each variant carries the sentence its refusal renders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceArnRefusal {
+    /// The value is no ARN; refused with `ValidationException`.
+    Invalid(String),
+    /// The ARN addresses no resource this account holds, or one whose deletion has been
+    /// accepted; refused with `ResourceNotFoundException`.
+    NotFound(String),
 }
 
 /// The customer managed key a policy statement assigns, if it names one. A statement that
@@ -3449,6 +3483,27 @@ impl ComAmazonawsOpensearchserverlessOpensearchserverlessState {
                 self.collection_group_by_arn(arn).is_some()
             }
             None => false,
+        }
+    }
+
+    /// Whether the TAGGING plane's `resourceArn` addresses a resource at all, or why it
+    /// addresses none ([`ResourceArnRefusal`]).
+    ///
+    /// The SYNTAX of the value is settled before any lookup: a value that is no ARN
+    /// ([`is_arn`]) names nothing any lookup could resolve, so it is refused as malformed
+    /// input, and only an ARN is looked up and reported as not found. Every tagging
+    /// operation resolves its `resourceArn` here, so the tag write, the tag read and the
+    /// tag removal cannot classify one value three ways.
+    pub fn resolve_tag_resource_arn(&self, arn: &str) -> Result<(), ResourceArnRefusal> {
+        if !is_arn(arn) {
+            return Err(ResourceArnRefusal::Invalid(invalid_resource_arn_message(
+                arn,
+            )));
+        }
+        if self.is_tag_addressable(arn) {
+            Ok(())
+        } else {
+            Err(ResourceArnRefusal::NotFound(resource_not_found_message(arn)))
         }
     }
 

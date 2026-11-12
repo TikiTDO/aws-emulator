@@ -111,6 +111,8 @@ mod tag_write_timestamps;
 mod tagging_plane_resource_kinds;
 #[path = "all/tagging_resource_arn_precondition.rs"]
 mod tagging_resource_arn_precondition;
+#[path = "all/tagging_resource_arn_syntax.rs"]
+mod tagging_resource_arn_syntax;
 #[path = "all/update_collection_token_scope.rs"]
 mod update_collection_token_scope;
 #[path = "all/vpc_endpoint.rs"]
