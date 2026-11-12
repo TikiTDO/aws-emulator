@@ -111,6 +111,67 @@ pub fn published_resource_types() -> Vec<&'static str> {
         .collect()
 }
 
+/// The service field of an Amazon Redshift ARN: the only ARNs whose resource a
+/// tagging operation of this service resolves (see [`cluster_arn`] for the form
+/// the Cluster Management Guide publishes).
+const ARN_SERVICE: &str = "redshift";
+
+/// The published resource type and the bare identifier the resource portion of
+/// `resource_name` carries, or `None` when the value is not an Amazon Redshift
+/// ARN of a type this service publishes.
+///
+/// A Redshift ARN's resource portion is `<type>:<identifier>`, with the type one
+/// of [`TAGGABLE_RESOURCE_TYPES`]'s segments and the identifier everything after
+/// it — for a snapshot the `<cluster>/<snapshot>` pair its ARN carries (see
+/// [`snapshot_arn`]).
+fn arn_resource(resource_name: &str) -> Option<(&'static str, &str)> {
+    if resource_name.len() > MAX_ARN_LENGTH {
+        return None;
+    }
+    let mut fields = resource_name.splitn(7, ':');
+    if fields.next()? != "arn" {
+        return None;
+    }
+    // The partition, the service, the Region and the account: only the service
+    // decides whether the value can name a resource of THIS control plane.
+    fields.next()?;
+    if fields.next()? != ARN_SERVICE {
+        return None;
+    }
+    fields.next()?;
+    fields.next()?;
+    let resource_type = fields.next()?;
+    let identifier = fields.next().filter(|value| !value.is_empty())?;
+    let published = TAGGABLE_RESOURCE_TYPES
+        .iter()
+        .find(|candidate| candidate.arn_segment == resource_type)?;
+    Some((published.arn_segment, identifier))
+}
+
+/// Why a request naming a resource this account holds none of is refused.
+///
+/// Amazon Redshift words it from what the ARN NAMES rather than echoing the ARN:
+/// the resource type the ARN carries, then the bare identifier that follows it,
+/// as `<type> (<identifier>) was not found.` The type is the ARN's own
+/// resource-type segment, which is the same value `TaggedResource$ResourceType`
+/// reports for a resource of that type, so a missing cluster, snapshot and
+/// parameter group each read as what they are rather than as one sentence with a
+/// different ARN in it. A value that is no Amazon Redshift ARN of a published
+/// type names no type to report ([`arn_resource`]), so that one is refused
+/// naming the value the request carried.
+///
+/// One function for every operation of this service that resolves an ARN to
+/// nothing (see `create_tags.rs`, `delete_tags.rs`, `describe_tags.rs`), so one
+/// condition reads the same whichever operation reports it.
+pub fn resource_not_found_message(resource_name: &str) -> String {
+    match arn_resource(resource_name) {
+        Some((resource_type, identifier)) => {
+            format!("{resource_type} ({identifier}) was not found.")
+        }
+        None => format!("The resource could not be found: {resource_name}"),
+    }
+}
+
 /// How many tags one resource may carry.
 ///
 /// Source: `smithy_query(query="doc", operation="CreateTags")` — "A resource can

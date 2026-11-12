@@ -222,7 +222,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> ModifyClusterPara
                 ModifyClusterParameterGroupErrorModeled::ClusterParameterGroupNotFoundFault(
                     ClusterParameterGroupNotFoundFault {
                         message: Some(st::cluster_parameter_group_not_found_message(
-                            st::ClusterParameterGroupNotFoundWording::ShortNameThenName,
+                            st::ClusterParameterGroupNotFoundWording::DoesNotExist,
                             &input.parameter_group_name,
                         )),
                     },
@@ -297,11 +297,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> ModifyClusterPara
                     format!("Invalid value for {member}.ParameterValue: {reason}"),
                 ));
             }
-            if !parameter.admits(&value) {
-                return Err(crate::scaffolded::Scaffolded::invalid_parameter_value(format!(
-                    "Invalid value for {member}.ParameterValue: '{value}' is not a value parameter '{name}' allows. Allowed values: {}",
-                    parameter.allowed_values.unwrap_or_default()
-                )));
+            // A value the published set does not admit is refused in the
+            // vocabulary of the PARAMETER the caller set — its data type, or the
+            // range the catalogue advertises — and not in the vocabulary of the
+            // wire, which is why this one sentence names no member.
+            if let Some(refusal) = st::parameter_value_refusal(parameter, &value) {
+                return Err(crate::scaffolded::Scaffolded::invalid_parameter_value(
+                    refusal,
+                ));
             }
             resolved.push((parameter, value));
         }

@@ -374,9 +374,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteCluster<Eng
             if store.snapshot(identifier).is_some() {
                 return Err(DeleteClusterErrorModeled::ClusterSnapshotAlreadyExistsFault(
                     ClusterSnapshotAlreadyExistsFault {
-                        message: Some(format!(
-                            "Cluster snapshot already exists: {identifier}"
-                        )),
+                        message: Some(st::cluster_snapshot_already_exists_message(identifier)),
                     },
                 )
                 .into());

@@ -299,9 +299,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CreateClusterSnap
             return Err(
                 CreateClusterSnapshotErrorModeled::ClusterSnapshotAlreadyExistsFault(
                     ClusterSnapshotAlreadyExistsFault {
-                        message: Some(format!(
-                            "Cluster snapshot already exists: {}",
-                            input.snapshot_identifier
+                        message: Some(st::cluster_snapshot_already_exists_message(
+                            &input.snapshot_identifier,
                         )),
                     },
                 )

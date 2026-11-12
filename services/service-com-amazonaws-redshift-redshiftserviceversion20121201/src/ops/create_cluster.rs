@@ -558,10 +558,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CreateCluster<Eng
         if store.cluster(&input.cluster_identifier).is_some() {
             return Err(CreateClusterErrorModeled::ClusterAlreadyExistsFault(
                 ClusterAlreadyExistsFault {
-                    message: Some(format!(
-                        "Cluster already exists: {}",
-                        input.cluster_identifier
-                    )),
+                    message: Some(st::CLUSTER_ALREADY_EXISTS.to_string()),
                 },
             )
             .into());

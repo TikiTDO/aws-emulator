@@ -96,6 +96,9 @@ enum GroupWording {
     /// `ClusterParameterGroup <ParameterGroupName> not found.` — the group
     /// listing filtered by name.
     NameThenNotFound,
+    /// `Parameter group does not exist` — the parameter-group modify, whose
+    /// sentence names no group at all.
+    DoesNotExist,
 }
 
 fn group_sentence(wording: GroupWording, name: &str) -> String {
@@ -103,6 +106,7 @@ fn group_sentence(wording: GroupWording, name: &str) -> String {
         GroupWording::ShapeNameThenName => format!("ClusterParameterGroup not found: {name}"),
         GroupWording::ShortNameThenName => format!("ParameterGroup not found: {name}"),
         GroupWording::NameThenNotFound => format!("ClusterParameterGroup {name} not found."),
+        GroupWording::DoesNotExist => "Parameter group does not exist".to_string(),
     }
 }
 
@@ -164,7 +168,7 @@ fn group_operations() -> Vec<(&'static str, Request, GroupWording)> {
         (
             "ModifyClusterParameterGroup",
             modify_group as Request,
-            GroupWording::ShortNameThenName,
+            GroupWording::DoesNotExist,
         ),
         (
             "ResetClusterParameterGroup",
@@ -267,7 +271,7 @@ async fn every_parameter_group_operation_words_its_not_found_refusal_its_own_way
     }
 
     // The sentences are DISTINGUISHABLE: the same missing name, asked about
-    // through operations of the three wording classes, comes back worded three
+    // through operations of the four wording classes, comes back worded four
     // different ways rather than collapsed onto one template.
     let shared = "pg-collapse-probe";
     let mut answered: Vec<String> = Vec::new();
@@ -284,8 +288,8 @@ async fn every_parameter_group_operation_words_its_not_found_refusal_its_own_way
     answered.dedup();
     assert_eq!(
         answered.len(),
-        3,
-        "case the three wording classes: expected three different sentences for one name, got {answered:?}"
+        4,
+        "case the four wording classes: expected four different sentences for one name, got {answered:?}"
     );
 
     // The group that exists is still there: not one refusal removed it.

@@ -996,6 +996,33 @@ pub fn cluster_not_found_message(
     }
 }
 
+/// What a `ClusterAlreadyExistsFault` says: the account already holds a cluster
+/// under the `ClusterIdentifier` the request named, so nothing was created.
+///
+/// Amazon Redshift's wording for this fault carries NO variable part — it names
+/// neither the identifier nor the operation — so one constant serves every path
+/// that raises it (`CreateCluster`, the rename `ModifyCluster` performs and
+/// `RestoreFromClusterSnapshot`), the way
+/// [`ClusterNotFoundWording::SpecifiedIdentifierCannotBeFound`] carries none for
+/// the not-found fault.
+pub const CLUSTER_ALREADY_EXISTS: &str = "Cluster already exists";
+
+/// Why a request that would take a `SnapshotIdentifier` the account already
+/// holds a snapshot under is refused, naming that identifier.
+///
+/// `smithy_query(query="shape", shape="ClusterSnapshotAlreadyExistsFault")` —
+/// "The value specified as a snapshot identifier is already used by an existing
+/// snapshot": the identifier IS what the refusal is about, so unlike
+/// [`CLUSTER_ALREADY_EXISTS`] it is interpolated. One sentence for every path
+/// that mints a snapshot under a caller-chosen identifier
+/// (`CreateClusterSnapshot`, `CopyClusterSnapshot` and the final snapshot
+/// `DeleteCluster` takes), so the three cannot drift apart.
+pub fn cluster_snapshot_already_exists_message(snapshot_identifier: &str) -> String {
+    format!(
+        "Cannot create the snapshot because a snapshot with the identifier {snapshot_identifier} already exists."
+    )
+}
+
 /// The snapshot `Status` a snapshot this service no longer holds reports.
 ///
 /// Source: `smithy_query(query="doc", shape="Snapshot", member="Status")` —
@@ -1662,16 +1689,6 @@ pub async fn resolve_policy_resource<Eng: Send + Sync + 'static>(
 /// one condition, and it names nothing about the request: the condition is that
 /// the POLICY does not exist, not that the resource does not.
 pub const RESOURCE_POLICY_NOT_FOUND: &str = "The requested resource policy doesn’t exist.";
-
-/// Why a request naming a resource this account holds none of is refused, naming
-/// the ARN it carried.
-///
-/// The wording every operation of this service that resolves an ARN answers a
-/// value naming nothing with (see `create_tags.rs`, `delete_tags.rs`), so one
-/// condition reads the same whichever operation reports it.
-pub fn resource_not_found_message(resource_arn: &str) -> String {
-    format!("The resource could not be found: {resource_arn}")
-}
 
 /// How many tags one resource may carry before a create that would exceed it
 /// refuses with the modelled `TagLimitExceededFault`.

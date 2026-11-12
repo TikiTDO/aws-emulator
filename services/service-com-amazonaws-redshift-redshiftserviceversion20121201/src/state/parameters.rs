@@ -232,6 +232,67 @@ impl EngineParameter {
                 .is_ok_and(|wanted| (low..=high).contains(&wanted))
         })
     }
+
+    /// The inclusive bounds the published `AllowedValues` set spans, for a
+    /// parameter whose values are NUMBERS; `None` for one that publishes no set
+    /// or holds something other than a number.
+    ///
+    /// The set is published as a comma-separated list whose items are each a
+    /// single value or an inclusive `low-high` range (see [`Self::admits`]), so
+    /// the span of the whole set runs from its lowest low to its highest high —
+    /// which is the range a refusal reports, whatever shape the set has.
+    pub fn published_range(&self) -> Option<(i64, i64)> {
+        if self.data_type != DATA_TYPE_INTEGER {
+            return None;
+        }
+        let mut bounds: Option<(i64, i64)> = None;
+        for item in self.allowed_values?.split(',').map(str::trim) {
+            let (low, high) = allowed_range(item)
+                .or_else(|| item.parse::<i64>().ok().map(|single| (single, single)))?;
+            bounds = Some(match bounds {
+                Some((lowest, highest)) => (lowest.min(low), highest.max(high)),
+                None => (low, high),
+            });
+        }
+        bounds
+    }
+}
+
+/// Why the value a request carried for `parameter` is not one it admits, or
+/// `None` for a value it does admit.
+///
+/// Amazon Redshift words a parameter-value refusal from the PARAMETER, never
+/// from where the value sat in the request, and picks the sentence by what is
+/// wrong with the value:
+///
+/// * a value that is not of the parameter's own `Parameter$DataType` at all —
+///   anything but a published boolean literal for a `boolean`, anything that is
+///   not a whole number for an `integer` — is refused on its FORM, naming the
+///   data type and the value the request carried;
+/// * a whole number the published `Parameter$AllowedValues` range does not
+///   contain is refused on its MAGNITUDE, naming the parameter, the value and
+///   the bounds the catalogue advertises ([`EngineParameter::published_range`]).
+///
+/// One function for every path that sets a parameter value, so the refusal a
+/// caller reads depends on the value it sent and not on which operation it sent
+/// it to.
+pub fn parameter_value_refusal(parameter: &EngineParameter, value: &str) -> Option<String> {
+    if parameter.admits(value) {
+        return None;
+    }
+    if let (true, Some((low, high))) = (
+        value.parse::<i64>().is_ok(),
+        parameter.published_range(),
+    ) {
+        return Some(format!(
+            "The {} of {value} is outside of the acceptable range of {low}-{high}",
+            parameter.name
+        ));
+    }
+    Some(format!(
+        "parameter value is not a valid {}:{value}",
+        parameter.data_type
+    ))
 }
 
 /// One `AllowedValues` item read as an inclusive numeric range, or `None` when
@@ -444,8 +505,8 @@ pub const PARAMETER_GROUP_QUOTA: usize = 1_000;
 /// The same split as [`ClusterNotFoundWording`]: the fault's status (404) and
 /// awsQuery code (`ClusterParameterGroupNotFound`) are what the model fixes,
 /// while the fixed text around the `ParameterGroupName` the request named is an
-/// attribute of the OPERATION. Recorded refusals show the three sentences below
-/// in use, so naming each one here keeps the choice at the handler that makes
+/// attribute of the OPERATION. Recorded refusals show the sentences below in
+/// use, so naming each one here keeps the choice at the handler that makes
 /// it and no operation can quietly inherit another one's sentence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClusterParameterGroupNotFoundWording {
@@ -457,10 +518,14 @@ pub enum ClusterParameterGroupNotFoundWording {
     ShapeNameThenName,
     /// `ParameterGroup not found: <ParameterGroupName>` — what the operations
     /// whose TARGET is the group itself answer
-    /// (`DeleteClusterParameterGroup`, and with it the two writes that change a
-    /// group's parameters, `ModifyClusterParameterGroup` and
-    /// `ResetClusterParameterGroup`).
+    /// (`DeleteClusterParameterGroup` and `ResetClusterParameterGroup`).
     ShortNameThenName,
+    /// `Parameter group does not exist` — what the parameter-group MODIFY,
+    /// `ModifyClusterParameterGroup`, answers. The one wording with NO variable
+    /// part: the refusal does not name the group the request asked for, so it is
+    /// passed one only to keep every caller of
+    /// [`cluster_parameter_group_not_found_message`] uniform.
+    DoesNotExist,
     /// `ClusterParameterGroup <ParameterGroupName> not found.` — what the
     /// group LISTING, `DescribeClusterParameterGroups`, answers when its
     /// `ParameterGroupName` filter names no group: the identifier is embedded
@@ -483,6 +548,9 @@ pub fn cluster_parameter_group_not_found_message(
         }
         ClusterParameterGroupNotFoundWording::NameThenNotFound => {
             format!("ClusterParameterGroup {parameter_group_name} not found.")
+        }
+        ClusterParameterGroupNotFoundWording::DoesNotExist => {
+            "Parameter group does not exist".to_string()
         }
     }
 }

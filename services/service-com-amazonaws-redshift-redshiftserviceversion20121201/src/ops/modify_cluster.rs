@@ -469,7 +469,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> ModifyCluster<Eng
             {
                 return Err(ModifyClusterErrorModeled::ClusterAlreadyExistsFault(
                     ClusterAlreadyExistsFault {
-                        message: Some(format!("Cluster already exists: {new_identifier}")),
+                        message: Some(st::CLUSTER_ALREADY_EXISTS.to_string()),
                     },
                 )
                 .into());

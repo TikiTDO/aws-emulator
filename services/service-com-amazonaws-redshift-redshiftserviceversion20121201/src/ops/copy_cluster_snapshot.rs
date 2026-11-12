@@ -379,8 +379,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CopyClusterSnapsh
             return Err(
                 CopyClusterSnapshotErrorModeled::ClusterSnapshotAlreadyExistsFault(
                     ClusterSnapshotAlreadyExistsFault {
-                        message: Some(format!(
-                            "Cluster snapshot already exists: {target_identifier}"
+                        message: Some(st::cluster_snapshot_already_exists_message(
+                            target_identifier,
                         )),
                     },
                 )

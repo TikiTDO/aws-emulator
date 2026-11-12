@@ -119,6 +119,8 @@ mod reboot_cluster;
 mod redshift_idc_applications;
 #[path = "all/refusal_message_templates.rs"]
 mod refusal_message_templates;
+#[path = "all/refusal_payloads_use_aws_wording.rs"]
+mod refusal_payloads_use_aws_wording;
 #[path = "all/resource_policies.rs"]
 mod resource_policies;
 #[path = "all/resource_tags.rs"]

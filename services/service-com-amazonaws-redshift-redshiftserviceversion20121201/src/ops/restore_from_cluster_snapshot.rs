@@ -698,10 +698,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> RestoreFromCluste
             return Err(
                 RestoreFromClusterSnapshotErrorModeled::ClusterAlreadyExistsFault(
                     ClusterAlreadyExistsFault {
-                        message: Some(format!(
-                            "Cluster already exists: {}",
-                            input.cluster_identifier
-                        )),
+                        message: Some(st::CLUSTER_ALREADY_EXISTS.to_string()),
                     },
                 )
                 .into(),
