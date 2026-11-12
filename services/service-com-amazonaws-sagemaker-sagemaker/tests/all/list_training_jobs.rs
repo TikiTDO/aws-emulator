@@ -140,6 +140,13 @@ fn job(name: &str, status: &str, created: u64, modified: u64) -> TrainingJob {
         model_artifacts: None,
         final_metrics: Vec::new(),
         ends_at: at(modified),
+        // The stage the row is seeded in, which is the one its `SecondaryStatus` names: a
+        // row is stored where the clock has already left it, so nothing more is due.
+        phases: vec![service_com_amazonaws_sagemaker_sagemaker::state::TrainingPhase {
+            status: secondary_status_for(status).to_string(),
+            starts_at: at(created),
+        }],
+        entered: 1,
         tuning_job_arn: None,
         request: CreateTrainingJobInput::default(),
         tags: Vec::new(),

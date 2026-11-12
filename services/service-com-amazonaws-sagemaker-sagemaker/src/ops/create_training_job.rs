@@ -31,6 +31,14 @@
 //! data or write its artifact leaves the job's modelled `Failed` status with the reason
 //! naming that condition — never a `Completed` status for a run that produced nothing.
 //!
+//! The stages of the work are revealed in the same way: the run records the `SecondaryStatus`
+//! phases it went through and the clock materialises them in order
+//! ([`crate::state::TrainingJob::settle_status`]), so a caller polling the job observes
+//! `Downloading`, `Training` and `Uploading` before the terminal status, and
+//! `SecondaryStatusTransitions` reports every stage the job was in. A job whose
+//! `StoppingCondition.MaxRuntimeInSeconds` falls inside the span of its work is ended at that
+//! cap instead, with the `Stopped`/`MaxRuntimeExceeded` pair the model groups together.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -592,6 +600,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     model_artifacts: None,
                     final_metrics: Vec::new(),
                     ends_at: now + crate::state::TRAINING_JOB_ENDS_AFTER,
+                    // The job is accepted in `Starting` and enters the stages of its work as
+                    // its run reports them (`crate::state::TrainingJob::record_run`).
+                    phases: vec![crate::state::TrainingPhase {
+                        status: crate::state::TRAINING_SECONDARY_STATUS_STARTING.to_string(),
+                        starts_at: now,
+                    }],
+                    entered: 1,
                     // Set only on a training job a tuning job launched; a caller's own create
                     // has no parent.
                     tuning_job_arn: None,

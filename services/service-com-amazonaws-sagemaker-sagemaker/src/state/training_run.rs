@@ -48,6 +48,18 @@
 //! `CreateTrainingJob` request that submitted it, and never a `Completed` status for a run
 //! that wrote no artifact.
 //!
+//! What fails a run is a LEG of its work that failed: an object it could not download under
+//! the execution role, or an artifact it could not write. The SHAPE of the caller's data is
+//! not one of them — nothing in the API models what a channel's bytes mean, `Channel$ContentType`
+//! being the caller's own MIME type and the algorithm, not SageMaker, reading them — so data
+//! that holds no record of the form above leaves a run that still fits, writes its artifact
+//! and completes, with how many rows held no record reported in that artifact.
+//!
+//! The stages of the work are reported as they happen: the run records the `SecondaryStatus`
+//! phases it got through ([`TrainingRunOutcome::phases`]) and the clock reveals them in order
+//! ([`super::TrainingJob::settle_status`]), so a caller polling the job sees the data come
+//! down, the fit run and the artifact go up before the terminal status.
+//!
 //! # The job runs AS the execution role
 //!
 //! "RoleArn - The Amazon Resource Name (ARN) that SageMaker assumes to perform tasks on your
@@ -136,22 +148,54 @@ pub enum TrainingRunOutcome {
         /// "The name, value, and date and time of a metric that was emitted"
         /// (`MetricData`), one per channel the run measured the fitted model over.
         final_metrics: Vec<MetricData>,
+        /// The stages of its work the run GOT THROUGH, in the order it did (see
+        /// [`TrainingRunOutcome::phases`]).
+        phases: Vec<String>,
     },
     /// The run did not finish, and this is the condition that stopped it — the job's
     /// `FailureReason`.
-    Failed { reason: String },
+    Failed {
+        reason: String,
+        /// The stages the run had got through when the condition stopped it, so the job's
+        /// history says WHERE its work failed (see [`TrainingRunOutcome::phases`]).
+        phases: Vec<String>,
+    },
 }
 
 impl TrainingRunOutcome {
-    /// A run stopped by `reason`, bounded to the modelled `FailureReason` length (0..1024).
+    /// A run stopped by `reason` before it got through any stage of its work.
     #[must_use]
     pub fn failed(reason: impl Into<String>) -> Self {
+        Self::failed_in(Vec::new(), reason)
+    }
+
+    /// A run stopped by `reason` once it had got through `phases`, bounded to the modelled
+    /// `FailureReason` length (0..1024).
+    #[must_use]
+    pub fn failed_in(phases: Vec<String>, reason: impl Into<String>) -> Self {
         let reason: String = reason.into();
         let bounded = match reason.char_indices().nth(1024) {
             Some((at, _)) => reason[..at].to_string(),
             None => reason,
         };
-        Self::Failed { reason: bounded }
+        Self::Failed {
+            reason: bounded,
+            phases,
+        }
+    }
+
+    /// The `SecondaryStatus` stages of its own work this run went through, after the
+    /// `Starting` the job is accepted in: the data it downloaded to the ML storage volumes,
+    /// the fit it performed and the artifact it uploaded, each named by the member
+    /// `DescribeTrainingJob$SecondaryStatus`'s doc gives it.
+    ///
+    /// They are what the job ENTERED, so a run that stopped on one of its legs reports the
+    /// stages before that leg and not the ones it never reached.
+    #[must_use]
+    pub fn phases(&self) -> &[String] {
+        match self {
+            Self::Completed { phases, .. } | Self::Failed { phases, .. } => phases,
+        }
     }
 }
 
@@ -189,17 +233,6 @@ const UNREAD_OBJECT_DETAIL: &str = "the object could not be read from Amazon S3"
 
 /// [`s3_answer_detail`]'s wording for a write Amazon S3 answered nothing readable to.
 const UNWRITTEN_OBJECT_DETAIL: &str = "the object could not be written to Amazon S3";
-
-/// How SageMaker words training data it could not read as records: the `ClientError:` class
-/// again, naming the channel, its location and the form a training channel carries.
-#[must_use]
-pub fn unable_to_parse_records(channel: &str, uri: &str) -> String {
-    format!(
-        "ClientError: Unable to parse csv for channel {channel} at {uri}. Please ensure the \
-         training data holds comma-separated records with the target variable in the first \
-         column and no header record."
-    )
-}
 
 /// How SageMaker words a run whose model artifacts could not be written: the upload leg that
 /// failed and what failed on it.
@@ -380,6 +413,22 @@ pub async fn run_training_job(
     let partition = arn_partition(&request.role_arn);
     let client = s3_client(ctx, region);
 
+    // The stages of its own work this run gets through, recorded as it enters each one so a
+    // run that stops on a leg reports the ones before it (see [`TrainingRunOutcome::phases`]).
+    let mut phases: Vec<String> = Vec::new();
+    // "Downloading - An optional stage for algorithms that support File training input mode.
+    // It indicates that data is being downloaded to the ML storage volumes"
+    // (`DescribeTrainingJob$SecondaryStatus`): the stage belongs to a run that HAS data to
+    // bring down, so a job whose channels name no Amazon S3 location never enters it.
+    if request
+        .input_data_config
+        .iter()
+        .flatten()
+        .any(|channel| channel.data_source.s3_data_source.is_some())
+    {
+        phases.push(TRAINING_SECONDARY_STATUS_DOWNLOADING.to_string());
+    }
+
     let mut remaining_bytes = MAX_RUN_INPUT_BYTES;
     let mut channels: Vec<ChannelData> = Vec::new();
     for channel in request.input_data_config.iter().flatten() {
@@ -401,7 +450,7 @@ pub async fn run_training_job(
         .await
         {
             Ok(read) => channels.push(read),
-            Err(reason) => return TrainingRunOutcome::failed(reason),
+            Err(reason) => return TrainingRunOutcome::failed_in(phases, reason),
         }
     }
 
@@ -409,6 +458,13 @@ pub async fn run_training_job(
     // and otherwise every record the job's channels hold, narrowed to the ONE shape a model
     // can be fitted on — the feature count of the first record — so a channel of another
     // width takes no part rather than being read against the wrong columns.
+    //
+    // Data that holds no record of that form is not a failure of the JOB: nothing in the API
+    // models what a channel's bytes mean — `Channel$ContentType` is the caller's own MIME
+    // type and it is the algorithm, not SageMaker, that reads them — so a run whose download
+    // and upload legs both succeeded completes, fitted on whatever records it could read and
+    // reporting a metric only for the channels it measured one over. How many rows held no
+    // record is reported in the artifact the run writes.
     let mut fitted_on: Vec<Record> = match channels.iter().find(|read| read.name == TRAIN_CHANNEL)
     {
         Some(train) => train.records.clone(),
@@ -419,13 +475,10 @@ pub async fn run_training_job(
     };
     let columns = fitted_on.first().map_or(0, |record| record.features.len());
     fitted_on.retain(|record| record.features.len() == columns);
-    if fitted_on.is_empty() {
-        let (channel, uri) = channels
-            .first()
-            .map(|read| (read.name.clone(), read.uri_read.clone()))
-            .unwrap_or_else(|| (TRAIN_CHANNEL.to_string(), String::new()));
-        return TrainingRunOutcome::failed(unable_to_parse_records(&channel, &uri));
-    }
+
+    // "Training - Training is in progress" (`DescribeTrainingJob$SecondaryStatus`): the fit
+    // the run performs over the records it read.
+    phases.push(TRAINING_SECONDARY_STATUS_TRAINING.to_string());
 
     // Fitting a model and measuring it are synchronous, CPU-bound work with no await of
     // their own, so they go to the blocking pool and the worker serving this request is
@@ -454,16 +507,19 @@ pub async fn run_training_job(
     })
     .await;
     let Ok((model, final_metrics)) = fit_and_measure else {
-        return TrainingRunOutcome::failed(crate::state::INTERNAL_FAILURE_REASON);
+        return TrainingRunOutcome::failed_in(phases, crate::state::INTERNAL_FAILURE_REASON);
     };
 
+    // "Uploading - Training is complete and the model artifacts are being uploaded to the S3
+    // location" (`DescribeTrainingJob$SecondaryStatus`).
+    phases.push(TRAINING_SECONDARY_STATUS_UPLOADING.to_string());
     let artifact = artifact_location(&output, job_name);
     let document = model_document(job_name, request, &model, &channels, &final_metrics);
     let Ok(archive) = model_archive(&document) else {
-        return TrainingRunOutcome::failed(model_upload_failed(
-            &artifact.uri(),
-            "the model archive could not be built",
-        ));
+        return TrainingRunOutcome::failed_in(
+            phases,
+            model_upload_failed(&artifact.uri(), "the model archive could not be built"),
+        );
     };
     if ::service_common::iam_role::role_withholds_action(
         ctx,
@@ -474,17 +530,21 @@ pub async fn run_training_job(
     )
     .await
     {
-        return TrainingRunOutcome::failed(model_upload_failed(
-            &artifact.uri(),
-            &access_denied_detail(),
-        ));
+        return TrainingRunOutcome::failed_in(
+            phases,
+            model_upload_failed(&artifact.uri(), &access_denied_detail()),
+        );
     }
     if let Err(detail) = write_object(&client, &artifact, archive).await {
-        return TrainingRunOutcome::failed(model_upload_failed(&artifact.uri(), &detail));
+        return TrainingRunOutcome::failed_in(
+            phases,
+            model_upload_failed(&artifact.uri(), &detail),
+        );
     }
     TrainingRunOutcome::Completed {
         model_artifacts: artifact.uri(),
         final_metrics,
+        phases,
     }
 }
 

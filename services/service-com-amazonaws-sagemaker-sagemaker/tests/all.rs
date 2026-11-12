@@ -243,6 +243,8 @@ mod training_job_constraint_admission;
 mod training_job_execution;
 #[path = "all/training_job_hyperparameters.rs"]
 mod training_job_hyperparameters;
+#[path = "all/training_job_phase_progression.rs"]
+mod training_job_phase_progression;
 #[path = "all/training_job_stop.rs"]
 mod training_job_stop;
 #[path = "all/trial_component_association.rs"]

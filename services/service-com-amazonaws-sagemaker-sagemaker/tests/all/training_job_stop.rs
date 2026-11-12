@@ -32,7 +32,7 @@ const PAST_STOP_DUE: Duration =
         .saturating_mul(2)
         .saturating_add(Duration::from_millis(100));
 
-/// Long enough to pass `state::TRAINING_JOB_ENDS_AFTER` (400 ms), after which a job left to
+/// Long enough to pass `state::TRAINING_JOB_ENDS_AFTER`, after which a job left to
 /// run has reached its terminal status.
 const PAST_JOB_END_DUE: Duration =
     service_com_amazonaws_sagemaker_sagemaker::state::TRAINING_JOB_ENDS_AFTER

@@ -25,10 +25,12 @@ use crate::inference_deployment_lifecycle::{error_code, message, str_field, Emul
 /// Long enough to pass `state::FEATURE_GROUP_CREATED_AFTER` (300 ms).
 const PAST_CREATED_DUE: Duration = Duration::from_millis(600);
 
-/// Long enough to pass `state::TRAINING_JOB_ENDS_AFTER`, read from the constant itself so
-/// the wait follows the span rather than restating it.
-const PAST_TRAINING_ENDS_DUE: Duration = state::TRAINING_JOB_ENDS_AFTER
-    .saturating_add(Duration::from_millis(200));
+/// How long a poll below gives the clock to settle a training job: far longer than the span
+/// the state gives a job's work, so a loaded host still settles well inside it.
+const SETTLE_DEADLINE: Duration = Duration::from_secs(120);
+
+/// How often such a poll looks again. Only the loop's condition decides when it stops.
+const SETTLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The type prefix an IAM user's unique id carries, from IAM's documented "unique
 /// identifier prefixes" table (`AIDA` for a user).
@@ -1159,9 +1161,10 @@ async fn deleting_a_feature_group_that_is_still_being_created_is_refused() {
 }
 
 /// RULE: the secondary-status history a read reports is the statuses the job has actually
-/// been in: one open-ended entry while it is still in its first, and the terminal one
-/// beside it — starting where the first ended, carrying what the job reports as its
-/// failure — once the clock has settled the job.
+/// been in: one open-ended entry while it is still in its first, and then every stage of the
+/// work it went through followed by the terminal one — each starting where the one before it
+/// ended, the last carrying what the job reports as its failure — once the clock has settled
+/// the job.
 #[tokio::test]
 async fn the_secondary_status_history_follows_the_statuses_the_job_has_been_in() {
     let emulator = Emulator::new();
@@ -1195,36 +1198,35 @@ async fn the_secondary_status_history_follows_the_statuses_the_job_has_been_in()
         "case {case}: the status the job is still in has not ended, got {running:?}"
     );
 
-    tokio::time::sleep(PAST_TRAINING_ENDS_DUE).await;
-
-    let settled = emulator
-        .ok("DescribeTrainingJob", &json!({ "TrainingJobName": case }))
-        .await;
+    let settled = poll_until_the_job_settles(&emulator, case).await;
     let transitions = history(&settled);
-    assert_eq!(
-        transitions.len(),
-        2,
-        "case {case}: a settled job reports the status it left and the one it reached, \
-         got {settled:?}"
+    assert!(
+        transitions.len() >= 2,
+        "case {case}: a settled job reports the stages it went through and the status it \
+         reached, got {settled:?}"
     );
+    for (index, pair) in transitions.windows(2).enumerate() {
+        assert_eq!(
+            pair[0].get("EndTime"),
+            pair[1].get("StartTime"),
+            "case {case}: entry {index} must end where the next one begins, got {settled:?}"
+        );
+    }
+    let last = transitions
+        .last()
+        .unwrap_or_else(|| panic!("case {case}: expected a last entry in {settled:?}"));
     assert_eq!(
-        transitions[0].get("EndTime"),
-        transitions[1].get("StartTime"),
-        "case {case}: the job entered the terminal status when it left the first, \
-         got {settled:?}"
-    );
-    assert_eq!(
-        transitions[1].get("Status"),
+        last.get("Status"),
         settled.get("SecondaryStatus"),
         "case {case}: the last entry names the status the job is now in, got {settled:?}"
     );
     assert_eq!(
-        transitions[1].get("StartTime"),
+        last.get("StartTime"),
         settled.get("TrainingEndTime"),
         "case {case}: the terminal entry starts when the job ended, got {settled:?}"
     );
     assert_eq!(
-        transitions[1].get("StatusMessage"),
+        last.get("StatusMessage"),
         settled.get("FailureReason"),
         "case {case}: the history says what the job's own FailureReason says, \
          got {settled:?}"
@@ -1240,4 +1242,30 @@ fn history(described: &Value) -> Vec<Value> {
             panic!("expected SecondaryStatusTransitions in {described}")
         })
         .clone()
+}
+
+/// Poll `DescribeTrainingJob` for `name` until the job reaches a status nothing leaves on
+/// its own, answering that last read.
+///
+/// The wait is on the CONDITION rather than on a span: the loop looks again until the clock
+/// has settled the job, or until a deadline far longer than the span the state gives a job's
+/// work has passed.
+async fn poll_until_the_job_settles(emulator: &Emulator, name: &str) -> Value {
+    /// The `TrainingJobStatus` members nothing leaves on its own.
+    const TERMINAL: [&str; 3] = ["Completed", "Failed", "Stopped"];
+
+    let deadline = std::time::Instant::now() + SETTLE_DEADLINE;
+    loop {
+        let described = emulator
+            .ok("DescribeTrainingJob", &json!({ "TrainingJobName": name }))
+            .await;
+        if TERMINAL.contains(&str_field(&described, "TrainingJobStatus").as_str()) {
+            return described;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the training job {name} must reach a terminal status, last read {described}"
+        );
+        tokio::time::sleep(SETTLE_POLL_INTERVAL).await;
+    }
 }

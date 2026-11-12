@@ -29,7 +29,7 @@ use serde_json::{json, Value};
 
 use crate::inference_deployment_lifecycle::{error_code, message, str_field, Emulator, ACCOUNT};
 
-/// Long enough to pass `state::TRAINING_JOB_ENDS_AFTER` (400 ms).
+/// Long enough to pass `state::TRAINING_JOB_ENDS_AFTER`, whatever that span is.
 const PAST_ENDS_DUE: Duration =
     service_com_amazonaws_sagemaker_sagemaker::state::TRAINING_JOB_ENDS_AFTER
         .saturating_mul(2)
