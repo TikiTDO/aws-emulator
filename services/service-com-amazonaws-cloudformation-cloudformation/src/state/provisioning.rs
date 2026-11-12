@@ -266,6 +266,11 @@ mod deferred;
 /// ([`Owner`]'s own methods, moved out so adding a type's arms does not grow this file).
 mod owner;
 
+/// The success signals the INSTANCES of a signalled resource send: what releases the
+/// resource-signal wait of a resource whose signals come from the instances it consists of
+/// ([`instance_signals`]).
+mod instance_signals;
+
 /// AWS's reserved tag-key namespace: "the `aws:` prefix is reserved for AWS use". Matched
 /// case-insensitively, as the services that refuse it match it.
 pub(super) const RESERVED_TAG_KEY_PREFIX: &str = "aws:";
@@ -936,6 +941,14 @@ pub async fn advance_stabilisations_in(
     // handler, so the handle a handler has is what that plane publishes the next request
     // through.
     state.lock().remember_provisioning_reach(ctx);
+    // The signals the INSTANCES of a signalled resource send, which is what releases a wait
+    // whose signals come from them ([`instance_signals`]): read before the waits that have run
+    // out are failed, so a gate its instances have signalled is released rather than failed.
+    //
+    // The pass holds every call it makes in a box of its own, so what this function keeps on
+    // the stack for it while the walks below run is the pass's own bookkeeping and not another
+    // service's request chain.
+    instance_signals::settle_instance_signals(ctx, state, region).await;
     settle_expired_waits(ctx, state, region).await;
     // ...and the rollback the stack's own ROLLBACK TRIGGERS force: an alarm a monitored
     // operation's configuration names, read in CloudWatch before this handler takes the lock,
@@ -1012,22 +1025,27 @@ pub async fn advance_stabilisations_in(
                         // Unreachable: a wait for a creation that has not started is not
                         // asked of anybody ([`deferred`]) and left this loop above.
                         | super::stabilising::Awaited::Deferred => {
-                            provisioner
-                                .readiness(
-                                    ctx,
-                                    region,
-                                    &barrier.physical_resource_id,
-                                    declared.as_ref(),
-                                )
-                                .await
-                        }
-                        super::stabilising::Awaited::Gone => provisioner
-                            .removal(ctx, region, &barrier.physical_resource_id)
+                            // BOXED, like the walk's own provider calls: the read is another
+                            // service's whole handler, and this function holds its state while
+                            // the passes below it run.
+                            Box::pin(provisioner.readiness(
+                                ctx,
+                                region,
+                                &barrier.physical_resource_id,
+                                declared.as_ref(),
+                            ))
                             .await
-                            .map(|removal| match removal {
-                                Removal::Gone => Readiness::Ready,
-                                Removal::Pending(state) => Readiness::Pending(state),
-                            }),
+                        }
+                        super::stabilising::Awaited::Gone => Box::pin(provisioner.removal(
+                            ctx,
+                            region,
+                            &barrier.physical_resource_id,
+                        ))
+                        .await
+                        .map(|removal| match removal {
+                            Removal::Gone => Readiness::Ready,
+                            Removal::Pending(state) => Readiness::Pending(state),
+                        }),
                     },
                     // Nothing owns the type any more, so there is nothing to ask: the wait is
                     // over, because what opened it was that provisioner's answer.
@@ -1053,15 +1071,14 @@ pub async fn advance_stabilisations_in(
                 response.data.clone()
             } else {
                 match owner_for(&barrier.resource_type) {
-                    Some(provisioner) => provisioner
-                        .ready_attributes(
-                            ctx,
-                            region,
-                            &barrier.resource_type,
-                            &barrier.physical_resource_id,
-                        )
-                        .await
-                        .unwrap_or_default(),
+                    Some(provisioner) => Box::pin(provisioner.ready_attributes(
+                        ctx,
+                        region,
+                        &barrier.resource_type,
+                        &barrier.physical_resource_id,
+                    ))
+                    .await
+                    .unwrap_or_default(),
                     None => BTreeMap::new(),
                 }
             };
@@ -1233,7 +1250,11 @@ pub async fn advance_stabilisations_in(
     // ...and the resources this operation WITHHELD because a resource they read had not
     // published its attributes yet: created now that those waits have answered
     // ([`deferred`]), which is what finishes the walk.
-    deferred::resume(ctx, state, region).await;
+    //
+    // BOXED: that pass runs the deployment walk again ([`reconcile`]), which is the deepest
+    // work a READ of this service performs, so its whole state is held off this function's
+    // own future rather than on the stack of the request that asked.
+    Box::pin(deferred::resume(ctx, state, region)).await;
     // Last: the notifications the stack events OWE to the stack's `NotificationARNs`. Here
     // for the same reason everything above is — the publish was due the instant the event
     // was recorded, and it reaches another service, which nothing under this store's lock
@@ -2192,10 +2213,15 @@ pub async fn reconcile(
                     properties: deployed_properties,
                     ..resource.clone()
                 };
-                super::service_role::on_resource(
+                // BOXED, for the reason [`roll_back_failed_resource`]'s own call records: the
+                // call's future is the owning service's whole handler, and holding one of
+                // those inline in this walk's state machine is what takes a deployment of a
+                // wide template past the thread's stack — the more so for a walk a READ
+                // resumes, which is already several frames down ([`deferred::resume`]).
+                Box::pin(super::service_role::on_resource(
                     super::service_role::target_of(&asked),
                     provisioner.create(ctx, region, &asked, &tags, &stack.capabilities),
-                )
+                ))
                 .await
             }
             // No provisioner for this type: nothing is asked of any service, and the

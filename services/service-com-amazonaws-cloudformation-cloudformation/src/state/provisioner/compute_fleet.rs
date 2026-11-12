@@ -673,6 +673,149 @@ pub(super) async fn update_auto_scaling_group(
     Ok(Some(Created::attributes(BTreeMap::new())))
 }
 
+/// Apply a CHANGED `AWS::EC2::LaunchTemplate` declaration to the template that exists, by
+/// creating a NEW VERSION of it — `CreateLaunchTemplateVersion` "creates a new version of a
+/// launch template" from the launch data the call carries — and making that version the
+/// template's default one, which is what `ModifyLaunchTemplate` does ("you can specify which
+/// version of the launch template to set as the default version").
+///
+/// That is the change the type publishes: its `LaunchTemplateData` is updatable with no
+/// interruption, a launch template being a versioned document, so the template keeps the
+/// `lt-` id it was created under and the two version numbers the type publishes move —
+/// which is what an Auto Scaling group reading `LatestVersionNumber` launches from next. Both
+/// are read off the answer rather than counted here.
+///
+/// A declaration whose launch DATA and version description are unchanged asks for no new
+/// version: only the template's TAGS can have changed, and those reach EC2 through the one
+/// call that tags a resource that exists ([`super::Provisioner::retag`]).
+pub(super) async fn update_ec2_launch_template(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    resource: &StoredResource,
+    declared: &Value,
+) -> Result<Option<Created>, Refusal> {
+    let mut parameters = Vec::new();
+    for member in EC2_LAUNCH_TEMPLATE_CREATE_MEMBERS {
+        if let Some(value) = declared.get(member) {
+            push_ec2_member(&mut parameters, "", member, value, 0)?;
+        }
+    }
+    let same_version = EC2_LAUNCH_TEMPLATE_CREATE_MEMBERS
+        .iter()
+        .all(|member| resource.properties.get(member) == declared.get(member));
+    if same_version {
+        return Ok(Some(Created::attributes(BTreeMap::new())));
+    }
+    // The template is addressed by the id EC2 minted for it, which is this resource.
+    parameters.push((
+        "LaunchTemplateId".to_string(),
+        resource.physical_resource_id.clone(),
+    ));
+    // Each call is held in a box of its own, as every call a walk this deep makes is: what the
+    // deployment keeps on the stack for this arm is then its own bookkeeping rather than
+    // Amazon EC2's whole request chain ([`provisioning::reconcile`]).
+    let answered = Box::pin(call_query(
+        ctx,
+        EC2_SIGNING_NAME,
+        region,
+        EC2_API_VERSION,
+        "CreateLaunchTemplateVersion",
+        &parameters,
+    ))
+    .await?;
+    // "The version number" of the version just created
+    // (`LaunchTemplateVersion$VersionNumber`), which the template's default version is then
+    // set to.
+    let version_number = ec2_reported(&answered, "launchTemplateVersion")
+        .get("VersionNumber")
+        .and_then(Value::as_str)
+        .filter(|version| !version.is_empty())
+        .ok_or_else(|| Refusal {
+            code: UNIDENTIFIED_FAILURE.to_string(),
+            message: "CreateLaunchTemplateVersion answered no versionNumber".to_string(),
+        })?
+        .to_string();
+    let modified = Box::pin(call_query(
+        ctx,
+        EC2_SIGNING_NAME,
+        region,
+        EC2_API_VERSION,
+        "ModifyLaunchTemplate",
+        &[
+            (
+                "LaunchTemplateId".to_string(),
+                resource.physical_resource_id.clone(),
+            ),
+            // `ModifyLaunchTemplateRequest$DefaultVersion` travels under the `xmlName` the
+            // model declares for it (`SetDefaultVersion`).
+            ("SetDefaultVersion".to_string(), version_number),
+        ],
+    ))
+    .await?;
+    // The two version numbers the type publishes, as the template EC2 now holds reports them.
+    let reported = ec2_reported(&modified, "launchTemplate");
+    let mut attributes = BTreeMap::new();
+    for attribute in ["DefaultVersionNumber", "LatestVersionNumber"] {
+        if let Some(value) = reported
+            .get(attribute)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            attributes.insert(attribute.to_string(), value.to_string());
+        }
+    }
+    Ok(Some(Created::attributes(attributes)))
+}
+
+/// The lifecycle state Amazon EC2 Auto Scaling reports an instance of a group in once that
+/// instance is serving: "`InService` — The instance is running and in service"
+/// (`Instance$LifecycleState`), which is the state a group's own capacity is counted in.
+const LIFECYCLE_IN_SERVICE: &str = "InService";
+
+/// The ids of the Amazon EC2 instances the group `name` reports IN SERVICE right now, in the
+/// order that service reports them.
+///
+/// `DescribeAutoScalingGroups` reports a group's `Instances` as one `<member>` per instance,
+/// each carrying that instance's own `InstanceId` and `LifecycleState`, so the list is read
+/// through the one reader of a list of STRUCTURES this crate has
+/// ([`xml_member_structures`]): each entry is read on its own, so an entry that carries one of
+/// the two members and not the other is an entry whose other member is absent, and not a
+/// pairing of one instance's id with another's state. The empty list is what a group holding
+/// no serving instance reports — and what a name that service holds no group for reports,
+/// there being no instance to name for it.
+pub(crate) async fn in_service_instance_ids(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    name: &str,
+) -> Result<Vec<String>, Refusal> {
+    let parameters = vec![(
+        "AutoScalingGroupNames.member.1".to_string(),
+        name.to_string(),
+    )];
+    let answered = call_query(
+        ctx,
+        AUTOSCALING_SIGNING_NAME,
+        region,
+        AUTOSCALING_API_VERSION,
+        "DescribeAutoScalingGroups",
+        &parameters,
+    )
+    .await?;
+    Ok(xml_member_structures(&answered, "Instances")
+        .into_iter()
+        .filter(|instance| {
+            instance.get("LifecycleState").and_then(Value::as_str) == Some(LIFECYCLE_IN_SERVICE)
+        })
+        .filter_map(|instance| {
+            instance
+                .get("InstanceId")
+                .and_then(Value::as_str)
+                .filter(|instance_id| !instance_id.is_empty())
+                .map(str::to_string)
+        })
+        .collect())
+}
+
 /// The Auto Scaling group as that service reports it NOW, or `None` where it reports no such
 /// group: the scalar members of the one entry `DescribeAutoScalingGroups` answers for the
 /// name, which are named exactly as this type's properties are (`MinSize`, `MaxSize`,

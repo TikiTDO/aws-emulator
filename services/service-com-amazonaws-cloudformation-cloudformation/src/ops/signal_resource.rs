@@ -79,6 +79,7 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+use crate::state::wait_conditions::signal_received;
 use crate::state::{resource_signal_status, resource_status, status};
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
@@ -411,11 +412,4 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         Ok(SignalResourceOutput)
     }
-}
-
-/// The reason CloudFormation records on the event for a signal it received, naming the
-/// signal's status and the unique id it arrived under — the two things
-/// `SignalResource` carries about one signal.
-fn signal_received(status: &str, unique_id: &str) -> String {
-    format!("Received {status} signal with UniqueId {unique_id}")
 }

@@ -2292,6 +2292,29 @@ pub fn identity_is_service_assigned(resource_type: &str) -> bool {
         // `vol-` id, and "Ref returns the volume ID", so the identifier in force is the one
         // that service answered.
         || resource_type == EC2_VOLUME
+        // The VPC-NETWORK resources whose identifier Amazon EC2 ASSIGNS are in exactly the
+        // same position as the VPC and the subnet above, and for the same reason: each of
+        // their creates takes no identifier for the resource it makes and answers the id that
+        // service minted, which is what the type's `Ref` returns — "Ref returns the ID of the
+        // internet gateway" (`CreateInternetGateway`'s `internetGatewayId`), "Ref returns the
+        // route table ID" (`CreateRouteTable`'s `routeTableId`), the subnet-route table
+        // association's own id (`AssociateRouteTable`'s `associationId`), "Ref returns the ID
+        // of the VPC endpoint" (`CreateVpcEndpoint`'s `vpcEndpointId`), the virtual private
+        // gateway's id (`CreateVpnGateway`'s `vpnGatewayId`), "Ref returns the NAT gateway ID"
+        // (`CreateNatGateway`'s `natGatewayId`) and, for an Elastic IP, the address
+        // `AllocateAddress` allocated. None of them is a function of anything a template
+        // declares — a route table and an internet gateway declare no name at all — so the
+        // value [`ec2_network_identity`] computes is only the stand-in a declaration is
+        // resolved against until the create answers, and a later deployment of the same
+        // declaration carries the id in force forward instead of creating the resource all
+        // over again.
+        || resource_type == EC2_INTERNET_GATEWAY
+        || resource_type == EC2_ROUTE_TABLE
+        || resource_type == EC2_SUBNET_ROUTE_TABLE_ASSOCIATION
+        || resource_type == EC2_VPC_ENDPOINT
+        || resource_type == EC2_VPN_GATEWAY
+        || resource_type == EC2_NAT_GATEWAY
+        || resource_type == EC2_EIP
         // A LAUNCH TEMPLATE is one more: `CreateLaunchTemplate` takes the template's NAME and
         // no identifier — Amazon EC2 assigns the `lt-` id — and "Ref returns the launch
         // template ID", so the identifier in force is the one that service answered the
@@ -4115,6 +4138,13 @@ pub const EC2_NAT_GATEWAY: &str = "AWS::EC2::NatGateway";
 pub const EC2_VPC_ENDPOINT: &str = "AWS::EC2::VPCEndpoint";
 pub const EC2_DHCP_OPTIONS: &str = "AWS::EC2::DHCPOptions";
 pub const EC2_VPN_GATEWAY: &str = "AWS::EC2::VPNGateway";
+
+/// `AWS::EC2::SubnetRouteTableAssociation`: the association that puts one route table on one
+/// subnet. Not a `<prefix>-` resource of its own in the sense the types above are — the
+/// association's identity is the `rtbassoc-…` id `AssociateRouteTable` answers — which is why
+/// [`identity_is_service_assigned`] names it: a declaration states the subnet and the table,
+/// never that id.
+pub const EC2_SUBNET_ROUTE_TABLE_ASSOCIATION: &str = "AWS::EC2::SubnetRouteTableAssociation";
 
 /// `AWS::EC2::EIP`: an Elastic IP address of the account. Not a VPC-network type whose
 /// identity is an Amazon EC2 `<prefix>-` id — "Ref returns the Elastic IP address" — but its

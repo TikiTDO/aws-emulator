@@ -157,6 +157,11 @@ const INSTANCE_STATE_PENDING: &str = "pending";
 const INSTANCE_STATE_RUNNING: &str = "running";
 const INSTANCE_STATE_TERMINATED: &str = "terminated";
 
+/// The `InstanceAttributeName` that names an instance's boot configuration — "the user
+/// data", the attribute `DescribeInstanceAttribute` reports it under
+/// ([`boot_configuration`]).
+const USER_DATA_ATTRIBUTE: &str = "userData";
+
 /// Each `Fn::GetAtt` attribute of this type that Amazon EC2 reports as a DIRECT member of the
 /// instance, as the element of an ec2Query answer that carries it.
 ///
@@ -391,6 +396,47 @@ fn instance_entry(document: &str) -> ::serde_json::Map<String, Value> {
         .find("<instancesSet>")
         .map_or(document, |start| &document[start..]);
     xml_scalar_children(entries, "item")
+}
+
+/// The BOOT CONFIGURATION Amazon EC2 holds for one launched instance — "the user data"
+/// (`InstanceAttribute$UserData`), as that service stored it — or `None` for an instance
+/// launched without any, and for one Amazon EC2 holds nothing for.
+///
+/// `DescribeInstanceAttribute` reports the attribute asked about as
+/// `<userData><value>…</value></userData>`, carrying no value for an instance that has none;
+/// the text is the base64 the launch supplied, which is the form the API takes it in.
+///
+/// This is what says what the instance was told to do when it came up, which the signals a
+/// resource's `CreationPolicy` waits for are read against
+/// ([`super::instance_signals`]): the instance that sends such a signal on AWS is one whose
+/// own boot configuration asks it to.
+pub(super) async fn boot_configuration(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    instance_id: &str,
+) -> Result<Option<String>, Refusal> {
+    let answered = match call_query(
+        ctx,
+        EC2_SIGNING_NAME,
+        region,
+        EC2_API_VERSION,
+        "DescribeInstanceAttribute",
+        &[
+            ("InstanceId".to_string(), instance_id.to_string()),
+            ("Attribute".to_string(), USER_DATA_ATTRIBUTE.to_string()),
+        ],
+    )
+    .await
+    {
+        Ok(answered) => answered,
+        Err(refusal) if refusal.code.ends_with(NOT_FOUND_SUFFIX) => return Ok(None),
+        Err(refusal) => return Err(refusal),
+    };
+    Ok(xml_scalar_children(&answered, USER_DATA_ATTRIBUTE)
+        .get("value")
+        .and_then(Value::as_str)
+        .filter(|user_data| !user_data.is_empty())
+        .map(str::to_string))
 }
 
 /// The state Amazon EC2 reports the described instance in, from the instance's own

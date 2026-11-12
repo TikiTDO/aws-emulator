@@ -374,6 +374,17 @@ impl WaitConditionBarrier {
     }
 }
 
+/// The reason CloudFormation records on the event for a signal it RECEIVED, naming the
+/// signal's status and the unique id it arrived under — the two things one signal carries.
+///
+/// The one wording for every signal this service records, whoever sent it: the client's own
+/// `SignalResource` call ([`crate::ops::signal_resource`]) and the instances of a signalled
+/// resource ([`super::provisioning::instance_signals`]) report a signal the same way,
+/// because what the event reports is the signal rather than the caller.
+pub fn signal_received(status: &str, unique_id: &str) -> String {
+    format!("Received {status} signal with UniqueId {unique_id}")
+}
+
 /// The status an operation an expired wait FAILED leaves the stack in, by the
 /// `*_IN_PROGRESS` status that operation was in.
 ///

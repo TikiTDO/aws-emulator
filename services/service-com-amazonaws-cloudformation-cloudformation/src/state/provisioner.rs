@@ -466,7 +466,8 @@ pub(super) use super::{
 use super::provisioning::{
     call_json_rpc, call_query, call_rest_json, call_rest_json_named, call_rest_xml,
     percent_encoded, xml_element, xml_elements,
-    xml_entry_map, xml_leaf, xml_scalar_children, Created, Readiness, Refusal, Removal,
+    xml_entry_map, xml_leaf, xml_member_structures, xml_scalar_children, Created, Readiness,
+    Refusal, Removal,
     AWS_JSON_1_0, AWS_JSON_1_1,
 };
 use super::template::{
@@ -2204,6 +2205,14 @@ impl Provisioner {
             Self::AutoScalingGroup => {
                 update_auto_scaling_group(ctx, region, resource, declared).await
             }
+            // A LAUNCH TEMPLATE is a versioned document: `CreateLaunchTemplateVersion`
+            // "creates a new version of a launch template", so a changed declaration of its
+            // launch data reaches Amazon EC2 as a new version of the template the stack
+            // created — under the `lt-` id that template keeps
+            // ([`update_ec2_launch_template`]).
+            Self::Ec2LaunchTemplate => {
+                update_ec2_launch_template(ctx, region, resource, declared).await
+            }
             // `UpdateSpendingLimit` "updates an existing spending limit" by the ARN Amazon
             // Braket minted, taking the limit's amount and its period — every property of
             // the type except the device it caps, which replaces the resource instead — so a
@@ -3203,7 +3212,12 @@ mod iam_identities;
 mod application_services;
 mod platform_services;
 mod route53_policies;
-mod compute_fleet;
+/// The FLEET types a stack launches instances with — the Amazon EC2 launch template and the
+/// Auto Scaling group that launches from one: visible to the rest of this service's state
+/// because the INSTANCES a group holds are read there too, where the signals a resource's
+/// `CreationPolicy` waits for are accounted for
+/// ([`super::provisioning::instance_signals`]).
+pub(super) mod compute_fleet;
 mod network_and_delivery;
 mod ssm_associations;
 use ssm_associations::*;

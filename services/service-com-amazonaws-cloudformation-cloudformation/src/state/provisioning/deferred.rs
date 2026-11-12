@@ -81,7 +81,10 @@ pub(super) async fn resume(
     // see the module docs for why the cascade is not left to the next call, and for what
     // bounds it.
     for _ in 0..super::super::template::MAX_RESOURCES_PER_TEMPLATE {
-        if !resume_pass(ctx, state, region).await {
+        // BOXED, for the reason the walk's own provider calls are ([`reconcile`]): a pass runs
+        // the whole deployment walk, so its state is held off this function's future rather
+        // than on the stack of the read that resumed it.
+        if !Box::pin(resume_pass(ctx, state, region)).await {
             return;
         }
     }
@@ -108,7 +111,7 @@ async fn resume_pass(
         .iter()
         .any(|resumption| !resumption.create.is_empty());
     for resumption in resumptions {
-        let materialised = reconcile(
+        let materialised = Box::pin(reconcile(
             ctx,
             region,
             &resumption.provenance,
@@ -116,7 +119,7 @@ async fn resume_pass(
             &[],
             None,
             Policies::Honoured,
-        )
+        ))
         .await;
         let now = SystemTime::now();
         let unwinding = {
