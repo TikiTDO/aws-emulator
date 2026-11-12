@@ -187,6 +187,8 @@ mod running_execution_history;
 mod s3_sdk_task_integration;
 #[path = "all/s3_sdk_task_object_lifecycle.rs"]
 mod s3_sdk_task_object_lifecycle;
+#[path = "all/saga_catch_error_output_routing.rs"]
+mod saga_catch_error_output_routing;
 #[path = "all/saga_compensation_on_task_failure.rs"]
 mod saga_compensation_on_task_failure;
 #[path = "all/sdk_response_envelope.rs"]

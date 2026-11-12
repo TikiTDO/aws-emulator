@@ -46,24 +46,31 @@ use crate::state_machine_lifecycle::string;
 
 /// The table both functions act on: the work step reserves an order in it and the
 /// compensation releases that reservation.
-const TABLE: &str = "saga-orders";
+///
+/// `pub(crate)`, not private: `tests/all.rs` is one crate root, so the sibling suite that
+/// drives a saga's error output reads this table through [`given_table`] and [`item`]
+/// rather than carrying a second copy of either.
+pub(crate) const TABLE: &str = "saga-orders";
 
-/// The attribute the table is keyed by.
-const KEY: &str = "pk";
+/// The attribute the table is keyed by. `pub(crate)` for the reason [`TABLE`] gives.
+pub(crate) const KEY: &str = "pk";
 
 /// The attribute the work step stamps a reservation with, and the value it stamps there.
-const STATUS_ATTRIBUTE: &str = "status";
+/// `pub(crate)` for the reason [`TABLE`] gives.
+pub(crate) const STATUS_ATTRIBUTE: &str = "status";
 /// See [`STATUS_ATTRIBUTE`].
-const RESERVED: &str = "reserved";
+pub(crate) const RESERVED: &str = "reserved";
 
 /// The attribute the compensation stamps its own record with: the error name it was
 /// handed, which is how a row shows the error output reached the compensating state.
-const ERROR_ATTRIBUTE: &str = "error";
+/// `pub(crate)` for the reason [`TABLE`] gives.
+pub(crate) const ERROR_ATTRIBUTE: &str = "error";
 
 /// How long one invocation of either function is given, as the function's own `Timeout`:
 /// well past what a run needs, because what is under test is the control flow around the
-/// task rather than how fast an interpreter gets through a handler.
-const FUNCTION_TIMEOUT_SECONDS: u64 = 30;
+/// task rather than how fast an interpreter gets through a handler. `pub(crate)` for the
+/// reason [`TABLE`] gives.
+pub(crate) const FUNCTION_TIMEOUT_SECONDS: u64 = 30;
 
 /// How long a row waits for a created table to serve items — "You can perform read and
 /// write operations only on an ACTIVE table" — before it is a failure.
@@ -86,12 +93,13 @@ const BUILTIN_ERROR_TYPE: &str = "ValueError";
 /// The two wildcards the Amazon States Language documents for a catcher: "States.ALL — A
 /// wildcard that matches any known error name", and "States.TaskFailed […] matches any
 /// known error name except States.Timeout".
-const TASK_FAILED_WILDCARD: &str = "States.TaskFailed";
+pub(crate) const TASK_FAILED_WILDCARD: &str = "States.TaskFailed";
 /// See [`TASK_FAILED_WILDCARD`].
-const ALL_ERRORS_WILDCARD: &str = "States.ALL";
+pub(crate) const ALL_ERRORS_WILDCARD: &str = "States.ALL";
 
 /// An error name no run below reports, so a catcher naming it matches nothing.
-const UNRELATED_ERROR: &str = "InventoryUnavailable";
+/// `pub(crate)` for the reason [`TABLE`] gives.
+pub(crate) const UNRELATED_ERROR: &str = "InventoryUnavailable";
 
 /// The `Error` and `Cause` the saga's own terminal `Fail` state carries, which is what a
 /// client reads off an execution the compensation ran in.
@@ -371,8 +379,9 @@ fn rows() -> Vec<Row> {
     ]
 }
 
-/// The table both handlers act on, waited out until it serves items.
-async fn given_table(chain: &Chain, case: &str) {
+/// The table both handlers act on, waited out until it serves items. `pub(crate)` for the
+/// reason [`TABLE`] gives.
+pub(crate) async fn given_table(chain: &Chain, case: &str) {
     chain
         .ddb(
             case,
@@ -401,8 +410,9 @@ async fn given_table(chain: &Chain, case: &str) {
     }
 }
 
-/// The item stored under `key`, or `None` when the table holds none.
-async fn item(chain: &Chain, case: &str, key: &str) -> Option<Value> {
+/// The item stored under `key`, or `None` when the table holds none. `pub(crate)` for the
+/// reason [`TABLE`] gives.
+pub(crate) async fn item(chain: &Chain, case: &str, key: &str) -> Option<Value> {
     let read = chain
         .ddb(
             case,
@@ -463,8 +473,9 @@ fn only_failure(events: &[Value], kind: &str, member: &str, case: &str) -> (Stri
     (read("error"), read("cause"))
 }
 
-/// The error document `cause` carries, as the run produced it.
-fn document(cause: &str, case: &str) -> Value {
+/// The error document `cause` carries, as the run produced it. `pub(crate)` for the reason
+/// [`TABLE`] gives.
+pub(crate) fn document(cause: &str, case: &str) -> Value {
     serde_json::from_str(cause).unwrap_or_else(|error| {
         panic!("case {case:?}: expected the cause to be the error document, got {error} for {cause:?}")
     })
