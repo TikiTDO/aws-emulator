@@ -20,7 +20,12 @@
 //!   routing key cannot name correctly". Reading the request, checking it against the
 //!   model and rendering a modelled error are that module's helpers, not local copies.
 //!
-//! It resolves the endpoint through the one resolver all three operations of this service
+//! It decides the CALLER's authorization first — the identity-based IAM policies in force
+//! on the principal the request signed as, for
+//! `sagemaker:InvokeEndpointWithResponseStream` on the endpoint it addressed
+//! ([`crate::state::authorization`]), refused 403 `AccessDeniedException` before the
+//! endpoint is resolved — then resolves the endpoint through the one resolver all three
+//! operations of this service
 //! share ([`crate::state::resolve_endpoint`]) and applies the same rules `InvokeEndpoint`
 //! does — the account must host the endpoint, a deployment must be behind it, a
 //! `TargetVariant` must name a variant it hosts, and a `SessionId` must name a stateful
@@ -186,10 +191,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> ResponseStreamInv
                 Err(message) => return self.validation(svc, message),
             };
 
+        // AWS evaluates the caller's authorization at the front door, before the endpoint
+        // the request addresses is resolved — the same decision the other two routes take,
+        // under this route's own action name (`crate::state::authorization`). A refused
+        // call is answered 403 `AccessDeniedException` and leaves no invocation record.
+        if let Some(denial) = crate::state::authorization::refusal(
+            &*self.engine,
+            ctx,
+            "InvokeEndpointWithResponseStream",
+            &input.endpoint_name,
+        ) {
+            return self.refusal(
+                svc,
+                &crate::scaffolded::Scaffolded::<
+                    InvokeEndpointWithResponseStreamErrorModeled,
+                >::access_denied(denial),
+            );
+        }
+
         let Some(log) = crate::state::service_state(&*self.engine) else {
             return self.internal_failure(svc, crate::state::NO_STATE.to_string());
         };
-
         let now = ::std::time::SystemTime::now();
         // Everything the clock already owes this service's own store is materialised
         // before this request extends it, as the other two routes do.

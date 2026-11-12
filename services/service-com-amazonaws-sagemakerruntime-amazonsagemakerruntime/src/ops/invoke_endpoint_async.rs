@@ -2,8 +2,13 @@
 
 //! @op InvokeEndpointAsync
 //!
-//! IMPLEMENTED: queues one asynchronous inference against an endpoint the SageMaker
-//! CONTROL PLANE holds, through the resolver all three operations of this service share
+//! IMPLEMENTED: decides the CALLER's authorization first — the identity-based IAM
+//! policies in force on the principal the request signed as, for
+//! `sagemaker:InvokeEndpointAsync` on the endpoint it addressed
+//! ([`crate::state::authorization`]), refused 403 `AccessDeniedException` before anything
+//! else is looked at — then queues one asynchronous inference against an endpoint the
+//! SageMaker CONTROL PLANE holds, through the resolver all three operations of this
+//! service share
 //! ([`crate::state::resolve_endpoint`]), and answers HTTP 202 with WHERE the result will
 //! be. The two locations are computed from the endpoint's own
 //! `AsyncInferenceConfig$OutputConfig` paths plus the request's
@@ -218,6 +223,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // The same front-door decision every route of this data plane takes, and the first
+        // thing it does: a principal whose identity-based policies do not allow
+        // `sagemaker:InvokeEndpointAsync` on the endpoint the request addressed is refused
+        // 403 `AccessDeniedException` before the request's input sources are looked at and
+        // before the endpoint resolves, so no submission is queued and nothing is logged
+        // (`crate::state::authorization`).
+        if let Some(denial) = crate::state::authorization::refusal(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &input.endpoint_name,
+        ) {
+            return Err(crate::scaffolded::Scaffolded::access_denied(denial));
+        }
+
         let Some(log) = crate::state::service_state(&*self.engine) else {
             return Err(internal_failure(crate::state::NO_STATE));
         };

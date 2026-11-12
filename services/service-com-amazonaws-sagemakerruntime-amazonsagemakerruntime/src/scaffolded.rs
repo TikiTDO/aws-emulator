@@ -40,6 +40,12 @@
 //! place it can return an error its own model does not declare — `validation` above,
 //! for a service whose model carries no client-input error. Delete the wrapper and the
 //! handler has no way to refuse a bad request at all.
+//!
+//! That is what [`Scaffolded::access_denied`] is: an authorization failure
+//! (HTTP 403 `AccessDeniedException`) belongs to the layer AWS decides authorization in
+//! rather than to the operation, so no operation of this model declares the shape and the
+//! refusal travels here. The decision and the sentence it carries live in
+//! [`crate::state::authorization`].
 
 use aws_smithy_schema::serde::{SerdeError, SerializableStruct, ShapeSerializer};
 use aws_smithy_schema::{Schema, ShapeId, ShapeType};
@@ -238,6 +244,79 @@ impl SerializableStruct for DiscriminatedValidationError {
     }
 }
 
+/// The wire error code an authorization failure carries: the code AWS states that class
+/// with, which is what a client branches on to tell "fix your IAM policy" from "fix your
+/// request".
+pub const ACCESS_DENIED_CODE: &str = "AccessDeniedException";
+
+/// The HTTP status of that refusal. 403 is the status of an authorization failure, as
+/// opposed to the 400 of the modelled `ValidationError`, which says the request itself was
+/// wrong.
+pub const ACCESS_DENIED_STATUS: u16 = 403;
+
+/// The `Message` member of the synthetic `AccessDeniedException` error shape, spelled as
+/// this service's own error shapes spell theirs.
+static ACCESS_DENIED_MESSAGE: Schema = Schema::new_member(
+    ShapeId::from_static(
+        "smithy.framework#AccessDeniedException$Message",
+        "smithy.framework",
+        "Message",
+    ),
+    ShapeType::String,
+    "Message",
+    0,
+)
+.with_xml_name("Message");
+
+/// Schema for the synthetic `AccessDeniedException` error shape.
+///
+/// In the `smithy.framework` namespace for the same reason as [`NOT_IMPLEMENTED_SCHEMA`]:
+/// this model declares no `AccessDeniedException` at all — the refusal is produced by the
+/// authorization layer, which no operation lists as one of its own errors — so the shape
+/// must not collide with a modelled one. The wire code and the status come from
+/// [`OperationError`] below.
+pub static ACCESS_DENIED_SCHEMA: Schema = Schema::new_struct(
+    ShapeId::from_static(
+        "smithy.framework#AccessDeniedException",
+        "smithy.framework",
+        "AccessDeniedException",
+    ),
+    ShapeType::Structure,
+    &[&ACCESS_DENIED_MESSAGE],
+);
+
+/// The payload of an `AccessDeniedException`: who was refused, which action, on which
+/// resource, and which of IAM's rules refused it.
+#[derive(Debug, Clone)]
+pub struct AccessDeniedException {
+    pub message: String,
+}
+
+impl AccessDeniedException {
+    /// An `AccessDeniedException` carrying `message` — IAM's own denial sentence, which
+    /// `crate::state::authorization` words.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for AccessDeniedException {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{ACCESS_DENIED_CODE}: {}", self.message)
+    }
+}
+
+impl std::error::Error for AccessDeniedException {}
+
+impl SerializableStruct for AccessDeniedException {
+    fn serialize_members(&self, s: &mut dyn ShapeSerializer) -> Result<(), SerdeError> {
+        s.write_string(&ACCESS_DENIED_MESSAGE, self.message.as_str())?;
+        Ok(())
+    }
+}
+
 /// An operation's error channel: either the synthetic scaffold signal, or one of the
 /// operation's own modeled errors.
 #[derive(Debug)]
@@ -246,6 +325,11 @@ pub enum Scaffolded<E> {
     NotImplemented(NotImplemented),
     /// A modeled error the operation declares. Renders with the model's own status.
     Modeled(E),
+    /// The caller's identity-based policies do not allow the action it asked for. Renders
+    /// as HTTP 403 with the error code `AccessDeniedException`, which no operation of this
+    /// model declares: the refusal belongs to the authorization layer, not to the
+    /// operation, so it cannot travel as [`Modeled`](Self::Modeled).
+    AccessDenied(AccessDeniedException),
     /// The modeled `ValidationError` with the discriminator the wire carries beside its
     /// `Message`. Renders with that shape's own name and status, so a client resolves the
     /// same error class it resolves for every other refusal of this service.
@@ -293,6 +377,16 @@ impl<E> Scaffolded<E> {
     ///
     /// Built HERE rather than per operation so the three routes answer one envelope and
     /// one sentence for one condition.
+    /// Refuse the request the way AWS refuses a caller whose identity-based policies do
+    /// not allow the action it asked for: HTTP 403 `AccessDeniedException`, carrying IAM's
+    /// own denial sentence.
+    ///
+    /// The decision and the wording both live in `crate::state::authorization`; this
+    /// constructor is only how the refusal travels on an operation's error channel.
+    pub fn access_denied(message: impl Into<String>) -> Self {
+        Self::AccessDenied(AccessDeniedException::new(message))
+    }
+
     pub fn no_such_endpoint(endpoint_name: &str) -> Self {
         Self::Discriminated(DiscriminatedValidationError {
             modelled: crate::ops::types::ValidationError {
@@ -311,6 +405,7 @@ impl<E: std::fmt::Display> std::fmt::Display for Scaffolded<E> {
         match self {
             Self::NotImplemented(e) => write!(f, "{e}"),
             Self::Modeled(e) => write!(f, "{e}"),
+            Self::AccessDenied(e) => write!(f, "{e}"),
             Self::Discriminated(e) => write!(f, "{e}"),
             Self::ValidationException(e) => write!(f, "{e}"),
         }
@@ -324,6 +419,7 @@ impl<E: std::error::Error + 'static> std::error::Error for Scaffolded<E> {
         match self {
             Self::NotImplemented(e) => e.source(),
             Self::Modeled(e) => e.source(),
+            Self::AccessDenied(e) => e.source(),
             Self::Discriminated(e) => e.source(),
             Self::ValidationException(e) => e.source(),
         }
@@ -339,6 +435,7 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
         match self {
             Self::NotImplemented(e) => e,
             Self::Modeled(e) => e.as_serializable(),
+            Self::AccessDenied(e) => e,
             Self::Discriminated(e) => e,
             Self::ValidationException(e) => e,
         }
@@ -348,6 +445,7 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
         match self {
             Self::NotImplemented(_) => &NOT_IMPLEMENTED_SCHEMA,
             Self::Modeled(e) => e.variant_schema(),
+            Self::AccessDenied(_) => &ACCESS_DENIED_SCHEMA,
             // The MODELLED shape's own schema: the discriminator rides beside its
             // members, it does not replace the shape.
             Self::Discriminated(_) => &crate::ops::types::SCHEMA_VALIDATION_ERROR,
@@ -363,6 +461,7 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
         match self {
             Self::NotImplemented(_) => "NotImplemented",
             Self::Modeled(e) => e.shape_name(),
+            Self::AccessDenied(_) => ACCESS_DENIED_CODE,
             Self::Discriminated(_) => crate::service::error_envelope::VALIDATION_ERROR,
             Self::ValidationException(_) => "ValidationException",
         }
@@ -376,6 +475,7 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
         match self {
             Self::NotImplemented(_) => 501,
             Self::Modeled(e) => e.http_status(),
+            Self::AccessDenied(_) => ACCESS_DENIED_STATUS,
             // `ValidationError`'s own `@httpError`.
             Self::Discriminated(_) => 400,
             Self::ValidationException(_) => 400,
@@ -389,6 +489,9 @@ impl<E: OperationError> OperationError for Scaffolded<E> {
             // envelope carries the signal on the query protocols too.
             Self::NotImplemented(_) => None,
             Self::Modeled(e) => e.query_error_code(),
+            // Same reason: the synthetic shape carries no `awsQueryError` trait, and this
+            // service speaks `restJson1`, which has no query envelope at all.
+            Self::AccessDenied(_) => None,
             // This service is restJson1 and `ValidationError` carries no `awsQueryError`
             // trait, so there is no legacy query code to honour.
             Self::Discriminated(_) => None,

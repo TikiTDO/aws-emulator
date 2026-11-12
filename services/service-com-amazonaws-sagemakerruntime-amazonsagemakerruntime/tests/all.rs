@@ -19,6 +19,8 @@ mod endpoint_invocation;
 mod endpoint_registry;
 #[path = "all/harness.rs"]
 mod harness;
+#[path = "all/invocation_authorization.rs"]
+mod invocation_authorization;
 #[path = "all/invoke_endpoint.rs"]
 mod invoke_endpoint;
 #[path = "all/invoke_endpoint_async.rs"]

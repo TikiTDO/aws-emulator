@@ -31,5 +31,13 @@ service-com-amazonaws-sagemaker-sagemaker = { workspace = true }
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
+[dev-dependencies]
+# The services a caller's own identity is made with:
+# `tests/all/invocation_authorization.rs` creates roles with IAM's own operations and
+# assumes them through STS, so the identity-based documents the authorization gate reads
+# are the ones those services wrote.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+
 [lints]
 workspace = true

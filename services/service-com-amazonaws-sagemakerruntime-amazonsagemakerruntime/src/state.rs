@@ -27,6 +27,12 @@
 //! submission's outcome, due [`ASYNC_OUTCOME_DUE_AFTER`] the call that queued it — see
 //! [`AsyncInvocation::settle`].
 
+/// Whether IAM lets the caller perform the invocation it asks for — the decision every
+/// route takes before any of the state below is read. Held beside this store rather than
+/// in it: the documents it is taken from belong to the IAM service, and nothing of it is
+/// written here.
+pub mod authorization;
+
 use std::collections::VecDeque;
 use std::time::{Duration, SystemTime};
 

@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op InvokeEndpoint
-//! IMPLEMENTED: resolves the endpoint the request names in the SageMaker CONTROL
+//! IMPLEMENTED: decides the CALLER's authorization first — the identity-based IAM
+//! policies in force on the principal the request signed as, for
+//! `sagemaker:InvokeEndpoint` on the endpoint it addressed
+//! ([`crate::state::authorization`]), refused 403 `AccessDeniedException` before anything
+//! is resolved — then resolves the endpoint the request names in the SageMaker CONTROL
 //! PLANE's store (through the one shared engine), refuses a request that names no
 //! endpoint, an endpoint that is not yet `InService`, a `TargetVariant` the endpoint
 //! does not host, `EnableExplanations` on an endpoint with no explainer configuration or
@@ -285,6 +289,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // AWS evaluates the caller's authorization at the front door, BEFORE the endpoint
+        // the request addresses is resolved: a principal whose identity-based policies do
+        // not allow `sagemaker:InvokeEndpoint` on that endpoint is refused 403
+        // `AccessDeniedException` whatever the account hosts, so the refusal discloses
+        // nothing and this invocation is never recorded as one the data plane served. The
+        // decision is the SageMaker control plane's own gate, read through
+        // [`crate::state::authorization`].
+        if let Some(denial) = crate::state::authorization::refusal(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &input.endpoint_name,
+        ) {
+            return Err(crate::scaffolded::Scaffolded::access_denied(denial));
+        }
+
         let Some(log) = crate::state::service_state(&*self.engine) else {
             return Err(internal_failure(crate::state::NO_STATE));
         };
