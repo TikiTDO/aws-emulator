@@ -20,9 +20,9 @@
 //!
 //! The rows differ along what the rule generalises over — which operation is called, which
 //! input member carries the ARN, which resource the operation names, and the FORM of the
-//! absent ARN (region, account, the shape and case of the resource id, an id carrying an
-//! owning resource's id, both ends of the modelled length range, and an ARN this emulator
-//! really minted and then released) — so no single request is the specification.
+//! absent ARN (region, account, the shape and case of the resource id, both ends of the
+//! modelled length range, and an ARN this emulator really minted and then released) — so no
+//! single request is the specification.
 //!
 //! The wire harness is the one [`crate::projects`] owns and every suite in this crate
 //! shares.
@@ -146,7 +146,21 @@ const ARN_CALLS: &[ArnCall] = &[
         extra: &[],
     },
     ArnCall {
+        op: "UpdateDevicePool",
+        member: "arn",
+        resource_type: DEVICE_POOL_TYPE,
+        absence_prefix: DEVICE_POOL_ABSENCE,
+        extra: &[("name", "renamed-by-the-refusal-row")],
+    },
+    ArnCall {
         op: "GetUpload",
+        member: "arn",
+        resource_type: UPLOAD_TYPE,
+        absence_prefix: UPLOAD_ABSENCE,
+        extra: &[],
+    },
+    ArnCall {
+        op: "DeleteUpload",
         member: "arn",
         resource_type: UPLOAD_TYPE,
         absence_prefix: UPLOAD_ABSENCE,
@@ -168,8 +182,22 @@ fn devicefarm_arn(region: &str, account: &str, resource_type: &str, id: &str) ->
 
 /// Well-formed ARNs of `resource_type` that no stored resource has, one per form the rule
 /// generalises over.
+///
+/// Every id has the FORM an ARN of that type carries: a resource that lives inside a
+/// project embeds the owning project's id ahead of its own, a project's id stands alone.
+/// An ARN whose id is not of its type's form names no resource of that type at all, so it
+/// is refused as a bad argument rather than reported missing — the subject of
+/// [`crate::reference_checks`], not of this suite.
 fn absent_arns(resource_type: &str) -> Vec<(String, String)> {
     let account = engine::EMULATOR_ACCOUNT_ID;
+    // The owning project's id a project-scoped type's resource field carries, and the
+    // empty prefix a top-level type's carries.
+    let owner = if resource_type == PROJECT_TYPE {
+        String::new()
+    } else {
+        "0000000000000f0f-absent/".to_string()
+    };
+    let id = |core: &str| format!("{owner}{core}");
     let mut rows = vec![
         (
             "a uuid-shaped id in the request's own region".to_string(),
@@ -177,39 +205,62 @@ fn absent_arns(resource_type: &str) -> Vec<(String, String)> {
                 "us-west-2",
                 account,
                 resource_type,
-                "11111111-2222-3333-4444-555555555555",
+                &id("11111111-2222-3333-4444-555555555555"),
             ),
         ),
         (
             "another region".to_string(),
-            devicefarm_arn("eu-central-1", account, resource_type, "0123456789abcdef-absent"),
+            devicefarm_arn(
+                "eu-central-1",
+                account,
+                resource_type,
+                &id("0123456789abcdef-absent"),
+            ),
         ),
         (
             "another account".to_string(),
-            devicefarm_arn("us-west-2", "210987654321", resource_type, "0123456789abcdef-absent"),
+            devicefarm_arn(
+                "us-west-2",
+                "210987654321",
+                resource_type,
+                &id("0123456789abcdef-absent"),
+            ),
         ),
         (
             "an UPPER-CASE id, which no normalisation may fold".to_string(),
-            devicefarm_arn("us-west-2", account, resource_type, "ABCDEF0123456789-ABSENT"),
-        ),
-        (
-            "an id carrying an owning resource's id and a slash".to_string(),
             devicefarm_arn(
                 "us-west-2",
                 account,
                 resource_type,
-                "000000000000000f-absent/00000000000000aa-absent",
+                &id("ABCDEF0123456789-ABSENT"),
+            ),
+        ),
+        (
+            if owner.is_empty() {
+                "an id of the shape this emulator's own minting gives it".to_string()
+            } else {
+                "an id under ANOTHER absent owning resource".to_string()
+            },
+            devicefarm_arn(
+                "us-west-2",
+                account,
+                resource_type,
+                &if owner.is_empty() {
+                    "000000000000000f-absent".to_string()
+                } else {
+                    "00000000000000cc-absent/00000000000000aa-absent".to_string()
+                },
             ),
         ),
     ];
 
     // Both ends of the modelled length range, padded to land exactly on the bound where
     // the frame leaves room for it.
-    let frame = devicefarm_arn("us-west-2", account, resource_type, "").len();
+    let frame = devicefarm_arn("us-west-2", account, resource_type, &id("")).len();
     let shortest = ARN_MIN_LENGTH.saturating_sub(frame).max(1);
     rows.push((
         format!("the shortest id the modelled minimum length of {ARN_MIN_LENGTH} leaves room for"),
-        devicefarm_arn("us-west-2", account, resource_type, &"a".repeat(shortest)),
+        devicefarm_arn("us-west-2", account, resource_type, &id(&"a".repeat(shortest))),
     ));
     rows.push((
         format!("an ARN exactly at the modelled maximum length of {ARN_MAX_LENGTH}"),
@@ -217,7 +268,7 @@ fn absent_arns(resource_type: &str) -> Vec<(String, String)> {
             "us-west-2",
             account,
             resource_type,
-            &"b".repeat(ARN_MAX_LENGTH - frame),
+            &id(&"b".repeat(ARN_MAX_LENGTH - frame)),
         ),
     ));
     rows

@@ -149,11 +149,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         // The model constrains `arn` only to `^arn:aws:devicefarm:.+$`, so an ARN naming
-        // another Device Farm resource type reaches here. That is a bad argument, not a
-        // missing device pool.
+        // another Device Farm resource type, or carrying a resource id that is not of a
+        // device-pool ARN's form, reaches here. Either way the ARN itself is wrong: that is
+        // a bad argument, not a device pool that is missing.
         if !crate::state::is_device_pool_arn(&input.arn) {
             return Err(GetDevicePoolErrorModeled::ArgumentException(ArgumentException {
-                message: Some(format!("{} is not a device pool ARN", input.arn)),
+                message: Some(crate::state::invalid_arn_message(&input.arn)),
             })
             .into());
         }

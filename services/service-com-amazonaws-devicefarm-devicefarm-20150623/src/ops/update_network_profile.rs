@@ -175,7 +175,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if !crate::state::is_network_profile_arn(&input.arn) {
             return Err(UpdateNetworkProfileErrorModeled::ArgumentException(
                 ArgumentException {
-                    message: Some(format!("{} is not a network profile ARN", input.arn)),
+                    message: Some(crate::state::invalid_arn_message(&input.arn)),
                 },
             )
             .into());

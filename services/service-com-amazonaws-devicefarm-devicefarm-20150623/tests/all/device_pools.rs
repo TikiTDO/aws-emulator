@@ -261,8 +261,9 @@ async fn created_device_pools_are_persisted_and_read_back_identically() {
 }
 
 /// A device pool is a resource of its own: deleting the project it was created in releases
-/// the project only, so every pool created under it still reads back unchanged, while a new
-/// pool for that released project is refused as a missing project.
+/// the project only, so every pool created under it still reads back unchanged, and a new
+/// pool can still be created under that released project's ARN — the create is judged on
+/// the ARN's form, not on the project record still being there.
 #[tokio::test]
 async fn device_pools_outlive_the_project_they_were_created_in() {
     let emu = Emulator::new();
@@ -319,23 +320,43 @@ async fn device_pools_outlive_the_project_they_were_created_in() {
         );
     }
 
-    // The project really is gone: a pool cannot be created under it any more.
+    // The project record really is gone — and a pool is still minted under its id, because
+    // a device pool's identity is the project id its ARN carries and nothing of the
+    // project record is read.
     let (status, response) = emu
         .call(
             "CreateDevicePool",
             REGION,
-            &json!({ "projectArn": project_arn, "name": "too-late", "rules": [] }),
+            &json!({ "projectArn": project_arn, "name": "after-the-project", "rules": [] }),
         )
         .await;
     assert_eq!(
+        status, 200,
+        "case a new pool for the released project: expected 200, got {status:?} with {response}"
+    );
+    let orphan_arn = arn_of(&response["devicePool"]);
+    let expected_prefix = format!(
+        "arn:aws:devicefarm:us-west-2:{}:{DEVICE_POOL_TYPE}:{}/",
+        engine::EMULATOR_ACCOUNT_ID,
+        resource_id(&project_arn)
+    );
+    assert!(
+        orphan_arn.starts_with(&expected_prefix),
+        "case a new pool for the released project: expected an ARN starting \
+         {expected_prefix:?}, got {orphan_arn:?}"
+    );
+
+    let (status, response) = emu
+        .call("GetProject", REGION, &json!({ "arn": project_arn }))
+        .await;
+    assert_eq!(
         status, 400,
-        "case a new pool for the deleted project: expected a 400 refusal, got {status:?} with \
-         {response}"
+        "case the released project itself: expected a 400 refusal, got {status:?} with {response}"
     );
     assert_eq!(
         error_code(&response),
         "NotFoundException",
-        "case a new pool for the deleted project: expected NotFoundException, got {response}"
+        "case the released project itself: expected NotFoundException, got {response}"
     );
 }
 
@@ -398,7 +419,10 @@ async fn pools_sharing_a_name_are_distinct_resources() {
 /// Every way a device-pool request can name a resource that is not there is refused with
 /// the modelled HTTP 400 — never a 501 and never a 200: `ArgumentException` for an ARN that
 /// does not name the resource type the member expects, and `NotFoundException` for a
-/// well-formed ARN the store has no record for.
+/// well-formed device-pool ARN the store has no record for. A `projectArn` naming a project
+/// the store does not hold is NOT one of these: a pool is minted under the project id the
+/// ARN carries, which [`device_pools_outlive_the_project_they_were_created_in`] and
+/// [`crate::reference_checks`] cover.
 #[tokio::test]
 async fn device_pool_requests_naming_absent_resources_are_refused() {
     let emu = Emulator::new();
@@ -417,12 +441,6 @@ async fn device_pool_requests_naming_absent_resources_are_refused() {
 
     // (case, operation, request, expected error code)
     let cases: Vec<(String, &str, Value, &str)> = vec![
-        (
-            "CreateDevicePool for a project ARN no project has".to_string(),
-            "CreateDevicePool",
-            json!({ "projectArn": foreign_arn("project"), "name": "orphan", "rules": [] }),
-            "NotFoundException",
-        ),
         (
             "CreateDevicePool given an upload ARN".to_string(),
             "CreateDevicePool",
@@ -474,12 +492,13 @@ async fn device_pool_requests_naming_absent_resources_are_refused() {
         .await;
     assert_eq!(
         status, 200,
-        "case the surviving pool after six refusals: expected 200, got {status:?} with {response}"
+        "case the surviving pool after every refusal: expected 200, got {status:?} with \
+         {response}"
     );
     assert_eq!(
         response["devicePool"]["name"],
         json!("present"),
-        "case the surviving pool after six refusals: expected name \"present\", got {}",
+        "case the surviving pool after every refusal: expected name \"present\", got {}",
         response["devicePool"]["name"]
     );
 }

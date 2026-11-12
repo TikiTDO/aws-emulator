@@ -152,7 +152,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // missing upload.
         if !crate::state::is_upload_arn(&input.arn) {
             return Err(GetUploadErrorModeled::ArgumentException(ArgumentException {
-                message: Some(format!("{} is not an upload ARN", input.arn)),
+                message: Some(crate::state::invalid_arn_message(&input.arn)),
             })
             .into());
         }

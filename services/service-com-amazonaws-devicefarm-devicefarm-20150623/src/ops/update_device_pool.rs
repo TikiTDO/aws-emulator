@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateDevicePool
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateDevicePool`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateDevicePool::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Modifies the pool its `arn` names: the name, the description, the device ceiling and —
+//! all or nothing, as the operation documents — the whole rule list, written onto the
+//! record in [`crate::state`] and read back out of it for the response, so every later
+//! `GetDevicePool` reports what this call stored.
+//!
+//! An absent member leaves the stored value alone. The rules a request does carry are
+//! judged exactly as `CreateDevicePool` judges them, through the one operand rule in
+//! [`crate::state::rule_operand_refusal`]: the operand of a rule is a stringified attribute
+//! value, and an operand the service cannot parse is refused before anything is written.
 //!
 //! ## Shape of an operation
 //!
@@ -161,18 +162,93 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateDevicePool` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateDevicePoolErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateDevicePool"))
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(UpdateDevicePoolErrorModeled::ServiceAccountException(
+                ServiceAccountException {
+                    message: Some("the Device Farm state store is unavailable".to_string()),
+                },
+            )
+            .into());
+        };
+
+        // The model constrains `arn` only to `^arn:aws:devicefarm:.+$`, so an ARN naming
+        // another Device Farm resource type, or carrying a resource id that is not of a
+        // device-pool ARN's form, reaches here. That is a bad argument, not a device pool
+        // that is missing.
+        if !crate::state::is_device_pool_arn(&input.arn) {
+            return Err(UpdateDevicePoolErrorModeled::ArgumentException(ArgumentException {
+                message: Some(crate::state::invalid_arn_message(&input.arn)),
+            })
+            .into());
+        }
+
+        // The same operand rule `CreateDevicePool` applies: a rule's operand is a
+        // STRINGIFIED attribute value, and one the service cannot parse is refused before
+        // anything is written, so a refused update leaves the pool exactly as it was.
+        if let Some(rules) = input.rules.as_deref() {
+            if let Some(refusal) = crate::state::rule_operand_refusal(rules) {
+                return Err(UpdateDevicePoolErrorModeled::ArgumentException(ArgumentException {
+                    message: Some(refusal),
+                })
+                .into());
+            }
+        }
+
+        // The two ceiling members are mutually exclusive, and the refusal says so in the
+        // service's own words for it: `UpdateDevicePool$clearMaxDevices` documents "If you
+        // use this parameter in your request, you cannot use the maxDevices parameter in the
+        // same request."
+        if input.clear_max_devices.is_some() && input.max_devices.is_some() {
+            return Err(UpdateDevicePoolErrorModeled::ArgumentException(ArgumentException {
+                message: Some(
+                    "If you use this parameter in your request, you cannot use the maxDevices \
+                     parameter in the same request."
+                        .to_string(),
+                ),
+            })
+            .into());
+        }
+
+        let mut store = state.lock();
+        let Some(record) = store.device_pools.get_mut(&input.arn) else {
+            return Err(UpdateDevicePoolErrorModeled::NotFoundException(NotFoundException {
+                message: Some(crate::state::arn_not_found_message(
+                    crate::state::DEVICE_POOL_RESOURCE_TYPE,
+                    &input.arn,
+                )),
+            })
+            .into());
+        };
+
+        // An absent member leaves the stored value alone; `arn`, the owning project and the
+        // pool's `type` are identity and classification rather than configuration, so
+        // nothing here touches them.
+        if let Some(name) = input.name {
+            record.name = name;
+        }
+        if let Some(description) = input.description {
+            record.description = Some(description);
+        }
+        // "Rule updates are all-or-nothing, meaning they can only be updated as a whole (or
+        // not at all)": a request carrying rules REPLACES the stored list, and one carrying
+        // none leaves it as it is.
+        if let Some(rules) = input.rules {
+            record.rules = rules;
+        }
+        // The ceiling: a number sets it, and `clearMaxDevices` means "the maxDevices
+        // parameter does not apply", which is the pool having no ceiling at all.
+        if let Some(max_devices) = input.max_devices {
+            record.max_devices = Some(max_devices);
+        }
+        if input.clear_max_devices == Some(true) {
+            record.max_devices = None;
+        }
+
+        // The response is built from the record the store now HOLDS, so it can never report
+        // a value a later `GetDevicePool` will not.
+        Ok(UpdateDevicePoolOutput {
+            device_pool: Some(record.to_device_pool()),
+        })
     }
 }

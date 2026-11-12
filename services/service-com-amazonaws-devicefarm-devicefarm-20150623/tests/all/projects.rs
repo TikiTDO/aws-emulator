@@ -173,9 +173,20 @@ pub(crate) fn resource_id(arn: &str) -> String {
 }
 
 /// A Device Farm ARN this emulator never minted, of resource type `resource_type`.
+///
+/// The resource id has the FORM an ARN of that type carries: a resource that lives inside
+/// a project embeds the owning project's id ahead of its own
+/// (`<type>:<project-id>/<resource-id>`), while a project's id stands alone. An ARN whose
+/// resource id is not of its type's form is a malformed ARN rather than one that resolves
+/// to nothing, which is what [`crate::reference_checks`] covers.
 pub(crate) fn foreign_arn(resource_type: &str) -> String {
+    let id = if resource_type == "project" {
+        "11111111-2222-3333-4444-555555555555".to_string()
+    } else {
+        "99999999-8888-7777-6666-555555555555/11111111-2222-3333-4444-555555555555".to_string()
+    };
     format!(
-        "arn:aws:devicefarm:us-west-2:{}:{resource_type}:11111111-2222-3333-4444-555555555555",
+        "arn:aws:devicefarm:us-west-2:{}:{resource_type}:{id}",
         engine::EMULATOR_ACCOUNT_ID
     )
 }

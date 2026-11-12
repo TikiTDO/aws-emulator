@@ -2,10 +2,17 @@
 
 //! @op CreateDevicePool
 //!
-//! Mints a device pool inside an existing project: a fresh ARN plus the caller's own
-//! selection rules and device ceiling, stored on the record in [`crate::state`] and read
-//! back out of it for the response, so every later `GetDevicePool` reports the identical
-//! values.
+//! Mints a device pool under the project its `projectArn` names: a fresh ARN plus the
+//! caller's own selection rules and device ceiling, reported from the record and — where
+//! the project that holds pools is one this account has — stored on it in [`crate::state`],
+//! so every later `GetDevicePool` reports the identical values.
+//!
+//! The pool's identity is the project id the request's ARN carries: the create reads
+//! nothing else of the project, so it is judged on the ARN's form and on the operand of
+//! every rule it carries, never on the project record being there. A project the account
+//! does not hold therefore holds no pool either: the response reports the pool the service
+//! minted, and nothing resolves that ARN afterwards. Once a project HAS taken the record,
+//! it is the pool's own and outlives that project's deletion.
 //!
 //! The created pool's `type` is the service's own classification, not the request's: the
 //! model documents `CURATED` as a pool AWS itself manages, so a pool a caller creates is
@@ -160,25 +167,41 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         // The model constrains `projectArn` only to `^arn:aws:devicefarm:.+$`, so an ARN
-        // naming another Device Farm resource type reaches here. That is a bad argument,
-        // not a missing project.
+        // naming another Device Farm resource type, or carrying a resource id that is not
+        // of a project ARN's form, reaches here. That is a bad argument, not a missing
+        // project.
         if !crate::state::is_project_arn(&input.project_arn) {
             return Err(CreateDevicePoolErrorModeled::ArgumentException(ArgumentException {
-                message: Some(format!("{} is not a project ARN", input.project_arn)),
+                message: Some(crate::state::invalid_arn_message(&input.project_arn)),
+            })
+            .into());
+        }
+
+        // Every rule's operand is a STRINGIFIED attribute value; one the service cannot
+        // parse is refused here, before anything is minted, so a pool whose rules the
+        // service never accepted is never left in the store.
+        if let Some(refusal) = crate::state::rule_operand_refusal(&input.rules) {
+            return Err(CreateDevicePoolErrorModeled::ArgumentException(ArgumentException {
+                message: Some(refusal),
             })
             .into());
         }
 
         let region = crate::state::request_region(ctx.parts());
         let mut store = state.lock();
-        // A device pool is created inside a project, so it cannot be minted for a project
-        // the store does not hold.
-        if !store.projects.contains_key(&input.project_arn) {
-            return Err(CreateDevicePoolErrorModeled::NotFoundException(NotFoundException {
-                message: Some(crate::state::project_not_found_message(&input.project_arn)),
-            })
-            .into());
-        }
+        // A device pool is created INSIDE the project its `projectArn` names, and the
+        // project record is what holds it: the create derives the pool's identity from the
+        // project id the ARN carries and reads nothing else of the project, so it is judged
+        // on the ARN's form and never on the project being there — but a pool minted for a
+        // project the account does not hold has nothing holding it, so the pool the response
+        // reports is all there is of it. A project the account DOES hold takes the record,
+        // which from then on is the pool's own and outlives the project's deletion.
+        //
+        // Both halves are recorded behaviour of the same trace: the create against a
+        // projectArn whose project the account does not hold is SERVED with the pool it
+        // minted, and the later `GetDevicePool` of that very minted ARN reports the pool
+        // absent.
+        let project_holds_the_pool = store.projects.contains_key(&input.project_arn);
         // The store's own bound: refuse rather than let an unbounded number of calls grow
         // the state without end. Checked before anything is minted, so a refused call
         // leaves the store exactly as it was.
@@ -213,27 +236,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             max_devices: input.max_devices,
         };
 
-        // The response is built from the record the store now HOLDS, through the entry the
-        // insert hands back, so it can never report a value the store does not have. A
-        // minted ARN the store already holds would mean the sequence repeated, which it
-        // cannot; that is an internal invariant breach, never someone else's pool returned
-        // under a 200.
-        let device_pool = match store.device_pools.entry(arn) {
-            ::std::collections::btree_map::Entry::Vacant(slot) => {
-                slot.insert(record).to_device_pool()
+        // The pool the response reports is the one built from this record, and where the
+        // project holds it the record is what the store keeps: it is written through the
+        // entry the insert hands back, so a kept pool can never be reported with a value
+        // the store does not have. A minted ARN the store already holds would mean the
+        // sequence repeated, which it cannot; that is an internal invariant breach, never
+        // someone else's pool returned under a 200.
+        let device_pool = if project_holds_the_pool {
+            match store.device_pools.entry(arn) {
+                ::std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(record).to_device_pool()
+                }
+                ::std::collections::btree_map::Entry::Occupied(_) => {
+                    return Err(CreateDevicePoolErrorModeled::ServiceAccountException(
+                        ServiceAccountException {
+                            message: Some(
+                                "the Device Farm state store minted a device pool id it \
+                                 already holds"
+                                    .to_string(),
+                            ),
+                        },
+                    )
+                    .into());
+                }
             }
-            ::std::collections::btree_map::Entry::Occupied(_) => {
-                return Err(CreateDevicePoolErrorModeled::ServiceAccountException(
-                    ServiceAccountException {
-                        message: Some(
-                            "the Device Farm state store minted a device pool id it already \
-                             holds"
-                                .to_string(),
-                        ),
-                    },
-                )
-                .into());
-            }
+        } else {
+            record.to_device_pool()
         };
         Ok(CreateDevicePoolOutput {
             device_pool: Some(device_pool),

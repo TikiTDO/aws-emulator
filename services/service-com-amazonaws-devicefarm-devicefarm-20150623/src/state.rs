@@ -20,6 +20,12 @@ mod vpc_config;
 
 pub use vpc_config::unresolved_vpc_config;
 
+/// The operand of a device-pool selection rule — the one rule every operation that writes
+/// a pool's `rules` applies before it writes.
+mod device_pool_rules;
+
+pub use device_pool_rules::rule_operand_refusal;
+
 /// The execution timeout a project gets when `CreateProject` is called without
 /// `defaultJobTimeoutMinutes`.
 ///
@@ -555,9 +561,10 @@ const DEFAULT_REGION: &str = "us-east-1";
 /// `resource_type`.
 ///
 /// Applies the ARN grammar: `arn:<partition>:<service>:<region>:<account>:<type>:<id>`,
-/// with a non-empty resource id. A resource that lives inside a project carries both ids
-/// in that one field (`<project-id>/<profile-id>`), which is why the id is returned whole
-/// rather than split further.
+/// with a resource id of the form that type's ARNs carry ([`resource_id_has_type_form`]).
+/// A resource that lives inside a project carries both ids in that one field
+/// (`<project-id>/<profile-id>`), which is why the id is returned whole rather than split
+/// further.
 pub fn devicefarm_resource_id<'a>(arn: &'a str, resource_type: &str) -> Option<&'a str> {
     let mut fields = arn.split(':');
     match (
@@ -579,8 +586,39 @@ pub fn devicefarm_resource_id<'a>(arn: &'a str, resource_type: &str) -> Option<&
             Some(found_type),
             Some(id),
             None,
-        ) if found_type == resource_type && !id.is_empty() => Some(id),
+        ) if found_type == resource_type && resource_id_has_type_form(resource_type, id) => {
+            Some(id)
+        }
         _ => None,
+    }
+}
+
+/// The resource types whose ARN carries the owning project's id beside the resource's own,
+/// `<type>:<project-id>/<resource-id>` — the form [`project_child_arn`] mints and the form
+/// the service's own ARNs for these types take.
+const PROJECT_SCOPED_RESOURCE_TYPES: [&str; 3] = [
+    NETWORK_PROFILE_RESOURCE_TYPE,
+    DEVICE_POOL_RESOURCE_TYPE,
+    UPLOAD_RESOURCE_TYPE,
+];
+
+/// Whether `resource_id` has the form an ARN of `resource_type` carries in its resource
+/// field.
+///
+/// A project-scoped resource's id is TWO non-empty segments separated by a single `/`: the
+/// owning project's id and the resource's own. A top-level resource's id is ONE non-empty
+/// segment, the resource's own alone. An id that is not of its type's form names no
+/// resource of that type at all — however many of them the store holds — so it is a
+/// malformed ARN rather than one that resolves to nothing.
+fn resource_id_has_type_form(resource_type: &str, resource_id: &str) -> bool {
+    let project_scoped = PROJECT_SCOPED_RESOURCE_TYPES.contains(&resource_type);
+    let mut segments = resource_id.split('/');
+    match (segments.next(), segments.next(), segments.next()) {
+        (Some(own_id), None, _) => !project_scoped && !own_id.is_empty(),
+        (Some(project_id), Some(own_id), None) => {
+            project_scoped && !project_id.is_empty() && !own_id.is_empty()
+        }
+        _ => false,
     }
 }
 
@@ -606,6 +644,18 @@ pub fn is_devicefarm_arn_of_type(arn: &str, resource_type: &str) -> bool {
 /// type here and never a phrase of this crate's own making.
 pub fn arn_not_found_message(resource_type: &str, arn: &str) -> String {
     format!("No {resource_type} found for arn {arn}")
+}
+
+/// The message a Device Farm `ArgumentException` carries when an ARN member's value is not
+/// a well-formed ARN of the resource type that member names.
+///
+/// Device Farm words a bad ARN `Invalid arn <arn>`: the text before it is fixed, and the
+/// ARN is echoed verbatim from the request's own member rather than re-derived or
+/// normalised. The wording belongs to the judgement and not to the operation, so every
+/// handler that refuses an ARN on its FORM — the wrong resource type, or a resource id
+/// that is not of that type's form — words it through here.
+pub fn invalid_arn_message(arn: &str) -> String {
+    format!("Invalid arn {arn}")
 }
 
 /// The message a Device Farm `NotFoundException` carries for an ARN that resolves to no

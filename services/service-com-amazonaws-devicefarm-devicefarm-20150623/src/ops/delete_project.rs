@@ -145,7 +145,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         if !crate::state::is_project_arn(&input.arn) {
             return Err(DeleteProjectErrorModeled::ArgumentException(ArgumentException {
-                message: Some(format!("{} is not a project ARN", input.arn)),
+                message: Some(crate::state::invalid_arn_message(&input.arn)),
             })
             .into());
         }

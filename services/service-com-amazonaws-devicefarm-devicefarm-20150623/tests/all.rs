@@ -23,6 +23,8 @@ mod not_found_wording;
 mod project_vpc_config;
 #[path = "all/projects.rs"]
 mod projects;
+#[path = "all/reference_checks.rs"]
+mod reference_checks;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/uploads.rs"]

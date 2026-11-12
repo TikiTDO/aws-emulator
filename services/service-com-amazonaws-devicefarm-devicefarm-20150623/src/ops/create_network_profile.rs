@@ -178,7 +178,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if !crate::state::is_project_arn(&input.project_arn) {
             return Err(CreateNetworkProfileErrorModeled::ArgumentException(
                 ArgumentException {
-                    message: Some(format!("{} is not a project ARN", input.project_arn)),
+                    message: Some(crate::state::invalid_arn_message(&input.project_arn)),
                 },
             )
             .into());

@@ -161,7 +161,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some(arn) = input.arn.as_deref() {
             if !crate::state::is_project_arn(arn) {
                 return Err(ListProjectsErrorModeled::ArgumentException(ArgumentException {
-                    message: Some(format!("{arn} is not a project ARN")),
+                    message: Some(crate::state::invalid_arn_message(arn)),
                 })
                 .into());
             }
