@@ -13,7 +13,8 @@
 //! than in a handler because several operations reach each of them.
 //!
 //! Every one of those resources is taggable, and each keeps its own tag list on its
-//! record, so the ARN-keyed tag operations (`TagResource`, `ListTagsForResource`) resolve
+//! record, so the ARN-keyed tag operations (`TagResource`, `UntagResource`,
+//! `ListTagsForResource`) resolve
 //! an ARN against the records themselves rather than against a second tag table that
 //! could disagree with them.
 
@@ -342,6 +343,16 @@ pub fn merge_tags(held: &mut Vec<Tag>, incoming: Vec<Tag>) {
             None => held.push(tag),
         }
     }
+}
+
+/// Detach the keys a request named from the tags a resource holds, keyed by tag key: a
+/// key the resource carries is dropped with its value, a key it does not carry leaves the
+/// set alone, and a key the request does not name is kept. So the set afterwards is
+/// exactly what the resource held minus the named keys, whatever the order the keys come
+/// in and however often one is repeated — which makes removing a key idempotent: a
+/// repeated call reaches the same set rather than failing.
+pub fn remove_tags(held: &mut Vec<Tag>, keys: &[String]) {
+    held.retain(|tag| !keys.iter().any(|key| key == &tag.key));
 }
 
 /// How many tags the resource would hold after [`merge_tags`]: the number of distinct

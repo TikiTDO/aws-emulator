@@ -33,6 +33,8 @@ mod profile_disablement;
 mod resource_tag_quota;
 #[path = "all/resource_tagging.rs"]
 mod resource_tagging;
+#[path = "all/resource_untagging.rs"]
+mod resource_untagging;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/trust_anchor_and_profile_lifecycle.rs"]
