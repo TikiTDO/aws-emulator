@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op AssociateApplicationFleet
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `AssociateApplicationFleet`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`AssociateApplicationFleet::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: records the `(fleet, application)` edge this service's store holds, which
+//! is what `DescribeApplicationFleetAssociations` reports. A fleet name or application ARN
+//! this account holds nothing under answers `ResourceNotFoundException` (HTTP 404); a
+//! fleet that is not an Elastic fleet answers `OperationNotPermittedException` (HTTP 400),
+//! because "this is only supported for Elastic fleets"; and an application whose
+//! `Platforms` do not include the fleet's own `Platform` answers
+//! `InvalidParameterValueException` (HTTP 400) and records nothing — that application
+//! cannot run on that fleet's instances.
 //!
 //! ## Shape of an operation
 //!
@@ -102,9 +101,13 @@ pub enum AssociateApplicationFleetErrorModeled {
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
-/// (`crate::ops::associate_application_fleet::AssociateApplicationFleetError`). Wrapping the modeled enum is what
-/// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
-pub type AssociateApplicationFleetError = crate::scaffolded::Scaffolded<AssociateApplicationFleetErrorModeled>;
+/// (`crate::ops::associate_application_fleet::AssociateApplicationFleetError`). The
+/// modelled enum is wrapped TWICE: by the scaffold channel, and by this service's own
+/// [`crate::state::Refusable`], which is what lets the platform-compatibility gate answer
+/// `InvalidParameterValueException` — a shape this service's model declares for no
+/// operation.
+pub type AssociateApplicationFleetError =
+    crate::state::Refusable<AssociateApplicationFleetErrorModeled>;
 
 /// Lets `?` and `.into()` lift a modeled failure into the error channel, so an
 /// implemented handler writes `Err(SomeModeledError.into())` rather than naming the
@@ -112,7 +115,7 @@ pub type AssociateApplicationFleetError = crate::scaffolded::Scaffolded<Associat
 /// this operation is implemented.
 impl From<AssociateApplicationFleetErrorModeled> for AssociateApplicationFleetError {
     fn from(modeled: AssociateApplicationFleetErrorModeled) -> Self {
-        crate::scaffolded::Scaffolded::Modeled(modeled)
+        crate::state::Refusable::Channel(crate::scaffolded::Scaffolded::Modeled(modeled))
     }
 }
 
@@ -150,20 +153,109 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `AssociateApplicationFleet` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(AssociateApplicationFleetErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("AssociateApplicationFleet"))
+        // See `create_stack.rs` for why an engine without this service's store answers
+        // "not written for that engine" rather than a fabricated success.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            AssociateApplicationFleetError::Channel(
+                crate::scaffolded::Scaffolded::not_implemented("AssociateApplicationFleet"),
+            )
+        })?;
+        let mut state = state.lock();
+
+        // Both endpoints have to exist before anything is recorded: a fleet name this
+        // account holds no fleet under, and an ARN that addresses no application of this
+        // account, each name a resource that was not found.
+        let Some(fleet) = state.fleets.get(&input.fleet_name) else {
+            return Err(
+                AssociateApplicationFleetErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(crate::state::resource_not_found_message(
+                            crate::state::FLEET_KIND,
+                            &input.fleet_name,
+                        )),
+                    },
+                )
+                .into(),
+            );
+        };
+        let fleet_type = fleet.fleet_type.clone();
+        let fleet_platform = fleet.platform.clone();
+        let Some(application) = state.application_by_arn(&input.application_arn) else {
+            return Err(
+                AssociateApplicationFleetErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(crate::state::tagged_resource_not_found_message(
+                            &input.application_arn,
+                        )),
+                    },
+                )
+                .into(),
+            );
+        };
+        let application_platforms = application.platforms.clone();
+
+        // "This is only supported for Elastic fleets": a fleet of any other type streams
+        // applications from the image it was created with rather than from app blocks, so
+        // attaching one to it is an operation that is not permitted.
+        if fleet_type != crate::state::ELASTIC_FLEET_TYPE {
+            return Err(
+                AssociateApplicationFleetErrorModeled::OperationNotPermittedException(
+                    OperationNotPermittedException {
+                        message: Some(crate::state::fleet_not_elastic_message(
+                            &input.fleet_name,
+                            &fleet_type,
+                        )),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // The platform gate: an application runs on the operating systems its `Platforms`
+        // name, so a fleet whose own `Platform` is not one of them cannot stream it. The
+        // refusal happens BEFORE the store is touched, so a mismatched association leaves
+        // no edge for a read to report. A fleet that publishes no platform at all supports
+        // none of the application's either, and is refused the same way: nothing shows
+        // that the application can run on its instances.
+        let platform = fleet_platform.unwrap_or_default();
+        if !application_platforms.contains(&platform) {
+            return Err(crate::state::WireRefusal::invalid_parameter_value(
+                crate::state::application_platform_mismatch_message(
+                    &input.application_arn,
+                    &input.fleet_name,
+                    &platform,
+                    &application_platforms,
+                ),
+            )
+            .into());
+        }
+
+        // The store must not grow per request without a ceiling, so an edge past it is
+        // refused with the modelled error AWS uses for an account's limit. An association
+        // the store already holds inserts nothing, so it is never refused: associating
+        // the same pair again is answered with the same association.
+        let edge = (input.fleet_name.clone(), input.application_arn.clone());
+        if !state.application_fleet_associations.contains(&edge)
+            && state.application_fleet_associations.len() >= crate::state::MAX_RECORDS_PER_STORE
+        {
+            return Err(AssociateApplicationFleetErrorModeled::LimitExceededException(
+                LimitExceededException {
+                    message: Some(crate::state::limit_exceeded_message(
+                        "application fleet associations",
+                    )),
+                },
+            )
+            .into());
+        }
+        state.application_fleet_associations.insert(edge);
+
+        Ok(AssociateApplicationFleetOutput {
+            application_fleet_association: Some(ApplicationFleetAssociation {
+                fleet_name: input.fleet_name,
+                application_arn: input.application_arn,
+            }),
+        })
     }
 }

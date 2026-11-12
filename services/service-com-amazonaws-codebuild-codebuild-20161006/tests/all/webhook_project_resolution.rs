@@ -317,7 +317,6 @@ async fn a_held_project_with_no_webhook_reports_the_webhook() {
             );
             continue;
         }
-
         if operation == &"DeleteWebhook" {
             // The one request that resolves no webhook in order to act on it: a project
             // that carries none is already in the state a delete asks for, so the call is

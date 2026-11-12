@@ -4,8 +4,12 @@
 //! IMPLEMENTED: resolves the stack and the fleet the request names, requires the fleet to
 //! be one of that stack's fleets and to be streaming — a fleet that is not running
 //! answers `OperationNotPermittedException` (HTTP 400) and issues no URL — and otherwise
-//! returns a time-limited URL that leads back to this emulator together with the instant
-//! it expires.
+//! dedicates the session for that `(stack, fleet, user)` identity and returns a
+//! time-limited URL that leads back to this emulator together with the instant it expires.
+//!
+//! The URL is a reservation rather than a formatted string: a `GET` of it is served by
+//! [`crate::service::streaming_session`], which resolves the session this call dedicated
+//! and redirects to that session's own address.
 //!
 //! ## Shape of an operation
 //!
@@ -234,14 +238,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // The URL the caller opens later has to lead back to THIS emulator, so it is
         // signed by the emulator's own signer, for exactly as long as the request asked
-        // the URL to stay valid.
+        // the URL to stay valid. The path is the identity the session is dedicated for,
+        // which is how the route serving that URL (`crate::service::streaming_session`)
+        // resolves the reservation back to this session.
         let max_user_duration = fleet.max_user_duration_in_seconds;
-        let path = format!(
-            "/{}/{}/{}/{}",
-            crate::state::STREAMING_SESSION_PATH_PREFIX,
-            input.stack_name,
-            input.fleet_name,
-            input.user_id
+        let path = crate::state::streaming_url_path(
+            &input.stack_name,
+            &input.fleet_name,
+            &input.user_id,
         );
         let mut signed = ::smithy_server_runtime::SignedUrlRequest::new(
             ::http::Method::GET,

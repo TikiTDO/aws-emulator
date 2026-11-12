@@ -12,12 +12,14 @@
 //! * creating a user allocates the `(AuthenticationType, UserName)` identity and
 //!   persists it, so a later read reports that user with the ARN, the names and the
 //!   creation instant the create stored, enabled and not yet confirmed;
-//! * the identity is allocated at most once: a repeat create of an identity that exists
-//!   asks for the user that is already there, so it answers the same empty success and
-//!   changes nothing — however many callers race on it — while a repeat that names an
-//!   attribute differing from the stored one is refused with
-//!   `ResourceAlreadyExistsException` (400); and names differing only in capitalisation
-//!   are different identities, because email addresses are case-sensitive;
+//! * the identity is allocated at most once: a create that arrives while the allocation
+//!   is still open asks for the user that is already there, so it answers the same empty
+//!   success and changes nothing — however many callers race on it — while one that names
+//!   an attribute differing from the stored one is refused with
+//!   `ResourceAlreadyExistsException` (400), as is any create of an identity that is
+//!   already established (`tests/all/user_identity_allocation.rs`); and names differing
+//!   only in capitalisation are different identities, because email addresses are
+//!   case-sensitive;
 //! * the user pool operations manage USERPOOL identities only, so any other
 //!   authentication type is refused with `InvalidParameterCombinationException` (400);
 //! * `RESEND` re-sends an existing user's welcome email, so naming the user's first or
@@ -722,16 +724,19 @@ async fn the_user_store_refuses_a_user_past_its_ceiling() {
     )
     .await;
 
-    // An identity already held allocates nothing, so a repeat create of one is answered
-    // with the same empty success at the ceiling as below it.
-    emulator
-        .ok(
-            case,
-            "CreateUser",
-            json!({
-                "UserName": "u00000@example.com",
-                "AuthenticationType": USER_POOL,
-            }),
-        )
-        .await;
+    // An identity already held allocates nothing, so a create of one is answered by the
+    // identity gate rather than by the ceiling: the username is taken, at the ceiling as
+    // below it.
+    assert_error(
+        &emulator,
+        case,
+        "CreateUser",
+        json!({
+            "UserName": "u00000@example.com",
+            "AuthenticationType": USER_POOL,
+        }),
+        400,
+        "ResourceAlreadyExistsException",
+    )
+    .await;
 }

@@ -11,8 +11,12 @@
 // points it into `tests/all/`.
 #[path = "all/app_block_builder.rs"]
 mod app_block_builder;
+#[path = "all/app_block_deletion.rs"]
+mod app_block_deletion;
 #[path = "all/app_blocks.rs"]
 mod app_blocks;
+#[path = "all/application_fleet_associations.rs"]
+mod application_fleet_associations;
 #[path = "all/applications.rs"]
 mod applications;
 #[path = "all/associated_fleets.rs"]
@@ -31,6 +35,8 @@ mod stack_registry;
 mod stack_theme;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/streaming_session_resolution.rs"]
+mod streaming_session_resolution;
 #[path = "all/streaming_url.rs"]
 mod streaming_url;
 #[path = "all/update_stack.rs"]
@@ -39,6 +45,8 @@ mod update_stack;
 mod usage_report_subscription;
 #[path = "all/user_enable_disable.rs"]
 mod user_enable_disable;
+#[path = "all/user_identity_allocation.rs"]
+mod user_identity_allocation;
 #[path = "all/user_pool.rs"]
 mod user_pool;
 #[path = "all/user_stack_associations.rs"]

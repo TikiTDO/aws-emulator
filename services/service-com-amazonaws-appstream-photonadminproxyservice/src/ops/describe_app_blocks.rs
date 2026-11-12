@@ -168,7 +168,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                                 DescribeAppBlocksErrorModeled::ResourceNotFoundException(
                                     ResourceNotFoundException {
                                         message: Some(
-                                            crate::state::tagged_resource_not_found_message(arn),
+                                            crate::state::app_block_not_found_message(arn),
                                         ),
                                     },
                                 )

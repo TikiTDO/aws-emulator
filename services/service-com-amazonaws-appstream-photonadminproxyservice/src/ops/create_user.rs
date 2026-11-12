@@ -3,20 +3,19 @@
 //! @op CreateUser
 //! IMPLEMENTED: allocates the `(AuthenticationType, UserName)` identity in the account's
 //! user pool by persisting a [`crate::state::UserRecord`], so a later `DescribeUsers`
-//! reports that user with the ARN, `CreatedTime` and names this call stored. The create
-//! is IDEMPOTENT on that identity: a repeat that asks for nothing different about the user
-//! it names answers the same empty success and allocates the identity once — the lookup
-//! and the insert happen under one lock, so concurrent repeats all succeed and the pool
-//! still holds exactly one record for it — while a repeat naming an attribute whose value
-//! is not the stored one asks for a DIFFERENT user under a name that is taken and answers
-//! `ResourceAlreadyExistsException` (HTTP 400), leaving the stored user untouched.
+//! reports that user with the ARN, `CreatedTime` and names this call stored. The identity
+//! is allocated AT MOST ONCE: creates issued together all find the username free, all
+//! answer the same empty success and leave the pool holding one record for it — the lookup
+//! and the insert happen under one lock, and the pool's username index catches up over
+//! [`crate::state::USER_ALLOCATION_GRACE`] — while a create issued once the identity is
+//! established, or one naming an attribute whose value is not the stored one, asks for a
+//! user under a name that is taken and answers `ResourceAlreadyExistsException` (HTTP 400),
+//! leaving the stored user untouched.
 //!
 //! `MessageAction` selects what happens to the welcome email, which this emulator has no
 //! mail plane to send, so no email action is carried out or claimed for any value of it:
 //! the member is honoured only where it constrains the REQUEST — RESEND forbids naming
-//! the user's first or last name. RESEND is documented as re-sending the welcome email of
-//! a user that already exists, so a request carrying it reaches the idempotent path above
-//! rather than a refusal.
+//! the user's first or last name.
 //!
 //! ## Shape of an operation
 //!
@@ -237,17 +236,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Email addresses are case-sensitive, so the identity is the name exactly as the
         // request spells it, under the authentication type it names.
         let identity = (input.authentication_type.clone(), input.user_name.clone());
+        let now = ::std::time::Instant::now();
         if let Some(stored) = state.users.get(&identity) {
-            // The identity is already allocated. A repeat create that asks for nothing
-            // different about the user it names describes the user that is already
-            // there, so it is answered with the same empty success the first call got
-            // and allocates nothing a second time: the lookup and the insert happen
-            // under one lock, so concurrent repeats of one identity all succeed and the
-            // pool still holds exactly one record for it. A repeat that names an
+            // The identity is already allocated. A repeat create that asks for an
             // attribute differing from the stored one asks for a DIFFERENT user under a
             // name that is taken, which is what the modelled already-exists refusal is
-            // for.
-            if conflicts_with_stored(&input, stored) {
+            // for — and so is any create of an identity that is ESTABLISHED, however
+            // identical: the username is in the pool and a second caller may not claim
+            // it. Only a create that RACES the allocation collapses into it: the pool's
+            // username index is eventually consistent, so creates issued together all
+            // find the name free, all succeed and allocate it once
+            // ([`crate::state::USER_ALLOCATION_GRACE`]). The lookup and the insert happen
+            // under one lock, so the pool still holds exactly one record for the
+            // identity.
+            if stored.is_established(now) || conflicts_with_stored(&input, stored) {
                 return Err(CreateUserErrorModeled::ResourceAlreadyExistsException(
                     ResourceAlreadyExistsException {
                         message: Some(crate::state::USER_ALREADY_EXISTS_MESSAGE.to_string()),
@@ -255,6 +257,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
                 .into());
             }
+            // This create arrived while the allocation was still open, so it collapses
+            // into it. The window the allocating create fixed is NOT extended by it: the
+            // identity becomes established at that one instant, so a stream of creates
+            // cannot hold the username un-established.
             return Ok(CreateUserOutput {});
         }
 
@@ -280,6 +286,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             first_name: input.first_name,
             last_name: input.last_name,
             created_time: crate::state::now(),
+            // The allocation stays open to a create racing it for this span, and the
+            // identity is established — refusing any further create — afterwards.
+            established_at: now + crate::state::USER_ALLOCATION_GRACE,
         };
         state.users.insert(identity, record);
 

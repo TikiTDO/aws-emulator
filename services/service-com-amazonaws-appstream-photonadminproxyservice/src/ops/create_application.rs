@@ -178,8 +178,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if state.app_block_by_arn(&input.app_block_arn).is_none() {
             return Err(CreateApplicationErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
-                    message: Some(crate::state::resource_not_found_message(
-                        crate::state::APP_BLOCK_ARN_KIND,
+                    message: Some(crate::state::app_block_not_found_message(
                         &input.app_block_arn,
                     )),
                 },

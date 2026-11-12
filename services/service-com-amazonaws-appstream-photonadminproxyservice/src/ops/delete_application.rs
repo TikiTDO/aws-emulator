@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteApplication
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteApplication`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteApplication::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: removes the application record from this service's store, so the matching
+//! `DescribeApplications` no longer reports it and the app block it streamed from can be
+//! deleted. An unknown name answers `ResourceNotFoundException` (HTTP 404); an
+//! application a fleet is still associated with answers `ResourceInUseException`
+//! (HTTP 400) until `DisassociateApplicationFleet` clears that edge.
 //!
 //! ## Shape of an operation
 //!
@@ -136,20 +132,45 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteApplication` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteApplicationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteApplication"))
+        // See `create_stack.rs` for why an engine without this service's store answers
+        // "not written for that engine" rather than a fabricated success.
+        let state = crate::state::service_state(&*self.engine)
+            .ok_or_else(|| crate::scaffolded::Scaffolded::not_implemented("DeleteApplication"))?;
+        let mut state = state.lock();
+
+        // An application is deleted by the name it was created under, so a name this
+        // account holds no application under is a resource that was not found — as it is
+        // for every other resource this API names by name.
+        let Some(application) = state.applications.get(&input.name) else {
+            return Err(DeleteApplicationErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: Some(crate::state::resource_not_found_message(
+                        crate::state::APPLICATION_KIND,
+                        &input.name,
+                    )),
+                },
+            )
+            .into());
+        };
+
+        // A fleet still associated with this application streams it, so the application
+        // is in use: the delete is refused and nothing is removed, leaving no fleet
+        // associated with an application that is gone.
+        let arn = application.arn.clone();
+        if state.application_is_associated(&arn) {
+            return Err(DeleteApplicationErrorModeled::ResourceInUseException(
+                ResourceInUseException {
+                    message: Some(crate::state::application_in_use_message(&input.name)),
+                },
+            )
+            .into());
+        }
+
+        state.applications.remove(&input.name);
+        // The modelled result carries no members: what is left is read back through
+        // `DescribeApplications`.
+        Ok(DeleteApplicationOutput {})
     }
 }

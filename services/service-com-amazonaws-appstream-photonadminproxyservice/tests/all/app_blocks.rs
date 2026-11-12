@@ -36,10 +36,21 @@ use crate::stack_fleet_lifecycle::Emulator;
 /// The account every emulator ARN and every refusal sentence names.
 const ACCOUNT: &str = engine::EMULATOR_ACCOUNT_ID;
 
-/// The resource words AWS's refusal sentences use for an app block, and for a stack —
-/// the sentence names the kind the ARN's `resource-type` segment carries.
+/// The resource words AWS's refusal sentences use for an app block.
+///
+/// An app block is addressed by ARN wherever it is read, and AWS's not-found sentence for
+/// one names the ARN the request gave under the capitalised resource word
+/// ([`app_block_not_found_sentence`]); `APP_BLOCK_KIND` is the lower-case word the
+/// duplicate-name sentence uses, where the app block is named by the name a create asked
+/// for.
 const APP_BLOCK_KIND: &str = "app block";
-const STACK_KIND: &str = "stack";
+const APP_BLOCK_ARN_KIND: &str = "App block";
+
+/// AWS's `ResourceNotFoundException` sentence for an app block this account does not
+/// hold, which names the ARN the request addressed it with.
+fn app_block_not_found_sentence(arn: &str) -> String {
+    not_found_sentence(APP_BLOCK_ARN_KIND, arn)
+}
 
 /// The `PackagingType` values the model admits (`PACKAGING_TYPE_VALUES` in
 /// `src/ops/types/shared_types.rs`, from `smithy_query(query="shape",
@@ -476,14 +487,14 @@ async fn a_create_carries_the_script_members_its_packaging_admits() {
             &emulator,
             case,
             "DescribeAppBlocks",
-            json!({ "Arns": [arn] }),
+            json!({ "Arns": [arn.clone()] }),
             404,
             "ResourceNotFoundException",
         )
         .await;
         assert_eq!(
             not_found,
-            not_found_sentence(APP_BLOCK_KIND, &name),
+            app_block_not_found_sentence(&arn),
             "case {case:?}: the refused create must have persisted nothing"
         );
     }
@@ -535,17 +546,14 @@ async fn a_read_refuses_an_arn_that_addresses_no_app_block() {
     let stored = create_and_assert(&emulator, region, row).await;
 
     // Each row makes one part of the ARN wrong, so the read must match the stored ARN in
-    // full rather than only its name.
-    let cases: Vec<(&str, String, String)> = vec![
-        (
-            "a name no app block carries",
-            app_block_arn(region, "absent"),
-            not_found_sentence(APP_BLOCK_KIND, "absent"),
-        ),
+    // full rather than only its name. The refusal names the ARN the request gave,
+    // whatever is wrong with it: `Arns` addresses app blocks, so an ARN of another
+    // Region, another account or another resource type addresses no app block here.
+    let cases: Vec<(&str, String)> = vec![
+        ("a name no app block carries", app_block_arn(region, "absent")),
         (
             "the stored name in another Region",
             app_block_arn("eu-west-2", &row.name),
-            not_found_sentence(APP_BLOCK_KIND, &row.name),
         ),
         (
             "the stored name under another account",
@@ -553,27 +561,26 @@ async fn a_read_refuses_an_arn_that_addresses_no_app_block() {
                 "arn:aws:appstream:{region}:123456789012:app-block/{}",
                 row.name
             ),
-            not_found_sentence(APP_BLOCK_KIND, &row.name),
         ),
         (
             "the stored name as another resource type",
             format!("arn:aws:appstream:{region}:{ACCOUNT}:stack/{}", row.name),
-            not_found_sentence(STACK_KIND, &row.name),
         ),
     ];
 
-    for (case, arn, expected) in cases {
+    for (case, arn) in cases {
         let message = refusal(
             &emulator,
             case,
             "DescribeAppBlocks",
-            json!({ "Arns": [arn] }),
+            json!({ "Arns": [arn.clone()] }),
             404,
             "ResourceNotFoundException",
         )
         .await;
         assert_eq!(
-            message, expected,
+            message,
+            app_block_not_found_sentence(&arn),
             "case {case:?}: the refusal must name the resource that was searched for"
         );
     }
@@ -591,7 +598,7 @@ async fn a_read_refuses_an_arn_that_addresses_no_app_block() {
     .await;
     assert_eq!(
         message,
-        not_found_sentence(APP_BLOCK_KIND, "absent"),
+        app_block_not_found_sentence(&app_block_arn(region, "absent")),
         "case \"a stored ARN and an unknown one\": the refusal must name the missing one"
     );
 }

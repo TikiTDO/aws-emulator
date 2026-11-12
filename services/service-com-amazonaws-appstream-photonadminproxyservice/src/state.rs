@@ -31,8 +31,14 @@
 //!
 //! Applications live here as well: `CreateApplication` resolves the app block the request
 //! names against the stored app blocks and then writes one [`ApplicationRecord`] under the
-//! name it allocates, and `DescribeApplications` renders the stored records back, a page
-//! at a time.
+//! name it allocates, `DescribeApplications` renders the stored records back, a page at
+//! a time, and `DeleteApplication` removes one while nothing still holds it. Which
+//! application an Elastic fleet streams lives here too: `AssociateApplicationFleet` writes
+//! the `(fleet, application)` edge once the fleet's platform is one the application
+//! supports, `DescribeApplicationFleetAssociations` reports the edges of one endpoint, a
+//! page at a time, and `DisassociateApplicationFleet` removes one. An app block a stored
+//! application still names as the source of its binaries is in use, which is what
+//! `DeleteAppBlock` refuses on.
 //!
 //! A fleet's streaming state lives here too, with the transition the clock owes it:
 //! `StartFleet` moves the stored record to `STARTING` and records the instant from which
@@ -41,14 +47,19 @@
 //! and `CreateStreamingURL` reads that same state as the gate on issuing a URL.
 //!
 //! Streaming sessions live here too: `CreateStreamingURL` dedicates one [`SessionRecord`]
-//! per `(stack, fleet, user)` identity it issues a URL for, that session is expired by the
-//! clock once the URL it was issued for stops verifying, and `DescribeSessions` renders
-//! the sessions of one stack's fleet back, a page at a time.
+//! per `(stack, fleet, user)` identity it issues a URL for, a GET of that URL lands on the
+//! session's own address ([`streaming_session_endpoint_path`]), that session is expired by
+//! the clock once the URL it was issued for stops verifying, and `DescribeSessions`
+//! renders the sessions of one stack's fleet back, a page at a time.
 //!
 //! The user pool lives here as well: `CreateUser` writes a [`UserRecord`] under the
-//! `(AuthenticationType, UserName)` identity it allocates, `DisableUser` and `EnableUser`
+//! `(AuthenticationType, UserName)` identity it allocates, a create racing that allocation
+//! collapses into it while one issued after the identity is established is refused
+//! ([`UserRecord::is_established`]), `DisableUser` and `EnableUser`
 //! move that record's sign-in flag
-//! ([`ComAmazonawsAppstreamPhotonadminproxyserviceState::set_user_enabled`]), and
+//! ([`ComAmazonawsAppstreamPhotonadminproxyserviceState::set_user_enabled`]), `DeleteUser`
+//! removes the identity with what it entitled
+//! ([`ComAmazonawsAppstreamPhotonadminproxyserviceState::remove_user`]), and
 //! `DescribeUsers` renders the stored records of one authentication type back, a page at
 //! a time.
 //!
@@ -72,18 +83,21 @@
 //! any image an operation of this API mints — a page at a time.
 
 mod images;
+mod wire_refusals;
 
 pub use images::*;
+pub use wire_refusals::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ops::types::{
     AccessEndpoint, AgentAccessConfig, AppBlock, AppBlockBuilder, AppBlockBuilderStateChangeReason,
-    Application, ApplicationSettingsResponse, ComputeCapacityStatus, ContentRedirection,
-    DomainJoinInfo, ErrorDetails, Fleet, FleetError, LastReportGenerationExecutionError,
-    ResourceError, S3Location, ScriptDetails, Session, Stack, StackError,
-    StorageConnector, StreamingExperienceSettings, Theme, ThemeFooterLink, UsageReportSubscription,
-    User, UserSetting, UserStackAssociation, UserStackAssociationError, VolumeConfig, VpcConfig,
+    Application, ApplicationFleetAssociation, ApplicationSettingsResponse, ComputeCapacityStatus,
+    ContentRedirection, DomainJoinInfo, ErrorDetails, Fleet, FleetError,
+    LastReportGenerationExecutionError, ResourceError, S3Location, ScriptDetails, Session, Stack,
+    StackError, StorageConnector, StreamingExperienceSettings, Theme, ThemeFooterLink,
+    UsageReportSubscription, User, UserSetting, UserStackAssociation, UserStackAssociationError,
+    VolumeConfig, VpcConfig,
 };
 
 /// The ARN namespace this service stamps on every resource ARN
@@ -347,6 +361,38 @@ pub const SIGNING_NAME: &str = "appstream";
 /// for: `/<prefix>/<stack>/<fleet>/<user id>`.
 pub const STREAMING_SESSION_PATH_PREFIX: &str = "streaming-sessions";
 
+/// The path a `CreateStreamingURL` signs: the identity the session was dedicated for,
+/// which is also the address the route serving that URL reads the identity back out of —
+/// ONE spelling, so the URL handed out and the route that resolves it cannot drift.
+pub fn streaming_url_path(stack_name: &str, fleet_name: &str, user_id: &str) -> String {
+    format!("/{STREAMING_SESSION_PATH_PREFIX}/{stack_name}/{fleet_name}/{user_id}")
+}
+
+/// The segment that tells a session's own address apart from the address a streaming URL
+/// is signed for: `/<prefix>/session/<session id>` against
+/// `/<prefix>/<stack>/<fleet>/<user id>`.
+pub const STREAMING_SESSION_ENDPOINT_SEGMENT: &str = "session";
+
+/// The query field a session endpoint names the fleet the session was allocated against
+/// in, and the `<resource type>/<name>` reference it carries: AppStream's session address
+/// identifies the resource streaming the session as `fleet/<fleet name>`, percent-encoded
+/// in the URL.
+pub const STREAMING_SESSION_REFERENCE_FIELD: &str = "reference";
+
+/// The address of ONE dedicated session: where a GET of the streaming URL issued for it
+/// lands, carrying the session's own id and the percent-encoded `fleet/<fleet name>`
+/// reference of the fleet the session was allocated against.
+///
+/// A relative reference, so the session is reached on whatever address the caller reached
+/// the emulator on — the browser that follows the redirect resolves it against the URL it
+/// was handed.
+pub fn streaming_session_endpoint_path(session_id: &str, fleet_name: &str) -> String {
+    format!(
+        "/{STREAMING_SESSION_PATH_PREFIX}/{STREAMING_SESSION_ENDPOINT_SEGMENT}/{session_id}\
+         ?{STREAMING_SESSION_REFERENCE_FIELD}={FLEET_ARN_RESOURCE_TYPE}%2F{fleet_name}"
+    )
+}
+
 /// How long a streaming URL stays valid when the request names no `Validity`.
 ///
 /// `CreateStreamingURL.Validity` is documented "The time that the streaming URL will be
@@ -398,6 +444,62 @@ pub fn fleet_not_running_message(fleet_name: &str) -> String {
         "The fleet {fleet_name} is not running. The stack must have a running fleet \
          to get a streaming URL"
     )
+}
+
+/// AWS's `ResourceInUseException` sentence for an app block another resource still holds:
+/// it states that the app block is in use and names it, and names nothing that holds it.
+/// The only variable part is the app block name the request asked for.
+pub fn app_block_in_use_message(name: &str) -> String {
+    format!("The app-block {name} is currently in use.")
+}
+
+/// The same sentence for an application another resource still holds, which is what
+/// blocks deleting it: the app-block wording with the resource word the condition is
+/// about.
+pub fn application_in_use_message(name: &str) -> String {
+    format!("The application {name} is currently in use.")
+}
+
+/// The sentence a request refused for associating an application with a fleet whose
+/// platform the application does not support carries.
+///
+/// Fixed text is AWS's; the variable parts are the ARN and the fleet name the request
+/// named, the fleet's own `Platform` and the `Platforms` the stored application supports.
+pub fn application_platform_mismatch_message(
+    application_arn: &str,
+    fleet_name: &str,
+    fleet_platform: &str,
+    application_platforms: &[String],
+) -> String {
+    let platforms = application_platforms.join(", ");
+    format!(
+        "Application '{application_arn}' may not be associated with fleet '{fleet_name}' \
+         because fleet Platform '{fleet_platform}' is not supported by application \
+         Platforms: [{platforms}]"
+    )
+}
+
+/// The `FleetType` an application may be associated with: `AssociateApplicationFleet` is
+/// documented "This is only supported for Elastic fleets", so a fleet of any other type
+/// is one no application can be attached to. One of `FLEET_TYPE_VALUES`
+/// (`ops/types/shared_types.rs`).
+pub const ELASTIC_FLEET_TYPE: &str = "ELASTIC";
+
+/// The sentence a request refused for associating an application with a fleet that is not
+/// an Elastic fleet carries: the operation's own documented rule, with the fleet named.
+pub fn fleet_not_elastic_message(fleet_name: &str, fleet_type: &str) -> String {
+    format!(
+        "Fleet {fleet_name} is a {fleet_type} fleet. Associating an application with a \
+         fleet is only supported for Elastic fleets."
+    )
+}
+
+/// The sentence a read of the application/fleet associations is refused with when it names
+/// neither endpoint, or both: `DescribeApplicationFleetAssociations`'s own documentation
+/// states "Either ApplicationArn or FleetName must be specified", so exactly one of them
+/// selects what the read reports.
+pub fn application_fleet_association_selector_message() -> String {
+    "Either ApplicationArn or FleetName must be specified.".to_string()
 }
 
 /// How many tags ONE resource may carry.
@@ -478,6 +580,20 @@ pub fn tagged_resource_not_found_message(resource_arn: &str) -> String {
         other => other.replace('-', " "),
     };
     resource_not_found_message(&kind, &resource_id)
+}
+
+/// AWS's `ResourceNotFoundException` sentence for an app block this account does not
+/// hold, named by the ARN the request addressed it with: `The App block <ARN> for account
+/// <account id> does not exist.`
+///
+/// An app block is addressed by ARN wherever it is addressed at all — `DescribeAppBlocks`
+/// takes `Arns`, `CreateApplication` an `AppBlockArn` — so the refusal names the ARN the
+/// request gave rather than the name inside it, under the capitalised resource word AWS
+/// spells that sentence with ([`APP_BLOCK_ARN_KIND`]). `DeleteAppBlock` names the app
+/// block by NAME, so it refuses with the ARN that name addresses in the caller's account
+/// and Region: an app block that is gone is unusable under either address.
+pub fn app_block_not_found_message(app_block_arn: &str) -> String {
+    resource_not_found_message(APP_BLOCK_ARN_KIND, app_block_arn)
 }
 
 /// The `Schedule` a usage report subscription carries. The model's
@@ -1088,6 +1204,25 @@ impl UsageReportSubscriptionRecord {
     }
 }
 
+/// How long the allocation of a user pool identity stays open to a create arriving
+/// together with it.
+///
+/// AppStream's user pool is written through an index a create checks the username
+/// against, and that index is eventually consistent: creates issued together all find the
+/// identity free, all succeed, and the pool ends up holding it exactly once. A create
+/// issued once the identity is ESTABLISHED — the case AWS refuses as an already-taken
+/// username — is one a caller sends after that view has caught up, as a caller which has
+/// already read the user back has.
+///
+/// AWS publishes no propagation window, so this span is the emulator's own, and it is
+/// SHORT: a caller that has already read the user back has waited a round trip, which is
+/// an order of magnitude longer than this, so that caller's next create is refused as AWS
+/// refuses it. The window is ABSOLUTE — measured from the create that allocated the
+/// identity, and never extended by a later one — so the identity becomes established at an
+/// instant that create fixed, whatever arrives in the meantime. Nothing sleeps for it: the
+/// instant the identity is established is stored on the record.
+pub const USER_ALLOCATION_GRACE: ::std::time::Duration = ::std::time::Duration::from_millis(5);
+
 /// A persisted user pool user.
 ///
 /// The identity is the `(AuthenticationType, UserName)` pair this record is stored
@@ -1109,9 +1244,20 @@ pub struct UserRecord {
     pub first_name: Option<String>,
     pub last_name: Option<String>,
     pub created_time: ::aws_smithy_types::DateTime,
+    /// The instant from which this identity counts as established, so that a further
+    /// create of it is refused as a username that is taken: the create that allocated it
+    /// plus [`USER_ALLOCATION_GRACE`].
+    pub established_at: ::std::time::Instant,
 }
 
 impl UserRecord {
+    /// Whether this identity is established at `now`: the allocation that minted it is no
+    /// longer open to a create racing it, so a further create of the same username is
+    /// refused rather than answered like the first.
+    pub fn is_established(&self, now: ::std::time::Instant) -> bool {
+        now >= self.established_at
+    }
+
     /// Render the stored record as the modelled `User` every reader returns.
     pub fn to_user(&self) -> User {
         User {
@@ -1326,6 +1472,64 @@ pub struct SessionPage {
     pub next_token: Option<String>,
 }
 
+/// The identity one application/fleet association is stored under: `(FleetName,
+/// ApplicationArn)`, the two members the modelled `ApplicationFleetAssociation` carries.
+pub type ApplicationFleetAssociationKey = (String, String);
+
+/// How many application/fleet associations one `DescribeApplicationFleetAssociations`
+/// page carries.
+///
+/// The model caps `ApplicationFleetAssociationList` at 25 members and that list is what a
+/// page of the read is rendered into, so a page holds at most 25 associations however
+/// large a `MaxResults` a request asks for.
+pub const APPLICATION_FLEET_ASSOCIATION_PAGE_SIZE: usize = 25;
+
+/// Which application/fleet associations a read reports: exactly one of the two endpoints
+/// selects them ("Either ApplicationArn or FleetName must be specified"), and the other
+/// filters nothing.
+#[derive(Debug)]
+pub struct ApplicationFleetAssociationFilter<'a> {
+    pub fleet_name: Option<&'a str>,
+    pub application_arn: Option<&'a str>,
+}
+
+impl ApplicationFleetAssociationFilter<'_> {
+    /// Whether the association stored under `key` is one this read reports.
+    fn matches(&self, key: &ApplicationFleetAssociationKey) -> bool {
+        let (fleet_name, application_arn) = key;
+        self.fleet_name
+            .is_none_or(|asked| asked == fleet_name.as_str())
+            && self
+                .application_arn
+                .is_none_or(|asked| asked == application_arn.as_str())
+    }
+}
+
+/// One page of a `DescribeApplicationFleetAssociations`: the associations to render, and
+/// the opaque token that resumes after them.
+#[derive(Debug)]
+pub struct ApplicationFleetAssociationPage {
+    pub associations: Vec<ApplicationFleetAssociation>,
+    pub next_token: Option<String>,
+}
+
+/// Encode an application/fleet association cursor: the key of the first record of the
+/// next page, hex-encoded for the same reason [`encode_cursor`] is.
+fn encode_fleet_application_cursor(key: &ApplicationFleetAssociationKey) -> String {
+    let (fleet_name, application_arn) = key;
+    encode_cursor(&format!(
+        "{fleet_name}{ASSOCIATION_CURSOR_SEPARATOR}{application_arn}"
+    ))
+}
+
+/// The inverse of [`encode_fleet_application_cursor`]; `None` for a token this service
+/// did not mint.
+fn decode_fleet_application_cursor(token: &str) -> Option<ApplicationFleetAssociationKey> {
+    let decoded = decode_cursor(token)?;
+    let mut parts = decoded.splitn(2, ASSOCIATION_CURSOR_SEPARATOR);
+    Some((parts.next()?.to_string(), parts.next()?.to_string()))
+}
+
 /// Per-service state for com-amazonaws-appstream-photonadminproxyservice. A handler reaches it through [`service_state`].
 #[derive(Debug)]
 pub struct ComAmazonawsAppstreamPhotonadminproxyserviceState {
@@ -1371,6 +1575,12 @@ pub struct ComAmazonawsAppstreamPhotonadminproxyserviceState {
     pub images: BTreeMap<String, ImageRecord>,
     /// `(FleetName, StackName)` edges written by `AssociateFleet`.
     pub fleet_stack_associations: BTreeSet<(String, String)>,
+    /// `(FleetName, ApplicationArn)` edges written by `AssociateApplicationFleet` — which
+    /// application an Elastic fleet streams. `BTreeSet` so every page of a read walks a
+    /// stable order, and so one fleet's associations form a contiguous range.
+    ///
+    /// Bounded by [`MAX_RECORDS_PER_STORE`] like every other store a request can grow.
+    pub application_fleet_associations: BTreeSet<ApplicationFleetAssociationKey>,
     /// The account's usage report subscription, once one has been created; `None` while
     /// usage reporting is not enabled.
     pub usage_report_subscription: Option<UsageReportSubscriptionRecord>,
@@ -1403,6 +1613,7 @@ impl Default for ComAmazonawsAppstreamPhotonadminproxyserviceState {
             sessions: BTreeMap::new(),
             images: seed_image_catalog(),
             fleet_stack_associations: BTreeSet::new(),
+            application_fleet_associations: BTreeSet::new(),
             usage_report_subscription: None,
             users: BTreeMap::new(),
             user_stack_associations: BTreeMap::new(),
@@ -1520,6 +1731,63 @@ impl ComAmazonawsAppstreamPhotonadminproxyserviceState {
                 .next()
                 .map(|(key, _)| encode_association_cursor(key)),
             sessions,
+        })
+    }
+
+    /// Whether any application this account holds still names this app block as the
+    /// source of its binaries, which is what makes the app block in use.
+    ///
+    /// A predicate, not a list: the refusal states that the app block is in use without
+    /// naming what holds it.
+    pub fn app_block_is_in_use(&self, app_block_arn: &str) -> bool {
+        self.applications
+            .values()
+            .any(|application| application.app_block_arn == app_block_arn)
+    }
+
+    /// Whether any fleet association still names this application, which is what makes
+    /// the application in use.
+    pub fn application_is_associated(&self, application_arn: &str) -> bool {
+        self.application_fleet_associations
+            .iter()
+            .any(|(_, arn)| arn == application_arn)
+    }
+
+    /// One page of the application/fleet associations `filter` reports: the associations
+    /// to render, and the token that resumes after them. `None` means `next_token` is not
+    /// a token this service minted.
+    ///
+    /// The edges are read straight from the stored set in key order, so a page renders
+    /// exactly the associations the store holds — there is no second lookup that could
+    /// miss one — and following the token walks every matching association exactly once
+    /// even when associations are added between calls.
+    pub fn application_fleet_associations_page(
+        &self,
+        filter: &ApplicationFleetAssociationFilter<'_>,
+        next_token: Option<&str>,
+        page_size: usize,
+    ) -> Option<ApplicationFleetAssociationPage> {
+        let resume_at = match next_token {
+            Some(token) => Some(decode_fleet_application_cursor(token)?),
+            None => None,
+        };
+        let mut remaining = self
+            .application_fleet_associations
+            .iter()
+            .filter(|key| resume_at.as_ref().is_none_or(|from| *key >= from))
+            .filter(|key| filter.matches(key));
+        // A page holds at least one record, so following the token always advances.
+        let associations: Vec<ApplicationFleetAssociation> = remaining
+            .by_ref()
+            .take(page_size.max(1))
+            .map(|(fleet_name, application_arn)| ApplicationFleetAssociation {
+                fleet_name: fleet_name.clone(),
+                application_arn: application_arn.clone(),
+            })
+            .collect();
+        Some(ApplicationFleetAssociationPage {
+            next_token: remaining.next().map(encode_fleet_application_cursor),
+            associations,
         })
     }
 
@@ -1675,6 +1943,25 @@ impl ComAmazonawsAppstreamPhotonadminproxyserviceState {
             }
             None => false,
         }
+    }
+
+    /// Remove the user the given `(AuthenticationType, UserName)` identity names, with
+    /// everything that identity entitled it to, reporting whether the pool held it.
+    ///
+    /// A deleted user is gone rather than merely unlisted: the stack associations written
+    /// for that identity go with the record, so nothing names a user the pool no longer
+    /// holds and a later create of the same username allocates a fresh identity.
+    pub fn remove_user(&mut self, authentication_type: &str, user_name: &str) -> bool {
+        let identity = (authentication_type.to_string(), user_name.to_string());
+        if self.users.remove(&identity).is_none() {
+            return false;
+        }
+        self.user_stack_associations
+            .retain(|(stored_type, stored_name, _), _| {
+                (stored_type.as_str(), stored_name.as_str())
+                    != (authentication_type, user_name)
+            });
+        true
     }
 
     /// The fleets associated with the named stack, in the stable order a page of

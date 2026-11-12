@@ -100,6 +100,36 @@ impl Emulator {
         );
         payload
     }
+
+    /// Fetch one URL this emulator handed out, the way a browser fetches it: a plain
+    /// `GET`, nothing signed beyond what the URL itself carries, and no redirect followed.
+    ///
+    /// Returns `(status, Location header, body)`. Shared with the suites that follow a
+    /// handed-out URL (`tests/all/streaming_session_resolution.rs`).
+    pub(crate) async fn fetch(&self, url: &str) -> (u16, Option<String>, Vec<u8>) {
+        // Whatever host the URL names, the request is dispatched to this router: what is
+        // under test is the path and query the emulator signed, not name resolution.
+        let target = match url.split_once("://") {
+            Some((_, rest)) => match rest.split_once('/') {
+                Some((_, path_and_query)) => format!("/{path_and_query}"),
+                None => "/".to_string(),
+            },
+            None => url.to_string(),
+        };
+        let request = http::Request::builder()
+            .method("GET")
+            .uri(target)
+            .body(bytes::Bytes::new())
+            .expect("a well-formed request");
+        let response = self.router.dispatch(request).await;
+        let status = response.status().as_u16();
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .map(ToString::to_string);
+        (status, location, response.into_body().to_vec())
+    }
 }
 
 /// The wire error code of a failure body (`__type`, possibly namespace-qualified).

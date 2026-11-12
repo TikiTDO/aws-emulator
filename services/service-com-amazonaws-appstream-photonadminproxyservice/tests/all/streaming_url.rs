@@ -73,7 +73,10 @@ fn not_running_sentence(fleet: &str) -> String {
 
 /// Create a stack, a fleet and the association between them, which is the setup every
 /// case below starts from.
-async fn stack_with_fleet(emulator: &Emulator, case: &str, stack: &str, fleet: &str) {
+///
+/// Shared with the suite that follows the URL this setup makes issuable
+/// (`tests/all/streaming_session_resolution.rs`).
+pub(crate) async fn stack_with_fleet(emulator: &Emulator, case: &str, stack: &str, fleet: &str) {
     stack_with_fleet_lasting(emulator, case, stack, fleet, None).await;
 }
 
@@ -121,7 +124,10 @@ async fn fleet_state(emulator: &Emulator, case: &str, fleet: &str) -> String {
 
 /// Start the fleet and wait for the state the clock owes it, asserting that the transient
 /// state is observable first.
-async fn start_and_await_running(emulator: &Emulator, case: &str, fleet: &str) {
+///
+/// Shared with `tests/all/streaming_session_resolution.rs`, so both suites make a fleet
+/// streaming the same way.
+pub(crate) async fn start_and_await_running(emulator: &Emulator, case: &str, fleet: &str) {
     emulator.ok(case, "StartFleet", json!({ "Name": fleet })).await;
     let starting = fleet_state(emulator, case, fleet).await;
     assert_eq!(
