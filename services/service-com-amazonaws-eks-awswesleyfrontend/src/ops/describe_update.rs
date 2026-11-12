@@ -197,10 +197,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The scoping member names the resource the update must belong to, so an update
         // of another resource of the same cluster — or of the cluster's own control
         // plane — is not the one asked for. The UPDATE is the resource reported missing,
-        // so the message names it and, when the lookup was scoped, the member that
-        // scoped it; the exception's identity members stay unset — EKS does not echo the
-        // request's `nodegroupName`/`addonName` into a not-found payload (see
-        // [`crate::state::child_resource_not_found`]).
+        // so the message names it by the id the request carried, whichever reason the
+        // lookup missed on; the exception's identity members stay unset — EKS does not
+        // echo the request's `nodegroupName`/`addonName` into a not-found payload (see
+        // [`crate::state::update_not_found`]).
         let found = record
             .updates
             .get(&input.update_id)
@@ -209,23 +209,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             Some(update) => Ok(DescribeUpdateOutput {
                 update: Some(update.to_update()),
             }),
-            None => {
-                let scoped_by = [
-                    ("nodegroupName", input.nodegroup_name.as_deref()),
-                    ("addonName", input.addon_name.as_deref()),
-                    ("capabilityName", input.capability_name.as_deref()),
-                ]
-                .into_iter()
-                .find_map(|(member, value)| value.map(|value| format!(" with {member}: {value}")))
-                .unwrap_or_default();
-                Err(DescribeUpdateErrorModeled::ResourceNotFoundException(
-                    crate::state::child_resource_not_found(format!(
-                        "No update found for ID: {}{scoped_by}.",
-                        input.update_id
-                    )),
-                )
-                .into())
-            }
+            None => Err(DescribeUpdateErrorModeled::ResourceNotFoundException(
+                crate::state::update_not_found(&input.update_id),
+            )
+            .into()),
         }
     }
 }

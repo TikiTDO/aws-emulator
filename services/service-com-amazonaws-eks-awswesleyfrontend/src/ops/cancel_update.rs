@@ -246,10 +246,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let cluster_status = cluster.status.clone();
 
         let Some(update) = cluster.updates.get_mut(&input.update_id) else {
-            return Err(not_found(crate::state::child_resource_not_found(format!(
-                "No update found for ID: {}.",
-                input.update_id
-            ))));
+            return Err(not_found(crate::state::update_not_found(&input.update_id)));
         };
 
         // `clientRequestToken` is the request's idempotency token, so a retry of the

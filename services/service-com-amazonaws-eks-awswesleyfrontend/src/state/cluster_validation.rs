@@ -68,6 +68,20 @@ pub fn cluster_being_deleted(cluster_name: &str) -> String {
     format!("Cluster is being deleted: {cluster_name}")
 }
 
+/// The refusal a `DeleteCluster` of a cluster whose `DeletionProtection` is on
+/// earns.
+///
+/// Deletion protection is a switch on the cluster ("Indicates whether deletion
+/// protection is enabled for the cluster", `Cluster$deletionProtection`), so the
+/// refusal states the cluster the request named and the switch that forbids the
+/// call, by the member's own name: fixed text around the cluster name, which is the
+/// only variable part. The caller's recovery — turn the switch off through
+/// `UpdateClusterConfig` — follows from naming it, so the sentence does not spell
+/// it out.
+pub fn cluster_deletion_protected(cluster_name: &str) -> String {
+    format!("Cluster {cluster_name} cannot be deleted while DeletionProtection is enabled.")
+}
+
 /// The refusal a partial EKS Auto Mode configuration earns.
 ///
 /// EKS Auto Mode is ONE mode of the cluster made of three capabilities — compute,

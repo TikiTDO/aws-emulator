@@ -207,11 +207,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 return Err(DeleteClusterErrorModeled::InvalidRequestException(
                     InvalidRequestException {
                         cluster_name: Some(input.name.clone()),
-                        message: Some(format!(
-                            "Cluster {} has deletion protection enabled. Disable deletion \
-                             protection before deleting the cluster.",
-                            input.name
-                        )),
+                        message: Some(crate::state::cluster_deletion_protected(&input.name)),
                         ..Default::default()
                     },
                 )

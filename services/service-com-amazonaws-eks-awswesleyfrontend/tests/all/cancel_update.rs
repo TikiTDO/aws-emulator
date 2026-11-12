@@ -954,7 +954,7 @@ async fn an_update_id_the_cluster_does_not_hold_is_a_not_found_naming_the_id() {
         );
         assert_eq!(
             message_of(&answer),
-            format!("No update found for ID: {update_id}."),
+            format!("Update {update_id} not found"),
             "case {label:?}: expected the update-not-found message, got {answer:?}"
         );
     }

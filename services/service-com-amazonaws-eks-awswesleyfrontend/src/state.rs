@@ -1048,6 +1048,31 @@ pub fn child_resource_not_found(message: String) -> ResourceNotFoundException {
     }
 }
 
+/// The sentence this service refuses an `updateId` no update of the resource the
+/// request addresses carries with.
+///
+/// The id is the WHOLE of what a caller can act on — an update is addressed by it
+/// and by the resource it belongs to, and the resource is already in the request's
+/// own path — so the sentence states the update by that id and nothing else: fixed
+/// text around the id, in the register of the recorded service, with no trailing
+/// period and no mention of the scoping member the lookup was narrowed by.
+/// Whichever reason the id resolved to nothing (never minted, minted for another
+/// cluster, or belonging to another resource of this cluster), the update asked for
+/// is what was not found, so every caller words it this way.
+pub fn update_not_found_message(update_id: &str) -> String {
+    format!("Update {update_id} not found")
+}
+
+/// The `ResourceNotFoundException` payload an operation addressed to ONE update
+/// answers for an `updateId` it did not resolve.
+///
+/// NO identity member is set — see [`cluster_not_found`] for the rule: the UPDATE is
+/// the resource reported missing, and the exception models no member for one, so the
+/// id lives in the message ([`update_not_found_message`]) and nowhere else.
+pub fn update_not_found(update_id: &str) -> ResourceNotFoundException {
+    child_resource_not_found(update_not_found_message(update_id))
+}
+
 /// The sentence this service refuses a `(addonName, addonVersion)` pair the
 /// add-on catalog publishes no build of with.
 ///
@@ -4448,10 +4473,13 @@ pub fn decode_page_token(token: &str) -> Option<String> {
 ///
 /// Entirely fixed text, and the SAME sentence for every listing of this service: a
 /// token this service did not mint, one minted for another listing, and one whose
-/// position no longer exists are the one condition a caller acts on — start the
-/// listing again — so the recorded service words them all this way and names neither
-/// the listing nor the token.
-pub const INVALID_NEXT_TOKEN_MESSAGE: &str = "nextToken is not valid or expired.";
+/// position no longer exists all fail the one check a listing makes of a token —
+/// whether it recognises it — and leave the caller the one thing to act on, which is
+/// to start the listing again. So the sentence states that the token the request
+/// supplied is not one this service can read, and names neither the listing nor the
+/// token.
+pub const INVALID_NEXT_TOKEN_MESSAGE: &str =
+    "The specified nextToken is invalid: unrecognized format.";
 
 /// The ARN of one managed capability of one cluster.
 ///

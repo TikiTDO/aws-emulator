@@ -7,7 +7,8 @@
 //! message, which S3 reference and in which region the call was made, together with
 //! the outcome it answered — so a change to an in-transit message's content, and
 //! every refusal of one, is reconstructable from the emulator's own records. The
-//! reporting operation leaves no such record: it changes nothing.
+//! reporting operation leaves a record of the ACCESS for the same reason, and none of
+//! a change: it changes nothing, and it never records the content it reported.
 //!
 //! The rows span the outcomes the operation can reach: the accepted update, the two
 //! eligibility refusals (`ResourceNotFoundException`, `MessageFrozen`), the content
@@ -117,8 +118,53 @@ impl Subscriber for Capture {
     fn exit(&self, _span: &Id) {}
 }
 
+/// A subscriber that is enabled for everything and keeps nothing.
+///
+/// See [`pin_callsite_interest`] for why one of these is installed process-wide.
+struct AlwaysEnabled;
+
+impl Subscriber for AlwaysEnabled {
+    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _span: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+    fn event(&self, _event: &Event<'_>) {}
+
+    fn enter(&self, _span: &Id) {}
+
+    fn exit(&self, _span: &Id) {}
+}
+
+/// Make every event callsite of this process interesting, once.
+///
+/// `tracing` caches whether a callsite is worth evaluating for the whole PROCESS,
+/// and rebuilds that cache from the subscribers it knows about — while the capture
+/// below is a default for ONE thread. So a callsite another suite's thread reaches
+/// first, with no subscriber installed, can be cached as uninteresting, and the
+/// record this suite is waiting for then never reaches the capture: which suite wins
+/// depends on how the test binary interleaves. One process-wide subscriber that is
+/// enabled for everything and keeps nothing pins every callsite as interesting, so
+/// the thread-local capture sees its thread's events however the suites interleave.
+fn pin_callsite_interest() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        // Another suite of this binary may have installed one already, which serves
+        // the same purpose: nothing is wrong when this does not win.
+        let _ = tracing::subscriber::set_global_default(AlwaysEnabled);
+    });
+}
+
 /// Capture this thread's `tracing` events for the life of the returned guard.
 fn capture_events() -> (Capture, tracing::subscriber::DefaultGuard) {
+    pin_callsite_interest();
     let capture = Capture::default();
     let guard = tracing::subscriber::set_default(capture.clone());
     (capture, guard)
@@ -219,7 +265,7 @@ async fn every_update_outcome_leaves_one_access_record() {
             .put_raw_message_content(REGION, message_id, &s3_reference)
             .await;
         // And the reporting operation runs inside the capture too, to show it adds
-        // no record of its own.
+        // no record of a CHANGE of its own.
         let _ = emulator.get_raw_message_content(REGION, message_id).await;
         drop(guard);
 
@@ -282,13 +328,15 @@ async fn every_update_outcome_leaves_one_access_record() {
     }
 }
 
-/// A read leaves no record at all: `GetRawMessageContent` changes nothing, so there
-/// is no access to attribute.
+/// A read leaves no record of a CHANGE — it changes nothing — and the record it does
+/// leave of the access names the caller, the message, the region and the outcome, and
+/// never the content it reported.
 #[tokio::test]
-async fn a_read_leaves_no_record_of_its_own() {
+async fn a_read_leaves_no_record_of_a_change_and_never_records_the_content() {
     let emulator = Emulator::new();
     let message_id = "access-record-1";
-    emulator.seed_message(message_id, &mime("original", "body"));
+    let content = mime("original", "sentinel-body-text");
+    emulator.seed_message(message_id, &content);
 
     let (capture, guard) = capture_events();
     let reply = emulator.get_raw_message_content(REGION, message_id).await;
@@ -307,10 +355,63 @@ async fn a_read_leaves_no_record_of_its_own() {
         missing.status,
         missing.summary()
     );
-    let records = capture.records_for("GetRawMessageContent");
+
+    // The reporting operation changes nothing, so it leaves no record of a change:
+    // the mutating operation's record is the one above, and a read never writes one.
+    let changes = capture.records_for("PutRawMessageContent");
     assert!(
-        records.is_empty(),
-        "case \"the read\": expected a reporting operation to leave no access record, captured \
-         {records:?}"
+        changes.is_empty(),
+        "case \"the read\": expected no record of a change, captured {changes:?}"
     );
+
+    // The access itself IS recorded, once per call, whichever outcome it reached —
+    // which is what makes access to message content observable.
+    let records = capture.records_for("GetRawMessageContent");
+    assert_eq!(
+        records.len(),
+        2,
+        "case \"the read\": expected one access record per read, captured {records:?}"
+    );
+    for (case, record, outcome, addressed) in [
+        ("the read", &records[0], "success", message_id),
+        (
+            "the read of an unknown id",
+            &records[1],
+            "ResourceNotFoundException",
+            "never-there",
+        ),
+    ] {
+        assert_eq!(
+            record.field("outcome"),
+            Some(outcome),
+            "case {case:?}: expected the record to name outcome {outcome:?}, got {record:?}"
+        );
+        assert_eq!(
+            record.field("akid"),
+            Some(PRESENTED_AKID),
+            "case {case:?}: expected the record to name the presented access key id, got \
+             {record:?}"
+        );
+        assert_eq!(
+            record.field("message_id"),
+            Some(addressed),
+            "case {case:?}: expected the record to name the message the call addressed, got \
+             {record:?}"
+        );
+        assert_eq!(
+            record.field("region"),
+            Some(REGION),
+            "case {case:?}: expected the record to name the region the call was made in, got \
+             {record:?}"
+        );
+        // The content is what the read reported to its caller; a record of the access
+        // must not carry it.
+        assert!(
+            record
+                .fields
+                .values()
+                .all(|value| !value.contains("sentinel-body-text")),
+            "case {case:?}: expected the record to carry no message content, got {record:?}"
+        );
+    }
 }

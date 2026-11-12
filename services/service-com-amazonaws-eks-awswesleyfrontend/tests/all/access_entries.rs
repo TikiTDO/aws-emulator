@@ -603,11 +603,13 @@ async fn paging_associated_policies_at_any_size_yields_each_once() {
         );
     }
 
-    // A token this service did not issue is refused rather than resumed from. The
-    // rows differ along HOW the token is foreign: not hex, an odd length, a
-    // well-formed encoding carrying no provenance tag, and — the one a scope-less
-    // token check would wave through — a token another listing of this same service
-    // minted (`ListClusters`).
+    // A token this service did not issue is refused rather than resumed from, as the
+    // MALFORMED PARAMETER it is — the class every listing of this service answers a
+    // page token it did not mint with, rather than the state-dependent
+    // `InvalidRequestException`. The rows differ along HOW the token is foreign: not
+    // hex, an odd length, a well-formed encoding carrying no provenance tag, and —
+    // the one a scope-less token check would wave through — a token another listing
+    // of this same service minted (`ListClusters`).
     let untagged: String = VIEW_POLICY.bytes().map(|byte| format!("{byte:02x}")).collect();
     let other_listing = encode_page_token("paging");
     for case in [
@@ -626,8 +628,8 @@ async fn paging_associated_policies_at_any_size_yields_each_once() {
         );
         assert_eq!(
             answer.error_type.as_deref(),
-            Some("InvalidRequestException"),
-            "case {case:?}: expected InvalidRequestException, got {answer:?}"
+            Some("InvalidParameterException"),
+            "case {case:?}: expected InvalidParameterException, got {answer:?}"
         );
     }
 }

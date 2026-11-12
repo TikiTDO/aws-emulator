@@ -84,13 +84,21 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-eks-awswesleyfrontend.j
 // shape and many of its operations declare it, but this one does not list it — and it
 // is the class every operation of the Amazon EKS-managed plane refuses a cluster this
 // service does not manage with ([`crate::state::connected_cluster_refusal`]).
+//
+// `InvalidParameterException` is widened in the same way: this operation's own list
+// carries only the state-dependent `InvalidRequestException`, but a `nextToken` this
+// listing did not mint IS a bad parameter, and the SERVICE models that shape ("The
+// specified parameter is invalid. Review the available parameters for the API
+// request.") — so every listing of this service answers a foreign page token with the
+// one code (`ListClusters`, `ListAccessEntries` and `ListAccessPolicies` already do).
 #[smithy_macros::operation_error(
     "com.amazonaws.eks#ListAssociatedAccessPolicies",
-    extra_errors = ["ClientException"]
+    extra_errors = ["ClientException", "InvalidParameterException"]
 )]
 #[derive(Debug)]
 pub enum ListAssociatedAccessPoliciesErrorModeled {
     ClientException(ClientException),
+    InvalidParameterException(InvalidParameterException),
     InvalidRequestException(InvalidRequestException),
     ResourceNotFoundException(ResourceNotFoundException),
     ServerException(ServerException),
@@ -170,17 +178,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // A `nextToken` names the policy ARN to resume AFTER, in THIS listing's own
         // token scope, so a well-formed token another listing issued is refused here
-        // too. One this service did not issue is a request this operation cannot
-        // serve, not an empty page; it models no parameter error, so the refusal goes
-        // out as the modelled `InvalidRequestException`.
+        // too. One this service did not issue is a MALFORMED PARAMETER — the value the
+        // caller handed in cannot be decoded, whatever the cluster or the access entry
+        // is doing — so it is refused as `InvalidParameterException`, the code every
+        // other listing of this service answers a foreign token with, rather than as
+        // the state-dependent `InvalidRequestException`.
         let resume_after = match input.next_token.as_deref() {
             None => None,
             Some(token) => Some(
                 state::decode_scoped_page_token(ASSOCIATED_ACCESS_POLICIES_LISTING, token)
                     .ok_or_else(|| {
                         ListAssociatedAccessPoliciesError::from(
-                            ListAssociatedAccessPoliciesErrorModeled::InvalidRequestException(
-                                InvalidRequestException {
+                            ListAssociatedAccessPoliciesErrorModeled::InvalidParameterException(
+                                InvalidParameterException {
                                     cluster_name: Some(input.cluster_name.clone()),
                                     message: Some(
                                         state::INVALID_NEXT_TOKEN_MESSAGE.to_string(),
