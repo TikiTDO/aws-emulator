@@ -117,15 +117,21 @@ impl Association {
                 }),
                 "ResolverRule",
             ),
-            Self::QueryLogConfig => (
-                "CreateResolverQueryLogConfig",
-                json!({
-                    "CreatorRequestId": format!("config-{tag}"),
-                    "Name": format!("config-{tag}"),
-                    "DestinationArn": "arn:aws:s3:::amzn-s3-demo-bucket",
-                }),
-                "ResolverQueryLogConfig",
-            ),
+            Self::QueryLogConfig => {
+                // The create resolves its `DestinationArn` against the store of
+                // the service that owns the destination, so the account holds
+                // that bucket first.
+                router.hold_query_log_destinations(["arn:aws:s3:::amzn-s3-demo-bucket"]);
+                (
+                    "CreateResolverQueryLogConfig",
+                    json!({
+                        "CreatorRequestId": format!("config-{tag}"),
+                        "Name": format!("config-{tag}"),
+                        "DestinationArn": "arn:aws:s3:::amzn-s3-demo-bucket",
+                    }),
+                    "ResolverQueryLogConfig",
+                )
+            }
             Self::FirewallRuleGroup => (
                 "CreateFirewallRuleGroup",
                 json!({

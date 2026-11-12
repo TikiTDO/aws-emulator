@@ -23,9 +23,8 @@ use service_com_amazonaws_route53resolver_route53resolver::state::{
     service_state, AUTODEFINED_REVERSE_DISABLED, AUTODEFINED_REVERSE_DISABLING,
     AUTODEFINED_REVERSE_ENABLED, AUTODEFINED_REVERSE_FLAG_DISABLE, PROVISIONING_DELAY,
 };
-use smithy_server_runtime::MultiServiceRouter;
 
-use super::harness::{emulator_on, ok, string_member, ACCOUNT};
+use super::harness::{emulator_on, ok, string_member, Emulator, ACCOUNT};
 
 /// The `ResolverConfig` a get or update answered with, owned so two answers can be
 /// compared after both calls have returned.
@@ -36,7 +35,7 @@ fn config(body: &Value) -> Value {
 }
 
 /// Read one VPC's Resolver behavior configuration over the wire.
-async fn get(router: &MultiServiceRouter, resource_id: &str) -> Value {
+async fn get(router: &Emulator, resource_id: &str) -> Value {
     config(
         &ok(
             router,
@@ -48,7 +47,7 @@ async fn get(router: &MultiServiceRouter, resource_id: &str) -> Value {
 }
 
 /// Set one VPC's autodefined-reverse setting over the wire.
-async fn update(router: &MultiServiceRouter, resource_id: &str, flag: &str) -> Value {
+async fn update(router: &Emulator, resource_id: &str, flag: &str) -> Value {
     config(
         &ok(
             router,
@@ -93,6 +92,9 @@ async fn reading_a_configuration_stores_nothing() {
 
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let router = emulator_on(Arc::clone(&engine));
+    // Every row's VPC is one the account holds: the read resolves its
+    // `ResourceId` against the account's own Amazon EC2 inventory.
+    router.hold_vpcs(cases.iter().map(|(_, resource_id)| resource_id));
 
     for (case, resource_id) in &cases {
         // Three reads of the same VPC: the first reports the configuration the service
@@ -172,6 +174,7 @@ async fn a_read_reports_the_status_the_clock_owes_and_changes_nothing() {
 
     for (case, reads_in_flight) in cases {
         let resource_id = format!("vpc-in-flight-{reads_in_flight}");
+        router.hold_vpcs([&resource_id]);
         let updated = update(&router, &resource_id, AUTODEFINED_REVERSE_FLAG_DISABLE).await;
         let id = string_member(&updated, "Id");
         assert_eq!(

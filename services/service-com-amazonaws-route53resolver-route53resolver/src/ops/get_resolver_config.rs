@@ -160,11 +160,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         // "Retrieves the behavior configuration of Route 53 Resolver behavior
-        // for a single VPC": every VPC has one, so a VPC nothing has written to
-        // reports the default configuration rather than a refusal. A pure read
-        // — the reported `AutodefinedReverse` is computed from the stored status
-        // pair and the due instant, and a VPC with no record is not given one,
-        // so nothing about the configuration changes for the next caller.
+        // for a single VPC": every VPC of the account has one, so a VPC nothing
+        // has written to reports the default configuration rather than a
+        // refusal. A pure read — the reported `AutodefinedReverse` is computed
+        // from the stored status pair and the due instant, and a VPC with no
+        // record is not given one, so nothing about the configuration changes
+        // for the next caller.
+        //
+        // A `ResourceId` naming no resource the account holds addresses no
+        // configuration at all, so it is refused with the `ResourceNotFound`
+        // this operation models before anything is projected: a Resolver
+        // behavior configuration belongs to a VPC of the account's own Amazon
+        // EC2 inventory or to a Route 53 Profile the account holds
+        // (`crate::state::resolver_configuration_resource_is_unknown`), both
+        // resolved with no lock of this service's store held.
+        if crate::state::resolver_configuration_resource_is_unknown(
+            &*self.engine,
+            &input.resource_id,
+        ) {
+            return Err(GetResolverConfigErrorModeled::ResourceNotFoundException(
+                crate::state::resolver_config_resource_not_found(&input.resource_id),
+            )
+            .into());
+        }
+
         let store = state.lock();
         let record = store.resolver_config(&input.resource_id);
 

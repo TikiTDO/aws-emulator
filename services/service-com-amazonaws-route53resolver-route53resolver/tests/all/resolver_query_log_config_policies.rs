@@ -20,7 +20,9 @@
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
-use super::harness::{call, emulator, error_type, expect_error, ok, string_member, ACCOUNT, REGION};
+use super::harness::{
+    call, emulator, error_type, expect_error, ok, string_member, Emulator, ACCOUNT, REGION,
+};
 
 /// An account other than the one this emulator's resources belong to, so a
 /// document that names it shares the configuration with somebody else.
@@ -32,7 +34,11 @@ const OTHER_ACCOUNT: &str = "123456789012";
 const CODE_ACCESS_DENIED: &str = "RSLVR-01600";
 
 /// Create a query logging configuration and return `(Id, Arn)`.
-async fn query_log_config(router: &MultiServiceRouter, creator: &str) -> (String, String) {
+///
+/// The destination it delivers to is one the account holds, which the create
+/// resolves against the store of the service that owns it.
+async fn query_log_config(router: &Emulator, creator: &str) -> (String, String) {
+    router.hold_query_log_destinations(["arn:aws:s3:::amzn-s3-demo-bucket"]);
     let created = ok(
         router,
         "CreateResolverQueryLogConfig",

@@ -48,12 +48,14 @@ use crate::ops::types::{
 mod domain_imports;
 mod firewall_rules;
 mod query_log;
+mod query_log_destinations;
 mod resolver_rules;
 mod tags;
 mod vpc_configs;
 pub use domain_imports::*;
 pub use firewall_rules::*;
 pub use query_log::*;
+pub use query_log_destinations::*;
 pub use resolver_rules::*;
 pub use tags::*;
 pub use vpc_configs::*;
@@ -371,6 +373,15 @@ pub const RSLVR_CODE_RULE_VPC_ASSOCIATION_NOT_FOUND: &str = "RSLVR-00800";
 /// caller names but cannot address. See [`resource_not_found_message`].
 pub const RSLVR_CODE_RESOURCE_NOT_FOUND: &str = "RSLVR-02025";
 
+/// The service error code Route 53 Resolver reports when a request names a VPC
+/// the account does not hold, for the per-VPC Resolver behavior configuration.
+///
+/// The same can't-find sentence ([`coded_resource_not_found_message`]) travels
+/// under a code per subsystem: the DNS Firewall operations report
+/// [`RSLVR_CODE_RESOURCE_NOT_FOUND`] and the Resolver behavior configuration
+/// reports this one, which is what the recorded responses of the two carry.
+pub const RSLVR_CODE_RESOLVER_RESOURCE_NOT_FOUND: &str = "RSLVR-00913";
+
 /// The Route 53 Resolver service error code reported when a request carries a
 /// tag the service will not store, because one of the tag's parameters is
 /// outside what it accepts.
@@ -398,6 +409,18 @@ pub const RSLVR_CODE_INVALID_IAM_POLICY: &str = "RSLVR-02035";
 /// from the recorded responses of the query-logging policy read. See
 /// [`query_log_config_policy_access_denied`].
 pub const RSLVR_CODE_QUERY_LOG_CONFIG_POLICY_ACCESS_DENIED: &str = "RSLVR-01600";
+
+/// The Route 53 Resolver service error code reported when the caller is granted
+/// nothing on the resource a request names.
+///
+/// Carried for the same reason as [`RSLVR_CODE_ENDPOINT_NOT_FOUND`]: the HTTP
+/// status (400) and the exception shape name together do not say which Resolver
+/// fault occurred, and the model states no message text, so this code comes from
+/// the recorded denial of the per-VPC configuration read. It is NOT the code of
+/// the denial a query logging configuration's policy read answers
+/// ([`RSLVR_CODE_QUERY_LOG_CONFIG_POLICY_ACCESS_DENIED`]), which that slice's
+/// own recorded response states. See [`resolver_access_denied`].
+pub const RSLVR_CODE_ACCESS_DENIED: &str = "RSLVR-01803";
 
 /// The Route 53 Resolver service error code reported when a request names an
 /// association between a VPC and a query logging configuration that the service
@@ -1001,8 +1024,19 @@ pub fn rslvr_message_sentences(code: &str, sentences: &[&str]) -> String {
 /// one sentence, with the bare id inside it. An argument that is already an id
 /// carries no `/` and so passes through unchanged.
 pub fn resource_not_found_message(resource: &str) -> String {
+    coded_resource_not_found_message(RSLVR_CODE_RESOURCE_NOT_FOUND, resource)
+}
+
+/// The same can't-find sentence under the service error code `code`.
+///
+/// The sentence is ONE string however the fault is coded, so the subsystem that
+/// reports it chooses the code and never the wording: the DNS Firewall
+/// operations carry [`RSLVR_CODE_RESOURCE_NOT_FOUND`]
+/// ([`resource_not_found_message`]) and the Resolver behavior configuration
+/// carries [`RSLVR_CODE_RESOLVER_RESOURCE_NOT_FOUND`].
+pub fn coded_resource_not_found_message(code: &str, resource: &str) -> String {
     rslvr_message(
-        RSLVR_CODE_RESOURCE_NOT_FOUND,
+        code,
         &format!(
             "Can’t find the resource with ID \"{}\"",
             arn_resource_id(resource)
@@ -1939,6 +1973,62 @@ pub fn query_log_config_policy_access_denied() -> AccessDeniedException {
     AccessDeniedException {
         message: Some(format!(
             "[{RSLVR_CODE_QUERY_LOG_CONFIG_POLICY_ACCESS_DENIED}] Access denied"
+        )),
+    }
+}
+
+/// The AWS X-Ray trace id the service reports THIS request under: the `Root` of
+/// the tracing header the caller sent, when it sent one naming a trace, and
+/// otherwise one minted for this request.
+///
+/// A Resolver refusal closes with the trace id of the request it refused
+/// ([`traced_message`]), so a caller can quote it when asking why. The id is
+/// read and minted through the one reading of X-Ray's own form the services of
+/// this emulator share, so a chain a caller started is continued rather than
+/// replaced.
+pub fn request_trace_root(headers: &::http::HeaderMap) -> String {
+    headers
+        .get("x-amzn-trace-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(::service_common::xray_trace::continued_root)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            ::service_common::xray_trace::mint_trace_id(::std::time::SystemTime::now())
+        })
+}
+
+/// `message` closed with the trace clause Route 53 Resolver ends it with: a
+/// single space, `Trace Id:`, and the request's trace id in double quotes.
+///
+/// The recorded refusals of the per-VPC configuration operations carry this
+/// clause after the coded sentence, and the id in it is the trace of the
+/// REQUEST ([`request_trace_root`]) — so it is a different value on every call
+/// and is never derived from anything the caller asked about.
+pub fn traced_message(message: String, trace_root: &str) -> String {
+    format!("{message} Trace Id: \"{trace_root}\"")
+}
+
+/// The `AccessDeniedException` an operation answers for a resource the caller
+/// is granted nothing on — one the account does not hold, and one it holds but
+/// may not use for what the request asks.
+///
+/// The model's `AccessDeniedException` is "the current account doesn't have the
+/// IAM permissions required to perform the specified Resolver operation", which
+/// is the answer for a request the caller is not entitled to have served. The
+/// body carries NOTHING from the request, because that is the point of the
+/// refusal: the service does not disclose whether the resource exists, so a
+/// resource the caller may not reach and one that was never created are
+/// indistinguishable.
+///
+/// The sentence is the one the service's recorded denial words that fault with,
+/// behind its service error code ([`RSLVR_CODE_ACCESS_DENIED`]) and closed with
+/// the trace clause of the request ([`traced_message`]), which is the only part
+/// of it that is not fixed text.
+pub fn resolver_access_denied(trace_root: &str) -> AccessDeniedException {
+    AccessDeniedException {
+        message: Some(traced_message(
+            rslvr_message(RSLVR_CODE_ACCESS_DENIED, "Access to resource is denied"),
+            trace_root,
         )),
     }
 }

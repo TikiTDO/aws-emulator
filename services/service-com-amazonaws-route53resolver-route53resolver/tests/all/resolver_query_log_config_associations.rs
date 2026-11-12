@@ -18,7 +18,13 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use super::harness::{
     call, emulator, error_type, expect_error, ok, parse_time, string_member, without_status,
+    Emulator,
 };
+
+/// The destination every configuration these cases create delivers to: one
+/// Amazon S3 bucket of the account, which the create resolves its
+/// `DestinationArn` against.
+const DESTINATION: &str = "arn:aws:s3:::amzn-s3-demo-bucket";
 
 /// The `ResolverQueryLogConfigAssociation` of an associate/get response.
 pub fn association(body: &Value) -> &Value {
@@ -35,14 +41,18 @@ async fn settle() {
 
 /// Create a query logging configuration to associate VPCs with, and answer its
 /// `Id`.
-pub async fn config_id(router: &MultiServiceRouter, name: &str) -> String {
+///
+/// The destination the create names is one the account holds: a create resolves
+/// its `DestinationArn` against the store of the service that owns it.
+pub async fn config_id(router: &Emulator, name: &str) -> String {
+    router.hold_query_log_destinations([DESTINATION]);
     let created = ok(
         router,
         "CreateResolverQueryLogConfig",
         json!({
             "CreatorRequestId": format!("req-{name}"),
             "Name": name,
-            "DestinationArn": "arn:aws:s3:::amzn-s3-demo-bucket",
+            "DestinationArn": DESTINATION,
         }),
     )
     .await;

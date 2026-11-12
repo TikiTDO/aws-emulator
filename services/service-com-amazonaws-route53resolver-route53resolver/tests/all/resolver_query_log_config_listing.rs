@@ -63,6 +63,9 @@ const SEEDS: [(&str, &str, usize); 5] = [
 async fn seed_configs(router: &Emulator) -> Vec<Seeded> {
     let mut seeded = Vec::new();
     for (index, (name, destination, associations)) in SEEDS.iter().enumerate() {
+        // Each configuration delivers to a destination the account holds, which
+        // the create resolves against the owning service's store.
+        router.hold_query_log_destinations([destination]);
         let created = ok(
             router,
             "CreateResolverQueryLogConfig",
@@ -888,6 +891,7 @@ async fn listing_reports_the_store_and_changes_nothing() {
         "a list must not disturb the records it reports, got {again}"
     );
 
+    router.hold_query_log_destinations(["arn:aws:s3:::amzn-s3-demo-bucket-appended"]);
     let created = ok(
         &router,
         "CreateResolverQueryLogConfig",

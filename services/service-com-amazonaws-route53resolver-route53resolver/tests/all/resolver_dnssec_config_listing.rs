@@ -21,7 +21,7 @@ use service_com_amazonaws_route53resolver_route53resolver::state::{
 };
 use smithy_server_runtime::MultiServiceRouter;
 
-use super::harness::{call, emulator, error_type, ok, string_member, ACCOUNT};
+use super::harness::{call, emulator, error_type, ok, string_member, Emulator, ACCOUNT};
 
 /// Wait out the span the clock owes a configuration whose validation status is
 /// still in flight, so the next call sees the settled status.
@@ -80,7 +80,12 @@ async fn walk(router: &MultiServiceRouter, request: &Value, case: &str) -> Vec<V
 
 /// Set one VPC's DNSSEC validation setting over the wire, returning the `Id` of
 /// the configuration the call reports.
-async fn update(router: &MultiServiceRouter, resource_id: &str, validation: &str) -> String {
+///
+/// The VPC is registered in the account's own Amazon EC2 store first: a per-VPC
+/// configuration belongs to a VPC of the account, which the write resolves
+/// against that store.
+async fn update(router: &Emulator, resource_id: &str, validation: &str) -> String {
+    router.hold_vpcs([resource_id]);
     let body = ok(
         router,
         "UpdateResolverDnssecConfig",
@@ -157,6 +162,7 @@ async fn every_configuration_with_validation_on_is_reported() {
         empty.is_empty(),
         "case \"an account that configured nothing\": the listing must be empty, got {empty:?}"
     );
+    router.hold_vpcs(["vpc-only-read"]);
     ok(
         &router,
         "GetResolverDnssecConfig",

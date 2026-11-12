@@ -135,3 +135,5 @@ mod state_roundtrip;
 mod tag_acceptance;
 #[path = "all/vpc_configuration_inventory.rs"]
 mod vpc_configuration_inventory;
+#[path = "all/vpc_configuration_preconditions.rs"]
+mod vpc_configuration_preconditions;

@@ -12,7 +12,7 @@
 use serde_json::{json, Value};
 use service_com_amazonaws_route53resolver_route53resolver::state::MAX_STORED_FIREWALL_CONFIGS;
 
-use super::harness::{call, error_type, expect_error, ok, string_member, ACCOUNT};
+use super::harness::{call, error_type, expect_error, ok, string_member, Emulator, ACCOUNT};
 
 /// Every value the model's `FirewallFailOpenStatus` enum declares
 /// (`smithy_query(query="shape",shape="FirewallFailOpenStatus")`), which is what
@@ -30,10 +30,7 @@ fn firewall_config(body: &Value) -> &Value {
 }
 
 /// Read one VPC's firewall configuration over the wire.
-async fn get_config(
-    router: &smithy_server_runtime::MultiServiceRouter,
-    resource_id: &str,
-) -> Value {
+async fn get_config(router: &Emulator, resource_id: &str) -> Value {
     let body = ok(
         router,
         "GetFirewallConfig",
@@ -44,11 +41,7 @@ async fn get_config(
 }
 
 /// Set one VPC's failure mode over the wire, through a call that must succeed.
-async fn update_config(
-    router: &smithy_server_runtime::MultiServiceRouter,
-    resource_id: &str,
-    fail_open: &str,
-) -> Value {
+async fn update_config(router: &Emulator, resource_id: &str, fail_open: &str) -> Value {
     let body = ok(
         router,
         "UpdateFirewallConfig",
@@ -110,6 +103,9 @@ async fn every_vpc_reports_a_firewall_configuration_at_its_documented_default() 
     ];
 
     let router = super::harness::emulator();
+    // Every row's VPC is one the account holds: both operations resolve their
+    // `ResourceId` against the account's own Amazon EC2 inventory.
+    router.hold_vpcs(cases.iter().map(|(_, resource_id)| resource_id));
     let mut seen_ids: Vec<(String, String)> = Vec::new();
 
     for (case, resource_id) in &cases {
@@ -155,6 +151,7 @@ async fn an_updated_firewall_configuration_is_read_back_from_state() {
     let router = super::harness::emulator();
     let subject = "vpc-0123456789abcdef0";
     let untouched = "vpc-fedcba9876543210f";
+    router.hold_vpcs([subject, untouched]);
 
     let before = get_config(&router, subject).await;
 
@@ -200,6 +197,7 @@ async fn an_updated_firewall_configuration_is_read_back_from_state() {
 async fn an_unmodelled_fail_open_status_is_refused_and_stores_nothing() {
     let router = super::harness::emulator();
     let subject = "vpc-00112233445566778";
+    router.hold_vpcs([subject]);
 
     ok(
         &router,
@@ -257,6 +255,7 @@ async fn the_last_update_decides_the_reported_failure_mode() {
     for (index, sequence) in sequences.iter().enumerate() {
         let case = format!("sequence {sequence:?}");
         let resource_id = format!("vpc-sequence-{index}");
+        router.hold_vpcs([&resource_id]);
 
         let mut last_answer = Value::Null;
         for fail_open in sequence.iter() {
@@ -318,6 +317,7 @@ async fn a_resource_id_outside_the_modelled_length_is_refused() {
 #[tokio::test]
 async fn a_request_missing_a_required_member_is_refused() {
     let router = super::harness::emulator();
+    router.hold_vpcs(["vpc-missing-member"]);
 
     for (case, operation, body) in [
         (
@@ -360,6 +360,11 @@ async fn a_request_missing_a_required_member_is_refused() {
 #[tokio::test]
 async fn the_configuration_store_is_bounded() {
     let router = super::harness::emulator();
+    router.hold_vpcs(
+        (0..MAX_STORED_FIREWALL_CONFIGS)
+            .map(|index| format!("vpc-bound-{index}"))
+            .chain(["vpc-one-too-many".to_string()]),
+    );
 
     for index in 0..MAX_STORED_FIREWALL_CONFIGS {
         update_config(&router, &format!("vpc-bound-{index}"), "ENABLED").await;

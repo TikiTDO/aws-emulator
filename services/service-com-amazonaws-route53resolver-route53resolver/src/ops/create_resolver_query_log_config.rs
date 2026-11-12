@@ -226,6 +226,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
+        // A destination Resolver could deliver to has to be one the account
+        // HOLDS: the bucket, log group or delivery stream the ARN names is a
+        // resource of another service of the account, and which of them exist
+        // is a fact of that service's own store
+        // (`crate::state::account_holds_query_log_destination`, read with no
+        // lock of this service's store held). A destination the caller cannot
+        // write to is answered with the `AccessDenied` this operation models —
+        // the refusal discloses nothing about whether the destination exists
+        // (`crate::state::resolver_access_denied`) — and NO configuration is
+        // created, so the store never holds one whose logs could not be
+        // delivered.
+        if !crate::state::account_holds_query_log_destination(
+            &*self.engine,
+            &input.destination_arn,
+        ) {
+            return Err(
+                CreateResolverQueryLogConfigErrorModeled::AccessDeniedException(
+                    crate::state::resolver_access_denied(&crate::state::request_trace_root(
+                        &ctx.parts().headers,
+                    )),
+                )
+                .into(),
+            );
+        }
+
         let now = ::std::time::Instant::now();
         let mut store = state.lock();
 

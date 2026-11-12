@@ -151,9 +151,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); this
-        // operation mints no ARN, so it takes nothing from `ctx`.
-        let _ = ctx;
+        // The engine is reachable from `&self` (constructor-injected); `ctx`
+        // carries the request's tracing header, which the refusal below closes
+        // with.
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 UpdateFirewallConfigErrorModeled::InternalServiceErrorException(
@@ -178,6 +178,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         crate::ops::types::FIREWALL_FAIL_OPEN_STATUS_VALUES
                     )),
                 },
+            )
+            .into());
+        }
+
+        // A `ResourceId` naming no VPC the account holds addresses no
+        // configuration at all, so the write is refused with the
+        // `ResourceNotFound` this operation models and NOTHING is stored:
+        // which VPCs exist is a fact of the account's own Amazon EC2 inventory
+        // (`crate::state::vpc_configuration_resource_is_unknown`), resolved
+        // before this service's store is locked.
+        if crate::state::vpc_configuration_resource_is_unknown(&*self.engine, &input.resource_id) {
+            return Err(UpdateFirewallConfigErrorModeled::ResourceNotFoundException(
+                crate::state::firewall_config_resource_not_found(
+                    &input.resource_id,
+                    &crate::state::request_trace_root(&ctx.parts().headers),
+                ),
             )
             .into());
         }

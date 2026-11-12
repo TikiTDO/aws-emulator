@@ -142,9 +142,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); this
-        // operation mints no ARN, so it takes nothing from `ctx`.
-        let _ = ctx;
+        // The engine is reachable from `&self` (constructor-injected); `ctx`
+        // carries the request's tracing header, which the refusal below closes
+        // with.
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(GetFirewallConfigErrorModeled::InternalServiceErrorException(
                 InternalServiceErrorException {
@@ -155,15 +155,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         // "Retrieves the configuration of the firewall behavior provided by DNS
-        // Firewall for a single VPC": a pure read. Every VPC HAS such a
-        // configuration — no operation creates or deletes one — so the store
-        // reports the record written for this VPC when there is one and the
-        // VPC's default configuration otherwise, and writes nothing either way.
+        // Firewall for a single VPC": a pure read. Every VPC of the account HAS
+        // such a configuration — no operation creates or deletes one — so the
+        // store reports the record written for this VPC when there is one and
+        // the VPC's default configuration otherwise, and writes nothing either
+        // way.
         //
-        // AWS answers `ResourceNotFoundException` for a VPC that does not
-        // exist; the emulator holds no VPC inventory to decide that against, so
-        // the modelled error stays unreported here rather than being guessed
-        // from the shape of the id.
+        // A `ResourceId` naming no VPC the account holds addresses no
+        // configuration at all, so it is refused with the `ResourceNotFound`
+        // this operation models before anything is projected: which VPCs exist
+        // is a fact of the account's own Amazon EC2 inventory
+        // (`crate::state::vpc_configuration_resource_is_unknown`), read with no
+        // lock of this service's store held.
+        if crate::state::vpc_configuration_resource_is_unknown(&*self.engine, &input.resource_id) {
+            return Err(GetFirewallConfigErrorModeled::ResourceNotFoundException(
+                crate::state::firewall_config_resource_not_found(
+                    &input.resource_id,
+                    &crate::state::request_trace_root(&ctx.parts().headers),
+                ),
+            )
+            .into());
+        }
+
         let config = state.lock().firewall_config(&input.resource_id);
 
         Ok(GetFirewallConfigOutput {

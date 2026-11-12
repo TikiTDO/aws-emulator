@@ -61,6 +61,110 @@ pub fn dnssec_validation_transition(validation: &str) -> Option<(&'static str, &
     }
 }
 
+/// Whether the account holds NO VPC under `resource_id`.
+///
+/// The per-VPC singleton configurations this service maintains — the DNS
+/// Firewall configuration, the Resolver behavior configuration and the
+/// configuration for DNSSEC validation — belong to a VPC of the caller's
+/// account, and which VPCs those are is a fact of the account's own Amazon EC2
+/// inventory ([`unresolvable_vpc_id`], the one place that resolution happens)
+/// rather than a value this service's caller supplies. So this is the
+/// precondition every one of those operations checks before it reports a
+/// configuration or writes one: an id naming no VPC of the account addresses no
+/// configuration at all, and is refused.
+///
+/// LOCKING. As [`unresolvable_vpc_id`]: the Amazon EC2 store lock is taken for
+/// this one pass and released before returning, so a handler calls this with no
+/// lock of its own held.
+pub fn vpc_configuration_resource_is_unknown<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    resource_id: &str,
+) -> bool {
+    unresolvable_vpc_id(engine, [resource_id]).is_some()
+}
+
+/// Whether the account holds NO VPC and NO Route 53 Profile under
+/// `resource_id`.
+///
+/// `ResolverConfig$ResourceId` is "the ID of the Amazon Virtual Private Cloud
+/// VPC or a Route 53 Profile that you're configuring Resolver for", so the
+/// Resolver BEHAVIOR configuration belongs to either of them — which is one
+/// member more than the DNS Firewall and DNSSEC validation configurations,
+/// whose own `ResourceId` docs name a VPC alone. Both inventories belong to the
+/// service that owns the resource: the VPCs of the account's own Amazon EC2
+/// inventory ([`vpc_configuration_resource_is_unknown`]) and the Profiles
+/// Route 53 Profiles holds, read through its own accessors.
+///
+/// LOCKING. As [`unresolvable_vpc_id`]: each store's lock is taken for one pass
+/// and released before returning, and no two are held at once, so a handler
+/// calls this with no lock of its own held.
+pub fn resolver_configuration_resource_is_unknown<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    resource_id: &str,
+) -> bool {
+    vpc_configuration_resource_is_unknown(engine, resource_id)
+        && !account_holds_profile(engine, resource_id)
+}
+
+/// Whether the account's own Route 53 Profiles inventory holds the Profile
+/// `profile_id` names — the one `GetProfile` answers from, keyed by the `Id`
+/// that service mints.
+fn account_holds_profile<Eng: Send + Sync + 'static>(engine: &Eng, profile_id: &str) -> bool {
+    let Some(state) =
+        ::service_com_amazonaws_route53profiles_route53profiles::state::service_state(engine)
+    else {
+        // No store for that service on this engine is no inventory to resolve
+        // against; the VPC half of the precondition has then already made the
+        // same allowance ([`unresolvable_ec2_id`]), so nothing is refused for
+        // want of an inventory.
+        return false;
+    };
+    let held = state.lock().profiles.contains_key(profile_id);
+    held
+}
+
+/// The `ResourceNotFoundException` the DNS Firewall per-VPC configuration
+/// operations answer for a `ResourceId` that names no VPC of the account.
+///
+/// Built here so `GetFirewallConfig` and `UpdateFirewallConfig` cannot drift
+/// apart: both report the can't-find sentence naming the id the REQUEST sent,
+/// under the DNS Firewall slice's own code for a resource the caller cannot
+/// address ([`RSLVR_CODE_RESOURCE_NOT_FOUND`], which
+/// [`resource_not_found_message`] renders), closed with the trace clause of the
+/// request ([`traced_message`]). No `ResourceType` is reported
+/// beside it: the resource that could not be found is a VPC of the account's
+/// Amazon EC2 inventory, which is not one of this service's own modelled
+/// resource types.
+pub fn firewall_config_resource_not_found(
+    resource_id: &str,
+    trace_root: &str,
+) -> ResourceNotFoundException {
+    ResourceNotFoundException {
+        message: Some(traced_message(
+            resource_not_found_message(resource_id),
+            trace_root,
+        )),
+        resource_type: None,
+    }
+}
+
+/// The same refusal for the Resolver behavior configuration operations
+/// (`GetResolverConfig`, `UpdateResolverConfig`), whose recorded responses carry
+/// the one can't-find sentence under the Resolver code
+/// ([`RSLVR_CODE_RESOLVER_RESOURCE_NOT_FOUND`]) rather than the DNS Firewall
+/// one, and carry it ALONE: the trace clause the DNS Firewall slice closes its
+/// refusal with ([`firewall_config_resource_not_found`]) is not part of this
+/// one, as the recorded responses of the two show.
+pub fn resolver_config_resource_not_found(resource_id: &str) -> ResourceNotFoundException {
+    ResourceNotFoundException {
+        message: Some(coded_resource_not_found_message(
+            RSLVR_CODE_RESOLVER_RESOURCE_NOT_FOUND,
+            resource_id,
+        )),
+        resource_type: None,
+    }
+}
+
 /// The `Id` of a VPC's configuration for DNSSEC validation. AWS names one
 /// `rdsc-<hex>`; every result fits `ResourceId` (length 1..64).
 ///

@@ -18,9 +18,8 @@ use serde_json::{json, Value};
 use service_com_amazonaws_route53resolver_route53resolver::state::{
     service_state, DNSSEC_STATUS_DISABLED, DNSSEC_STATUS_ENABLING, VALIDATION_ENABLE,
 };
-use smithy_server_runtime::MultiServiceRouter;
 
-use super::harness::{emulator, emulator_on, expect_error, ok, string_member};
+use super::harness::{emulator, emulator_on, expect_error, ok, string_member, Emulator};
 
 /// The `ResolverDNSSECConfig` a get or update answered with, owned so two answers can be
 /// compared after both calls have returned.
@@ -30,7 +29,7 @@ fn config(body: &Value) -> Value {
         .unwrap_or_else(|| panic!("the response carries a ResolverDNSSECConfig, got {body}"))
 }
 
-async fn get(router: &MultiServiceRouter, resource_id: &str) -> Value {
+async fn get(router: &Emulator, resource_id: &str) -> Value {
     config(
         &ok(
             router,
@@ -74,6 +73,9 @@ async fn reading_a_configuration_stores_nothing() {
 
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let router = emulator_on(Arc::clone(&engine));
+    // Every row's VPC is one the account holds: the read resolves its
+    // `ResourceId` against the account's own Amazon EC2 inventory.
+    router.hold_vpcs(cases.iter().map(|(_, resource_id)| resource_id));
 
     for (case, resource_id) in &cases {
         // Three reads of the same VPC: the first reports the configuration the service
@@ -143,6 +145,7 @@ async fn a_resource_id_outside_the_modelled_length_is_refused() {
         ("1 character, the modelled minimum", "z".to_string()),
         ("64 characters, the modelled maximum", "z".repeat(64)),
     ] {
+        router.hold_vpcs([&resource_id]);
         let reported = get(&router, &resource_id).await;
         assert_eq!(
             string_member(&reported, "ResourceId"),

@@ -338,10 +338,9 @@ async fn associate_rule_group(router: &Emulator, rule_group: &str, vpc_id: &str,
 ///
 /// The rows span what the rule generalises over — how the VPC came to be known:
 /// a VPC the account created and no Resolver call has ever named, one whose
-/// firewall failure mode was written, one a DNS Firewall rule group is
-/// associated with, and a VPC only this service's own records name (the
-/// inventory holds none under that id). Each row is asserted against both
-/// slices, so the rule is not pinned to one collection.
+/// firewall failure mode was written, and one a DNS Firewall rule group is
+/// associated with. Each row is asserted against both slices, so the rule is not
+/// pinned to one collection.
 #[tokio::test]
 async fn every_vpc_the_account_holds_is_listed_with_the_configuration_its_reader_reports() {
     let router = emulator_with_ec2();
@@ -358,24 +357,14 @@ async fn every_vpc_the_account_holds_is_listed_with_the_configuration_its_reader
     let rule_group = create_rule_group(&router, "group-for-inventory").await;
     associate_rule_group(&router, &rule_group, &associated, 101).await;
 
-    // A VPC the account's inventory holds nothing under, which only this
-    // service's own records name: a well-formed id above everything Amazon
-    // EC2's ONE id mint has issued, so no VPC of the account carries it.
-    let record_only = "vpc-0000000000000ffff";
-    update_firewall_config(&router, record_only, "USE_LOCAL_RESOURCE_SETTING").await;
-
     let rows = [
         ("a VPC no Resolver call has ever named", untouched.as_str()),
         ("a VPC whose firewall failure mode was written", written.as_str()),
         ("a VPC a rule group is associated with", associated.as_str()),
-        ("a VPC only a Resolver record names", record_only),
     ];
 
-    // The collection is exactly the account's own VPC inventory, beside the
-    // VPCs only this service's records name.
-    let mut expected_ids = inventory_vpc_ids(&router).await;
-    expected_ids.push(record_only.to_string());
-    let expected_ids = sorted(expected_ids);
+    // The collection is exactly the account's own VPC inventory.
+    let expected_ids = sorted(inventory_vpc_ids(&router).await);
     for (_, resource_id) in rows {
         assert!(
             expected_ids.iter().any(|held| held == resource_id),

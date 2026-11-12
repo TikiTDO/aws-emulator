@@ -143,7 +143,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // `ctx` carries the request's tracing header, which the refusal below
+        // closes with.
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 GetResolverDnssecConfigErrorModeled::InternalServiceErrorException(
@@ -157,11 +158,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "Gets DNSSEC validation information for a specified resource": the
         // configuration is a per-VPC singleton the service maintains itself, so
-        // every VPC has one and a VPC nothing has written to reports the default
-        // configuration (validation off) rather than a refusal. A pure read —
-        // the reported `ValidationStatus` is computed from the stored status
-        // pair and the due instant, and a VPC with no record is not given one,
-        // so nothing about the configuration changes for the next caller.
+        // every VPC of the account has one and a VPC nothing has written to
+        // reports the default configuration (validation off) rather than a
+        // refusal. A pure read — the reported `ValidationStatus` is computed
+        // from the stored status pair and the due instant, and a VPC with no
+        // record is not given one, so nothing about the configuration changes
+        // for the next caller.
+        //
+        // A `ResourceId` the caller cannot reach — no VPC of the account
+        // carries it (`crate::state::vpc_configuration_resource_is_unknown`) —
+        // is answered with the `AccessDenied` this operation models, and not
+        // with a configuration: the refusal states that the caller is granted
+        // nothing on that resource and discloses NOTHING about whether it
+        // exists (`crate::state::resolver_access_denied`).
+        if crate::state::vpc_configuration_resource_is_unknown(&*self.engine, &input.resource_id) {
+            return Err(GetResolverDnssecConfigErrorModeled::AccessDeniedException(
+                crate::state::resolver_access_denied(&crate::state::request_trace_root(
+                    &ctx.parts().headers,
+                )),
+            )
+            .into());
+        }
+
         let store = state.lock();
         let record = store.resolver_dnssec_config(&input.resource_id);
 

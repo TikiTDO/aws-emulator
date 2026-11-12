@@ -33,8 +33,22 @@ service-com-amazonaws-ec2-amazonec2 = { workspace = true }
 service-com-amazonaws-outposts-outpostsolafservice = { workspace = true }
 # The account's own Amazon S3 inventory: the domain file `ImportFirewallDomains`
 # reads is an object of that store, read through its own accessors
-# (`state::domain_imports`).
+# (`state::domain_imports`), and an S3 bucket is one of the destinations a
+# Resolver query logging configuration delivers to.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
+# The other inventories a query logging configuration's `DestinationArn` is
+# resolved against (`state::query_log_destinations`): a CloudWatch Logs log
+# group, a Kinesis data stream and a Kinesis Data Firehose delivery stream.
+service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
+service-com-amazonaws-kinesis-kinesis-20131202 = { workspace = true }
+service-com-amazonaws-firehose-firehose-20150804 = { workspace = true }
+# The account's own Route 53 Profiles inventory: `ResolverConfig$ResourceId` is a
+# VPC or a Route 53 Profile, so the Resolver behavior configuration resolves the
+# id it is given against the Profiles that service holds as well.
+service-com-amazonaws-route53profiles-route53profiles = { workspace = true }
+# The ONE reading and minting of an AWS X-Ray trace id, which the refusals of the
+# per-VPC configuration operations close with.
+service-common = { path = "../common" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

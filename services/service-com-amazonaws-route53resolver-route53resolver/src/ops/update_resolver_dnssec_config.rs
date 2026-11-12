@@ -148,7 +148,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // `ctx` carries the request's tracing header, which the refusal below
+        // closes with.
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 UpdateResolverDnssecConfigErrorModeled::InternalServiceErrorException(
@@ -183,6 +184,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let now = ::std::time::Instant::now();
+
+        // A `ResourceId` the caller cannot reach — no VPC of the account
+        // carries it (`crate::state::vpc_configuration_resource_is_unknown`) —
+        // is answered with the `AccessDenied` this operation models and NOTHING
+        // is written: the refusal states that the caller is granted nothing on
+        // that resource and discloses nothing about whether it exists, the same
+        // way the read of the validation status does.
+        if crate::state::vpc_configuration_resource_is_unknown(&*self.engine, &input.resource_id) {
+            return Err(
+                UpdateResolverDnssecConfigErrorModeled::AccessDeniedException(
+                    crate::state::resolver_access_denied(&crate::state::request_trace_root(
+                        &ctx.parts().headers,
+                    )),
+                )
+                .into(),
+            );
+        }
+
         let mut store = state.lock();
 
         // "Updates an existing DNSSEC validation configuration. If there is no

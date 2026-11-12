@@ -140,6 +140,13 @@ async fn a_created_query_log_config_is_read_back_from_state() {
     ];
 
     let router = emulator();
+    // Every row's destination is one the account holds: a create resolves its
+    // `DestinationArn` against the store of the service that owns it.
+    router.hold_query_log_destinations(
+        cases
+            .iter()
+            .filter_map(|case| case.body.get("DestinationArn").and_then(Value::as_str)),
+    );
     let mut seen_ids: Vec<String> = Vec::new();
 
     for CreateCase {
@@ -252,6 +259,7 @@ async fn a_created_query_log_config_is_read_back_from_state() {
 #[tokio::test]
 async fn a_created_config_settles_from_creating_to_created() {
     let router = emulator();
+    router.hold_query_log_destinations(["arn:aws:s3:::amzn-s3-demo-bucket"]);
     let created = ok(
         &router,
         "CreateResolverQueryLogConfig",
@@ -317,6 +325,10 @@ async fn a_created_config_settles_from_creating_to_created() {
 #[tokio::test]
 async fn a_repeated_creator_request_id_does_not_create_a_second_config() {
     let router = emulator();
+    router.hold_query_log_destinations([
+        "arn:aws:s3:::amzn-s3-demo-bucket",
+        "arn:aws:logs:us-west-2:123456789012:log-group:/queries:*",
+    ]);
 
     for (case, body) in [
         (
@@ -363,6 +375,7 @@ async fn a_repeated_creator_request_id_does_not_create_a_second_config() {
 #[tokio::test]
 async fn a_destination_that_is_no_log_destination_is_refused() {
     let router = emulator();
+    router.hold_query_log_destinations(["arn:aws:s3:::amzn-s3-demo-bucket"]);
 
     for (case, destination) in [
         ("not an ARN at all", "amzn-s3-demo-bucket"),
@@ -442,6 +455,7 @@ async fn a_destination_that_is_no_log_destination_is_refused() {
 #[tokio::test]
 async fn a_name_outside_the_modelled_constraints_is_refused() {
     let router = emulator();
+    router.hold_query_log_destinations(["arn:aws:s3:::amzn-s3-demo-bucket"]);
 
     for (case, name) in [
         ("one character past the 64-character maximum", "a".repeat(65)),
@@ -494,6 +508,7 @@ async fn a_name_outside_the_modelled_constraints_is_refused() {
 #[tokio::test]
 async fn an_unknown_config_id_is_reported_as_missing() {
     let router = emulator();
+    router.hold_query_log_destinations(["arn:aws:s3:::amzn-s3-demo-bucket"]);
     let created = ok(
         &router,
         "CreateResolverQueryLogConfig",
@@ -546,6 +561,7 @@ async fn an_unknown_config_id_is_reported_as_missing() {
 #[tokio::test]
 async fn the_tags_a_create_carries_are_stored_with_the_configuration() {
     let router = emulator();
+    router.hold_query_log_destinations(["arn:aws:s3:::amzn-s3-demo-bucket"]);
 
     for (case, tags) in [
         ("no Tags member", json!(null)),
@@ -585,6 +601,9 @@ async fn the_tags_a_create_carries_are_stored_with_the_configuration() {
 #[tokio::test]
 async fn many_creates_in_one_store_are_each_served_and_distinct() {
     let router = emulator();
+    router.hold_query_log_destinations(
+        (0..25).map(|index| format!("arn:aws:s3:::amzn-s3-demo-bucket-{index}")),
+    );
     let mut ids: Vec<String> = Vec::new();
     for index in 0..25 {
         let created = ok(

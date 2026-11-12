@@ -81,7 +81,7 @@ async fn walk(router: &MultiServiceRouter, request: &Value, case: &str) -> Vec<V
 }
 
 /// Read one VPC's firewall configuration through `GetFirewallConfig`.
-async fn get_config(router: &MultiServiceRouter, resource_id: &str) -> Value {
+async fn get_config(router: &Emulator, resource_id: &str) -> Value {
     let body = ok(
         router,
         "GetFirewallConfig",
@@ -178,7 +178,13 @@ async fn associate_rule_with_vpc(router: &Emulator, endpoint: &str, vpc: &str) {
 }
 
 /// Write one VPC's failure mode through `UpdateFirewallConfig`.
-async fn update_firewall_config(router: &MultiServiceRouter, resource_id: &str, fail_open: &str) {
+///
+/// The VPC is registered in the account's own Amazon EC2 store first: a per-VPC
+/// configuration belongs to a VPC of the account, which the write resolves
+/// against that store — the same way [`associate_rule_with_vpc`] registers the
+/// VPC a rule is associated with.
+async fn update_firewall_config(router: &Emulator, resource_id: &str, fail_open: &str) {
+    router.hold_vpcs([resource_id]);
     ok(
         router,
         "UpdateFirewallConfig",
@@ -195,6 +201,17 @@ async fn update_firewall_config(router: &MultiServiceRouter, resource_id: &str, 
 async fn reading_a_configuration_adds_no_vpc_to_the_listing() {
     let router = emulator();
 
+    // Rows spanning the forms of VPC id `ResourceId` (length 1..64) admits, so
+    // what is pinned is "a read registers nothing" and not one id's treatment.
+    // Each one is a VPC the account holds, which is what the read resolves its
+    // `ResourceId` against.
+    let rows = [
+        ("the 8-hex-digit form", "vpc-1a2b3c4d"),
+        ("the 17-hex-digit form", "vpc-0abcdef1234567890"),
+        ("an id in no form AWS mints", "my.private.network"),
+    ];
+    router.hold_vpcs(rows.iter().map(|(_, resource_id)| *resource_id));
+
     // The collection an account starts with: the VPCs its own Amazon EC2
     // inventory holds, reported as a list and with no cursor owed.
     let page = ok(&router, "ListFirewallConfigs", json!({})).await;
@@ -210,13 +227,7 @@ async fn reading_a_configuration_adds_no_vpc_to_the_listing() {
         "case \"a store nobody wrote to\": no cursor is owed on a page that ends the collection, got {page}"
     );
 
-    // Rows spanning the forms of VPC id `ResourceId` (length 1..64) admits, so
-    // what is pinned is "a read registers nothing" and not one id's treatment.
-    for (case, resource_id) in [
-        ("the 8-hex-digit form", "vpc-1a2b3c4d"),
-        ("the 17-hex-digit form", "vpc-0abcdef1234567890"),
-        ("an id in no form AWS mints", "my.private.network"),
-    ] {
+    for (case, resource_id) in rows {
         let read = get_config(&router, resource_id).await;
         assert_eq!(
             string_member(&read, "FirewallFailOpen"),
@@ -263,6 +274,7 @@ async fn every_vpc_the_service_knows_of_is_listed_once_with_its_own_configuratio
         "ENABLED".to_string(),
     ));
 
+    router.hold_vpcs(["vpc-00000000000000012"]);
     ok(
         &router,
         "UpdateResolverConfig",
@@ -275,6 +287,7 @@ async fn every_vpc_the_service_knows_of_is_listed_once_with_its_own_configuratio
         FAIL_OPEN_DEFAULT.to_string(),
     ));
 
+    router.hold_vpcs(["vpc-00000000000000013"]);
     ok(
         &router,
         "UpdateResolverDnssecConfig",
@@ -379,7 +392,7 @@ async fn paging_walks_every_firewall_configuration_exactly_once() {
     for index in 0..written {
         update_firewall_config(&router, &format!("vpc-paged-{index}"), "ENABLED").await;
     }
-    let known = written + router.held_vpc_ids().len();
+    let known = router.held_vpc_ids().len();
 
     let expected: Vec<String> = walk(&router, &json!({}), "MaxResults omitted")
         .await
@@ -505,9 +518,9 @@ async fn a_next_token_this_query_did_not_mint_is_refused() {
     for index in 0..8 {
         update_firewall_config(&router, &format!("vpc-cursor-{index}"), "ENABLED").await;
     }
-    // The VPCs the account already holds are part of the collection, so what the
-    // resumed page must hold is read off its size rather than assumed.
-    let known = 8 + router.held_vpc_ids().len();
+    // The VPCs the account holds are the collection, so what the resumed page
+    // must hold is read off its size rather than assumed.
+    let known = router.held_vpc_ids().len();
 
     let page = ok(
         &router,

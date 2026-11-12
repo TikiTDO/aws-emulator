@@ -11,8 +11,13 @@
 //! copy of the dispatch, the error reading and the timestamp parsing.
 
 use serde_json::{json, Value};
+use service_com_amazonaws_cloudwatchlogs_logs_20140328 as logs;
 use service_com_amazonaws_ec2_amazonec2 as ec2;
+use service_com_amazonaws_firehose_firehose_20150804 as firehose;
+use service_com_amazonaws_kinesis_kinesis_20131202 as kinesis;
+use service_com_amazonaws_route53profiles_route53profiles as profiles;
 use service_com_amazonaws_route53resolver_route53resolver::EmulatedService;
+use service_com_amazonaws_s3_amazons3 as s3;
 use smithy_server_runtime::MultiServiceRouter;
 use std::sync::Arc;
 
@@ -250,6 +255,187 @@ impl Emulator {
     fn ec2_store(&self) -> engine::ServiceState<ec2::state::ComAmazonawsEc2Amazonec2State> {
         ec2::state::service_state(&*self.engine)
             .expect("the in-memory engine carries the account's Amazon EC2 store")
+    }
+
+    /// Put one Route 53 Profile into the account's own Route 53 Profiles store,
+    /// under the id `profile_id`, and answer that id.
+    ///
+    /// `ResolverConfig$ResourceId` is "the ID of the Amazon Virtual Private
+    /// Cloud VPC or a Route 53 Profile that you're configuring Resolver for", so
+    /// the Resolver behavior configuration resolves the id it is given against
+    /// that inventory too — and a suite whose call must be served for a Profile
+    /// registers it here first, the way [`Emulator::hold_vpcs`] registers a VPC.
+    pub fn hold_profile(&self, profile_id: &str) -> String {
+        let state = profiles::state::service_state(&*self.engine)
+            .expect("the in-memory engine carries the account's Route 53 Profiles store");
+        let mut store = state.lock();
+        let now = std::time::SystemTime::now();
+        store
+            .profiles
+            .entry(profile_id.to_string())
+            .or_insert_with(|| profiles::state::Profile {
+                id: profile_id.to_string(),
+                arn: format!(
+                    "arn:aws:route53profiles:{REGION}:{ACCOUNT}:profile/{profile_id}"
+                ),
+                name: format!("profile-{profile_id}"),
+                owner_id: ACCOUNT.to_string(),
+                status: profiles::state::STATUS_COMPLETE.to_string(),
+                status_message: None,
+                share_status: profiles::state::SHARE_STATUS_NOT_SHARED.to_string(),
+                creation_time: now,
+                modification_time: now,
+                client_token: format!("token-{profile_id}"),
+            });
+        profile_id.to_string()
+    }
+
+    /// Put the resource each `DestinationArn` names into the store of the
+    /// service that OWNS it, so a query logging configuration naming that
+    /// destination can be created.
+    ///
+    /// `CreateResolverQueryLogConfig` delivers to a destination the account
+    /// HOLDS — an Amazon S3 bucket, a CloudWatch Logs log group, a Kinesis data
+    /// stream or a Kinesis Data Firehose delivery stream — and resolves the ARN
+    /// it is given against that service's own store, so a suite whose create
+    /// must be served registers its destinations here first, the way
+    /// [`Emulator::hold_vpcs`] registers the VPCs an association names.
+    ///
+    /// A destination already held is left exactly as it was.
+    pub fn hold_query_log_destinations<I>(&self, destination_arns: I)
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+    {
+        for destination_arn in destination_arns {
+            let destination_arn = destination_arn.as_ref();
+            let fields: Vec<&str> = destination_arn.splitn(6, ':').collect();
+            let [_, _, service, region, _, resource] = fields.as_slice() else {
+                panic!("a destination ARN carries six fields, got {destination_arn:?}");
+            };
+            match *service {
+                // The destination is the BUCKET, whatever key prefix the ARN
+                // carries under it.
+                "s3" => self.hold_bucket(resource.split('/').next().unwrap_or_default()),
+                "logs" => {
+                    let group = resource
+                        .strip_prefix("log-group:")
+                        .map(|group| group.strip_suffix(":*").unwrap_or(group))
+                        .unwrap_or_else(|| panic!("a log-group ARN, got {destination_arn:?}"));
+                    self.hold_log_group(region, group);
+                }
+                "kinesis" => {
+                    let stream = resource
+                        .strip_prefix("stream/")
+                        .unwrap_or_else(|| panic!("a data-stream ARN, got {destination_arn:?}"));
+                    self.hold_data_stream(region, stream);
+                }
+                "firehose" => {
+                    let stream = resource.strip_prefix("deliverystream/").unwrap_or_else(|| {
+                        panic!("a delivery-stream ARN, got {destination_arn:?}")
+                    });
+                    self.hold_delivery_stream(destination_arn, stream);
+                }
+                other => panic!("{other:?} owns no query log destination: {destination_arn:?}"),
+            }
+        }
+    }
+
+    /// Put one bucket into the account's own Amazon S3 store.
+    fn hold_bucket(&self, bucket: &str) {
+        let state = s3::state::service_state(&*self.engine)
+            .expect("the in-memory engine carries the account's Amazon S3 store");
+        let _creation = state.lock().create_bucket(bucket, REGION);
+    }
+
+    /// Put one log group into the account's own CloudWatch Logs store.
+    fn hold_log_group(&self, region: &str, group: &str) {
+        let state = logs::state::service_state(&*self.engine)
+            .expect("the in-memory engine carries the account's CloudWatch Logs store");
+        let mut store = state.lock();
+        if store.log_groups.contains_key(group) {
+            return;
+        }
+        store.log_groups.insert(
+            group.to_string(),
+            logs::state::LogGroupRecord::new(region, group, 0),
+        );
+    }
+
+    /// Put one Kinesis data stream into the account's own Amazon Kinesis store,
+    /// held by the Region's endpoint and active from the moment it exists.
+    fn hold_data_stream(&self, region: &str, stream: &str) {
+        let state = kinesis::state::service_state(&*self.engine)
+            .expect("the in-memory engine carries the account's Amazon Kinesis store");
+        let mut store = state.lock();
+        let key = kinesis::state::RegionalName::new(region, stream);
+        if store.streams.contains_key(&key) {
+            return;
+        }
+        let now = std::time::SystemTime::now();
+        store.streams.insert(
+            key,
+            kinesis::state::Stream {
+                name: stream.to_string(),
+                region: region.to_string(),
+                arn: kinesis::state::stream_arn(region, stream),
+                stream_mode: kinesis::state::STREAM_MODE_ON_DEMAND.to_string(),
+                shards: Vec::new(),
+                retention_period_hours: kinesis::state::DEFAULT_RETENTION_PERIOD_HOURS,
+                created_at: now,
+                active_at: now,
+                encryption_type: kinesis::state::ENCRYPTION_TYPE_NONE.to_string(),
+                key_id: None,
+                shard_level_metrics: Vec::new(),
+                warm_throughput_mi_bps: None,
+                max_record_size_in_ki_b: kinesis::state::DEFAULT_MAX_RECORD_SIZE_KI_B,
+                record_distribution_strategy: None,
+                deleted_at: None,
+                updating_until: None,
+                reshards: Vec::new(),
+                encryption_starts: Vec::new(),
+                encryption_stops: Vec::new(),
+                tags: Default::default(),
+                consumers: Vec::new(),
+                policy: None,
+            },
+        );
+    }
+
+    /// Put one Firehose delivery stream into the account's own Kinesis Data
+    /// Firehose store, active from the moment it exists.
+    fn hold_delivery_stream(&self, arn: &str, stream: &str) {
+        let state = firehose::state::service_state(&*self.engine)
+            .expect("the in-memory engine carries the account's Firehose store");
+        let mut store = state.lock();
+        if store.streams.contains_key(stream) {
+            return;
+        }
+        let now = std::time::SystemTime::now();
+        store.streams.insert(
+            stream.to_string(),
+            firehose::state::DeliveryStream {
+                name: stream.to_string(),
+                arn: arn.to_string(),
+                status: firehose::state::StreamStatus::Active,
+                pending: None,
+                stream_type: "DirectPut".to_string(),
+                version_id: 1,
+                create_timestamp: now,
+                last_update_timestamp: now,
+                source: None,
+                destinations: Vec::new(),
+                encryption: None,
+                pending_encryption: None,
+                encryption_calls: Vec::new(),
+                tags: Default::default(),
+                records: Vec::new(),
+                buffered_bytes: 0,
+                next_destination_id: 1,
+                delivery_retry_at: None,
+                source_positions: Default::default(),
+            },
+        );
     }
 }
 

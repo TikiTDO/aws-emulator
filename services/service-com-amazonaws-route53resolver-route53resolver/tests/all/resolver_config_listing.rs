@@ -96,7 +96,7 @@ async fn walk(router: &MultiServiceRouter, request: &Value, case: &str) -> Vec<V
 }
 
 /// Read one VPC's Resolver behavior configuration through `GetResolverConfig`.
-async fn get_config(router: &MultiServiceRouter, resource_id: &str) -> Value {
+async fn get_config(router: &Emulator, resource_id: &str) -> Value {
     let body = ok(
         router,
         "GetResolverConfig",
@@ -109,7 +109,13 @@ async fn get_config(router: &MultiServiceRouter, resource_id: &str) -> Value {
 }
 
 /// Move one VPC's autodefined-reverse setting through `UpdateResolverConfig`.
-async fn update_resolver_config(router: &MultiServiceRouter, resource_id: &str, flag: &str) {
+///
+/// The VPC is registered in the account's own Amazon EC2 store first: a per-VPC
+/// configuration belongs to a VPC of the account, which the write resolves
+/// against that store — the same way [`associate_rule_with_vpc`] registers the
+/// VPC a rule is associated with.
+async fn update_resolver_config(router: &Emulator, resource_id: &str, flag: &str) {
+    router.hold_vpcs([resource_id]);
     ok(
         router,
         "UpdateResolverConfig",
@@ -210,6 +216,22 @@ async fn associate_rule_with_vpc(router: &Emulator, endpoint: &str, vpc: &str) {
 async fn reading_a_configuration_adds_no_vpc_to_the_listing() {
     let router = emulator();
 
+    // Rows spanning the forms of VPC id `ResourceId` (length 1..64) admits, so
+    // what is pinned is "a read registers nothing" and not one id's treatment.
+    // Each one is a VPC the account holds, which is what the read resolves its
+    // `ResourceId` against.
+    let rows: Vec<(&str, String)> = vec![
+        ("the 8-hex-digit form", "vpc-1a2b3c4d".to_string()),
+        ("the 17-hex-digit form", "vpc-0abcdef1234567890".to_string()),
+        ("one character, the modelled minimum", "q".to_string()),
+        (
+            "64 characters, the modelled maximum",
+            format!("vpc-{}", "7".repeat(60)),
+        ),
+        ("an id in no form AWS mints", "my.private.network".to_string()),
+    ];
+    router.hold_vpcs(rows.iter().map(|(_, resource_id)| resource_id));
+
     // The collection an account starts with: the VPCs its own Amazon EC2
     // inventory holds, reported as a list and with no cursor owed.
     let page = ok(&router, "ListResolverConfigs", json!({})).await;
@@ -228,18 +250,7 @@ async fn reading_a_configuration_adds_no_vpc_to_the_listing() {
         "case \"a store nobody wrote to\": no cursor is owed on a page that ends the collection, got {page}"
     );
 
-    // Rows spanning the forms of VPC id `ResourceId` (length 1..64) admits, so
-    // what is pinned is "a read registers nothing" and not one id's treatment.
-    for (case, resource_id) in [
-        ("the 8-hex-digit form", "vpc-1a2b3c4d".to_string()),
-        ("the 17-hex-digit form", "vpc-0abcdef1234567890".to_string()),
-        ("one character, the modelled minimum", "q".to_string()),
-        (
-            "64 characters, the modelled maximum",
-            format!("vpc-{}", "7".repeat(60)),
-        ),
-        ("an id in no form AWS mints", "my.private.network".to_string()),
-    ] {
+    for (case, resource_id) in rows {
         let read = get_config(&router, &resource_id).await;
         assert_eq!(
             string_member(&read, "AutodefinedReverse"),
@@ -287,6 +298,7 @@ async fn every_vpc_the_service_knows_of_is_listed_once_with_its_own_configuratio
         AUTODEFINED_REVERSE_DISABLED.to_string(),
     ));
 
+    router.hold_vpcs(["vpc-00000000000000022"]);
     ok(
         &router,
         "UpdateFirewallConfig",
@@ -299,6 +311,7 @@ async fn every_vpc_the_service_knows_of_is_listed_once_with_its_own_configuratio
         AUTODEFINED_REVERSE_ENABLED.to_string(),
     ));
 
+    router.hold_vpcs(["vpc-00000000000000023"]);
     ok(
         &router,
         "UpdateResolverDnssecConfig",
@@ -515,7 +528,7 @@ async fn paging_walks_every_resolver_configuration_exactly_once() {
         .await;
     }
     settle().await;
-    let known = written + router.held_vpc_ids().len();
+    let known = router.held_vpc_ids().len();
 
     let expected: Vec<String> = walk(&router, &json!({}), "MaxResults omitted")
         .await
@@ -661,9 +674,9 @@ async fn a_next_token_this_query_did_not_mint_is_refused() {
         )
         .await;
     }
-    // The VPCs the account already holds are part of the collection, so what the
-    // resumed page must hold is read off its size rather than assumed.
-    let known = 8 + router.held_vpc_ids().len();
+    // The VPCs the account holds are the collection, so what the resumed page
+    // must hold is read off its size rather than assumed.
+    let known = router.held_vpc_ids().len();
 
     let page = ok(
         &router,
@@ -775,6 +788,7 @@ async fn listing_the_configurations_changes_nothing() {
     // One VPC the store holds a record for, and one it only knows of through
     // another record — so a walk has both kinds to leave alone.
     update_resolver_config(&router, "vpc-pure-0", AUTODEFINED_REVERSE_FLAG_DISABLE).await;
+    router.hold_vpcs(["vpc-pure-1"]);
     ok(
         &router,
         "UpdateFirewallConfig",

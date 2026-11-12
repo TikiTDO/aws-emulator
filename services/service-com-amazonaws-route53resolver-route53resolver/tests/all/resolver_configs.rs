@@ -23,9 +23,8 @@ use service_com_amazonaws_route53resolver_route53resolver::state::{
     AUTODEFINED_REVERSE_USE_LOCAL_RESOURCE_SETTING, MAX_STORED_RESOLVER_CONFIGS,
     PROVISIONING_DELAY,
 };
-use smithy_server_runtime::MultiServiceRouter;
 
-use super::harness::{call, error_type, expect_error, ok, string_member, ACCOUNT};
+use super::harness::{call, error_type, expect_error, ok, string_member, Emulator, ACCOUNT};
 
 /// The `ResolverConfig` of a get or update response.
 fn config(body: &Value) -> &Value {
@@ -40,7 +39,7 @@ async fn settle() {
 }
 
 /// Read one VPC's Resolver configuration over the wire.
-async fn get(router: &MultiServiceRouter, resource_id: &str) -> Value {
+async fn get(router: &Emulator, resource_id: &str) -> Value {
     let body = ok(
         router,
         "GetResolverConfig",
@@ -52,7 +51,7 @@ async fn get(router: &MultiServiceRouter, resource_id: &str) -> Value {
 
 /// Set one VPC's autodefined-reverse setting over the wire, through a call that
 /// must succeed.
-async fn update(router: &MultiServiceRouter, resource_id: &str, flag: &str) -> Value {
+async fn update(router: &Emulator, resource_id: &str, flag: &str) -> Value {
     let body = ok(
         router,
         "UpdateResolverConfig",
@@ -132,6 +131,9 @@ async fn every_vpc_reports_a_resolver_configuration_at_its_documented_default() 
     ];
 
     let router = super::harness::emulator();
+    // Every row's VPC is one the account holds: both operations resolve their
+    // `ResourceId` against the account's own Amazon EC2 inventory.
+    router.hold_vpcs(cases.iter().map(|(_, resource_id)| resource_id));
     let mut seen: Vec<(String, String)> = Vec::new();
 
     for (case, resource_id) in &cases {
@@ -213,6 +215,7 @@ async fn an_update_moves_the_status_through_its_transient_value_and_is_read_back
     ];
 
     let router = super::harness::emulator();
+    router.hold_vpcs(cases.iter().map(|case| &case.resource_id));
     let mut written: Vec<(String, String, &'static str)> = Vec::with_capacity(cases.len());
 
     for case in &cases {
@@ -281,6 +284,7 @@ async fn an_update_moves_the_status_through_its_transient_value_and_is_read_back
 #[tokio::test]
 async fn an_update_to_the_setting_already_in_effect_moves_nothing() {
     let router = super::harness::emulator();
+    router.hold_vpcs(["vpc-already-enabled", "vpc-in-flight"]);
 
     // A VPC at its default, asked for the setting it is already settled in.
     let settled_already = update(&router, "vpc-already-enabled", AUTODEFINED_REVERSE_FLAG_ENABLE).await;
@@ -337,6 +341,7 @@ async fn an_update_to_the_setting_already_in_effect_moves_nothing() {
 async fn an_unmodelled_autodefined_reverse_flag_is_refused_and_stores_nothing() {
     let router = super::harness::emulator();
     let resource_id = "vpc-refused";
+    router.hold_vpcs([resource_id]);
 
     update(&router, resource_id, AUTODEFINED_REVERSE_FLAG_DISABLE).await;
     settle().await;
@@ -408,6 +413,7 @@ async fn a_resource_id_outside_the_modelled_length_is_refused() {
 #[tokio::test]
 async fn a_request_missing_a_required_member_is_refused() {
     let router = super::harness::emulator();
+    router.hold_vpcs(["vpc-missing-member"]);
 
     for (case, operation, body) in [
         (
@@ -453,6 +459,14 @@ async fn a_request_missing_a_required_member_is_refused() {
 #[tokio::test]
 async fn the_configuration_store_is_bounded() {
     let router = super::harness::emulator();
+    router.hold_vpcs(
+        (0..MAX_STORED_RESOLVER_CONFIGS)
+            .map(|index| format!("vpc-bound-{index}"))
+            .chain([
+                "vpc-one-too-many".to_string(),
+                "vpc-at-the-bound-no-op".to_string(),
+            ]),
+    );
 
     for index in 0..MAX_STORED_RESOLVER_CONFIGS {
         update(

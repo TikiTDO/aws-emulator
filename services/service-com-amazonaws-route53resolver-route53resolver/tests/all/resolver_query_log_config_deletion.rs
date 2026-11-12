@@ -124,6 +124,9 @@ fn config(body: &Value) -> &Value {
 /// Create the configuration `row` describes and answer the record the create
 /// reported.
 async fn create(router: &Emulator, row: &DeleteCase) -> Value {
+    // The create resolves its `DestinationArn` against the store of the service
+    // that owns the destination, so the account holds that destination first.
+    router.hold_query_log_destinations([row.destination_arn]);
     let mut body = json!({
         "CreatorRequestId": row.creator_request_id,
         "Name": row.name,
@@ -345,6 +348,7 @@ async fn a_delete_takes_out_exactly_the_configuration_it_names() {
 #[tokio::test]
 async fn a_deleted_configuration_releases_its_creator_request_id() {
     let router = emulator();
+    router.hold_query_log_destinations(["arn:aws:s3:::amzn-s3-demo-bucket"]);
     let request = json!({
         "CreatorRequestId": "req-released",
         "Name": "released",

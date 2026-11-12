@@ -358,6 +358,9 @@ async fn tag_carrying_writes(router: &Emulator) -> Vec<WriteCase> {
 #[tokio::test]
 async fn a_write_carrying_an_unacceptable_tag_is_refused_and_creates_nothing() {
     let router = emulator_with_outposts();
+    // The query-logging create resolves its `DestinationArn` against the store
+    // of the service that owns the destination, so the account holds it first.
+    router.hold_query_log_destinations(["arn:aws:s3:::amzn-s3-demo-bucket"]);
 
     for write in tag_carrying_writes(&router).await {
         let mut refused = write.body.clone();

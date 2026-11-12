@@ -66,6 +66,9 @@ const SEEDS: [(&str, &str, &[&str]); 3] = [
 async fn seed_associations(router: &Emulator) -> Vec<Seeded> {
     let mut seeded = Vec::new();
     for (index, (name, destination, vpcs)) in SEEDS.iter().enumerate() {
+        // Each configuration delivers to a destination the account holds, which
+        // the create resolves against the owning service's store.
+        router.hold_query_log_destinations([destination]);
         let created = ok(
             router,
             "CreateResolverQueryLogConfig",
@@ -235,6 +238,7 @@ async fn associations_are_listed_from_state_and_projected_as_the_reader_projects
     // both counts at zero — never as an absent list. A configuration with no VPC
     // contributes nothing, so creating one changes neither.
     let bare = emulator();
+    bare.hold_query_log_destinations(["arn:aws:s3:::amzn-s3-demo-bucket-bare"]);
     ok(
         &bare,
         "CreateResolverQueryLogConfig",

@@ -194,6 +194,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let now = ::std::time::Instant::now();
+
+        // A `ResourceId` naming no resource the account holds addresses no
+        // configuration at all, so the write is refused with the
+        // `ResourceNotFound` this operation models and NOTHING is stored: a
+        // Resolver behavior configuration belongs to a VPC of the account's own
+        // Amazon EC2 inventory or to a Route 53 Profile the account holds
+        // (`crate::state::resolver_configuration_resource_is_unknown`), both
+        // resolved before this service's store is locked.
+        if crate::state::resolver_configuration_resource_is_unknown(
+            &*self.engine,
+            &input.resource_id,
+        ) {
+            return Err(UpdateResolverConfigErrorModeled::ResourceNotFoundException(
+                crate::state::resolver_config_resource_not_found(&input.resource_id),
+            )
+            .into());
+        }
+
         let mut store = state.lock();
 
         // "Updates the behavior configuration of Route 53 Resolver behavior for

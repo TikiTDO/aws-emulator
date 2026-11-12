@@ -23,9 +23,8 @@ use service_com_amazonaws_route53resolver_route53resolver::state::{
     PROVISIONING_DELAY, VALIDATION_DISABLE, VALIDATION_ENABLE,
     VALIDATION_USE_LOCAL_RESOURCE_SETTING,
 };
-use smithy_server_runtime::MultiServiceRouter;
 
-use super::harness::{emulator, expect_error, ok, string_member, ACCOUNT};
+use super::harness::{emulator, expect_error, ok, string_member, Emulator, ACCOUNT};
 
 /// The `ResolverDNSSECConfig` of an update or get response.
 fn config(body: &Value) -> &Value {
@@ -39,7 +38,7 @@ async fn settle() {
     tokio::time::sleep(PROVISIONING_DELAY + Duration::from_millis(250)).await;
 }
 
-async fn update(router: &MultiServiceRouter, resource_id: &str, validation: &str) -> Value {
+async fn update(router: &Emulator, resource_id: &str, validation: &str) -> Value {
     ok(
         router,
         "UpdateResolverDnssecConfig",
@@ -48,7 +47,7 @@ async fn update(router: &MultiServiceRouter, resource_id: &str, validation: &str
     .await
 }
 
-async fn get(router: &MultiServiceRouter, resource_id: &str) -> Value {
+async fn get(router: &Emulator, resource_id: &str) -> Value {
     ok(
         router,
         "GetResolverDnssecConfig",
@@ -127,6 +126,9 @@ async fn every_vpc_reports_a_dnssec_configuration_with_validation_off() {
     ];
 
     let router = emulator();
+    // Every row's VPC is one the account holds: both operations resolve their
+    // `ResourceId` against the account's own Amazon EC2 inventory.
+    router.hold_vpcs(cases.iter().map(|(_, resource_id)| resource_id));
     let mut seen: Vec<(String, String)> = Vec::new();
 
     for (case, resource_id) in &cases {
@@ -224,6 +226,7 @@ async fn an_update_moves_the_validation_status_and_is_read_back_from_state() {
     ];
 
     let router = emulator();
+    router.hold_vpcs(cases.iter().map(|case| &case.resource_id));
     let mut created: Vec<(String, String, &'static str)> = Vec::with_capacity(cases.len());
 
     for case in &cases {
@@ -355,6 +358,7 @@ async fn an_update_of_an_existing_configuration_keeps_its_identity() {
 
     for (index, case) in cases.iter().enumerate() {
         let resource_id = format!("vpc-transition-{index}");
+        router.hold_vpcs([&resource_id]);
         let first = update(&router, &resource_id, case.from).await;
         let id = string_member(config(&first), "Id");
         settle().await;
@@ -386,6 +390,7 @@ async fn an_update_of_an_existing_configuration_keeps_its_identity() {
 async fn repeating_an_in_flight_update_does_not_restart_the_clock() {
     let router = emulator();
     let resource_id = "vpc-in-flight";
+    router.hold_vpcs([resource_id]);
 
     let first = update(&router, resource_id, VALIDATION_ENABLE).await;
     let id = assert_config(
@@ -426,6 +431,7 @@ async fn repeating_an_in_flight_update_does_not_restart_the_clock() {
 #[tokio::test]
 async fn a_validation_outside_the_modelled_enum_is_refused() {
     let router = emulator();
+    router.hold_vpcs(["vpc-refused"]);
 
     // One case per way a value can fall outside VALIDATION_VALUES: wrong case,
     // a value of the *status* enum rather than of `Validation`, an empty
