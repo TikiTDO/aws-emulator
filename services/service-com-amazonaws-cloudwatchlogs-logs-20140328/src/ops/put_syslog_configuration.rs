@@ -170,9 +170,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // `ctx` carries only request metadata; this operation stamps no ARN of its own —
-        // a listed configuration is reported under the log group's stored ARN.
-        let _ = ctx;
+        // `ctx` carries the Region the credential scope names, which is where the VPC
+        // endpoint this configuration would ingest through is resolved; this operation
+        // stamps no ARN of its own — a listed configuration is reported under the log
+        // group's stored ARN.
+        let region = crate::state::request_region(ctx.parts());
+
+        let invalid = |message: String| {
+            PutSyslogConfigurationError::from(
+                PutSyslogConfigurationErrorModeled::InvalidParameterException(
+                    InvalidParameterException {
+                        message: Some(message),
+                    },
+                ),
+            )
+        };
 
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             PutSyslogConfigurationError::from(
@@ -183,32 +195,56 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ),
             )
         })?;
-        let mut store = state.lock();
-
-        // `logGroupIdentifier` is "the name or ARN of the log group", so an ARN resolves
-        // to the name the store is keyed by.
-        let log_group_name =
-            crate::state::log_group_name_from_identifier(&input.log_group_identifier).to_string();
-
-        let Some(group) = store.log_groups.get_mut(&log_group_name) else {
-            return Err(PutSyslogConfigurationErrorModeled::ResourceNotFoundException(
-                ResourceNotFoundException {
-                    message: Some(crate::state::resource_not_found_message("log group")),
-                },
-            )
-            .into());
-        };
 
         // "This enables ingestion of syslog data through the specified VPC endpoint into
         // the log group": the endpoint is what identifies the configuration within the
         // group, and the only source type the model admits is the VPC endpoint one, so a
         // request that names no endpoint names no configuration and is refused for that
         // member (`crate::state::VPC_ENDPOINT_ID_REQUIRED`) even though the model leaves
-        // it optional.
+        // it optional. The request's own parameters are judged BEFORE the resource its
+        // identifier names is resolved, so a caller that left this member out is told
+        // which parameter is missing rather than about the log group.
         let Some(vpc_endpoint_id) = input.vpc_endpoint_id else {
-            return Err(PutSyslogConfigurationErrorModeled::InvalidParameterException(
-                InvalidParameterException {
-                    message: Some(crate::state::VPC_ENDPOINT_ID_REQUIRED.to_string()),
+            return Err(invalid(crate::state::VPC_ENDPOINT_ID_REQUIRED.to_string()));
+        };
+
+        // `logGroupIdentifier` is "the name or ARN of the log group", so an ARN resolves
+        // to the name the store is keyed by. The guard is taken and released around the
+        // lookup so none is held across the call below.
+        let log_group_name =
+            crate::state::log_group_name_from_identifier(&input.log_group_identifier).to_string();
+        if !state.lock().log_groups.contains_key(&log_group_name) {
+            return Err(PutSyslogConfigurationErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: Some(crate::state::resource_not_found_message("log group")),
+                },
+            )
+            .into());
+        }
+
+        // The configuration ingests "through the specified VPC endpoint", and a VPC
+        // endpoint is Amazon EC2's resource, so the endpoint is resolved where EC2 holds
+        // it ([`crate::state::syslog_vpc_endpoint`]) with no lock held. The transport
+        // handed over is the IN-PROCESS callback (`ctx.callback()`, the emulator's own
+        // transport into its sibling services), so this hop opens no socket and leaves
+        // the host untouched. An identifier the account has no endpoint under configures
+        // an ingestion path that could never carry anything, so it is refused and NOTHING
+        // is stored.
+        if let Some(message) = crate::state::syslog_vpc_endpoint::refusal_for(
+            ctx.callback(),
+            &region,
+            &vpc_endpoint_id,
+        )
+        .await
+        {
+            return Err(invalid(message));
+        }
+
+        let mut store = state.lock();
+        let Some(group) = store.log_groups.get_mut(&log_group_name) else {
+            return Err(PutSyslogConfigurationErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: Some(crate::state::resource_not_found_message("log group")),
                 },
             )
             .into());

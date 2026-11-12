@@ -277,6 +277,8 @@ mod subscription_filter_independence;
 mod subscription_filters;
 #[path = "all/syslog_configurations.rs"]
 mod syslog_configurations;
+#[path = "all/syslog_vpc_endpoint_validation.rs"]
+mod syslog_vpc_endpoint_validation;
 #[path = "all/transformed_log_filters.rs"]
 mod transformed_log_filters;
 #[path = "all/transformed_subscription_delivery.rs"]

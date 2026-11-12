@@ -180,6 +180,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ),
             )
         })?;
+
+        let invalid = |message: String| {
+            DeleteSyslogConfigurationError::from(
+                DeleteSyslogConfigurationErrorModeled::InvalidParameterException(
+                    InvalidParameterException {
+                        message: Some(message),
+                    },
+                ),
+            )
+        };
+
+        // "After deletion, syslog data is no longer ingested through the specified VPC
+        // endpoint": the endpoint is what identifies the configuration within the group, so
+        // a request that names none names no configuration and is refused for that member
+        // (`crate::state::VPC_ENDPOINT_ID_REQUIRED`) even though the model leaves it
+        // optional. The request's own parameters are judged BEFORE the resource its
+        // identifier names is resolved, so a caller that left this member out is told which
+        // parameter is missing rather than about the log group.
+        let Some(vpc_endpoint_id) = input.vpc_endpoint_id else {
+            return Err(invalid(crate::state::VPC_ENDPOINT_ID_REQUIRED.to_string()));
+        };
+
         let mut store = state.lock();
 
         // `logGroupIdentifier` is "the name or ARN of the log group", so an ARN resolves
@@ -198,42 +220,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         };
 
-        // "After deletion, syslog data is no longer ingested through the specified VPC
-        // endpoint": the endpoint is what identifies the configuration within the group, so
-        // a request that names none names no configuration and is refused for that member
-        // (`crate::state::VPC_ENDPOINT_ID_REQUIRED`) even though the model leaves it
-        // optional.
-        let Some(vpc_endpoint_id) = input.vpc_endpoint_id else {
-            return Err(
-                DeleteSyslogConfigurationErrorModeled::InvalidParameterException(
-                    InvalidParameterException {
-                        message: Some(crate::state::VPC_ENDPOINT_ID_REQUIRED.to_string()),
-                    },
-                )
-                .into(),
-            );
-        };
-
         // The delete takes away exactly the configuration stored for that endpoint and
         // leaves the group's other endpoints ingesting. A delete naming an endpoint the
         // group has no configuration for is refused as the parameter it was named by
         // rather than as a missing log group: the group is there, and it is the
-        // `vpcEndpointId` that selects nothing.
+        // `vpcEndpointId` that selects no ingestion into it — so the refusal names both
+        // the endpoint and the group it is not associated with
+        // (`crate::state::syslog_vpc_endpoint::not_associated_message`), and the delete is
+        // NOT silently idempotent.
         if group
             .syslog_configurations
             .remove(&vpc_endpoint_id)
             .is_none()
         {
-            return Err(
-                DeleteSyslogConfigurationErrorModeled::InvalidParameterException(
-                    InvalidParameterException {
-                        message: Some(crate::state::syslog_configuration_not_found_message(
-                            &vpc_endpoint_id,
-                        )),
-                    },
-                )
-                .into(),
-            );
+            return Err(invalid(
+                crate::state::syslog_vpc_endpoint::not_associated_message(
+                    &vpc_endpoint_id,
+                    &log_group_name,
+                ),
+            ));
         }
 
         Ok(DeleteSyslogConfigurationOutput)

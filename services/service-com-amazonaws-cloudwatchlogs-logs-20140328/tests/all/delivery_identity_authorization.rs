@@ -221,7 +221,10 @@ fn form_encode(value: &str) -> String {
 }
 
 /// The text of the first `<name>…</name>` element of an awsQuery response.
-fn xml_element(body: &str, name: &str) -> Option<String> {
+///
+/// `pub(crate)` because the syslog VPC-endpoint suite reads the ids Amazon EC2 mints out of
+/// that service's `ec2Query` XML the same way, so this target holds one reading of it.
+pub(crate) fn xml_element(body: &str, name: &str) -> Option<String> {
     let open = format!("<{name}>");
     let close = format!("</{name}>");
     let start = body.find(&open)? + open.len();

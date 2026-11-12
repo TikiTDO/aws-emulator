@@ -196,6 +196,10 @@ pub mod export_worker;
 /// is what the key's own key policy decides.
 pub mod kms_key_grant;
 
+/// Whether the VPC endpoint a syslog configuration ingests through is one the account has,
+/// which is what Amazon EC2 — the service that owns VPC endpoints — answers.
+pub mod syslog_vpc_endpoint;
+
 /// The AWS-vended log record formats a log group's transformer parses.
 pub mod log_transformer;
 
@@ -3528,15 +3532,6 @@ pub fn destination_not_found_message(destination_name: &str) -> String {
 /// instead of guessing which of its requests failed.
 pub fn policy_not_found_message(policy_name: &str) -> String {
     format!("Policy with name [{policy_name}] does not exist.")
-}
-
-/// The refusal CloudWatch Logs builds from the request when the log group names no syslog
-/// configuration for the endpoint a `DeleteSyslogConfiguration` names. The message
-/// interpolates the requested `vpcEndpointId`, so a caller deleting configurations in a
-/// loop can attribute the refusal to one endpoint instead of guessing which of its
-/// requests failed.
-pub fn syslog_configuration_not_found_message(vpc_endpoint_id: &str) -> String {
-    format!("No syslog configuration for vpcEndpointId [{vpc_endpoint_id}] exists on this log group.")
 }
 
 /// The refusal for a value outside the set a member's own documentation enumerates: the

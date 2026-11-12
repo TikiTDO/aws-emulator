@@ -84,6 +84,12 @@ aws-sdk-kms = { version = "1", default-features = false, features = ["rt-tokio",
 # source its `importSourceArn` names where CloudTrail holds it, with the `GetEventDataStore`
 # this client generates, over the same in-process callback.
 aws-sdk-cloudtrail = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# A syslog configuration ingests through a VPC endpoint, and VPC endpoints are Amazon EC2's
+# records: the `vpcEndpointId` a `PutSyslogConfiguration` carries is resolved against that
+# service over the same in-process callback, with the `DescribeVpcEndpoints` this client
+# generates, so this service keeps no second reading of which endpoints the account has
+# (`state::syslog_vpc_endpoint`).
+aws-sdk-ec2 = { version = "1", default-features = false }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -113,6 +119,10 @@ service-com-amazonaws-s3-amazons3 = { workspace = true }
 # about creating one mounts CloudTrail beside this service on the same engine and creates,
 # and deletes, the source through it.
 service-com-amazonaws-cloudtrail-cloudtrail-20131101 = { workspace = true }
+# The VPC endpoint a syslog configuration ingests through is one Amazon EC2 holds, so the
+# suite about that gate mounts EC2 beside this service on the same engine and creates every
+# endpoint a case names through EC2's OWN API rather than writing one into a store by hand.
+service-com-amazonaws-ec2-amazonec2 = { workspace = true }
 
 [lints]
 workspace = true
