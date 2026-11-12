@@ -181,6 +181,8 @@ mod run_a_job_target_authorization;
 mod running_execution_history;
 #[path = "all/s3_sdk_task_integration.rs"]
 mod s3_sdk_task_integration;
+#[path = "all/s3_sdk_task_object_lifecycle.rs"]
+mod s3_sdk_task_object_lifecycle;
 #[path = "all/saga_compensation_on_task_failure.rs"]
 mod saga_compensation_on_task_failure;
 #[path = "all/sdk_response_envelope.rs"]

@@ -1037,13 +1037,14 @@ fn an_instant_in_a_result_is_reported_in_epoch_millis() {
 ///
 /// The rows span what the rule generalises over: a label named by each form the
 /// member admits and one needing encoding to stay a single segment, a payload given
-/// as a document and as the text of one and absent altogether, a header member
-/// present and absent, the query parameter, and parameters naming no label at all.
+/// as a document, as the text of one, as a string that is no document and absent
+/// altogether, a header member present and absent, the query parameter, and parameters
+/// naming no label at all.
 #[test]
 fn a_rest_integrations_request_binds_each_member_where_the_operation_does() {
     let call = read("arn:aws:states:::lambda:invoke").expect("this names a call");
     let path = "/2015-03-31/functions";
-    let rows: [RestRow; 9] = [
+    let rows: [RestRow; 10] = [
         (
             "a function named by its bare name, the payload a document",
             ::serde_json::json!({"FunctionName": "handler", "Payload": {"a": 1}}),
@@ -1072,12 +1073,25 @@ fn a_rest_integrations_request_binds_each_member_where_the_operation_does() {
             None,
         ),
         (
+            // What a state wrote for the payload member is a JSON VALUE of the document
+            // it built, so the bytes the member carries are that value's own text: a
+            // string arrives as the JSON string literal it is in that document, which
+            // is the event a function invoked with a string is handed.
             "the payload given as the text of a document",
             ::serde_json::json!({"FunctionName": "handler", "Payload": "{\"a\":1}"}),
             Some((
                 "/2015-03-31/functions/handler/invocations",
                 Vec::new(),
-                r#"{"a":1}"#,
+                r#""{\"a\":1}""#,
+            )),
+        ),
+        (
+            "the payload given as a string that is no document at all",
+            ::serde_json::json!({"FunctionName": "handler", "Payload": "plain"}),
+            Some((
+                "/2015-03-31/functions/handler/invocations",
+                Vec::new(),
+                r#""plain""#,
             )),
         ),
         (

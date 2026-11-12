@@ -1213,12 +1213,13 @@ static S3_API: Api = Api {
 /// label.
 const S3_NAMESPACE: &str = "s3";
 
-/// The REST bindings of the three S3 operations a dataset read and a dataset write
-/// make.
+/// The REST bindings of the S3 operations this crate calls: the ones a dataset read
+/// and a dataset write make, and the ones a `Task` state's AWS SDK integration names
+/// ([`S3_SDK_OPERATIONS`]).
 ///
-/// `smithy_query(query="operation",operation="ListObjectsV2,GetObject,PutObject",
-/// model_path="services/service-com-amazonaws-s3-amazons3/smithy-model/
-/// com-amazonaws-s3-amazons3.json")`: `ListObjectsV2` is `http` GET
+/// `smithy_query(query="operation",operation="ListObjectsV2,GetObject,PutObject,
+/// HeadBucket,DeleteObject",model_path="services/service-com-amazonaws-s3-amazons3/
+/// smithy-model/com-amazonaws-s3-amazons3.json")`: `ListObjectsV2` is `http` GET
 /// `/{Bucket}?list-type=2` with `Bucket` an `httpLabel` and `Prefix`,
 /// `ContinuationToken` and `MaxKeys` `httpQuery` members, answering an XML document
 /// as the whole body; `GetObject` is GET `/{Bucket}/{Key+}?x-id=GetObject` with
@@ -1226,7 +1227,11 @@ const S3_NAMESPACE: &str = "s3";
 /// `httpPayload` and `ETag`, `ContentType` and `VersionId` to headers whose value is
 /// the text they carry; `PutObject` is PUT `/{Bucket}/{Key+}?x-id=PutObject` over
 /// the same two labels, with `Body` as the request's own `httpPayload` and `ETag` bound
-/// to the answer's `ETag` header.
+/// to the answer's `ETag` header; `HeadBucket` is HEAD `/{Bucket}` over the one label,
+/// every member of its output bound to a header; `DeleteObject` is DELETE
+/// `/{Bucket}/{Key+}?x-id=DeleteObject` over the two labels, with `VersionId` an
+/// `httpQuery` member, `MFA`, `BypassGovernanceRetention`, `IfMatch` and the rest
+/// `httpHeader`s, and every member of its output bound to a header.
 const S3_REST: &[Rest] = &[
     Rest {
         operation: LIST_OBJECTS_OPERATION,
@@ -1279,6 +1284,60 @@ const S3_REST: &[Rest] = &[
         response_status: "",
         response_headers: &[("ETag", "ETag")],
     },
+    Rest {
+        operation: HEAD_BUCKET_OPERATION,
+        method: "HEAD",
+        uri: "/{Bucket}",
+        // `Bucket` is the path, and `ExpectedBucketOwner` the one other input member,
+        // is a header: a HEAD of a bucket sends no body at all.
+        request_body: Body::Empty,
+        headers: &[("ExpectedBucketOwner", "x-amz-expected-bucket-owner")],
+        query: &[],
+        // A HEAD carries no body: every member of this operation's output is a header,
+        // so the answer's headers ARE its output.
+        response_body: Body::Empty,
+        response_status: "",
+        // The output members whose value IS the text the header holds. The remaining
+        // one, `AccessPointAlias`, the model types as a boolean, and reporting a
+        // header's text under a member a client reads as a flag would be the wrong type
+        // rather than the answer — the same reading `GetObject`'s own numbers and
+        // instants are left out under.
+        response_headers: &[
+            ("BucketArn", "x-amz-bucket-arn"),
+            ("BucketRegion", "x-amz-bucket-region"),
+            ("BucketLocationName", "x-amz-bucket-location-name"),
+            ("BucketLocationType", "x-amz-bucket-location-type"),
+        ],
+    },
+    Rest {
+        operation: DELETE_OBJECT_OPERATION,
+        method: "DELETE",
+        uri: "/{Bucket}/{Key+}?x-id=DeleteObject",
+        // Both labels are in the path and every other input member is a header or a
+        // query parameter, so a delete sends no body.
+        request_body: Body::Empty,
+        headers: &[
+            ("MFA", "x-amz-mfa"),
+            ("RequestPayer", "x-amz-request-payer"),
+            (
+                "BypassGovernanceRetention",
+                "x-amz-bypass-governance-retention",
+            ),
+            ("ExpectedBucketOwner", "x-amz-expected-bucket-owner"),
+            ("IfMatch", "If-Match"),
+        ],
+        query: &[("VersionId", "versionId")],
+        // A delete answers no body either: its output is the headers its answer
+        // carried, exactly as a write's is.
+        response_body: Body::Empty,
+        response_status: "",
+        // `DeleteMarker` is left out for the reason `HeadBucket`'s `AccessPointAlias`
+        // is: the model types it as a boolean.
+        response_headers: &[
+            ("VersionId", "x-amz-version-id"),
+            ("RequestCharged", "x-amz-request-charged"),
+        ],
+    },
 ];
 
 /// The S3 operations a dataset read makes, as that model spells them.
@@ -1288,17 +1347,28 @@ pub const GET_OBJECT_OPERATION: &str = "GetObject";
 /// The S3 operation a dataset WRITE makes, as that model spells it: the one call a
 /// `Map` state's `ResultWriter` is made of ([`super::result_writer`]).
 pub const PUT_OBJECT_OPERATION: &str = "PutObject";
+/// The S3 operations a `Task` state names that no dataset call makes, as that model
+/// spells them.
+const HEAD_BUCKET_OPERATION: &str = "HeadBucket";
+/// See [`HEAD_BUCKET_OPERATION`].
+const DELETE_OBJECT_OPERATION: &str = "DeleteObject";
 
 /// The S3 operations a `Task` state's AWS SDK integration call IS made for.
 ///
-/// Both are operations whose answer this emulator reads as the operation's own output:
-/// `GetObject` binds the object's bytes as its output's `httpPayload`, and `PutObject`
-/// answers no body at all, so its output is the headers its answer carried. A LISTING's
-/// answer is a restXml document whose elements this emulator does not read as that
-/// operation's output members, so a `Task` naming it is reported as work nothing was
-/// run for rather than answered with that document's text — the dataset read that DOES
-/// consume it reads the text itself ([`super::item_reader`]).
-const S3_SDK_OPERATIONS: &[&str] = &[GET_OBJECT_OPERATION, PUT_OBJECT_OPERATION];
+/// Each is an operation whose answer this emulator reads as the operation's own
+/// output: `GetObject` binds the object's bytes as its output's `httpPayload`, and
+/// `PutObject`, `HeadBucket` and `DeleteObject` answer no body at all, so the headers
+/// their answers carry ARE their output members. A LISTING's answer is a restXml
+/// document whose elements this emulator does not read as that operation's output
+/// members, so a `Task` naming it is reported as work nothing was run for rather than
+/// answered with that document's text — the dataset read that DOES consume it reads the
+/// text itself ([`super::item_reader`]).
+const S3_SDK_OPERATIONS: &[&str] = &[
+    GET_OBJECT_OPERATION,
+    PUT_OBJECT_OPERATION,
+    HEAD_BUCKET_OPERATION,
+    DELETE_OBJECT_OPERATION,
+];
 
 /// The member a dataset read reports the answer's BODY under: `GetObject`'s own
 /// `Body`, which that operation binds as its `httpPayload`, and — for the listing,
@@ -1330,6 +1400,10 @@ pub fn dataset_call(operation: &str) -> Option<Call> {
         targets: None,
         invokes: None,
         endpoint: false,
+        // The caller hands this call the object's own BYTES, already rendered: the
+        // dataset this writes is the text that writer built ([`super::result_writer`]),
+        // not a value out of a state's document.
+        payload_document: false,
     })
 }
 
@@ -1400,6 +1474,17 @@ pub struct Call {
     /// function's event instead ([`Call::operation_input`]), and the task's result is
     /// the function's own response payload ([`reported_result`]).
     pub invokes: Option<String>,
+    /// Whether this call's request is a JSON document a STATE built, whose payload
+    /// member therefore goes on the wire as the TEXT of the JSON value that document
+    /// carries for it: a string as the JSON string literal it is in the document, an
+    /// object or an array as its own JSON text.
+    ///
+    /// True for every call a `Task` state's work is made of, because "the state's
+    /// effective input IS that operation's request": what the state wrote for the
+    /// payload member is a JSON value, and the bytes the member carries are that
+    /// value's text. False for a dataset call, which is handed the object's own bytes
+    /// instead ([`dataset_call`]).
+    pub payload_document: bool,
     /// Whether the work is an HTTP REQUEST the state's own parameters describe rather
     /// than an API call to an operation of a service ([`super::http_task`]).
     ///
@@ -2746,6 +2831,9 @@ pub fn read(resource: &str) -> Result<Call, String> {
         // one named an integration, whose request is the document the state built.
         invokes: None,
         endpoint: false,
+        // The request IS the document this state built, so its payload member carries
+        // the text of the value that document holds for it.
+        payload_document: true,
     })
 }
 
@@ -2795,6 +2883,9 @@ fn http_invoke(shown: &str, action: &str) -> Result<Call, String> {
         targets: None,
         invokes: None,
         endpoint: true,
+        // No operation's input is built for this call at all ([`Call::endpoint`]), so
+        // there is no payload member to put on the wire.
+        payload_document: false,
     })
 }
 
@@ -2845,6 +2936,10 @@ fn direct_invocation(function: &str, shown: &str) -> Result<Call, String> {
             .find(|entry| entry.integration == LAMBDA_INVOKE_INTEGRATION),
         invokes: Some(function.to_string()),
         endpoint: false,
+        // The function's EVENT is the document this state built
+        // ([`Call::operation_input`]), and the payload member carries that document's
+        // own text.
+        payload_document: true,
     })
 }
 
@@ -2961,6 +3056,9 @@ fn pattern_call(api: &'static Api, operation: &str) -> Call {
         targets: None,
         invokes: None,
         endpoint: false,
+        // Every such call is to an AWS JSON service, whose request body IS the
+        // operation's input document: no payload member is bound for one.
+        payload_document: false,
     }
 }
 
@@ -3545,7 +3643,7 @@ fn wired(call: &Call, request: &Value) -> Result<Wired, String> {
             body,
         });
     };
-    rest.wired(&document)
+    rest.wired(&document, call.payload_document)
 }
 
 /// The `application/x-www-form-urlencoded` body an `awsQuery` request carries:
@@ -3688,7 +3786,11 @@ pub(super) const UNRESERVED_ONLY: &::percent_encoding::AsciiSet =
 
 impl Rest {
     /// The request this operation's bindings put `document` on the wire as.
-    fn wired(&self, document: &Value) -> Result<Wired, String> {
+    ///
+    /// `payload_document` says what the payload member's value IS: a value out of a
+    /// JSON document a state built, whose bytes are that value's own JSON text, or the
+    /// bytes a caller handed the member already rendered ([`Call::payload_document`]).
+    fn wired(&self, document: &Value, payload_document: bool) -> Result<Wired, String> {
         let mut uri = String::new();
         let mut remaining = self.uri;
         // Each `{<member>}` of the path stands for the value the request names that
@@ -3737,12 +3839,15 @@ impl Rest {
             // Every member is bound to the path, the query or a header, so there is no
             // body to send.
             Body::Empty => Vec::new(),
-            // The payload member IS the body: a value given as text is those bytes, and
-            // a document is its JSON text, which is what the member the integration
-            // documents as a document carries.
+            // The payload member IS the body. For a value out of the document a state
+            // built, the bytes are that JSON value's own TEXT — a string arrives as the
+            // JSON string literal it is in that document, an object or an array as its
+            // own document — because what the member carries is a value of that
+            // document rather than bytes. A member handed bytes already rendered
+            // carries them as they stand.
             Body::Member(member) | Body::Text(member) => match document.get(member) {
                 None | Some(Value::Null) => Vec::new(),
-                Some(Value::String(text)) => text.clone().into_bytes(),
+                Some(Value::String(text)) if !payload_document => text.clone().into_bytes(),
                 Some(value) => ::serde_json::to_vec(value).map_err(|error| error.to_string())?,
             },
             // The document of every member no other binding carries: one already on

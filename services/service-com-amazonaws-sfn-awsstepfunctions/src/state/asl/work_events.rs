@@ -113,6 +113,23 @@ impl WorkEvents {
         }
     }
 
+    /// What the service names as the PRODUCER of this task's result, which is what a
+    /// diagnosis about that result reports it against: the work as this state's own
+    /// history events name it.
+    ///
+    /// For an integration that is the KIND of resource the call was made on
+    /// (`aws-sdk:<service>` for the AWS SDK family, `<service>` for the optimized one),
+    /// which is the service name those events carry; for a direct invocation it is the
+    /// function's own ARN, which is the whole of what that family's events name the work
+    /// by. Read from the SAME naming the events carry ([`WorkEvents::naming`]), so the
+    /// producer a failure names and the work the history reports cannot drift.
+    pub(super) fn produced_by(&self) -> &str {
+        match self {
+            Self::Integration { resource_type, .. } => resource_type,
+            Self::Function { function } => function,
+        }
+    }
+
     /// What every event of this family NAMES the work by, as the record carries it:
     /// the kind of resource and the action for an integration, and the function's own
     /// ARN for an invocation.

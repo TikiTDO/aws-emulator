@@ -1258,7 +1258,7 @@ impl Interpreter<'_> {
                 let mut details = work.naming();
                 details.output = Some(self.echo(&result));
                 self.push_detailed(work.succeeded(), state_name, at, details);
-                measure_payload(&result, state_name).map(|_bytes| result)
+                measure_payload(&result, work.produced_by()).map(|_bytes| result)
             }
             Err(failure) => {
                 self.push_task_failure(state_name, work, &failure, at);
@@ -1315,9 +1315,8 @@ impl Interpreter<'_> {
         context: &Value,
         at: Duration,
     ) -> Result<StateStep, Fault> {
-        let outcome = outcome.and_then(|result| {
-            measure_payload(&result, &task_producer(state, name)).map(|_bytes| result)
-        });
+        let outcome = outcome
+            .and_then(|result| measure_payload(&result, work.produced_by()).map(|_bytes| result));
         match outcome {
             Ok(result) => {
                 let mut details = work.naming();
@@ -2124,7 +2123,7 @@ impl Interpreter<'_> {
                 // against.
                 Ok(answer) => {
                     let result = super::super::integration::reported_result(&call, &answer);
-                    match measure_payload(&result, &task_producer(state, name)) {
+                    match measure_payload(&result, work.produced_by()) {
                         Ok(_bytes) => Ok(result),
                         Err(failure) => Err(failure),
                     }
@@ -3673,17 +3672,6 @@ fn records_a_failure(event_type: &str) -> bool {
         super::super::EVENT_LAMBDA_FUNCTION_FAILED,
     ]
     .contains(&event_type)
-}
-
-/// What the service names as the producer of a `Task` state's result: the invoked
-/// RESOURCE the state's `Resource` names, which is what such a result is reported
-/// against, and the state's own name for a state that declares none.
-fn task_producer(state: &Map<String, Value>, name: &str) -> String {
-    state
-        .get("Resource")
-        .and_then(Value::as_str)
-        .unwrap_or(name)
-        .to_string()
 }
 
 /// Where in a definition the `Condition` of the `Choice` rule at `index` is written.

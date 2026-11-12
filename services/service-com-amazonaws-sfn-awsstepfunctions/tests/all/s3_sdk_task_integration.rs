@@ -150,12 +150,18 @@ async fn a_read_object_parses_with_string_to_json() {
 
 /// An AWS SDK `s3:putObject` task really stores the object, and the state's result
 /// carries the output members the answer carried.
+///
+/// What the state wrote for `Body` is a JSON VALUE of the document the state built, so
+/// the object holds that value's own TEXT: a string is stored as the JSON string
+/// literal it is in that document, and a document as its own compact text.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_sdk_s3_write_stores_the_object() {
     // (case, the body the task writes, the text the object then holds)
     let rows: &[(&str, Value, &str)] = &[
-        ("text", json!("just text"), "just text"),
+        ("text", json!("just text"), "\"just text\""),
         ("a document", json!({ "id": 7 }), "{\"id\":7}"),
+        ("an array", json!([1, 2]), "[1,2]"),
+        ("a number", json!(7), "7"),
     ];
 
     let chain = Chain::new();
