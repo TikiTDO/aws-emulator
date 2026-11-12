@@ -14,11 +14,14 @@
 //! An endpoint of a type that points at a resource configuration or a service network, and
 //! a request member naming state this slice does not hold (an IPv6 address), is answered
 //! with a 501 rather than an endpoint that silently lacks what was asked for — the same rule
-//! the siblings of this operation follow. The account's OWN
-//! endpoint services are created by `CreateVpcEndpointServiceConfiguration`, still a
-//! scaffold, so no name resolves to one yet: when it lands, an endpoint to one of them also
-//! owes the `pendingAcceptance` state and a `VpcEndpointConnection` row, which is that
-//! operation's change rather than this one's.
+//! the siblings of this operation follow. `ServiceName` is RESOLVED before anything is
+//! written, against the one catalogue of endpoint services `DescribeVpcEndpointServices`
+//! reports from ([`crate::state::endpoint_service_name_is_offered`]): the services Amazon
+//! Web Services publishes in the Region the name carries and the account's own
+//! configurations, so a name neither offers is refused with `InvalidServiceName` instead of
+//! yielding an endpoint to a service that does not exist. An endpoint to one of the
+//! account's own services also owes the `pendingAcceptance` state and a
+//! `VpcEndpointConnection` row, which is that operation's change rather than this one's.
 //!
 //! This is the ONLY file to touch for this operation.
 //!
@@ -499,6 +502,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // no VPC.
         if !store.vpcs.contains_key(&input.vpc_id) {
             return Err(state::invalid_vpc_id_not_found(&input.vpc_id));
+        }
+
+        // "… and the specified endpoint service": the name is RESOLVED against the endpoint
+        // services this caller can reach — the ones Amazon Web Services publishes in the
+        // Region the name carries, and the account's own service configurations — before any
+        // state is written ([`crate::state::endpoint_service_name_is_offered`]). One
+        // catalogue serves both this create and `DescribeVpcEndpointServices`, so a name that
+        // describe refuses as naming no service cannot have an endpoint created to it either:
+        // a typo yields EC2's own refusal rather than an endpoint to a service that does not
+        // exist, which nothing could ever reach.
+        if !state::endpoint_service_name_is_offered(&store, service_name) {
+            return Err(state::invalid_service_name(service_name));
         }
 
         // "To use a private hosted zone, you must set the following VPC attributes to true:

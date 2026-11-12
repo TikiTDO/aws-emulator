@@ -894,6 +894,28 @@ pub const INVALID_HOST_ID_NOT_FOUND: &str = "InvalidHostID.NotFound";
 /// at all, so there is nothing to look up.
 pub const INVALID_HOST_ID_MALFORMED: &str = "InvalidHostID.Malformed";
 
+/// `InvalidHostReservationOfferingId.Malformed` (HTTP 400): the request named something that
+/// is not a Dedicated Host reservation OFFERING id at all, so there is nothing to look up —
+/// the `Invalid<Kind>.Malformed` half of the pair, refused before the published catalog is
+/// consulted.
+pub const INVALID_HOST_RESERVATION_OFFERING_ID_MALFORMED: &str =
+    "InvalidHostReservationOfferingId.Malformed";
+
+/// Refuse an `OfferingId` that is not a host reservation offering id at all: HTTP 400
+/// [`INVALID_HOST_RESERVATION_OFFERING_ID_MALFORMED`], in the sentence EC2 words for it —
+/// fixed text with the value the REQUEST sent single-quoted in it, bounded by
+/// [`echoed_resource_id`] the way every other echoed id is.
+pub fn invalid_host_reservation_offering_id_malformed<E>(offering_id: &str) -> Scaffolded<E> {
+    Scaffolded::service_error(
+        INVALID_HOST_RESERVATION_OFFERING_ID_MALFORMED,
+        400,
+        format!(
+            "The specified host reservation Offering ID '{}' is not valid.",
+            echoed_resource_id(offering_id)
+        ),
+    )
+}
+
 /// `InvalidHostConfiguration` (HTTP 400): the request asks for a Dedicated Host configuration
 /// EC2 cannot provide, rather than for a parameter it could not read.
 ///
@@ -2048,9 +2070,11 @@ pub(super) const AWS_ENDPOINT_SERVICES: &[AwsEndpointService] = &[
 ///
 /// The family has further members, and each is added here under the label Amazon Web
 /// Services publishes it as; a label nothing states is not guessed at, since the name IS
-/// the service's identity and an invented one would name a service no Region offers. The
-/// PARSE ([`parse_endpoint_service_name`]) is over the whole family, so an endpoint to a
-/// member this catalogue does not list is still created to the service its name names.
+/// the service's identity and an invented one would name a service no Region offers. This
+/// catalogue is what decides whether a name of the family names a service at all
+/// ([`endpoint_service_name_is_offered`]), so a member it does not list is refused by the
+/// create exactly as `DescribeVpcEndpointServices` refuses it — the two cannot disagree
+/// about which services exist.
 pub(super) const AWS_API_ENDPOINT_SERVICES: &[AwsEndpointService] =
     &[AwsEndpointService { label: "emr-service-cell01", types: INTERFACE_ONLY }];
 
@@ -2352,6 +2376,55 @@ pub fn vpc_endpoint_service_limit_exceeded<E>() -> Scaffolded<E> {
             max = MAX_STORED_RECORDS_PER_STORE,
         ),
     )
+}
+
+/// Whether an endpoint service called `service_name` is one a caller of this account can
+/// create a VPC endpoint TO.
+///
+/// ONE catalogue decides which service names exist, so the create and
+/// `DescribeVpcEndpointServices` cannot disagree: a name that describe refuses as naming no
+/// service ([`invalid_service_name`]) is not a name an endpoint can be created to either.
+/// The two sources are the same two that describe reports — the services Amazon Web Services
+/// publishes in the Region the NAME carries ([`endpoint_services_in_region`]), and the
+/// account's own stored service configurations
+/// ([`ComAmazonawsEc2Amazonec2State::vpc_endpoint_services`], read through
+/// [`account_endpoint_service_record`] so one reading of "a service a caller can reach" serves
+/// both).
+///
+/// The PARTNER family (`com.amazonaws.vpce.<region>.<service-id>`,
+/// [`PARTNER_ENDPOINT_SERVICE_LABEL`]) is the exception, and it is one about this emulator's
+/// knowledge rather than about the rule: such a name belongs to a service ANOTHER account or
+/// an Amazon Web Services Marketplace partner offers, which this service holds no catalogue of
+/// at all — only the account's own configurations and the Region's published services are
+/// enumerable here. So a name of that family is read for FORM: its service label has to be an
+/// endpoint service id ([`VPC_ENDPOINT_SERVICE_ID_PREFIX`]), which is what a service of another
+/// account is named by ([`account_endpoint_service_name`]), and anything else names no service.
+pub fn endpoint_service_name_is_offered(
+    store: &ComAmazonawsEc2Amazonec2State,
+    service_name: &str,
+) -> bool {
+    let Some(parsed) = parse_endpoint_service_name(service_name) else {
+        return false;
+    };
+    // The account's own services first: the cheapest source, and the one a name of either
+    // family may sit in.
+    if store
+        .vpc_endpoint_services
+        .values()
+        .filter_map(account_endpoint_service_record)
+        .any(|service| service.service_name == service_name)
+    {
+        return true;
+    }
+    if service_name.starts_with(AWS_ENDPOINT_SERVICE_PREFIX)
+        && service_name[AWS_ENDPOINT_SERVICE_PREFIX.len()..]
+            .starts_with(PARTNER_ENDPOINT_SERVICE_LABEL)
+    {
+        return prefixed_id_is_well_formed(VPC_ENDPOINT_SERVICE_ID_PREFIX, &parsed.service);
+    }
+    endpoint_services_in_region(&parsed.region)
+        .iter()
+        .any(|service| service.service_name == service_name)
 }
 
 /// The name of an endpoint service the ACCOUNT offers, for the service `service_id` hosted in

@@ -1512,3 +1512,121 @@ async fn every_admitted_page_size_walks_the_store_exactly_once() {
         "the walks must leave the store alone, got {body}"
     );
 }
+
+/// A VALUE of the `instance-id` filter that this service could not have issued as an
+/// instance id is REFUSED — `InvalidParameterValue` with the one sentence EC2 answers for an
+/// unreadable filter value, naming the filter and the value the request sent — never served
+/// as an empty association set, which a caller cannot tell from "the instance has no
+/// profile".
+///
+/// The refused rows span the ways a value falls outside the instance ids this service issues
+/// (`ec2::state::instance_id_filter_value_is_readable`): the all-zero placeholder, a
+/// long-form id above everything the mint has reached, a long form whose leading digit is
+/// above zero, the wrong suffix length, a non-hexadecimal and an upper-case digit, EC2's
+/// filter wildcards (which are text matching, not an id), another resource's prefix, a bare
+/// name and the empty value. The served rows are ids the service CAN read: the instance the
+/// association is over, another instance of the account that has no profile, and the retired
+/// SHORT id form — the last two selecting no association, which is what a readable id
+/// nothing matches answers.
+#[tokio::test]
+async fn the_describe_refuses_an_instance_id_filter_value_it_cannot_read() {
+    let router = emulator();
+    let case = "the filter-value store";
+    let instance_id = launch(case, &router).await;
+    let other_instance = launch(case, &router).await;
+    let (status, body) = associate(&router, &instance_id, &by_name("filter-profile")).await;
+    assert_eq!(
+        status, 200,
+        "the associate must succeed, got {status}: {body}"
+    );
+    let association_id = one_association(case, &body).id;
+
+    let refused: [(&str, &str); 11] = [
+        ("the all-zero placeholder", "i-00000000000000000"),
+        ("a long-form id the mint never reached", "i-0123456789abcdef0"),
+        ("a leading digit above zero", "i-1234567890abcdef0"),
+        ("one digit too short", "i-0123456789abcde"),
+        ("one digit too long", "i-0123456789abcdef01"),
+        ("a non-hexadecimal digit", "i-0g23456789abcdef0"),
+        ("an upper-case digit", "i-0123456789ABCDEF0"),
+        ("a trailing wildcard", "i-*"),
+        ("a single-character wildcard", "i-000000000000000?0"),
+        ("another resource's prefix", "vpc-0123456789abcdef0"),
+        ("the empty value", ""),
+    ];
+    for (row, value) in refused {
+        let (status, body) =
+            describe_associations(&router, &filters(&[("instance-id", &[value])])).await;
+        assert_eq!(
+            status, 400,
+            "case {row:?}: expected HTTP 400 for instance-id {value:?}, got {status}: {body}"
+        );
+        assert_eq!(
+            error_code(&body),
+            INVALID_PARAMETER_VALUE,
+            "case {row:?}: expected {INVALID_PARAMETER_VALUE}, got {body}"
+        );
+        assert_eq!(
+            error_message(&body),
+            format!("A filter with an invalid instance-id of '{value}' was given"),
+            "case {row:?}: expected the sentence naming the filter and the value the request \
+             sent, got {body}"
+        );
+        assert_eq!(
+            reported_ids(row, &body),
+            Vec::<String>::new(),
+            "case {row:?}: a refused request reports no association, got {body}"
+        );
+    }
+
+    // One refused value in a list of readable ones refuses the whole request: the values of
+    // one filter are ORed, so serving the rest would answer a question the caller did not
+    // ask.
+    let (status, body) = describe_associations(
+        &router,
+        &filters(&[(
+            "instance-id",
+            &[instance_id.as_str(), "i-0123456789abcdef0"],
+        )]),
+    )
+    .await;
+    assert_eq!(
+        status, 400,
+        "case \"one refused value beside a readable one\": expected HTTP 400, got {status}: \
+         {body}"
+    );
+
+    let served: [(&str, &str, bool); 3] = [
+        ("the instance the association is over", instance_id.as_str(), true),
+        ("another instance of the account", other_instance.as_str(), false),
+        ("the retired short id form", "i-0abc1234", false),
+    ];
+    for (row, value, selects) in served {
+        let (status, body) =
+            describe_associations(&router, &filters(&[("instance-id", &[value])])).await;
+        assert_eq!(
+            status, 200,
+            "case {row:?}: a readable value must be served, got {status}: {body}"
+        );
+        let expected = if selects {
+            vec![association_id.clone()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(
+            reported_ids(row, &body),
+            expected,
+            "case {row:?}: expected {expected:?}, got {body}"
+        );
+    }
+
+    // Every refusal above is a READ that changed nothing: the store still holds the one
+    // association it held.
+    let (status, body) = describe_associations(&router, &[]).await;
+    assert_eq!(status, 200, "the describe must succeed: {body}");
+    assert_eq!(
+        reported_ids("after the refusals", &body),
+        vec![association_id],
+        "the refusals must leave the store alone, got {body}"
+    );
+}

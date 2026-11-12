@@ -33,34 +33,73 @@ use ec2::state::{
 use service_com_amazonaws_ec2_amazonec2 as ec2;
 use smithy_server_runtime::MultiServiceRouter;
 
-use super::ec2_query::{element, elements, error_code, indexed};
+use super::ec2_query::{element, elements, error_code, error_message, indexed};
 
 /// The Region every call here is signed for — not the service's default, so an ARN that
 /// named a hardcoded Region instead of the signed one would fail every assertion below.
 const REGION: &str = "us-west-2";
 
-/// The image three running instances, one stopped instance and one single-version launch
-/// template reference.
-const AMI_A: &str = "ami-0a1b2c3d4e5f60001";
+/// The images this suite reports the references of, under the ids `RegisterImage` MINTED for
+/// them.
+///
+/// The ids are the service's own rather than values this file chose: an `ImageId` reaches EC2
+/// as an obfuscated identifier the service decodes, so the ids a request may name are exactly
+/// the ones the service has issued, and a suite that named ids of its own would be asserting
+/// over values no AMI of the account carries.
+struct Amis {
+    /// The image three running instances, one stopped instance and one single-version launch
+    /// template reference.
+    a: String,
+    /// The image one running instance references, and the NEWEST version of the multi-version
+    /// launch template.
+    b: String,
+    /// The image only version 2 of the multi-version template names — outside the documented
+    /// default `version-depth` of 10, inside a depth of 11.
+    c: String,
+    /// The image only version 1 (the oldest) of the multi-version template names.
+    d: String,
+    /// The image the filler versions 3..=11 of the multi-version template name.
+    filler: String,
+    /// An image nothing in the store references.
+    unreferenced: String,
+    /// Further images nothing references, so a request can name the ten ids the model admits.
+    spare: Vec<String>,
+}
 
-/// The image one running instance references, and the NEWEST version of the multi-version
-/// launch template.
-const AMI_B: &str = "ami-0a1b2c3d4e5f60002";
+impl Amis {
+    /// [`Amis::a`] as a request names it.
+    fn a(&self) -> &str {
+        &self.a
+    }
 
-/// The image only version 2 of the multi-version template names — outside the documented
-/// default `version-depth` of 10, inside a depth of 11.
-const AMI_C: &str = "ami-0a1b2c3d4e5f60003";
+    /// [`Amis::b`] as a request names it.
+    fn b(&self) -> &str {
+        &self.b
+    }
 
-/// The image only version 1 (the oldest) of the multi-version template names.
-const AMI_D: &str = "ami-0a1b2c3d4e5f60004";
+    /// [`Amis::c`] as a request names it.
+    fn c(&self) -> &str {
+        &self.c
+    }
 
-/// The image the filler versions 3..=11 of the multi-version template name.
-const AMI_FILLER: &str = "ami-0a1b2c3d4e5f60005";
+    /// [`Amis::d`] as a request names it.
+    fn d(&self) -> &str {
+        &self.d
+    }
 
-/// A well-formed image id nothing in the store references.
-const AMI_UNREFERENCED: &str = "ami-0a1b2c3d4e5f60009";
+    /// [`Amis::filler`] as a request names it.
+    fn filler(&self) -> &str {
+        &self.filler
+    }
 
-/// A well-formed image id in the SHORT (8 hex digit) form, which nothing references.
+    /// [`Amis::unreferenced`] as a request names it.
+    fn unreferenced(&self) -> &str {
+        &self.unreferenced
+    }
+}
+
+/// An image id in the SHORT (8 hex digit) form — a form EC2 has issued ids in, which this
+/// operation's validator does not read, there being no identifier in it to decode.
 const AMI_SHORT_FORM: &str = "ami-0abc1234";
 
 /// The newest version number of the multi-version launch template.
@@ -206,17 +245,63 @@ async fn past_the_transition() {
 struct Seeded {
     router: MultiServiceRouter,
     engine: std::sync::Arc<engine::InMemoryEngine>,
-    /// The three instances launched from [`AMI_A`] and left running.
+    /// The images every row below names, under the ids `RegisterImage` minted.
+    amis: Amis,
+    /// The three instances launched from [`Amis::a`] and left running.
     running_a: Vec<String>,
-    /// The instance launched from [`AMI_A`] and then stopped.
+    /// The instance launched from [`Amis::a`] and then stopped.
     stopped_a: String,
-    /// The instance launched from [`AMI_B`] and left running.
+    /// The instance launched from [`Amis::b`] and left running.
     running_b: String,
-    /// A launch template whose only version names [`AMI_A`].
+    /// A launch template whose only version names [`Amis::a`].
     template_a: String,
-    /// A launch template with [`NEWEST_VERSION`] versions: version 1 names [`AMI_D`],
-    /// version 2 [`AMI_C`], versions 3..=11 [`AMI_FILLER`] and the newest [`AMI_B`].
+    /// A launch template with [`NEWEST_VERSION`] versions: version 1 names [`Amis::d`],
+    /// version 2 [`Amis::c`], versions 3..=11 [`Amis::filler`] and the newest [`Amis::b`].
     template_versions: String,
+}
+
+/// Register one image under `name` and answer the id EC2 minted for it.
+///
+/// `RegisterImage` is the API that mints an AMI id, so every id this suite names is one the
+/// service issued — which is what an operation that DECODES an `ImageId` can read.
+async fn register_image(router: &MultiServiceRouter, name: &str) -> String {
+    let (status, body) = api(
+        router,
+        "RegisterImage",
+        &[
+            p("Name", name),
+            // "The device name of the root device volume" (`RegisterImageRequest$RootDeviceName`)
+            // — a register that names neither it nor an `ImageLocation` is refused, and which
+            // root device an image declares has nothing to do with what references it, so one
+            // serves every image here.
+            p("RootDeviceName", "/dev/sda1"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "RegisterImage {name:?} must succeed, got {status}: {body}"
+    );
+    element(&body, "imageId")
+        .unwrap_or_else(|| panic!("the register must report an image id: {body}"))
+}
+
+/// The images every table below reports the references of, each registered through the API
+/// that mints its id.
+async fn register_images(router: &MultiServiceRouter) -> Amis {
+    let mut spare = Vec::new();
+    for index in 0..4usize {
+        spare.push(register_image(router, &format!("references-spare-{index}")).await);
+    }
+    Amis {
+        a: register_image(router, "references-a").await,
+        b: register_image(router, "references-b").await,
+        c: register_image(router, "references-c").await,
+        d: register_image(router, "references-d").await,
+        filler: register_image(router, "references-filler").await,
+        unreferenced: register_image(router, "references-unreferenced").await,
+        spare,
+    }
 }
 
 /// Launch `count` instances from `image_id` and answer their ids.
@@ -303,9 +388,10 @@ impl Seeded {
     async fn new() -> Self {
         let (router, engine) = super::ec2_query::emulator();
 
-        let running_a = run_instances(&router, AMI_A, 3).await;
-        let stopped_a = run_instances(&router, AMI_A, 1).await.remove(0);
-        let running_b = run_instances(&router, AMI_B, 1).await.remove(0);
+        let amis = register_images(&router).await;
+        let running_a = run_instances(&router, amis.a(), 3).await;
+        let stopped_a = run_instances(&router, amis.a(), 1).await.remove(0);
+        let running_b = run_instances(&router, amis.b(), 1).await.remove(0);
 
         // The launch of `stopped_a` is `pending`, and a stop is only accepted from
         // `pending` or `running`; the wait before and after makes the stop's own
@@ -320,17 +406,19 @@ impl Seeded {
         assert_eq!(status, 200, "StopInstances must succeed, got {status}: {body}");
         past_the_transition().await;
 
-        let template_a = create_launch_template(&router, "references-single", AMI_A).await;
-        let template_versions = create_launch_template(&router, "references-many", AMI_D).await;
-        seed_version(&engine, &template_versions, 2, AMI_C);
+        let template_a = create_launch_template(&router, "references-single", amis.a()).await;
+        let template_versions =
+            create_launch_template(&router, "references-many", amis.d()).await;
+        seed_version(&engine, &template_versions, 2, amis.c());
         for version in 3..NEWEST_VERSION {
-            seed_version(&engine, &template_versions, version, AMI_FILLER);
+            seed_version(&engine, &template_versions, version, amis.filler());
         }
-        seed_version(&engine, &template_versions, NEWEST_VERSION, AMI_B);
+        seed_version(&engine, &template_versions, NEWEST_VERSION, amis.b());
 
         Self {
             router,
             engine,
+            amis,
             running_a,
             stopped_a,
             running_b,
@@ -339,18 +427,19 @@ impl Seeded {
         }
     }
 
-    /// Every reference the store holds for [`AMI_A`] and [`AMI_B`] under the documented
+    /// Every reference the store holds for [`Amis::a`] and [`Amis::b`] under the documented
     /// defaults, sorted.
     fn all_references(&self) -> Vec<Reference> {
+        let ami = &self.amis;
         let mut expected: Vec<Reference> = self
             .running_a
             .iter()
-            .map(|id| instance_reference(AMI_A, id))
+            .map(|id| instance_reference(ami.a(), id))
             .collect();
-        expected.push(instance_reference(AMI_A, &self.stopped_a));
-        expected.push(instance_reference(AMI_B, &self.running_b));
-        expected.push(template_reference(AMI_A, &self.template_a));
-        expected.push(template_reference(AMI_B, &self.template_versions));
+        expected.push(instance_reference(ami.a(), &self.stopped_a));
+        expected.push(instance_reference(ami.b(), &self.running_b));
+        expected.push(template_reference(ami.a(), &self.template_a));
+        expected.push(template_reference(ami.b(), &self.template_versions));
         expected.sort();
         expected
     }
@@ -375,50 +464,51 @@ fn image_ids(ids: &[&str]) -> Vec<(String, String)> {
 
 /// The rows the reporting table is written against.
 fn rows(seeded: &Seeded) -> Vec<Row> {
+    let ami = &seeded.amis;
     let instances_a: Vec<Reference> = seeded
         .running_a
         .iter()
-        .map(|id| instance_reference(AMI_A, id))
+        .map(|id| instance_reference(ami.a(), id))
         .collect();
-    let stopped_a = instance_reference(AMI_A, &seeded.stopped_a);
-    let running_b = instance_reference(AMI_B, &seeded.running_b);
-    let template_a = template_reference(AMI_A, &seeded.template_a);
-    let template_b = template_reference(AMI_B, &seeded.template_versions);
-    let template_c = template_reference(AMI_C, &seeded.template_versions);
-    let template_d = template_reference(AMI_D, &seeded.template_versions);
+    let stopped_a = instance_reference(ami.a(), &seeded.stopped_a);
+    let running_b = instance_reference(ami.b(), &seeded.running_b);
+    let template_a = template_reference(ami.a(), &seeded.template_a);
+    let template_b = template_reference(ami.b(), &seeded.template_versions);
+    let template_c = template_reference(ami.c(), &seeded.template_versions);
+    let template_d = template_reference(ami.d(), &seeded.template_versions);
 
     let mut every_a = instances_a.clone();
     every_a.push(stopped_a.clone());
     every_a.push(template_a.clone());
 
     let ten_ids = [
-        AMI_A,
-        AMI_B,
-        AMI_C,
-        AMI_D,
-        AMI_FILLER,
-        AMI_UNREFERENCED,
-        AMI_SHORT_FORM,
-        "ami-0a1b2c3d4e5f6000a",
-        "ami-0a1b2c3d4e5f6000b",
-        "ami-0a1b2c3d4e5f6000c",
+        ami.a(),
+        ami.b(),
+        ami.c(),
+        ami.d(),
+        ami.filler(),
+        ami.unreferenced(),
+        ami.spare[0].as_str(),
+        ami.spare[1].as_str(),
+        ami.spare[2].as_str(),
+        ami.spare[3].as_str(),
     ];
 
     let mut rows = vec![
         Row {
             case: "one image id, every resource type",
-            params: [image_ids(&[AMI_A]), vec![p("IncludeAllResourceTypes", "true")]].concat(),
+            params: [image_ids(&[ami.a()]), vec![p("IncludeAllResourceTypes", "true")]].concat(),
             expected: every_a.clone(),
         },
         Row {
             case: "one image id, only ec2:Instance",
-            params: [image_ids(&[AMI_A]), one_resource_type("ec2:Instance", &[])].concat(),
+            params: [image_ids(&[ami.a()]), one_resource_type("ec2:Instance", &[])].concat(),
             expected: [instances_a.clone(), vec![stopped_a.clone()]].concat(),
         },
         Row {
             case: "one image id, only ec2:LaunchTemplate",
             params: [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 one_resource_type("ec2:LaunchTemplate", &[]),
             ]
             .concat(),
@@ -427,7 +517,7 @@ fn rows(seeded: &Seeded) -> Vec<Row> {
         Row {
             case: "two image ids, every resource type",
             params: [
-                image_ids(&[AMI_A, AMI_B]),
+                image_ids(&[ami.a(), ami.b()]),
                 vec![p("IncludeAllResourceTypes", "true")],
             ]
             .concat(),
@@ -440,7 +530,7 @@ fn rows(seeded: &Seeded) -> Vec<Row> {
         Row {
             case: "state-name selects the stopped instance only",
             params: [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 one_resource_type("ec2:Instance", &[("state-name", &["stopped"])]),
             ]
             .concat(),
@@ -449,7 +539,7 @@ fn rows(seeded: &Seeded) -> Vec<Row> {
         Row {
             case: "state-name selects two states",
             params: [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 one_resource_type("ec2:Instance", &[("state-name", &["running", "stopped"])]),
             ]
             .concat(),
@@ -458,7 +548,7 @@ fn rows(seeded: &Seeded) -> Vec<Row> {
         Row {
             case: "state-name selects a state nothing is in",
             params: [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 one_resource_type("ec2:Instance", &[("state-name", &["terminated"])]),
             ]
             .concat(),
@@ -467,7 +557,7 @@ fn rows(seeded: &Seeded) -> Vec<Row> {
         Row {
             case: "the default version-depth reaches the newest version",
             params: [
-                image_ids(&[AMI_B]),
+                image_ids(&[ami.b()]),
                 one_resource_type("ec2:LaunchTemplate", &[]),
             ]
             .concat(),
@@ -476,7 +566,7 @@ fn rows(seeded: &Seeded) -> Vec<Row> {
         Row {
             case: "the default version-depth of 10 stops before version 2",
             params: [
-                image_ids(&[AMI_C]),
+                image_ids(&[ami.c()]),
                 one_resource_type("ec2:LaunchTemplate", &[]),
             ]
             .concat(),
@@ -485,7 +575,7 @@ fn rows(seeded: &Seeded) -> Vec<Row> {
         Row {
             case: "version-depth 11 reaches version 2",
             params: [
-                image_ids(&[AMI_C]),
+                image_ids(&[ami.c()]),
                 one_resource_type("ec2:LaunchTemplate", &[("version-depth", &["11"])]),
             ]
             .concat(),
@@ -494,7 +584,7 @@ fn rows(seeded: &Seeded) -> Vec<Row> {
         Row {
             case: "version-depth at the published maximum reaches the oldest version",
             params: [
-                image_ids(&[AMI_D]),
+                image_ids(&[ami.d()]),
                 one_resource_type("ec2:LaunchTemplate", &[("version-depth", &["10000"])]),
             ]
             .concat(),
@@ -503,7 +593,7 @@ fn rows(seeded: &Seeded) -> Vec<Row> {
         Row {
             case: "version-depth at the published minimum sees the newest version only",
             params: [
-                image_ids(&[AMI_B, AMI_D]),
+                image_ids(&[ami.b(), ami.d()]),
                 one_resource_type("ec2:LaunchTemplate", &[("version-depth", &["1"])]),
             ]
             .concat(),
@@ -512,16 +602,7 @@ fn rows(seeded: &Seeded) -> Vec<Row> {
         Row {
             case: "a well-formed image id nothing references",
             params: [
-                image_ids(&[AMI_UNREFERENCED]),
-                vec![p("IncludeAllResourceTypes", "true")],
-            ]
-            .concat(),
-            expected: Vec::new(),
-        },
-        Row {
-            case: "a short-form image id nothing references",
-            params: [
-                image_ids(&[AMI_SHORT_FORM]),
+                image_ids(&[ami.unreferenced()]),
                 vec![p("IncludeAllResourceTypes", "true")],
             ]
             .concat(),
@@ -544,7 +625,7 @@ fn rows(seeded: &Seeded) -> Vec<Row> {
                     template_b.clone(),
                     template_c.clone(),
                     template_d.clone(),
-                    template_reference(AMI_FILLER, &seeded.template_versions),
+                    template_reference(ami.filler(), &seeded.template_versions),
                 ],
             ]
             .concat(),
@@ -552,7 +633,7 @@ fn rows(seeded: &Seeded) -> Vec<Row> {
         Row {
             case: "both EC2 types named with their own options",
             params: [
-                image_ids(&[AMI_A, AMI_C]),
+                image_ids(&[ami.a(), ami.c()]),
                 resource_type_fields(1, "ec2:Instance", &[("state-name", &["running"])]),
                 resource_type_fields(2, "ec2:LaunchTemplate", &[("version-depth", &["11"])]),
             ]
@@ -570,7 +651,7 @@ fn rows(seeded: &Seeded) -> Vec<Row> {
     for cross_service in ["ssm:Parameter", "imagebuilder:ImageRecipe", "imagebuilder:ContainerRecipe"] {
         rows.push(Row {
             case: "a resource type of another service",
-            params: [image_ids(&[AMI_A]), one_resource_type(cross_service, &[])].concat(),
+            params: [image_ids(&[ami.a()]), one_resource_type(cross_service, &[])].concat(),
             expected: Vec::new(),
         });
     }
@@ -588,9 +669,10 @@ fn rows(seeded: &Seeded) -> Vec<Row> {
 #[tokio::test]
 async fn the_selectable_states_are_the_modelled_ones() {
     let seeded = Seeded::new().await;
+    let ami = &seeded.amis;
     for value in ec2::ops::types::INSTANCE_STATE_NAME_VALUES {
         let params = [
-            image_ids(&[AMI_A]),
+            image_ids(&[ami.a()]),
             one_resource_type("ec2:Instance", &[("state-name", &[value])]),
         ]
         .concat();
@@ -602,7 +684,7 @@ async fn the_selectable_states_are_the_modelled_ones() {
     }
     for value in ["", "available", "Running", "shutting_down"] {
         let params = [
-            image_ids(&[AMI_A]),
+            image_ids(&[ami.a()]),
             one_resource_type("ec2:Instance", &[("state-name", &[value])]),
         ]
         .concat();
@@ -637,9 +719,10 @@ async fn image_references_are_computed_from_the_store() {
 #[tokio::test]
 async fn pages_partition_the_reference_set() {
     let seeded = Seeded::new().await;
+    let ami = &seeded.amis;
     let expected = seeded.all_references();
     let named = [
-        image_ids(&[AMI_A, AMI_B]),
+        image_ids(&[ami.a(), ami.b()]),
         vec![p("IncludeAllResourceTypes", "true")],
     ]
     .concat();
@@ -707,15 +790,16 @@ async fn pages_partition_the_reference_set() {
 #[tokio::test]
 async fn a_request_that_cannot_be_answered_is_refused() {
     let seeded = Seeded::new().await;
+    let ami = &seeded.amis;
     let cases: Vec<RefusalCase> = vec![
         (
             "neither IncludeAllResourceTypes nor ResourceTypes",
-            image_ids(&[AMI_A]),
+            image_ids(&[ami.a()]),
             "MissingParameter",
         ),
         (
             "IncludeAllResourceTypes false and no ResourceTypes",
-            [image_ids(&[AMI_A]), vec![p("IncludeAllResourceTypes", "false")]].concat(),
+            [image_ids(&[ami.a()]), vec![p("IncludeAllResourceTypes", "false")]].concat(),
             "MissingParameter",
         ),
         (
@@ -748,7 +832,7 @@ async fn a_request_that_cannot_be_answered_is_refused() {
         (
             "one malformed id beside a well-formed one",
             [
-                image_ids(&[AMI_A, "ami-"]),
+                image_ids(&[ami.a(), "ami-"]),
                 vec![p("IncludeAllResourceTypes", "true")],
             ]
             .concat(),
@@ -757,7 +841,7 @@ async fn a_request_that_cannot_be_answered_is_refused() {
         (
             "a resource type named twice",
             [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 resource_type_fields(1, "ec2:Instance", &[]),
                 resource_type_fields(2, "ec2:Instance", &[("state-name", &["running"])]),
             ]
@@ -767,7 +851,7 @@ async fn a_request_that_cannot_be_answered_is_refused() {
         (
             "version-depth on ec2:Instance",
             [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 one_resource_type("ec2:Instance", &[("version-depth", &["5"])]),
             ]
             .concat(),
@@ -776,7 +860,7 @@ async fn a_request_that_cannot_be_answered_is_refused() {
         (
             "state-name on ec2:LaunchTemplate",
             [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 one_resource_type("ec2:LaunchTemplate", &[("state-name", &["running"])]),
             ]
             .concat(),
@@ -785,7 +869,7 @@ async fn a_request_that_cannot_be_answered_is_refused() {
         (
             "an option on a resource type that documents none",
             [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 one_resource_type("ssm:Parameter", &[("state-name", &["running"])]),
             ]
             .concat(),
@@ -794,7 +878,7 @@ async fn a_request_that_cannot_be_answered_is_refused() {
         (
             "a state-name value the model does not carry",
             [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 one_resource_type("ec2:Instance", &[("state-name", &["available"])]),
             ]
             .concat(),
@@ -803,7 +887,7 @@ async fn a_request_that_cannot_be_answered_is_refused() {
         (
             "a member-cased state-name value",
             [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 one_resource_type("ec2:Instance", &[("state-name", &["Running"])]),
             ]
             .concat(),
@@ -812,7 +896,7 @@ async fn a_request_that_cannot_be_answered_is_refused() {
         (
             "version-depth below the published minimum",
             [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 one_resource_type("ec2:LaunchTemplate", &[("version-depth", &["0"])]),
             ]
             .concat(),
@@ -821,7 +905,7 @@ async fn a_request_that_cannot_be_answered_is_refused() {
         (
             "version-depth one past the published maximum",
             [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 one_resource_type("ec2:LaunchTemplate", &[("version-depth", &["10001"])]),
             ]
             .concat(),
@@ -830,7 +914,7 @@ async fn a_request_that_cannot_be_answered_is_refused() {
         (
             "a negative version-depth",
             [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 one_resource_type("ec2:LaunchTemplate", &[("version-depth", &["-1"])]),
             ]
             .concat(),
@@ -839,7 +923,7 @@ async fn a_request_that_cannot_be_answered_is_refused() {
         (
             "a version-depth that is not a number",
             [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 one_resource_type("ec2:LaunchTemplate", &[("version-depth", &["ten"])]),
             ]
             .concat(),
@@ -848,7 +932,7 @@ async fn a_request_that_cannot_be_answered_is_refused() {
         (
             "two values for a one-value option",
             [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 one_resource_type("ec2:LaunchTemplate", &[("version-depth", &["1", "2"])]),
             ]
             .concat(),
@@ -857,7 +941,7 @@ async fn a_request_that_cannot_be_answered_is_refused() {
         (
             "version-depth named twice",
             [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 one_resource_type(
                     "ec2:LaunchTemplate",
                     &[("version-depth", &["1"]), ("version-depth", &["2"])],
@@ -869,7 +953,7 @@ async fn a_request_that_cannot_be_answered_is_refused() {
         (
             "state-name named twice",
             [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 one_resource_type(
                     "ec2:Instance",
                     &[("state-name", &["running"]), ("state-name", &["stopped"])],
@@ -881,7 +965,7 @@ async fn a_request_that_cannot_be_answered_is_refused() {
         (
             "a token this service did not issue",
             [
-                image_ids(&[AMI_A]),
+                image_ids(&[ami.a()]),
                 vec![
                     p("IncludeAllResourceTypes", "true"),
                     p("NextToken", "not-a-token-this-service-minted"),
@@ -920,13 +1004,14 @@ async fn a_request_that_cannot_be_answered_is_refused() {
 #[tokio::test]
 async fn an_unsupported_resource_type_is_refused() {
     let seeded = Seeded::new().await;
+    let ami = &seeded.amis;
     for (case, value) in [
         ("another EC2 resource", "ec2:Volume"),
         ("no namespace", "Instance"),
         ("member-cased", "EC2:Instance"),
         ("empty", ""),
     ] {
-        let params = [image_ids(&[AMI_A]), one_resource_type(value, &[])].concat();
+        let params = [image_ids(&[ami.a()]), one_resource_type(value, &[])].concat();
         let (status, body) = describe(&seeded.router, &params).await;
         assert_eq!(
             status, 400,
@@ -945,8 +1030,9 @@ async fn an_unsupported_resource_type_is_refused() {
 #[tokio::test]
 async fn a_read_changes_nothing_a_later_caller_sees() {
     let seeded = Seeded::new().await;
+    let ami = &seeded.amis;
     let named = [
-        image_ids(&[AMI_A, AMI_B]),
+        image_ids(&[ami.a(), ami.b()]),
         vec![p("IncludeAllResourceTypes", "true")],
     ]
     .concat();
@@ -1001,4 +1087,98 @@ async fn a_read_changes_nothing_a_later_caller_sees() {
         (instances, templates, states),
         "reading the references must leave the store as it was"
     );
+}
+
+/// An `ImageIds` entry EC2 could not have ISSUED as an AMI id is refused with HTTP 400
+/// `InvalidAMIID.Malformed` and this operation's own sentence for that code — which names no
+/// value, being entirely fixed text — never with the empty reference set a readable id gets,
+/// which reads as "nothing references these images".
+///
+/// The refused rows span the ways a value falls outside the AMI ids EC2 issues
+/// (`ec2::state::issued_image_id_is_well_formed`): the all-zero placeholder in each of the
+/// two id forms, the retired short form (which is not the format this operation accepts), a
+/// long form whose leading digit is above zero (that form carries
+/// 68 bits for a 64-bit identifier, so an issued id always reads `ami-0…`), a suffix one
+/// digit short of and one past each published length, a non-hexadecimal and an upper-case
+/// digit, another resource's prefix, a bare name, and the empty value. The served rows are
+/// ids this operation CAN read: an id of the form EC2 issues, and one no stored image has — a
+/// question about a deregistered image, or one owned by another account, is answered rather
+/// than refused.
+#[tokio::test]
+async fn an_image_id_that_ec2_could_not_have_issued_is_refused() {
+    let seeded = Seeded::new().await;
+    let ami = &seeded.amis;
+    let every_type = || vec![p("IncludeAllResourceTypes", "true")];
+
+    let refused: [(&str, &str); 13] = [
+        ("the all-zero long form", "ami-00000000000000000"),
+        ("the all-zero short form", "ami-00000000"),
+        ("the retired short form", AMI_SHORT_FORM),
+        ("a leading digit above zero", "ami-1234567890abcdef0"),
+        ("one digit short of the long form", "ami-0123456789abcde"),
+        ("one digit past the long form", "ami-0123456789abcdef01"),
+        ("one digit short of the short form", "ami-0abc123"),
+        ("one digit past the short form", "ami-0abc12345"),
+        ("a non-hexadecimal digit", "ami-0g23456789abcdef0"),
+        ("an upper-case digit", "ami-0123456789ABCDEF0"),
+        ("another resource's prefix", "i-0a1b2c3d4e5f60001"),
+        ("a bare name", "not-an-image"),
+        ("the empty value", ""),
+    ];
+    for (case, image_id) in refused {
+        for (shape, params) in [
+            ("alone", [image_ids(&[image_id]), every_type()].concat()),
+            (
+                "beside a readable id",
+                [image_ids(&[ami.a(), image_id]), every_type()].concat(),
+            ),
+        ] {
+            let (status, body) = describe(&seeded.router, &params).await;
+            assert_eq!(
+                status, 400,
+                "case {case:?} {shape}: expected HTTP 400 for ImageId {image_id:?}, got \
+                 {status} {body}"
+            );
+            assert_eq!(
+                error_code(&body),
+                "InvalidAMIID.Malformed",
+                "case {case:?} {shape}: expected InvalidAMIID.Malformed, got {body}"
+            );
+            assert_eq!(
+                error_message(&body),
+                "One or more ImageIds isn't valid. Verify that each ImageId is in the correct \
+                 format and try again.",
+                "case {case:?} {shape}: expected this operation's fixed sentence, got {body}"
+            );
+            assert!(
+                references(&body).is_empty(),
+                "case {case:?} {shape}: a refused request reports no reference, got {body}"
+            );
+        }
+    }
+
+    // An id the operation CAN read is answered — with the references the store holds for it,
+    // which for an image nothing was launched from or templated on is none.
+    let served: [(&str, &str, bool); 2] = [
+        ("an id of the long form", ami.a(), true),
+        ("a readable id no image has", ami.unreferenced(), false),
+    ];
+    for (case, image_id, referenced) in served {
+        let found = described(
+            &seeded.router,
+            case,
+            &[image_ids(&[image_id]), every_type()].concat(),
+        )
+        .await;
+        assert_eq!(
+            !found.is_empty(),
+            referenced,
+            "case {case:?}: expected {image_id:?} to be {}, got {found:?}",
+            if referenced {
+                "referenced"
+            } else {
+                "referenced by nothing"
+            }
+        );
+    }
 }

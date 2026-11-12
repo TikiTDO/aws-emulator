@@ -340,6 +340,30 @@ impl ComAmazonawsEc2Amazonec2State {
     }
 }
 
+/// Whether `value` is readable as an instance id where a FILTER selects on one.
+///
+/// A filter that selects on an instance id has its values read through the service's own id
+/// parser before anything is narrowed, which is the same decode
+/// [`require_decoded_instance_record`] makes for an `InstanceIds` member: the value is inside
+/// one of the two published forms ([`instance_id_is_well_formed`]), and a LONG-form value is an
+/// identifier this service has issued rather than one merely spelled in that form — EC2's long
+/// id form is an OBFUSCATED identifier, so a value it cannot decode is no instance id at all.
+/// A caller that mistypes such a value is refused ([`invalid_filter_id_value`]) rather than
+/// handed an empty result set, which it could not tell from an association that is not there.
+///
+/// WHICH filter values an operation parses as ids is a fact of that operation, recorded by its
+/// caller — the same split [`instance_id_reads_as_one`] states for the `InstanceIds` readers —
+/// so this is the reading of the operations recorded answering that refusal, not of every
+/// describe that documents an `instance-id` filter.
+pub fn instance_id_filter_value_is_readable(
+    store: &ComAmazonawsEc2Amazonec2State,
+    value: &str,
+) -> bool {
+    instance_id_is_well_formed(value)
+        && !long_form_identifier(value)
+            .is_some_and(|identifier| identifier > u128::from(store.next_instance))
+}
+
 /// Refuse an instance id the request named that this service cannot resolve: a
 /// malformed one before an unknown one, the way the service orders the two.
 pub fn require_known_instance<E>(

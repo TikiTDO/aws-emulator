@@ -963,3 +963,147 @@ async fn a_subnet_configuration_places_the_interface_on_the_address_it_names() {
         );
     }
 }
+
+/// `ServiceName` is RESOLVED against the one catalogue of endpoint services, so the create
+/// and `DescribeVpcEndpointServices` agree about which services exist: a name that describe
+/// offers can have an endpoint created to it, and a name it refuses is refused here too —
+/// with the same `InvalidServiceName` code and the same sentence, naming the value the
+/// request sent — rather than yielding an endpoint to a service nothing could reach.
+///
+/// The rows span the published name families
+/// (`smithy_query(query="doc",shape="CreateVpcEndpointRequest",member="ServiceName")`, whose
+/// examples give `com.amazonaws.<region>.<service>`): a gateway service of the Region's
+/// catalogue, an interface service of it, a service whose label carries a dot, a member of
+/// the `aws.api` family and one of the `api.aws` family — and, for each family, a label the
+/// catalogue does not publish, plus a label published under ANOTHER family and an
+/// upper-cased label.
+#[tokio::test]
+async fn a_service_name_is_resolved_against_the_one_endpoint_service_catalogue() {
+    let router = emulator();
+    let built = network("the service-name table", &router, &["us-east-1a"]).await;
+
+    // `offered` is what the catalogue is expected to hold; every row is checked against the
+    // describe as well, so a row that disagreed with the catalogue would fail there rather
+    // than silently assert this test's own opinion.
+    let rows: [(&str, &str, bool); 11] = [
+        ("a gateway service", "com.amazonaws.us-east-1.s3", true),
+        ("an interface service", "com.amazonaws.us-east-1.logs", true),
+        (
+            "a service label carrying a dot",
+            "com.amazonaws.us-east-1.ecr.dkr",
+            true,
+        ),
+        (
+            "a member of the aws.api family",
+            "aws.api.us-east-1.emr-service-cell01",
+            true,
+        ),
+        (
+            "a member of the api.aws family",
+            "api.aws.us-east-1.cassandra-streams",
+            true,
+        ),
+        (
+            "a label the catalogue does not publish",
+            "com.amazonaws.us-east-1.not-a-real-service",
+            false,
+        ),
+        (
+            "a near-miss of a published label",
+            "com.amazonaws.us-east-1.s3-express",
+            false,
+        ),
+        (
+            "an aws.api label the catalogue does not publish",
+            "aws.api.us-east-1.emr-service-cell02",
+            false,
+        ),
+        (
+            "an api.aws label published under com.amazonaws instead",
+            "api.aws.us-east-1.cassandra",
+            false,
+        ),
+        (
+            "an upper-cased label",
+            "com.amazonaws.us-east-1.LOGS",
+            false,
+        ),
+        (
+            "a partner-form name whose label is no service id",
+            "com.amazonaws.vpce.us-east-1.not-a-service-id",
+            false,
+        ),
+    ];
+
+    for (case, service_name, offered) in rows {
+        // What the catalogue says, read through the describe that reports it.
+        let (describe_status, describe_body) = call(
+            &router,
+            "DescribeVpcEndpointServices",
+            &indexed("ServiceName", &[service_name]),
+        )
+        .await;
+        let (status, body) = call(
+            &router,
+            "CreateVpcEndpoint",
+            &[
+                param("VpcId", &built.vpc_id),
+                param("ServiceName", service_name),
+            ],
+        )
+        .await;
+        assert_eq!(
+            describe_status == 200,
+            offered,
+            "case {case:?}: expected the describe to {} {service_name:?}, got \
+             {describe_status}: {describe_body}",
+            if offered { "offer" } else { "refuse" }
+        );
+        assert_eq!(
+            status == 200,
+            describe_status == 200,
+            "case {case:?}: the create and the describe must agree about {service_name:?}, \
+             got create {status} and describe {describe_status}: {body}"
+        );
+        if offered {
+            continue;
+        }
+        assert_eq!(
+            error_code(&body),
+            ec2::state::INVALID_SERVICE_NAME,
+            "case {case:?}: expected {code}, got {body}",
+            code = ec2::state::INVALID_SERVICE_NAME
+        );
+        assert_eq!(
+            super::ec2_query::error_message(&body),
+            format!("The Vpc Endpoint Service '{service_name}' does not exist"),
+            "case {case:?}: expected the refusal to name the value the request sent, got {body}"
+        );
+        assert_eq!(
+            super::ec2_query::error_message(&body),
+            super::ec2_query::error_message(&describe_body),
+            "case {case:?}: the create and the describe must word one refusal one way, got \
+             {body}"
+        );
+    }
+
+    // Exactly the offered rows were created, each reported by `DescribeVpcEndpoints` against
+    // the service name it was created to: a refused create stored nothing.
+    let created = ok(
+        "the service-name table",
+        &router,
+        "DescribeVpcEndpoints",
+        &[],
+    )
+    .await;
+    let names: BTreeSet<String> = elements(&created, "serviceName").into_iter().collect();
+    let expected: BTreeSet<String> = rows
+        .iter()
+        .filter(|(_, _, offered)| *offered)
+        .map(|(_, service_name, _)| (*service_name).to_string())
+        .collect();
+    assert_eq!(
+        names, expected,
+        "expected one endpoint per offered service name, got {created}"
+    );
+}

@@ -908,6 +908,28 @@ pub fn invalid_filter<E>(supported: &[&str]) -> crate::scaffolded::Scaffolded<E>
     )
 }
 
+/// Refuse a `Filters` entry whose VALUE is not an id of the kind that filter selects on, the
+/// way EC2 does: HTTP 400 `InvalidParameterValue`, with the sentence it answers for one —
+/// the fixed `A filter with an invalid `, the filter's own name, and the value the REQUEST
+/// sent in single quotes.
+///
+/// A filter that selects on a resource id has its values PARSED as ids before anything is
+/// narrowed, so a value outside that id's form is refused rather than compared: a client that
+/// mistypes one is told its request was wrong instead of being handed the empty result set an
+/// id nothing holds would produce, which it could not tell from "the resource is not there".
+/// This is about the VALUE, where [`invalid_filter`] and the unknown-filter refusals are about
+/// the NAME. The echo is bounded the way every refusal that quotes a caller-chosen id bounds
+/// it ([`echoed_resource_id`]).
+pub fn invalid_filter_id_value<E>(
+    filter_name: &str,
+    value: &str,
+) -> crate::scaffolded::Scaffolded<E> {
+    invalid_parameter_value(format!(
+        "A filter with an invalid {filter_name} of '{}' was given",
+        echoed_resource_id(value),
+    ))
+}
+
 /// Refuse a request that reuses an idempotency token for a request that is not the one that
 /// token already named, the way EC2 does: HTTP 400 [`IDEMPOTENT_PARAMETER_MISMATCH`].
 ///

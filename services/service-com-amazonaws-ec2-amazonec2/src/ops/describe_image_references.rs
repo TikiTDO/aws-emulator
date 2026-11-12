@@ -97,8 +97,8 @@
 use super::types::*;
 use crate::state::{
     InstanceStateName, MAX_PAGE_SIZE, decode_page_token, dry_run_operation, encode_page_token,
-    image_id_is_well_formed, invalid_ami_id_malformed, invalid_pagination_token,
-    invalid_parameter_value, missing_parameter, request_region, require_service_state,
+    invalid_image_ids_malformed, invalid_pagination_token, invalid_parameter_value,
+    missing_parameter, request_region, require_service_state,
 };
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
@@ -178,16 +178,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // request walk refuses a violation of either before this handler runs, so what
         // reaches here satisfies both.
         //
-        // An id that is not an image id at all is malformed. A well-formed one no stored
-        // image has is NOT refused: this operation asks which resources reference an
-        // image, which is exactly the question asked about an image that is being
-        // deprecated or has already been deregistered, and about one owned by another
-        // account — so an unknown id simply has no references to report.
-        for image_id in &input.image_ids {
-            if !image_id_is_well_formed(image_id) {
-                return Err(invalid_ami_id_malformed(image_id));
-            }
-        }
+        // The ids themselves are validated below, once the store is reached: EC2's long id
+        // form is an obfuscated identifier the service DECODES, so whether a value is an AMI
+        // id at all is a question about the ids this service has issued
+        // ([`crate::state::ComAmazonawsEc2Amazonec2State::image_id_was_issued`]).
 
         // "The maximum number of items to return for this request" carries a modelled
         // minimum but no maximum, so above that minimum the only bound on the page size is
@@ -215,6 +209,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let state = require_service_state(&*self.engine)?;
         let mut store = state.lock();
+
+        // An id EC2 could not have ISSUED as an AMI id is no image id at all, so the whole
+        // list is refused before anything is scanned — `InvalidAMIID.Malformed`, in the one
+        // sentence this operation answers for an `ImageIds` entry it cannot read. The reading
+        // is the DECODE a service that hands out obfuscated ids makes
+        // ([`crate::state::ComAmazonawsEc2Amazonec2State::image_id_was_issued`]): the form
+        // EC2 issues AMI ids in, carrying an identifier this service's mint has actually
+        // reached. An id it HAS issued is answered whether or not an image still stands under
+        // it: this operation asks which resources reference an image, which is exactly the
+        // question asked about an image that is being deprecated or has already been
+        // deregistered — so such an id is reported as having the references the store holds,
+        // which may be none.
+        if !input
+            .image_ids
+            .iter()
+            .all(|image_id| store.image_id_was_issued(image_id))
+        {
+            return Err(invalid_image_ids_malformed());
+        }
         // The one write this reporting operation makes: the transitions the clock already
         // owed at this instant, which no caller had to ask for. An instance's state is
         // what the `state-name` option selects on, so it is materialised before the scan.

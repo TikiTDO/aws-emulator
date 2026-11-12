@@ -44,7 +44,7 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use ec2::state::{MAX_FILTER_VALUE_BYTES, MAX_FILTER_VALUES, MAX_FILTERS};
 
-use super::ec2_query::{element, elements, error_code, filters, unescaped};
+use super::ec2_query::{element, elements, error_code, error_message, filters, unescaped};
 
 /// Any Region: an offering is a published price-list entry, and the results "describe all
 /// of the Dedicated Host reservation offerings, including offerings that might not match
@@ -744,8 +744,10 @@ async fn the_duration_bounds_select_the_terms() {
 ///
 /// The ids that are expected to resolve are read back out of an unfiltered describe, over
 /// rows spanning the payment options and both terms, so the test names no id of its own.
-/// The rows that resolve to nothing differ in how the id misses: a well-formed id of the
-/// catalog's own form, a value of another resource's form, and the empty id.
+/// The rows that resolve to nothing are ids the service CAN read and the catalog does not
+/// publish: an id past the catalog's end, and one at the top of the form's range. A value
+/// that is no offering id at all is a refusal rather than a miss, which
+/// `an_offering_id_that_is_not_one_is_refused` covers.
 #[tokio::test]
 async fn an_offering_id_selects_one_offering() {
     let (router, _engine) = super::ec2_query::emulator();
@@ -778,12 +780,11 @@ async fn an_offering_id_selects_one_offering() {
         );
     }
 
-    // An id of the catalog's own form but past its end, a value of another resource's
-    // form, and the empty id.
-    let misses: [(&str, &str); 3] = [
-        ("an unheld id of the right form", "hro-fffffffffffffffff"),
-        ("another resource's form", "i-0123456789abcdef0"),
-        ("empty", ""),
+    // Ids of the catalog's own form that it does not publish: one just past its end, and
+    // the largest value the form holds.
+    let misses: [(&str, &str); 2] = [
+        ("an unheld id of the right form", "hro-0ffffffffffffffff"),
+        ("the largest id the form holds", "hro-0fffffffffffffffe"),
     ];
     for (case, offering_id) in misses {
         let (status, body) = describe(&router, &field("OfferingId", offering_id)).await;
@@ -798,10 +799,82 @@ async fn an_offering_id_selects_one_offering() {
     }
 }
 
+/// An `OfferingId` that is not a host reservation offering id AT ALL is refused with HTTP
+/// 400 `InvalidHostReservationOfferingId.Malformed`, naming the value the request sent —
+/// never with the empty offering set a readable id the catalog does not publish gets.
+///
+/// The rows span the ways a value falls outside the id form AWS issues
+/// (`hro-03f707bf363b6b324`, the form the `OfferingId` member's examples name, read by
+/// `ec2::ops::describe_host_reservation_offerings::host_offering_id_is_well_formed`): the
+/// all-zero placeholder, a leading digit above zero (the long form carries 68 bits for a
+/// 64-bit identifier, so an issued id always reads `hro-0…`), the retired short id form, a
+/// suffix one digit too short and one too long, a non-hexadecimal digit, an upper-case
+/// digit, another resource's prefix, a bare name, and the empty value.
+#[tokio::test]
+async fn an_offering_id_that_is_not_one_is_refused() {
+    let (router, _engine) = super::ec2_query::emulator();
+
+    let rows: [(&str, &str); 11] = [
+        ("the all-zero placeholder", "hro-00000000000000000"),
+        ("a leading digit above zero", "hro-fffffffffffffffff"),
+        ("a leading digit above zero, decimal", "hro-10000000000000000"),
+        ("the retired short form", "hro-0abc1234"),
+        ("one digit too short", "hro-0123456789abcdef"),
+        ("one digit too long", "hro-0123456789abcdef01"),
+        ("a non-hexadecimal digit", "hro-0g23456789abcdef0"),
+        ("an upper-case digit", "hro-0123456789ABCDEF0"),
+        ("another resource's prefix", "i-0123456789abcdef0"),
+        ("a bare name", "not-an-offering"),
+        ("the empty value", ""),
+    ];
+
+    for (case, offering_id) in rows {
+        let (status, body) = describe(&router, &field("OfferingId", offering_id)).await;
+        assert_eq!(
+            status, 400,
+            "case {case:?}: expected HTTP 400 for OfferingId {offering_id:?}, got {status} {body}"
+        );
+        assert_eq!(
+            error_code(&body),
+            "InvalidHostReservationOfferingId.Malformed",
+            "case {case:?}: expected the malformed-offering-id code, got {body}"
+        );
+        assert_eq!(
+            error_message(&body),
+            format!("The specified host reservation Offering ID '{offering_id}' is not valid."),
+            "case {case:?}: expected the sentence naming the value the request sent, got {body}"
+        );
+        assert!(
+            elements(&body, "offeringId").is_empty(),
+            "case {case:?}: a refused request reports no offering, got {body}"
+        );
+    }
+
+    // And every id the published catalog carries IS readable, so no offering is made
+    // unreachable by the rule above.
+    let (status, body) = describe(&router, &filters(&[("instance-family", &["m5"])])).await;
+    assert_eq!(
+        status, 200,
+        "case catalog: expected 200, got {status} {body}"
+    );
+    let published = offerings("catalog", &body);
+    assert!(
+        !published.is_empty(),
+        "case catalog: the catalog must publish offerings to check, got {body}"
+    );
+    for offering in &published {
+        let (status, body) = describe(&router, &field("OfferingId", &offering.offering_id)).await;
+        assert_eq!(
+            status, 200,
+            "case {id:?}: a published offering id must be readable, got {status} {body}",
+            id = offering.offering_id
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Rule 5: MaxResults / NextToken
 // ---------------------------------------------------------------------------
-
 /// A `NextToken` walk reports every matching offering exactly once, in pages of at most
 /// `MaxResults`, and the last page carries no token.
 ///

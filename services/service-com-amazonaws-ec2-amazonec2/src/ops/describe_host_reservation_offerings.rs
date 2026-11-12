@@ -28,11 +28,12 @@
 //!   of the reservation you'd like to purchase" and "the maximum duration of the
 //!   reservation to purchase" — inclusively, so a request naming both reports the terms
 //!   between them and a request naming neither reports every term.
-//! * `OfferingId` names one offering of that catalog. An id the catalog does not hold
-//!   names no offering and is reported as none: this operation's model declares no error
-//!   shape, and the catalog is a published list rather than the caller's own resources,
-//!   so an id outside it is a selection that matches nothing rather than a missing
-//!   resource.
+//! * `OfferingId` names one offering of that catalog. A value that is no offering id at all
+//!   is refused with `InvalidHostReservationOfferingId.Malformed` before the catalog is
+//!   consulted (`host_offering_id_is_well_formed`), while a well-formed id the catalog does
+//!   not hold names no offering and is reported as none: the catalog is a published list
+//!   rather than the caller's own resources, so an id inside the form but outside the list
+//!   is a selection that matches nothing rather than a missing resource.
 //! * `MaxResults` and `NextToken` page the matching offerings in a stable order: the
 //!   token is the opaque cursor `crate::state::encode_page_token` mints, naming the
 //!   offering the next page starts at, and the last page carries no token. A request
@@ -197,6 +198,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .ok_or_else(crate::state::invalid_pagination_token)?,
             ),
         };
+
+        // "The ID of the reservation offering" (`OfferingId`): an offering id is read
+        // through the id parser BEFORE the catalog is consulted
+        // ([`host_offering_id_is_well_formed`]), so a value that is no offering id at all is
+        // refused rather than looked up — `InvalidHostReservationOfferingId.Malformed`. That
+        // is a different answer from the empty offering set a well-formed id this catalog
+        // does not publish gets, which is what lets a caller tell a bad id from a term or
+        // family nothing is offered for.
+        if let Some(offering_id) = input.offering_id.as_deref() {
+            if !host_offering_id_is_well_formed(offering_id) {
+                return Err(
+                    crate::state::invalid_host_reservation_offering_id_malformed(offering_id),
+                );
+            }
+        }
 
         // Matching cost is filters x values x value length x candidate families and
         // options, and the model bounds none of the request-controlled factors (`Filter`
@@ -428,6 +444,23 @@ pub const HOST_OFFERING_CURRENCY_CODE: &str = "USD";
 /// ids read (`hro-03f707bf363b6b324`, the form the `OfferingId` member's examples name).
 pub const HOST_OFFERING_ID_PREFIX: &str = "hro";
 
+/// Whether `offering_id` is an offering id AWS could have ISSUED.
+///
+/// AWS's own offering ids are the LONG EC2 resource id form under this prefix
+/// (`hro-03f707bf363b6b324`), which is what
+/// [`crate::state::issued_long_id_is_well_formed`] reads: 17 lowercase hexadecimal digits
+/// whose leading digit is `0` — that form carries 68 bits for a 64-bit identifier, so an
+/// issued id always reads `hro-0…` — and not the all-zero placeholder every client reaches
+/// for. [`host_offering_id`] mints the catalog's ids in exactly that form, so every offering
+/// this operation publishes is an id it reads back.
+///
+/// Anything else is no offering id at all and is refused before the catalog is consulted
+/// ([`crate::state::invalid_host_reservation_offering_id_malformed`]), where a well-formed id
+/// the catalog does not publish selects no offering.
+pub fn host_offering_id_is_well_formed(offering_id: &str) -> bool {
+    crate::state::issued_long_id_is_well_formed(HOST_OFFERING_ID_PREFIX, offering_id)
+}
+
 /// The modelled `PaymentOption` value that pays the whole reservation at purchase
 /// (`super::types::PAYMENT_OPTION_VALUES`).
 pub const PAYMENT_OPTION_ALL_UPFRONT: &str = "AllUpfront";
@@ -564,8 +597,13 @@ pub fn host_reservation_durations() -> Vec<i32> {
 /// function needed to make it so. The form is the `<prefix>-<17 lowercase hex digits>`
 /// EC2 uses, the same shape `ComAmazonawsEc2Amazonec2State::next_id` mints a stored
 /// resource's id in.
+///
+/// The ids COUNT FROM ONE, exactly as that mint does: `hro-00000000000000000` is the
+/// placeholder every client reaches for and no id AWS ever issued, so it is the value this
+/// operation answers `InvalidHostReservationOfferingId.Malformed` for
+/// ([`host_offering_id_is_well_formed`]) and can therefore never be an offering's own.
 fn host_offering_id(index: usize) -> String {
-    format!("{HOST_OFFERING_ID_PREFIX}-{index:017x}")
+    format!("{HOST_OFFERING_ID_PREFIX}-{:017x}", index + 1)
 }
 
 /// The published offering `offering_id` names, and `None` for an id no entry of the

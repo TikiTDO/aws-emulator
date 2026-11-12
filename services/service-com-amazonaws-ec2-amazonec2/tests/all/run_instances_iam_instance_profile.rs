@@ -561,14 +561,30 @@ async fn the_association_describe_refuses_a_filter_name_it_does_not_document() {
 
     // And the names it documents are served rather than refused
     // ("instance-id - The ID of the instance. state - The state of the association" —
-    // `DescribeIamInstanceProfileAssociationsRequest$Filters`).
+    // `DescribeIamInstanceProfileAssociationsRequest$Filters`). The `instance-id` rows name
+    // the instance the launch above minted: the values of that filter are read as instance
+    // ids, so an id this service never issued is refused for its VALUE (which
+    // `iam_instance_profile_associations.rs` covers) and would say nothing about the NAME.
+    let (status, body) = describe_associations(&router, &[]).await;
+    assert_eq!(
+        status, 200,
+        "the association describe must succeed, got {status}: {body}"
+    );
+    let launched = elements(&body, "instanceId");
+    let instance_id = launched
+        .first()
+        .unwrap_or_else(|| panic!("the launch must have recorded an association: {body}"))
+        .clone();
     for (case, params) in [
-        ("instance-id", filters(&[("instance-id", &["i-00000000000000000"])])),
+        (
+            "instance-id",
+            filters(&[("instance-id", &[instance_id.as_str()])]),
+        ),
         ("state", filters(&[("state", &["associating"])])),
         (
             "both documented names",
             filters(&[
-                ("instance-id", &["i-00000000000000000"]),
+                ("instance-id", &[instance_id.as_str()]),
                 ("state", &["associated"]),
             ]),
         ),

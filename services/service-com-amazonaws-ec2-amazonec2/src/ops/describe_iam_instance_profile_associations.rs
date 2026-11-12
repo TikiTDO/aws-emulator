@@ -240,6 +240,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // have seen anyway.
         store.materialize_due_transitions();
 
+        // "instance-id - The ID of the instance"
+        // (`DescribeIamInstanceProfileAssociationsRequest$Filters`): the values of a filter
+        // that selects on a resource id are read through the service's own id parser BEFORE
+        // anything is narrowed, so a value that is no instance id this service could have
+        // issued is refused ([`crate::state::instance_id_filter_value_is_readable`]) instead
+        // of compared — a mistyped id is a wrong request, not an association that is absent.
+        // Every documented filter whose values are ids is read this way, which here is the
+        // one: `state` selects on an association's own state word rather than on an id.
+        for filter in filters {
+            if filter.name.as_deref() != Some(INSTANCE_ID_FILTER) {
+                continue;
+            }
+            for value in filter.values.iter().flatten() {
+                if !crate::state::instance_id_filter_value_is_readable(&store, value) {
+                    return Err(crate::state::invalid_filter_id_value(
+                        INSTANCE_ID_FILTER,
+                        value,
+                    ));
+                }
+            }
+        }
+
         // An id that names no association of the account is an error, not an absent row —
         // and EC2 answers the one refusal it has for an association id it cannot resolve,
         // whatever the shape of the value.
@@ -340,7 +362,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 ///
 /// This operation documents no `tag:<key>` family — an association carries no tags — so every
 /// name is listed here, and every entry must be answered by [`filter_values`].
-const IAM_INSTANCE_PROFILE_ASSOCIATION_FILTERS: [&str; 2] = ["instance-id", "state"];
+const IAM_INSTANCE_PROFILE_ASSOCIATION_FILTERS: [&str; 2] = [INSTANCE_ID_FILTER, "state"];
+
+/// The one filter of this operation whose values are RESOURCE IDS: "instance-id - The ID of
+/// the instance" (`DescribeIamInstanceProfileAssociationsRequest$Filters`). Its values are
+/// parsed as instance ids before anything is narrowed, where `state`'s are state words
+/// compared as text.
+const INSTANCE_ID_FILTER: &str = "instance-id";
 
 /// Whether this operation documents a filter called `name`.
 ///
@@ -366,7 +394,7 @@ fn filter_values<'a>(
     };
     match name {
         // "instance-id - The ID of the instance."
-        "instance-id" => text(association.instance_id.as_deref()),
+        INSTANCE_ID_FILTER => text(association.instance_id.as_deref()),
         // "state - The state of the association (associating | associated |
         // disassociating)."
         "state" => text(association.state.as_deref()),

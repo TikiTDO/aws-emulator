@@ -1064,8 +1064,11 @@ pub const INVALID_USER_ID_MALFORMED: &str = "InvalidUserID.Malformed";
 /// answers `InvalidAMIID.Malformed` for anything else, BEFORE it looks the id up, which is
 /// a different answer from `InvalidAMIID.NotFound` for a well-formed id no image has.
 pub fn image_id_is_well_formed(id: &str) -> bool {
-    prefixed_id_is_well_formed("ami", id)
+    prefixed_id_is_well_formed(IMAGE_ID_PREFIX, id)
 }
+
+/// The id prefix of an Amazon Machine Image, as every reading of an AMI id here spells it.
+pub const IMAGE_ID_PREFIX: &str = "ami";
 
 /// Is `id` shaped like an Amazon Web Services account id — [`AWS_ACCOUNT_ID_DIGITS`]
 /// decimal digits?
@@ -1156,6 +1159,24 @@ pub fn invalid_ami_id_malformed<E>(image_id: &str) -> Scaffolded<E> {
     Scaffolded::service_error(INVALID_AMI_ID_MALFORMED, 400, invalid_id_message(image_id))
 }
 
+/// Refuse an `ImageIds` LIST one of whose entries EC2 cannot read as an AMI id: HTTP 400
+/// `InvalidAMIID.Malformed`, worded the way EC2 words that code for an operation that
+/// validates the whole list rather than resolving one named image.
+///
+/// The sentence is ENTIRELY fixed — it names the MEMBER and what is wrong with it rather than
+/// echoing a value, so no caller-supplied text reaches it. Kept beside
+/// [`invalid_ami_id_malformed`] rather than replacing it, because the shared
+/// [`invalid_id_message`] template is what the operations that resolve ONE image id were
+/// recorded answering and this sentence is what the list validator was.
+pub fn invalid_image_ids_malformed<E>() -> Scaffolded<E> {
+    Scaffolded::service_error(
+        INVALID_AMI_ID_MALFORMED,
+        400,
+        "One or more ImageIds isn't valid. Verify that each ImageId is in the correct format \
+         and try again.",
+    )
+}
+
 /// Whether `id` is an AMI id EC2 could have ISSUED: `ami-` followed by the long id form
 /// ([`issued_long_id_is_well_formed`]) — 17 lowercase hexadecimal digits under a leading
 /// `0`, not all of them `0`.
@@ -1168,9 +1189,11 @@ pub fn invalid_ami_id_malformed<E>(image_id: &str) -> Scaffolded<E> {
 /// LONG-form instance id is read under too ([`instance_id_is_well_formed`]). The
 /// describes of the account's images keep the wider [`image_id_is_well_formed`] on their own
 /// recorded evidence (a short-form id there is answered `InvalidAMIID.NotFound`), so which
-/// reading an operation uses is a fact of that operation's validator.
+/// reading an operation uses is a fact of that operation's validator — the strictest being
+/// the DECODE [`ComAmazonawsEc2Amazonec2State::image_id_was_issued`] makes, for an operation
+/// that looks no image up at all.
 pub fn issued_image_id_is_well_formed(id: &str) -> bool {
-    issued_long_id_is_well_formed("ami", id)
+    issued_long_id_is_well_formed(IMAGE_ID_PREFIX, id)
 }
 
 /// Refuse an AMI id the launch validator cannot read: HTTP 400 `InvalidAMIID.Malformed`,
@@ -1685,6 +1708,26 @@ impl ComAmazonawsEc2Amazonec2State {
             inserted.push(self.insert_image(spec));
         }
         inserted
+    }
+
+    /// Whether `image_id` is an AMI id this service COULD HAVE ISSUED — the reading of an
+    /// operation that validates an `ImageId` as a FORMAT and looks no image up.
+    ///
+    /// EC2's long id form is an OBFUSCATED identifier, decoded by the service before it
+    /// resolves anything ([`Self::id_was_issued`]), so a value that is merely IN the printed
+    /// form — the `ami-0123456789abcdef0` shape documentation examples and hand-written
+    /// probes reach for — is no AMI id at all and is answered `InvalidAMIID.Malformed`
+    /// without being looked up. The ids this service could have issued are the ones its mint
+    /// has counted, which includes every image it still holds and every image it has let go
+    /// of: an AMI that has been deprecated or deregistered keeps its id, so a question ABOUT
+    /// that id is still a question the service can read.
+    ///
+    /// Which operations read an `ImageId` this way is a fact of each operation's validator
+    /// ([`issued_image_id_is_well_formed`] for the ones that read the FORM only, and
+    /// [`require_visible_image`] for the ones that resolve an image and answer
+    /// `InvalidAMIID.NotFound` for a readable id they cannot see).
+    pub fn image_id_was_issued(&self, image_id: &str) -> bool {
+        self.id_was_issued(IMAGE_ID_PREFIX, image_id)
     }
 
     /// Whether `image_id` is a long-form id whose identifier names a resource this service
