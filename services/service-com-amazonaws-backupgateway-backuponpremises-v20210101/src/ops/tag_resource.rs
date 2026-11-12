@@ -8,7 +8,10 @@
 //! An ARN with no record behind it is refused as the resource TYPE it names: the modelled
 //! `ResourceNotFoundException` shape at HTTP 400, carrying the `ErrorCode` that names
 //! which of this service's resource types was not found
-//! ([`crate::state::MissingResource`]).
+//! ([`crate::state::MissingResource`]) — but only once the tag pairs the request carries
+//! have been accepted: the prose-only tag rules
+//! ([`crate::state::validate_tags`]) are facts of the request alone, so they are answered
+//! first, as they are for every other member of this service that carries an AWS tag pair.
 //!
 //! ## Shape of an operation
 //!
@@ -153,6 +156,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let in_request_region =
             crate::state::arn_is_in_request_region(&input.resource_arn, ctx.parts());
 
+        // `ResourceARN`'s length and pattern and every tag's key and value constraints are
+        // refused by the boundary validator before `handle` runs. What the model states
+        // only in prose are the two rules of a tag PAIR — a key may not start with the
+        // reserved prefix and a value may not carry spaces
+        // (`crate::state::validate_tags`). Both are read off the pair and off nothing
+        // else, so they are facts of the REQUEST: they are answered here, before the store
+        // is consulted at all and with nothing written, exactly as `tag_map` is answered
+        // for a create's `Tags` and `crate::state::validate_tag_mappings` for a put's
+        // mappings. A pair this service may not persist is refused for being that pair,
+        // whether or not the ARN beside it names a record this store holds.
+        crate::state::validate_tags(&input.tags).map_err(|message| {
+            TagResourceErrorModeled::ValidationException(ValidationException {
+                error_code: None,
+                message: Some(message),
+            })
+        })?;
+
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             TagResourceErrorModeled::InternalServerException(InternalServerException {
                 error_code: None,
@@ -194,8 +214,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 None => error.into(),
             });
         };
-        // The tag rules the model's own traits cannot express; nothing is written when
-        // they refuse.
+        // The one tag rule left that is NOT a fact of the request: the per-resource tag
+        // ceiling, which can only be judged against the tags the resource already carries.
+        // Nothing is written when it refuses.
         let resource_arn = merged.map_err(|message| {
             TagResourceErrorModeled::ValidationException(ValidationException {
                 error_code: None,

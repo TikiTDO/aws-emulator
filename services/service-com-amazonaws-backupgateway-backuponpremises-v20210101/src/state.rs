@@ -2986,21 +2986,21 @@ pub fn validate_tag_mappings(mappings: &[VmwareToAwsTagMapping]) -> Result<(), S
     Ok(())
 }
 
-/// Merge a request's `Tags` into the tags a resource already carries, refusing what the
-/// model's own traits cannot express.
+/// Check every AWS tag pair a request's `Tags` carries, by the rules
+/// [`validate_tag_pair`] states.
 ///
-/// Each requested pair satisfies the tag rules [`validate_tag_pair`] states, and a
-/// resource carries at most [`MAX_TAGS_PER_RESOURCE`] tags — the one rule of the three
-/// that is about the resource rather than a single pair, and so the one reported at the
-/// tag member itself rather than at a pair inside it.
+/// Both rules are facts of the REQUEST alone — they are read off the pair and off nothing
+/// else — so a handler answers them BEFORE it consults the store, exactly as
+/// [`validate_tag_mappings`] is answered for the mapping member: a pair this service may
+/// not persist is refused for being that pair, whether or not the `ResourceARN` beside it
+/// names a record this store holds. Were the lookup first, one request would get two
+/// different answers for the same pair depending on something the pair has nothing to do
+/// with, and a caller that got both wrong would learn only about the ARN.
 ///
-/// `Err` carries the message the refusal states. Merging is by key, so a key already
-/// present is overwritten rather than duplicated.
-pub fn merged_tags(
-    existing: &BTreeMap<String, String>,
-    requested: &[Tag],
-) -> Result<BTreeMap<String, String>, String> {
-    let mut merged = existing.clone();
+/// `Err` carries the message the refusal states, in which case NOTHING is written. The
+/// pairs are checked in the order the request listed them, so one request is always
+/// refused for its first offending pair.
+pub fn validate_tags(requested: &[Tag]) -> Result<(), String> {
     for (index, tag) in requested.iter().enumerate() {
         // As in `validate_tag_mappings`: the position names the pair that was refused.
         let position = index + 1;
@@ -3010,6 +3010,28 @@ pub fn merged_tags(
             &crate::service::element_member_path(TAGS_MEMBER, position, "Key"),
             &crate::service::element_member_path(TAGS_MEMBER, position, "Value"),
         )?;
+    }
+    Ok(())
+}
+
+/// Merge a request's `Tags` into the tags a resource already carries, refusing what the
+/// model's own traits cannot express.
+///
+/// Each requested pair satisfies the tag rules [`validate_tags`] states, and a
+/// resource carries at most [`MAX_TAGS_PER_RESOURCE`] tags — the one rule of the three
+/// that is about the resource rather than a single pair, and so the one reported at the
+/// tag member itself rather than at a pair inside it, and the one a handler can only
+/// answer once it has the resource in hand.
+///
+/// `Err` carries the message the refusal states. Merging is by key, so a key already
+/// present is overwritten rather than duplicated.
+pub fn merged_tags(
+    existing: &BTreeMap<String, String>,
+    requested: &[Tag],
+) -> Result<BTreeMap<String, String>, String> {
+    validate_tags(requested)?;
+    let mut merged = existing.clone();
+    for tag in requested {
         merged.insert(tag.key.clone(), tag.value.clone());
     }
     if merged.len() > MAX_TAGS_PER_RESOURCE {
