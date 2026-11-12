@@ -366,6 +366,10 @@ impl ComAmazonawsEc2Amazonec2State {
     /// it — and an IPAM (with its default scopes, resource discovery and that discovery's
     /// association) reaching `create-complete`.
     ///
+    /// So is the end of a secondary subnet's deletion — a `delete-in-progress` secondary
+    /// subnet reaching `delete-complete` with its IPv4 CIDR block associations
+    /// `disassociated` ([`Self::materialize_due_secondary_subnet_deletions`]).
+    ///
     /// An `active` import image task becoming `completed` with the AMI it created is one of
     /// them too; it is documented on [`Self::complete_due_import_image_tasks`], which this
     /// calls. So is an `active` import SNAPSHOT task reaching `completed` with the EBS
@@ -1129,6 +1133,11 @@ impl ComAmazonawsEc2Amazonec2State {
                 }
                 false
             });
+        // A secondary subnet goes down the same way: `DeleteSecondarySubnet` answers it in
+        // the non-terminal `delete-in-progress` state with its IPv4 CIDR blocks
+        // `disassociating`, so the clock owes it `delete-complete` with those blocks
+        // `disassociated` one TRANSITION_DELAY later whether or not anybody calls again.
+        self.materialize_due_secondary_subnet_deletions(now);
         self.fast_launch_images.retain(|_image_id, record| {
             let Some(pending) = record
                 .pending

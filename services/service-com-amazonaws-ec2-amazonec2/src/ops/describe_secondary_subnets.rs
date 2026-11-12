@@ -240,11 +240,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let state = require_service_state(&*self.engine)?;
-        let store = state.lock();
+        let mut store = state.lock();
 
-        // A pure read: a secondary subnet's `SecondarySubnetState` moves when something
-        // creates or deletes one, which is an action and not an instant, so there is no
-        // clock-owed transition to materialise here and nothing this call writes.
+        // A secondary subnet whose deletion was asked for reaches `delete-complete` with its
+        // IPv4 CIDR block associations `disassociated` at the instant that delete recorded
+        // for it, whether or not anybody called — so the move is applied before the store is
+        // read ([`crate::state::ComAmazonawsEc2Amazonec2State::materialize_due_transitions`]).
+        // It was owed at that same instant either way, so this changes nothing a later
+        // caller would have seen; everything else this operation reports was decided when
+        // the subnet was stored.
+        store.materialize_due_transitions();
 
         // An id that names no secondary subnet of the account is an error, not an absent
         // row — the same answer `DescribeSubnets` gives for an unknown `SubnetId`.

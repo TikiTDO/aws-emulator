@@ -2540,6 +2540,16 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// [`SecondarySubnet`] shape itself — see the module docs. Ordered by id, which is the
     /// order `DescribeSecondarySubnets` reports and pages over.
     pub secondary_subnets: BTreeMap<String, SecondarySubnet>,
+    /// When each secondary subnet a `DeleteSecondarySubnet` started taking down finishes
+    /// deleting, by `SecondarySubnetId` — the deletion counterpart of
+    /// [`Self::subnet_available_at`], beside the subnet store rather than inside it because
+    /// that store holds the modelled shape itself, which carries no instant.
+    /// `DeleteSecondarySubnet` answers the subnet in the non-terminal `delete-in-progress`
+    /// state, so the clock owes it `delete-complete` [`TRANSITION_DELAY`] later
+    /// ([`Self::begin_secondary_subnet_deletion`], applied by
+    /// [`Self::materialize_due_secondary_subnet_deletions`]); a subnet nobody has asked to
+    /// delete has no entry here, and an applied move leaves none behind.
+    pub secondary_subnet_delete_complete_at: BTreeMap<String, Instant>,
     /// Every secondary interface the account holds, by `SecondaryInterfaceId`, as the
     /// modelled [`SecondaryInterface`] shape itself — see the module docs. Ordered by id,
     /// which is the order `DescribeSecondaryInterfaces` reports and pages over.
@@ -3445,6 +3455,7 @@ impl Default for ComAmazonawsEc2Amazonec2State {
             export_tasks: BTreeMap::new(),
             bundle_tasks: BTreeMap::new(),
             secondary_subnets: BTreeMap::new(),
+            secondary_subnet_delete_complete_at: BTreeMap::new(),
             secondary_interfaces: BTreeMap::new(),
             capacity_reservation_billing_requests: BTreeMap::new(),
             vpc_endpoint_connection_moves: BTreeMap::new(),

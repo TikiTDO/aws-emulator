@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteSecondarySubnet
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteSecondarySubnet`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteSecondarySubnet::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Deletes a secondary subnet of a secondary network: the one file to touch for this
+//! operation.
 //!
 //! ## Shape of an operation
 //!
@@ -141,18 +134,99 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteSecondarySubnet` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteSecondarySubnetErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteSecondarySubnet"))
+        use crate::state;
+        use std::time::Instant;
+
+        // `ctx` carries request metadata only; this operation reads none of it — a secondary
+        // subnet is named by id, which is unique across Regions in this store. The store is
+        // reached through the engine held on `self`.
+        let _ = ctx;
+
+        // "Unique, case-sensitive identifier that you provide to ensure the idempotency of
+        // the request" (`ClientToken`), held to the published constraint every client token
+        // of this crate is held to ([`state::MAX_CLIENT_TOKEN_CHARS`]). Nothing is stored for
+        // it, and nothing needs to be: this delete is already idempotent in the subnet it
+        // names — the store keeps the due instant the first call gave it — so a repeat
+        // reports that same deletion without a token map to keep, and no caller-chosen bytes
+        // are added to the store.
+        if input
+            .client_token
+            .as_ref()
+            .is_some_and(|token| token.chars().count() > state::MAX_CLIENT_TOKEN_CHARS)
+        {
+            return Err(state::invalid_parameter_value(format!(
+                "clientToken accepts at most {} characters",
+                state::MAX_CLIENT_TOKEN_CHARS
+            )));
+        }
+
+        let subnets = state::require_service_state(&*self.engine)?;
+        let mut store = subnets.lock();
+
+        // Whether the subnet still holds anything, and which state it is in, are questions
+        // about the CURRENT store, so the moves the clock already owed are applied before
+        // either is asked — a deletion that fell due a second ago was owed at that instant
+        // whether or not anybody called, so materialising it changes nothing a later caller
+        // would have seen.
+        store.materialize_due_transitions();
+
+        // "Deletes a secondary subnet" (`DeleteSecondarySubnet`): the id is read for its
+        // SYNTAX first and only then looked up, which is the order EC2 answers the two
+        // questions in — something that is not a secondary subnet id at all is
+        // `InvalidSecondarySubnetId.Malformed` before any lookup, and a well-formed id the
+        // account holds no subnet for is the kind's own not-found code. Neither is a no-op: a
+        // caller has to be able to tell the deletion it performed from one it did not, and a
+        // typo from a resource that is gone.
+        state::require_known_secondary_subnet(&store, &input.secondary_subnet_id)?;
+
+        // "A secondary subnet must not contain any secondary interfaces prior to deletion"
+        // (`DeleteSecondarySubnet`) — the same dependency refusal `DeleteSubnet` answers for
+        // an ordinary subnet something still holds a place in.
+        let dependencies = store.secondary_subnet_dependencies(&input.secondary_subnet_id);
+        if !dependencies.is_empty() {
+            // The refusal names the SUBNET THE REQUEST NAMED and nothing else: which
+            // resource still holds a place in it is not part of the message AWS builds for
+            // this error class.
+            return Err(state::dependency_violation(format!(
+                "The secondary subnet '{secondary_subnet_id}' has dependencies and cannot be \
+                 deleted.",
+                secondary_subnet_id = input.secondary_subnet_id,
+            )));
+        }
+
+        // DryRun sits AFTER every parameter has been validated and the named subnet
+        // resolved, and BEFORE the write: the flag asks whether the request WOULD have
+        // worked, so one that would have been refused is refused with that reason instead,
+        // and one that would have succeeded leaves state untouched.
+        if input.dry_run == Some(true) {
+            return Err(state::dry_run_operation());
+        }
+
+        // The deletion is owed to the clock rather than finished here: the subnet answers
+        // `delete-in-progress` with each IPv4 CIDR block association `disassociating` until
+        // the stored instant falls due, so a caller acting straight after this call still
+        // sees the transient states. The record itself stays in the store — a subnet in
+        // either delete state is still reported — so the bytes it holds stay charged to the
+        // store's budget, which still holds them.
+        let secondary_subnet = store
+            .begin_secondary_subnet_deletion(
+                &input.secondary_subnet_id,
+                Instant::now() + state::TRANSITION_DELAY,
+            )
+            .ok_or_else(|| {
+                state::internal_error(format!(
+                    "the secondary subnet '{}' checked a moment ago could not be deleted",
+                    input.secondary_subnet_id
+                ))
+            })?;
+
+        // The subnet as the store now holds it, so the caller sees what a later
+        // `DescribeSecondarySubnets` will see rather than the request object. "Only returned
+        // if a client token was provided in the request"
+        // (`DeleteSecondarySubnetResult$ClientToken`).
+        Ok(DeleteSecondarySubnetOutput {
+            secondary_subnet: Some(secondary_subnet),
+            client_token: input.client_token,
+        })
     }
 }

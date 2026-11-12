@@ -1160,6 +1160,11 @@ mod search_local_gateway_routes;
 mod secondary_interfaces;
 #[path = "all/secondary_networks.rs"]
 mod secondary_networks;
+// What `DeleteSecondarySubnet` does to the secondary subnet the request names: the form of the
+// id it reads before any lookup, the secondary interfaces that block the delete, and the
+// clock-owed move to `delete-complete`.
+#[path = "all/secondary_subnet_deletion.rs"]
+mod secondary_subnet_deletion;
 #[path = "all/secondary_subnets.rs"]
 mod secondary_subnets;
 #[path = "all/security_group_filter_limits.rs"]

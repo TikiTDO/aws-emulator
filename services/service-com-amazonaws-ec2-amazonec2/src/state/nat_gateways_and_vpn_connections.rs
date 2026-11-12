@@ -31,17 +31,92 @@ pub fn invalid_secondary_subnet_id_not_found<E>(secondary_subnet_id: &str) -> Sc
 
 /// The id prefix a secondary subnet carries.
 ///
-/// CHOSEN: the model publishes no `@pattern` for `SecondarySubnetId`
-/// (`smithy_query(query="shape",shape="SecondarySubnetId")` reports a plain string), so the
-/// only form it has to satisfy is EC2's own `<prefix>-<hex>`, which
-/// [`ComAmazonawsEc2Amazonec2State::next_id`] gives.
-pub const SECONDARY_SUBNET_ID_PREFIX: &str = "snet";
+/// The model publishes no `@pattern` for `SecondarySubnetId`
+/// (`smithy_query(query="shape",shape="SecondarySubnetId")` reports a plain string), so it
+/// publishes no spelling for one; the recorded wire corpus does. AWS answers
+/// `secsub-00000000000000000` with `InvalidSecondarySubnetId.Malformed` rather than with the
+/// `UnknownParameter`/`InvalidParameterValue` it answers a value it cannot place at all, and
+/// the same recorded catalog probes `secnet-00000000000000000` and `afi-00000000000000000` —
+/// prefixes EC2 certainly issues ([`SECONDARY_NETWORK_ID_PREFIX`]) — and gets each
+/// resource's own `.Malformed` back too. What those probes share is the ALL-ZERO long-form
+/// suffix, not an unknown prefix, so `secsub` is read as the prefix AWS issues for this
+/// resource and the suffix as what makes the probe malformed (see
+/// [`secondary_subnet_id_is_well_formed`]).
+///
+/// [`ComAmazonawsEc2Amazonec2State::next_id`] mints EC2's own
+/// `<prefix>-<17 lowercase hex digits>` form under it, the way every other id of this store
+/// is minted, so every id this store issues is one that reader accepts.
+pub const SECONDARY_SUBNET_ID_PREFIX: &str = "secsub";
 
-/// The id prefix of one IPv4 CIDR block association of a secondary subnet, on the same
-/// terms as [`SECONDARY_SUBNET_ID_PREFIX`]: `SecondarySubnetCidrAssociationId` is a plain
-/// string in the model, and an ordinary subnet's CIDR associations are minted under
+/// The id prefix of one IPv4 CIDR block association of a secondary subnet: CHOSEN, the model
+/// publishing no pattern for `SecondarySubnetCidrAssociationId` either and no recording
+/// probing one, and spelled as [`SECONDARY_SUBNET_ID_PREFIX`] extended by the association it
+/// names — the way an ordinary subnet's CIDR associations are minted under
 /// `subnet-cidr-assoc`.
-pub const SECONDARY_SUBNET_CIDR_ASSOCIATION_ID_PREFIX: &str = "snet-cidr-assoc";
+pub const SECONDARY_SUBNET_CIDR_ASSOCIATION_ID_PREFIX: &str = "secsub-cidr-assoc";
+
+/// The `ResourceType` a secondary subnet is named by — the resource part of its ARN, and the
+/// word EC2 uses for the kind in the messages it builds about one, the way
+/// [`SECONDARY_INTERFACE_RESOURCE`] is for a secondary interface and
+/// [`SECONDARY_NETWORK_TAGGABLE_RESOURCE`] for a secondary network.
+pub const SECONDARY_SUBNET_RESOURCE: &str = "secondary-subnet";
+
+/// EC2's error code for a request naming something that is not a secondary subnet id at all,
+/// in EC2's `Invalid<Resource>Id.Malformed` spelling — the code AWS answers before any
+/// lookup, as the recorded wire corpus shows
+/// (`secsub-00000000000000000` -> `InvalidSecondarySubnetId.Malformed`), and the same
+/// spelling [`INVALID_SECONDARY_NETWORK_ID_MALFORMED`] carries.
+pub const INVALID_SECONDARY_SUBNET_ID_MALFORMED: &str = "InvalidSecondarySubnetId.Malformed";
+
+/// Whether `id` is a well-formed secondary subnet id — one this service could have ISSUED.
+///
+/// Read by the stricter of the two generic id readers
+/// ([`issued_long_id_is_well_formed`]): the long EC2 resource id form only
+/// (`<prefix>-<17 lowercase hex digits>`, leading `0`, not all `0`) under this resource's own
+/// prefix ([`SECONDARY_SUBNET_ID_PREFIX`], whose doc carries the recorded evidence).
+/// Secondary subnets are a resource EC2 only ever issued LONG ids for — there is no
+/// eight-digit era behind them — and the all-zero suffix is what the recorded catalog shows
+/// AWS calling malformed, under this prefix and under the other prefixes it probes beside it.
+///
+/// Anything else is [`INVALID_SECONDARY_SUBNET_ID_MALFORMED`] BEFORE any lookup, so a caller
+/// can tell "not an id of this kind" from "no such secondary subnet".
+pub fn secondary_subnet_id_is_well_formed(id: &str) -> bool {
+    issued_long_id_is_well_formed(SECONDARY_SUBNET_ID_PREFIX, id)
+}
+
+/// Refuse something that is not a secondary subnet id at all: HTTP 400
+/// [`INVALID_SECONDARY_SUBNET_ID_MALFORMED`], worded the way EC2 words a malformed id of a
+/// resource kind ([`invalid_secondary_network_id_malformed`]) and built from the request's
+/// own value.
+pub fn invalid_secondary_subnet_id_malformed<E>(secondary_subnet_id: &str) -> Scaffolded<E> {
+    Scaffolded::service_error(
+        INVALID_SECONDARY_SUBNET_ID_MALFORMED,
+        400,
+        format!("The {SECONDARY_SUBNET_RESOURCE} ID '{secondary_subnet_id}' is malformed"),
+    )
+}
+
+/// Refuse a secondary subnet id the request named that this service cannot resolve.
+///
+/// The two questions EC2 asks in order, the way [`require_known_secondary_network`] asks them
+/// of a secondary network id: is this an id of this resource kind at all
+/// ([`secondary_subnet_id_is_well_formed`], answered
+/// [`INVALID_SECONDARY_SUBNET_ID_MALFORMED`] before any lookup), and does the account hold a
+/// secondary subnet with it ([`INVALID_SECONDARY_SUBNET_ID_NOT_FOUND`])? A caller branches on
+/// the code, and the two mean different things: a malformed id is a permanent client bug,
+/// while a missing one is a resource that is gone.
+pub fn require_known_secondary_subnet<E>(
+    store: &ComAmazonawsEc2Amazonec2State,
+    secondary_subnet_id: &str,
+) -> Result<(), Scaffolded<E>> {
+    if !secondary_subnet_id_is_well_formed(secondary_subnet_id) {
+        return Err(invalid_secondary_subnet_id_malformed(secondary_subnet_id));
+    }
+    if store.secondary_subnets.contains_key(secondary_subnet_id) {
+        return Ok(());
+    }
+    Err(invalid_secondary_subnet_id_not_found(secondary_subnet_id))
+}
 
 /// The only secondary network type the model publishes: `SecondaryNetworkType`'s sole
 /// member — "The type of the secondary network (`rdma`)"
@@ -59,6 +134,28 @@ pub const SECONDARY_SUBNET_STATE_CREATE_COMPLETE: &str = "create-complete";
 /// `SecondarySubnetCidrBlockAssociationState`'s `associated` member. The whole catalog is
 /// the generated [`crate::ops::types::SECONDARY_SUBNET_CIDR_BLOCK_ASSOCIATION_STATE_VALUES`].
 pub const SECONDARY_SUBNET_CIDR_STATE_ASSOCIATED: &str = "associated";
+
+/// A secondary subnet AWS has been asked to delete and has not finished deleting:
+/// `SecondarySubnetState`'s `delete-in-progress` member, the non-terminal state
+/// `DeleteSecondarySubnet` answers with.
+pub const SECONDARY_SUBNET_STATE_DELETE_IN_PROGRESS: &str = "delete-in-progress";
+
+/// A secondary subnet AWS has finished deleting: `SecondarySubnetState`'s `delete-complete`
+/// member.
+///
+/// A subnet in either delete state is still REPORTED: `DescribeSecondarySubnets` documents
+/// `delete-in-progress` and `delete-complete` among the values of its `state` filter
+/// (`smithy_query(query="doc",shape="DescribeSecondarySubnetsRequest",member="Filters")`),
+/// which no report could ever select on if a deleted subnet left the account's subnets.
+pub const SECONDARY_SUBNET_STATE_DELETE_COMPLETE: &str = "delete-complete";
+
+/// The IPv4 CIDR block of a secondary subnet that is being deleted:
+/// `SecondarySubnetCidrBlockAssociationState`'s `disassociating` member.
+pub const SECONDARY_SUBNET_CIDR_STATE_DISASSOCIATING: &str = "disassociating";
+
+/// The IPv4 CIDR block of a secondary subnet whose deletion has finished:
+/// `SecondarySubnetCidrBlockAssociationState`'s `disassociated` member.
+pub const SECONDARY_SUBNET_CIDR_STATE_DISASSOCIATED: &str = "disassociated";
 
 /// One IPv4 CIDR block of a secondary subnet, as the writer of one asks for it.
 ///
@@ -159,7 +256,7 @@ impl ComAmazonawsEc2Amazonec2State {
             secondary_subnet_arn: Some(::engine::emulator_arn(
                 "ec2",
                 &spec.region,
-                &format!("secondary-subnet/{secondary_subnet_id}"),
+                &format!("{SECONDARY_SUBNET_RESOURCE}/{secondary_subnet_id}"),
             )),
             secondary_network_id: Some(spec.secondary_network_id),
             secondary_network_type: Some(spec.secondary_network_type),
@@ -178,6 +275,101 @@ impl ComAmazonawsEc2Amazonec2State {
         self.secondary_subnets
             .insert(secondary_subnet_id.clone(), secondary_subnet);
         Some(secondary_subnet_id)
+    }
+
+    /// What still depends on the secondary subnet `secondary_subnet_id`, as the ids of the
+    /// depending resources, in id order.
+    ///
+    /// "A secondary subnet must not contain any secondary interfaces prior to deletion"
+    /// (`DeleteSecondarySubnet`): an interface created IN the subnet holds a place in it the
+    /// same way a network interface holds a place in an ordinary subnet
+    /// ([`Self::subnet_dependencies`]), whether or not an instance currently holds the
+    /// interface — the caller has to take the interface away first either way, so the status
+    /// of its attachment is not what decides this.
+    pub fn secondary_subnet_dependencies(&self, secondary_subnet_id: &str) -> Vec<String> {
+        let mut found: Vec<String> = self
+            .secondary_interfaces
+            .iter()
+            .filter(|(_, interface)| {
+                interface.secondary_subnet_id.as_deref() == Some(secondary_subnet_id)
+            })
+            .map(|(secondary_interface_id, _)| secondary_interface_id.clone())
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Start deleting the secondary subnet `secondary_subnet_id`, and answer it as the store
+    /// then holds it — `None` when the account holds no such subnet.
+    ///
+    /// The deletion is a CLOCK-OWED move: the subnet is
+    /// [`SECONDARY_SUBNET_STATE_DELETE_IN_PROGRESS`] with each of its IPv4 CIDR block
+    /// associations [`SECONDARY_SUBNET_CIDR_STATE_DISASSOCIATING`] until
+    /// `delete_complete_at`, which is STORED rather than slept for, so a caller reading
+    /// straight after the delete still sees the subnet going down;
+    /// [`Self::materialize_due_secondary_subnet_deletions`] applies the terminal states once
+    /// that instant has passed, whether or not anybody called again.
+    ///
+    /// The record STAYS in the store, because a subnet in either delete state is still
+    /// reported ([`SECONDARY_SUBNET_STATE_DELETE_COMPLETE`]) — so its caller-chosen bytes
+    /// stay charged to the store's budget, which still holds them, and it still counts
+    /// against [`MAX_STORED_SECONDARY_SUBNETS`], which bounds the records this process holds.
+    ///
+    /// A subnet whose deletion has already been asked for keeps the states and the due
+    /// instant that first delete gave it: a repeat of the call reports the deletion already
+    /// under way, or the one that has finished, instead of restarting its clock.
+    pub fn begin_secondary_subnet_deletion(
+        &mut self,
+        secondary_subnet_id: &str,
+        delete_complete_at: Instant,
+    ) -> Option<SecondarySubnet> {
+        let subnet = self.secondary_subnets.get_mut(secondary_subnet_id)?;
+        let deleting = matches!(
+            subnet.state.as_deref(),
+            Some(SECONDARY_SUBNET_STATE_DELETE_IN_PROGRESS | SECONDARY_SUBNET_STATE_DELETE_COMPLETE)
+        );
+        if !deleting {
+            subnet.state = Some(SECONDARY_SUBNET_STATE_DELETE_IN_PROGRESS.to_string());
+            for association in subnet.ipv4_cidr_block_associations.iter_mut().flatten() {
+                association.state = Some(SECONDARY_SUBNET_CIDR_STATE_DISASSOCIATING.to_string());
+            }
+            let subnet = subnet.clone();
+            self.secondary_subnet_delete_complete_at
+                .insert(secondary_subnet_id.to_string(), delete_complete_at);
+            return Some(subnet);
+        }
+        Some(subnet.clone())
+    }
+
+    /// Apply the deletions of secondary subnets the clock already owes: a subnet a
+    /// `DeleteSecondarySubnet` left [`SECONDARY_SUBNET_STATE_DELETE_IN_PROGRESS`] reached
+    /// [`SECONDARY_SUBNET_STATE_DELETE_COMPLETE`], with each of its IPv4 CIDR block
+    /// associations [`SECONDARY_SUBNET_CIDR_STATE_DISASSOCIATED`], at the instant that call
+    /// recorded for it — whether or not anybody called again.
+    ///
+    /// Called by [`Self::materialize_due_transitions`], the one place this store's clock-owed
+    /// moves are applied, so every operation that materialises them gets this one too.
+    pub(super) fn materialize_due_secondary_subnet_deletions(&mut self, now: Instant) {
+        let secondary_subnets = &mut self.secondary_subnets;
+        self.secondary_subnet_delete_complete_at
+            .retain(|secondary_subnet_id, due_at| {
+                if now < *due_at {
+                    return true;
+                }
+                if let Some(subnet) = secondary_subnets.get_mut(secondary_subnet_id) {
+                    if subnet.state.as_deref() == Some(SECONDARY_SUBNET_STATE_DELETE_IN_PROGRESS) {
+                        subnet.state = Some(SECONDARY_SUBNET_STATE_DELETE_COMPLETE.to_string());
+                        for association in
+                            subnet.ipv4_cidr_block_associations.iter_mut().flatten()
+                        {
+                            association.state =
+                                Some(SECONDARY_SUBNET_CIDR_STATE_DISASSOCIATED.to_string());
+                        }
+                    }
+                }
+                // The transition is applied once; nothing is owed on this subnet any more.
+                false
+            });
     }
 }
 

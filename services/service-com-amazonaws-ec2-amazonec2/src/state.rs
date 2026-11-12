@@ -1499,6 +1499,14 @@
 //! place a record is built, so the id, the ARN, the owning account and the id of each
 //! IPv4 CIDR block association are decided once however many writers there are.
 //!
+//! A subnet `DeleteSecondarySubnet` has started taking down stays in that store, because a
+//! subnet in either delete state is still reported; the instant its `delete-in-progress` ->
+//! `delete-complete` move falls due sits in
+//! [`ComAmazonawsEc2Amazonec2State::secondary_subnet_delete_complete_at`] beside it, the way
+//! [`ComAmazonawsEc2Amazonec2State::subnet_available_at`] holds an ordinary subnet's own
+//! clock-owed move, because the modelled shape this store holds carries no instant.
+//! [`ComAmazonawsEc2Amazonec2State::materialize_due_transitions`] applies it.
+//!
 //! ## Secondary interfaces
 //!
 //! [`ComAmazonawsEc2Amazonec2State::secondary_interfaces`] holds the account's secondary
