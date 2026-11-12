@@ -102,7 +102,11 @@ async fn each_service_sharing_the_connect_signing_name_serves_its_own_path_space
             "contact lens analysis segments",
             "POST",
             "/realtime-contact-analysis/analysis-segments",
-            r#"{"InstanceId":"inst-1","ContactId":"contact-1"}"#,
+            // The `InstanceId` is GUID-shaped because that is what an Amazon Connect
+            // instance is identified by: Contact Lens resolves the identifier to an
+            // instance before it looks anything up, and one of another form is refused at
+            // its front door rather than by the session lookup this row is about.
+            r#"{"InstanceId":"4cd1aa0d-1f2e-4b3c-8d4e-5f60718293a4","ContactId":"contact-1"}"#,
             404,
             Expect::Error("ResourceNotFoundException"),
         ),

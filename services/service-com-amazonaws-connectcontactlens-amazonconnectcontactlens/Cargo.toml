@@ -7,6 +7,19 @@ publish = false
 build = "build.rs"
 
 [dependencies]
+# The shared pre-handler violation walk (`validation`), the ONE evaluation of IAM policy
+# documents against an action on a resource (`iam_authorization`) and the reader of which IAM
+# entity a principal ARN names (`iam_role`), so this service decides and words authorization
+# the way every other authorizing service does.
+service-common = { path = "../common" }
+# The STS store, for the identity an access key id speaks for: the principal
+# `sts:GetCallerIdentity` answers for the credentials a request signed with.
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# The IAM store, for the identity-based policy documents in force on that principal.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# The regular-expression engine the `InstanceId` form is checked with: Amazon Connect's own
+# `InstanceId` pattern is run as declared rather than re-derived by hand.
+regex = "1.13"
 engine = { workspace = true }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }

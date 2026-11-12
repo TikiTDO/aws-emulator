@@ -27,8 +27,16 @@ use contact_lens::state::{
     service_state, AnalysisSession, SessionKey, MAX_PAGE_SIZE, VOICE_DATA_RETENTION,
 };
 
-const INSTANCE: &str = "inst-1";
-const CONTACT: &str = "contact-1";
+/// The `(InstanceId, ContactId)` pair every seeded session is stored under.
+///
+/// `InstanceId` is a GUID because that is what an Amazon Connect instance is identified by:
+/// an identifier of any other form resolves to no instance and is refused at the front door
+/// (`src/service/instance_id.rs`, pinned in `tests/all/refusal_stages.rs`). `ContactId` is a
+/// GUID too so the swapped-pair row below addresses a resolvable instance and still misses.
+const INSTANCE: &str = "4cd1aa0d-1f2e-4b3c-8d4e-5f60718293a4";
+const CONTACT: &str = "b5f87632-2a3b-4c5d-9e8f-0a1b2c3d4e5f";
+/// A second GUID-shaped instance identifier, for the rows that miss on the instance half.
+const OTHER_INSTANCE: &str = "7d9e1c3a-4b5c-4d6e-8f90-1a2b3c4d5e6f";
 const URI: &str = "/realtime-contact-analysis/analysis-segments";
 
 /// A SigV4 `Authorization` header whose credential scope names this service's signing
@@ -723,8 +731,8 @@ async fn an_unknown_session_is_not_found() {
 
     let misses = [
         ("unknown contact", INSTANCE, "contact-does-not-exist"),
-        ("unknown instance", "inst-does-not-exist", CONTACT),
-        ("both unknown", "inst-9", "contact-9"),
+        ("unknown instance", OTHER_INSTANCE, CONTACT),
+        ("both unknown", OTHER_INSTANCE, "contact-9"),
         ("swapped pair", CONTACT, INSTANCE),
     ];
     for (case, instance, contact) in misses {
@@ -767,26 +775,28 @@ const NOT_FOUND_MESSAGE: &str = "Real-time contact analysis not found.";
 /// it, and no member besides `Message` in the body.
 ///
 /// The rows vary what the rule generalises over — which half of the key misses, the form
-/// and length of the identifiers (`ContactId`/`InstanceId` are len 1..256, pattern `\S`,
-/// per `smithy_query(query="operation",operation="ListRealtimeContactAnalysisSegments")`),
-/// and whether the session never existed at all or has aged out of the retention window.
+/// and length of the `ContactId` (len 1..256, pattern `\S`, per
+/// `smithy_query(query="operation",operation="ListRealtimeContactAnalysisSegments")`), and
+/// whether the session never existed at all or has aged out of the retention window. Every
+/// row names a resolvable instance, because an `InstanceId` that resolves to none never
+/// reaches this stage (`tests/all/refusal_stages.rs` pins that one).
 #[tokio::test]
 async fn the_not_found_message_is_the_services_fixed_text() {
     let longest = "l".repeat(256);
     let rows: [(&str, &str, &str, bool); 9] = [
         ("unknown contact", INSTANCE, "contact-does-not-exist", false),
-        ("unknown instance", "inst-does-not-exist", CONTACT, false),
-        ("both unknown", "inst-9", "contact-9", false),
+        ("unknown instance", OTHER_INSTANCE, CONTACT, false),
+        ("both unknown", OTHER_INSTANCE, "contact-9", false),
         ("swapped pair", CONTACT, INSTANCE, false),
         (
-            "uuid-shaped identifiers",
-            "4cd1aa0d-0000-4000-8000-000000000001",
-            "b5f87632-0000-4000-8000-000000000002",
+            "an instance arn naming the instance",
+            "arn:aws:connect:us-east-1:000000000000:instance/7d9e1c3a-4b5c-4d6e-8f90-1a2b3c4d5e6f",
+            CONTACT,
             false,
         ),
-        ("single-character identifiers", "i", "c", false),
-        ("maximum-length identifiers", &longest, &longest, false),
-        ("punctuated identifiers", "inst/9:a|b", "contact%9#d", false),
+        ("single-character contact id", INSTANCE, "c", false),
+        ("maximum-length contact id", INSTANCE, &longest, false),
+        ("punctuated contact id", INSTANCE, "contact%9#d", false),
         ("session aged out of retention", INSTANCE, CONTACT, true),
     ];
 

@@ -13,5 +13,7 @@
 // points it into `tests/all/`.
 #[path = "all/realtime_contact_analysis_segments.rs"]
 mod realtime_contact_analysis_segments;
+#[path = "all/refusal_stages.rs"]
+mod refusal_stages;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;

@@ -9,13 +9,18 @@
 //! and the page cursor behind the `NextToken` it returns — and that cursor is minted once
 //! per position, so two identical requests answer identically.
 //!
-//! ## Authorization is out of scope here, deliberately
+//! ## The stages ahead of this handler
 //!
-//! The emulator verifies every request signature at the framework boundary and models no
-//! IAM principal or policy, so there is nothing for a handler to evaluate: the modeled
-//! `AccessDeniedException` is intentionally unreachable rather than overlooked. Answering
-//! 403 would mean inventing an entitlement decision nothing computed. `ctx` is therefore
-//! bound and dropped below.
+//! Three decisions are taken before this handler runs, in `crate::service::front_door`: the
+//! `InstanceId` is resolved to an Amazon Connect instance (an identifier that resolves to
+//! none is refused `UnauthorizedException` / "Unauthorized"), IAM is asked whether the caller
+//! may perform this action on the contact the request addresses (a denied caller is refused
+//! the modelled `AccessDeniedException`), and the body is judged against the model's own
+//! constraints (refused as the modelled `InvalidRequestException` with the body validator's
+//! finding list). So an input that reaches `handle` names a resolvable instance, comes from a
+//! caller IAM permits and satisfies every modelled constraint — and the only refusals left to
+//! this handler are the ones about STORED state: no session for the pair, and a `NextToken`
+//! this service did not mint for it.
 //!
 //! ## Shape of an operation
 //!
@@ -185,7 +190,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // Request metadata only; the store is reached through `self.engine`.
+        // Request metadata only; the store is reached through `self.engine`. The caller's
+        // identity is judged ahead of this handler (see the module docs), so nothing of the
+        // request's metadata is read here.
         let _ = ctx;
 
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {

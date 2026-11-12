@@ -21,8 +21,9 @@
 //!   for anything the model does not express: a signing name shared by several
 //!   services, or routing that keys on the access-key id.
 //! - `override_operation` — serve a request the model's routing key cannot name
-//!   correctly. The default returns `None`, so every request resolves through the
-//!   generated routing table. Return `Some(op)` to route one yourself.
+//!   correctly, or serve a modelled operation WRAPPED. This service wraps its operation in
+//!   [`front_door::FrontDoor`], so the decisions AWS takes before dispatch are taken before
+//!   the handler runs (see the section below).
 //! - `override_refusal` — how this service words a request the framework refused
 //!   before any handler ran. The default returns `None`, keeping the framework's
 //!   wording. See the inline note on that method for how to reword.
@@ -39,11 +40,39 @@
 //! table, and the default error renderers — lives in the generated `ServiceDefinition`
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
+//!
+//! # How this service answers a request it never ran
+//!
+//! Three decisions are taken before the operation a request names is dispatched — the
+//! `InstanceId` is resolved to an Amazon Connect instance, IAM is asked about the action on
+//! the contact the request addresses, and the body is judged against the model's own
+//! constraints — and each has its own code, status and wording. The framework's pre-dispatch
+//! renderer can state none of them: its only seam, `override_refusal`, carries a code and a
+//! sentence, takes its status from the protocol, and is handed the violations alone, so it
+//! can neither answer the front door's 401 nor see which members the request carried.
+//!
+//! Every operation is therefore served through [`front_door::FrontDoor`], which takes those
+//! three decisions in AWS's own order. [`instance_id`], [`authorization`] and
+//! [`invalid_request`] own one decision each, and `override_refusal` below words anything the
+//! framework still renders from the same helpers, so the two paths cannot disagree.
 
 use smithy_server_runtime::{
-    http, ErasedOperation, Refusal, Refused, Service,
+    http, ErasedOperation, Operation, Refusal, Refused, Service,
 };
 use std::sync::Arc;
+
+/// Whether IAM lets the caller perform the action the request names.
+mod authorization;
+/// The stages every request passes before its operation is dispatched.
+mod front_door;
+/// How a request refused for a modelled input constraint is stated.
+mod invalid_request;
+/// Resolving the request's `InstanceId` to an Amazon Connect instance.
+mod instance_id;
+
+/// The operation this service serves, as the generated routing table names it.
+type ListRealtimeContactAnalysisSegments<Eng> =
+    crate::ops::list_realtime_contact_analysis_segments::ListRealtimeContactAnalysisSegments<Eng>;
 
 /// The first `/`-separated segment of `path`, or `None` for a path with no non-empty
 /// first segment (`"/"`, `""`).
@@ -81,14 +110,20 @@ fn claims_modeled_path(parts: &http::request::Parts, path_segments: &[&str]) -> 
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
     entry: crate::ServiceDefinition<Eng>,
+    /// The layer every request is served behind; see [`front_door::FrontDoor`]. Built once
+    /// here because [`Service::override_operation`] hands back a borrow of it.
+    front_door: front_door::FrontDoor<ListRealtimeContactAnalysisSegments<Eng>, Eng>,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// Build this service from the shared engine. The engine is threaded into the
     /// generated [`ServiceDefinition`], which constructs each operation from it; the
-    /// operation's behaviour lives in that operation's own `impl Operation`.
+    /// operation's behaviour lives in that operation's own `impl Operation`. The front-door
+    /// layer is handed the SAME engine, so the identity it judges and the state the handler
+    /// reads come from one store.
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
+            front_door: front_door::FrontDoor::new(Arc::clone(&engine)),
             entry: crate::ServiceDefinition::new(engine),
         }
     }
@@ -125,26 +160,39 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         &self,
         req: &aws_smithy_runtime_api::http::Request,
     ) -> Option<&dyn ErasedOperation> {
-        // Return `Some(op)` to serve a request the model's routing key cannot name
-        // correctly; `None` (the default) lets the generated routing table resolve
-        // it. `req` is the whole request, so a decision that depends on the body —
-        // the `Action` form field on a query protocol, say — is reachable here.
-        let _ = req;
-        None
+        // NOT a re-route: serve the modelled operation through its front-door layer, so the
+        // three decisions AWS takes before dispatch are taken — and worded — the way AWS
+        // takes them (see the module docs and [`front_door::FrontDoor`]).
+        //
+        // The key comes from the protocol's own routing resolution, so a request naming no
+        // modelled operation resolves to nothing here and is left to the generated routing
+        // table (and then to the framework's routing error).
+        let routing_key = self.entry.protocol().routing_key(req).ok()?;
+        (routing_key
+            == <ListRealtimeContactAnalysisSegments<Eng> as Operation>::NAME)
+            .then_some(&self.front_door as &dyn ErasedOperation)
     }
 
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {
-        // The centralized walk calls this on a framework-level refusal (an absent
-        // required member, or a value outside a declared bound) to let this
-        // service reword it. Returning `None` keeps the framework's default
-        // wording. To state a refusal the way the emulated service states it,
-        // replace this body with a `match refusal { .. }` that returns
-        // `Some(Refused { code, message })` for the cases you reword and `None`
-        // for the rest. Replace BOTH the code and the message: a client branches
-        // on the code, so a message without its matching code is worse than
-        // leaving both alone.
-        let _ = refusal;
-        None
+        // The centralized walk calls this on a framework-level refusal (an absent required
+        // member, or a value outside a declared bound) to let this service state it the way
+        // Contact Lens states it: the modelled `InvalidRequestException`, never the synthetic
+        // `ValidationException`, which this model does not declare. [`front_door`] answers
+        // every refusal it can state in full, so what reaches here is what the framework
+        // still renders — a clause class this service has no wording for, and the fallback
+        // when the modelled error cannot be serialized. Worded from the same helpers, so the
+        // two paths cannot disagree, and both halves are replaced together because a client
+        // branches on the code.
+        //
+        // An authentication refusal keeps the framework's wording: it is not an
+        // input-constraint failure.
+        match refusal {
+            Refusal::Invalid(violations) => invalid_request::refused_for(
+                violations,
+                <ListRealtimeContactAnalysisSegments<Eng> as Operation>::INPUT_SCHEMA,
+            ),
+            _ => None,
+        }
     }
 
     fn override_routing_error(
