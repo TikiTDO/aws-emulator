@@ -38,6 +38,16 @@ percent-encoding = "2"
 # client feature: the transport is the emulator's own, so no socket is opened and no host is
 # resolved).
 aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# The AWS SDK for CloudWatch Logs, driven over the same in-process callback: a notebook
+# instance's lifecycle-configuration hook publishes what its script wrote to the log group
+# and stream the hook's own model doc names (`state::notebook_hook_logs`), through that
+# service's own API, so what a client reads back with `GetLogEvents` is what the log service
+# stored.
+aws-sdk-cloudwatchlogs = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# `base64`: the codec the hook script's `Content` is carried in ("a base64-encoded string
+# that contains a shell script", `NotebookInstanceLifecycleHook$Content`), decoded with the
+# maintained codec rather than by hand.
+base64 = "0.22"
 # Reads the comma-separated records a training channel carries; a library computing over data
 # in this process, with no native or build-time code.
 csv = "1.3"
@@ -65,6 +75,10 @@ emulator-core-build-support = { workspace = true }
 # the channel objects a test staged with `PutObject` and writes its model artifact where
 # `GetObject` then reads it back.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
+# CloudWatch Logs, mounted beside SageMaker on one engine by the notebook lifecycle-hook
+# suite: the hook publishes what its script wrote through that service's own API, and the
+# suite reads it back with `GetLogEvents`.
+service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
 
 [lints]
 workspace = true

@@ -5,8 +5,10 @@
 //! the instances its groups were created asking for plus the ones
 //! `BatchAddClusterNodes` added, as `crate::state::Cluster::nodes` holds them — filtered
 //! by instance-group name and the creation window, sorted by the requested key and
-//! order, and paged by `MaxResults`/`NextToken`. This is the ONLY file to touch for this
-//! operation.
+//! order, and paged by `MaxResults`/`NextToken`. Every summary carries the node's
+//! `NodeLogicalId`; `IncludeNodeLogicalIds` selects WHICH nodes are reported (see the
+//! member's handling in [`ListClusterNodes::handle`]). This is the ONLY file to touch for
+//! this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -219,9 +221,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let before = input.creation_time_before.map(crate::state::timestamp_key);
         // `IncludeNodeLogicalIds`: "When set to true, the response includes all nodes
         // regardless of their provisioning status. When set to False (default), only
-        // nodes with assigned InstanceIds are returned." The same flag decides whether a
-        // summary carries `NodeLogicalId`, which "is only included when
-        // IncludeNodeLogicalIds is set to True".
+        // nodes with assigned InstanceIds are returned." The flag selects WHICH NODES are
+        // reported and nothing else; see the summary's `NodeLogicalId` below for why it
+        // does not select the members a summary carries.
         let include_logical_ids = input.include_node_logical_ids.unwrap_or(false);
 
         let mut store = state.lock();
@@ -270,7 +272,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     // not reached `Running` has none yet, and is reported only under
                     // `IncludeNodeLogicalIds`, which is what identifies it instead.
                     instance_id: node.instance_id.clone().unwrap_or_default(),
-                    node_logical_id: include_logical_ids.then(|| node.logical_id.clone()),
+                    // The node's own `NodeLogicalId`, on EVERY summary: it is the
+                    // identifier that "persists throughout its lifecycle, from
+                    // provisioning request to termination", so a reader learns it for
+                    // every node the listing reports, exactly as `DescribeClusterNode`
+                    // reports it for every node it answers. The member's doc sentence
+                    // tying it to `IncludeNodeLogicalIds` is the stale account of a flag
+                    // that selects which NODES are reported — what SageMaker answers for a
+                    // default listing carries the identifier too — so it is not withheld
+                    // here, and a client that tracks a node by the id an add answered
+                    // finds it in either listing.
+                    node_logical_id: Some(node.logical_id.clone()),
                     // The type its instance group runs; a group that names
                     // `InstanceRequirements` with no type at all leaves the node none.
                     instance_type: node.instance_type.clone().unwrap_or_default(),

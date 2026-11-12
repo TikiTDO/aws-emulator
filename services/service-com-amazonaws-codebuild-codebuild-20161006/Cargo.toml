@@ -44,25 +44,6 @@ aws-sdk-s3 = { version = "1", default-features = false }
 # DATA-FORMAT PARSER, not an execution substrate: no `unsafe`, no C, no build script).
 # The text it is handed is bounded first — see `crate::state`'s batchspec reading.
 yaml-rust2 = { version = "0.10", default-features = false }
-# `brush-parser`: the POSIX/bash TOKENIZER AND GRAMMAR a buildspec's command lines are
-# read with, so the and-or lists, pipelines, assignments and quoting of a command line
-# come from the shell's own grammar rather than from scanning the text. A DATA/LANGUAGE
-# PARSER, the same position `sqlparser` and `yaml-rust2` hold in this workspace, and NOT
-# an execution substrate: it builds a syntax tree and runs nothing. The project's
-# EXECUTING half, `brush-core`, is deliberately NOT taken: an engine resolves a command
-# against the host's PATH and starts a host process for it, opens the host files a
-# redirection names and expands a command substitution by running it, and the crate
-# exposes no seam to replace any of those with an in-memory one — so it cannot be
-# confined here. What a command DOES is this crate's own `state::build_shell`, which
-# performs a fixed catalog of session-local utilities and starts no process, opens no
-# socket and touches no file; every other command, command form and expansion answers as
-# a shell answers one it cannot run. The default feature set (empty) keeps the parser's
-# optional diagnostics, serde and alternate-parser code out. Its grammar is generated at
-# BUILD TIME by the `peg` proc macro, which runs on the builder's machine like every
-# other proc macro in this workspace; it compiles no C and the tree carries no FFI. The
-# text it is handed is bounded first — see `crate::state::build_shell`'s own size,
-# nesting, expansion and command-count bounds.
-brush-parser = { version = "0.4", default-features = false }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

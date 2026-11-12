@@ -3,8 +3,11 @@
 //! @op CreateNotebookInstance
 //! IMPLEMENTED: stores the notebook instance in `crate::state` as `Pending`, with every
 //! member the request left out at the default the model documents for it, and mints its
-//! ARN, its Jupyter URL and its network-interface id. This is the ONLY file to touch for
-//! this operation.
+//! ARN, its Jupyter URL and its network-interface id. The hooks of the
+//! `LifecycleConfigName` it names are RUN while the instance is still coming up and what
+//! each wrote is published to that hook's CloudWatch Logs stream (see
+//! [`crate::state::notebook_lifecycle_hook`] and [`crate::state::notebook_hook_logs`]).
+//! This is the ONLY file to touch for this operation.
 //!
 //! The instance RUNS AS the `RoleArn` the request names: a role this account's IAM HOLDS and
 //! whose trust document does not admit SageMaker is refused with 400 `ValidationException`
@@ -272,6 +275,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::execution_role_is_unassumable(ctx, &region, &input.role_arn)
                 .await
                 .then(|| crate::state::admission::unable_to_assume_role_with_arn(&input.role_arn));
+        // An instance whose provisioning cannot complete never gets as far as its lifecycle
+        // scripts: the platform runs them on an instance that is coming up, and this one
+        // settles into `Failed` instead, so no hook of its configuration runs and no stream
+        // is published for it.
+        let provisioning_completes = creation_failure_reason.is_none();
         let arn = crate::state::resource_arn(
             &region,
             crate::state::NOTEBOOK_INSTANCE_ARN_KIND,
@@ -289,103 +297,141 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
 
-        let mut store = state.lock();
-        // The name is resolved first: a create naming an instance that already exists
-        // adds no record, so it is a duplicate rather than a request for more capacity.
-        if store
-            .notebook_instances
-            .contains_key(&input.notebook_instance_name)
-        {
-            return Err(crate::scaffolded::Scaffolded::validation(format!(
-                "Cannot create already existing notebook instance \"{arn}\"."
-            )));
-        }
-        // The store is bounded, so a caller varying `NotebookInstanceName` cannot grow it
-        // without end. `ResourceLimitExceeded` is the limit failure this operation models.
-        if !store.notebook_instances_below_quota() {
-            return Err(CreateNotebookInstanceErrorModeled::ResourceLimitExceeded(
-                ResourceLimitExceeded {
-                    message: Some(format!(
-                        "The account-level service limit for notebook instances is {}, with \
-                         current utilization of {} and a request delta of 1.",
-                        crate::state::NOTEBOOK_INSTANCE_QUOTA,
-                        store.notebook_instances.len()
-                    )),
-                },
-            )
-            .into());
-        }
+        // The store guard lives in a BLOCK of its own, as `CreateTrainingJob`'s does: the
+        // hooks below are awaited, and no state guard is ever held across an await. The
+        // block answers the lifecycle configuration this instance's hooks are run from.
+        let lifecycle_config = {
+            let mut store = state.lock();
+            // The name is resolved first: a create naming an instance that already exists
+            // adds no record, so it is a duplicate rather than a request for more capacity.
+            if store
+                .notebook_instances
+                .contains_key(&input.notebook_instance_name)
+            {
+                return Err(crate::scaffolded::Scaffolded::validation(format!(
+                    "Cannot create already existing notebook instance \"{arn}\"."
+                )));
+            }
+            // The store is bounded, so a caller varying `NotebookInstanceName` cannot grow
+            // it without end. `ResourceLimitExceeded` is the limit failure this operation
+            // models.
+            if !store.notebook_instances_below_quota() {
+                return Err(CreateNotebookInstanceErrorModeled::ResourceLimitExceeded(
+                    ResourceLimitExceeded {
+                        message: Some(format!(
+                            "The account-level service limit for notebook instances is {}, \
+                             with current utilization of {} and a request delta of 1.",
+                            crate::state::NOTEBOOK_INSTANCE_QUOTA,
+                            store.notebook_instances.len()
+                        )),
+                    },
+                )
+                .into());
+            }
 
-        // Server-generated, so it is minted here and stored: every later read of this
-        // instance reports the same network interface.
-        let network_interface_id = crate::state::mint_network_interface_id();
-        let now = ::std::time::SystemTime::now();
-        store.notebook_instances.insert(
-            input.notebook_instance_name.clone(),
-            crate::state::NotebookInstance {
-                name: input.notebook_instance_name.clone(),
-                arn: arn.clone(),
-                // A fresh instance is still provisioning; the clock owes the move to
-                // `InService`, which the reader materialises once it comes due.
-                status: crate::state::NOTEBOOK_INSTANCE_STATUS_PENDING.to_string(),
-                failure_reason: None,
-                creation_failure_reason,
-                url: crate::state::notebook_instance_url(&region, &input.notebook_instance_name),
-                instance_type: input.instance_type.clone(),
-                ip_address_type: input
-                    .ip_address_type
-                    .clone()
-                    .unwrap_or_else(|| crate::state::DEFAULT_IP_ADDRESS_TYPE.to_string()),
-                subnet_id: input.subnet_id.clone(),
-                security_groups: input.security_group_ids.clone().unwrap_or_default(),
-                role_arn: input.role_arn.clone(),
-                kms_key_id: input.kms_key_id.clone(),
-                network_interface_id,
-                lifecycle_config_name: input.lifecycle_config_name.clone(),
-                direct_internet_access: input
-                    .direct_internet_access
-                    .clone()
-                    .unwrap_or_else(|| crate::state::DEFAULT_DIRECT_INTERNET_ACCESS.to_string()),
-                volume_size_in_gb: input
-                    .volume_size_in_gb
-                    .unwrap_or(crate::state::DEFAULT_VOLUME_SIZE_IN_GB),
-                accelerator_types: input.accelerator_types.clone().unwrap_or_default(),
-                default_code_repository: input.default_code_repository.clone(),
-                additional_code_repositories: input
-                    .additional_code_repositories
-                    .clone()
-                    .unwrap_or_default(),
-                root_access: input
-                    .root_access
-                    .clone()
-                    .unwrap_or_else(|| crate::state::DEFAULT_ROOT_ACCESS.to_string()),
-                platform_identifier: input
-                    .platform_identifier
-                    .clone()
-                    .unwrap_or_else(|| crate::state::DEFAULT_PLATFORM_IDENTIFIER.to_string()),
-                // `MinimumInstanceMetadataServiceVersion`'s doc: on a create that names
-                // no value, "it defaults to IMDSv1".
-                instance_metadata_service_configuration: input
-                    .instance_metadata_service_configuration
-                    .clone()
-                    .unwrap_or_else(|| InstanceMetadataServiceConfiguration {
-                        minimum_instance_metadata_service_version:
-                            crate::state::DEFAULT_IMDS_VERSION.to_string(),
-                    }),
-                tags: input.tags.clone().unwrap_or_default(),
-                creation_time: now,
-                last_modified_time: now,
-                in_service_at: now + crate::state::NOTEBOOK_INSTANCE_IN_SERVICE_AFTER,
-                // Nothing is stopping yet, so the clock owes no `Stopped` transition.
-                stopped_at: None,
-                // Still provisioning: the instance has no Jupyter endpoint or network
-                // interface to report until the clock's `InService` transition is due.
-                provisioned: false,
-                // No presigned URL has been asked for yet, so the instance holds no grant.
-                url_grants: Vec::new(),
-            },
-        );
-        drop(store);
+            // Server-generated, so it is minted here and stored: every later read of this
+            // instance reports the same network interface.
+            let network_interface_id = crate::state::mint_network_interface_id();
+            let now = ::std::time::SystemTime::now();
+            store.notebook_instances.insert(
+                input.notebook_instance_name.clone(),
+                crate::state::NotebookInstance {
+                    name: input.notebook_instance_name.clone(),
+                    arn: arn.clone(),
+                    // A fresh instance is still provisioning; the clock owes the move to
+                    // `InService`, which the reader materialises once it comes due.
+                    status: crate::state::NOTEBOOK_INSTANCE_STATUS_PENDING.to_string(),
+                    failure_reason: None,
+                    creation_failure_reason,
+                    url: crate::state::notebook_instance_url(
+                        &region,
+                        &input.notebook_instance_name,
+                    ),
+                    instance_type: input.instance_type.clone(),
+                    ip_address_type: input
+                        .ip_address_type
+                        .clone()
+                        .unwrap_or_else(|| crate::state::DEFAULT_IP_ADDRESS_TYPE.to_string()),
+                    subnet_id: input.subnet_id.clone(),
+                    security_groups: input.security_group_ids.clone().unwrap_or_default(),
+                    role_arn: input.role_arn.clone(),
+                    kms_key_id: input.kms_key_id.clone(),
+                    network_interface_id,
+                    lifecycle_config_name: input.lifecycle_config_name.clone(),
+                    direct_internet_access: input.direct_internet_access.clone().unwrap_or_else(
+                        || crate::state::DEFAULT_DIRECT_INTERNET_ACCESS.to_string(),
+                    ),
+                    volume_size_in_gb: input
+                        .volume_size_in_gb
+                        .unwrap_or(crate::state::DEFAULT_VOLUME_SIZE_IN_GB),
+                    accelerator_types: input.accelerator_types.clone().unwrap_or_default(),
+                    default_code_repository: input.default_code_repository.clone(),
+                    additional_code_repositories: input
+                        .additional_code_repositories
+                        .clone()
+                        .unwrap_or_default(),
+                    root_access: input
+                        .root_access
+                        .clone()
+                        .unwrap_or_else(|| crate::state::DEFAULT_ROOT_ACCESS.to_string()),
+                    platform_identifier: input
+                        .platform_identifier
+                        .clone()
+                        .unwrap_or_else(|| crate::state::DEFAULT_PLATFORM_IDENTIFIER.to_string()),
+                    // `MinimumInstanceMetadataServiceVersion`'s doc: on a create that names
+                    // no value, "it defaults to IMDSv1".
+                    instance_metadata_service_configuration: input
+                        .instance_metadata_service_configuration
+                        .clone()
+                        .unwrap_or_else(|| InstanceMetadataServiceConfiguration {
+                            minimum_instance_metadata_service_version:
+                                crate::state::DEFAULT_IMDS_VERSION.to_string(),
+                        }),
+                    tags: input.tags.clone().unwrap_or_default(),
+                    creation_time: now,
+                    last_modified_time: now,
+                    in_service_at: now + crate::state::NOTEBOOK_INSTANCE_IN_SERVICE_AFTER,
+                    // Nothing is stopping yet, so the clock owes no `Stopped` transition.
+                    stopped_at: None,
+                    // Still provisioning: the instance has no Jupyter endpoint or network
+                    // interface to report until the clock's `InService` transition is due.
+                    provisioned: false,
+                    // No presigned URL has been asked for yet, so the instance holds no
+                    // grant.
+                    url_grants: Vec::new(),
+                },
+            );
+            // The configuration the instance names. A name this account holds no
+            // configuration under leaves nothing to run.
+            input
+                .lifecycle_config_name
+                .as_ref()
+                .and_then(|name| store.notebook_instance_lifecycle_configs.get(name))
+                .cloned()
+        };
+
+        // The hooks the configuration declares are RUN, in the order the platform runs
+        // them for an instance that is coming up — the `OnCreate` script once, then the
+        // `OnStart` script of the start the create itself performs — and what each wrote is
+        // published to that hook's own log stream. This happens while the instance is still
+        // `Pending`, so a client that waits for `InService` reads the output of a hook that
+        // has already run (see `crate::state::notebook_lifecycle_hook`).
+        if let Some(config) = lifecycle_config.filter(|_| provisioning_completes) {
+            for hook in [
+                crate::state::LifecycleHook::OnCreate,
+                crate::state::LifecycleHook::OnStart,
+            ] {
+                let Some(script) = crate::state::hook_script(&config, hook) else {
+                    continue;
+                };
+                let publication = crate::state::HookLogPublication {
+                    notebook_instance_name: input.notebook_instance_name.clone(),
+                    hook,
+                    lines: crate::state::hook_output(&script),
+                };
+                crate::state::publish_hook_output(ctx, &region, &publication).await;
+            }
+        }
 
         crate::state::record_state_change(Self::NAME, &arn, ctx);
         Ok(CreateNotebookInstanceOutput {

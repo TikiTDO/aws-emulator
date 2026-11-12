@@ -1081,6 +1081,15 @@ pub use model_card::*;
 pub mod notebook_instance;
 pub use notebook_instance::*;
 
+/// The notebook lifecycle-configuration HOOK slice — what one hook's script does: see
+/// `state/notebook_lifecycle_hook.rs`.
+pub mod notebook_lifecycle_hook;
+pub use notebook_lifecycle_hook::*;
+
+/// Where a hook's output is published: see `state/notebook_hook_logs.rs`.
+pub mod notebook_hook_logs;
+pub use notebook_hook_logs::*;
+
 /// The partner-AI-app slice: see `state/partner_app.rs`.
 pub mod partner_app;
 pub use partner_app::*;

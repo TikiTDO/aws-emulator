@@ -16,9 +16,9 @@
 //!   type, status and launch time the per-node reader reports for it;
 //! * a group's nodes are the instances it was created asking for, as many as the
 //!   cluster's own realised count reports;
-//! * `IncludeNodeLogicalIds` decides both which nodes are reported (only those with an
-//!   assigned `InstanceId` when it is absent or false) and whether a summary carries
-//!   `NodeLogicalId`;
+//! * `IncludeNodeLogicalIds` decides which nodes are reported (only those with an
+//!   assigned `InstanceId` when it is absent or false), and every summary carries the
+//!   node's `NodeLogicalId` whichever listing reported it;
 //! * `InstanceGroupNameContains` and the `CreationTimeAfter`/`CreationTimeBefore` window
 //!   select by substring and by inclusive bounds, combining by intersection;
 //! * results follow the requested `SortBy`/`SortOrder`, defaulting to `CREATION_TIME`
@@ -433,11 +433,12 @@ async fn every_node_of_a_cluster_is_listed_once_with_the_identity_its_reader_rep
     }
 }
 
-/// RULE: `IncludeNodeLogicalIds` decides both which nodes a listing reports — only those
-/// with an assigned `InstanceId` when it is absent or false, every node whatever its
-/// provisioning status when it is true — and whether a summary carries `NodeLogicalId`.
+/// RULE: `IncludeNodeLogicalIds` decides which nodes a listing reports — only those with
+/// an assigned `InstanceId` when it is absent or false, every node whatever its
+/// provisioning status when it is true — and every summary a listing reports carries the
+/// node's own `NodeLogicalId`, whichever of the two listings reported it.
 #[tokio::test]
-async fn include_node_logical_ids_decides_which_nodes_and_whether_logical_ids_are_reported() {
+async fn include_node_logical_ids_decides_which_nodes_are_reported() {
     // Rows differ along the number of nodes still provisioning, which is the axis the
     // flag selects on.
     for node_count in [1_i64, 2, 4] {
@@ -495,15 +496,14 @@ async fn include_node_logical_ids_decides_which_nodes_and_whether_logical_ids_ar
             );
         }
 
-        // Once the clock owes the transition, both listings report every node — and only
-        // the opt-in one carries `NodeLogicalId`.
+        // Once the clock owes the transition, both listings report every node, each
+        // summary carrying the node's `NodeLogicalId`.
         tokio::time::sleep(PAST_SETTLE_DUE).await;
-        for (flag, body, carries_logical_id) in [
-            ("absent", json!({ "ClusterName": name }), false),
+        for (flag, body) in [
+            ("absent", json!({ "ClusterName": name })),
             (
                 "true",
                 json!({ "ClusterName": name, "IncludeNodeLogicalIds": true }),
-                true,
             ),
         ] {
             let listed = emulator.ok("ListClusterNodes", &body).await;
@@ -515,11 +515,10 @@ async fn include_node_logical_ids_decides_which_nodes_and_whether_logical_ids_ar
                  got {listed:?}"
             );
             for summary in &reported {
-                assert_eq!(
-                    summary.get("NodeLogicalId").is_some(),
-                    carries_logical_id,
-                    "case {case} IncludeNodeLogicalIds={flag}: NodeLogicalId is reported only \
-                     under the flag, got {summary:?}"
+                assert!(
+                    added.contains(&str_field(summary, "NodeLogicalId")),
+                    "case {case} IncludeNodeLogicalIds={flag}: every summary carries the node's \
+                     own NodeLogicalId, got {summary:?}"
                 );
                 assert_instance_id(&case, &str_field(summary, "InstanceId"));
             }

@@ -471,6 +471,11 @@ pub mod jwt;
 /// whose API carries one — so the ceilings that confine an engine evaluating a caller's
 /// text are stated, and met, in one place rather than per service.
 pub mod jsonata;
+/// The ONE bounded, session-local POSIX/bash shell session every service that has to
+/// PERFORM caller-supplied shell text drives — a build's command lines, a container's
+/// program, a notebook instance's lifecycle hook — so the catalog it performs, what it
+/// fails closed on and the bounds that confine it are stated once rather than per service.
+pub mod posix_shell_session;
 pub mod lex;
 pub mod management_events;
 /// The ONE construction of the in-process EventBridge client a service publishing an event

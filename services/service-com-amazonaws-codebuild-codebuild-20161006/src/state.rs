@@ -47,7 +47,8 @@ use crate::ops::types::{
 mod artifacts;
 /// Which builds the `batch` section of a buildspec declares a batch build is made of.
 mod batchspec;
-/// What ONE command line of a buildspec does, in the build environment's shell.
+/// What ONE command line of a buildspec does, in the build environment's shell — the
+/// shared bounded session, configured as a build's.
 mod build_shell;
 /// The phases a buildspec declares, and what running them answered.
 mod buildspec;
