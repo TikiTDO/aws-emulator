@@ -1,15 +1,34 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListJobExecutionsForThing
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListJobExecutionsForThing`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListJobExecutionsForThing::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! One page of the job executions ONE device has, computed from the SHARED
+//! job-execution store (`service_common::iot_job_executions`) the IoT Jobs data plane
+//! serves — a `CreateJob` that targeted the device created the execution, and the device
+//! then moves it. Every entry is the projection of one stored record
+//! ([`crate::state::to_job_execution_summary_for_thing`]), so what this lists and what a
+//! single-execution reader (`DescribeJobExecution`) reports are one value.
+//!
+//! The request narrows the listing with `jobId` (the executions of ONE job on this
+//! device) and `status` (the executions in one `JobExecutionStatus`), and pages it with
+//! `maxResults` / `nextToken`. The order is the store's own enqueue order, oldest first,
+//! which is the one total order over a device's executions and therefore the only thing
+//! that makes a page boundary meaningful.
+//!
+//! Only executions of a JOB this account holds are reported: an execution the shared
+//! store keys under an id the jobs store does not hold is a COMMAND execution
+//! (`StartCommandExecution` mints its own `executionId`), which the command surface
+//! reports — the same rule `DescribeJobExecution` reads one record by. A `jobId` naming
+//! no job is the modelled `ResourceNotFoundException` (404), as it is for a read of one
+//! execution of that job; a device with no execution at all is an EMPTY page, since a job
+//! may target a thing that is not in the registry and a device that was never targeted
+//! has no executions rather than not existing.
+//!
+//! This reporting operation writes exactly one thing: the `TIMED_OUT` transitions a timer
+//! armed on this device's executions had already made DUE at their own deadlines (see
+//! `service_common::iot_job_executions::JobExecutionRecord::time_out_if_due`), so the
+//! statuses listed here are the ones the clock decided and the device polling the data
+//! plane sees the same records. Nothing else about an execution changes on a read.
 //!
 //! ## Shape of an operation
 //!
@@ -160,18 +179,207 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListJobExecutionsForThing` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListJobExecutionsForThingErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        // `ctx` carries request metadata only; this operation needs none of it — a
+        // `JobExecutionSummaryForThing` carries no ARN and nothing it reports is scoped
+        // to a region.
+        let _ = ctx;
+
+        // The filters are resolved BEFORE any store is reached: a request whose
+        // `nextToken` is not one this listing issued is refused whatever the store holds.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListJobExecutionsForThing"))
+        // `namespaceId` is NOT one of them, and narrows nothing here: the member documents
+        // what it does — "Amazon Web Services IoT Core sends jobs notifications to MQTT
+        // topics that contain the value in the following format
+        // $aws/things/THING_NAME/jobs/JOB_ID/notify-namespace-NAMESPACE_ID/" — so it names
+        // the topic namespace a job's notifications are published under, and this emulator
+        // publishes no job notifications and no creator of a job records a namespace on
+        // one. Selecting on it would therefore have to invent a namespace for every stored
+        // job; the executions this device has are reported whatever namespace the request
+        // names, and a namespace becomes selectable here once a creator persists one.
+        let scope = listing_scope(input.job_id.as_deref(), input.status.as_deref());
+        let resume_after = match input.next_token.as_deref() {
+            Some(token) => Some(decode_next_token(token, &scope)?),
+            None => None,
+        };
+
+        // `maxResults` is `range 1..250`, refused outside that before this handler runs,
+        // so a request that names it asks for at least one summary; one that does not
+        // asks for every execution of this device that matches, which the store's own
+        // per-thing ceilings bound. The clamp is defensive rather than load-bearing: it
+        // keeps the page size inside the modelled range without depending on a validation
+        // performed outside this module, and nothing is sized from the request.
+        let page_size = input.max_results.map_or(usize::MAX, |max| {
+            max.clamp(1, MAX_LASER_MAX_RESULTS) as usize
+        });
+
+        let unavailable = || -> ListJobExecutionsForThingError {
+            ListJobExecutionsForThingErrorModeled::ServiceUnavailableException(
+                ServiceUnavailableException {
+                    message: Some("the IoT emulator has no state store attached".to_string()),
+                },
+            )
+            .into()
+        };
+        // The jobs the listed executions belong to live in the SHARED jobs store every
+        // creator of an IoT job records one in.
+        let Some(jobs) = crate::state::job_store(&*self.engine) else {
+            return Err(unavailable());
+        };
+        // The executions live in the SHARED store the IoT Jobs data plane serves, so this
+        // read answers from the very records the device polls, starts and updates.
+        let Some(executions) = crate::state::job_execution_store(&*self.engine) else {
+            return Err(unavailable());
+        };
+
+        let now = ::service_common::iot_job_executions::now_epoch_seconds();
+
+        // LOCK ORDER: the shared jobs store first, the shared execution store second, as
+        // `crate::state::job_store` documents.
+        let jobs = jobs.lock();
+        // A `jobId` no creator recorded names no job, so it has no execution anywhere —
+        // the refusal `DescribeJobExecution` answers a read of one such execution with.
+        if let Some(job_id) = input.job_id.as_deref() {
+            if !jobs.contains(job_id) {
+                return Err(
+                    ListJobExecutionsForThingErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException {
+                            message: Some(crate::state::missing_job_execution_job_message(job_id)),
+                        },
+                    )
+                    .into(),
+                );
+            }
+        }
+
+        let mut store = executions.lock();
+        // A timer the job or the device armed moves an execution to `TIMED_OUT` by
+        // itself, so the transitions the clock has already made due on this device's
+        // queue are recorded before anything is read: each was owed at its own deadline
+        // whether or not this call happened, and the status a later reader of the shared
+        // store sees must be the one this listing reported.
+        store.time_out_due_executions(&input.thing_name, now);
+
+        // One row per execution this page may carry, keyed by the store's enqueue
+        // sequence: the position in the listing's order, so a page resumes where the last
+        // one ended even if that execution has since been deleted.
+        let mut page: Vec<(u64, JobExecutionSummaryForThing)> = store
+            .executions_for(&input.thing_name)
+            .iter()
+            // An execution the jobs store holds no job for is not a job execution of this
+            // account: it is a COMMAND execution, keyed by the `executionId` a command
+            // start minted and reported through `GetCommandExecution` /
+            // `ListCommandExecutions`.
+            .filter(|record| jobs.contains(&record.job_id))
+            // `jobId`: "The unique identifier you assigned to this job when it was
+            // created" — the executions of that one job on this device.
+            .filter(|record| {
+                input
+                    .job_id
+                    .as_deref()
+                    .is_none_or(|wanted| record.job_id == wanted)
+            })
+            // `status`: "An optional filter that lets you search for jobs that have the
+            // specified status."
+            .filter(|record| {
+                input
+                    .status
+                    .as_deref()
+                    .is_none_or(|wanted| record.status == wanted)
+            })
+            // The store holds a thing's executions in enqueue order, so "the executions
+            // enqueued after the last one emitted" resumes the same walk.
+            .filter(|record| {
+                resume_after.is_none_or(|cursor| record.enqueue_sequence > cursor)
+            })
+            // One row beyond the page: its presence is what says the listing is
+            // truncated, and nothing more than that is read.
+            .take(page_size.saturating_add(1))
+            .map(|record| {
+                (
+                    record.enqueue_sequence,
+                    crate::state::to_job_execution_summary_for_thing(record),
+                )
+            })
+            .collect();
+        let truncated = page.len() > page_size;
+        page.truncate(page_size);
+
+        // `nextToken` is "The token for the next set of results, or null if there are no
+        // additional results".
+        let next_token = if truncated {
+            page.last()
+                .map(|(sequence, _)| encode_next_token(&scope, *sequence))
+        } else {
+            None
+        };
+
+        Ok(ListJobExecutionsForThingOutput {
+            // `JobExecutionSummaryForThingList` carries no length constraint, so a device
+            // with no matching execution answers with an EMPTY list rather than an absent
+            // member: "nothing matches" is an answer, not a missing one.
+            execution_summaries: Some(page.into_iter().map(|(_, summary)| summary).collect()),
+            next_token,
+        })
     }
+}
+
+/// The largest page `LaserMaxResults` admits (`range 1..250`).
+const MAX_LASER_MAX_RESULTS: i32 = 250;
+
+/// The character that separates the fields of a token's SCOPE. A control character, so it
+/// cannot occur inside a `JobId` (`^[a-zA-Z0-9_-]+$`) or a `JobExecutionStatus` value.
+const SCOPE_SEPARATOR: char = '\u{1e}';
+
+/// The character that separates a token's scope from the position it resumes after.
+const TOKEN_SEPARATOR: char = '\u{1f}';
+
+/// The LISTING a continuation token belongs to: the filters, which decide which of the
+/// device's executions it walks and therefore what "the next set of results" means. A
+/// token issued for one listing is refused by another.
+///
+/// The device itself is not in the scope: it is a path label, so a token replayed against
+/// another `thingName` is a request about another device's listing, which resumes at a
+/// position of its own order and reports that device's executions and nothing else.
+fn listing_scope(job_id: Option<&str>, status: Option<&str>) -> String {
+    format!(
+        "{}{SCOPE_SEPARATOR}{}",
+        job_id.unwrap_or_default(),
+        status.unwrap_or_default()
+    )
+}
+
+/// The opaque `nextToken` that resumes `scope`'s listing after the execution enqueued at
+/// `sequence`.
+///
+/// The position, not the execution's id: it is the place in the listing's order, so a
+/// page resumes where the last one ended even if that execution has since been deleted.
+/// Hex-encoded so the token is opaque to the caller whatever the filters contain. The
+/// encoding carries no integrity protection and claims none: a caller that reverses it can
+/// name any resume point of the listing it is already reading, which selects a page of
+/// that same listing and nothing else.
+fn encode_next_token(scope: &str, sequence: u64) -> String {
+    ::hex::encode(format!("{scope}{TOKEN_SEPARATOR}{sequence}"))
+}
+
+/// The position a `nextToken` resumes after, or `InvalidRequestException` (HTTP 400, "The
+/// request is not valid") when the token is not one [`encode_next_token`] issued for THIS
+/// listing.
+///
+/// Every step is fallible on purpose: the token is caller-supplied, so nothing read out of
+/// it may panic the handler. A token issued for another filter set is refused rather than
+/// silently resuming a different listing from the middle.
+fn decode_next_token(token: &str, scope: &str) -> Result<u64, ListJobExecutionsForThingError> {
+    let invalid = || -> ListJobExecutionsForThingError {
+        ListJobExecutionsForThingErrorModeled::InvalidRequestException(InvalidRequestException {
+            message: Some("nextToken is not a continuation token of this listing".to_string()),
+        })
+        .into()
+    };
+    let bytes = ::hex::decode(token).map_err(|_| invalid())?;
+    let decoded = String::from_utf8(bytes).map_err(|_| invalid())?;
+    let (token_scope, cursor) = decoded.split_once(TOKEN_SEPARATOR).ok_or_else(invalid)?;
+    if token_scope != scope {
+        return Err(invalid());
+    }
+    cursor.parse().map_err(|_| invalid())
 }

@@ -129,7 +129,8 @@ use crate::ops::types::{
     Action, AuthorizerDescription, AwsJobExecutionsRolloutConfig, AwsJobPresignedUrlConfig,
     CodeSigning, CommandParameter, CommandParameterValue, CommandPayload, CommandPreprocessor,
     CommandSummary, GetCommandExecutionOutput, GetCommandOutput, Job, JobExecution,
-    JobExecutionStatusDetails, JobProcessDetails, Mqtt5Configuration, OTAUpdateFile, OTAUpdateInfo,
+    JobExecutionStatusDetails, JobExecutionSummary, JobExecutionSummaryForThing, JobProcessDetails,
+    Mqtt5Configuration, OTAUpdateFile, OTAUpdateInfo,
     PackageVersionArtifact, PropagatingAttribute, S3Location, Sbom,
     ThingGroupIndexingConfiguration, ThingIndexingConfiguration, ThingTypeMetadata,
     ThingTypeProperties, TimeoutConfig, TopicRule, TopicRulePayload,
@@ -3101,6 +3102,49 @@ pub fn to_job_execution(record: &JobExecutionRecord, region: &str, now: i64) -> 
         execution_number: Some(record.execution_number),
         version_number: record.version_number,
         approximate_seconds_before_timed_out: record.approximate_seconds_before_timed_out(now),
+    }
+}
+
+/// A stored job execution as the modeled `JobExecutionSummary` — "a subset of
+/// information about a job execution" — that every LISTING of job executions carries.
+///
+/// It is the same record [`to_job_execution`] projects, read through the smaller shape:
+/// the status it has reached, the instants it reached them at and which execution of the
+/// job on that device it is, so a listing and a single-execution read of one record
+/// cannot disagree about any member they share.
+///
+/// `retryAttempt` is "The number that indicates how many retry attempts have been
+/// completed for this job on this device": nothing in this emulator retries an execution
+/// — no creator persists a `jobExecutionsRetryConfig` — so there is no stored retry count
+/// to report and the member is left out rather than reported as zero, which would claim a
+/// retry policy ran and completed nothing.
+pub fn to_job_execution_summary(record: &JobExecutionRecord) -> JobExecutionSummary {
+    JobExecutionSummary {
+        status: Some(record.status.clone()),
+        queued_at: Some(::aws_smithy_types::DateTime::from_secs(record.queued_at)),
+        started_at: record
+            .started_at
+            .map(::aws_smithy_types::DateTime::from_secs),
+        last_updated_at: Some(::aws_smithy_types::DateTime::from_secs(
+            record.last_updated_at,
+        )),
+        execution_number: Some(record.execution_number),
+        retry_attempt: None,
+    }
+}
+
+/// A stored job execution as the modeled `JobExecutionSummaryForThing` — "the job
+/// execution summary for a thing" — one entry of what a listing of ONE device's job
+/// executions reports.
+///
+/// The entry names the JOB the execution belongs to, because the device is the one the
+/// request addressed; the execution itself is [`to_job_execution_summary`].
+pub fn to_job_execution_summary_for_thing(
+    record: &JobExecutionRecord,
+) -> JobExecutionSummaryForThing {
+    JobExecutionSummaryForThing {
+        job_id: Some(record.job_id.clone()),
+        job_execution_summary: Some(to_job_execution_summary(record)),
     }
 }
 

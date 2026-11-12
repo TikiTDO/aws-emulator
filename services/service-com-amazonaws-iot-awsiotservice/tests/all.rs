@@ -45,6 +45,8 @@ mod job_description;
 mod job_document_read;
 #[path = "all/job_execution_deletion.rs"]
 mod job_execution_deletion;
+#[path = "all/job_execution_listing_for_thing.rs"]
+mod job_execution_listing_for_thing;
 #[path = "all/job_execution_read.rs"]
 mod job_execution_read;
 #[path = "all/job_targeting.rs"]
