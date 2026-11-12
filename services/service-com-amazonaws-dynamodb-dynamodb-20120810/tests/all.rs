@@ -119,6 +119,8 @@ mod kinesis_streaming_destinations;
 mod kms_key_state_refusals;
 #[path = "all/legacy_conditional_operator_refusals.rs"]
 mod legacy_conditional_operator_refusals;
+#[path = "all/limit_reached_page_stop_keys.rs"]
+mod limit_reached_page_stop_keys;
 #[path = "all/list_exports.rs"]
 mod list_exports;
 #[path = "all/list_imports.rs"]
@@ -171,6 +173,8 @@ mod regions_indexes_and_capacity;
 mod replica_auto_scaling;
 #[path = "all/resource_policy_not_found_messages.rs"]
 mod resource_policy_not_found_messages;
+#[path = "all/resource_policy_revision_tokens.rs"]
+mod resource_policy_revision_tokens;
 #[path = "all/response_request_id.rs"]
 mod response_request_id;
 #[path = "all/resource_tags.rs"]
@@ -257,6 +261,8 @@ mod vector_index_updates;
 mod vector_indexes;
 #[path = "all/vector_search.rs"]
 mod vector_search;
+#[path = "all/vector_write_capacity_cost.rs"]
+mod vector_write_capacity_cost;
 #[path = "all/vector_write_validation.rs"]
 mod vector_write_validation;
 #[path = "all/legacy_filters_and_statement_values.rs"]

@@ -374,6 +374,7 @@ fn stated_enum_order(allowed: &[String]) -> Vec<String> {
 const ITEM_REQUEST_FORM_OPERATIONS: &[&str] = &[
     "BatchGetItem",
     "Query",
+    "Scan",
     "TransactGetItems",
     "TransactWriteItems",
 ];
@@ -1050,7 +1051,6 @@ mod tests {
             );
         }
         for operation in [
-            "Scan",
             "ListBackups",
             "ListExports",
             "UpdateTimeToLive",

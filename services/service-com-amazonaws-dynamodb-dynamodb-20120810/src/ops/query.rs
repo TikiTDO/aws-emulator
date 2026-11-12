@@ -697,8 +697,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // An index read reports the index's key beside the table's, because that pair
         // is what addresses one entry of an index
-        // ([`crate::state::evaluated_key`]).
-        let last_evaluated_key = truncated
+        // ([`crate::state::evaluated_key`]), and it reports one whenever the page
+        // stopped short of the end of what it walked — rows left to evaluate, or the
+        // caller's `Limit` reached ([`crate::state::reports_stop_key`]).
+        let last_evaluated_key = crate::state::reports_stop_key(input.limit, page.len(), truncated)
             .then(|| page.last())
             .flatten()
             .map(|read| crate::state::evaluated_key(table, index.as_ref(), read.item()));

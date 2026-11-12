@@ -140,13 +140,21 @@ async fn a_last_evaluated_key_resumes_the_page_it_was_reported_on() {
             let page = query_page(&router, "PagedByToken", limit, &start).await;
             let items = page["Items"].as_array().cloned().unwrap_or_default();
             assert!(
-                !items.is_empty() && items.len() <= usize::try_from(limit).unwrap_or(0),
-                "case {case}: a page holds between one item and the Limit, got {page}"
+                items.len() <= usize::try_from(limit).unwrap_or(0),
+                "case {case}: a page holds at most the Limit, got {page}"
             );
             for item in &items {
                 collected.push(item["Sort"]["N"].as_str().unwrap_or_default().to_string());
             }
             start = page["LastEvaluatedKey"].clone();
+            // A page that reached the Limit reports where it stopped whether or not an
+            // item is left to evaluate, so a walk whose last item filled a page asks for
+            // one page more: that page is the only empty one, and it is the one that
+            // reports no token.
+            assert!(
+                !items.is_empty() || start.is_null(),
+                "case {case}: only the page past the last item is empty, got {page}"
+            );
             if start.is_null() {
                 break;
             }

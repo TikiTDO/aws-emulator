@@ -530,6 +530,23 @@ pub fn evaluated_key(table: &Table, index: Option<&SecondaryIndex<'_>>, item: &I
     }
 }
 
+/// Whether a page reports the key it STOPPED AT, where `limit` is the page size the
+/// request asked for, `evaluated` is how many rows the page took and `more` says whether
+/// the walk left a row unevaluated.
+///
+/// A paginated read stops for one of two reasons: rows were left to evaluate, or it
+/// reached the `Limit` the caller asked for. It reports where it stopped in BOTH cases —
+/// "if LastEvaluatedKey is not empty, it does not necessarily mean that there is more
+/// data in the result set. The only way to know when you have reached the end of the
+/// result set is when LastEvaluatedKey is empty" (`Scan$LastEvaluatedKey`) — so a page
+/// whose limit was reached by the last row the walk held still carries a key, and the
+/// client learns the read is done from the page it asks for next. Only a read that ran
+/// out of rows with the caller's limit unreached is the last page and reports none,
+/// which is also every read that named no limit at all.
+pub fn reports_stop_key(limit: Option<i32>, evaluated: usize, more: bool) -> bool {
+    more || limit.is_some_and(|limit| usize::try_from(limit).is_ok_and(|limit| evaluated >= limit))
+}
+
 /// The `ConsumedCapacity` a read reports, billed to the index it was served from when it
 /// named one ([`consumed_index_capacity`]) and to the table otherwise
 /// ([`consumed_capacity`]).

@@ -68,12 +68,19 @@ const POLICY_ACTION_SERVICE: &str = "dynamodb";
 pub struct AttachedPolicy {
     /// The document as it was attached, carrying the `Version` it is read under.
     pub document: String,
-    /// The revision id, DERIVED from the document: "PutResourcePolicy is an idempotent
-    /// operation; running it multiple times on the same resource using the same policy
-    /// document will return the same revision id" (the `PutResourcePolicy` doc). A
-    /// different document therefore gets a different id, and the same one re-attached
-    /// gets the one it had.
-    pub revision_id: String,
+    /// This revision's TOKEN, rendered on the wire as the `RevisionId` by
+    /// [`Self::revision_id`]: the instant the revision was made, in milliseconds since
+    /// the epoch ([`policy_revision_token`]).
+    ///
+    /// A revision id is a token of the SERVICE's own, never a digest of the document: the
+    /// modelled `PolicyRevisionId` is a 1..255-character string with no pattern
+    /// (`smithy_query(query="shape", shape="com.amazonaws.dynamodb#PolicyRevisionId")`),
+    /// and what a caller does with one is compare it — pass it back as an
+    /// `ExpectedRevisionId` to make a write conditional on the revision it read. So two
+    /// revisions carrying the same text are still told apart, the tokens of one policy's
+    /// revisions are ordered, and a revision never reuses the token of the one it
+    /// replaced ([`Self::revise_after`]).
+    pub revision: u64,
     /// When the clock owes this policy its application to the data plane.
     ///
     /// "PutResourcePolicy is an asynchronous operation" and "the policy application is
@@ -91,8 +98,16 @@ pub struct AttachedPolicy {
 impl AttachedPolicy {
     /// Parse `document` into the policy to attach, or say why it cannot be attached.
     ///
-    /// `effective_at` is when the data plane starts honouring it (see the field).
-    pub fn attach(document: &str, effective_at: SystemTime) -> Result<Self, PolicyFault> {
+    /// `effective_at` is when the data plane starts honouring it (see the field) and
+    /// `revised_at` is when the revision is being made, which is the instant its
+    /// `RevisionId` names ([`policy_revision_token`]). The policy is numbered as the
+    /// revision that replaces the one the resource carries when the attaching operation
+    /// places it there ([`Self::revise_after`]).
+    pub fn attach(
+        document: &str,
+        effective_at: SystemTime,
+        revised_at: SystemTime,
+    ) -> Result<Self, PolicyFault> {
         if document.len() > MAX_RESOURCE_POLICY_BYTES {
             return Err(PolicyFault::TooLarge);
         }
@@ -122,11 +137,41 @@ impl AttachedPolicy {
             false => versioned_document(object),
         };
         Ok(Self {
-            revision_id: policy_revision_id(&document),
+            revision: policy_revision_token(revised_at),
             document,
             effective_at,
             statements,
         })
+    }
+
+    /// `RevisionId` as the wire carries it: this revision's token in decimal.
+    pub fn revision_id(&self) -> String {
+        self.revision.to_string()
+    }
+
+    /// Number this policy as the revision that REPLACES `previous`, the policy the
+    /// resource carries now (`None` while it carries none).
+    ///
+    /// A re-attach of the document the resource already carries keeps the token that
+    /// revision has: "PutResourcePolicy is an idempotent operation; running it multiple
+    /// times on the same resource using the same policy document will return the same
+    /// revision id" (the `PutResourcePolicy` doc) — compared on the document as the
+    /// service STORED it, which is the document a read of the policy reports and the one
+    /// the decision is made on.
+    ///
+    /// Any other document is a NEW revision, and a revision is never handed the token of
+    /// one before it: two revisions made inside the same millisecond would otherwise
+    /// share a token and a client could not tell which of them it holds, so such a
+    /// revision takes the next token after the one it replaces.
+    pub fn revise_after(&mut self, previous: Option<&Self>) {
+        let Some(previous) = previous else {
+            return;
+        };
+        if previous.document == self.document {
+            self.revision = previous.revision;
+        } else if self.revision <= previous.revision {
+            self.revision = previous.revision.saturating_add(1);
+        }
     }
 
     /// Whether this policy EXPLICITLY DENIES `action` on `resource_arn` to a caller any
@@ -405,11 +450,21 @@ fn versioned_document(object: &serde_json::Map<String, serde_json::Value>) -> St
     serde_json::Value::Object(versioned).to_string()
 }
 
-/// The revision id of a policy document: a digest of the document, so the same
-/// document always gets the same id and a different one never does.
-pub(super) fn policy_revision_id(document: &str) -> String {
-    use sha2::Digest;
-    hex::encode(sha2::Sha256::digest(document.as_bytes()))
+/// The revision token a policy revision made at `at` carries: that instant in
+/// milliseconds since the epoch.
+///
+/// A `RevisionId` is a short opaque numeric token that changes per revision, and what a
+/// caller does with one is compare it — hold it and pass it back as an
+/// `ExpectedRevisionId`. The instant of the revision is such a token: it changes with
+/// every revision, the tokens of one policy's revisions are ordered, and it says nothing
+/// about the document, so a document re-attached unchanged is still a revision of its own
+/// to everything but the idempotent re-attach ([`AttachedPolicy::revise_after`]).
+pub fn policy_revision_token(at: SystemTime) -> u64 {
+    let since_epoch = at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    u64::try_from(since_epoch).unwrap_or(u64::MAX)
 }
 
 /// One statement of a resource-based policy, reduced to what decides a request.

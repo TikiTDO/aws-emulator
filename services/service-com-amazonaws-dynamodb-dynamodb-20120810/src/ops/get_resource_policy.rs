@@ -197,7 +197,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         Ok(GetResourcePolicyOutput {
             policy: Some(policy.document.clone()),
-            revision_id: Some(policy.revision_id.clone()),
+            revision_id: Some(policy.revision_id()),
         })
     }
 }

@@ -301,10 +301,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // "When you attach a resource-based policy while creating a table, the policy
         // application is strongly consistent" (`CreateTable$ResourcePolicy`), so the
         // policy is parsed here, attached to the stored table and effective at once —
-        // the table's first data-plane request already sees it.
+        // the table's first data-plane request already sees it. It is the first revision
+        // of that table's policy, made at the instant of the create — the instant its
+        // `RevisionId` names.
         let resource_policy = match input.resource_policy.as_deref() {
             Some(document) => Some(
-                crate::state::AttachedPolicy::attach(document, now)
+                crate::state::AttachedPolicy::attach(document, now, now)
                     .map_err(lift_policy_fault)?,
             ),
             None => None,

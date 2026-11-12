@@ -4562,8 +4562,10 @@ pub struct WriteCapacity {
     /// The units consumed on each global secondary index the write affected.
     pub global_secondary_indexes: BTreeMap<String, f64>,
     /// The `VectorWriteRequestBytes` metered on each VECTOR index the write affected: a
-    /// vector index is metered in bytes rather than in capacity units, so its figures sit
-    /// beside the breakdown above and are left out of [`Self::total`].
+    /// vector index is metered in BYTES rather than in capacity units, so its figure sits
+    /// beside the breakdown above and is no part of [`Self::total`] — what writing the
+    /// vector costs in capacity is charged on the item itself
+    /// ([`Table::metered_item_size`]).
     pub vector_indexes: BTreeMap<String, f64>,
 }
 

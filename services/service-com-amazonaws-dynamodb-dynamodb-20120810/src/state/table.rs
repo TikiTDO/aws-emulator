@@ -70,6 +70,47 @@ impl VectorIndex {
 }
 
 impl Table {
+    /// The size a WRITE of `item` against this table is charged for: the item as the
+    /// store holds it, with every attribute a vector index of this table indexes counted
+    /// at four bytes per dimension ([`BYTES_PER_VECTOR_DIMENSION`]) instead of at the
+    /// decimal text the request spelled that vector with.
+    ///
+    /// A vector is held as 32-bit floats, which is the form the index meters as well
+    /// ([`VectorIndex::write_request_bytes`]), so one rule sizes a vector wherever it is
+    /// metered: the per-dimension cost of writing it is part of what the item's own
+    /// capacity is charged for, and it does not depend on how many digits the request
+    /// spelled each coordinate with.
+    ///
+    /// An attribute several indexes index is counted once: what is being sized is the
+    /// ITEM, not the entries the write fans out to. An item carrying no vector, and every
+    /// item of a table with no vector index, is sized exactly as the store holds it.
+    fn metered_item_size(&self, item: &Item) -> i64 {
+        let mut size = item_size(item);
+        let mut counted: Vec<&str> = Vec::new();
+        for index in &self.vector_indexes {
+            let name = index.vector_attribute.attribute_name.as_str();
+            if counted.contains(&name) {
+                continue;
+            }
+            let Some(value) = item.get(name) else {
+                continue;
+            };
+            let AttributeValue::L(coordinates) = value else {
+                continue;
+            };
+            counted.push(name);
+            let stored = i64::try_from(coordinates.len())
+                .unwrap_or(i64::MAX)
+                .saturating_mul(BYTES_PER_VECTOR_DIMENSION);
+            size = size
+                .saturating_sub(attribute_value_size(value))
+                .saturating_add(stored);
+        }
+        size
+    }
+}
+
+impl Table {
     /// The status at `now`, derived from the stored instants.
     pub fn status(&self, now: SystemTime) -> TableStatus {
         if self.removed_at.is_some() {
@@ -1334,9 +1375,14 @@ impl Table {
     /// Each index is charged by [`index_write_units`], so an index the write leaves
     /// untouched gets no entry at all — neither one the item does not reach, nor one
     /// whose stored entry this write does not change.
+    ///
+    /// The item is weighed as this table meters a write of it
+    /// ([`Self::metered_item_size`]), which counts a vector at the four bytes per
+    /// dimension it is stored as.
     pub fn write_capacity(&self, before: Option<&Item>, after: Option<&Item>) -> WriteCapacity {
+        let weighed = |item: Option<&Item>| item.map_or(0, |item| self.metered_item_size(item));
         let mut capacity = WriteCapacity {
-            table: write_capacity_units(before.map_or(0, item_size).max(after.map_or(0, item_size))),
+            table: write_capacity_units(weighed(before).max(weighed(after))),
             ..WriteCapacity::default()
         };
         for index in &self.local_secondary_indexes {

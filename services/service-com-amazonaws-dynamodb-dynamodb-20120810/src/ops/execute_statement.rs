@@ -580,7 +580,13 @@ fn select_items(
             crate::state::project_item(&held, select.projection.as_ref())
         })
         .collect();
-    let (next_token, last_evaluated_key) = match (truncated, stopped_on) {
+    // A page that stopped short of the end of what it walked carries on from where it
+    // stopped: rows left to evaluate, or the caller's `Limit` reached, whether or not a
+    // row remains ([`crate::state::reports_stop_key`]).
+    let (next_token, last_evaluated_key) = match (
+        crate::state::reports_stop_key(input.limit, evaluated, truncated),
+        stopped_on,
+    ) {
         (true, Some((key, map))) => (
             Some(crate::state::encode_cursor(&input.statement, &key)),
             Some(map),

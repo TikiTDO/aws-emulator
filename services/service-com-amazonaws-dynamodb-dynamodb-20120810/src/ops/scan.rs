@@ -623,14 +623,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // "The primary key of the item where the operation stopped" — reported when
-        // the walk stopped with items left to evaluate; "If LastEvaluatedKey is
-        // empty, then the 'last page' of results has been processed". A page that
-        // ends exactly on the last row reports none, which the member's own doc allows
-        // ("If LastEvaluatedKey is not empty, it does not necessarily mean that there
-        // is more data in the result set") and `Query` answers alike. An index scan
-        // reports the index's key beside the table's, because that pair is what
-        // addresses one entry of an index.
-        let last_evaluated_key = truncated
+        // the walk stopped with items left to evaluate, and when it stopped because it
+        // reached the `Limit` the request asked for, whether or not a row remains
+        // ([`crate::state::reports_stop_key`]). A page that ran out of rows with no
+        // limit reached reports none, which is what tells the client the scan is done.
+        // An index scan reports the index's key beside the table's, because that pair is
+        // what addresses one entry of an index.
+        let last_evaluated_key = crate::state::reports_stop_key(input.limit, page.len(), truncated)
             .then(|| page.last())
             .flatten()
             .map(|read| crate::state::evaluated_key(table, index.as_ref(), read.item()));

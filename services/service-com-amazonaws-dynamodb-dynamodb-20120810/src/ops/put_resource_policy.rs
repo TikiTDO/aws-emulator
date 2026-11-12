@@ -8,9 +8,11 @@
 //! ([`crate::ops::get_item`] and the other item operations) refuses a request the
 //! attached policy explicitly denies.
 //!
-//! The revision id is DERIVED from the document, which is what makes the operation
-//! idempotent the way the doc below states: "running it multiple times on the same
-//! resource using the same policy document will return the same revision id".
+//! The revision id is the instant this revision was made, which is what makes it change
+//! per revision; a re-attach of the document the resource already carries reports the
+//! revision it already had, which is what makes the operation idempotent the way the doc
+//! below states: "running it multiple times on the same resource using the same policy
+//! document will return the same revision id".
 //! `ExpectedRevisionId` is honoured as documented, `NO_POLICY` included.
 //!
 //! The attach is ASYNCHRONOUS, as the doc below says ("PutResourcePolicy is an
@@ -234,9 +236,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // data plane starts honouring it one [`crate::state::STATUS_TRANSITION`] from
         // now, and a request made straight after this one is still authorized as it
         // was. Nothing sleeps for that span: the instant is stored.
-        let policy = crate::state::AttachedPolicy::attach(
+        //
+        // It is numbered as the revision it replaces once the resource it is attached to
+        // is known, below.
+        let mut policy = crate::state::AttachedPolicy::attach(
             &input.policy,
             now + crate::state::STATUS_TRANSITION,
+            now,
         )
         .map_err(lift_policy_fault)?;
         // A policy over the STREAM decides requests to the stream, so every action it
@@ -278,7 +284,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let attached_revision_id = table
             .attached_policy(&resource)
             .map_err(lift)?
-            .map(|policy| policy.revision_id.clone());
+            .map(crate::state::AttachedPolicy::revision_id);
         let attached_revision_id = attached_revision_id.as_deref();
         let unmet_expectation = match input.expected_revision_id.as_deref() {
             None => None,
@@ -299,8 +305,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
 
-        let revision_id = policy.revision_id.clone();
-        *table.policy_slot(&resource).map_err(lift)? = Some(policy);
+        // Every accepted attach is a NEW revision of this resource's policy, and
+        // "PutResourcePolicy is an idempotent operation; running it multiple times on the
+        // same resource using the same policy document will return the same revision id":
+        // re-attaching the document the resource already carries reports the revision it
+        // already had, so a client that repeats a put sees one revision and not two
+        // ([`crate::state::AttachedPolicy::revise_after`]).
+        let slot = table.policy_slot(&resource).map_err(lift)?;
+        policy.revise_after(slot.as_ref());
+        let revision_id = policy.revision_id();
+        *slot = Some(policy);
 
         // The audit record for a state-changing call: who asked, what changed and that
         // it succeeded. Never the document itself, and never a credential.

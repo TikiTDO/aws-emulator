@@ -349,16 +349,19 @@ async fn limit_and_exclusive_start_key_page_the_table_exactly_once() {
                  once, got {seen:?}",
                 table.case
             );
-            let expected_pages = if total == 0 {
-                1
-            } else {
-                total.div_ceil(limit)
+            let expected_pages = match total {
+                0 => 1,
+                // The last page a walk takes is one whose own Limit was reached, so a
+                // table whose items divide evenly into pages takes one page more.
+                total if total % limit == 0 => total / limit + 1,
+                total => total.div_ceil(limit),
             };
             // A page reports a `LastEvaluatedKey` when it stopped with items still to
-            // evaluate, so `n` items take `ceil(n / limit)` pages rather than one
-            // more — "If LastEvaluatedKey is not empty, it does not necessarily mean
-            // that there is more data in the result set" leaves the choice open, and
-            // the sibling `Query` reader makes the same one.
+            // evaluate AND when it stopped because it reached the caller's `Limit`, so
+            // `n` items take `ceil(n / limit)` pages, plus one more when the limit was
+            // reached by the last item — "If LastEvaluatedKey is not empty, it does not
+            // necessarily mean that there is more data in the result set", and the
+            // sibling `Query` reader makes the same choice.
             assert_eq!(
                 pages, expected_pages,
                 "case {:?} limit {limit}: {total} item(s) take {expected_pages} page(s), \
