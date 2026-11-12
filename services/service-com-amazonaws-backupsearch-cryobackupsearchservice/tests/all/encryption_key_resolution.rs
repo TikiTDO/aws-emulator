@@ -29,7 +29,11 @@ use crate::search_jobs::{call, create_kms_key, emulator, Answer};
 const REGION: &str = "us-west-2";
 
 /// Start a search job, optionally under `encryption_key`.
-async fn start_under_key(
+///
+/// `pub(crate)` because the relayed-refusal suite (`tests/all/relayed_kms_refusal.rs`)
+/// drives the same request: how the refusal of an unresolvable reference is WORDED is
+/// judged on exactly the call this builds.
+pub(crate) async fn start_under_key(
     emulator: &smithy_server_runtime::MultiServiceRouter,
     region: &str,
     encryption_key: Option<&str>,

@@ -446,8 +446,11 @@ fn store_unavailable() -> StartSearchJobError {
 /// and nothing of the key is copied here: the search job keeps the ARN the caller sent.
 ///
 /// The refusal RELAYS the sentence KMS states for an identifier that names no key, since
-/// that is the failure being reported; the `resourceId` is the submitted ARN and the
-/// `resourceType` the type that reference names.
+/// that is the failure being reported — as a relayed refusal, so the message carries the
+/// downstream reason followed by the envelope naming the service that refused, the status
+/// it refused with and that call's request id ([`crate::state::relayed_refusal_message`]);
+/// the `resourceId` is the submitted ARN and the `resourceType` the type that reference
+/// names.
 ///
 /// `None` when no KMS service is mounted beside this one: there is no store to resolve the
 /// reference in, so nothing can be attributed to the key, and a deployment that serves no
@@ -475,8 +478,13 @@ fn encryption_key_refusal<Eng: Send + Sync + 'static>(
         return None;
     }
     Some(ResourceNotFoundException {
-        message: ::service_com_amazonaws_kms_trentservice::state::key_not_found_message(
-            &region, key_arn,
+        // The reason is KMS's own, and it reaches the caller inside the relay envelope:
+        // this service made that call, so what it reports is a failure OF that call.
+        message: crate::state::relayed_refusal_message(
+            &::service_com_amazonaws_kms_trentservice::state::key_not_found_message(
+                &region, key_arn,
+            ),
+            crate::state::relayed_kms(),
         ),
         resource_id: key_arn.to_string(),
         resource_type: ENCRYPTION_KEY_RESOURCE.to_string(),

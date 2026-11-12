@@ -55,6 +55,8 @@ mod page_context_filter_values;
 mod page_token_under_a_changing_filter;
 #[path = "all/page_token_under_a_growing_sequence.rs"]
 mod page_token_under_a_growing_sequence;
+#[path = "all/relayed_kms_refusal.rs"]
+mod relayed_kms_refusal;
 #[path = "all/resource_tags.rs"]
 mod resource_tags;
 #[path = "all/scan_run_outlasts_a_client_gap.rs"]

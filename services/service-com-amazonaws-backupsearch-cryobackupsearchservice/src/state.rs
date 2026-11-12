@@ -76,6 +76,11 @@
 mod export_delivery;
 pub use export_delivery::*;
 
+/// How a refusal another service answered is reported to this service's caller: the
+/// downstream reason inside the envelope naming the call it was relayed from.
+mod relayed_refusal;
+pub use relayed_refusal::*;
+
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
