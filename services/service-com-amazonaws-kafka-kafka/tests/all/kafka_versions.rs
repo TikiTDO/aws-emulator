@@ -153,8 +153,10 @@ async fn the_catalog_is_reported_with_every_version_and_its_support_status() {
     // itself publishes) — entries of several SHAPES (three numbers, a fourth
     // component, the `.tiered` and `.link` spellings, the `.x` patch name and the
     // `.kraft` metadata-mode lines) and both support statuses, so the table spans
-    // the class rather than one example. Each row is the statuses published for
-    // that version: exactly one, since a version is published once.
+    // the class rather than one example. Each row is the status SEQUENCE published
+    // for that version, in published order: one status for a version published
+    // once, and both lifecycle statuses for a version the catalog publishes on two
+    // rows (either order).
     let expected: &[(&str, &[&str])] = &[
         ("1.1.1", &["DEPRECATED"]),
         ("2.4.1.1", &["DEPRECATED"]),
@@ -167,11 +169,11 @@ async fn the_catalog_is_reported_with_every_version_and_its_support_status() {
         ("3.7.x", &["ACTIVE"]),
         ("3.7.x.kraft", &["ACTIVE"]),
         ("3.8.link", &["DEPRECATED"]),
-        ("3.9.x", &["ACTIVE"]),
+        ("3.9.x", &["ACTIVE", "DEPRECATED"]),
         ("3.9.x.kraft", &["ACTIVE"]),
         ("4.0.x.kraft", &["ACTIVE"]),
         ("4.1.x.kraft", &["ACTIVE"]),
-        ("4.2.x.kraft", &["ACTIVE"]),
+        ("4.2.x.kraft", &["DEPRECATED", "ACTIVE"]),
     ];
     for (version, statuses) in expected {
         let reported: Vec<&str> = versions
@@ -212,18 +214,20 @@ async fn the_catalog_is_reported_with_every_version_and_its_support_status() {
     }
 
     // Every reported entry is well formed: a modelled status value, a non-empty
-    // version, and no VERSION published twice — the published `{version, status}`
-    // projection carries nothing that could tell two rows of one version apart, so
-    // a second row would only contradict the first for a client keying the listing
-    // by version.
-    let mut names: Vec<&str> = versions.iter().map(|(name, _)| name.as_str()).collect();
-    let total = names.len();
-    names.sort_unstable();
-    names.dedup();
+    // version, and no identical ROW published twice — a version may be published
+    // on more than one row, but the two rows are the two lifecycle statuses of
+    // that version, never the same status repeated.
+    let total = versions.len();
+    let mut rows: Vec<(&str, &str)> = versions
+        .iter()
+        .map(|(name, status)| (name.as_str(), status.as_str()))
+        .collect();
+    rows.sort_unstable();
+    rows.dedup();
     assert_eq!(
-        names.len(),
+        rows.len(),
         total,
-        "the catalog must publish each version exactly once, got {versions:?}"
+        "the catalog must publish each (version, status) row at most once, got {versions:?}"
     );
     for (name, status) in &versions {
         assert!(

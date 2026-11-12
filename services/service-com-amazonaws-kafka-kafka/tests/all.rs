@@ -91,6 +91,8 @@ mod iso8601_timestamps;
 mod kafka_harness;
 #[path = "all/kafka_version_catalog_rows.rs"]
 mod kafka_version_catalog_rows;
+#[path = "all/kafka_version_lifecycle_rows.rs"]
+mod kafka_version_lifecycle_rows;
 #[path = "all/kafka_version_update.rs"]
 mod kafka_version_update;
 #[path = "all/kafka_versions.rs"]
