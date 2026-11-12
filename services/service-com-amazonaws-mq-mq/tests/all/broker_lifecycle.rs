@@ -54,15 +54,16 @@ impl Mq {
         (status, json)
     }
 
-    /// The same dispatch, also reporting the error code a restJson1 client
-    /// branches on: the `x-amzn-errortype` header, falling back to the body's
-    /// `__type`/`code` member.
-    pub(crate) async fn call_with_code(
+    /// The WHOLE answer the production dispatch path gives: its status, every header it
+    /// carries and its body bytes. A case about the framing of a response rather than
+    /// about the document in it reads it here; [`Mq::call_with_code`] is this call with
+    /// the body parsed.
+    pub(crate) async fn call_raw(
         &self,
         method: &str,
         path: &str,
         body: Option<Value>,
-    ) -> (u16, String, Value) {
+    ) -> (u16, http::HeaderMap, Bytes) {
         let payload = body
             .map(|b| Bytes::from(serde_json::to_vec(&b).expect("serialize the request body")))
             .unwrap_or_default();
@@ -75,13 +76,25 @@ impl Mq {
             .expect("build the request");
         let response = self.router.dispatch(request).await;
         let status = response.status().as_u16();
-        let header_code = response
-            .headers()
+        let headers = response.headers().clone();
+        (status, headers, response.into_body())
+    }
+
+    /// The same dispatch, also reporting the error code a restJson1 client
+    /// branches on: the `x-amzn-errortype` header, falling back to the body's
+    /// `__type`/`code` member.
+    pub(crate) async fn call_with_code(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> (u16, String, Value) {
+        let (status, headers, bytes) = self.call_raw(method, path, body).await;
+        let header_code = headers
             .get("x-amzn-errortype")
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        let bytes = response.into_body();
         let json = if bytes.is_empty() {
             Value::Null
         } else {

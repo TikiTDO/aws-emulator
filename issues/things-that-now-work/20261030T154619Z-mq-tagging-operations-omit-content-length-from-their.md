@@ -50,3 +50,23 @@ Model grounding: CreateTags POST /v1/tags/{ResourceArn}, code 204, output Unit; 
 2. Replay the simparity-wire-aws-v1 wire corpus (replay_wire_corpus).
 3. Cause 1: fixture mq-tags-create-list-delete-roundtrip-on-configuration, step task#2 — POST /v1/tags/{configuration-arn} with a tag map and inspect the 204 response headers: no content-length is sent.
 4. Cause 2: same fixture, step task#4 — DELETE /v1/tags/{configuration-arn}?tagKeys=... and inspect the 204 response headers: no content-length is sent.
+
+## Resolution
+
+Causes 1 and 2 are the same fault and are closed together, at the one seam a service owns
+for this: the protocol this service hands every modelled response through
+(`src/service/iso8601_timestamps.rs`, taken at `Service::override_protocol`) now frames an
+answer at the no-content status as one — no body, and the length it has,
+`content-length: 0` — through the shared reading of that framing in
+`services/common/src/no_content_responses.rs`. The rule is the status's, not the
+operation's, so it covers every operation of this model whose success code is 204
+(`CreateTags`, `DeleteTags`) and leaves every answer that carries content exactly as its
+renderer wrote it. `tests/all/no_content_framing.rs` pins both halves.
+
+CAVEAT: a client reached over HTTP/1.1 still does not see the header. The HTTP writer the
+vendored transport serves on (`vendor/server/src/lib.rs`, hyper's connection builder)
+removes `content-length` from a `204` — RFC 9110 §15.3.5 gives that status no body — and
+that writer is under the read-only vendored tree, so the wire-level half of this cause is a
+platform limitation rather than something a service crate can state its way out of. The
+suite's wire probe pins what the socket really delivers, so the boundary is a fact in the
+tests rather than a claim in a comment.

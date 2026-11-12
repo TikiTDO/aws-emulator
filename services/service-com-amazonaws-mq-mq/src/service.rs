@@ -37,7 +37,8 @@
 //!
 //! A sixth seam, `override_protocol`, is the one this service DOES take: it serves the
 //! model's `restJson1` codec with every timestamp of a modelled response in the
-//! ISO-8601 `date-time` form this model's only timestamp shape declares (see
+//! ISO-8601 `date-time` form this model's only timestamp shape declares, and with an
+//! answer that carries no content framed as one — no body, and the length it has (see
 //! [`iso8601_timestamps`]).
 //!
 //! The model-derived half of this service — its identity, wire protocol, routing
@@ -50,8 +51,8 @@ use smithy_server_runtime::{
 };
 use std::sync::Arc;
 
-/// How a timestamp of a modelled response is rendered — the one difference from the
-/// model's own `restJson1` codec this service takes.
+/// How this service's responses are written: the timestamp form a modelled body carries,
+/// and the framing an answer that carries no content states.
 pub mod iso8601_timestamps;
 
 /// The `com-amazonaws-mq-mq` emulated service: the generated [`ServiceDefinition`] plus
@@ -162,10 +163,11 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     }
 
     fn override_protocol(&self) -> Option<&dyn smithy_server_runtime::ServerHttpProtocol> {
-        // The model's own restJson1 codec, with the ONE difference the generic
-        // renderer cannot express: a timestamp is written in the ISO-8601 date-time
-        // form this model's only timestamp shape declares, rather than in the
-        // protocol's default epoch-seconds form (see `iso8601_timestamps`).
+        // The model's own restJson1 codec, with the TWO differences the generic renderer
+        // cannot express: a timestamp is written in the ISO-8601 date-time form this
+        // model's only timestamp shape declares, rather than in the protocol's default
+        // epoch-seconds form, and an answer at the no-content status states the length it
+        // has (see `iso8601_timestamps`).
         // Borrowed from the field built in `new`, never constructed per request.
         Some(&self.protocol)
     }

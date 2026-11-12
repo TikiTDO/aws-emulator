@@ -24,7 +24,9 @@ tracing = { workspace = true }
 # Digests the store's own mint sequence into a broker's `b-<128 bits>` BrokerId.
 sha2 = { workspace = true }
 # `service-common` carries the ONE reading of the address a client reaches this
-# emulator at, which a broker's published endpoints name.
+# emulator at, which a broker's published endpoints name, and of the framing an
+# answer that carries no content states (`service_common::no_content_responses`),
+# which this service's tag mutations answer at.
 service-common = { path = "../common" }
 
 [build-dependencies]

@@ -27,6 +27,8 @@ mod configuration_lifecycle;
 mod configuration_name;
 #[path = "all/configuration_wire_form.rs"]
 mod configuration_wire_form;
+#[path = "all/no_content_framing.rs"]
+mod no_content_framing;
 #[path = "all/resource_tags.rs"]
 mod resource_tags;
 #[path = "all/state_roundtrip.rs"]

@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! How this service's `restJson1` responses carry a TIMESTAMP.
+//! How this service's `restJson1` responses are written: the TIMESTAMP form every
+//! modelled body carries, and the FRAMING an answer that carries no content states.
+//!
+//! This is the one seam every response a modelled operation produces passes through
+//! ([`smithy_server_runtime::Service::override_protocol`], wired in [`crate::service`]),
+//! so both corrections live on it rather than being restated by each operation that
+//! needs one. Everything else — routing, request deserialization, the body bytes of
+//! every answer that carries content, and every modelled failure — is the framework's
+//! own `restJson1` protocol, delegated to unchanged.
+//!
+//! # Timestamps
 //!
 //! RULE: every timestamp Amazon MQ answers with is an ISO-8601 / RFC-3339 date-time
 //! STRING — `"2026-10-30T15:43:01.513Z"` — never the epoch-seconds number the
@@ -35,6 +45,26 @@
 //! Only the modelled SUCCESS body goes through it. No error shape of this model
 //! carries a timestamp member, so an error document has nothing to re-render, and
 //! request deserialization is untouched: no input member of this model is a timestamp.
+//!
+//! # An answer that carries no content
+//!
+//! RULE: a success at the no-content status carries no body and STATES the length it
+//! has — `content-length: 0` — so a client, a proxy or a contract check reading the
+//! framing of such an answer finds the length of the body that is not there rather than
+//! no framing header at all.
+//!
+//! Every operation of this service whose success code is that status is one whose output
+//! is `smithy.api#Unit`: the two tagging writes, `CreateTags` (POST /v1/tags/{ResourceArn},
+//! code 204) and `DeleteTags` (DELETE /v1/tags/{ResourceArn}, code 204) —
+//! `smithy_query(query="operation",operation="CreateTags,DeleteTags",
+//! model_path="services/service-com-amazonaws-mq-mq/smithy-model/com-amazonaws-mq-mq.json")`.
+//! The framework's renderer already writes no body for such an output, but states no
+//! length for it. The correction itself is `service_common`'s, written once for every
+//! service that answers at that status; all this module does is take it here.
+//!
+//! The framing header is the HTTP writer's last word rather than this crate's: over
+//! HTTP/1.1 that writer leaves it off a no-content answer (RFC 9110 section 15.3.5
+//! gives a 204 no body), which is below anything a service crate decides.
 
 use aws_smithy_runtime_api::http::{Request, Response};
 use aws_smithy_schema::serde::{SerdeError, SerializableStruct, ShapeDeserializer, ShapeSerializer};
@@ -163,7 +193,7 @@ impl ShapeSerializer for IsoTimestampSerializer<'_> {
 
 /// This service's wire protocol: `restJson1` exactly as the model declares it, with
 /// every timestamp of a modelled response in the `date-time` form the model's one
-/// timestamp shape declares.
+/// timestamp shape declares, and an answer that carries no content framed as one.
 #[derive(Debug)]
 pub struct Iso8601TimestampRestJson {
     inner: RestJsonServerProtocol,
@@ -214,6 +244,9 @@ impl ServerProtocol for Iso8601TimestampRestJson {
         self.inner.deserialize_input(request, input_schema)
     }
 
+    /// The modelled success, with every timestamp in its date-time form and, when it is
+    /// an answer that carries no content, framed as one. An answer that DOES carry
+    /// content keeps the status, the headers and every body byte its renderer wrote.
     fn serialize_output(
         &self,
         output: &dyn SerializableStruct,
@@ -221,12 +254,15 @@ impl ServerProtocol for Iso8601TimestampRestJson {
         operation_name: &str,
         success_status: u16,
     ) -> Result<Self::Response, ProtocolError> {
-        self.inner.serialize_output(
+        let rendered = self.inner.serialize_output(
             &IsoTimestamps(output),
             output_schema,
             operation_name,
             success_status,
-        )
+        )?;
+        Ok(::service_common::no_content_responses::without_content(
+            rendered,
+        ))
     }
 
     fn serialize_error(
