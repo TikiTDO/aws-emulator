@@ -311,6 +311,7 @@ mod tests {
             pickup_details: None,
             job_part_ids: Vec::new(),
             unlock_code: String::new(),
+            order_region: String::new(),
         };
         job.notification = notification;
         job

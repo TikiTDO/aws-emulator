@@ -172,6 +172,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let now = ::std::time::SystemTime::now();
         let region = crate::state::request_region(ctx.parts());
         let mut store = state.lock();
+        // The devices this account's Snow Family orders ship, materialised before any
+        // device is read (`crate::state::snow_orders`).
+        store.activate_ordered_devices(&*self.engine);
         store.settle(now);
 
         // The account/region device precondition, FIRST: a Region this account has
@@ -200,7 +203,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         Ok(DescribeDeviceOutput {
             managed_device_id: Some(device.managed_device_id.clone()),
             managed_device_arn: Some(device.managed_device_arn.clone()),
-            device_type: Some(device.device_type.clone()),
+            // "The type of Amazon Web Services Snow Family device": the type the device's
+            // own order was placed for, and no member at all for a device whose order
+            // named none.
+            device_type: device.device_type.clone(),
             associated_with_job: Some(device.associated_with_job.clone()),
             device_state: Some(device.device_state.clone()),
             physical_network_interfaces: Some(device.physical_network_interfaces.clone()),

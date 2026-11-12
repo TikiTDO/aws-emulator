@@ -41,6 +41,8 @@ mod empty_inventory_refusals;
 mod list_tasks_empty_page;
 #[path = "all/one_execution_per_device.rs"]
 mod one_execution_per_device;
+#[path = "all/ordered_device_inventory.rs"]
+mod ordered_device_inventory;
 #[path = "all/pagination_cursor_binding.rs"]
 mod pagination_cursor_binding;
 #[path = "all/pagination_resume_position.rs"]

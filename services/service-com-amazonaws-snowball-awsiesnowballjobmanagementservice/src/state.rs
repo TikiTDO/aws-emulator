@@ -768,6 +768,17 @@ pub struct StoredJob {
     /// when it is passed along with the manifest to the Snow device". It is the job's own
     /// and is minted once, so every read of it answers the same code.
     pub unlock_code: String,
+    /// The Region this order was placed in: the SigV4 credential scope of the create that
+    /// made the record ([`request_region`]), which is the only Region a request carries.
+    ///
+    /// Nothing in THIS service's API reads it — "Calling this API action in one of the US
+    /// regions will return jobs from the list of all jobs associated with this account in
+    /// all US regions" (`ListJobs`), so a job is reported wherever it is asked for — but
+    /// the device this order ships is a REGIONAL resource of the service that manages it,
+    /// and the Region it is managed in is the Region the order was placed in. An empty
+    /// string when the create carried no scope to read a Region from, which is a request
+    /// this emulator can place in no Region.
+    pub order_region: String,
 }
 
 impl StoredJob {
@@ -1046,6 +1057,9 @@ pub struct StoredCluster {
     /// The long-term pricing ids the cluster's automatically created jobs are associated
     /// with, in the order they were supplied (`CreateClusterRequest$LongTermPricingIds`).
     pub long_term_pricing_ids: Vec<String>,
+    /// The Region this cluster order was placed in, which every node job of it inherits
+    /// ([`StoredJob::order_region`]).
+    pub order_region: String,
     /// This cluster's node jobs, in the order they were created.
     ///
     /// Every node ever registered against the cluster is here, whatever state it reached:
@@ -1133,6 +1147,9 @@ impl StoredCluster {
             // it holds no job parts.
             job_part_ids: Vec::new(),
             unlock_code,
+            // A node ships with the cluster, so its order was placed where the cluster's
+            // was.
+            order_region: self.order_region.clone(),
         }
     }
 

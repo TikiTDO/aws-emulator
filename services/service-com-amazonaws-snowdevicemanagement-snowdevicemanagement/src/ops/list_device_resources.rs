@@ -158,6 +158,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let now = ::std::time::SystemTime::now();
         let region = crate::state::request_region(ctx.parts());
         let mut store = state.lock();
+        // The devices this account's Snow Family orders ship, materialised before any
+        // device is read (`crate::state::snow_orders`).
+        store.activate_ordered_devices(&*self.engine);
         store.settle(now);
 
         // The account/region device precondition, FIRST: a Region this account has

@@ -206,6 +206,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // addressed ARN has to agree with.
         let region = crate::state::request_region(ctx.parts());
         let mut store = state.lock();
+        // The devices this account's Snow Family orders ship, materialised before the
+        // addressed resource is resolved (`crate::state::snow_orders`), so an ordered
+        // device's ARN names a resource here.
+        store.activate_ordered_devices(&*self.engine);
         // Settling is owed here too, because a tag read of a task has to see the
         // state the clock gave it.
         store.settle(now);

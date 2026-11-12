@@ -25,6 +25,11 @@ tracing = { workspace = true }
 hex = { workspace = true }
 # Fingerprints the enumeration a pagination cursor is a position in, at a fixed size.
 sha2 = { workspace = true }
+# The Snow Family ORDER store this service's device inventory is a projection of. This API
+# models no device-creation operation because a device becomes remotely manageable by being
+# ORDERED — a Snowball job created with remote management installed — so the crate that
+# holds those orders is the component the inventory is read from (src/state/snow_orders.rs).
+service-com-amazonaws-snowball-awsiesnowballjobmanagementservice = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

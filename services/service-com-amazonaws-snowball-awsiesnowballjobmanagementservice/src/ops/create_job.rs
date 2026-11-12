@@ -323,7 +323,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The create holds the store's lock; the notifications the job states it starts owe
         // are published once that lock is released, because a publish is an in-process call
         // into Amazon SNS and must not run under it.
-        let (output, notifications) = self.place_order(input)?;
+        let (output, notifications) =
+            self.place_order(input, &crate::state::request_region(ctx.parts()))?;
 
         // Every job record created has entered its first state, which its own notification
         // settings may select, and a subscriber of the topic they name is told about it.
@@ -337,10 +338,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CreateJob<Eng> {
     /// The order itself: what it answers, and the job-state notifications it owes.
     ///
     /// Everything that touches the store lives here, so the lock is held for the write
-    /// ALONE and nothing is awaited while it is.
+    /// ALONE and nothing is awaited while it is. `order_region` is the Region the request
+    /// was signed for, which every record of this order is stored with
+    /// (`StoredJob::order_region`).
     fn place_order(
         &self,
         input: CreateJobInput,
+        order_region: &str,
     ) -> Result<
         (
             CreateJobOutput,
@@ -700,6 +704,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CreateJob<Eng> {
             // The credential the job's device is unlocked with, minted with the job and
             // read back by `GetJobUnlockCode`.
             unlock_code: store.mint_unlock_code(),
+            // Where this order was placed, which is where the device it ships is managed.
+            order_region: order_region.to_string(),
         };
 
         // The order this create stores: one record for a plain job, and for an export the

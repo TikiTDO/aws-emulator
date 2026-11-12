@@ -349,7 +349,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The create holds the store's lock; the notifications its node jobs' first states
         // owe are published once that lock is released, because a publish is an in-process
         // call into Amazon SNS and must not run under it.
-        let (output, notifications) = self.place_order(input)?;
+        let (output, notifications) =
+            self.place_order(input, &crate::state::request_region(ctx.parts()))?;
 
         // Each node job created has entered its first state, which its own notification
         // settings may select, and a subscriber of the topic they name is told about it.
@@ -363,10 +364,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CreateCluster<Eng
     /// The order itself: what it answers, and the job-state notifications it owes.
     ///
     /// Everything that touches the store lives here, so the lock is held for the write
-    /// ALONE and nothing is awaited while it is.
+    /// ALONE and nothing is awaited while it is. `order_region` is the Region the request
+    /// was signed for, which the cluster and every node job of it is stored with
+    /// (`StoredJob::order_region`).
     fn place_order(
         &self,
         input: CreateClusterInput,
+        order_region: &str,
     ) -> Result<
         (
             CreateClusterOutput,
@@ -552,6 +556,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CreateCluster<Eng
             tax_documents: input.tax_documents,
             remote_management: input.remote_management,
             long_term_pricing_ids: input.long_term_pricing_ids.unwrap_or_default(),
+            // Where this order was placed, which is where the devices its nodes ship are
+            // managed.
+            order_region: order_region.to_string(),
             // Filled in by `add_cluster_node_jobs` below for the nodes this create makes.
             node_job_ids: Vec::new(),
         };

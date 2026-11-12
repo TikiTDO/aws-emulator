@@ -160,6 +160,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let now = ::std::time::SystemTime::now();
         let region = crate::state::request_region(ctx.parts());
         let mut store = state.lock();
+        // The devices this account's Snow Family orders ship, materialised before any
+        // device is read (`crate::state::snow_orders`).
+        store.activate_ordered_devices(&*self.engine);
         // Settle first, so this call cancels only what the clock had not already
         // carried to a terminal state.
         store.settle(now);

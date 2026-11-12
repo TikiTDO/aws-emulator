@@ -164,6 +164,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let now = ::std::time::SystemTime::now();
         let region = crate::state::request_region(ctx.parts());
         let mut store = state.lock();
+        // The inventory is the projection of this account's Snow Family orders: a device
+        // becomes manageable by being ORDERED with remote management installed, which this
+        // API models no operation for (`crate::state::snow_orders`).
+        store.activate_ordered_devices(&*self.engine);
         store.settle(now);
 
         // The account/region device precondition, FIRST: a Region this account has

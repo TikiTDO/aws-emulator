@@ -4,9 +4,11 @@
 //!
 //! Snow Device Management manages Amazon Web Services Snow Family devices that an
 //! account already ordered with remote management enabled: the API models NO
-//! device-creation operation, so a device enters the inventory only through
-//! [`ComAmazonawsSnowdevicemanagementSnowdevicemanagementState::activate_devices`],
-//! never through a request. Having at least one such device in the signed Region is
+//! device-creation operation, so the inventory is not minted here — it is the
+//! PROJECTION of this account's Snow Family orders that installed remote management,
+//! read from the service that holds those orders ([`snow_orders`]) and materialised by
+//! [`ComAmazonawsSnowdevicemanagementSnowdevicemanagementState::activate_ordered_devices`].
+//! Having at least one such device in the signed Region is
 //! the PRECONDITION the whole device/task surface is served behind: a Region this
 //! account has activated none in has no device for a call to act on or be authorized
 //! against, so every operation the model declares `AccessDeniedException` on refuses
@@ -42,6 +44,11 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, SystemTime};
+
+/// Reading this account's Snow Family ORDERS — the Snowball jobs that installed remote
+/// management on the device they ship — which is what the managed-device inventory is a
+/// projection of, since this API models no operation that creates a device.
+pub mod snow_orders;
 
 use crate::ops::types::{
     AccessDeniedException, Capacity, CpuOptions, DeviceSummary, EbsInstanceBlockDevice,
@@ -292,8 +299,11 @@ pub struct Device {
     /// The Region this device has Snow Device Management enabled in. A request
     /// signed for any other Region does not see it.
     pub region: String,
-    /// "The type of Amazon Web Services Snow Family device."
-    pub device_type: String,
+    /// "The type of Amazon Web Services Snow Family device." The `SnowballType` the
+    /// order this device was ordered by was placed for, and `None` for a device whose
+    /// order named none: an unknown type is reported as an absent member rather than as
+    /// an empty string, which is not a value AWS answers.
+    pub device_type: Option<String>,
     /// "The ID of the job used to order the device."
     pub associated_with_job: String,
     /// One of `UnlockState`'s values: `LOCKED`, `UNLOCKED` or `UNLOCKING`.
@@ -907,12 +917,13 @@ impl ComAmazonawsSnowdevicemanagementSnowdevicemanagementState {
     /// Activate Snow Device Management on `count` devices in `region`, answering
     /// the ids they were given.
     ///
-    /// This is the ONLY way a device enters the inventory, and it is deliberately
-    /// not reachable from a request: Snow Device Management models no
-    /// device-creation operation, because a device becomes manageable by being
-    /// ORDERED — a Snow Family job created with remote management enabled — which
-    /// is another service's API. Until something activates a device here, this
-    /// account's inventory in `region` is empty, and the device/task surface is
+    /// The FIXTURE seam: a device whose order is not in this emulator's Snow Family
+    /// order store, which is what a suite seeds an inventory with. The path a client
+    /// takes is the order itself — a Snowball job created with remote management
+    /// installed, projected into the inventory by
+    /// [`Self::activate_ordered_devices`] — because Snow Device Management models no
+    /// device-creation operation. Until one of the two puts a device here, this
+    /// account's inventory in `region` is empty and the device/task surface is
     /// refused there ([`Self::has_devices_in`]).
     ///
     /// Ids, ARNs and job ids are the store's own: an id is minted from the
@@ -923,69 +934,102 @@ impl ComAmazonawsSnowdevicemanagementSnowdevicemanagementState {
         let mut activated = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
         for _ in 0..count {
             let index = self.device_id_seq;
-            self.device_id_seq += 1;
-            let managed_device_id = managed_device_id(index);
-            let device = Device {
-                managed_device_arn: device_arn(&managed_device_id, region),
-                region: region.to_string(),
-                device_type: DEVICE_TYPES[usize::try_from(index % DEVICE_TYPES_LEN)
-                    .expect("an index modulo the type count fits in usize")]
-                .to_string(),
-                // A device Snow Device Management has just been activated on is
-                // `LOCKED`: unlocking one is what an `unlock` task does, and a
-                // device that arrived unlocked would make that task unobservable.
-                device_state: "LOCKED".to_string(),
-                physical_network_interfaces: vec![PhysicalNetworkInterface {
-                    physical_network_interface_id: Some(format!("s.ni-{index:016x}")),
-                    // `PhysicalConnectorType`'s values, cycled so the inventory
-                    // is not uniform.
-                    physical_connector_type: Some(
-                        CONNECTOR_TYPES[usize::try_from(index % CONNECTOR_TYPES_LEN)
-                            .expect("an index modulo the connector count fits in usize")]
-                        .to_string(),
-                    ),
-                    // `IpAddressAssignment`: an activated device holds a fixed
-                    // address, so it is `STATIC`.
-                    ip_address_assignment: Some("STATIC".to_string()),
-                    ip_address: Some(format!("10.0.0.{}", index % 240 + 10)),
-                    netmask: Some("255.255.255.0".to_string()),
-                    default_gateway: Some("10.0.0.1".to_string()),
-                    mac_address: Some(format!("02:00:00:00:00:{:02x}", index % 256)),
-                }],
-                device_capacities: vec![
-                    Capacity {
-                        name: Some("HDD Storage".to_string()),
-                        unit: Some("Byte".to_string()),
-                        total: Some(8_000_000_000_000),
-                        used: Some(0),
-                        available: Some(8_000_000_000_000),
-                    },
-                    Capacity {
-                        name: Some("Memory".to_string()),
-                        unit: Some("Byte".to_string()),
-                        total: Some(103_079_215_104),
-                        used: Some(0),
-                        available: Some(103_079_215_104),
-                    },
-                ],
-                software: SoftwareInformation {
-                    installed_version: Some("1.0.0".to_string()),
-                    // Nothing is being installed on a device that just arrived, so
-                    // there is no version in flight and no install in progress.
-                    installing_version: None,
-                    install_state: Some("NA".to_string()),
-                },
-                tags: BTreeMap::new(),
-                last_reached_out_at: now,
-                last_updated_at: now,
-                associated_with_job: ordering_job_id(index / 2),
-                ec2_instances: fixture_instances(index, now),
-                managed_device_id: managed_device_id.clone(),
-            };
-            self.devices.insert(managed_device_id.clone(), device);
-            activated.push(managed_device_id);
+            let device_type = DEVICE_TYPES[usize::try_from(index % DEVICE_TYPES_LEN)
+                .expect("an index modulo the type count fits in usize")]
+            .to_string();
+            activated.push(self.activate_device(
+                region,
+                now,
+                ordering_job_id(index / 2),
+                Some(device_type),
+                fixture_instances(index, now),
+            ));
         }
         activated
+    }
+
+    /// Put ONE device in the inventory of `region`, ordered by the job
+    /// `associated_with_job` and manageable since `activated_at`, and answer the
+    /// `managedDeviceId` it was given.
+    ///
+    /// The ONE place a device record is built, whichever path put the device there, so
+    /// a projected order and a seeded fixture cannot describe a device differently.
+    /// Everything not taken from the order is read off the device's own index, and a
+    /// device Snow Device Management has just been activated on reports nothing a
+    /// caller has not asked for yet.
+    ///
+    /// `activated_at` is when the device became manageable, which is the instant it has
+    /// last reached out and last pushed an update at until something changes its record.
+    /// For a projected device that is when its ORDER was placed, so no member of the
+    /// record depends on when a call first observed it.
+    fn activate_device(
+        &mut self,
+        region: &str,
+        activated_at: SystemTime,
+        associated_with_job: String,
+        device_type: Option<String>,
+        ec2_instances: BTreeMap<String, Ec2Instance>,
+    ) -> String {
+        let index = self.device_id_seq;
+        self.device_id_seq += 1;
+        let managed_device_id = managed_device_id(index);
+        let device = Device {
+            managed_device_arn: device_arn(&managed_device_id, region),
+            region: region.to_string(),
+            device_type,
+            // A device Snow Device Management has just been activated on is
+            // `LOCKED`: unlocking one is what an `unlock` task does, and a
+            // device that arrived unlocked would make that task unobservable.
+            device_state: "LOCKED".to_string(),
+            physical_network_interfaces: vec![PhysicalNetworkInterface {
+                physical_network_interface_id: Some(format!("s.ni-{index:016x}")),
+                // `PhysicalConnectorType`'s values, cycled so the inventory
+                // is not uniform.
+                physical_connector_type: Some(
+                    CONNECTOR_TYPES[usize::try_from(index % CONNECTOR_TYPES_LEN)
+                        .expect("an index modulo the connector count fits in usize")]
+                    .to_string(),
+                ),
+                // `IpAddressAssignment`: an activated device holds a fixed
+                // address, so it is `STATIC`.
+                ip_address_assignment: Some("STATIC".to_string()),
+                ip_address: Some(format!("10.0.0.{}", index % 240 + 10)),
+                netmask: Some("255.255.255.0".to_string()),
+                default_gateway: Some("10.0.0.1".to_string()),
+                mac_address: Some(format!("02:00:00:00:00:{:02x}", index % 256)),
+            }],
+            device_capacities: vec![
+                Capacity {
+                    name: Some("HDD Storage".to_string()),
+                    unit: Some("Byte".to_string()),
+                    total: Some(8_000_000_000_000),
+                    used: Some(0),
+                    available: Some(8_000_000_000_000),
+                },
+                Capacity {
+                    name: Some("Memory".to_string()),
+                    unit: Some("Byte".to_string()),
+                    total: Some(103_079_215_104),
+                    used: Some(0),
+                    available: Some(103_079_215_104),
+                },
+            ],
+            software: SoftwareInformation {
+                installed_version: Some("1.0.0".to_string()),
+                // Nothing is being installed on a device that just arrived, so
+                // there is no version in flight and no install in progress.
+                installing_version: None,
+                install_state: Some("NA".to_string()),
+            },
+            tags: BTreeMap::new(),
+            last_reached_out_at: activated_at,
+            last_updated_at: activated_at,
+            associated_with_job,
+            ec2_instances,
+            managed_device_id: managed_device_id.clone(),
+        };
+        self.devices.insert(managed_device_id.clone(), device);
+        managed_device_id
     }
 
     /// Mint an unused task id. `TaskId` is bounded 1..64 and otherwise
@@ -1296,13 +1340,18 @@ pub fn managed_device_id(index: u64) -> String {
     format!("smd-{index:016x}")
 }
 
-/// The id form of the Snow Family job a device was ordered by. `JobId` is bounded
-/// 1..64; `JID` plus a UUID is the shape Snow Family job ids carry.
+/// The id form of the Snow Family job a FIXTURE device was ordered by. `JobId` is
+/// bounded 1..64; `JID` plus a UUID is the shape Snow Family job ids carry.
+///
+/// Only [`ComAmazonawsSnowdevicemanagementSnowdevicemanagementState::activate_devices`]
+/// mints one: a device projected from a real order carries THAT order's `JobId`, read
+/// off the order store ([`snow_orders`]), never a value of this service's own.
 pub fn ordering_job_id(index: u64) -> String {
     format!("JID{index:08x}-0000-4000-8000-{index:012x}")
 }
 
-/// The Snow Family device types an activated inventory cycles through.
+/// The Snow Family device types a FIXTURE inventory cycles through. A device
+/// projected from a real order reports the `SnowballType` that order was placed for.
 const DEVICE_TYPES: &[&str] = &["SNC1_HDD", "SNC1_SSD", "EDGE_C"];
 
 /// `DEVICE_TYPES`'s length, as the `u64` the index arithmetic needs.
