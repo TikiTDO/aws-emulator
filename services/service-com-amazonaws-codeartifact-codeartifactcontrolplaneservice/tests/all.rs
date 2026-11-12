@@ -123,3 +123,5 @@ mod package_version_readme;
 mod domain_resource_fields;
 #[path = "all/arn_addressed_authorization.rs"]
 mod arn_addressed_authorization;
+#[path = "all/root_package_group_description.rs"]
+mod root_package_group_description;

@@ -328,6 +328,16 @@ pub const MAX_PACKAGE_GROUPS_PER_DOMAIN: usize = 100;
 /// ultimately resolve against.
 pub const ROOT_PACKAGE_GROUP_PATTERN: &str = "/*";
 
+/// The `description` the service itself assigns to the root package group it creates with
+/// every domain.
+///
+/// Fixed text, identical for every domain: it carries no part of the request, the account
+/// or the clock. A caller-created group has no description until the caller gives it one,
+/// but the root group is created BY the service, so its record carries this from the
+/// moment the domain exists — and an `UpdatePackageGroup` on the root group replaces it
+/// like any other stored description.
+pub const ROOT_PACKAGE_GROUP_DESCRIPTION: &str = "Default root package group";
+
 /// `PackageGroupOriginRestrictionMode$ALLOW`.
 pub const ORIGIN_MODE_ALLOW: &str = "ALLOW";
 
@@ -1176,7 +1186,8 @@ pub struct PackageGroup {
 impl PackageGroup {
     /// The root group of a domain: it has no parent, so none of its restrictions can
     /// inherit — they are the domain's effective defaults, and CodeArtifact's root group
-    /// allows publishing and both upstream kinds.
+    /// allows publishing and both upstream kinds. The service creates this group itself,
+    /// so it also carries the service-assigned [`ROOT_PACKAGE_GROUP_DESCRIPTION`].
     pub fn root(region: &str, domain: &str, owner: &str, created_time: SystemTime) -> Self {
         Self {
             pattern: ROOT_PACKAGE_GROUP_PATTERN.to_string(),
@@ -1185,7 +1196,7 @@ impl PackageGroup {
             arn: package_group_arn(region, domain, ROOT_PACKAGE_GROUP_PATTERN),
             created_time,
             contact_info: None,
-            description: None,
+            description: Some(ROOT_PACKAGE_GROUP_DESCRIPTION.to_string()),
             restrictions: origin_restrictions_in_mode(ORIGIN_MODE_ALLOW),
             tags: Vec::new(),
         }
