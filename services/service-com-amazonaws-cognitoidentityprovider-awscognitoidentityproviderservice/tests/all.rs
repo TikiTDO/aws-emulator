@@ -31,6 +31,8 @@ mod admin_remove_user_from_group;
 mod admin_reset_user_password;
 #[path = "all/admin_respond_to_auth_challenge.rs"]
 mod admin_respond_to_auth_challenge;
+#[path = "all/admin_set_user_mfa_preference.rs"]
+mod admin_set_user_mfa_preference;
 #[path = "all/admin_set_user_settings.rs"]
 mod admin_set_user_settings;
 #[path = "all/admin_update_user_attributes.rs"]
