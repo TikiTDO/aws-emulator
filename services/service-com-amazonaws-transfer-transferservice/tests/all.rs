@@ -201,3 +201,11 @@ mod security_policy_publication;
 // material may arrive in.
 #[path = "all/host_key_private_key_containers.rs"]
 mod host_key_private_key_containers;
+// `home_directory_mapping_overlap`, likewise: the one rule a logical home directory's
+// `Entry` paths have to satisfy, over every operation that writes them.
+#[path = "all/home_directory_mapping_overlap.rs"]
+mod home_directory_mapping_overlap;
+// `server_vended_log_group`, likewise: the CloudWatch Logs group a server's logging
+// configuration provisions.
+#[path = "all/server_vended_log_group.rs"]
+mod server_vended_log_group;

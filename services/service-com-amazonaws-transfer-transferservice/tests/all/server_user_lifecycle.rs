@@ -317,8 +317,10 @@ async fn describe_user_reports_exactly_what_create_user_persisted() {
                 "UserName": "bob.builder-2",
                 "Role": ROLE,
                 "HomeDirectoryType": "LOGICAL",
+                // Two entries naming two DIFFERENT paths: a logical home directory's
+                // entries may not overlap (`home_directory_mapping_overlap.rs`).
                 "HomeDirectoryMappings": [
-                    {"Entry": "/", "Target": "/bucket/bob"},
+                    {"Entry": "/home", "Target": "/bucket/bob"},
                     {"Entry": "/shared", "Target": "/bucket/shared", "Type": "DIRECTORY"},
                 ],
             }),
@@ -326,7 +328,7 @@ async fn describe_user_reports_exactly_what_create_user_persisted() {
                 "UserName": "bob.builder-2",
                 "HomeDirectoryType": "LOGICAL",
                 "HomeDirectoryMappings": [
-                    {"Entry": "/", "Target": "/bucket/bob"},
+                    {"Entry": "/home", "Target": "/bucket/bob"},
                     {"Entry": "/shared", "Target": "/bucket/shared", "Type": "DIRECTORY"},
                 ],
                 "HomeDirectory": null,

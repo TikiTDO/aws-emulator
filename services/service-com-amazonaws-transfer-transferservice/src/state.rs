@@ -60,6 +60,8 @@
 
 pub mod authorization;
 pub mod connector_delivery;
+pub mod home_directory_mappings;
+pub mod vended_log_group;
 pub mod connector_plane;
 pub mod connector_protocol;
 pub mod identity_center;
@@ -2422,6 +2424,11 @@ impl ConnectorConfig<'_> {
 /// minimum (`@length` min 1, max 50000), because that is the constraint an absent or
 /// empty list violates; the opposite direction has no modelled constraint of its own
 /// to state, so it names the condition the value was sent under.
+///
+/// The mappings a request DOES send are then held to the requirement they carry among
+/// themselves — no two entries may name one path ([`home_directory_mappings`]) — so
+/// every write of these members goes through one validator, whichever resource it
+/// configures.
 pub fn home_directory_violation(
     home_directory_type: Option<&str>,
     home_directory_mappings: Option<&[HomeDirectoryMapEntry]>,
@@ -2429,13 +2436,21 @@ pub fn home_directory_violation(
     let logical = home_directory_type == Some(HOME_DIRECTORY_TYPE_LOGICAL);
     let mapped = home_directory_mappings.is_some_and(|mappings| !mappings.is_empty());
     match (logical, mapped) {
-        (true, false) => Some(must_not_be_empty("HomeDirectoryMappings")),
-        (false, true) => Some(settable_only_when(
-            "HomeDirectoryMappings",
-            &format!("HomeDirectoryType is {HOME_DIRECTORY_TYPE_LOGICAL}"),
-        )),
-        _ => None,
+        (true, false) => return Some(must_not_be_empty("HomeDirectoryMappings")),
+        (false, true) => {
+            return Some(settable_only_when(
+                "HomeDirectoryMappings",
+                &format!("HomeDirectoryType is {HOME_DIRECTORY_TYPE_LOGICAL}"),
+            ))
+        }
+        _ => {}
     }
+
+    // The mappings also have to be consistent WITH EACH OTHER: each `Entry` is the path
+    // one `Target` is made visible at, so two entries that name one path leave the
+    // logical directory undefined. See [`home_directory_mappings`], which states the
+    // rule and words the refusal.
+    home_directory_mappings.and_then(home_directory_mappings::overlapping_entry)
 }
 
 /// One stored directory access grant, keyed by `(ServerId, ExternalId)`.

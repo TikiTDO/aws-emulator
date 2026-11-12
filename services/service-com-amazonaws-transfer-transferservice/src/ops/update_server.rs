@@ -390,194 +390,215 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             None => None,
         };
 
-        let mut guard = state.lock();
+        // The whole store write is one SCOPE, so the guard is released at its end and
+        // the provisioning step below — the only await of this handler — cannot hold the
+        // store's lock across it. It answers what that step needs: the server this
+        // update applied to, and whether it left a logging role configured.
+        let (server_id, configures_logging_role) = {
+            let mut guard = state.lock();
 
-        // The key becomes one of the server's host keys
-        // (`state::ComAmazonawsTransferTransferserviceState::materialise_host_key` — the
-        // caller supplied it, so it is one of the keys the server's readers report), and
-        // a server's key set is BOUNDED, so a rotation the server has no room for is
-        // refused here rather than applied without the key it names being readable. A
-        // key the server already holds needs no room — it is the same key. The refusal
-        // is the modelled `InvalidRequestException`, as it is for an import past the
-        // same bound, and the capacity is released by `DeleteHostKey`.
-        if let Some(rotating_to) = rotation.as_ref() {
-            let holds_it = guard
-                .host_keys_of(&input.server_id)
-                .any(|host_key| host_key.fingerprint == rotating_to.fingerprint);
-            if guard.servers.contains_key(&input.server_id)
-                && !holds_it
-                && !guard.server_has_host_key_capacity(&input.server_id)
-            {
+            // The key becomes one of the server's host keys
+            // (`state::ComAmazonawsTransferTransferserviceState::materialise_host_key` —
+            // the caller supplied it, so it is one of the keys the server's readers
+            // report), and a server's key set is BOUNDED, so a rotation the server has no
+            // room for is refused here rather than applied without the key it names being
+            // readable. A key the server already holds needs no room — it is the same
+            // key. The refusal is the modelled `InvalidRequestException`, as it is for an
+            // import past the same bound, and the capacity is released by
+            // `DeleteHostKey`.
+            if let Some(rotating_to) = rotation.as_ref() {
+                let holds_it = guard
+                    .host_keys_of(&input.server_id)
+                    .any(|host_key| host_key.fingerprint == rotating_to.fingerprint);
+                if guard.servers.contains_key(&input.server_id)
+                    && !holds_it
+                    && !guard.server_has_host_key_capacity(&input.server_id)
+                {
+                    return Err(UpdateServerErrorModeled::InvalidRequestException(
+                        InvalidRequestException {
+                            message: format!(
+                                "server {} already holds the maximum of {} host keys; \
+                                 delete one before rotating to another",
+                                input.server_id,
+                                st::MAX_HOST_KEYS_PER_SERVER
+                            ),
+                        },
+                    )
+                    .into());
+                }
+            }
+
+            let Some(stored) = guard.servers.get_mut(&input.server_id) else {
+                return Err(st::not_found(
+                    UpdateServerErrorModeled::ResourceNotFoundException(st::unknown_server(
+                        &input.server_id,
+                    )),
+                ));
+            };
+            // Materialise what the clock already owed, so the state this update is judged
+            // against is the one a read at `now` would report.
+            stored.settle(now);
+
+            // `IpAddressType`: "It cannot be changed while the server is online. You must
+            // stop the server before modifying this parameter." A request that names the
+            // value the server already has changes nothing and is not refused.
+            //
+            // The refusal states the requirement, not the state the server happens to be
+            // in: `OFFLINE` is the one state the change is allowed from, so the text is
+            // fixed for the condition and carries nothing of the request.
+            if let Some(requested) = input.ip_address_type.as_deref() {
+                if requested != stored.ip_address_type
+                    && stored.state != st::SERVER_STATE_OFFLINE
+                {
+                    return Err(UpdateServerErrorModeled::InvalidRequestException(
+                        InvalidRequestException {
+                            message: st::IP_ADDRESS_TYPE_NEEDS_OFFLINE_SERVER.to_string(),
+                        },
+                    )
+                    .into());
+                }
+            }
+
+            // The configuration the server would HAVE after this update must satisfy the
+            // same documented cross-member requirements `CreateServer` enforces — the
+            // invariant belongs to the stored server, not to one write path — so the
+            // post-update configuration is built from "what the request names, else what
+            // the server has" and refused BEFORE anything is written. `Domain` is
+            // `create-and-read`: an update cannot change it.
+            let next_endpoint_type = input
+                .endpoint_type
+                .clone()
+                .unwrap_or_else(|| stored.endpoint_type.clone());
+            let next_endpoint_details = input
+                .endpoint_details
+                .clone()
+                .or_else(|| stored.endpoint_details.clone());
+            let next_identity_provider_type = input
+                .identity_provider_type
+                .clone()
+                .unwrap_or_else(|| stored.identity_provider_type.clone());
+            let next_identity_provider_details = input
+                .identity_provider_details
+                .clone()
+                .or_else(|| stored.identity_provider_details.clone());
+            let next_ip_address_type = input
+                .ip_address_type
+                .clone()
+                .unwrap_or_else(|| stored.ip_address_type.clone());
+            let next_protocols = input
+                .protocols
+                .clone()
+                .filter(|protocols| !protocols.is_empty())
+                .unwrap_or_else(|| stored.protocols.clone());
+            let next_certificate = input
+                .certificate
+                .clone()
+                .or_else(|| stored.certificate.clone());
+            let violation = st::ServerConfig {
+                domain: &stored.domain,
+                endpoint_type: &next_endpoint_type,
+                endpoint_details: next_endpoint_details.as_ref(),
+                identity_provider_type: &next_identity_provider_type,
+                identity_provider_details: next_identity_provider_details.as_ref(),
+                ip_address_type: &next_ip_address_type,
+                protocols: &next_protocols,
+                certificate: next_certificate.as_deref(),
+            }
+            .cross_member_violation();
+            if let Some(message) = violation {
                 return Err(UpdateServerErrorModeled::InvalidRequestException(
-                    InvalidRequestException {
-                        message: format!(
-                            "server {} already holds the maximum of {} host keys; \
-                             delete one before rotating to another",
-                            input.server_id,
-                            st::MAX_HOST_KEYS_PER_SERVER
-                        ),
-                    },
+                    InvalidRequestException { message },
                 )
                 .into());
             }
-        }
 
-        let Some(stored) = guard.servers.get_mut(&input.server_id) else {
-            return Err(st::not_found(
-                UpdateServerErrorModeled::ResourceNotFoundException(st::unknown_server(
-                    &input.server_id,
-                )),
-            ));
+            // Every member the request names replaces the stored one; a member it leaves
+            // out is left alone. The two fully-materialised structures merge per
+            // sub-member.
+            if let Some(certificate) = input.certificate {
+                stored.certificate = Some(certificate);
+            }
+            if let Some(protocol_details) = input.protocol_details {
+                stored.protocol_details =
+                    st::merge_protocol_details(&stored.protocol_details, protocol_details);
+            }
+            if let Some(endpoint_details) = input.endpoint_details {
+                stored.endpoint_details = Some(endpoint_details);
+            }
+            if let Some(endpoint_type) = input.endpoint_type {
+                stored.endpoint_type = endpoint_type;
+            }
+            if let Some(identity_provider_details) = input.identity_provider_details {
+                stored.identity_provider_details = Some(identity_provider_details);
+            }
+            if let Some(identity_provider_type) = input.identity_provider_type {
+                stored.identity_provider_type = identity_provider_type;
+            }
+            // An empty value CLEARS a logging member (`NullableRole`'s empty string, an
+            // empty `StructuredLogDestinations`), leaving the server with no such
+            // configuration — which a reader reports by omitting the member.
+            let mut configures_logging_role = false;
+            if let Some(logging_role) = input.logging_role {
+                stored.logging_role = st::configured_logging_role(Some(logging_role));
+                configures_logging_role = stored.logging_role.is_some();
+            }
+            if let Some(banner) = input.post_authentication_login_banner {
+                stored.post_authentication_login_banner = Some(banner);
+            }
+            if let Some(banner) = input.pre_authentication_login_banner {
+                stored.pre_authentication_login_banner = Some(banner);
+            }
+            // `Protocols` is modelled `len 1..4`, so an empty list cannot reach here and
+            // a named list always names at least one protocol.
+            if let Some(protocols) = input.protocols {
+                stored.protocols = protocols;
+            }
+            if let Some(security_policy_name) = input.security_policy_name {
+                stored.security_policy_name = security_policy_name;
+            }
+            if let Some(workflow_details) = input.workflow_details {
+                stored.workflow_details = Some(workflow_details);
+            }
+            // "You can clear it, and in effect turn off structured logging, by providing
+            // an empty value for this parameter" — so an empty list leaves the server
+            // with NO structured-logging configuration, not with a configured empty one.
+            if let Some(destinations) = input.structured_log_destinations {
+                stored.structured_log_destinations =
+                    st::configured_log_destinations(Some(destinations));
+            }
+            if let Some(s3_storage_options) = input.s3_storage_options {
+                stored.s3_storage_options =
+                    st::merge_s3_storage_options(&stored.s3_storage_options, s3_storage_options);
+            }
+            if let Some(ip_address_type) = input.ip_address_type {
+                stored.ip_address_type = ip_address_type;
+            }
+            // A readable host key replaces the server's own, so the fingerprint it
+            // reports and the public half it presents become that key's — and that key,
+            // supplied by the caller, is then one of the server's HOST KEYS, so a client
+            // enumerating them finds the one the server serves with. The room for it was
+            // checked above, before anything was written.
+            if let Some(key) = rotation.as_ref() {
+                stored.host_key_fingerprint = key.fingerprint.clone();
+                stored.host_key_public = key.public_key.clone();
+            }
+
+            let server_id = stored.server_id.clone();
+            if let Some(key) = rotation.as_ref() {
+                guard.materialise_host_key(&region, &server_id, key);
+            }
+            (server_id, configures_logging_role)
         };
-        // Materialise what the clock already owed, so the state this update is judged
-        // against is the one a read at `now` would report.
-        stored.settle(now);
 
-        // `IpAddressType`: "It cannot be changed while the server is online. You must
-        // stop the server before modifying this parameter." A request that names the
-        // value the server already has changes nothing and is not refused.
-        //
-        // The refusal states the requirement, not the state the server happens to be
-        // in: `OFFLINE` is the one state the change is allowed from, so the text is
-        // fixed for the condition and carries nothing of the request.
-        if let Some(requested) = input.ip_address_type.as_deref() {
-            if requested != stored.ip_address_type && stored.state != st::SERVER_STATE_OFFLINE {
-                return Err(UpdateServerErrorModeled::InvalidRequestException(
-                    InvalidRequestException {
-                        message: st::IP_ADDRESS_TYPE_NEEDS_OFFLINE_SERVER.to_string(),
-                    },
-                )
-                .into());
-            }
+        // An update that CONFIGURES a logging role leaves the server publishing to the
+        // service-managed log group named after it, so that group is created in
+        // CloudWatch Logs for the same reason `CreateServer` creates it: the name is
+        // where a client reads this server's logs. A role the update cleared provisions
+        // nothing, and the logs already in the group stay where they are. See
+        // `crate::state::vended_log_group`.
+        if configures_logging_role {
+            st::vended_log_group::provision(ctx, Self::NAME, &region, &server_id).await;
         }
-
-        // The configuration the server would HAVE after this update must satisfy the
-        // same documented cross-member requirements `CreateServer` enforces — the
-        // invariant belongs to the stored server, not to one write path — so the
-        // post-update configuration is built from "what the request names, else what the
-        // server has" and refused BEFORE anything is written. `Domain` is
-        // `create-and-read`: an update cannot change it.
-        let next_endpoint_type = input
-            .endpoint_type
-            .clone()
-            .unwrap_or_else(|| stored.endpoint_type.clone());
-        let next_endpoint_details = input
-            .endpoint_details
-            .clone()
-            .or_else(|| stored.endpoint_details.clone());
-        let next_identity_provider_type = input
-            .identity_provider_type
-            .clone()
-            .unwrap_or_else(|| stored.identity_provider_type.clone());
-        let next_identity_provider_details = input
-            .identity_provider_details
-            .clone()
-            .or_else(|| stored.identity_provider_details.clone());
-        let next_ip_address_type = input
-            .ip_address_type
-            .clone()
-            .unwrap_or_else(|| stored.ip_address_type.clone());
-        let next_protocols = input
-            .protocols
-            .clone()
-            .filter(|protocols| !protocols.is_empty())
-            .unwrap_or_else(|| stored.protocols.clone());
-        let next_certificate = input
-            .certificate
-            .clone()
-            .or_else(|| stored.certificate.clone());
-        let violation = st::ServerConfig {
-            domain: &stored.domain,
-            endpoint_type: &next_endpoint_type,
-            endpoint_details: next_endpoint_details.as_ref(),
-            identity_provider_type: &next_identity_provider_type,
-            identity_provider_details: next_identity_provider_details.as_ref(),
-            ip_address_type: &next_ip_address_type,
-            protocols: &next_protocols,
-            certificate: next_certificate.as_deref(),
-        }
-        .cross_member_violation();
-        if let Some(message) = violation {
-            return Err(
-                UpdateServerErrorModeled::InvalidRequestException(InvalidRequestException {
-                    message,
-                })
-                .into(),
-            );
-        }
-
-        // Every member the request names replaces the stored one; a member it leaves out
-        // is left alone. The two fully-materialised structures merge per sub-member.
-        if let Some(certificate) = input.certificate {
-            stored.certificate = Some(certificate);
-        }
-        if let Some(protocol_details) = input.protocol_details {
-            stored.protocol_details =
-                st::merge_protocol_details(&stored.protocol_details, protocol_details);
-        }
-        if let Some(endpoint_details) = input.endpoint_details {
-            stored.endpoint_details = Some(endpoint_details);
-        }
-        if let Some(endpoint_type) = input.endpoint_type {
-            stored.endpoint_type = endpoint_type;
-        }
-        if let Some(identity_provider_details) = input.identity_provider_details {
-            stored.identity_provider_details = Some(identity_provider_details);
-        }
-        if let Some(identity_provider_type) = input.identity_provider_type {
-            stored.identity_provider_type = identity_provider_type;
-        }
-        // An empty value CLEARS a logging member (`NullableRole`'s empty string, an
-        // empty `StructuredLogDestinations`), leaving the server with no such
-        // configuration — which a reader reports by omitting the member.
-        if let Some(logging_role) = input.logging_role {
-            stored.logging_role = st::configured_logging_role(Some(logging_role));
-        }
-        if let Some(banner) = input.post_authentication_login_banner {
-            stored.post_authentication_login_banner = Some(banner);
-        }
-        if let Some(banner) = input.pre_authentication_login_banner {
-            stored.pre_authentication_login_banner = Some(banner);
-        }
-        // `Protocols` is modelled `len 1..4`, so an empty list cannot reach here and a
-        // named list always names at least one protocol.
-        if let Some(protocols) = input.protocols {
-            stored.protocols = protocols;
-        }
-        if let Some(security_policy_name) = input.security_policy_name {
-            stored.security_policy_name = security_policy_name;
-        }
-        if let Some(workflow_details) = input.workflow_details {
-            stored.workflow_details = Some(workflow_details);
-        }
-        // "You can clear it, and in effect turn off structured logging, by providing an
-        // empty value for this parameter" — so an empty list leaves the server with NO
-        // structured-logging configuration, not with a configured empty one.
-        if let Some(destinations) = input.structured_log_destinations {
-            stored.structured_log_destinations = st::configured_log_destinations(Some(destinations));
-        }
-        if let Some(s3_storage_options) = input.s3_storage_options {
-            stored.s3_storage_options =
-                st::merge_s3_storage_options(&stored.s3_storage_options, s3_storage_options);
-        }
-        if let Some(ip_address_type) = input.ip_address_type {
-            stored.ip_address_type = ip_address_type;
-        }
-        // A readable host key replaces the server's own, so the fingerprint it reports
-        // and the public half it presents become that key's — and that key, supplied by
-        // the caller, is then one of the server's HOST KEYS, so a client enumerating
-        // them finds the one the server serves with. The room for it was checked above,
-        // before anything was written.
-        if let Some(key) = rotation.as_ref() {
-            stored.host_key_fingerprint = key.fingerprint.clone();
-            stored.host_key_public = key.public_key.clone();
-        }
-
-        let server_id = stored.server_id.clone();
-        if let Some(key) = rotation.as_ref() {
-            guard.materialise_host_key(&region, &server_id, key);
-        }
-        drop(guard);
 
         Ok(UpdateServerOutput { server_id })
     }

@@ -521,8 +521,11 @@ async fn home_directory_mappings_are_required_exactly_for_a_logical_home_directo
     let server_id = emulator.create_server(json!({})).await;
 
     let one_mapping = json!([{"Entry": "/", "Target": "/bucket/home"}]);
+    // Two mappings whose entries name two DIFFERENT paths: a logical home directory's
+    // entries may not overlap (`home_directory_mapping_overlap.rs` pins that rule), and
+    // these rows are about the type/mappings pairing, not about the overlap.
     let two_mappings = json!([
-        {"Entry": "/", "Target": "/bucket/home"},
+        {"Entry": "/home", "Target": "/bucket/home"},
         {"Entry": "/shared", "Target": "/bucket/shared", "Type": "DIRECTORY"},
     ]);
 

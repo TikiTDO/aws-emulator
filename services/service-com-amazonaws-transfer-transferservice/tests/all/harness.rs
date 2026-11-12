@@ -119,6 +119,9 @@ pub(crate) struct Emulator {
 pub(crate) enum Peer {
     SecretsManager,
     S3,
+    /// CloudWatch Logs, which `CreateServer` / `UpdateServer` call to provision the
+    /// service-managed log group a server configured with a `LoggingRole` publishes to.
+    Logs,
 }
 
 /// One HTTP answer, decoded.
@@ -199,6 +202,12 @@ impl Emulator {
         Self::mounting(&[Peer::SecretsManager, Peer::S3])
     }
 
+    /// One emulator that also mounts CloudWatch Logs, the service a server write calls
+    /// over the in-process callback to provision the server's service-managed log group.
+    pub(crate) fn with_logs() -> Self {
+        Self::mounting(&[Peer::Logs])
+    }
+
     /// The transfer service, plus each `peers` entry, over ONE shared engine.
     fn mounting(peers: &[Peer]) -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
@@ -224,6 +233,13 @@ impl Emulator {
                         service_com_amazonaws_s3_amazons3::EmulatedService::new(Arc::clone(
                             &engine,
                         )),
+                    );
+                }
+                Peer::Logs => {
+                    router.register_service(
+                        service_com_amazonaws_cloudwatchlogs_logs_20140328::EmulatedService::new(
+                            Arc::clone(&engine),
+                        ),
                     );
                 }
             }
@@ -409,15 +425,30 @@ impl Emulator {
     /// Dispatch `op` signed for `region`, so a handler that reads the credential
     /// scope sees it.
     pub(crate) async fn call_in(&self, region: &str, op: &str, body: Value) -> Answer {
+        self.call_service(region, "transfer", &format!("TransferService.{op}"), body)
+            .await
+    }
+
+    /// Dispatch an awsJson1_1 call to ANY service mounted on this router: `signing_name`
+    /// is the credential scope's service and `target` the `X-Amz-Target` that service
+    /// claims. A suite reads the state a transfer handler wrote into a PEER through the
+    /// peer's own API this way, rather than reaching into that service's store.
+    pub(crate) async fn call_service(
+        &self,
+        region: &str,
+        signing_name: &str,
+        target: &str,
+        body: Value,
+    ) -> Answer {
         let request = http::Request::builder()
             .method("POST")
             .uri("/")
             .header("content-type", "application/x-amz-json-1.1")
-            .header("x-amz-target", format!("TransferService.{op}"))
+            .header("x-amz-target", target)
             .header(
                 "authorization",
                 format!(
-                    "AWS4-HMAC-SHA256 Credential={ACCESS_KEY_ID}/20240101/{region}/transfer/\
+                    "AWS4-HMAC-SHA256 Credential={ACCESS_KEY_ID}/20240101/{region}/{signing_name}/\
                      aws4_request, SignedHeaders=host, Signature=0123456789abcdef"
                 ),
             )
@@ -434,7 +465,7 @@ impl Emulator {
         } else {
             serde_json::from_slice(&bytes).unwrap_or_else(|e| {
                 panic!(
-                    "op {op}: response body is not JSON ({e}): {}",
+                    "target {target}: response body is not JSON ({e}): {}",
                     String::from_utf8_lossy(&bytes)
                 )
             })

@@ -342,6 +342,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let security_policy_name = input
             .security_policy_name
             .unwrap_or_else(|| st::DEFAULT_SECURITY_POLICY_NAME.to_string());
+        // The logging role is resolved to CONFIGURED or NOT CONFIGURED here, because it
+        // decides two things at once: what the stored server carries, and whether this
+        // create provisions the server's service-managed log group below.
+        let logging_role = st::configured_logging_role(input.logging_role);
 
         // A configuration the service would never host is refused BEFORE the state
         // write, with the modelled `InvalidRequestException` (HTTP 400) the model
@@ -473,74 +477,88 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             },
         };
 
-        let mut guard = state.lock();
+        // The whole store write is one SCOPE, so the guard is released at its end and
+        // the provisioning step below — the only await of this handler — cannot hold the
+        // store's lock across it.
+        let server_id = {
+            let mut guard = state.lock();
 
-        // The store is BOUNDED: past its capacity a create is refused rather than
-        // adding another record. The modelled `ServiceUnavailableException` is the
-        // refusal that says the service cannot take this request; the capacity is
-        // released by `DeleteServer`.
-        if !guard.has_server_capacity() {
-            return Err(CreateServerErrorModeled::ServiceUnavailableException(
-                ServiceUnavailableException {
-                    message: Some(format!(
-                        "this emulator already holds the maximum of {} servers; \
-                         delete one before creating another",
-                        st::MAX_STORED_SERVERS
-                    )),
-                },
-            )
-            .into());
-        }
+            // The store is BOUNDED: past its capacity a create is refused rather than
+            // adding another record. The modelled `ServiceUnavailableException` is the
+            // refusal that says the service cannot take this request; the capacity is
+            // released by `DeleteServer`.
+            if !guard.has_server_capacity() {
+                return Err(CreateServerErrorModeled::ServiceUnavailableException(
+                    ServiceUnavailableException {
+                        message: Some(format!(
+                            "this emulator already holds the maximum of {} servers; \
+                             delete one before creating another",
+                            st::MAX_STORED_SERVERS
+                        )),
+                    },
+                )
+                .into());
+            }
 
-        let server_id = guard.mint_id("s");
-        let (due, next_state) =
-            crate::state::ComAmazonawsTransferTransferserviceState::server_start_due(now);
+            let server_id = guard.mint_id("s");
+            let (due, next_state) =
+                crate::state::ComAmazonawsTransferTransferserviceState::server_start_due(now);
 
-        let server = st::Server {
-            arn: st::server_arn(&region, &server_id),
-            domain,
-            identity_provider_type,
-            identity_provider_details: input.identity_provider_details,
-            endpoint_type,
-            endpoint_details: input.endpoint_details,
-            protocols,
-            // Defaulted ONCE, here: every member the model documents a default for is
-            // materialised at create time, so no reader has to re-apply one and a
-            // configuration read-back reports the server as configured.
-            protocol_details: st::resolve_protocol_details(input.protocol_details),
-            // The two logging members are stored as CONFIGURED or NOT CONFIGURED: an
-            // empty value is the documented way to have no logging configuration, and
-            // a reader omits what is not configured.
-            logging_role: st::configured_logging_role(input.logging_role),
-            security_policy_name,
-            pre_authentication_login_banner: input.pre_authentication_login_banner,
-            post_authentication_login_banner: input.post_authentication_login_banner,
-            host_key_fingerprint: host_key.fingerprint.clone(),
-            host_key_public: host_key.public_key.clone(),
-            structured_log_destinations: st::configured_log_destinations(
-                input.structured_log_destinations,
-            ),
-            s3_storage_options: st::resolve_s3_storage_options(input.s3_storage_options),
-            ip_address_type,
-            workflow_details: input.workflow_details,
-            certificate: input.certificate,
-            // A created server is instantiated but not yet able to serve file
-            // operations; the start it began comes due on the clock, not on a read.
-            state: st::SERVER_STATE_STARTING.to_string(),
-            state_due: Some((due, next_state)),
-            tags: input.tags.unwrap_or_default(),
-            server_id: server_id.clone(),
+            let server = st::Server {
+                arn: st::server_arn(&region, &server_id),
+                domain,
+                identity_provider_type,
+                identity_provider_details: input.identity_provider_details,
+                endpoint_type,
+                endpoint_details: input.endpoint_details,
+                protocols,
+                // Defaulted ONCE, here: every member the model documents a default for
+                // is materialised at create time, so no reader has to re-apply one and a
+                // configuration read-back reports the server as configured.
+                protocol_details: st::resolve_protocol_details(input.protocol_details),
+                // The two logging members are stored as CONFIGURED or NOT CONFIGURED: an
+                // empty value is the documented way to have no logging configuration,
+                // and a reader omits what is not configured.
+                logging_role: logging_role.clone(),
+                security_policy_name,
+                pre_authentication_login_banner: input.pre_authentication_login_banner,
+                post_authentication_login_banner: input.post_authentication_login_banner,
+                host_key_fingerprint: host_key.fingerprint.clone(),
+                host_key_public: host_key.public_key.clone(),
+                structured_log_destinations: st::configured_log_destinations(
+                    input.structured_log_destinations,
+                ),
+                s3_storage_options: st::resolve_s3_storage_options(input.s3_storage_options),
+                ip_address_type,
+                workflow_details: input.workflow_details,
+                certificate: input.certificate,
+                // A created server is instantiated but not yet able to serve file
+                // operations; the start it began comes due on the clock, not on a read.
+                state: st::SERVER_STATE_STARTING.to_string(),
+                state_due: Some((due, next_state)),
+                tags: input.tags.unwrap_or_default(),
+                server_id: server_id.clone(),
+            };
+            guard.servers.insert(server_id.clone(), server);
+            // The key the server serves with is one of the server's HOST KEYS, so it is
+            // materialised into the collection `ListHostKeys` and `DescribeHostKey`
+            // read: a client that enumerates a server's keys to audit or rotate them
+            // finds the key the server is actually serving with, under the same
+            // fingerprint the server reports — whether the create supplied it or the
+            // service generated it. Written under the SAME lock as the server itself, so
+            // no read can see one without the other.
+            guard.materialise_host_key(&region, &server_id, &host_key);
+            server_id
         };
-        guard.servers.insert(server_id.clone(), server);
-        // The key the server serves with is one of the server's HOST KEYS, so it is
-        // materialised into the collection `ListHostKeys` and `DescribeHostKey` read:
-        // a client that enumerates a server's keys to audit or rotate them finds the
-        // key the server is actually serving with, under the same fingerprint the
-        // server reports — whether the create supplied it or the service generated it.
-        // Written under the SAME lock as the server itself, so no read can see one
-        // without the other.
-        guard.materialise_host_key(&region, &server_id, &host_key);
-        drop(guard);
+
+        // A server that logs to the SERVICE-managed destination publishes to the log
+        // group named after it, so that group is created in CloudWatch Logs — the
+        // emulated one, over the in-process callback — for a client to read, tail or
+        // build a metric filter on. Done after the store write, since the group's name
+        // is the identifier the store minted; see `crate::state::vended_log_group`.
+        if logging_role.is_some() {
+            st::vended_log_group::provision(ctx, Self::NAME, &region, &server_id).await;
+        }
 
         Ok(CreateServerOutput { server_id })
     }

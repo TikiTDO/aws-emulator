@@ -69,6 +69,11 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", 
 # The Lambda function a workflow's CUSTOM step names as its `Target`, invoked with that
 # step's callback token (see `src/state/connector_delivery.rs`).
 aws-sdk-lambda = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# Creates the service-managed log group a server configured with a `LoggingRole`
+# publishes to, over the in-process callback into this same emulator (no network client
+# feature is enabled: the transport is the emulator's own) — see
+# `src/state/vended_log_group.rs`.
+aws-sdk-cloudwatchlogs = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -91,6 +96,9 @@ rcgen = "0.13"
 # emulated ones. TEST-ONLY.
 service-com-amazonaws-secretsmanager-secretsmanager = { workspace = true }
 service-com-amazonaws-s3-amazons3 = { workspace = true }
+# The CloudWatch Logs service, mounted beside this one by the suite that asserts the
+# service-managed log group a server's logging configuration provisions. TEST-ONLY.
+service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
 
 [lints]
 workspace = true
