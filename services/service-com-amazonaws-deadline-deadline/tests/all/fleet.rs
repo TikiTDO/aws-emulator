@@ -365,12 +365,10 @@ async fn create_fleet_then_get_fleet_returns_what_was_created() {
             "case {case:?}: expected a createdBy principal, got {fleet}"
         );
         assert!(
-            fleet
-                .get("createdAt")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0)
-                > 0.0,
-            "case {case:?}: expected a createdAt timestamp, got {fleet}"
+            // Modelled `@timestampFormat("date-time")`: an RFC 3339 string, never the
+            // protocol-default epoch number (`date_time_wire_form` owns that rule).
+            fleet.get("createdAt").and_then(Value::as_str).is_some(),
+            "case {case:?}: expected createdAt as an RFC 3339 string, got {fleet}"
         );
         assert!(
             fleet.get("updatedAt").is_none() && fleet.get("updatedBy").is_none(),

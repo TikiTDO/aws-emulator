@@ -160,13 +160,12 @@ async fn create_queue_fleet_association_stores_every_pair_it_is_asked_for() {
                      created and scheduling, got {association}"
                 );
                 assert!(
-                    association
-                        .get("createdAt")
-                        .and_then(Value::as_f64)
-                        .unwrap_or(0.0)
-                        > 0.0,
-                    "case {case:?}: expected a createdAt instant for {queue_id}/{fleet_id}, got \
-                     {association}"
+                    // Modelled `@timestampFormat("date-time")`: an RFC 3339 string, never
+                    // the protocol-default epoch number (`date_time_wire_form` owns that
+                    // rule).
+                    association.get("createdAt").and_then(Value::as_str).is_some(),
+                    "case {case:?}: expected createdAt as an RFC 3339 string for \
+                     {queue_id}/{fleet_id}, got {association}"
                 );
                 assert!(
                     association.get("updatedAt").is_none()

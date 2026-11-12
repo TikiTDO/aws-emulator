@@ -17,6 +17,8 @@ mod batch_get_job;
 mod budget;
 #[path = "all/create_queue_fleet_association.rs"]
 mod create_queue_fleet_association;
+#[path = "all/date_time_wire_form.rs"]
+mod date_time_wire_form;
 #[path = "all/delete_fleet.rs"]
 mod delete_fleet;
 #[path = "all/delete_storage_profile.rs"]
@@ -31,6 +33,8 @@ mod job_run_status;
 mod limit;
 #[path = "all/queue_fleet_association.rs"]
 mod queue_fleet_association;
+#[path = "all/resource_not_found_wording.rs"]
+mod resource_not_found_wording;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/storage_profile.rs"]

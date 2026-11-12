@@ -201,12 +201,10 @@ async fn create_storage_profile_then_get_storage_profile_returns_what_was_create
             "case {case:?}: expected a createdBy principal, got {profile}"
         );
         assert!(
-            profile
-                .get("createdAt")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0)
-                > 0.0,
-            "case {case:?}: expected a createdAt timestamp, got {profile}"
+            // Modelled `@timestampFormat("date-time")`: an RFC 3339 string, never the
+            // protocol-default epoch number (`date_time_wire_form` owns that rule).
+            profile.get("createdAt").and_then(Value::as_str).is_some(),
+            "case {case:?}: expected createdAt as an RFC 3339 string, got {profile}"
         );
         assert!(
             profile.get("updatedAt").is_none() && profile.get("updatedBy").is_none(),
@@ -276,14 +274,14 @@ async fn a_storage_profile_is_reachable_only_through_its_own_farm() {
             "a profile of another farm",
             other_farm_id,
             storage_profile_id.clone(),
-            "storageProfile",
+            "storage-profile",
             storage_profile_id.clone(),
         ),
         (
             "an unheld profile under a held farm",
             farm_id.clone(),
             absent_profile.clone(),
-            "storageProfile",
+            "storage-profile",
             absent_profile,
         ),
         (

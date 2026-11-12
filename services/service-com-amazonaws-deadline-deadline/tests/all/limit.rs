@@ -184,12 +184,10 @@ async fn create_limit_then_get_limit_returns_what_was_created() {
             "case {case:?}: expected a createdBy principal, got {limit}"
         );
         assert!(
-            limit
-                .get("createdAt")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0)
-                > 0.0,
-            "case {case:?}: expected a createdAt timestamp, got {limit}"
+            // Modelled `@timestampFormat("date-time")`: an RFC 3339 string, never the
+            // protocol-default epoch number (`date_time_wire_form` owns that rule).
+            limit.get("createdAt").and_then(Value::as_str).is_some(),
+            "case {case:?}: expected createdAt as an RFC 3339 string, got {limit}"
         );
         assert!(
             limit.get("updatedAt").is_none() && limit.get("updatedBy").is_none(),

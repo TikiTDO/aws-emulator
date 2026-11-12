@@ -413,12 +413,11 @@ async fn create_queue_fleet_association_then_get_reports_what_was_stored() {
             "case {display_name:?}: expected a createdBy principal, got {association}"
         );
         assert!(
-            association
-                .get("createdAt")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0)
-                > 0.0,
-            "case {display_name:?}: expected a createdAt timestamp, got {association}"
+            // Modelled `@timestampFormat("date-time")`: an RFC 3339 string, never the
+            // protocol-default epoch number (`date_time_wire_form` owns that rule).
+            association.get("createdAt").and_then(Value::as_str).is_some(),
+            "case {display_name:?}: expected createdAt as an RFC 3339 string, got \
+             {association}"
         );
         assert!(
             association.get("updatedAt").is_none() && association.get("updatedBy").is_none(),

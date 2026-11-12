@@ -46,7 +46,9 @@ fn association_path(farm_id: &str, queue_id: &str, fleet_id: &str) -> String {
 
 /// The composite id this service reports for a queue-fleet association: the three ids of
 /// its path, since the model mints the association no id of its own.
-fn association_id(farm_id: &str, queue_id: &str, fleet_id: &str) -> String {
+///
+/// `pub(crate)` so every suite in this test target names an association the same way.
+pub(crate) fn association_id(farm_id: &str, queue_id: &str, fleet_id: &str) -> String {
     format!("{farm_id}, {queue_id} and {fleet_id}")
 }
 

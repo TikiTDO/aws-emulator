@@ -174,15 +174,15 @@ pub const RESOURCE_TYPE_QUEUE_FLEET_ASSOCIATION: &str = "queue-fleet-association
 pub const RESOURCE_TYPE_BUDGET: &str = "budget";
 /// `resourceType` this service reports for a limit in `ResourceNotFoundException`. The
 /// model documents the member only as "the type of the resource that couldn't be found"
-/// and enumerates no values, so a resource type is spelled the way the model spells that
-/// resource everywhere else — the member name `limitId` names it `limit`.
+/// and enumerates no values, so a resource type is spelled the way the API path spells
+/// that resource — the segment `/limits/` names it `limit`.
 pub const RESOURCE_TYPE_LIMIT: &str = "limit";
 /// `resourceType` this service reports for a storage profile in
 /// `ResourceNotFoundException`. The model documents the member only as "the type of the
 /// resource that couldn't be found" and enumerates no values, so a resource type is
-/// spelled the way the model spells that resource everywhere else — the member name
-/// `storageProfileId` names it `storageProfile`.
-pub const RESOURCE_TYPE_STORAGE_PROFILE: &str = "storageProfile";
+/// spelled the way the API path spells that resource — the segment `/storage-profiles/`
+/// names it `storage-profile`, kebab-case and singular like every other type above.
+pub const RESOURCE_TYPE_STORAGE_PROFILE: &str = "storage-profile";
 
 /// How many client tokens the store remembers at once.
 ///

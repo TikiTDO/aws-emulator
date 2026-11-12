@@ -290,12 +290,12 @@ async fn create_farm_then_get_farm_returns_what_was_created() {
             "case {case:?}: expected a createdBy principal, got {farm}"
         );
         assert!(
-            // The timestamp's wire form is the framework's: the vendored schema macro
-            // bakes no `@timestampFormat`, so restJson1's default (epoch seconds) is what
-            // every service here renders. What this slice owns is that the value is
-            // present, is a timestamp, and does not move between reads.
-            farm.get("createdAt").and_then(Value::as_f64).unwrap_or(0.0) > 0.0,
-            "case {case:?}: expected a createdAt timestamp, got {farm}"
+            // `createdAt` is modelled `@timestampFormat("date-time")`, so its wire form is
+            // an RFC 3339 string rather than restJson1's default epoch-seconds number
+            // (`date_time_wire_form` owns that rule for every path of this service). What
+            // this slice owns is that the value is present and does not move between reads.
+            farm.get("createdAt").and_then(Value::as_str).is_some(),
+            "case {case:?}: expected createdAt as an RFC 3339 string, got {farm}"
         );
         // Nothing has updated the farm, so the update members stay absent.
         assert!(
