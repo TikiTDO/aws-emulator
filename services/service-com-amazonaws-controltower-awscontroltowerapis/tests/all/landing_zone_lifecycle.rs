@@ -131,6 +131,24 @@ pub(crate) async fn dispatch_in_region(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Answer {
+    dispatch_as(router, ACCOUNT_ACCESS_KEY_ID, region, method, path, body).await
+}
+
+/// The access key id these tests sign with unless a case names another one: a key neither
+/// STS nor IAM holds a record for, which is the position the account's own published
+/// credential is in.
+pub(crate) const ACCOUNT_ACCESS_KEY_ID: &str = "AKIDEXAMPLE";
+
+/// As [`dispatch_in_region`], signing with `access_key_id`: the key id is what names the
+/// principal a request speaks for, so this is how a test varies WHO is calling.
+pub(crate) async fn dispatch_as(
+    router: &MultiServiceRouter,
+    access_key_id: &str,
+    region: &str,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Answer {
     let mut request = http::Request::builder()
         .method(method)
         .uri(format!(
@@ -140,7 +158,7 @@ pub(crate) async fn dispatch_in_region(
             "authorization",
             format!(
                 "AWS4-HMAC-SHA256 \
-                 Credential=AKIDEXAMPLE/20260101/{region}/controltower/aws4_request, \
+                 Credential={access_key_id}/20260101/{region}/controltower/aws4_request, \
                  SignedHeaders=host, Signature=0"
             ),
         );

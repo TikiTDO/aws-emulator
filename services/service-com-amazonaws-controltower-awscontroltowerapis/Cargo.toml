@@ -24,6 +24,14 @@ tracing = { workspace = true }
 # Mixes the seed, counter and clock that mint `operationIdentifier` / landing zone ids
 # (see `state::new_operation_identifier`).
 sha2 = { workspace = true }
+# The STS store, for the identity an access key id speaks for: the principal
+# `sts:GetCallerIdentity` answers for the credentials a request signed with.
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# The IAM store, for the identity-based policy documents in force on that principal.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# `iam_authorization`: the shared evaluation of those documents against an action on a
+# resource, and the one wording of an authorization refusal.
+service-common = { path = "../common" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

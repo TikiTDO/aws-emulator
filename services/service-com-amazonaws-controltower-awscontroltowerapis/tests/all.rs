@@ -135,6 +135,8 @@ mod operation_detail_availability_window;
 mod page_token_listing_scope;
 #[path = "all/published_baseline_catalog.rs"]
 mod published_baseline_catalog;
+#[path = "all/request_authorization.rs"]
+mod request_authorization;
 #[path = "all/reserved_tag_keys.rs"]
 mod reserved_tag_keys;
 #[path = "all/resource_identifier_form.rs"]

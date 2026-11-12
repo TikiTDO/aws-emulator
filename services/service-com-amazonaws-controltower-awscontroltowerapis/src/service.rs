@@ -45,6 +45,11 @@ use smithy_server_runtime::{
 };
 use std::sync::Arc;
 
+/// Whether IAM lets a request perform the action it names — the decision every operation
+/// of this service whose model declares `AccessDeniedException` takes before it reads or
+/// writes anything.
+pub mod authorization;
+
 /// The error code AWS Control Tower answers a request that failed input validation
 /// with.
 ///

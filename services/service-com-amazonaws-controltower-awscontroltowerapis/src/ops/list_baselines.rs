@@ -161,6 +161,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // AWS takes the authorization decision at the IAM layer, ahead of the service
+        // reading anything. A listing names no single baseline, so the decision is made
+        // against every baseline of the published catalog in the caller's Region.
+        crate::service::authorization::authorize(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            crate::service::authorization::Addressed::Baseline,
+            None,
+        )
+        .map_err(ListBaselinesErrorModeled::AccessDeniedException)?;
+
         // The per-account store takes no part: the baselines are AWS-managed, so the
         // answer is the catalog, the same for every caller. Binding the engine keeps the
         // constructor seam honest without locking a store this read has no reason to

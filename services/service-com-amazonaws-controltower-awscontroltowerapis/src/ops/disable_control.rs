@@ -191,8 +191,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // AWS takes the authorization decision at the IAM layer, ahead of the service
+        // reading anything. The request names the enabled control to turn off when it
+        // addresses one; a request that addresses the control and the target instead is
+        // judged against every enabled control of the caller's Region.
+        crate::service::authorization::authorize(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            crate::service::authorization::Addressed::EnabledControl,
+            input.enabled_control_identifier.as_deref(),
+        )
+        .map_err(DisableControlErrorModeled::AccessDeniedException)?;
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(DisableControlErrorModeled::InternalServerException(
                 InternalServerException {

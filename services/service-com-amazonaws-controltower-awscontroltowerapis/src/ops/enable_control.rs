@@ -185,6 +185,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // AWS takes the authorization decision at the IAM layer, ahead of the service
+        // reading anything. An enablement names no enabled control of its own — the ARN
+        // its create mints is no value a policy could have been written against — so the
+        // decision is made against every enabled control of the caller's Region.
+        crate::service::authorization::authorize(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            crate::service::authorization::Addressed::EnabledControl,
+            None,
+        )
+        .map_err(EnableControlErrorModeled::AccessDeniedException)?;
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(EnableControlErrorModeled::InternalServerException(
                 InternalServerException {
