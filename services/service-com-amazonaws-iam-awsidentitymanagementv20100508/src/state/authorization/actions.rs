@@ -495,3 +495,15 @@ pub const GET_ORGANIZATIONS_ACCESS_REPORT: &str = "iam:GetOrganizationsAccessRep
 
 /// `iam:GetHumanReadableSummary`.
 pub const GET_HUMAN_READABLE_SUMMARY: &str = "iam:GetHumanReadableSummary";
+
+/// `iam:EnableOutboundWebIdentityFederation`.
+pub const ENABLE_OUTBOUND_WEB_IDENTITY_FEDERATION: &str =
+    "iam:EnableOutboundWebIdentityFederation";
+
+/// `iam:GetOutboundWebIdentityFederationInfo`.
+pub const GET_OUTBOUND_WEB_IDENTITY_FEDERATION_INFO: &str =
+    "iam:GetOutboundWebIdentityFederationInfo";
+
+/// `iam:DisableOutboundWebIdentityFederation`.
+pub const DISABLE_OUTBOUND_WEB_IDENTITY_FEDERATION: &str =
+    "iam:DisableOutboundWebIdentityFederation";

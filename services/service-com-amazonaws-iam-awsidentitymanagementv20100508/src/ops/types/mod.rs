@@ -67,9 +67,11 @@ pub mod detach_role_policy_types;
 pub mod detach_user_policy_types;
 pub mod disable_organizations_root_credentials_management_types;
 pub mod disable_organizations_root_sessions_types;
+pub mod disable_outbound_web_identity_federation_types;
 pub mod enable_mfa_device_types;
 pub mod enable_organizations_root_credentials_management_types;
 pub mod enable_organizations_root_sessions_types;
+pub mod enable_outbound_web_identity_federation_types;
 pub mod generate_credential_report_types;
 pub mod generate_organizations_access_report_types;
 pub mod generate_service_last_accessed_details_types;
@@ -89,6 +91,7 @@ pub mod get_login_profile_types;
 pub mod get_mfa_device_types;
 pub mod get_open_id_connect_provider_types;
 pub mod get_organizations_access_report_types;
+pub mod get_outbound_web_identity_federation_info_types;
 pub mod get_policy_types;
 pub mod get_policy_version_types;
 pub mod get_role_policy_types;
@@ -298,11 +301,15 @@ pub use disable_organizations_root_credentials_management_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use disable_organizations_root_sessions_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
+pub use disable_outbound_web_identity_federation_types::*;
+#[allow(ambiguous_glob_reexports, unused_imports)]
 pub use enable_mfa_device_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use enable_organizations_root_credentials_management_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use enable_organizations_root_sessions_types::*;
+#[allow(ambiguous_glob_reexports, unused_imports)]
+pub use enable_outbound_web_identity_federation_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use generate_credential_report_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
@@ -340,6 +347,8 @@ pub use get_mfa_device_types::*;
 pub use get_open_id_connect_provider_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use get_organizations_access_report_types::*;
+#[allow(ambiguous_glob_reexports, unused_imports)]
+pub use get_outbound_web_identity_federation_info_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]
 pub use get_policy_types::*;
 #[allow(ambiguous_glob_reexports, unused_imports)]

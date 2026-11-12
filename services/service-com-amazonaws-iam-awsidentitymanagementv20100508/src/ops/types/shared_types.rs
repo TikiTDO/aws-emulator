@@ -104,6 +104,15 @@ pub struct UnmodifiableEntityException {
     pub message: Option<String>,
 }
 
+/// Declared here rather than in one operation's own module because TWO operations model
+/// it: the read of the outbound-federation configuration and its disable are both refused
+/// with it while the account has the feature off.
+#[smithy_macros::smithy(shape = "com.amazonaws.iam#FeatureDisabledException")]
+#[derive(Debug, Clone, Default)]
+pub struct FeatureDisabledException {
+    pub message: Option<String>,
+}
+
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#PolicyNotAttachableException")]
 #[derive(Debug, Clone, Default)]
 pub struct PolicyNotAttachableException {

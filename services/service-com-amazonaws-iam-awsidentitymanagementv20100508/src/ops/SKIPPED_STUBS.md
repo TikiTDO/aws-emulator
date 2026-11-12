@@ -48,3 +48,11 @@ generator did not emit it.
 `src/ops/types/get_account_password_policy_types.rs`, and is wired in from its own
 `//! @op GetAccountPasswordPolicy` header. Its decline line above likewise records only
 that the generator did not emit it.
+
+The three OUTBOUND WEB IDENTITY FEDERATION operations —
+`EnableOutboundWebIdentityFederation`, `GetOutboundWebIdentityFederationInfo` and
+`DisableOutboundWebIdentityFederation` — are hand-authored the same way, each in its own
+`src/ops/<operation>.rs` with its shapes in `src/ops/types/<operation>_types.rs`, and each
+wired in from its own `//! @op` header. They read and write the one account-level record
+`src/state/outbound_web_identity_federation.rs` owns. Their decline lines above likewise
+record only that the generator did not emit them.

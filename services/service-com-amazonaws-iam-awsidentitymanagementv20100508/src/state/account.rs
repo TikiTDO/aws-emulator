@@ -627,6 +627,17 @@ pub struct ComAmazonawsIamAwsidentitymanagementv20100508State {
     /// account", so a second request is a request to generate THAT report again rather than
     /// another report beside it.
     pub credential_report: Option<CredentialReportGeneration>,
+    /// The account's outbound web identity federation, or `None` while the account has
+    /// never enabled it.
+    ///
+    /// `EnableOutboundWebIdentityFederation` fills this field and
+    /// `DisableOutboundWebIdentityFederation` clears its flag;
+    /// `GetOutboundWebIdentityFederationInfo` reports it. An `Option` rather than a
+    /// collection because the feature is an account-level flag: "enables the outbound
+    /// identity federation feature for your Amazon Web Services account", so there is one
+    /// such record per account. What each of the three calls does with it is
+    /// [`super::outbound_web_identity_federation`].
+    pub outbound_web_identity_federation: Option<OutboundWebIdentityFederation>,
     /// The organization this account belongs to, or `None` while it belongs to none.
     ///
     /// `None` is the standalone account this emulator presents until something records
@@ -804,6 +815,7 @@ impl ComAmazonawsIamAwsidentitymanagementv20100508State {
             delegation_request_workflow_ids: BTreeMap::new(),
             role_templates: BTreeMap::new(),
             credential_report: None,
+            outbound_web_identity_federation: None,
             organization: None,
             organizations_access_reports: BTreeMap::new(),
             service_last_accessed_reports: BTreeMap::new(),

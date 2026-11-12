@@ -197,6 +197,8 @@ mod open_id_connect_providers;
 mod organization_root_access_features;
 #[path = "all/organizations_access_report_generation.rs"]
 mod organizations_access_report_generation;
+#[path = "all/outbound_web_identity_federation.rs"]
+mod outbound_web_identity_federation;
 #[path = "all/own_api_authorization_coverage.rs"]
 mod own_api_authorization_coverage;
 #[path = "all/permissions_boundary_ceiling.rs"]
