@@ -105,6 +105,14 @@ pub mod time_zone;
 /// has to allow for a delivery to be made: Amazon S3's own write of an object.
 const S3_PUT_OBJECT_ACTION: &str = "s3:PutObject";
 
+/// The media type every delivered object is stored with.
+///
+/// Firehose writes the records' own bytes, whose type it does not interpret and which it
+/// may also have compressed, so a delivered object carries the media type of an opaque byte
+/// stream; what the bytes were encoded with is stated by the object's content coding
+/// instead ([`content_encoding`]).
+const DELIVERED_CONTENT_TYPE: &str = "application/octet-stream";
+
 /// The vendor field of a Firehose stream ARN, which is what the Region a delivery asks its
 /// authorization question in is read out of ([`delivery_region`]).
 const FIREHOSE_ARN_VENDOR: &str = "firehose";
@@ -168,26 +176,15 @@ const DEFAULT_BUFFER_SIZE_IN_MIB: usize = 5;
 const DEFAULT_BUFFER_INTERVAL: Duration = Duration::from_secs(300);
 
 /// How long after a stream's buffer opens — the instant the oldest record it holds landed
-/// — the delivery of that buffer comes due.
-///
-/// A CHOSEN span, and one the buffering parameters themselves admit: `BufferingHints` is
-/// "hints for the buffering to perform before delivering data to the destination. These
-/// options are treated as hints, and therefore Firehose might choose to use different
-/// values when it is optimal", so a configured interval is the longest a producer may wait
-/// and not a promise to wait exactly that long. It is kept short enough for a client to
-/// observe a delivery, and never zero, so a caller that reads the destination immediately
-/// after a put still sees the record buffered rather than delivered. The configured
-/// interval still caps it ([`delivery_window`]).
-pub const DELIVERY_SPAN: Duration = Duration::from_millis(600);
-
-/// How long after a stream's buffer opens the delivery comes due once the buffer holds at
-/// least `BufferingHints$SizeInMBs` of data.
+/// — the delivery comes due once the buffer holds at least `BufferingHints$SizeInMBs` of
+/// data, and the shortest window any buffer is held for.
 ///
 /// The size and the interval are two conditions on one buffer and the FIRST one satisfied
 /// flushes it ("Firehose buffers data up to 5 MB or for 5 minutes, whichever condition is
 /// satisfied first" — `CreateDeliveryStream`), so a buffer that has reached its size is
-/// due sooner than one still filling. Chosen like [`DELIVERY_SPAN`], and never zero for
-/// the same reason.
+/// delivered without waiting out the rest of its interval. A CHOSEN span, and never zero:
+/// `IntervalInSeconds` admits 0, and a zero window would hand a caller a delivery its own
+/// put had not yet returned from.
 pub const FULL_BUFFER_DELIVERY_SPAN: Duration = Duration::from_millis(250);
 
 /// `HttpEndpointRetryOptions$DurationInSeconds` when the configuration names none.
@@ -740,6 +737,9 @@ struct DeliveredObject {
     bucket: String,
     key: String,
     body: Vec<u8>,
+    /// The content coding `body` was encoded with, from the destination's
+    /// `CompressionFormat` ([`compressed`]), and `None` for a body that carries none.
+    content_encoding: Option<String>,
     /// The KMS key this object is stored encrypted with, from the destination's
     /// `EncryptionConfiguration` ([`S3Target::kms_key_arn`]).
     kms_key_arn: Option<String>,
@@ -789,20 +789,24 @@ fn buffer_limits(hints: Option<&BufferingHints>) -> (usize, Duration) {
 /// How long after it opened a buffer holding `buffered_bytes` under these hints is held
 /// before its delivery comes due.
 ///
-/// The emulator's own span ([`DELIVERY_SPAN`], or [`FULL_BUFFER_DELIVERY_SPAN`] once the
-/// buffer has reached `SizeInMBs`), capped by the configured `IntervalInSeconds` so a
-/// configuration asking for a shorter wait than the emulator's own gets the shorter one,
-/// and never shorter than [`FULL_BUFFER_DELIVERY_SPAN`] — `IntervalInSeconds` admits 0,
-/// and a zero span would hand a caller a delivery its own put had not yet returned from.
+/// The configured `IntervalInSeconds` is the wait the producer asked for — "buffer incoming
+/// data for the specified period of time, in seconds, before delivering it to the
+/// destination" (`BufferingHints$IntervalInSeconds`) — so that is how long a buffer still
+/// filling is held, and [`DEFAULT_BUFFER_INTERVAL`] is how long one whose configuration
+/// names no interval is. A buffer that has reached `SizeInMBs` is due at
+/// [`FULL_BUFFER_DELIVERY_SPAN`] instead, whichever interval was configured, because the
+/// first of the two conditions satisfied is what flushes a buffer. That span also floors
+/// the window: `IntervalInSeconds` admits 0, and a zero window would hand a caller a
+/// delivery its own put had not yet returned from.
 #[must_use]
 pub fn delivery_window(hints: Option<&BufferingHints>, buffered_bytes: usize) -> Duration {
     let (size, interval) = buffer_limits(hints);
-    let span = if buffered_bytes >= size {
+    let window = if buffered_bytes >= size {
         FULL_BUFFER_DELIVERY_SPAN
     } else {
-        DELIVERY_SPAN
+        interval
     };
-    span.min(interval).max(FULL_BUFFER_DELIVERY_SPAN)
+    window.max(FULL_BUFFER_DELIVERY_SPAN)
 }
 
 /// The bucket name a `BucketARN` names, or `None` when the value carries none.
@@ -1451,7 +1455,7 @@ pub async fn deliver_due<Eng: Send + Sync + 'static>(
         // written keeps the retry from writing the Amazon S3 half of the same buffer twice.
         let mut parked = Vec::new();
         let mut owed = false;
-        for (ordinal, endpoint) in delivery.endpoints.iter().enumerate() {
+        for endpoint in &delivery.endpoints {
             let Err(failure) = post_to_endpoint(hop.transport(), &delivery, endpoint, now).await
             else {
                 continue;
@@ -1464,7 +1468,7 @@ pub async fn deliver_due<Eng: Send + Sync + 'static>(
             // backup. One this emulator cannot work out — an `S3Configuration` naming no
             // bucket, a prefix that does not resolve — leaves the records owed instead of
             // dropping them.
-            match backup_object(&delivery, endpoint, failure, now, ordinal) {
+            match backup_object(&delivery, endpoint, failure, now) {
                 Some(object) => parked.push(object),
                 None => owed = true,
             }
@@ -1477,11 +1481,11 @@ pub async fn deliver_due<Eng: Send + Sync + 'static>(
         // Then the Amazon OpenSearch Service destinations: each record of the buffer is
         // one document, and the documents the domain did not take are parked in the
         // destination's Amazon S3 backup beside whatever the Amazon S3 locations get.
-        for (ordinal, search) in delivery.searches.iter().enumerate() {
+        for search in &delivery.searches {
             match index_documents(engine, &delivery, search, now).await {
                 Delivered::Indexed(failures) if failures.is_empty() => {}
                 Delivered::Indexed(failures) => {
-                    match search_backup_object(&delivery, search, &failures, now, ordinal) {
+                    match search_backup_object(&delivery, search, &failures, now) {
                         Some(object) => parked.push(object),
                         None => owed = true,
                     }
@@ -1505,7 +1509,7 @@ pub async fn deliver_due<Eng: Send + Sync + 'static>(
                                 error_message: failure.error_message.clone(),
                             })
                             .collect();
-                        match search_backup_object(&delivery, search, &failures, now, ordinal) {
+                        match search_backup_object(&delivery, search, &failures, now) {
                             Some(object) => parked.push(object),
                             None => owed = true,
                         }
@@ -1812,22 +1816,23 @@ fn backup_object(
     endpoint: &HttpEndpointTarget,
     failure: DeliveryFailure,
     now: SystemTime,
-    ordinal: usize,
 ) -> Option<DeliveredObject> {
     let target = endpoint.backup.as_ref()?;
     let prefix = error_output_prefix(target, failure, now).ok()?;
     let records: Vec<&StoredRecord> = delivery.records.iter().collect();
-    let (body, extension) = compressed(
+    let encoded = compressed(
         error_payload(&records, failure, now, None, &BTreeMap::new()),
         target,
     )?;
     Some(DeliveredObject {
         bucket: target.bucket.clone(),
         key: format!(
-            "{prefix}{}{extension}",
-            object_name(delivery, now, target.time_zone, ordinal)
+            "{prefix}{}{}",
+            object_name(delivery, now, target.time_zone),
+            encoded.extension
         ),
-        body,
+        body: encoded.body,
+        content_encoding: encoded.content_encoding,
         kms_key_arn: target.kms_key_arn.clone(),
         destination: target.destination(),
     })
@@ -2022,7 +2027,6 @@ fn search_backup_object(
     search: &SearchTarget,
     failures: &[SearchDocumentFailure],
     now: SystemTime,
-    ordinal: usize,
 ) -> Option<DeliveredObject> {
     let target = search.backup.as_ref()?;
     let prefix = search_error_prefix(target, now).ok()?;
@@ -2038,14 +2042,16 @@ fn search_backup_object(
             search_error_envelope(record, failure, now).to_string()
         })
         .collect();
-    let (body, extension) = compressed(documents.join("\n").into_bytes(), target)?;
+    let encoded = compressed(documents.join("\n").into_bytes(), target)?;
     Some(DeliveredObject {
         bucket: target.bucket.clone(),
         key: format!(
-            "{prefix}{}{extension}",
-            object_name(delivery, now, target.time_zone, ordinal)
+            "{prefix}{}{}",
+            object_name(delivery, now, target.time_zone),
+            encoded.extension
         ),
-        body,
+        body: encoded.body,
+        content_encoding: encoded.content_encoding,
         kms_key_arn: target.kms_key_arn.clone(),
         destination: target.destination(),
     })
@@ -2189,10 +2195,12 @@ fn write_objects<Eng: Send + Sync + 'static>(
             last_modified: SystemTime::now(),
             storage_class: ::service_com_amazonaws_s3_amazons3::state::DEFAULT_STORAGE_CLASS
                 .to_string(),
-            content_type: None,
+            content_type: Some(DELIVERED_CONTENT_TYPE.to_string()),
             cache_control: None,
             content_disposition: None,
-            content_encoding: None,
+            // What the body was encoded with, so a reader of the object is told which
+            // decoder its bytes are for ([`compressed`]).
+            content_encoding: object.content_encoding,
             content_language: None,
             expires: None,
             website_redirect_location: None,
@@ -2474,29 +2482,32 @@ async fn objects_of<Eng: Send + Sync + 'static>(
             ));
         }
         for (prefix, body) in bodies {
-            let name = object_name(delivery, now, target.time_zone, objects.len());
+            let name = object_name(delivery, now, target.time_zone);
             // An encoder that refused the body is not a record this delivery drops: the
             // whole delivery is owed again instead.
-            let (body, extension) = match body {
+            let encoded = match body {
                 ObjectBody::Records(body) => compressed(body, target)?,
                 // A converted object is not compressed again: the serializer compressed
                 // the object's own blocks (`ParquetSerDe$Compression`), which is the
                 // compression a destination converting its data format configures. Its
                 // name still carries a configured `FileExtension`, which "will override
-                // the default file extension" whatever wrote the object.
-                ObjectBody::Converted(body) => (
+                // the default file extension" whatever wrote the object, and its bytes
+                // carry no content coding of their own, so it reports none.
+                ObjectBody::Converted(body) => Encoded {
                     body,
-                    target
+                    extension: target
                         .file_extension
                         .clone()
                         .filter(|extension| !extension.is_empty())
                         .unwrap_or_default(),
-                ),
+                    content_encoding: None,
+                },
             };
             objects.push(DeliveredObject {
                 bucket: target.bucket.clone(),
-                key: format!("{prefix}{name}{extension}"),
-                body,
+                key: format!("{prefix}{name}{}", encoded.extension),
+                body: encoded.body,
+                content_encoding: encoded.content_encoding,
                 kms_key_arn: target.kms_key_arn.clone(),
                 destination: target.destination(),
             });
@@ -3316,12 +3327,24 @@ fn epoch_millis(at: SystemTime) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+/// What one object's bytes are delivered as: the encoded body, the file extension its name
+/// carries, and the `Content-Encoding` a reader of the object is told the body is in.
+struct Encoded {
+    body: Vec<u8>,
+    /// The extension appended to the object's name, empty where the format carries none and
+    /// the destination configures none.
+    extension: String,
+    /// The content coding the body was encoded with, named as the `CompressionFormat` value
+    /// it comes from in lower case, and `None` for a body that was not compressed at all.
+    content_encoding: Option<String>,
+}
+
 /// `body` encoded as the destination's `CompressionFormat` asks, with the file extension
-/// the delivered object's name carries.
+/// the delivered object's name carries and the content coding the stored object reports.
 ///
 /// `None` when the encoder failed, in which case nothing is delivered for this object
 /// rather than a body in a format the destination did not ask for.
-fn compressed(body: Vec<u8>, target: &S3Target) -> Option<(Vec<u8>, String)> {
+fn compressed(body: Vec<u8>, target: &S3Target) -> Option<Encoded> {
     const UNCOMPRESSED: &str = "UNCOMPRESSED";
     let format = target
         .compression_format
@@ -3348,7 +3371,22 @@ fn compressed(body: Vec<u8>, target: &S3Target) -> Option<(Vec<u8>, String)> {
         .clone()
         .filter(|extension| !extension.is_empty())
         .unwrap_or_else(|| default_extension.to_string());
-    Some((encoded, extension))
+    Some(Encoded {
+        body: encoded,
+        extension,
+        content_encoding: content_encoding(format),
+    })
+}
+
+/// The `Content-Encoding` a delivered object whose body was encoded under `format` carries:
+/// the content coding that format names, which is the `CompressionFormat` value in lower
+/// case, and `None` for `UNCOMPRESSED`, whose body carries no coding at all.
+///
+/// Firehose states the coding on the object it writes, so a reader handed the bytes knows
+/// which decoder they are for — the whole point of the header for a transport that
+/// decompresses transparently, and what tells a `zip` object from a `gzip` one.
+fn content_encoding(format: &str) -> Option<String> {
+    (format != "UNCOMPRESSED").then(|| format.to_ascii_lowercase())
 }
 
 /// `body` as a gzip stream.
@@ -3401,18 +3439,17 @@ fn hadoop_snappy(body: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// The name a delivered object carries, under whatever prefix it is written:
-/// `<stream>-<version>-<YYYY-MM-DD-HH-MM-SS>-<random>`, the form Firehose names an object
-/// it delivers to Amazon S3 with. `ordinal` distinguishes two objects of one flush written
-/// in the same second.
+/// `<stream>-<version>-<yyyy-MM-dd-HH-mm-ss>-<uuid>`, the documented default form Firehose
+/// names an object it delivers to Amazon S3 with — the stream's name, the `VersionId` the
+/// configuration it was delivered under carries, the delivery's own second and a value
+/// unique to the object, and nothing else between them.
+///
+/// Two objects of one flush are told apart by that last value alone, which is what carries
+/// the per-object uniqueness.
 ///
 /// The stamp is the delivery's instant in the destination's own zone, like every other time
 /// field a delivery writes ([`time_zone`]).
-fn object_name(
-    delivery: &PendingDelivery,
-    now: SystemTime,
-    zone: DeliveryTimeZone,
-    ordinal: usize,
-) -> String {
+fn object_name(delivery: &PendingDelivery, now: SystemTime, zone: DeliveryTimeZone) -> String {
     let stamp = zone.fields(now).map_or_else(String::new, |fields| {
         format!(
             "{}-{}-{}-{}-{}-{}",
@@ -3421,7 +3458,7 @@ fn object_name(
     });
     let random = ::uuid::Uuid::new_v4();
     format!(
-        "{}-{}-{stamp}-{ordinal}-{random}",
+        "{}-{}-{stamp}-{random}",
         delivery.stream, delivery.version_id
     )
 }

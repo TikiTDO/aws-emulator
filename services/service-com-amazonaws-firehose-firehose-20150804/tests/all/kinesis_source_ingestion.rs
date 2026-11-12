@@ -72,17 +72,22 @@ struct SourceRow {
 /// The rows differ along what the rule generalises over: how many shards the records are
 /// spread over, which destination member carries the Amazon S3 location, whether the
 /// destination names a `Prefix` of its own, the `BufferingHints` the stream was created with
-/// — a size the records cross well inside a long interval, each published bound of
-/// `IntervalInSeconds` (0..900) and of `SizeInMBs` (1..128), and no hints at all — and the
+/// — a size the records cross well inside a long interval, and each published bound of
+/// `SizeInMBs` (1..128) under the shortest interval the member admits — and the
 /// number and size of the records written to the source.
+///
+/// Every row whose records do not cross `SizeInMBs` asks for `IntervalInSeconds` 0, the
+/// shortest wait the member admits, because what these cases assert is that a source's
+/// records reach the destination at all; the wait a configured interval buys is asserted by
+/// the `buffering_hints` cases.
 fn source_rows() -> Vec<SourceRow> {
     vec![
         SourceRow {
-            case: "one record, an extended destination, a 1 MiB / 60 s buffer",
+            case: "one record, an extended destination, a 1 MiB buffer",
             shards: 1,
             member: "ExtendedS3DestinationConfiguration",
             prefix: None,
-            hints: Some((1, 60)),
+            hints: Some((1, 0)),
             records: 1,
             record_filler: 0,
         },
@@ -96,11 +101,11 @@ fn source_rows() -> Vec<SourceRow> {
             record_filler: 60 * 1024,
         },
         SourceRow {
-            case: "eight records spread over four shards, the documented default hints",
+            case: "eight records spread over four shards, the documented default size",
             shards: 4,
             member: "ExtendedS3DestinationConfiguration",
             prefix: Some("landing/"),
-            hints: None,
+            hints: Some((5, 0)),
             records: 8,
             record_filler: 32,
         },
@@ -207,7 +212,7 @@ async fn retrieval_starts_at_the_delivery_start_timestamp() {
         shards: 1,
         member: "ExtendedS3DestinationConfiguration",
         prefix: None,
-        hints: Some((1, 60)),
+        hints: Some((1, 0)),
         records: 0,
         record_filler: 0,
     };
@@ -257,7 +262,7 @@ async fn a_source_fed_stream_takes_no_direct_put() {
         shards: 1,
         member: "S3DestinationConfiguration",
         prefix: None,
-        hints: Some((1, 60)),
+        hints: Some((1, 0)),
         records: 0,
         record_filler: 0,
     };

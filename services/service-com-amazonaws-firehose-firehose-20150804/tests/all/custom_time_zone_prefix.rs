@@ -195,7 +195,7 @@ async fn a_custom_time_zone_moves_every_time_field_a_delivered_key_carries() {
                 "RoleARN": ROLE_ARN,
                 "BucketARN": format!("arn:aws:s3:::{bucket}"),
                 "Prefix": form.prefix(&leg),
-                "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 60 },
+                "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 0 },
                 "CompressionFormat": "UNCOMPRESSED",
             });
             if let Some(zone) = row.configured {
@@ -308,7 +308,7 @@ async fn a_custom_time_zone_moves_the_error_output_prefix_of_the_same_destinatio
                 "{stream}-err/!{{firehose:error-output-type}}/\
                  d=!{{timestamp:yyyy-MM-dd}}/h=!{{timestamp:HH}}/m=!{{timestamp:mm}}/"
             ),
-            "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 60 },
+            "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 0 },
             "CompressionFormat": "UNCOMPRESSED",
             "DynamicPartitioningConfiguration": { "Enabled": true },
             "ProcessingConfiguration": {
@@ -404,7 +404,7 @@ async fn an_update_naming_a_custom_time_zone_moves_every_later_delivery() {
                     "RoleARN": ROLE_ARN,
                     "BucketARN": format!("arn:aws:s3:::{bucket}"),
                     "Prefix": PrefixForm::Expressions.prefix(leg),
-                    "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 60 },
+                    "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 0 },
                     "CompressionFormat": "UNCOMPRESSED",
                 },
             }),
@@ -603,15 +603,15 @@ fn automatic_stamp(key: &str, leg: &str, case: &str) -> NaiveDateTime {
 }
 
 /// The timestamp a delivered object's own NAME carries:
-/// `<stream>-<version>-<YYYY-MM-DD-HH-MM-SS>-<ordinal>-<random>`.
+/// `<stream>-<version>-<yyyy-MM-dd-HH-mm-ss>-<uuid>`.
 fn object_name_stamp(key: &str, stream: &str, case: &str) -> NaiveDateTime {
     let name = key.rsplit('/').next().unwrap_or(key);
     let rest = after(name, &format!("{stream}-"), case);
     let fields: Vec<&str> = rest.split('-').collect();
     assert!(
         fields.len() > 7,
-        "case {case:?}: a delivered object's name carries its stream, version, timestamp, \
-         ordinal and random part, got {name:?}"
+        "case {case:?}: a delivered object's name carries its stream, version, timestamp \
+         and unique part, got {name:?}"
     );
     // The field after the stream's name is its `VersionId`; the six after that are the
     // calendar fields of the delivery.

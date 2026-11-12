@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/argument_validation.rs"]
 mod argument_validation;
+#[path = "all/buffering_hints.rs"]
+mod buffering_hints;
 #[path = "all/clock_owed_transition_span.rs"]
 mod clock_owed_transition_span;
 #[path = "all/cloudwatch_logs_pipeline_delivery.rs"]
@@ -25,8 +27,12 @@ mod constraint_refusal_precedes_state;
 mod control_plane_refusal_templates;
 #[path = "all/custom_time_zone_prefix.rs"]
 mod custom_time_zone_prefix;
+#[path = "all/delivered_object_content_encoding.rs"]
+mod delivered_object_content_encoding;
 #[path = "all/delivered_object_encryption.rs"]
 mod delivered_object_encryption;
+#[path = "all/delivered_object_name.rs"]
+mod delivered_object_name;
 #[path = "all/delivery_stream_encryption.rs"]
 mod delivery_stream_encryption;
 #[path = "all/delivery_stream_lifecycle.rs"]

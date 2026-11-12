@@ -553,10 +553,16 @@ struct DeliveryRow {
 }
 
 /// An S3 destination configuration naming `bucket`.
+///
+/// Its `BufferingHints` ask for the shortest wait `IntervalInSeconds` admits (its published
+/// minimum is 0), because what every case here asserts is WHERE a delivered object lands
+/// and WHAT it holds; how long a buffer is held for the configured interval is asserted by
+/// the `buffering_hints` cases instead.
 fn s3_destination(bucket: &str, prefix: Option<&str>) -> Value {
     let mut config = json!({
         "RoleARN": ROLE_ARN,
         "BucketARN": format!("arn:aws:s3:::{bucket}"),
+        "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 0 },
     });
     if let Some(prefix) = prefix {
         config["Prefix"] = json!(prefix);
@@ -571,9 +577,9 @@ fn s3_destination(bucket: &str, prefix: Option<&str>) -> Value {
 /// destination whose `S3Configuration` every record passes through), whether a custom
 /// `Prefix` is configured and whether it carries an expression of its own, the
 /// `CompressionFormat` the body is encoded with (every value `CompressionFormat` admits),
-/// a `FileExtension` overriding the format's own, the `BufferingHints` the stream was
-/// created with (each published bound), the record count, and whether the destination's
-/// processing asks for a delimiter between records.
+/// a `FileExtension` overriding the format's own, the `SizeInMBs` of the `BufferingHints`
+/// the stream was created with (each published bound), the record count, and whether the
+/// destination's processing asks for a delimiter between records.
 fn delivery_rows() -> Vec<DeliveryRow> {
     vec![
         DeliveryRow {
@@ -684,11 +690,14 @@ fn delivery_rows() -> Vec<DeliveryRow> {
             separator: "",
         },
         DeliveryRow {
-            case: "the largest buffering hints the model admits",
+            // The largest `SizeInMBs` the model admits, with the interval that delivers
+            // before it is reached: a buffer held for the LARGEST interval is not delivered
+            // this soon at all, which is what the `buffering_hints` cases assert.
+            case: "the largest SizeInMBs the model admits",
             member: "ExtendedS3DestinationConfiguration",
             config: {
                 let mut config = s3_destination("{bucket}", Some("large/"));
-                config["BufferingHints"] = json!({ "SizeInMBs": 128, "IntervalInSeconds": 900 });
+                config["BufferingHints"] = json!({ "SizeInMBs": 128, "IntervalInSeconds": 0 });
                 config
             },
             compression: Compression::Uncompressed,
@@ -1683,8 +1692,8 @@ struct StaticPrefixRow {
 ///
 /// The rows differ along what the rule generalises over: whether the create names
 /// `DeliveryStreamType` at all, the FORM of the static prefix (named for the stream, a
-/// nested path, one not ending in the delimiter, and none at all), the `BufferingHints`
-/// (the published bounds of `SizeInMBs`/`IntervalInSeconds` and the defaults), how the
+/// nested path, one not ending in the delimiter, and none at all), the `SizeInMBs` of the
+/// `BufferingHints` (each published bound), how the
 /// records are put (a call each or one batch), the record count, and whether an
 /// `ErrorOutputPrefix` is configured.
 fn static_prefix_rows() -> Vec<StaticPrefixRow> {
@@ -1702,7 +1711,7 @@ fn static_prefix_rows() -> Vec<StaticPrefixRow> {
             case: "a stream written to one record at a time, under a prefix named for it",
             stream_type: Some("DirectPut"),
             prefix: Some("{stream}/"),
-            hints: Some(json!({ "SizeInMBs": 1, "IntervalInSeconds": 60 })),
+            hints: Some(json!({ "SizeInMBs": 1, "IntervalInSeconds": 0 })),
             error_output: true,
             put: Put::OneCallEach,
             records: lines.clone(),
@@ -1711,13 +1720,14 @@ fn static_prefix_rows() -> Vec<StaticPrefixRow> {
             case: "the same destination reached with one batch instead of a call per record",
             stream_type: Some("DirectPut"),
             prefix: Some("{stream}/"),
-            hints: Some(json!({ "SizeInMBs": 1, "IntervalInSeconds": 60 })),
+            hints: Some(json!({ "SizeInMBs": 1, "IntervalInSeconds": 0 })),
             error_output: true,
             put: Put::OneBatch,
             records: lines.clone(),
         },
         StaticPrefixRow {
-            case: "a nested static prefix, the default buffering hints, and no stream type",
+            case: "a nested static prefix, the hints the helper configures, and no stream \
+                   type",
             stream_type: None,
             prefix: Some("raw/events/json/"),
             hints: None,
@@ -1729,7 +1739,7 @@ fn static_prefix_rows() -> Vec<StaticPrefixRow> {
             case: "a static prefix that does not end in the delimiter",
             stream_type: Some("DirectPut"),
             prefix: Some("{stream}-"),
-            hints: Some(json!({ "SizeInMBs": 128, "IntervalInSeconds": 900 })),
+            hints: Some(json!({ "SizeInMBs": 128, "IntervalInSeconds": 0 })),
             error_output: true,
             put: Put::OneCallEach,
             records: vec![lines[1], lines[2]],

@@ -144,6 +144,10 @@ fn destination(domain_arn: &str, role_arn: &str, prefix: &str) -> Value {
         "IndexName": INDEX,
         "IndexRotationPeriod": "OneDay",
         "S3BackupMode": "FailedDocumentsOnly",
+        // The shortest wait this destination's `IntervalInSeconds` admits (its published
+        // range is 0..900): these cases are about which identity indexes a document, not
+        // about how long a buffer is held first.
+        "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 0 },
         "S3Configuration": {
             "RoleARN": role_arn,
             "BucketARN": BACKUP_BUCKET_ARN,

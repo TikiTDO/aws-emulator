@@ -494,13 +494,13 @@ fn authorization(service: &str) -> String {
 /// The destination configuration of an HTTP endpoint at `url`, with the backup every row
 /// shares.
 ///
-/// `retry_seconds` is `RetryOptions$DurationInSeconds` and the buffering hints are the
-/// smallest the members admit, so a case does not wait longer than the emulator's own
-/// delivery span.
+/// `retry_seconds` is `RetryOptions$DurationInSeconds` and the buffering hints ask for the
+/// shortest wait their members admit (`IntervalInSeconds` 0..900), so a case does not wait
+/// out a buffering interval it is not about.
 fn endpoint_configuration(url: &str, retry_seconds: i64) -> Value {
     json!({
         "EndpointConfiguration": { "Url": url, "Name": "the-sink" },
-        "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 60 },
+        "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 0 },
         "RetryOptions": { "DurationInSeconds": retry_seconds },
         "S3BackupMode": "FailedDataOnly",
         "S3Configuration": {

@@ -43,7 +43,8 @@ const REPORT_DEADLINE: Duration = Duration::from_secs(10);
 /// How often the destination and the log stream are polled while waiting.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-/// Comfortably past the window a buffer is held for (`state::delivery::DELIVERY_SPAN`) and
+/// Comfortably past the window a buffer created with `IntervalInSeconds` 0 is held for
+/// (`state::delivery::FULL_BUFFER_DELIVERY_SPAN`) and
 /// one retry beyond it, so a read that finds nothing is reading something that was never
 /// written rather than something still owed.
 const PAST_THE_DELIVERY_WINDOW: Duration = Duration::from_millis(2_000);

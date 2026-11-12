@@ -58,7 +58,8 @@ const DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
 /// How often the destination is polled while waiting for a delivery.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-/// Comfortably past the window a buffer is held for (`state::delivery::DELIVERY_SPAN`), so a
+/// Comfortably past the window a buffer created with `IntervalInSeconds` 0 is held for
+/// (`state::delivery::FULL_BUFFER_DELIVERY_SPAN`), so a
 /// read that finds nothing is reading a delivery that was never owed rather than one the
 /// clock has not reached.
 const PAST_THE_DELIVERY_WINDOW: Duration = Duration::from_millis(2_000);

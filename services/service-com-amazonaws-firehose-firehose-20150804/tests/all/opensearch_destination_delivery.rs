@@ -198,6 +198,10 @@ fn destination(domain_arn: &str, index: &str, prefix: &str) -> Value {
         "DomainARN": domain_arn,
         "IndexName": index,
         "S3BackupMode": "FailedDocumentsOnly",
+        // The shortest wait this destination's `IntervalInSeconds` admits (its published
+        // range is 0..900): these cases are about WHICH documents the index takes, not
+        // about how long a buffer is held before they are offered to it.
+        "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 0 },
         "S3Configuration": {
             "RoleARN": ROLE_ARN,
             "BucketARN": BACKUP_BUCKET_ARN,

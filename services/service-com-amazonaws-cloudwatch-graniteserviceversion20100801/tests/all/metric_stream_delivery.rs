@@ -294,7 +294,10 @@ impl Emulator {
                 "ExtendedS3DestinationConfiguration": {
                     "RoleARN": ROLE_ARN,
                     "BucketARN": format!("arn:aws:s3:::{bucket}"),
-                    "BufferingHints": {"SizeInMBs": 1, "IntervalInSeconds": 60},
+                    // The shortest wait Firehose's `IntervalInSeconds` admits (its published
+                    // range is 0..900), so a case asserting that the metric stream's records
+                    // reach the bucket does not wait out a buffering interval it is not about.
+                    "BufferingHints": {"SizeInMBs": 1, "IntervalInSeconds": 0},
                 },
             }),
         )

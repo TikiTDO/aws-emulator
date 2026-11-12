@@ -273,7 +273,7 @@ async fn a_converted_destination_writes_its_rows_and_diverts_what_it_cannot_conv
                         "Prefix": format!("{stream}-main/"),
                         "ErrorOutputPrefix":
                             format!("{stream}-err/!{{firehose:error-output-type}}/"),
-                        "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 60 },
+                        "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 0 },
                         "DataFormatConversionConfiguration": {
                             "Enabled": true,
                             "SchemaConfiguration": {
@@ -707,7 +707,7 @@ async fn the_pinned_table_version_is_the_schema_the_records_convert_against() {
                         "Prefix": format!("{stream}-main/"),
                         "ErrorOutputPrefix":
                             format!("{stream}-err/!{{firehose:error-output-type}}/"),
-                        "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 60 },
+                        "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 0 },
                         "DataFormatConversionConfiguration": {
                             "Enabled": true,
                             "SchemaConfiguration": schema,

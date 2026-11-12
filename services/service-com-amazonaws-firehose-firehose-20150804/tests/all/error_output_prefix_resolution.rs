@@ -92,7 +92,7 @@ async fn an_error_output_prefix_naming_a_partition_key_still_writes_the_error_ou
                         // the error output.
                         "Prefix": format!("{stream}/!{{partitionKeyFromLambda:dept}}/"),
                         "ErrorOutputPrefix": row.configured.replace("{leg}", &leg),
-                        "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 60 },
+                        "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 0 },
                         "CompressionFormat": "UNCOMPRESSED",
                         "DynamicPartitioningConfiguration": { "Enabled": true },
                         "ProcessingConfiguration": {

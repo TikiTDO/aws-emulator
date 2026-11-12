@@ -224,6 +224,10 @@ async fn a_delivered_object_is_stored_under_the_encryption_its_destination_confi
         let mut config = json!({
             "RoleARN": ROLE_ARN,
             "BucketARN": format!("arn:aws:s3:::{bucket}"),
+            // The shortest wait `IntervalInSeconds` admits (its published range is 0..900):
+            // these cases are about the key a delivered object is encrypted under, not
+            // about how long its buffer is held.
+            "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 0 },
         });
         if let Some(encryption) = &row.encryption {
             config["EncryptionConfiguration"] = encryption.clone();

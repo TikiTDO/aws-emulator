@@ -54,8 +54,17 @@ pub(crate) fn bucket_arn(bucket: &str) -> String {
 }
 
 /// An `S3DestinationConfiguration` delivering to `bucket`.
+///
+/// Its `BufferingHints` ask for the shortest wait `IntervalInSeconds` admits (published
+/// range 0..900), so a case asserting that a delivery reaches the configured bucket does
+/// not wait out a buffering interval it is not about.
 pub(crate) fn s3_configuration(bucket: &str) -> Value {
-    json!({ "RoleARN": ROLE_ARN, "BucketARN": bucket_arn(bucket), "Prefix": "raw/" })
+    json!({
+        "RoleARN": ROLE_ARN,
+        "BucketARN": bucket_arn(bucket),
+        "Prefix": "raw/",
+        "BufferingHints": { "SizeInMBs": 1, "IntervalInSeconds": 0 },
+    })
 }
 
 /// One row: the stream under test, the update applied to it, and what the pre-flight must
