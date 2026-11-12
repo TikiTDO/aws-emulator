@@ -10,7 +10,11 @@
 //! declares a schedule, or off one, starts or stops the runs the service produces on its
 //! own. A
 //! workflow whose `DeleteWorkflow` teardown has started (`WorkflowStatus` `DELETING`)
-//! is refused with the modelled `ConflictException`.
+//! is refused with the modelled `ConflictException`, and so is a configuration whose
+//! dependencies the services that own them answer are unmet — an inaccessible
+//! `DefinitionS3Location` with `ValidationException`, a `RoleArn` IAM answers this
+//! service cannot assume with `AccessDeniedException`
+//! (`crate::state::configuration_dependencies`) — with the version history left as it was.
 //!
 //! ## Shape of an operation
 //!
@@ -224,12 +228,42 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // so the definition object is read HERE, once, exactly as `CreateWorkflow` reads
         // it. Read before the store is locked — the read is a call into another emulated
         // service, and this service's store is not held across it.
-        let definition = crate::state::workflow_definition::snapshot_definition(
+        let read = crate::state::workflow_definition::read_definition(
             ctx,
             &region,
             &input.definition_s3_location,
         )
         .await;
+
+        // The version this update would append freezes a configuration the service has to
+        // be able to RUN: the definition object just read, and the execution role it names.
+        // A dependency the owning service answered is unmet is refused with the error the
+        // model declares for it, before the store is touched, so the workflow keeps the
+        // version history — and the latest version — it already had
+        // (`crate::state::configuration_dependencies`). Asked with no store guard held,
+        // because resolving the role is a call into another emulated service, and judged
+        // with the rest of what the request CARRIES — beside `validate_input` above and
+        // before the workflow the request ADDRESSES is resolved — so a refusal about the
+        // configuration reads the same whichever workflow it was sent to.
+        if let Some(unmet) = crate::state::configuration_dependencies::unmet_dependency(
+            ctx,
+            &region,
+            &read,
+            &input.definition_s3_location,
+            &input.role_arn,
+        )
+        .await
+        {
+            return Err(match unmet {
+                crate::state::configuration_dependencies::UnmetDependency::DefinitionLocation(
+                    refusal,
+                ) => UpdateWorkflowErrorModeled::ValidationException(refusal).into(),
+                crate::state::configuration_dependencies::UnmetDependency::ExecutionRole(
+                    refusal,
+                ) => UpdateWorkflowErrorModeled::AccessDeniedException(refusal).into(),
+            });
+        }
+        let definition = read.snapshot();
 
         let mut store = state.lock();
 

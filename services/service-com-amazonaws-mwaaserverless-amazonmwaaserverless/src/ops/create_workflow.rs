@@ -274,12 +274,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // holds now and reports it however the object changes later. Read before the
         // store is locked — the read is a call into another emulated service, and this
         // service's store is not held across it.
-        let definition = crate::state::workflow_definition::snapshot_definition(
+        //
+        // The SNAPSHOT is what this handler takes from the read — the content and the
+        // schedule the version freezes; what the read established about the location
+        // itself is read by `crate::state::configuration_dependencies`.
+        let definition = crate::state::workflow_definition::read_definition(
             ctx,
             &region,
             &input.definition_s3_location,
         )
-        .await;
+        .await
+        .snapshot();
 
         let mut store = state.lock();
 

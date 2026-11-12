@@ -65,6 +65,10 @@ use crate::ops::types::{
 /// schedule and tasks that definition declares.
 pub mod workflow_definition;
 
+/// Resolving the dependencies a workflow configuration names — its definition object and
+/// its execution role — against the services that own them, before a version freezes it.
+pub mod configuration_dependencies;
+
 /// The task graph a run executes, built from the definition its version froze.
 pub mod workflow_execution;
 
@@ -275,7 +279,7 @@ pub struct WorkflowSnapshot {
     /// new version", so the content is read ONCE, here, and never re-read: a read of
     /// this version reports these bytes however the object has changed since. `None`
     /// when there was nothing to snapshot (see
-    /// [`workflow_definition::snapshot_definition`]).
+    /// [`workflow_definition::read_definition`]).
     pub workflow_definition: Option<String>,
     /// The schedule the snapshotted definition declares — what `ScheduleConfiguration`
     /// reports. Derived from [`Self::workflow_definition`] when the version froze it, so

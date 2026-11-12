@@ -52,6 +52,14 @@ emulator-core-build-support = { workspace = true }
 # engine, because CreateWorkflow and UpdateWorkflow snapshot the workflow definition file
 # by calling it.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
+# IAM is mounted beside them too, because UpdateWorkflow resolves the execution role its
+# configuration names against this account's IAM records: a role exists in those tests
+# only because IAM's own CreateRole answered for it.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# RFC 3986 percent-encoding, for the `application/x-www-form-urlencoded` body of the
+# awsQuery calls those tests create a role with (a trust policy document carries the
+# characters that have to be escaped).
+percent-encoding = "2.3"
 
 [lints]
 workspace = true

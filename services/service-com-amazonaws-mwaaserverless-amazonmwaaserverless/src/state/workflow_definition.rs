@@ -13,6 +13,11 @@
 //! The object is read through the emulator's own Amazon S3 service over the in-process
 //! callback, which is the framework's documented seam for calling another emulated
 //! service: nothing here opens a socket or leaves the host.
+//!
+//! That one read also establishes WHETHER the store serves an object at the address at
+//! all ([`DefinitionRead`]), which is the fact an operation that freezes a configuration
+//! holds the request to ([`crate::state::configuration_dependencies`]); what this module
+//! answers is only what the read established, never what an operation does about it.
 
 use crate::ops::types::{DefinitionS3Location, ScheduleConfiguration};
 
@@ -192,33 +197,103 @@ fn s3_client(
     ::aws_sdk_s3::Client::from_conf(config)
 }
 
-/// Take the definition snapshot a new version freezes: read the object `location`
-/// addresses ONCE, now, and keep its content and the schedule it declares.
+/// What reading the definition object a new version would freeze ESTABLISHED about the
+/// location that addresses it.
 ///
-/// `None` when there is nothing to snapshot — the location addresses no stored object,
-/// the object holds no definition (empty, not text, or past
-/// [`MAX_DEFINITION_BYTES`]) — in which case the version reports no definition content
-/// and no schedule rather than content this service never read. Whether such a create
-/// should be refused outright is the intake's business, not this reader's.
+/// The read answers two questions at once, and they are different questions: WHETHER
+/// Amazon S3 serves an object at that address at all — which is what decides whether the
+/// configuration naming it can be frozen ([`crate::state::configuration_dependencies`]) —
+/// and WHICH content the version freezes. Both come out of the one read, so no caller
+/// reads the object twice to learn them.
+#[derive(Debug, Clone)]
+pub enum DefinitionRead {
+    /// Amazon S3 answered about an object it HOLDS at that address, so the location is
+    /// one this service can read: the definition the version freezes, or `None` when
+    /// that object holds no definition content to report (it holds no bytes, is not
+    /// text, or is past [`MAX_DEFINITION_BYTES`]), in which case the version reports no
+    /// definition content and no schedule rather than content this service never read.
+    Snapshotted(Option<DefinitionSnapshot>),
+    /// Amazon S3 ANSWERED that the location serves no object this service can read: it
+    /// holds nothing at that address, or it will not serve the read. The address is also
+    /// this answer when it names no object anywhere — a blank bucket or key, or a bucket
+    /// name Amazon S3 holds no bucket under — since no read of it could ever serve one.
+    Inaccessible,
+    /// Nothing was established about the location: there is no Amazon S3 to ask, or the
+    /// call could not be dispatched. Nothing about the request is at fault.
+    Unanswered,
+}
+
+impl DefinitionRead {
+    /// The definition this version freezes, whatever the read established: `None` wherever
+    /// there is no content to report, so a version is never given content this service
+    /// did not read.
+    #[must_use]
+    pub fn snapshot(self) -> Option<DefinitionSnapshot> {
+        match self {
+            Self::Snapshotted(snapshot) => snapshot,
+            Self::Inaccessible | Self::Unanswered => None,
+        }
+    }
+}
+
+/// Read the object `location` addresses ONCE, now, and answer what that read established.
+///
+/// The address is read EXACTLY as the request carried it — an Amazon S3 object key may
+/// hold leading or trailing spaces, so nothing here trims one — which is what lets the
+/// refusal a caller gets name the very address that was read.
 ///
 /// `VersionId` is passed through when the location names one, because it selects which
 /// object version is snapshotted ("If not specified, the latest version is used").
-pub async fn snapshot_definition(
+///
+/// What the object store's REFUSAL establishes is read by the tree's one reading of it
+/// ([`::service_common::s3_object_read::answered_refusal`]), so this service agrees with
+/// every other about what an Amazon S3 answer MEANT; what this service then DOES about
+/// each outcome is its own ([`crate::state::configuration_dependencies`]).
+pub async fn read_definition(
     ctx: &::smithy_server_runtime::OperationContext<'_>,
     region: &str,
     location: &DefinitionS3Location,
-) -> Option<DefinitionSnapshot> {
-    if location.bucket.is_empty() || location.object_key.is_empty() {
-        return None;
+) -> DefinitionRead {
+    let (bucket, object_key) = (location.bucket.as_str(), location.object_key.as_str());
+    // An address that is not an address at all is checked BEFORE anything is asked of
+    // the store, the way the shared object read checks it: a blank bucket or key, and a
+    // value Amazon S3 holds no bucket under, name no object anywhere.
+    if bucket.is_empty()
+        || object_key.is_empty()
+        || !::service_common::s3_bucket_name::is_well_formed(bucket)
+    {
+        return DefinitionRead::Inaccessible;
     }
-    let object = s3_client(ctx, region)
+    let answered = s3_client(ctx, region)
         .get_object()
-        .bucket(&location.bucket)
-        .key(&location.object_key)
+        .bucket(bucket)
+        .key(object_key)
         .set_version_id(location.version_id.clone())
         .send()
-        .await
-        .ok()?;
+        .await;
+    let object = match answered {
+        Ok(object) => object,
+        Err(error) => {
+            return match ::service_common::s3_object_read::answered_refusal(&error) {
+                // The store answered about that address: it holds nothing there, or it
+                // will not serve the read.
+                ::service_common::s3_object_read::ObjectRead::Absent
+                | ::service_common::s3_object_read::ObjectRead::Denied => {
+                    DefinitionRead::Inaccessible
+                }
+                // The store answered something else about an object it holds, so the
+                // location is readable and there is simply nothing to snapshot.
+                ::service_common::s3_object_read::ObjectRead::Served(_)
+                | ::service_common::s3_object_read::ObjectRead::Unreadable => {
+                    DefinitionRead::Snapshotted(None)
+                }
+                // Nothing answered at all.
+                ::service_common::s3_object_read::ObjectRead::Unanswered => {
+                    DefinitionRead::Unanswered
+                }
+            };
+        }
+    };
     // The ceiling is applied to the size Amazon S3 REPORTS, before a byte is buffered,
     // so an oversized object costs no allocation; the check after the body is read is
     // the backstop for an object whose reported size was wrong.
@@ -226,23 +301,30 @@ pub async fn snapshot_definition(
         .content_length()
         .is_some_and(|length| length > MAX_DEFINITION_BYTES as i64)
     {
-        return None;
+        return DefinitionRead::Snapshotted(None);
     }
-    let bytes = object.body.collect().await.ok()?.into_bytes();
+    let Ok(body) = object.body.collect().await else {
+        // The store served the object and its bytes did not arrive in full, so nothing
+        // was established about the object itself.
+        return DefinitionRead::Unanswered;
+    };
+    let bytes = body.into_bytes();
     if bytes.len() > MAX_DEFINITION_BYTES {
-        return None;
+        return DefinitionRead::Snapshotted(None);
     }
-    let content = String::from_utf8(bytes.to_vec()).ok()?;
+    let Ok(content) = String::from_utf8(bytes.to_vec()) else {
+        return DefinitionRead::Snapshotted(None);
+    };
     // `WorkflowDefinition` is modelled with a minimum length of 1, so an object holding
     // no bytes holds no definition content to report.
     if content.is_empty() {
-        return None;
+        return DefinitionRead::Snapshotted(None);
     }
     let schedule_configuration = declared_schedule(&content);
-    Some(DefinitionSnapshot {
+    DefinitionRead::Snapshotted(Some(DefinitionSnapshot {
         content,
         schedule_configuration,
-    })
+    }))
 }
 
 /// The schedule a definition DECLARES: the cron expression its DAG-level schedule key

@@ -83,6 +83,8 @@ mod task_instance_reads;
 mod task_operator_reporting;
 #[path = "all/teardown_refusal_wording.rs"]
 mod teardown_refusal_wording;
+#[path = "all/update_configuration_dependencies.rs"]
+mod update_configuration_dependencies;
 #[path = "all/validation_errors.rs"]
 mod validation_errors;
 #[path = "all/workflow_configuration_digest.rs"]
