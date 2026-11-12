@@ -7,8 +7,10 @@
 //! there" class with a different fixed template per operation — the name bare, single-quoted,
 //! square-bracketed, colon-prefixed, or introduced by "with id" — and the only variable part
 //! of any of them is what the request named; a refusal about a stack whose current STATUS
-//! does not admit the call names the operation that cannot be called and nothing of the stack
-//! — neither the stack itself nor the status it is in; and an operation
+//! does not admit the call names the operation that cannot be called, plus whatever that
+//! operation's own template states about the status — the stack's current one where the
+//! template interpolates it, the statuses the call CAN be made from where it lists those
+//! instead — and never the stack itself; and an operation
 //! that addresses a record WITHIN a stack (a change set) resolves the stack FIRST, so a
 //! request naming a stack that is not addressable is refused about the stack rather than
 //! about the record.**

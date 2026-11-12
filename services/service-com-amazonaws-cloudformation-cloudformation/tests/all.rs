@@ -79,6 +79,8 @@ mod cognito_resource_types;
 mod cognito_user_pool_return_values;
 #[path = "all/content_delivery_stack_outputs.rs"]
 mod content_delivery_stack_outputs;
+#[path = "all/continue_update_rollback_status_gate.rs"]
+mod continue_update_rollback_status_gate;
 #[path = "all/cross_stack_imports.rs"]
 mod cross_stack_imports;
 #[path = "all/cross_stack_name_collision.rs"]
