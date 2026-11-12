@@ -16,8 +16,12 @@
 //!    can provide is 10" — see [`crate::state::requested_metadata_columns`]), and the
 //!    `promotions` members a promoted subset cannot be defined without.
 //! 2. **Resolve the resource.** Exactly one of `campaignArn` / `recommenderArn`
-//!    identifies what to recommend from; an ARN the registry does not hold is
-//!    `InvalidInputException` (400), "does not exist or is not active yet" (see
+//!    identifies what to recommend from; an ARN whose own resource part names another
+//!    resource type references no such resource at all, which is
+//!    `InvalidInputException` (400), "The given … ARN is invalid" (see
+//!    [`crate::state::Denied::invalid_arn`]), and an ARN of the right type the registry
+//!    does not hold is `InvalidInputException` (400), "does not exist or is not active
+//!    yet" (see
 //!    [`crate::state::Denied::unresolvable`]). A campaign whose solution version was
 //!    trained with `PERSONALIZED_RANKING` or `PERSONALIZED_ACTIONS` is served by
 //!    another operation, so it is `InvalidInputException` (400) here.

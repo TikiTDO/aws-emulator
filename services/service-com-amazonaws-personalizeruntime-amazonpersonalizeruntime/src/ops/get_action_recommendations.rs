@@ -288,11 +288,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// this operation can recommend from and it carries no `@required` trait, so the
 /// boundary cannot refuse its absence and this handler is where it is refused — as
 /// `InvalidInputException` (HTTP 400), the invalid-input channel every unusable
-/// resource reference on the inference path goes through.
+/// resource reference on the inference path goes through. The sentence is the registry's
+/// one invalid-reference sentence ([`Denied::invalid_arn`]), the same one a `campaignArn`
+/// that references another resource type earns.
 fn invalid_campaign_arn(given: Option<&str>) -> GetActionRecommendationsError {
-    invalid(format!(
-        "The given campaign ARN is invalid: {}",
-        given.unwrap_or("null")
+    deny(Denied::invalid_arn(
+        registry::ResourceKind::Campaign,
+        given.unwrap_or("null"),
     ))
 }
 

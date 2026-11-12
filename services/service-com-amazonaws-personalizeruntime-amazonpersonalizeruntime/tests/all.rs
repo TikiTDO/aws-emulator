@@ -15,6 +15,8 @@
 mod absent_attribute_columns;
 #[path = "all/action_filter_value_forms.rs"]
 mod action_filter_value_forms;
+#[path = "all/arn_resource_type.rs"]
+mod arn_resource_type;
 #[path = "all/comparison_operands.rs"]
 mod comparison_operands;
 #[path = "all/empty_string_member_constraints.rs"]

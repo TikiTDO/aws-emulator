@@ -13,16 +13,27 @@
 //! writes to the registry; the one value a call mints is its own `recommendationId`
 //! (see [`ComAmazonawsPersonalizeruntimeAmazonpersonalizeruntimeState::issue_recommendation_id`]).
 //!
-//! A well-formed resource ARN this registry does not hold is
-//! `InvalidInputException` (HTTP 400) with the message `<arn> does not exist or is
-//! not active yet.` for all three operations — the inference data plane cannot tell a
-//! resource that was never created from one that was created but has not reached
-//! ACTIVE, so it refuses both through the INVALID-INPUT channel (see
-//! [`Denied::unresolvable`]). A missing
-//! [`campaigns`](ComAmazonawsPersonalizeruntimeAmazonpersonalizeruntimeState::campaigns) /
-//! [`recommenders`](ComAmazonawsPersonalizeruntimeAmazonpersonalizeruntimeState::recommenders) /
-//! [`filters`](ComAmazonawsPersonalizeruntimeAmazonpersonalizeruntimeState::filters)
-//! entry is the single source of truth for that refusal.
+//! Resolving one of those ARNs has TWO refusals, not one, and they are told apart by
+//! what the ARN itself claims:
+//!
+//! * An ARN whose own resource part names another resource type than the member it
+//!   arrived in ([`ResourceKind`]) is no reference to such a resource at all, so
+//!   nothing is looked up: `InvalidInputException` (HTTP 400) with the message
+//!   `The given <kind> ARN is invalid: <arn>` (see [`Denied::invalid_arn`]).
+//! * An ARN of the RIGHT resource type this registry does not hold is
+//!   `InvalidInputException` (HTTP 400) with the message `<arn> does not exist or is
+//!   not active yet.` for all three operations — the inference data plane cannot tell a
+//!   resource that was never created from one that was created but has not reached
+//!   ACTIVE, so it refuses both through the INVALID-INPUT channel (see
+//!   [`Denied::unresolvable`]). A missing
+//!   [`campaigns`](ComAmazonawsPersonalizeruntimeAmazonpersonalizeruntimeState::campaigns) /
+//!   [`recommenders`](ComAmazonawsPersonalizeruntimeAmazonpersonalizeruntimeState::recommenders) /
+//!   [`filters`](ComAmazonawsPersonalizeruntimeAmazonpersonalizeruntimeState::filters)
+//!   entry is the single source of truth for that refusal.
+//!
+//! Both carry the same code and status, so the message is the only observable that
+//! separates a reference the caller mixed up from one whose resource is still being
+//! created — and only the second is a condition that can change by itself.
 //!
 //! # The registration seam, and the rule it follows
 //!
@@ -499,7 +510,11 @@ impl ComAmazonawsPersonalizeruntimeAmazonpersonalizeruntimeState {
         id
     }
 
-    /// The registered campaign under `arn`, or [`Denied::unresolvable`].
+    /// The registered campaign under `arn`, or a refusal.
+    ///
+    /// An ARN whose resource part names something other than a campaign is refused as
+    /// the invalid campaign reference it is, before the registry is consulted at all
+    /// ([`require_resource_kind`]).
     ///
     /// A campaign whose create the clock has not completed yet resolves to the SAME
     /// refusal as one that was never registered: the inference plane serves a campaign
@@ -507,6 +522,7 @@ impl ComAmazonawsPersonalizeruntimeAmazonpersonalizeruntimeState {
     /// states (see [`Denied::unresolvable`] and [`Campaign::active_at`]). A pure read —
     /// whether the create is due is a function of the stored instant and the clock.
     pub fn campaign(&self, arn: &str) -> Result<&Campaign, Denied> {
+        require_resource_kind(arn, ResourceKind::Campaign)?;
         self.campaigns
             .get(arn)
             .filter(|campaign| campaign.is_active(SystemTime::now()))
@@ -514,14 +530,22 @@ impl ComAmazonawsPersonalizeruntimeAmazonpersonalizeruntimeState {
     }
 
     /// The registered recommender under `arn`, or [`Denied::unresolvable`].
+    ///
+    /// An ARN that names no recommender resource type is refused as the invalid
+    /// reference it is, before anything is looked up ([`require_resource_kind`]).
     pub fn recommender(&self, arn: &str) -> Result<&Recommender, Denied> {
+        require_resource_kind(arn, ResourceKind::Recommender)?;
         self.recommenders
             .get(arn)
             .ok_or_else(|| Denied::unresolvable(arn))
     }
 
     /// The registered filter under `arn`, or [`Denied::unresolvable`].
+    ///
+    /// An ARN that names no filter resource type is refused as the invalid reference it
+    /// is, before anything is looked up ([`require_resource_kind`]).
     pub fn filter(&self, arn: &str) -> Result<&Filter, Denied> {
+        require_resource_kind(arn, ResourceKind::Filter)?;
         self.filters
             .get(arn)
             .ok_or_else(|| Denied::unresolvable(arn))
@@ -582,10 +606,70 @@ impl Denied {
         Self::invalid(format!("{arn} does not exist or is not active yet."))
     }
 
+    /// The refusal for a value that references no resource of `kind` at all: its ARN's
+    /// resource part names another resource type, or none.
+    ///
+    /// Deliberately NOT [`Denied::unresolvable`]: both are `InvalidInputException`
+    /// (HTTP 400), so the message is the only observable separating them, and they are
+    /// different conditions. An ARN of the wrong resource type can never be resolved by
+    /// anything the caller waits for, while "does not exist or is not active yet" is a
+    /// condition that changes by itself once the create the caller started completes.
+    /// `given` is the value the request sent, reported back verbatim.
+    pub fn invalid_arn(kind: ResourceKind, given: &str) -> Self {
+        Self::invalid(format!("The given {} ARN is invalid: {given}", kind.as_str()))
+    }
+
     /// The refusal's message.
     pub fn message(&self) -> &str {
         &self.0
     }
+}
+
+/// Which Personalize resource an ARN-carrying request member names.
+///
+/// Every ARN member of this service references exactly ONE resource type —
+/// `campaignArn` a campaign, `recommenderArn` a recommender, `filterArn` (and a
+/// promotion's own `filterArn`) a filter. The modelled `Arn` `@pattern`
+/// `^arn:([a-z\d-]+):personalize:.*:.*:.+$` admits an ARN of ANY Personalize resource
+/// type, so which type a value claims is this registry's own check rather than the
+/// boundary's — and it is readable from the request alone, out of the ARN's resource
+/// part (`service_common::arn::resource_type`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceKind {
+    /// A campaign, referenced by `campaignArn`.
+    Campaign,
+    /// A domain recommender, referenced by `recommenderArn`.
+    Recommender,
+    /// A filter, referenced by `filterArn`.
+    Filter,
+}
+
+impl ResourceKind {
+    /// The ARN resource-type segment a reference to this kind carries, which is also how
+    /// a refusal naming the kind reads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Campaign => "campaign",
+            Self::Recommender => "recommender",
+            Self::Filter => "filter",
+        }
+    }
+}
+
+/// Check that `arn` references a resource of `kind` before anything is looked up.
+///
+/// A reference whose resource type is another one is not a reference to a `kind` the
+/// registry could hold — no campaign can ever answer to a schema ARN — so existence is
+/// never consulted for it and the refusal says what is wrong with the request instead
+/// (see [`Denied::invalid_arn`]). The resource type is read through this tree's one
+/// caller-supplied-ARN parse (`service_common::arn`), which also answers `None` for a
+/// value that is no resource ARN at all — a value that references nothing of this kind
+/// either.
+pub fn require_resource_kind(arn: &str, kind: ResourceKind) -> Result<(), Denied> {
+    if ::service_common::arn::resource_type(arn) == Some(kind.as_str()) {
+        return Ok(());
+    }
+    Err(Denied::invalid_arn(kind, arn))
 }
 
 /// The number of results to compute, from the request's `numResults`.

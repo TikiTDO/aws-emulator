@@ -21,6 +21,10 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# `service-common` carries this tree's ONE caller-supplied-ARN parse, which the
+# inference registry reads the resource type a `campaignArn` / `recommenderArn` /
+# `filterArn` claims with (`src/state.rs`, `require_resource_kind`).
+service-common = { path = "../common" }
 # Deterministic, request-derived scoring and opaque recommendation ids
 # (`src/state/scoring.rs`): SHA-256 as a stable mixing function, hex for the id.
 sha2 = { workspace = true }
