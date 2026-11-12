@@ -51,3 +51,6 @@ mod map_value_constraint_clauses;
 
 #[path = "all/sns_tagged_resource_index.rs"]
 mod sns_tagged_resource_index;
+
+#[path = "all/arn_list_value_fault_template.rs"]
+mod arn_list_value_fault_template;
